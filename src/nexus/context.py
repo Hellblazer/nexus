@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 if TYPE_CHECKING:
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger(__name__)
 
@@ -100,7 +100,7 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
 
 
 def generate_context_l1(
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
     *,
     output_path: Path | None = None,
     repo_path: Path | None = None,
@@ -120,7 +120,7 @@ def generate_context_l1(
     allowed = _repo_collections(repo_path)
 
     # Query root topics only (excludes children from split).
-    # nexus-azss4: the raw-conn read only exists on a SQLite CatalogTaxonomy;
+    # nexus-azss4: the raw-conn read only exists on a SQLite HttpTaxonomyStore;
     # an HttpTaxonomyStore (service mode — the default since migration) has
     # no .conn/._lock, and the resulting AttributeError was swallowed as
     # "non-fatal" at both refresh call sites — every service-mode box's

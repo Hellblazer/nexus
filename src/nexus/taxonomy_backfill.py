@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 
 _ELIGIBLE_ASSIGNED_BY: tuple[str, ...] = ("hdbscan", "centroid")
@@ -66,14 +66,14 @@ class BackfillReport:
 
 
 def backfill_source_collection(
-    taxonomy_or_conn: "CatalogTaxonomy | sqlite3.Connection",
+    taxonomy_or_conn: "HttpTaxonomyStore | sqlite3.Connection",
     *,
     apply: bool,
 ) -> BackfillReport:
     """Backfill ``topic_assignments.source_collection`` from ``topics.collection``.
 
     Args:
-        taxonomy_or_conn: preferred — a ``CatalogTaxonomy`` store whose
+        taxonomy_or_conn: preferred — a ``HttpTaxonomyStore`` store whose
             ``_lock`` will be held for the entire read + UPDATE sequence,
             matching the contract every other writer on this connection
             observes. A raw ``sqlite3.Connection`` is also accepted for
@@ -90,7 +90,7 @@ def backfill_source_collection(
     coverage numbers and per-``assigned_by`` eligible counts.
 
     Concurrency (review gate C-1): the prior shape accepted a raw
-    ``conn`` and bypassed ``CatalogTaxonomy._lock``, racing any
+    ``conn`` and bypassed ``HttpTaxonomyStore._lock``, racing any
     concurrent writer on the same connection. The new signature
     threads the lock through when a taxonomy store is passed.
     """
@@ -107,7 +107,7 @@ def backfill_source_collection(
         _hold_lock = nullcontext()
     else:
         raise TypeError(
-            "backfill_source_collection expects a CatalogTaxonomy or "
+            "backfill_source_collection expects a HttpTaxonomyStore or "
             f"sqlite3.Connection; got {type(taxonomy_or_conn).__name__}"
         )
 

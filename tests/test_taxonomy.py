@@ -288,16 +288,11 @@ def test_assign_batch_still_composes_compute_and_persist(
         assert row[0] == expected[0]["assigned_by"]
 
 
-def test_compute_assignments_empty_when_no_centroids(
-    db: T2Database, chroma_client: Any,
-) -> None:
-    """No centroids for the collection → empty (the old no-op-returns-0 case)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-
-    out = CatalogTaxonomy.compute_assignments(
-        "never__discovered", ["x"], [[0.1] * 384], chroma_client,
-    )
-    assert out == []
+# test_compute_assignments_empty_when_no_centroids moved to
+# tests/db/test_http_taxonomy_store.py (nexus-i711w Stage 2 sub-stage C).
+# It drove CatalogTaxonomy.compute_assignments, a category-(c) static that
+# died with its class; the no-centroids contract lives on in the Http twin,
+# which had no coverage for it until the port.
 
 
 # ── RDR-151 Phase 3 (uzay8): discover_topics compute/persist split ───────────
@@ -330,10 +325,10 @@ def test_compute_discovered_topics_returns_serializable_specs() -> None:
     can cross the daemon RPC)."""
     import json
 
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
-    specs = CatalogTaxonomy.compute_discovered_topics(
+    specs = _tc.compute_discovered_topics(
         "split__disc", doc_ids, embeddings, texts,
     )
     assert len(specs) >= 2, "expected >=2 clusters from two separated blobs"
@@ -353,9 +348,9 @@ def test_compute_discovered_topics_returns_serializable_specs() -> None:
 
 def test_compute_discovered_topics_empty_short_circuits() -> None:
     """<5 docs returns [] (the old discover_topics no-op-returns-0 case)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
-    out = CatalogTaxonomy.compute_discovered_topics(
+    out = _tc.compute_discovered_topics(
         "tiny__disc", ["a", "b"], np.zeros((2, 384), dtype=np.float32), ["x", "y"],
     )
     assert out == []
@@ -364,10 +359,10 @@ def test_compute_discovered_topics_empty_short_circuits() -> None:
 def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> None:
     """The PERSIST half writes topic rows + assignments and returns the
     generated topic_ids aligned to the input spec order — no chroma needed."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
-    specs = CatalogTaxonomy.compute_discovered_topics(
+    specs = _tc.compute_discovered_topics(
         "persist__disc", doc_ids, embeddings, texts,
     )
     topic_ids = db.taxonomy.persist_discovered_topics("persist__disc", specs)
@@ -387,10 +382,10 @@ def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> Non
 def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
     """Existing-topics guard preserved: a second persist for the same
     collection is a no-op returning [] (matches discover_topics' guard)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
-    specs = CatalogTaxonomy.compute_discovered_topics(
+    specs = _tc.compute_discovered_topics(
         "guard__disc", doc_ids, embeddings, texts,
     )
     first = db.taxonomy.persist_discovered_topics("guard__disc", specs)
@@ -624,10 +619,10 @@ def test_compute_rebuild_plan_is_pure_and_serializable(
     manual-transfer decisions keyed to spec index) and touches no T2 write."""
     import json
 
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs(seed=23)
-    plan = CatalogTaxonomy.compute_rebuild_plan(
+    plan = _tc.compute_rebuild_plan(
         "rb__coll", doc_ids, embeddings, texts,
         old_centroids=np.empty((0, 0), dtype=np.float32),
         old_labels=[], old_review_statuses=[], old_centroid_topic_ids=[],
@@ -2312,7 +2307,7 @@ class TestSplitTopic:
         """compute_split returns serializable child specs (no T2 writes)."""
         import numpy as _np
         from nexus.db.local_ef import LocalEmbeddingFunction
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         texts_a = [f"machine learning neural {i}" for i in range(15)]
@@ -2321,7 +2316,7 @@ class TestSplitTopic:
         doc_ids = [f"doc-{i}" for i in range(30)]
         embeddings = _np.array(ef(texts), dtype=_np.float32)
 
-        result = CatalogTaxonomy.compute_split(
+        result = _tc.compute_split(
             topic_id=99,
             doc_ids=doc_ids,
             texts=texts,
@@ -2351,7 +2346,7 @@ class TestSplitTopic:
     ) -> None:
         """persist_split writes children to T2 and returns child IDs (no chroma)."""
         import json as _json
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         # Seed parent with assignments
         parent_id = _seed_topic(
@@ -2623,7 +2618,7 @@ class TestMergeStrategy:
 
     def test_high_similarity_transfers_label(self, db: T2Database) -> None:
         """Old label transferred when cosine similarity > 0.8."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         # Near-identical centroids (high cosine similarity)
         old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
@@ -2631,7 +2626,7 @@ class TestMergeStrategy:
         old_review_statuses = ["accepted"]
         new_centroids = np.array([[0.99, 0.1, 0.0]], dtype=np.float32)
 
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids,
         )
         assert len(merged) == 1
@@ -2640,7 +2635,7 @@ class TestMergeStrategy:
 
     def test_low_similarity_uses_new_label(self, db: T2Database) -> None:
         """New c-TF-IDF label used when cosine similarity <= 0.8."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
         old_labels = ["old-label"]
@@ -2648,7 +2643,7 @@ class TestMergeStrategy:
         # Orthogonal -> cosine similarity ~0
         new_centroids = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
 
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids,
         )
         assert len(merged) == 1
@@ -2657,7 +2652,7 @@ class TestMergeStrategy:
 
     def test_n1_dedup_highest_wins(self, db: T2Database) -> None:
         """When two new centroids match the same old centroid, highest similarity wins."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
         old_labels = ["shared-label"]
@@ -2668,7 +2663,7 @@ class TestMergeStrategy:
             [0.85, 0.5, 0.0],  # similarity ~0.86
         ], dtype=np.float32)
 
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids,
         )
         assert len(merged) == 2
@@ -2679,10 +2674,10 @@ class TestMergeStrategy:
 
     def test_no_old_centroids(self, db: T2Database) -> None:
         """With no old centroids, all new centroids get None labels."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         new_centroids = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             np.empty((0, 2), dtype=np.float32), [], [], new_centroids,
         )
         assert len(merged) == 2

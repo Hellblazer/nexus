@@ -3,8 +3,9 @@
 """HttpCentroidStore — service-backed taxonomy-centroid port (RDR-156 nexus-t1hnc).
 
 The chroma-free replacement for the ``taxonomy__centroids`` ChromaDB collection
-the oracle (:class:`~nexus.db.t2.catalog_taxonomy.CatalogTaxonomy`) reached via a
-``chroma_client``. Backs the centroid-ANN reads (``assign_single`` /
+that the SQLite ``CatalogTaxonomy`` reached via a ``chroma_client``. That class
+is DELETED (nexus-i711w Stage 2 sub-stage C); references to it here are lineage
+for where these shapes came from, not live code. Backs the centroid-ANN reads (``assign_single`` /
 ``compute_assignments`` / ``compute_cross_links`` / ``project_against``) and the
 ``discover_topics`` centroid upsert when taxonomy runs on the PG service backend.
 

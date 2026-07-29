@@ -3105,13 +3105,58 @@ def _is_existing_install(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+# ── Rehomed taxonomy base schema (nexus-i711w Stage 2 sub-stage C) ───────────
+#
+# This DDL used to live in ``nexus.db.t2.catalog_taxonomy`` beside the SQLite
+# CatalogTaxonomy store. The STORE is deleted; the SCHEMA is not, because it
+# describes the migration SOURCE — a pre-cutover box's memory.db still carries
+# these four tables and the SQLite -> PG reader has to be able to materialise
+# and read them. Same move as the Phase 0 type rehome (5377b547): the thing the
+# survivors need outlives the class it happened to be declared in.
+#
+# Retires with the rest of this module in sub-stage A, not here.
+_TAXONOMY_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS topics (
+    id            INTEGER PRIMARY KEY,
+    label         TEXT NOT NULL,
+    parent_id     INTEGER REFERENCES topics(id),
+    collection    TEXT NOT NULL,
+    centroid_hash TEXT,
+    doc_count     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    terms         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS taxonomy_meta (
+    collection              TEXT PRIMARY KEY,
+    last_discover_doc_count INTEGER NOT NULL DEFAULT 0,
+    last_discover_at        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS topic_assignments (
+    doc_id      TEXT NOT NULL,
+    topic_id    INTEGER NOT NULL REFERENCES topics(id),
+    assigned_by TEXT NOT NULL DEFAULT 'hdbscan',
+    PRIMARY KEY (doc_id, topic_id)
+);
+
+CREATE TABLE IF NOT EXISTS topic_links (
+    from_topic_id INTEGER NOT NULL REFERENCES topics(id),
+    to_topic_id   INTEGER NOT NULL REFERENCES topics(id),
+    link_count    INTEGER NOT NULL DEFAULT 0,
+    link_types    TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (from_topic_id, to_topic_id)
+);
+"""
+
+
 def _create_base_tables(conn: sqlite3.Connection) -> None:
     """Execute all domain base-schema SQL via CREATE TABLE IF NOT EXISTS.
 
     Lazy imports avoid circular dependencies between migrations.py and
     domain store modules.
     """
-    from nexus.db.t2.catalog_taxonomy import _TAXONOMY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
     from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
     from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
     from nexus.db.t2.telemetry import _TELEMETRY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load

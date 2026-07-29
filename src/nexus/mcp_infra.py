@@ -700,6 +700,15 @@ def taxonomy_assign_batch_hook(
     # would now mean a non-service T3 handle, which no longer exists.
 
 
+# nexus-duoak: FLUSH grain, not per-file. The batched indexer fires this once
+# per flush so clustering sees a whole batch of embeddings rather than one
+# file's worth. This declaration sat at the tail of the raw arm deleted above
+# and went with it — a silent demotion to "file" grain that changed dispatch
+# frequency without changing any behaviour the deletion was about. Restored,
+# and pinned by tests/test_hook_grain.py.
+taxonomy_assign_batch_hook.batch_grain = "flush"
+
+
 # _fetch_or_embed lived here. It fetched T3 embeddings for a batch and fell
 # back to a local MiniLM encode, and its ONLY caller was the raw taxonomy-assign
 # path deleted above (nexus-i711w Stage 2 sub-stage C). The service branch does

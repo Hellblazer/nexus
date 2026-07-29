@@ -70,10 +70,17 @@ DDL_CENSUS: dict[str, int] = {
     # aspect_promotion_log bootstrap died with the retired runtime promotion
     # verb; migrations.migrate_aspect_promotion_log_table is now the sole
     # creator. DOWNWARD-only edit.
-    "src/nexus/db/migrations.py": 25,             # the sanctioned-until-retired T2 registry
+    # 25 -> 29 is a RELOCATION, not growth, and the arithmetic is exact:
+    # catalog_taxonomy.py held 4 CREATE TABLEs (topics, taxonomy_meta,
+    # topic_assignments, topic_links) and its census line below is removed
+    # with the file (nexus-i711w Stage 2 sub-stage C). 25 + 4 = 29; the
+    # repo total is unchanged and no statement is new. The DDL moved here
+    # because it describes the migration SOURCE — a legacy memory.db still
+    # carries those tables and the SQLite -> PG reader must materialise and
+    # read them — while the STORE CLASS that happened to declare it is gone.
+    "src/nexus/db/migrations.py": 29,             # the sanctioned-until-retired T2 registry
     "src/nexus/db/t2/aspect_extraction_queue.py": 3,
     "src/nexus/db/t2/catalog.py": 9,
-    "src/nexus/db/t2/catalog_taxonomy.py": 4,
     "src/nexus/db/t2/chash_index.py": 2,
     "src/nexus/db/t2/document_aspects.py": 1,
     "src/nexus/db/t2/document_highlights.py": 1,
@@ -141,7 +148,11 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/search_cmd.py": 1,
     # storage_cmd.py entry removed (RDR-187/nexus-piwya.10): the retired
     # `migrate chash` command carried the file's one epsilon-allow connect.
-    "src/nexus/commands/taxonomy_cmd.py": 17,
+    # 17 -> 3 (nexus-i711w Stage 2 sub-stage C): every removed override sat
+    # on a `db.taxonomy._lock` / `.conn` raw-cursor read inside an
+    # `_has_raw_access` branch. Those branches are deleted, so the debt is
+    # gone rather than relabelled.
+    "src/nexus/commands/taxonomy_cmd.py": 3,
     "src/nexus/commands/tier_status.py": 1,
     "src/nexus/commands/upgrade.py": 3,
     "src/nexus/console/routes/health.py": 1,

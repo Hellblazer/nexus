@@ -48,3 +48,8 @@ mechanize, it matters enough to ship.
   `expectations_undeclared`'s exit code is now load-bearing (exit 1 + BLINDSPOT).
 - `conexus/skills/orchestration/SKILL.md` — nexus-mk3tw: same, for the
   orchestration skill's census step.
+- `conexus/hooks/hooks.json` — nexus-i711w: the SessionStart hook that ran
+  `nx daemon t2 ensure-running` on EVERY session start, for every plugin user,
+  silenced by `|| true`. The verb is deleted with the T2 daemon, so until this
+  ships that hook keeps firing a command that no longer exists — harmless only
+  because of the `|| true` that hid it in the first place.

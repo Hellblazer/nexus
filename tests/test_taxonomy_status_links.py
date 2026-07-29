@@ -4,9 +4,11 @@ nexus-ntkr5: the service-mode branch hardcoded ``link_count = 0``
 ("link count not exposed via public API") — stale since
 ``get_topic_link_pairs`` became public; after the first
 ``nx taxonomy links --refresh`` run the live store held 7,520 links while
-status still displayed "0 topic links". The service-mode branch is
-exercised here by forcing ``_has_raw_access`` False against a real SQLite
-T2 — both stores implement the same public taxonomy contract.
+status still displayed "0 topic links". The public-API path used to be reachable only by forcing ``_has_raw_access``
+False; nexus-i711w Stage 2 sub-stage C deleted the raw branch it selected
+against, so status_cmd now takes this path unconditionally and the patch is
+gone. The test got STRONGER for it: it exercises the shipping path directly
+instead of a monkeypatched approximation of it.
 """
 
 from __future__ import annotations
@@ -70,7 +72,6 @@ def test_status_counts_links_via_public_api_in_service_mode(tmp_path: Path) -> N
     runner = CliRunner()
     with (
         patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
-        patch("nexus.commands.taxonomy_cmd._has_raw_access", return_value=False),
     ):
         result = runner.invoke(taxonomy, ["status"])
 

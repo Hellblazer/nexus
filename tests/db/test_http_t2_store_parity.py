@@ -469,7 +469,13 @@ _SQLITE_ORACLES = {
     "document_aspects": "nexus.db.t2.document_aspects:DocumentAspects",
     "document_highlights": "nexus.db.t2.document_highlights:DocumentHighlights",
     "aspect_queue": "nexus.db.t2.aspect_extraction_queue:AspectExtractionQueue",
-    "taxonomy": "nexus.db.t2.catalog_taxonomy:CatalogTaxonomy",
+    # taxonomy: oracle DELETED (nexus-i711w Stage 2 sub-stage C). This block's
+    # own docstring anticipated it — "after RDR-158 P4 there is no oracle left
+    # to capture from". Taxonomy is simply the first to reach that state; the
+    # remaining eight go with their stores in sub-stage A. The frozen
+    # T2_STORE_RETURNS entry for taxonomy STAYS: it is now the contract of
+    # record rather than a mirror of a live oracle, which is exactly what it
+    # was frozen to become.
     "scratch": "nexus.db.t1:T1Database",
 }
 
