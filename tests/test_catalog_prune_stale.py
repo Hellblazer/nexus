@@ -22,13 +22,13 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 
 # nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
 # JSONL / .catalog.db projection), which service mode deliberately opens
 # read-only as a frozen migration source (RDR-176 P1 Gap 2).
-pytestmark = pytest.mark.usefixtures("local_catalog_backend")
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -51,7 +51,13 @@ def catalog_env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def initialized_catalog(catalog_env):
-    cat = Catalog.init(catalog_env)
+    # nexus-i711w C-store: seed and re-read through the ACTIVE catalog.
+    # Service mode opens the local .catalog.db READ-ONLY (frozen migration
+    # source), so a direct Catalog handle cannot seed; and the verb under
+    # test reads via _get_catalog(), so a local seed would be invisible to
+    # it — the bucket-2 false-negative _catalog_fixture_ops exists to stop.
+    Catalog.init(catalog_env)
+    cat = ActiveCatalog()
     cat.register_owner("rdr", "design")
     cat.register_owner("test-papers", "curator")
     return cat
@@ -75,11 +81,12 @@ def _register(
     physical_collection: str = "",
 ) -> Tumbler:
     """Register an entry under ``owner_name`` with the given ``file_path``."""
-    owner_row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,),
-    ).fetchone()
-    assert owner_row is not None, f"owner {owner_name!r} not registered"
-    owner = Tumbler.parse(owner_row[0])
+    # Was a raw "SELECT tumbler_prefix FROM owners WHERE name = ?". list_owners()
+    # has the same shape on Catalog and HttpCatalogClient, so the lookup works on
+    # whichever substrate is live (nexus-i711w C-store).
+    match = [o for o in cat.list_owners() if o["name"] == owner_name]
+    assert match, f"owner {owner_name!r} not registered"
+    owner = Tumbler.parse(match[0]["tumbler_prefix"])
     return cat.register(
         owner=owner,
         title=title,
@@ -137,7 +144,7 @@ class TestRemediateRdrPrefixMode:
         ])
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(tumbler)
         assert entry.file_path == str(rdr_dir / "rdr-066-composition-smoke.md")
 
@@ -156,7 +163,7 @@ class TestRemediateRdrPrefixMode:
         assert result.exit_code == 0, result.output
         assert "1 no candidate" in result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(tumbler)
         assert entry.file_path == old_abs
 
@@ -176,7 +183,7 @@ class TestRemediateRdrPrefixMode:
         assert result.exit_code == 0, result.output
         assert "ambiguous" in result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(tumbler)
         assert entry.file_path == old_abs
 
@@ -195,7 +202,7 @@ class TestRemediateRdrPrefixMode:
         ])
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(tumbler)
         assert entry.file_path == str(rdr_dir / "rdr-066-orig.md")
 
@@ -214,7 +221,7 @@ class TestRemediateRdrPrefixMode:
         assert result.exit_code == 0, result.output
         assert "1 no candidate" in result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(tumbler)
         assert entry.file_path == old_abs
 
@@ -235,7 +242,7 @@ class TestCatalogPruneStale:
         assert result.exit_code == 0, result.output
         assert "1 stale entr" in result.output
         # Default is dry-run; no deletion.
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is not None
 
     def test_no_dry_run_alone_is_report_only(
@@ -250,7 +257,7 @@ class TestCatalogPruneStale:
         assert result.exit_code == 0, result.output
         assert "--confirm" in result.output  # explicit nudge
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is not None
 
     def test_no_dry_run_confirm_deletes(
@@ -266,7 +273,7 @@ class TestCatalogPruneStale:
         )
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is None
 
     def test_live_paths_never_flagged(
@@ -282,7 +289,7 @@ class TestCatalogPruneStale:
         assert result.exit_code == 0, result.output
         assert "0 stale" in result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is not None
 
     def test_basename_only_entries_skipped(
@@ -302,7 +309,7 @@ class TestCatalogPruneStale:
         )
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is not None
 
     def test_empty_file_path_skipped(
@@ -317,7 +324,7 @@ class TestCatalogPruneStale:
         )
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is not None
 
     def test_collection_filter_scopes_deletion(
@@ -343,7 +350,7 @@ class TestCatalogPruneStale:
         ])
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(t_a) is None  # in scope → deleted
         assert cat2.resolve(t_b) is not None  # out of scope → kept
 
@@ -370,7 +377,7 @@ class TestCatalogPruneStale:
         assert result.exit_code == 0, result.output
         assert "skipped" in result.output.lower()
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         assert cat2.resolve(tumbler) is not None  # preserved
 
     def test_no_entries_clean_summary(

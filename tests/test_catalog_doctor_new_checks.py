@@ -694,17 +694,32 @@ class TestStorePutIntegrity:
 
 
 class TestUsage:
-    def test_no_flag_lists_all_six_checks(self, runner) -> None:
-        """The usage error must enumerate every flag so an operator
-        running ``nx catalog doctor`` blind sees every option, not
-        just the original three.
+    def test_no_flag_lists_every_check(self, runner) -> None:
+        """The usage error must enumerate every check flag so an operator
+        running ``nx catalog doctor`` blind sees every option.
+
+        Derived from the command's own parameters rather than a hardcoded
+        list. The hardcoded version silently rotted when --replay-equality
+        and --t3-doc-id-coverage were deleted in nexus-i711w Stage 2
+        sub-stage C-store: it kept asserting flags that no longer existed,
+        so it failed for a correct change while never noticing an ADDED
+        flag that the usage text forgot. Deriving both sides makes it catch
+        the direction that actually matters.
         """
         result = runner.invoke(doctor_cmd, [])
         assert result.exit_code != 0
         out = result.output + (result.stderr or "")
-        for flag in (
-            "--replay-equality", "--t3-doc-id-coverage",
-            "--collections-drift", "--chunk-size-distribution",
-            "--chunk-text-dedup", "--t3-vs-catalog",
-        ):
+
+        check_flags = {
+            opt
+            for prm in doctor_cmd.params
+            for opt in getattr(prm, "opts", ())
+            if opt.startswith("--") and opt not in ("--json",)
+        }
+        assert len(check_flags) >= 5, (
+            f"expected the doctor to still carry several check flags, "
+            f"found {sorted(check_flags)} — if the surface really shrank "
+            f"this far, this guard needs re-grounding, not lowering"
+        )
+        for flag in sorted(check_flags):
             assert flag in out, f"usage error must list {flag}"

@@ -28,16 +28,16 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 
 Run `/conexus:nx-preflight` after installing to verify all dependencies are present.
 
-The plugin's SessionStart hook auto-spawns the T2 daemon (`nx daemon
-t2 ensure-running --quiet`) on every Claude Code session start, so a
-fresh `pip install conexus` + `/plugin install conexus@nexus-plugins`
-yields a working substrate on first session without any manual
-`nx daemon t2 start` incantation. For a daemon that survives
-across reboots independent of Claude Code (recommended for any host
-with regular `nx` CLI use), run `nx daemon t2 install --autostart`
-once after install. See [Container Integration](../docs/container-integration.md)
-for the full story including dev-container TCP and Claude Cowork
-SDK-bridge transport.
+A fresh `pip install conexus` + `/plugin install conexus@nexus-plugins`
+yields a working substrate on first session with no daemon incantation
+of any kind: T2 is served by the storage service, which `nx init`
+provisions. The plugin's SessionStart hook no longer spawns anything for
+T2 — the T2 daemon was retired in favour of that service. For a storage
+service that survives reboots independent of Claude Code (recommended for
+any host with regular `nx` CLI use), run `nx daemon service install
+--autostart` once after install. See
+[Container Integration](../docs/container-integration.md) for the full
+story.
 
 **Companion plugin:**
 - **[sn](../sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.

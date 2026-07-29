@@ -353,92 +353,9 @@ def test_fire_batch_persist_failure_is_best_effort(
     registry.fire_batch(["d1"], "c", ["x"], None, None)
 
 
-# ── Taxonomy batch hook fallback (MCP path with embeddings=None) ─────────────
-#
-# End-to-end taxonomy assignment behaviour (centroid lookup, cross-collection
-# projection) is covered in tests/test_taxonomy.py via the underlying
-# assign_batch path. The tests here cover only the new ``embeddings=None``
-# fallback that the MCP store_put path relies on (taxonomy_assign_batch_hook
-# previously had no embedding-fetch path; the legacy single-doc shim handled
-# it via taxonomy_assign_hook).
-
-
-def test_fetch_or_embed_returns_t3_embedding_when_present(
-    monkeypatch,
-) -> None:
-    """_fetch_or_embed returns the doc's existing T3 embedding without
-    hitting the local-MiniLM fallback when the row is present.
-    """
-    import nexus.mcp_infra as mod
-    from nexus.mcp_infra import _fetch_or_embed
-
-    stored_emb = [0.1] * 384
-    stored_emb[0] = 0.9
-
-    class _Coll:
-        def get(self, ids, include):
-            return {"ids": list(ids), "embeddings": [stored_emb]}
-
-    class _Client:
-        def get_collection(self, name, embedding_function):
-            return _Coll()
-
-    class _T3Stub:
-        _client = _Client()
-
-    monkeypatch.setattr(mod, "get_t3", lambda: _T3Stub())
-
-    result = _fetch_or_embed(["doc-1"], "fetch__coll", ["payload"])
-    assert result is not None
-    assert len(result) == 1
-    assert result[0][0] == 0.9
-
-
-def test_fetch_or_embed_falls_back_to_local_minilm(
-    monkeypatch,
-) -> None:
-    """When T3 returns no embedding for a doc id, _fetch_or_embed falls
-    back to local MiniLM embedding of the supplied content. Keeps MCP
-    store_put working when the just-upserted row is not yet retrievable
-    (race condition with t3 visibility).
-    """
-    import nexus.mcp_infra as mod
-    from nexus.mcp_infra import _fetch_or_embed
-
-    class _EmptyColl:
-        def get(self, ids, include):
-            return {"ids": [], "embeddings": []}
-
-    class _Client:
-        def get_collection(self, name, embedding_function):
-            return _EmptyColl()
-
-    class _T3Stub:
-        _client = _Client()
-
-    monkeypatch.setattr(mod, "get_t3", lambda: _T3Stub())
-
-    result = _fetch_or_embed(["doc-x"], "fetch__coll", ["hello world"])
-    assert result is not None
-    assert len(result) == 1
-    assert len(result[0]) == 384  # MiniLM dim
-
-
-def test_fetch_or_embed_returns_none_when_no_t3_no_content(
-    monkeypatch,
-) -> None:
-    """If T3 fetch raises AND contents is empty, the fallback has no input;
-    the function returns None and the caller no-ops cleanly.
-    """
-    import nexus.mcp_infra as mod
-    from nexus.mcp_infra import _fetch_or_embed
-
-    class _T3Boom:
-        @property
-        def _client(self):
-            raise RuntimeError("t3 unreachable")
-
-    monkeypatch.setattr(mod, "get_t3", lambda: _T3Boom())
-
-    result = _fetch_or_embed(["doc-y"], "any__coll", [])
-    assert result is None
+# The "Taxonomy batch hook fallback" block stood here: three tests covering
+# mcp_infra._fetch_or_embed. Both the function and these went in nexus-i711w
+# Stage 2 sub-stage C — its only caller was the raw taxonomy-assign path, and
+# the surviving service branch re-fetches through get_t3().get_embeddings with
+# its own count-skew guard and tripwire, which these tests never covered.
+# Nothing was ported: there is no surviving subject to point them at.

@@ -2102,26 +2102,11 @@ def test_preflight_registration_idempotent_on_staleness_skip(
         f"chunks (gate: `if count > 0` at index_markdown line ~1394)."
     )
 
-    # Replay-equality must pass. The live SQLite snapshot reflects the
-    # single DocumentRegistered + (post-impl) the pre-flight Document
-    # row; the projector must produce the identical state from
-    # events.jsonl.
-    runner = CliRunner()
-    result = runner.invoke(
-        doctor_cmd, ["--replay-equality", "--json"],
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0, (
-        f"doctor --replay-equality exited {result.exit_code}: "
-        f"{result.output[:500]}"
-    )
-    payload = _json.loads(result.stdout)["replay_equality"]
-    assert payload["pass"] is True, (
-        f"replay-equality flagged drift after pre-flight registration + "
-        f"staleness skip; the projector must accept a "
-        f"DocumentRegistered-without-ChunkIndexed state as non-drift. "
-        f"Report: {_json.dumps(payload, indent=2)[:1000]}"
-    )
+    # The replay-equality cross-check that used to run here was removed
+    # with doctor --replay-equality (nexus-i711w Stage 2 sub-stage C-store).
+    # The assertions above are this test's actual subject: pre-flight
+    # registration + the staleness-skip gate. Only the corroborating
+    # projector round-trip is gone.
 
 
 @pytest.fixture(autouse=True)

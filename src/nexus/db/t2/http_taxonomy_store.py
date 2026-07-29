@@ -2,8 +2,17 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """HttpTaxonomyStore — thin HTTP client over the RDR-152 Java taxonomy service.
 
-Drop-in replacement for :class:`~nexus.db.t2.catalog_taxonomy.CatalogTaxonomy`.
-Activated when ``NX_STORAGE_BACKEND=service`` (or ``NX_STORAGE_BACKEND_TAXONOMY=service``).
+THE taxonomy store. It began as a drop-in replacement for the SQLite
+``CatalogTaxonomy``, which is now DELETED (nexus-i711w Stage 2 sub-stage C) —
+so it is no longer one of two backends but the only one, and
+``NX_STORAGE_BACKEND[_TAXONOMY]=sqlite`` raises rather than selecting anything.
+
+The per-method "mirrors CatalogTaxonomy.<x>" notes below are kept deliberately.
+They are LINEAGE, not a pointer to live code: they record which oracle each
+shape was frozen against back when a second implementation existed to disagree
+with, which is what makes the frozen return contracts auditable. Do not go
+looking for that class — the compute core it shared lives in
+:mod:`nexus.db.t2.taxonomy_compute`.
 
 Config:
     NX_SERVICE_HOST  — service host (default: 127.0.0.1)

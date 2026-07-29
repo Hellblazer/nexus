@@ -75,40 +75,9 @@ class TestRegisterOwnerCrashWindow:
         )
         # Both rows survive in SQLite.
         assert cat._db.execute("SELECT count(*) FROM owners").fetchone()[0] == 2
-
-
-class TestDoctorReportSchema:
-    """Round-4 review (reviewer D): the existing doctor JSON consumer
-    test in test_catalog_doctor_replay_equality.py does not assert on
-    the new ``event_source`` field. This test pins the schema so a
-    future refactor that drops the field breaks loudly."""
-
-        # nexus-aqbrk: PINNED (catalog). doctor --replay-equality is a local-only verb
-    # by design — local_catalog_backend's own contract names the replay/consistency
-    # family (nexus-kmo9h). Same disposition already used in test_doc_indexer.py and
-    # test_rdr101_round3_correctness.py this arc.
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_replay_equality_report_includes_event_source(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
-
-        # PR ζ flipped default to ES; legacy-path assertion.
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
-        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
-        d = tmp_path / "test-catalog"
-        Catalog.init(d)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(d))
-        cat = Catalog(d, d / ".catalog.db")
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        cat.register(owner, "a.md", content_type="prose", file_path="a.md")
-        cat._db.close()
-
-        report = _run_replay_equality()
-        assert "event_source" in report
-        assert report["event_source"] in ("events.jsonl", "synthesized")
-        assert "shadow_only" in report
-        assert isinstance(report["shadow_only"], bool)
+# TestDoctorReportSchema removed (nexus-i711w Stage 2 sub-stage C-store): it
+# pinned the JSON schema of doctor --replay-equality, a local-event-log check
+# deleted with the local catalog. Nothing to pin a schema on.
 
 
 class TestEventLogWriteFailure:

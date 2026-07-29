@@ -398,8 +398,10 @@ class TestSourceUriRegistration:
 class TestAliasResolution:
     """nexus-s8yz: documents.alias_of column — permanent tumbler aliasing.
 
-    Preserves external reference stability when dedupe-owners (nexus-tmbh)
-    consolidates duplicate owner registrations.
+    Preserves external reference stability across owner-registration
+    consolidation. The verb that performed it, ``dedupe-owners`` (nexus-tmbh),
+    was deleted in nexus-i711w Stage 2 sub-stage C-store; the alias_of column
+    it wrote is still read, so existing aliases keep resolving.
     """
 
     def test_new_document_has_empty_alias(self, cat_with_owner):

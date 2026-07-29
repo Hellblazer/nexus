@@ -81,16 +81,6 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
-    # RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): TTY-gated upgrade
-    # prompt. When the catalog is in bootstrap-fallback mode, surface
-    # a one-time stderr warning to the operator so the silent split
-    # state does not linger unnoticed. Suppressed in non-TTY contexts
-    # (CI / cron / MCP / scripted runs) and via NEXUS_NO_PROMPTS=1.
-    # Hook is here, at the top-level Click group, so it fires once per
-    # CLI invocation rather than per Catalog construction.
-    from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    maybe_emit_bootstrap_prompt()
-
     # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
     # check, no filesystem access) on every migration-capable release; at
     # N+1 it trips a LOUD stderr banner on EVERY invocation while pre-PG

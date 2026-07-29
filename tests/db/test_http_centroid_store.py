@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from nexus.db.t2.catalog_taxonomy import AssignResult
+from nexus.db.t2.taxonomy_compute import AssignResult
 from nexus.db.t2.http_centroid_store import HttpCentroidStore
 
 TOKEN = "fake-centroid-token"

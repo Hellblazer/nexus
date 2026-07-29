@@ -36,25 +36,30 @@ class _FakeServiceT2:
         pass
 
 
-def test_has_raw_access_true_for_sqlite_false_for_service(tmp_path):
-    """has_raw_access reports what the store actually is, on either substrate.
+def test_has_raw_access_true_for_raw_shape_false_for_service():
+    """has_raw_access reports what the store IS, from its shape alone.
 
-    nexus-aqbrk: the True leg needs a store that IS SQLite-backed. Under the
-    engine substrate ``T2Database(path).taxonomy`` is an HttpTaxonomyStore, so
-    the leg has to pin the backend rather than assume the ambient one — the
-    assertion is about has_raw_access's detection, not about which backend the
-    suite happens to be running.
+    The True leg used to build a real SQLite ``T2Database(path).taxonomy``.
+    That store is deleted (nexus-i711w Stage 2 sub-stage C) and the property
+    now raises for a =sqlite pin, so the leg is expressed with the shape the
+    predicate actually tests for — a ``_lock`` plus a ``conn`` — rather than
+    with a resurrected store. This keeps the DETECTION contract under test,
+    which is what the assertion was always about; nothing here depended on the
+    handle being a genuine CatalogTaxonomy.
+
+    has_raw_access itself outlives this sub-stage: it retires with the rest of
+    the SQLite stores in sub-stage A, when its last True case disappears for
+    real rather than by construction.
     """
     from nexus.db.storage_mode import has_raw_access
-    from nexus.db.t2 import T2Database
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("NX_STORAGE_BACKEND", "sqlite")
-        db = T2Database(tmp_path / "t2.db")  # epsilon-allow: test asserts raw-access detection on a real SQLite store
-        try:
-            assert has_raw_access(db.taxonomy) is True
-        finally:
-            db.close()
+    class _RawShaped:
+        """Duck-typed raw store: what a SQLite domain store looked like."""
+
+        _lock = object()
+        conn = object()
+
+    assert has_raw_access(_RawShaped()) is True
     assert has_raw_access(_ServiceTaxonomy()) is False
 
 

@@ -20,7 +20,7 @@ A collection-creation artifact row with `chunk_count=0` and empty `source_uri`. 
 
 **Detection signal**: the second home is the empty-URI bucket; the document has `chunk_count=0`. There are usually 1-3 of these per affected collection.
 
-**Action**: `nx catalog delete <tumbler>` to sweep. The 2026-05-08 shakeout cleaned 13 such rows under bead `nexus-4yfr` (all `chunk_count=0`, all confirmed safe via the bead's pre-audit). Reversible via `nx catalog undelete`.
+**Action**: `nx catalog delete <tumbler>` to sweep. The 2026-05-08 shakeout cleaned 13 such rows under bead `nexus-4yfr` (all `chunk_count=0`, all confirmed safe via the bead's pre-audit). **Not reversible in-product** as of 7.0.0: a JSONL snapshot is still written to `.deleted-backups/` before the delete, but the `nx catalog undelete` restore verb was removed with the local catalog (nexus-i711w). Confirm each tumbler before sweeping, as that pre-audit did.
 
 ### Axis 3: multi-source corpus
 

@@ -34,14 +34,24 @@ _SRC = Path(nexus.__file__).parent
 #: Exact allowlist: file (relative to src/nexus) -> occurrence count of
 #: ``Catalog.is_initialized`` (any receiver spelled ``*Catalog``). Every
 #: entry is deliberate:
-#: - catalog/factory.py: the SQLite-branch presence checks INSIDE the
+#: - catalog/factory.py: the SQLite-branch presence check INSIDE the
 #:   factory — the single place presence semantics live (f1itv contract).
+#:   2 -> 1 (nexus-i711w Stage 2 sub-stage C-store): make_catalog_admin held
+#:   the second one and was deleted with the two deep-maintenance verbs it
+#:   served (dedupe-owners, undelete). A SHRINK, caught by this census's own
+#:   exact-equality assert rather than by the author — which is the argument
+#:   for two-sided ledgers over one-sided counts (cf. nexus-th15h).
 #: - catalog/catalog.py: the definition + intra-class uses.
 #: - commands/catalog.py: SQLite-opt-out-only guards (service mode
 #:   bypasses via storage_backend_for / refuses setup divergence).
-#: - commands/catalog_cmds/doctor.py: local-artifact doctor verbs (the
-#:   event log / JSONL / projection ARE local by design) — diagnostics
-#:   routed through _local_artifacts_missing_error for mode honesty.
+#: - commands/catalog_cmds/doctor.py: REMOVED (was 4). The local-artifact
+#:   doctor surface — synthesize-log, _check_bootstrap_status,
+#:   _run_replay_equality, _run_t3_doc_id_coverage — held all four gates and
+#:   was deleted in nexus-i711w Stage 2 sub-stage C-store. The verbs were
+#:   local-only by design (the event log / JSONL / projection ARE local) and
+#:   already refused in service mode; replay-equality has no service meaning
+#:   at all. doctor itself survives with its six service-capable checks and
+#:   now reaches the catalog only through the factory.
 #: - db/collection_purge.py: unreachable in service mode (early return
 #:   at the atomic engine cascade) — verified nexus-e9ru2.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101);
@@ -52,10 +62,9 @@ _SRC = Path(nexus.__file__).parent
 #: - indexer.py: the CORRECT service-aware form (catalog_service_mode
 #:   boolean) — the pattern the sweep normalized everything else to.
 _ALLOWED: dict[str, int] = {
-    "catalog/factory.py": 2,
+    "catalog/factory.py": 1,
     "collection_audit.py": 1,  # sqlite-only branch AFTER the service check (e9ru2)
     "commands/catalog.py": 2,
-    "commands/catalog_cmds/doctor.py": 4,
     "db/collection_purge.py": 1,
     "catalog/synthesizer.py": 1,
     "db/embed_migrate.py": 1,
@@ -243,19 +252,6 @@ def test_catalog_setup_refuses_divergence_in_service_mode(
     assert not service_mode_fresh_box.exists(), (
         "setup must not have created a local catalog dir in service mode"
     )
-
-
-def test_doctor_uninitialized_message_is_mode_honest(tmp_path, monkeypatch):
-    from nexus.commands.catalog_cmds.doctor import _local_artifacts_missing_error
-
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-    msg = _local_artifacts_missing_error(tmp_path).message
-    assert "Do NOT run 'nx catalog setup'" in msg
-    assert "owned by the nexus service" in msg
-
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-    msg = _local_artifacts_missing_error(tmp_path).message
-    assert "Run 'nx catalog setup' first" in msg
 
 
 def test_audit_render_distinguishes_skipped_from_clean():

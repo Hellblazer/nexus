@@ -199,12 +199,12 @@ def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False, quiet=Fals
     ``HttpVectorClient`` service), not the raw ``_client``.
     """
     from nexus.commands.taxonomy_cmd import (  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
-        _require_supported_taxonomy_backend,
         discover_for_collection,
     )
-    # nexus-7ydks S1: close the split-backend hole on the post-index path too
-    # (discover_cmd/rebuild_cmd already guard; this shared wrapper did not).
-    _require_supported_taxonomy_backend(t3, taxonomy)
+    # The nexus-7ydks S1 split-backend guard stood here. It refused a
+    # service-backed T3 paired with a raw-SQLite taxonomy store; that pairing
+    # became unrepresentable when the raw store was deleted (nexus-i711w
+    # sub-stage C), so the guard could never fire again.
     return discover_for_collection(
         collection_name, taxonomy, t3, force=force, quiet=quiet,
     )

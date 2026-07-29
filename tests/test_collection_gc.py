@@ -21,12 +21,12 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
 class TestCollectionGCCli:
     """``nx catalog collection-gc`` over LOCAL, INJECTED artifacts.
 
@@ -79,7 +79,12 @@ class TestCollectionGCCli:
         catalog_dir = tmp_path / "catalog"
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         Catalog.init(catalog_dir)
-        return Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        # nexus-i711w C-store: route seeding at the ACTIVE catalog. Service mode
+    # opens the local .catalog.db READ-ONLY (frozen migration source,
+    # RDR-176 P1 Gap 2), so a direct Catalog handle dies on "attempt to
+    # write a readonly database". The subject here is the verb, not the
+    # substrate.
+        return ActiveCatalog()
 
     def _seed(
         self,
@@ -227,16 +232,15 @@ class TestCollectionGCCli:
         # Seed an empty T3 collection AND a documents row referencing it.
         empty_referenced = "rdr__doc-referenced__voyage-context-3__v1"
         t3_db._client.get_or_create_collection(empty_referenced)
-        # Direct insert into documents to skip the register flow.
-        catalog_env._db.execute(  # epsilon-allow: gc test fixture seeds an orphaned documents row to verify the document-reference protection guard
-            "INSERT INTO documents "
-            "(tumbler, title, author, year, content_type, file_path, "
-            " corpus, physical_collection, chunk_count, head_hash, "
-            " indexed_at, source_uri, alias_of) "
-            "VALUES (?, '', '', 0, 'paper', '', '', ?, 0, '', '', '', '')",
-            ("9.9.9", empty_referenced),
+        # Register a document referencing the collection. Was a raw INSERT at a
+        # pinned tumbler "to skip the register flow"; the assertion only needs
+        # SOME document row pointing at empty_referenced, and register() is the
+        # path that exists on both substrates (nexus-i711w C-store).
+        owner = catalog_env.register_owner("gc-protect", "repo", repo_hash="gcp")
+        catalog_env.register(
+            owner, "protected", content_type="paper",
+            file_path="protected.md", physical_collection=empty_referenced,
         )
-        catalog_env._db.commit()
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
 
         result = runner.invoke(main, ["catalog", "collection-gc", "--apply"])

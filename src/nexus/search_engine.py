@@ -489,8 +489,9 @@ def search_cross_corpus(
 
     Pass ``cluster_by=None`` to disable all clustering.
 
-    *taxonomy* is an optional :class:`CatalogTaxonomy` instance for topic
-    lookups. When ``None`` and ``cluster_by="semantic"``, falls back to
+    *taxonomy* is an optional :class:`~nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore`
+    instance for topic lookups (it named the SQLite ``CatalogTaxonomy`` until
+    nexus-i711w Stage 2 sub-stage C deleted that class). When ``None`` and ``cluster_by="semantic"``, falls back to
     Ward clustering.
 
     *threshold_override* (RDR-087 Phase 1.1 / nexus-yi4b.1.1) replaces the

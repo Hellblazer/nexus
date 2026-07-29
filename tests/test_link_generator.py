@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+from nexus.config import catalog_path
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.link_generator import (
     generate_citation_links,
     generate_pdf_corpus_links,
@@ -477,33 +480,49 @@ class TestCitationLinksReaderWriterSplit:
             owner, "Paper A", content_type="paper", file_path="a.pdf",
             meta={"bib_semantic_scholar_id": "S2_A", "references": ["S2_B"]},
         )
-        cat._db.close()
         return cat_dir
 
-        # nexus-aqbrk: PINNED (catalog). Asserts the RDR-146 P1.2 reads-via-cat /
-    # writes-via-writer SPLIT against a local Catalog handle; under the engine
-    # substrate the writes hit the RDR-176 frozen-source read-only guard.
-    @pytest.mark.usefixtures("local_catalog_backend")
     def test_reads_via_cat_writes_via_writer(self, tmp_path: Path) -> None:
         """The read-only reader supplies all_documents; the writer takes the
-        link_if_absent. A 'cites' edge is created."""
-        cat_dir = self._seed_citing_pair(tmp_path)
-        reader = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
-        writer = Catalog(cat_dir, cat_dir / ".catalog.db")  # full, write-capable
+        link_if_absent. A 'cites' edge is created.
+
+        Was pinned to the local catalog (nexus-aqbrk) because it built the
+        reader/writer pair as raw ``Catalog(..., read_only=True)`` handles,
+        which the RDR-176 frozen-source guard refuses to write in service mode.
+        The CONTRACT under test — reads via one handle, writes via a separate
+        write-capable one — is not local: it is exactly what
+        make_catalog_reader / make_catalog_writer supply, and what production
+        actually passes to generate_citation_links. Going through the factories
+        tests the same split on whichever catalog is live, which is strictly
+        more faithful than the raw pair it replaces.
+        """
+        # Seed through the ACTIVE catalog, not _seed_citing_pair: that helper
+        # seeds a LOCAL Catalog, which the factories below would not read in
+        # service mode (bucket-2 — the seed is invisible and the count is 0).
+        # It is left as-is for the sibling test, whose subject IS the raw
+        # read-only handle.
+        Catalog.init(catalog_path())
+        cat = ActiveCatalog()
+        owner = cat.register_owner("papers", "curator")
+        cat.register(
+            owner, "Paper B", content_type="paper", file_path="b.pdf",
+            meta={"bib_semantic_scholar_id": "S2_B"},
+        )
+        cat.register(
+            owner, "Paper A", content_type="paper", file_path="a.pdf",
+            meta={"bib_semantic_scholar_id": "S2_A", "references": ["S2_B"]},
+        )
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
         try:
             count = generate_citation_links(reader, writer=writer)
             assert count == 1
         finally:
-            reader._db.close()
-            writer._db.close()
+            writer.close()
         # Edge is durable: a fresh read sees it.
-        check = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
-        try:
-            from nexus.catalog.tumbler import Tumbler
-            a = [e for e in check.all_documents() if e.title == "Paper A"][0]
-            assert any(l.link_type == "cites" for l in check.links_from(a.tumbler))
-        finally:
-            check._db.close()
+        check = make_catalog_reader()
+        a = [e for e in check.all_documents() if e.title == "Paper A"][0]
+        assert any(l.link_type == "cites" for l in check.links_from(a.tumbler))
 
     def test_write_on_reader_without_writer_fails_loud(self, tmp_path: Path) -> None:
         """Passing only a read-only reader (no writer) must fail at the write,

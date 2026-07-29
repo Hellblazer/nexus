@@ -137,77 +137,17 @@ class TestChashIndexRename:
 # ── CatalogTaxonomy.rename_collection ───────────────────────────────────────
 
 
-class TestTaxonomyRename:
-    def _seed(self, tmp_path: Path):
-        from nexus.db.t2 import T2Database
-
-        db = T2Database(tmp_path / "memory.db")
-        tax = db.taxonomy
-        t_old = tax.conn.execute(
-            "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, '2026-04-18T00:00:00Z')",
-            ("T", "docs__old", "h1", 1, "[]"),
-        ).lastrowid
-        t_stays = tax.conn.execute(
-            "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, '2026-04-18T00:00:00Z')",
-            ("K", "docs__stays", "h2", 1, "[]"),
-        ).lastrowid
-        tax.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-            "VALUES (?, ?, ?, ?)",
-            ("d1", t_old, "hdbscan", "docs__old"),
-        )
-        tax.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-            "VALUES (?, ?, ?, ?)",
-            ("d2", t_stays, "projection", "docs__old"),
-        )
-        tax.conn.execute(
-            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-            "VALUES (?, ?, ?, ?)",
-            (t_old, t_stays, 1, "[]"),
-        )
-        tax.conn.execute(
-            "INSERT INTO taxonomy_meta (collection, last_discover_at) VALUES (?, ?)",
-            ("docs__old", "2026-04-18T00:00:00Z"),
-        )
-        tax.conn.commit()
-        return db, tax, t_old
-
-    def test_updates_topics_assignments_and_meta(self, tmp_path: Path) -> None:
-        db, tax, _ = self._seed(tmp_path)
-        try:
-            counts = tax.rename_collection("docs__old", "docs__new")
-            assert counts == {"topics": 1, "assignments": 2, "meta": 1}
-
-            assert tax.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                ("docs__new",),
-            ).fetchone()[0] == 1
-            assert tax.conn.execute(
-                "SELECT COUNT(*) FROM topic_assignments WHERE source_collection = ?",
-                ("docs__new",),
-            ).fetchone()[0] == 2
-            # Survivor untouched.
-            assert tax.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                ("docs__stays",),
-            ).fetchone()[0] == 1
-        finally:
-            db.close()
-
-    def test_topic_links_survive_rename(self, tmp_path: Path) -> None:
-        """topic_links use topic_id FK, not collection name — rename is
-        a no-op for links and must not drop or mutate them."""
-        db, tax, _ = self._seed(tmp_path)
-        try:
-            before = tax.conn.execute("SELECT COUNT(*) FROM topic_links").fetchone()[0]
-            tax.rename_collection("docs__old", "docs__new")
-            after = tax.conn.execute("SELECT COUNT(*) FROM topic_links").fetchone()[0]
-            assert before == after == 1
-        finally:
-            db.close()
+# TestTaxonomyRename stood here (nexus-i711w Stage 2 sub-stage C). Its two
+# tests called ``CatalogTaxonomy.rename_collection`` directly — the deleted
+# class's OWN method, not the cascade — so their subject is gone rather than
+# merely unreachable. The service-side equivalent is covered by
+# tests/test_t2_rename_cascade_service_mode.py, which spies
+# HttpTaxonomyStore.rename_collection through the cascade and asserts the
+# same three counts (topics / assignments / meta).
+#
+# The cascade's own SQLite taxonomy leg is NOT retired here — it is raw SQL on
+# a dedicated connection and lives on until sub-stage A. TestCascadeAtomicity
+# below still covers it; only its seeding moved off the deleted class.
 
 
 # ── Catalog.rename_collection ───────────────────────────────────────────────
@@ -794,6 +734,44 @@ class TestAspectCascadeIntegration:
 # ── K4 atomicity: all T2 cascades in one transaction ───────────────────────
 
 
+def _raw_count(db_path, collection: str) -> int:
+    """COUNT topics for *collection* over a raw connection.
+
+    Reads what the cascade's raw-SQL taxonomy leg wrote, without going through
+    a store — ``db.taxonomy`` is service-only since nexus-i711w sub-stage C and
+    raises for the =sqlite pin this module sets.
+    """
+    import sqlite3  # noqa: PLC0415 — test-local
+
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM topics WHERE collection = ?", (collection,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _seed_taxonomy_tables(t2db) -> None:
+    """Create the taxonomy tables on *t2db*'s file and stash a raw connection.
+
+    ``CatalogTaxonomy.__init__`` used to run this DDL as a side effect of
+    constructing the store, which is how these tests got their tables. The
+    store is deleted (nexus-i711w Stage 2 sub-stage C) but the TABLES are not:
+    the cascade's SQLite leg is raw SQL against them, and a legacy memory.db
+    still carries them. The DDL moved to db/migrations.py with the rest of the
+    base schema, so seed from there rather than resurrecting a store.
+    """
+    import sqlite3  # noqa: PLC0415 — test-local
+
+    from nexus.db.migrations import _TAXONOMY_SCHEMA_SQL  # noqa: PLC0415 — test-local
+
+    conn = sqlite3.connect(str(t2db._path), check_same_thread=False)
+    conn.executescript(_TAXONOMY_SCHEMA_SQL)
+    conn.commit()
+    t2db._raw_tax_conn = conn
+
+
 class TestCascadeAtomicity:
     """K4 (nexus-nhyh): T2 cascade must be atomic -- a mid-flight failure
     must leave ALL T2 tables showing the OLD name (rolled back).
@@ -811,16 +789,17 @@ class TestCascadeAtomicity:
             t2db.chash_index.upsert(
                 chash="aa", collection="code__old"
             )
-            t2db.taxonomy.conn.execute(
+            _seed_taxonomy_tables(t2db)
+            t2db._raw_tax_conn.execute(
                 "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
                 "VALUES (?, ?, ?, ?, ?, '2026-05-09T00:00:00Z')",
                 ("T", "code__old", "h1", 1, "[]"),
             )
-            t2db.taxonomy.conn.execute(
+            t2db._raw_tax_conn.execute(
                 "INSERT INTO taxonomy_meta (collection, last_discover_at) VALUES (?, ?)",
                 ("code__old", "2026-05-09T00:00:00Z"),
             )
-            t2db.taxonomy.conn.commit()
+            t2db._raw_tax_conn.commit()
             t2db.document_aspects.conn.execute(
                 "INSERT INTO document_aspects "
                 "(collection, source_path, problem_formulation, proposed_method, "
@@ -896,10 +875,10 @@ class TestCascadeAtomicity:
                 "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
                 ("code__old",),
             ).fetchone()[0]
-            tax_old = verify.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                ("code__old",),
-            ).fetchone()[0]
+            # Raw read: the cascade's taxonomy leg is raw SQL on these tables
+            # and the store that used to lend its connection is deleted
+            # (nexus-i711w Stage 2 sub-stage C).
+            tax_old = _raw_count(verify._path, "code__old")
 
         assert chash_old == 1, "chash_index must be rolled back"
         assert da_old == 1, "document_aspects must be rolled back"
@@ -936,10 +915,7 @@ class TestCascadeAtomicity:
                 "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
                 ("code__new",),
             ).fetchone()[0]
-            tax_new = verify.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                ("code__new",),
-            ).fetchone()[0]
+            tax_new = _raw_count(verify._path, "code__new")
 
         assert chash_new == 1
         assert da_new == 1

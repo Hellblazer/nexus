@@ -28,7 +28,7 @@ format (RDR-169 G3), not a dependency. Pinned by
 |---|---|
 | `MemoryStore` | Persistent notes + FTS5 (`nx memory`). |
 | `PlanLibrary` | Plan templates with TTL auto-expiry. 12 builtin templates seeded at `nx catalog setup`. |
-| `CatalogTaxonomy` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). |
+| `HttpTaxonomyStore` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). **Service-only.** The SQLite `CatalogTaxonomy` that used to fill this row is DELETED (`nexus-i711w` Stage 2 sub-stage C); `t2.taxonomy` is lazy and RAISES for `NX_STORAGE_BACKEND[_TAXONOMY]=sqlite` rather than silently returning the service store. Its pure-compute half lives in `taxonomy_compute.py`. |
 | `Telemetry` | Relevance log. |
 | `ChashIndex` | Content-hash chunk index (RDR-086). Dual-write hook ensures rows exist before topic assignment. |
 | `DocumentAspects` | Structured aspect rows (RDR-089). |

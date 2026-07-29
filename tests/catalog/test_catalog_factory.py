@@ -15,19 +15,19 @@ import pytest
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.factory import (
     CatalogWriter,
-    make_catalog_admin,
     make_catalog_reader,
     make_catalog_writer,
 )
 from nexus.catalog.tumbler import Tumbler
 
 # nexus-aqbrk: this file is the LOCAL factory's own test — read-only Catalog
-# mode over .catalog.db, the daemon-vs-direct writer fallback, and the admin
-# refusals. Service mode answers all three differently AND ON PURPOSE:
-# make_catalog_reader always returns a _SharedServiceCatalogHandle (so
-# "None when uninitialised" is unsatisfiable rather than wrong), the handle
-# has no _read_only or _db, and make_catalog_admin raises
-# CatalogAdminServiceModeError outright. The service half of this surface is
+# mode over .catalog.db and the daemon-vs-direct writer fallback. Service mode
+# answers both differently AND ON PURPOSE: make_catalog_reader always returns a
+# _SharedServiceCatalogHandle (so "None when uninitialised" is unsatisfiable
+# rather than wrong), and the handle has no _read_only or _db. (The third case,
+# make_catalog_admin's service-mode refusal, is gone — the factory and both
+# verbs it served were deleted in nexus-i711w Stage 2 sub-stage C-store.)
+# The service half of this surface is
 # owned by tests/test_catalog_factory_service_mode_cache.py, which exercises
 # make_catalog_reader/make_catalog_writer under _is_catalog_service_mode and
 # pins the shared-client contract.
@@ -193,38 +193,6 @@ def _run_daemon_in_thread(daemon, ready: threading.Event, stop_evt: threading.Ev
         loop.close()
 
 
-
-
-# ---------------------------------------------------------------------------
-# make_catalog_admin — deep-maintenance escape hatch + single-writer guard
-# (RDR-146 P1.2 review remediation: substantive-critic SIG-1, code-review H-1)
-# ---------------------------------------------------------------------------
-
-
-class TestMakeCatalogAdmin:
-    def test_none_when_uninitialised(self) -> None:
-        assert make_catalog_admin() is None
-
-    def test_returns_full_writable_catalog_when_no_daemon(self) -> None:
-        from nexus.config import catalog_path
-
-        _seed_catalog(catalog_path())
-        cat = make_catalog_admin()
-        try:
-            assert cat is not None
-            assert cat._read_only is False
-            # Full write capability (low-level ops the daemon proxy can't serve).
-            owner = cat.register_owner("beta", "project", repo_hash="h2", repo_root="/tmp/beta")
-            assert isinstance(owner, Tumbler)
-        finally:
-            cat._db.close()
-
-    # NO test_refuses_when_daemon_live: the RDR-146 P1.2 single-writer guard
-    # refused a second writer while a T2 daemon held the .catalog.db write
-    # handle. That daemon is retired (nexus-i711w Stage 2 sub-stage B), so no
-    # competing writer can exist to refuse. The surviving refusal is
-    # service-mode (CatalogAdminServiceModeError), covered by
-    # tests/catalog/test_aoqnb_admin_service_mode_refusal.py.
 
 
 class TestReaderColdCache:
