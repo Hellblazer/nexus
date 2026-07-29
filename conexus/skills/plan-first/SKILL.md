@@ -24,6 +24,22 @@ INSIDE `nx_answer` — there are no separately exposed `plan_match` /
 3. Raw `search` is for keyword lookup only ("find X in collection Y") — never
    for analytical / verb-shaped questions.
 
+## When to pass bindings
+
+`bindings` supplies typed plan values `nx_answer` will not infer from the
+question. Plans requiring one are not offered unless it is supplied.
+
+| Question carries | Pass |
+|---|---|
+| an artefact kind ("search **RDRs** for X", "in the **code**") | `bindings={"content_type": "rdr"}` |
+| a named author ("what did **Gupta** write about Y") | `bindings={"author": "Gupta"}` |
+| no such cue | omit — do not guess |
+
+- Catalog `content_type` is open-ended: `code`, `prose`, `rdr`, `paper`,
+  `knowledge`, `blog_post` all occur. Values are not validated, so a wrong
+  one retrieves nothing (nexus-enrmd).
+- Omitting is always safe — type-agnostic plans still match.
+
 ## When to pin dimensions
 
 - **From a verb skill** (e.g. `/conexus:research`): pass

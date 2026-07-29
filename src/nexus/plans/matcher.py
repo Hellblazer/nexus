@@ -33,6 +33,7 @@ import structlog
 
 from nexus.db.t2.plan_library import PlanLibrary
 from nexus.plans.match import Match
+from nexus.plans.schema import unsatisfiable_typed_binding
 from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS, _normalize_scope_string
 
 __all__ = ["PlanCache", "plan_match"]
@@ -122,6 +123,95 @@ def _is_unanchored_grown(row: dict) -> bool:
     if (row.get("scope_tags") or "").strip():
         return False
     return not (row.get("project") or "").strip()
+
+
+def _unmet_typed_binding(
+    m: Match, available: frozenset[str] | None,
+) -> str | None:
+    """Name the typed binding that makes *m* unrunnable, else ``None``.
+
+    ``available is None`` means the caller did not declare what it can
+    supply, so no filtering happens — this keeps every pre-nexus-0yrjr
+    caller (and ``plan_search``) behaving exactly as before.
+    """
+    if available is None:
+        return None
+    return unsatisfiable_typed_binding(
+        required=m.required_bindings,
+        defaults=m.default_bindings,
+        available=available,
+    )
+
+
+def _log_t1_drops(
+    *,
+    hits: list,
+    scope_conflict_drops: int,
+    always_failing_drops: int,
+    scope_pref: str,
+) -> None:
+    """Report the T1 path's scope-conflict and always-failing drops.
+
+    nexus-czoeu. Both records existed before but were emitted only after
+    the ``if scored:`` early return, so they fired only when EVERY
+    candidate was dropped. RDR-091's code-review finding I-4 added the
+    scope record specifically so "operators can see when
+    scope_preference is silently degrading matches" — which it could not
+    do in the case where a degraded match is actually returned.
+
+    INFO, not DEBUG, for the same reason as
+    :func:`_log_binding_drops`: ``_resolve_level``
+    (``logging_setup.py:36``) defaults MCP to INFO and CLI to WARNING,
+    so the original DEBUG records never reached a log in normal
+    operation — they were unobservable on the fallthrough path too.
+    """
+    if hits and scope_conflict_drops > 0:
+        _log.info(
+            "plan_match_scope_conflict_fallthrough",
+            t1_hits=len(hits),
+            dropped=scope_conflict_drops,
+            scope_pref=scope_pref,
+        )
+    if always_failing_drops:
+        _log.info(
+            "plan_match_always_failing_dropped",
+            dropped=always_failing_drops,
+            remedy="nx plan hygiene --apply retires these durably",
+        )
+
+
+def _log_binding_drops(drops: list[tuple[int, str]]) -> None:
+    """Surface unrunnable-plan drops.
+
+    A candidate vanishing from the pool with no record is the same defect
+    class as a retrieval silently widening: the caller sees a plausible
+    result and no signal that the shape of the search changed.
+
+    Emitted at INFO, not DEBUG, deliberately. ``_resolve_level``
+    (``logging_setup.py:36``) defaults MCP mode to INFO and CLI to
+    WARNING, so a DEBUG record here would never reach a log in practice
+    and the drop would be observable only in theory. It fires at most
+    once per ``plan_match`` call, and only when something was actually
+    dropped.
+    """
+    if not drops:
+        return
+    # Drain: plan_match can traverse the T1 path and then fall through to
+    # FTS5, and both call this on the way out. Without clearing, a single
+    # drop is reported twice and an operator counting occurrences
+    # over-reports.
+    snapshot = list(drops)
+    drops.clear()
+    _log.info(
+        "plan_match_unrunnable_binding_dropped",
+        dropped=len(snapshot),
+        detail=[{"plan_id": pid, "binding": b} for pid, b in snapshot],
+        remedy=(
+            "the plan is not necessarily wrong — a plan requiring a typed "
+            "binding is simply not offerable to a caller that cannot "
+            "supply one; pass it explicitly to use that plan"
+        ),
+    )
 
 
 def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None:
@@ -278,6 +368,7 @@ def plan_match(
     min_confidence: float = 0.40,
     n: int = 5,
     project: str = "",
+    available_bindings: frozenset[str] | None = None,
 ) -> list[Match]:
     """Return plans ranked for *intent*.
 
@@ -331,6 +422,12 @@ def plan_match(
     _over = max(n * 2, n + len(filter_dims) * 2)
     if scope_pref:
         _over += n  # extra budget for potential conflict drops
+    if available_bindings is not None:
+        _over += n  # and for unrunnable-plan drops (nexus-0yrjr)
+    # (plan_id, binding) for every candidate dropped as unrunnable; drained
+    # by _log_binding_drops on each return path so the pool never shrinks
+    # silently.
+    binding_drops: list[tuple[int, str]] = []
     if cache is not None and cache.is_available:
         hits = cache.query(intent, _over)
         # Gather all admissible candidates with (adjusted_score, specificity).
@@ -391,8 +488,33 @@ def plan_match(
             if fit is None:
                 scope_conflict_drops += 1
                 continue  # scope conflict — drop from pool
+            # nexus-0yrjr: never offer a plan the caller cannot run. A
+            # typed binding (content_type, author, ...) has an enumerated
+            # or numeric domain and cannot be inferred from the question,
+            # so a plan requiring one the caller has not supplied is
+            # unrunnable — offering it is what produced a zero-result
+            # answer from an otherwise-correct type-scoped plan.
+            unmet = _unmet_typed_binding(m, available_bindings)
+            if unmet is not None:
+                binding_drops.append((m.plan_id, unmet))
+                continue
             adjusted = confidence * (1.0 + _SCOPE_FIT_WEIGHT * fit)
             scored.append((adjusted, _specificity(m.scope_tags), m))
+
+        # nexus-czoeu: report EVERY drop reason before either exit, not
+        # only on the fallthrough. All three counters previously logged
+        # after the early return below, so a drop was invisible whenever
+        # a runnable sibling won — the common case, and the one where a
+        # degraded (rather than absent) match is what an operator needs
+        # to understand. binding_drops was fixed first (nexus-eedj4);
+        # these two carried the identical gap it was copied from.
+        _log_t1_drops(
+            hits=hits,
+            scope_conflict_drops=scope_conflict_drops,
+            always_failing_drops=always_failing_drops,
+            scope_pref=scope_pref,
+        )
+        _log_binding_drops(binding_drops)
 
         if scored:
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
@@ -401,28 +523,15 @@ def plan_match(
                 library.increment_match_metrics(m.plan_id, confidence=m.confidence)
             return matches
 
-        # T1 returned hits but every admissible plan was scope-filtered.
-        # Log so operators can see when scope_preference is silently
-        # degrading matches to FTS5 / inline planner (RDR-091 code-review
-        # finding I-4).
-        if hits and scope_conflict_drops > 0:
-            _log.debug(
-                "plan_match_scope_conflict_fallthrough",
-                t1_hits=len(hits),
-                dropped=scope_conflict_drops,
-                scope_pref=scope_pref,
-            )
-        if always_failing_drops:
-            _log.debug(
-                "plan_match_always_failing_dropped",
-                dropped=always_failing_drops,
-                remedy="nx plan hygiene --apply retires these durably",
-            )
-
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.
     _fts_over = max(n * 2, n + len(filter_dims) * 3)
     if scope_pref:
+        _fts_over += n
+    if available_bindings is not None:
+        # Symmetry with the T1 budget above: every other drop reason on
+        # this path carries compensating headroom, so binding drops must
+        # too or a caller asking for n silently receives fewer.
         _fts_over += n
     rows = library.search_plans(intent, limit=_fts_over, project=project)
     matches: list[Match] = []
@@ -440,10 +549,16 @@ def plan_match(
             continue
         if _scope_fit(m.scope_tags, scope_pref) is None:
             continue  # scope conflict on the fallback path too
+        # nexus-0yrjr: same unrunnable-plan drop on the FTS5 path.
+        unmet = _unmet_typed_binding(m, available_bindings)
+        if unmet is not None:
+            binding_drops.append((m.plan_id, unmet))
+            continue
         matches.append(m)
         if len(matches) >= n:
             break
 
+    _log_binding_drops(binding_drops)
     for m in matches:
         library.increment_match_metrics(m.plan_id, confidence=None)
     return matches

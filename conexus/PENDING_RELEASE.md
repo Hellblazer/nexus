@@ -48,6 +48,13 @@ mechanize, it matters enough to ship.
   `expectations_undeclared`'s exit code is now load-bearing (exit 1 + BLINDSPOT).
 - `conexus/skills/orchestration/SKILL.md` — nexus-mk3tw: same, for the
   orchestration skill's census step.
+- `conexus/skills/plan-first/SKILL.md` — nexus-0yrjr: adds the cue-to-`bindings`
+  table so an agent routes "search RDRs for X" into
+  `bindings={"content_type": "rdr"}`. Until this ships, `nx_answer`'s new
+  `bindings` parameter is discoverable only by an agent that reads the tool
+  schema directly, so the type-scoped builtins (`type-scoped-search`,
+  `find-by-author`) stay effectively unreachable — the practical half of the
+  reachability fix is inert even once the wheel ships.
 - `conexus/hooks/hooks.json` — nexus-i711w: the SessionStart hook that ran
   `nx daemon t2 ensure-running` on EVERY session start, for every plugin user,
   silenced by `|| true`. The verb is deleted with the T2 daemon, so until this
