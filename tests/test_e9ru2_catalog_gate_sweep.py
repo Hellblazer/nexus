@@ -34,14 +34,6 @@ import pytest
 
 import nexus.catalog.factory as factory
 
-# nexus-aqbrk: PINNED (catalog). Both failing tests assert SQLITE-substrate
-# behaviour inline — one checks storage_backend_for('catalog') is SQLITE, the
-# other the 'sqlite mode keeps the conn' half after reverting its own
-# per-test service override.
-#
-# SERVICE HALF IS OWNED IN THIS FILE: test_register_or_lookup_fresh_box_no_
-# local_catalog_created is the direct twin and already passes on both arms.
-pytestmark = pytest.mark.usefixtures("local_catalog_backend")
 
 
 _COLLECTION = "docs__sweep__voyage-context-3__v1"
@@ -179,32 +171,19 @@ def test_register_or_lookup_fresh_box_no_local_catalog_created(
     assert reg["chunk_count"] == 0, "preflight registers with chunk_count=0"
 
 
-def test_register_or_lookup_sqlite_mode_still_auto_inits(tmp_path, monkeypatch):
-    """SQLite opt-out mode keeps the nexus-fq3b auto-init: a fresh local
-    path gets a catalog created and a real registration lands in it."""
-    cat_path = tmp_path / "fresh-local-catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_path))
-    # suite-wide pin already forces sqlite mode; assert it to keep this
-    # test honest if the pin ever changes
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
-
-    assert storage_backend_for("catalog") == StorageBackend.SQLITE
-
-    from nexus.doc_indexer import _register_or_lookup_doc_id
-
-    doc = tmp_path / "pre.md"
-    doc.write_text("preflight body\n")
-    doc_id = _register_or_lookup_doc_id(
-        doc,
-        "",
-        content_type="prose",
-        physical_collection=_COLLECTION,
-        title="Preflight",
-    )
-    assert cat_path.exists(), "sqlite mode must keep the fq3b auto-init"
-    assert doc_id, "auto-init + local registration must yield a tumbler"
-
-
+# test_register_or_lookup_sqlite_mode_still_auto_inits REMOVED (nexus-i711w
+# Stage 2 sub-stage C-store). Its subject was the SQLite opt-out's auto-init
+# (nexus-fq3b), and it asserted storage_backend_for('catalog') == SQLITE
+# inline to keep itself honest. With the local catalog deleted there is no
+# SQLite arm for it to describe. Its service twin,
+# test_register_or_lookup_fresh_box_no_local_catalog_created above, already
+# covers the surviving behaviour and passed on both arms before this.
+#
+# NOTE for nexus-7bomn: test_audit_catalog_conn_is_none_in_service_mode below
+# still sets NX_STORAGE_BACKEND_CATALOG=sqlite explicitly to drive its second
+# branch. That is deliberate today (stating the branch beats inheriting the
+# ambient default) but the selector hard-fails when 7bomn lands, so that half
+# retires with it.
 def test_audit_catalog_conn_is_none_in_service_mode(tmp_path, monkeypatch):
     """On a MIGRATED box (frozen local .catalog.db present) the audit
     helper must not hand out a connection to stale data in service mode —
