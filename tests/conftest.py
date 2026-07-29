@@ -1197,8 +1197,16 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # strings; the frecency test pins the service path via
     # NX_STORAGE_BACKEND_VECTORS + a mocked HttpVectorClient (no embedder
     # runs), and the tripwire tests mock get_t3/compute_assignments entirely.
+    # RENAMED, not added (nexus-i711w Stage 2 sub-stage C): the first tripwire
+    # entry below was `::test_local_path_failure_records_hook_failures_row`
+    # until 9c0cff18 ported it to the service arm and renamed it. The reason
+    # class is unchanged — `_force_service_path` mocks get_t3 and the captured
+    # t2's compute_assignments, so still no embedder runs — but the old nodeid
+    # no longer resolved, which silently converted a granted exclusion into a
+    # non-exclusion and left this lint red on develop. Retargeting the pointer
+    # keeps the count at 58; no ceiling bump is warranted for a rename.
     "tests/test_frecency_service_mode.py::TestFrecencyRdrCollection::test_rdr_collection_included_in_frecency_update",
-    "tests/test_taxonomy_hook_tripwire.py::test_local_path_failure_records_hook_failures_row",
+    "tests/test_taxonomy_hook_tripwire.py::test_service_path_failure_records_hook_failures_row",
     "tests/test_taxonomy_hook_tripwire.py::test_tripwire_persist_failure_never_propagates",
     "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
     #
