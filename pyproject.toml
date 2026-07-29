@@ -199,6 +199,7 @@ markers = [
     "stress: RDR-120 stress harness scenarios (run with 'pytest -m stress')",
     "no_service_jar: integration test that drives PostgreSQL directly and is exempt from the service-jar freshness gate",
     "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
+    "cloud_mode: integration test that needs the SERVICE embedding voyage-* collections, i.e. cloud mode. Incompatible with a local-service install, which RDR-160 pins to bge-768 and which serves one embedding mode at a time (deselect with '-m \"integration and not cloud_mode\"')",
 ]
 
 [dependency-groups]

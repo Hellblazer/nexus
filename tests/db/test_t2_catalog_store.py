@@ -94,79 +94,15 @@ class TestT2DatabaseLazyCatalog:
             db.close()
 
 
-class TestDaemonDispatch:
-    def test_catalog_registered_in_store_attrs(self) -> None:
-        from nexus.daemon.t2_daemon import _T2_STORE_ATTRS
-
-        assert "catalog" in _T2_STORE_ATTRS
-        assert _T2_STORE_ATTRS[-1] == "catalog", (
-            "catalog must be the eighth (last) store per RDR-120 P5"
-        )
-
-    def test_catalog_rpc_denyops_include_unserialisable_methods(
-        self,
-    ) -> None:
-        from nexus.daemon.t2_daemon import _RPC_DENY_OPS
-
-        for op in (
-            "catalog.execute",
-            "catalog.transaction",
-            "catalog.bulk_load_documents",
-            "catalog.rebuild",
-        ):
-            assert op in _RPC_DENY_OPS, (
-                f"{op!r} must be denylisted — its shape does not "
-                f"round-trip framed JSON"
-            )
-
-        # nexus-aqbrk: PINNED. The T2 daemon dispatch table is SQLite-daemon
-    # machinery; no Python daemon runs in service mode (RDR-152).
-    @pytest.mark.usefixtures("local_t2_backend")
-    def test_dispatch_table_builds_with_catalog_store(
-        self, tmp_path: Path,
-    ) -> None:
-        """End-to-end: a real T2Database with catalog property
-        registered builds a dispatch table that includes catalog ops
-        for the methods that DO round-trip JSON.
-        """
-        from nexus.daemon.t2_daemon import _build_dispatch_table
-        from nexus.db.t2 import T2Database
-
-        db = T2Database(
-            tmp_path / "memory.db",
-            catalog_db_path=tmp_path / "catalog" / ".catalog.db",
-        )
-        try:
-            table = _build_dispatch_table(db)
-            # next_document_number / search / descendants ARE valid
-            # RPC ops (return JSON-shaped values).
-            assert "catalog.next_document_number" in table
-            assert "catalog.search" in table
-            assert "catalog.descendants" in table
-            # Denylisted ops MUST be absent.
-            for op in (
-                "catalog.execute",
-                "catalog.transaction",
-                "catalog.bulk_load_documents",
-                "catalog.rebuild",
-            ):
-                assert op not in table, f"{op!r} should be denylisted"
-        finally:
-            db.close()
-
-
-class TestT2ClientProxy:
-    def test_t2client_has_catalog_proxy(self) -> None:
-        from nexus.daemon.t2_client import T2Client
-
-        client = T2Client(skip_handshake=True)
-        try:
-            assert hasattr(client, "catalog")
-            # Method names build the right op via __getattr__.
-            method = client.catalog.search
-            assert callable(method)
-        finally:
-            client.close()
+# NO TestDaemonDispatch / TestT2ClientProxy: they pinned the CatalogStore's
+# registration in the T2 daemon's `_T2_STORE_ATTRS`, its `_RPC_DENY_OPS`
+# entries (methods whose shapes cannot round-trip framed JSON), the dispatch
+# table composition, and the `client.catalog` proxy. All four are properties of
+# the daemon RPC boundary, which is deleted (nexus-i711w Stage 2 sub-stage B).
+#
+# The store itself SURVIVES to sub-stage A, and its own invariants — lazy
+# import, lazy materialisation, parent-dir creation, and the read/write surface
+# parity below — are unaffected and still covered above and below.
 
 
 class TestCatalogStoreSurfaceParity:

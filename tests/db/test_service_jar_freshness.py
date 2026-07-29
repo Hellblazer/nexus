@@ -118,13 +118,12 @@ def test_pg_bin_dir_honors_nexus_pg_bin_override(tmp_path: Path, monkeypatch) ->
 def test_pg_bin_dir_returns_nonexistent_sentinel_when_nothing_found(
     tmp_path: Path, monkeypatch
 ) -> None:
-    # Nothing discoverable: no override, no candidate dirs, nothing on PATH
-    # (the autouse config-dir isolation already empties the bundle leg).
-    import nexus.db.pg_provision as pg_provision
-
+    # Nothing discoverable: no override, and no extracted bundle (the autouse
+    # config-dir isolation already empties the bundle leg). Host PostgreSQL is
+    # no longer a leg at all, so there is nothing else left to neutralise — the
+    # _CANDIDATE_DIRS and shutil.which patches this test used to need went away
+    # with the fallback legs themselves (tests/db/test_no_host_pg_fallback.py).
     monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
-    monkeypatch.setattr(pg_provision, "_CANDIDATE_DIRS", [])
-    monkeypatch.setattr(pg_provision.shutil, "which", lambda _name: None)
     # RDR-155 P4b P0a': discovery-miss now self-provisions the pinned
     # bundle; the sentinel contract applies only when that too is
     # impossible.

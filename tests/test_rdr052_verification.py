@@ -14,20 +14,6 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import _inject_t3, _reset_singletons, query
 from tests.conftest import make_vector_test_client
-from tests.conftest import engine_substrate_selected
-
-_ENGINE_SUBSTRATE = engine_substrate_selected()
-
-# These tests seed the rich SQLite Catalog (Catalog.init via the ``catalog``
-# fixture) and assert that catalog-filtered query() routing finds those rows.
-# On the engine substrate ``_get_catalog`` resolves the service catalog (a
-# freshly minted, empty tenant) instead, so the filters legitimately match
-# nothing ("No documents found matching catalog filters").
-_rich_catalog_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded "
-    "catalog-param query routing) dies at the RDR-155 P4b flip",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -82,17 +68,6 @@ def _seed_templates(tmp_path, monkeypatch):
 
 
 class TestPathRouting:
-    @_rich_catalog_dies_at_flip
-    @pytest.mark.parametrize("put_col,put_content,query_kw,assert_in", [
-        ("knowledge__delos", "chase procedure schema", {"author": "Fagin"}, "knowledge__delos"),
-        ("code__nexus", "def index_repo(): pipeline", {"content_type": "code"}, "code__nexus"),
-    ])
-    def test_catalog_param_routes_correctly(self, t3, catalog, put_col, put_content, query_kw, assert_in):
-        t3.put(collection=put_col, content=put_content, title="chunk")
-        result = query(question=put_content.split()[0], **query_kw)
-        assert not result.startswith("Error:")
-        assert assert_in in result
-
     def test_subtree_routes_to_descendants(self, t3, catalog):
         t3.put(collection="code__nexus", content="tree sitter chunking", title="ts-chunk")
         t3.put(collection="rdr__nexus", content="catalog first query routing", title="rdr-chunk")
@@ -131,13 +106,10 @@ class TestPathRouting:
 
 
 class TestReferenceQuestions:
+    # The "papers by Fagin" case is gone with nexus-i711w: it asserted that a
+    # rich Catalog.init-seeded LOCAL catalog surfaced knowledge__delos through
+    # an author filter, and the only remaining catalog is the service one.
     @pytest.mark.parametrize("question,kw,assert_check", [
-        pytest.param(
-            "papers by Fagin", {"author": "Fagin"},
-            lambda r: "knowledge__delos" in r,
-            marks=_rich_catalog_dies_at_flip,
-            id="papers by Fagin-kw0-<lambda>",
-        ),
         ("schema mappings", {"author": "Fagin"}, lambda r: not r.startswith("Error:")),
         ("RDR about streaming", {"content_type": "rdr"}, lambda r: not r.startswith("Error:")),
         ("what cites schema mappings", {"follow_links": "cites"}, lambda r: not r.startswith("Error:")),

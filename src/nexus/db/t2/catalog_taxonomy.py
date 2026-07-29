@@ -1403,13 +1403,12 @@ class CatalogTaxonomy:
     ) -> int:
         """Split a topic into k children via KMeans sub-clustering.
 
-        Fetches doc texts from the T3 collection, re-embeds with local
-        MiniLM, runs KMeans(n_clusters=k), creates child topics with
-        c-TF-IDF labels, and reassigns docs. Returns number of children
-        created, or 0 if too few docs.
+        Fetches doc texts AND their stored vectors from the T3 collection,
+        runs KMeans(n_clusters=k), creates child topics with c-TF-IDF labels,
+        and reassigns docs. Returns number of children created, or 0 if too
+        few docs — or if the collection cannot supply vectors, since child
+        centroids must share the parent's space.
         """
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import
-
         if k < 2:
             return 0
 
@@ -1431,23 +1430,61 @@ class CatalogTaxonomy:
             _log.warning("split_collection_not_found", collection=collection_name)
             return 0
 
-        # Paginate get() to respect cloud quota (limit 300)
+        # Read the collection's STORED vectors — never re-embed here. Mirrors
+        # the fix on the Http twin (HttpTaxonomyStore.split_topic, nexus-9pqoj
+        # extended 2026-07-28). The old MiniLM-384 re-embed produced child
+        # centroids in a DIFFERENT vector space than the collection's chunks
+        # whenever that collection was bge-768 or voyage-1024, so the children
+        # landed in taxonomy_centroids_384, the following ANN assign hit the
+        # dimension-mismatch guard and returned [], and the split reported
+        # success while creating unassignable topics.
+        #
+        # This file is slated for whole-file deletion with the SQLite T2 stores
+        # (nexus-i711w); the fix is applied anyway because the path is live
+        # until that lands and the bug is silent-wrong-answer, not a crash.
         _PAGE = 250
         fetched_ids: list[str] = []
         texts: list[str] = []
+        vectors: list[list[float]] = []
+        vectors_unavailable = False
         for i in range(0, len(doc_ids), _PAGE):
             batch = doc_ids[i : i + _PAGE]
-            result = coll.get(ids=batch, include=["documents"])
-            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                if fdoc:
-                    fetched_ids.append(fid)
-                    texts.append(fdoc)
+            result = coll.get(ids=batch, include=["documents", "embeddings"])
+            got_ids = result.get("ids") or []
+            got_docs = result.get("documents") or []
+            got_embs = result.get("embeddings")
+            if got_embs is None or len(got_embs) != len(got_ids):
+                vectors_unavailable = True
+                break
+            for fid, fdoc, femb in zip(got_ids, got_docs, got_embs):
+                if not fdoc:
+                    continue
+                # A usable document with no vector is the unavailable case, not
+                # a row to drop quietly — dropping shrinks `texts` until the
+                # `len < k` short-circuit returns 0 with nothing logged, a
+                # refusal indistinguishable from "topic too small to split".
+                if femb is None:
+                    vectors_unavailable = True
+                    break
+                fetched_ids.append(fid)
+                texts.append(fdoc)
+                vectors.append(list(femb))
+            if vectors_unavailable:
+                break
+        if vectors_unavailable:
+            _log.warning(
+                "split_stored_vectors_unavailable",
+                collection=collection_name,
+                topic_id=topic_id,
+                detail="store returned no embeddings (or a count skew) for the "
+                       "topic's docs; refusing to re-embed into a different "
+                       "vector space",
+            )
+            return 0
         if len(texts) < k:
             return 0
 
-        # Re-embed with MiniLM
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = np.array(ef(texts), dtype=np.float32)
+        embeddings = np.asarray(vectors, dtype=np.float32)
 
         # KMeans sub-clustering
         from sklearn.cluster import KMeans  # noqa: PLC0415 — heavy/optional dependency deferred to call time

@@ -81,6 +81,32 @@ jobs:
     name: Build + smoke + publish native nexus-service (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
     needs: jooq-codegen
+    # APPLE SIGNING SECRETS ARE ENVIRONMENT-SCOPED, NOT REPO-SCOPED (nexus-2oh5q).
+    #
+    # The six APPLE_* secrets live in the `apple-signing` environment. Repo-level
+    # secrets are readable by ANY job in ANY workflow that names them — including
+    # a workflow added later — and the Developer ID private key is the one
+    # credential here whose compromise is not cleanly recoverable: Apple's remedy
+    # is revoking the cert, and Gatekeeper checks revocation ONLINE, so binaries
+    # already shipped can start failing. Environment scoping means only a job
+    # that declares this environment can read them, and only after the required
+    # reviewer approves.
+    #
+    # The environment's deployment policy allows the `engine-service-v*` tag (the
+    # real release path) and `develop` (so the workflow_dispatch dev path in the
+    # header still runs — a ref outside the policy is REJECTED, not merely
+    # gated). The signing STEPS remain independently tag-gated, so the policy is
+    # defence in depth rather than the only control.
+    #
+    # COST, stated so it is not a surprise: every run of this job now waits for
+    # one approval, including the linux legs that need no secrets. Approval is
+    # per-environment-per-run, so one click releases all three matrix legs. The
+    # alternative — splitting mac signing into its own job so linux runs
+    # unattended — means rewriting this 20-step job into a build/sign/publish
+    # graph with artifact plumbing, in a workflow that only executes on a tag
+    # push. Not worth the post-tag-discovery risk for an approval click on a
+    # release the human just cut by hand.
+    environment: apple-signing
     # Native-image build (~2-3m analysis + image) + native smoke (linux only).
     # No jOOQ codegen here — sources come from the jooq-codegen artifact, so no
     # Docker is needed to BUILD (mac-arm64 can build). 40m covers a cold runner;

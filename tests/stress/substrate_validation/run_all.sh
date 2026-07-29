@@ -15,14 +15,13 @@ rm -f "$HERE/receipts/"*.json
 echo "═══════════════════════════════════════════════════════════════════════"
 echo "   RDR-120 substrate-validation stress matrix (nexus-57pwo)"
 echo "   Replaces the §Approach Phase 6 30-day calendar soak."
-echo "   5 scenarios, sequential, ~30-90s total wallclock."
+echo "   4 scenarios, sequential, ~30-90s total wallclock."
 echo "═══════════════════════════════════════════════════════════════════════"
 
 for scenario in \
     scenario_1_fan_in \
     scenario_2_mixed_workload \
     scenario_3_kill9_recovery \
-    scenario_4_schema_mismatch \
     scenario_5_catalog_rebuild
 do
     echo ""

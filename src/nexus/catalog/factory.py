@@ -129,20 +129,13 @@ def _is_catalog_service_mode() -> bool:
 class CatalogAdminServiceModeError(RuntimeError):
     """Raised by :func:`make_catalog_admin` in service mode (nexus-aoqnb).
 
-    Distinct from :class:`CatalogAdminDaemonLiveError`: that one says "stop the
-    daemon and retry", which is a real recovery. This one has no retry — the
-    verb has no service-mode implementation, and the local file it would touch
-    is a frozen migration source. Separate type so a caller cannot accidentally
-    offer the daemon-stop remedy for a situation it does not fix.
-    """
-
-
-class CatalogAdminDaemonLiveError(Exception):
-    """Raised by :func:`make_catalog_admin` when a T2 daemon is live.
-
-    Deep-maintenance commands need exclusive ``.catalog.db`` access; opening
-    a second full writer against a running daemon is the two-writer hazard
-    RDR-146 closes. CLI callers render the message and exit non-zero.
+    This error has no retry — the verb has no service-mode implementation, and
+    the local file it would touch is a frozen migration source. It once had a
+    sibling, ``CatalogAdminDaemonLiveError`` ("stop the T2 daemon and retry"),
+    kept deliberately separate so a caller could not offer the daemon-stop
+    remedy for a situation it does not fix. That sibling retired with the daemon
+    (nexus-i711w Stage 2 sub-stage B): with no daemon there is no competing
+    writer to stop, so this is the only way deep maintenance is refused.
     """
 
 
@@ -241,24 +234,13 @@ def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
-    # RDR-146 P1.2 single-writer guard: a live daemon is the sole legitimate
-    # .catalog.db writer. Opening a second full writer here while the daemon
-    # is up is the two-writer contention this RDR exists to prevent. Refuse
-    # loudly with the recovery action rather than silently racing. The probe
-    # is read-only discovery (no spawn/reap).
-    try:
-        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        if find_t2_daemon() is not None:
-            raise CatalogAdminDaemonLiveError(
-                "A T2 daemon is running; deep-maintenance catalog commands "
-                "(dedupe-owners --apply, undelete) need exclusive .catalog.db "
-                "access. Stop it first: `nx daemon t2 stop`, run the command, "
-                "then restart with `nx daemon t2 start`."
-            )
-    except CatalogAdminDaemonLiveError:
-        raise
-    except Exception:  # noqa: BLE001 — discovery import/probe must not block
-        _log.debug("catalog_admin_daemon_probe_failed", exc_info=True)
+    # NO live-daemon probe: the RDR-146 P1.2 single-writer guard refused to open
+    # a second full ``.catalog.db`` writer while a T2 daemon — the sole
+    # legitimate one — was up. That daemon is retired (nexus-i711w Stage 2
+    # sub-stage B), so no competing writer can exist for it to find, and its
+    # recovery text named `nx daemon t2 stop` / `start`, both gone. The
+    # service-mode arm above still refuses these verbs outright, which is where
+    # the real two-writer risk now lives.
     return Catalog(path, path / ".catalog.db")
 
 
@@ -296,36 +278,20 @@ class CatalogWriter:
         self._connect()
 
     def _connect(self) -> None:
-        from nexus.daemon.t2_client import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            T2DaemonNotReachableError,
-            T2SchemaVersionMismatchError,
-            make_t2_client,
-        )
+        # WAS DAEMON-ROUTED (RDR-128 class). The T2 daemon existed so a single
+        # writer held memory.db's WAL slot; that is a SQLite problem and the
+        # daemon is gone with it (nexus-i711w Stage 2 sub-stage B). This writer
+        # is therefore always direct now.
+        #
+        # The direct Catalog it falls to is ITSELF on the Stage 2 DELETE list
+        # (the rich SQLite catalog, sub-stage C) — this class collapses to
+        # service-only there. Left standing here so sub-stage B is about the
+        # daemon and nothing else.
+        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        client = None
-        try:
-            client = make_t2_client(config_dir=self._config_dir)
-            client.database.hello()  # force lazy connect; raises if down/skewed
-            self._client = client
-            self._routed = True
-            return
-        except (T2DaemonNotReachableError, T2SchemaVersionMismatchError) as exc:
-            if client is not None:
-                client.close()
-            # Documented-irreducible availability fallback (RDR-128 class):
-            # with no reachable daemon, this process is the sole writer, so
-            # a direct Catalog does not violate single-writer. Logged so the
-            # degraded path is visible.
-            _log.warning(
-                "catalog_writer_daemon_unreachable_fallback",
-                error=str(exc),
-                hint="start the T2 daemon (`nx daemon t2 start`) to route catalog writes",
-            )
-            from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-            path = catalog_path()
-            self._direct = Catalog(path, path / ".catalog.db")
-            self._routed = False
+        path = catalog_path()
+        self._direct = Catalog(path, path / ".catalog.db")
+        self._routed = False
 
     @property
     def routed(self) -> bool:

@@ -192,8 +192,14 @@ class TestUninstallService:
     def test_uninstall_default_tier_is_t2(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Back-compat: daemon_uninstall calls uninstall_autostart() with no tier
-        and must still target the T2 unit."""
+        """``daemon_uninstall`` and ``upgrade_finish`` call uninstall_autostart()
+        with no tier and must still target the T2 unit.
+
+        LOAD-BEARING AFTER THE DAEMON'S RETIREMENT (nexus-i711w Stage 2 sub-stage
+        B), not back-compat bookkeeping: a box upgraded from a pre-retirement
+        install still carries a launchd/systemd unit firing `nx daemon t2 start`.
+        Removal machinery outlives what it removes. Drop this default and that
+        unit fires a nonexistent command on every boot, forever."""
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
         result = installer.uninstall_autostart()
@@ -251,19 +257,16 @@ class TestInstallServiceLibrary:
         assert result.activated_cmd[0] == "launchctl"
         assert result.activated_cmd[-1] == str(dest)
 
-    def test_default_tier_is_still_t2(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Back-compat: existing callers invoke install_autostart() with no tier
-        and must still target T2 (first-run + daemon_uninstall depend on this)."""
-        _set_platform(monkeypatch, "darwin")
-        _stub_paths(tmp_path, monkeypatch)
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
-            mock_run.return_value.returncode = 0
-            mock_run.return_value.stderr = ""
-            mock_run.return_value.stdout = ""
-            result = installer.install_autostart()
-        assert result.dest == tmp_path / "units" / "com.nexus.t2.plist"
+    def test_install_requires_an_explicit_tier(self) -> None:
+        """``install_autostart`` has NO default tier (nexus-i711w Stage 2
+        sub-stage B). It defaulted to "t2" while that daemon existed; with the
+        daemon retired there is no t2 render arm, so a surviving default would
+        be a ValueError trap for any unqualified caller. Pair this with
+        ``test_uninstall_default_tier_is_t2``: the asymmetry (INSTALL dies,
+        REMOVE survives) is the contract, and a symmetric change to either half
+        breaks a real upgrade path."""
+        with pytest.raises(TypeError, match="tier"):
+            installer.install_autostart()  # type: ignore[call-arg]
 
     def test_idempotent_reinstall_reports_already_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

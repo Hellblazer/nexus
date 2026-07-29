@@ -186,9 +186,21 @@ def test_chromadb_arms_retired_from_banlist():
     redundant with reality.
 
     This is NOT a weakened guarantee: the resurrection tripwire moved somewhere
-    stronger. tests/test_rdr155_p4b_deletion_gate.py bans any chromadb IMPORT
-    anywhere in the package, which catches a re-introduction that these three
-    call-shape bans would have missed (e.g. `from chromadb import Client`).
+    stronger. tests/test_rdr155_p4b_deletion_gate.py::
+    test_no_chromadb_import_anywhere_in_src AST-scans every file under
+    src/nexus/ and bans any chromadb import at any nesting depth, which catches
+    a re-introduction that these three call-shape bans would have missed
+    (e.g. `from chromadb import Client`, or a function-local deferred import).
+
+    ⚠ That claim was FALSE when written and true only since 2026-07-28. The
+    named test did not exist: the gate banned ~30 dead ``nexus.*`` modules and
+    never ``chromadb`` itself, and the only chromadb-import bans were
+    single-file scoped (health.py, stranded_install.py). So this docstring
+    traded a real BANLIST guarantee for a test that was not there. Found by the
+    p4b-test-validator at the RDR-155 P4b gate; the missing test was written
+    rather than this claim softened, and it is mutation-verified against both a
+    module-level and a function-local import. If you weaken a guarantee on the
+    strength of coverage elsewhere, open that file and confirm it.
     """
     from nexus.storage_boundary_lint import BANLIST
 
@@ -445,18 +457,24 @@ def test_epsilon_allow_connect_counted_as_population(tmp_path):
     assert [v for v in result.violations if v.file == str(target)] == []
 
 
-def test_daemon_construction_is_allowlisted(tmp_path):
-    """db/ AND daemon/ are construction-allowlisted (the daemon is the
-    legitimate single writer). Under the RDR-128 P3 enforcement flip,
-    removing daemon/ from the allowlist must reveal strictly more
-    VIOLATIONS — the daemon's own (un-annotated) ``T2Database(...)``
-    constructions become hard violations once unallowlisted."""
+def test_construction_allowlist_is_load_bearing(tmp_path):
+    """The construction allowlist must actually exempt something.
+
+    Was ``test_daemon_construction_is_allowlisted``, asserting that removing
+    ``daemon/`` revealed strictly more violations. That premise died with
+    t2_daemon.py (nexus-i711w Stage 2 sub-stage B) — no daemon/ file
+    constructs a T2Database now, so the prefix exempted nothing and was
+    dropped from the allowlist entirely.
+
+    Re-pointed at ``db/``, the one surviving prefix, so this keeps proving the
+    allowlist is load-bearing rather than decorative: emptying it must reveal
+    strictly more violations. An allowlist that exempts nothing is a lint whose
+    exemption logic is never exercised."""
     default = _check().total_violations
-    db_only = _check(
-        construction_allowlist_prefixes=("src/nexus/db/",)
-    ).total_violations
-    assert db_only > default, (
-        "daemon/ T2Database construction(s) should be exempt by default"
+    none_allowed = _check(construction_allowlist_prefixes=()).total_violations
+    assert none_allowed > default, (
+        "the construction allowlist exempts nothing — either the lint's "
+        "exemption path is dead, or db/ stopped constructing T2Database"
     )
 
 
@@ -539,7 +557,10 @@ def test_dual_population_baseline_locked():
     # migration-divergence ro-connect died with the doctor row.
     # DOWNWARD-only recount; never bump upward.
 
-    assert result.epsilon_allow_connects == 15, (
+    # 15 -> 14: nexus-i711w Stage 2 sub-stage B deleted the `nx daemon t2`
+    # verb group from commands/daemon.py, taking its single epsilon-allow
+    # raw-connect with it. DOWNWARD-only recount; never bump upward.
+    assert result.epsilon_allow_connects == 14, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

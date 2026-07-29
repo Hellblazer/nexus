@@ -13,14 +13,29 @@
 #
 # SELF-PROVISIONING (nexus-edwlp, 2026-07-07): infra is hermetic — the gate
 # provisions its own PG + service, auto-rebuilds a stale dev jar, and the T3
-# vector resolver honors the same HOST/PORT env leg as the T2 stores. NOT
-# credential-independent: the voyage/CCE-embedding subset needs a real
-# VOYAGE_API_KEY, sourced explicitly from .env (repo root) — on a checkout
-# without one those tests fail rather than degrade. A `lived_in` marker
-# excludes the handful of tests that dispatch real `claude -p` or need
-# seeded lived-in corpora, and a vacuity guard asserts passed/skipped stay
-# within the pinned FLOOR/BUDGET below (plus an exact lived_in carve-out
-# count). A guard trip means real regression, not ambient drift.
+# vector resolver honors the same HOST/PORT env leg as the T2 stores. Two
+# markers carve tests out, each with an exact-count guard below: `lived_in`
+# (dispatches real `claude -p` or needs seeded lived-in corpora) and
+# `cloud_mode`. A vacuity guard asserts passed/skipped stay within the pinned
+# FLOOR/BUDGET. A guard trip means real regression, not ambient drift.
+#
+# THIS GATE IS BGE-768 ONLY (nexus-w6h2m, 2026-07-28). A local service embeds
+# with bge-768 and nothing else — RDR-160 makes that the only valid value in
+# the service-stack topology, and `nx init --service` stamps it. The service
+# also serves ONE embedding mode at a time. So tests that need the SERVICE to
+# embed voyage-* collections are cloud-mode tests and are marked `cloud_mode`
+# and deselected here; the gate no longer needs a Voyage key for its own
+# corpus.
+#
+# It used to carry those tests and pass, because it was never actually running
+# local: the CHROMA_* secrets made is_local_mode() answer False, `nx init
+# --service` returned before stamping local.embed_model, and the client built
+# voyage collections matching a voyage-mode service. Removing those dead
+# credentials (534251da, RDR-155 P4b P3) made the client honestly bge-768 and
+# exposed a corpus split across two modes the service cannot serve at once.
+# Do not "fix" that by routing the Voyage key — it only swaps which half 422s
+# (tried in 6b04cd1b, reverted in 699369b0) and reintroduces the exact failure
+# nexus-r5f3c exists to prevent.
 #
 # What it does, fully isolated from ~/.config/nexus and from any cloud config:
 #   1. Scratch NEXUS_CONFIG_DIR; `nx init --service` provisions a throwaway
@@ -273,6 +288,42 @@ if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   exit 1
 fi
 
+# The cloud_mode carve-out (nexus-w6h2m, 2026-07-28). Same exact-count
+# discipline as lived_in above, and for the same reason.
+#
+# WHY IT EXISTS: this gate's corpus spanned TWO embedding modes while the
+# service serves exactly one. Three tests require the SERVICE to embed
+# voyage-* collections; everything else here is a bge-768 local install,
+# which is what RDR-160 says a local service IS. Whichever way the Voyage key
+# was routed, one half 422'd:
+#     key withheld -> embedding mode onnx-local -> the voyage tests 422
+#     key plumbed  -> embedding mode voyage     -> the bge tests 422
+# There was no value of that knob that made the gate green, which is why the
+# first attempt at this (6b04cd1b, reverted in 699369b0) traded one 422
+# cluster for its mirror image and reintroduced the exact failure nexus-r5f3c
+# exists to prevent.
+#
+# It passed historically only because it was never running local: the CHROMA_*
+# secrets made is_local_mode() answer False, so `nx init --service` returned
+# before stamping local.embed_model and the client built voyage collections
+# that matched a voyage-mode service. Removing those dead credentials
+# (534251da, RDR-155 P4b P3) made the client honestly bge-768 and exposed the
+# split corpus.
+#
+# So the three go, and they go by MARKER rather than by -k pattern so the
+# reason travels with the test. They still need a cloud-mode home — see
+# tests/e2e/cloud-client-path-gate.sh and nexus-w6h2m; until they have one the
+# voyage/CCE embedding path has NO gate, and that is a known, recorded gap
+# rather than an accident.
+CLOUD_MODE_EXPECTED=3
+CLOUD_MODE_COUNT="$(uv run pytest -m "integration and cloud_mode" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+if [ "$CLOUD_MODE_COUNT" -ne "$CLOUD_MODE_EXPECTED" ]; then
+  echo "[gate] VACUITY GUARD TRIPPED: cloud_mode carve-out is $CLOUD_MODE_COUNT tests, expected exactly $CLOUD_MODE_EXPECTED" >&2
+  echo "[gate] (a new cloud_mode mark must bump CLOUD_MODE_EXPECTED here, consciously —" >&2
+  echo "[gate]  the marker must never become a place to park a red test)" >&2
+  exit 1
+fi
+
 set +e
 # NEXUS_CONFIG_DIR pinned to the scratch dir (2026-07-13): without it,
 # get_credential()'s config.yml fallback read the OPERATOR's real
@@ -293,7 +344,7 @@ if [ -x "$GATE_PG_BIN/initdb" ]; then
 fi   # else: host-PG / dev mode — fall through to auto-discovery
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
-  uv run pytest -m "integration and not lived_in" -q "$@" 2>&1 | tee "$SCRATCH/pytest.out"
+  uv run pytest -m "integration and not lived_in and not cloud_mode" -q "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e
 

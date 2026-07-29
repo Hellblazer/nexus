@@ -164,45 +164,11 @@ _PLAN_COLUMNS = (
 )
 
 
-def _synthesize_match_text(
-    *,
-    description: str | None,
-    verb: str | None,
-    name: str | None,
-    scope: str | None,
-) -> str:
-    """Hybrid match-text synthesiser. RDR-092 Phase 3 / Phase 1.
-
-    Shape: ``"<description>. <verb> <name> scope <scope>"`` when both
-    *verb* and *name* are provided. Scope is optional and only
-    appended when present. A trailing ``.`` on *description* is
-    collapsed so the output does not carry ``..``.
-
-    When verb or name is missing, returns the raw description so
-    legacy NULL-dimension rows still carry a usable FTS payload.
-    R10 validates the hybrid form at zero verb-accuracy regression.
-
-    This is the single source of truth for match-text synthesis;
-    :func:`nexus.plans.session_cache._synthesize_match_text` is a
-    thin dict-unpacking adapter around this function so the T1
-    cosine embedding and the T2 FTS payload cannot drift
-    (nexus-w98c).
-    """
-    desc = (description or "").strip()
-    v = (verb or "").strip()
-    n = (name or "").strip()
-    s = (scope or "").strip()
-
-    if not v or not n:
-        return desc
-
-    suffix = f"{v} {n}"
-    if s:
-        suffix += f" scope {s}"
-    if desc:
-        core = desc.rstrip(".").rstrip()
-        return f"{core}. {suffix}"
-    return suffix
+# _synthesize_match_text moved to nexus.plans.match_text (nexus-i711w
+# Stage 2 Phase 0). Re-exported for existing callers.
+from nexus.plans.match_text import (  # noqa: E402,F401  (re-export)
+    _synthesize_match_text,
+)
 
 _PLAN_SELECT_COLS = ", ".join(_PLAN_COLUMNS)
 

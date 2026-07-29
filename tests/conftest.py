@@ -315,9 +315,8 @@ def t2_service_env(request: pytest.FixtureRequest,
     per-test token. Tests never share or clean up state. Returns the
     tenant name.
 
-    Opt-in during the incremental migration; replaces the sqlite pin
-    (set AFTER _pin_t2_substrate — later setenv wins) and
-    becomes the suite default when the pin flips at the end of P0a'.
+    The suite default: ``_pin_t2_substrate`` pulls this fixture in for every
+    test. Still requestable directly by tests that want the tenant name.
     """
     from tests._engine_substrate import ensure_engine, mint_test_tenant
     from tests.db._service_fixture import jar_freshness_skip_reason
@@ -446,71 +445,29 @@ def local_catalog_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
 
 
-def engine_substrate_selected() -> bool:
-    """True when the suite's autouse pin routes tests to the engine substrate.
-
-    THE SINGLE SOURCE OF TRUTH for "which T2 substrate is this session on".
-    ``_pin_t2_substrate`` below calls it, and so does every
-    dies-roster ``skipif`` marker across the suite — so the flip changes this
-    one function and nothing else, and the pin and the rosters cannot drift
-    apart.
-
-    WHY THIS EXISTS (nexus-aqbrk, 2026-07-25). 111 sites across 36 files each
-    spelled the predicate inline as
-    ``os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"``. That was the
-    PRE-flip spelling: the engine was opt-IN, so the var was set when the
-    engine was wanted. Now the engine is the DEFAULT and
-    ``NX_TEST_T2_SUBSTRATE=sqlite`` is the opt-OUT, so a default engine run
-    leaves the var UNSET — and every one of those inline predicates would have
-    evaluated False, un-skipping the entire dies-roster at the exact moment the
-    flip landed, the event it exists to survive.
-
-    Not a projection: simulated by flipping this fixture's body and running
-    tests/test_catalog_cli.py with the var unset. The 36 rostered tests
-    un-skipped and all 36 failed. Hoisting the predicate here is what made the
-    flip below a ONE-LINE change instead of 111.
-
-    FLIPPED 2026-07-26 (nexus-aqbrk). The engine substrate is now the default;
-    ``NX_TEST_T2_SUBSTRATE=sqlite`` opts out. Gated on nexus-eqxxh proving green
-    on CI first — it had never executed anywhere before PR #1426, and when it
-    did it showed the CI pytest job could not boot an engine at all (ambient
-    pgvector-less PG, then a missing bge ONNX model). Flipping before that would
-    have turned a broken-by-construction CI job into a red default.
-
-    The inverse spelling is deliberate: ``!= "sqlite"`` rather than
-    ``== "engine"`` means an unset var, a typo'd value, or a stale
-    ``NX_TEST_T2_SUBSTRATE=engine`` from a pre-flip shell ALL resolve to the
-    engine. Only the explicit opt-out reaches SQLite, so the escape hatch is
-    the only thing that can be misspelled into silence — and it fails toward
-    the substrate the product actually ships on.
-    """
-    return os.environ.get("NX_TEST_T2_SUBSTRATE") != "sqlite"
-
-
 @pytest.fixture(autouse=True)
-def _pin_t2_substrate(request: pytest.FixtureRequest,
-                                monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route every test to the session's T2 substrate — ENGINE by default.
+def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
+    """Route every test to the session's T2 substrate — the ENGINE.
 
-    Renamed from ``_pin_storage_backend_sqlite`` at the flip (nexus-aqbrk,
-    2026-07-26): the old name described the branch that is now the OPT-OUT, and
-    a fixture whose name says "sqlite" while it hands out a PG-backed engine
-    tenant is the kind of lie that costs someone an hour. Autouse fixtures
-    resolve by decorator rather than by name, so the rename carries no
-    behavioural risk.
+    Every test gets the session PG+JAR with a freshly minted tenant, exactly
+    what the ``t2_service_env`` opt-in fixture provides. This is what the
+    product actually ships on; ``storage_backend_for`` has defaulted to
+    ``service`` since the T2 cutover, so the suite agrees with the shipping
+    default instead of contradicting it.
 
-    DEFAULT (var unset) — the engine substrate: every test gets the session
-    PG+JAR with a freshly minted tenant, exactly what the ``t2_service_env``
-    opt-in fixture provides. This is what the product actually ships on;
-    ``storage_backend_for`` has defaulted to ``service`` since the T2 cutover,
-    so the suite now agrees with the shipping default instead of contradicting
-    it.
+    THE SQLITE LEG IS GONE (nexus-i711w Stage 1b, 2026-07-28). Until now
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` opted out to the local SQLite stores, and
+    ``engine_substrate_selected()`` was the single lever every dies-roster
+    ``skipif`` read. Both retire here, with the stores themselves: a predicate
+    with one reachable value is not a choice, and 69 ``skipif`` markers reading
+    a constant are worse than no marker at all.
 
-    OPT-OUT — ``NX_TEST_T2_SUBSTRATE=sqlite`` pins SQLite. Kept for the tests
-    whose SUBJECT is the local substrate (migration sources, the SQLite-only
-    trigger paths) and as the escape hatch for bisecting a suspected
-    engine-side regression against the old baseline. It retires with the
-    SQLite stores themselves in nexus-i711w.
+    ``=sqlite`` now RAISES rather than resolving to the engine. It is the one
+    value a stale shell can still be carrying — the escape hatch was
+    documented, so someone bisecting an engine-side regression against "the old
+    baseline" will type it again. Silently handing them the engine would give a
+    green run that did not test what they believe it tested, which is the
+    silent-fallback class the project bans outright.
 
     HISTORY, because the old body's rationale is still worth knowing: this
     fixture used to pin SQLite so a bare ``T2Database(path)`` would not
@@ -525,13 +482,28 @@ def _pin_t2_substrate(request: pytest.FixtureRequest,
     Tests that exercise the resolver itself (``test_storage_mode.py``) carry
     their own ``_clean_storage_env`` autouse fixture that ``delenv``s the
     backend vars AFTER this one, so they still observe the true default. Any
-    test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
-    which overrides this pin (later ``setenv`` wins).
+    test that wants a specific backend sets ``NX_STORAGE_BACKEND[_<store>]``
+    itself, which overrides this pin (later ``setenv`` wins).
     """
-    if engine_substrate_selected():
-        request.getfixturevalue("t2_service_env")
+    # NX_TEST_T2_SUBSTRATE=none — provision NOTHING (nexus-lom9g / i711w).
+    # For tests whose subject needs no T2 store at all: endpoint resolution,
+    # env scrubbing, lease recovery. They previously said "=sqlite" to mean
+    # "don't boot an engine", which worked only while a SQLite substrate
+    # existed to fall back to. i711w deletes it, so the intent needs its own
+    # spelling rather than riding on a backend that is about to vanish.
+    # Checked FIRST: it is a statement about needing no substrate, not a
+    # choice between two.
+    selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
+    if selected == "none":
         return
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+    if selected == "sqlite":
+        raise RuntimeError(
+            "NX_TEST_T2_SUBSTRATE=sqlite: the SQLite test substrate was "
+            "deleted with the SQLite T2 stores (nexus-i711w). The engine is "
+            "the only substrate. If you meant 'this test needs no T2 store', "
+            "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
+        )
+    request.getfixturevalue("t2_service_env")
 
 
 @pytest.fixture
@@ -765,44 +737,14 @@ def _reset_aspect_worker_singleton() -> None:
     reset_worker_for_tests()
 
 
-@pytest.fixture(autouse=True)
-def _reap_spawned_daemons(tmp_path: Path):
-    """nexus-scoo5: reap any T2/T3 daemon a test spawned under its own
-    isolated tmp ``NEXUS_CONFIG_DIR``.
-
-    A test that drives a real ``nx upgrade`` (non-``--auto``) reaches
-    ``upgrade._cycle_daemon_to_current()``, which shells out to ``nx daemon
-    t2 ensure-running`` and spawns a *detached* ``nx daemon t2 start`` bound
-    to the per-test config dir. ``subprocess.run`` returns once the daemon
-    is up, so the process outlives the test body and lingers as an orphan
-    after pytest GCs the tmp dir (observed: three orphan daemons on
-    ``garbage-*/test_force0/.config/nexus/memory.db``).
-
-    The autouse ``_isolate_config_dir`` fixture sets ``NEXUS_CONFIG_DIR`` to
-    ``tmp_path / ".config" / "nexus"``, so a spawned daemon's discovery file
-    lands there. This teardown is the process-level analog of the
-    ``pytest_sessionfinish`` cache-file leak guard: it is scoped strictly to
-    that per-test tmp path (and double-guarded by a cmdline check in
-    ``reap_tmp_daemons``), so it can never signal the user's real daemon,
-    whose discovery file lives under ``~/.config/nexus``.
-
-    Best-effort; never raises. Tests that suppress the spawn at source
-    (patching ``_cycle_daemon_to_current``) make this a no-op.
-    """
-    yield
-    from tests._daemon_leak_guard import reap_tmp_daemons
-
-    # Scoped to the autouse ``_isolate_config_dir`` default
-    # (``tmp_path/.config/nexus``) only. A full-suite sweep confirmed this is
-    # leak-free: the ``tests/daemon`` lifecycle tests that spawn real daemons
-    # under the ``--config-dir str(tmp_path)`` root form self-clean. Scanning
-    # the tmp_path root too would reach the fake discovery files those tests
-    # pre-seed (with mocked ``subprocess.run`` / ``os.kill``) and trip their
-    # "must not spawn" guards at teardown — cost with no proven benefit.
-    try:
-        reap_tmp_daemons(tmp_path / ".config" / "nexus")
-    except BaseException:  # noqa: BLE001 — teardown guard must never fail a test
-        pass
+# NO _reap_spawned_daemons fixture: it SIGTERMed any T2/T3 daemon a test had
+# spawned into its own tmp NEXUS_CONFIG_DIR (nexus-scoo5 — real `nx upgrade`
+# runs reached `nx daemon t2 ensure-running`, which spawned a DETACHED
+# `nx daemon t2 start` that outlived the test body). It reaped tiers ("t2",
+# "t3") only; T3's daemon retired in RDR-155 P4b and T2's in nexus-i711w
+# Stage 2 sub-stage B, and both spawn paths are gone with them, so there is
+# nothing left for it to find. Its implementation (tests/_daemon_leak_guard.py)
+# and contract tests went with it.
 
 
 def set_credentials(monkeypatch) -> None:

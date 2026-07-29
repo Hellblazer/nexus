@@ -36,7 +36,7 @@ import httpx
 import structlog
 
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from nexus.db.t2.catalog_taxonomy import AssignResult
+from nexus.db.t2.taxonomy_compute import AssignResult
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT
 
 _log = structlog.get_logger(__name__)

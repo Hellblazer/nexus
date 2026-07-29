@@ -1157,8 +1157,9 @@ def run_collection_postprocessing(
     is_flag=True,
     default=False,
     help=(
-        "Extract and embed locally using ONNX (no API keys, no cloud writes). "
-        "Prints a chunk preview so you can verify extraction before indexing for real."
+        "Preview extraction and chunking only — nothing is embedded, stored, or "
+        "written (no API keys needed). Prints a chunk preview so you can verify "
+        "extraction before indexing for real."
     ),
 )
 @click.option(
@@ -1347,23 +1348,60 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     path = path.resolve()
 
     if dry_run:
-        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only)
-
         from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred; rare branch)
         from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — deliberate function-local import (rare branch)
+        from nexus.hook_registry import HookRegistry  # noqa: PLC0415 — deliberate function-local import (rare branch)
 
-        click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
-        ef = MiniLMDirectEmbeddingFunction()
-        local_t3 = make_t3(_client=InMemoryVectorClient(), _ef_override=ef)
+        # A dry run EMBEDS NOTHING (RDR-155 P4b, decision-3 site 2). Its whole
+        # output is a chunk count, a page range and a text preview, and the
+        # read-back below asks for ``documents`` + ``metadatas`` only — the
+        # vectors this used to compute with a local 384d ONNX model were
+        # discarded unread, making that model a hard dependency of a preview.
+        #
+        # ``embed_fn`` returns empty placeholders, the same contract the
+        # indexer already uses for service mode (``indexer.py``:
+        # ``lambda texts: [[]] * len(texts)``); InMemoryVectorStore stores the
+        # rows and pins the collection at dimension 0.
+        #
+        # The sentinel EF is load-bearing, not decoration:
+        # ``T3Database.get_or_create_collection`` resolves an embedding
+        # function EAGERLY, so with no override the handle would build a REAL
+        # one — a Voyage client or a model load — purely to satisfy plumbing
+        # nothing calls. Pinning a sentinel makes "nothing embeds" a property
+        # the code ENFORCES, so a future change that adds a query to the
+        # preview fails loudly instead of silently reintroducing the load.
+        class _RefusesToEmbed:
+            """EF placeholder for the dry-run handle; raises if ever called."""
 
-        def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
-            # MiniLMDirect returns plain list[list[float]] (the retired
-            # chroma EF returned numpy rows needing .tolist()).
-            return ef(texts), model
+            def __call__(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError(
+                    "nx index --dry-run must not embed: it previews extraction "
+                    "and chunking only. Something asked the throwaway handle "
+                    "for vectors — if the preview now needs them, decide that "
+                    "deliberately rather than reintroducing a model load here."
+                )
 
+        click.echo("Dry-run mode — extraction and chunking preview; nothing embedded or written.")
+        local_t3 = make_t3(
+            _client=InMemoryVectorClient(), _ef_override=_RefusesToEmbed(),
+        )
+
+        def _no_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
+            return [[] for _ in texts], model
+
+        # An EMPTY registry: a dry run fires no post-store hooks. Passing None
+        # makes index_pdf install the defaults — taxonomy assign, catalog
+        # manifest write, and aspect-extraction enqueue — so a command that
+        # advertises "(no cloud write)" was firing two side-effecting hooks
+        # against a throwaway collection, plus a taxonomy pass whose output is
+        # discarded with the client at return. (Observed no-op in a bare
+        # sandbox HOME, where nothing resolves; on a configured install they
+        # reach real consumers.) Pre-existing, and surfaced here because the
+        # no-embed switch made the taxonomy hook start warning
+        # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational

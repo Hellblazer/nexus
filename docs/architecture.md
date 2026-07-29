@@ -64,11 +64,13 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     surfaces: MCP nexus-catalog server (10 tools) + nx catalog CLI
     │
 
-    └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; T2 daemon-mediated, T3 service-mediated)
+    └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
-          T2: SQLite + FTS5 daemon ── nx daemon t2 start
-                Nine domain stores (eight share nexus.db + catalog) behind T2Database / T2Client
-                Transport: UDS (UID-gated) + 127.0.0.1 loopback TCP
+          T2: nexus-service over Postgres (the write arbiter)
+                Nine domain stores (eight share nexus.db + catalog) behind T2Database
+                Transport: HTTP to the nexus-service
+                (the SQLite + FTS5 `nx daemon t2` daemon is RETIRED — it
+                 arbitrated a single SQLite writer; Postgres does that now)
                 memory · plans · taxonomy · telemetry · document_aspects ·
                 aspect_queue · document_highlights · catalog
                 (chash_index RETIRED — table dropped by RDR-187, v0.1.51)
@@ -98,19 +100,19 @@ only as the `NX_STORAGE_BACKEND=sqlite` opt-out path.
 **One-service convergence.** Both tiers now serve through the native
 `nexus-service`: T3 vectors on Postgres + pgvector, and the T2 domain stores
 **hard-default to the service backend** as of [RDR-152](rdr/rdr-152-postgres-java-storage-service.md) (`nexus-gmiaf`).
-`NX_STORAGE_BACKEND[_<store>]=sqlite` is the explicit opt-out; the single-writer
-SQLite daemon remains only as that fallback path. One service backs both tiers,
-with SQLite retained as the local opt-out.
+`NX_STORAGE_BACKEND[_<store>]=sqlite` is the explicit opt-out, and it no longer
+has a daemon behind it — the single-writer SQLite daemon is retired. One
+service backs both tiers.
 
-For container deployments (Claude Co-Work and similar): containers
-reach the host's T2 daemon via the loopback TCP socket exposed by
-``nx daemon t2 status``, and the host's nexus-service for T3 via
-``NX_SERVICE_URL`` + ``NX_SERVICE_TOKEN``. Pattern:
+For container deployments (Claude Co-Work and similar): containers reach the
+host's nexus-service for BOTH tiers via ``NX_SERVICE_URL`` +
+``NX_SERVICE_TOKEN``. The separate T2 transport (``NX_T2_ADDR`` /
+``NX_T2_SOCK``, pointed at the T2 daemon's loopback TCP or UDS socket) is gone
+with that daemon — one URL now covers what took three variables. Pattern:
 
 ```
 # macOS Docker Desktop:
 docker run --rm \
-    -e NX_T2_ADDR=host.docker.internal:<port> \
     -e NX_SERVICE_URL=http://host.docker.internal:<service_port> \
     -e NX_SERVICE_TOKEN=<token> \
     <image-with-conexus>
@@ -118,7 +120,6 @@ docker run --rm \
 # Linux (default bridge):
 docker run --rm \
     --add-host=host.docker.internal:host-gateway \
-    -e NX_T2_ADDR=host.docker.internal:<port> \
     -e NX_SERVICE_URL=http://host.docker.internal:<service_port> \
     -e NX_SERVICE_TOKEN=<token> \
     <image>
@@ -143,11 +144,12 @@ SQLite+FTS5, T3 uid-scoped pgvector behind the nexus-service) but share
 (`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
 election, ungraceful-death reap, restart fencing, self-heal re-assert, and
 version-skew cycling all live in that one primitive, parameterized by tier
-and scope. Each tier is a thin consumer: T1 via `daemon/t1_lease.py`
-(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), T2 via
-`daemon/t2_daemon.py`, T3 via `daemon/storage_service_daemon.py` (the
-nexus-service supervisor; the retired `daemon/t3_daemon.py` ChromaDB path
-remains only as the migration source). Liveness is **lease freshness (TTL),
+and scope. Each surviving tier is a thin consumer: T1 via `daemon/t1_lease.py`
+(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), and the
+storage service via `daemon/storage_service_daemon.py`. Both per-tier daemons
+that used to sit here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b)
+and `daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w) — the service
+supervises every tier now. Liveness is **lease freshness (TTL),
 not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
 MinerU (`daemon/mineru_lifecycle.py`, nexus-1qdb9) consumes the substrate's
 public `election()` spawn guard rather than a full lease: the PDF pipeline's
@@ -483,11 +485,20 @@ Phase 2 consequences:
   own `threading.Lock` plus the SQLite file-level write lock -- callers
   never see `OperationalError: database is locked`.
 
-### Cross-process single writer ([RDR-120](rdr/rdr-120-storage-substrate-split.md) / [RDR-128](rdr/rdr-128-t2-single-writer-enforcement.md))
+### Cross-process single writer ([RDR-120](rdr/rdr-120-storage-substrate-split.md) / [RDR-128](rdr/rdr-128-t2-single-writer-enforcement.md)) — HISTORICAL
+
+> **This whole section describes a retired mechanism.** The T2 daemon, its
+> client, and the `nx daemon t2` verb group were deleted by nexus-i711w
+> (RDR-158 P4). The problem it solved — many processes contending on one
+> SQLite WAL writer lock — does not exist against Postgres, which is the write
+> arbiter now. The section is kept because the RDR-129/140/146 sequence is the
+> design heritage behind the current single-writer *lease* primitive
+> (`daemon/service_registry.py`), which generalised out of it; read it as how
+> we got here, not as how T2 works today.
 
 The per-store `busy_timeout` above absorbs *within-process* cross-domain
-contention. *Across* processes, `memory.db` has a single owner: the **T2
-daemon** ([RDR-120](rdr/rdr-120-storage-substrate-split.md)). Other processes reach T2 through it over a local RPC
+contention. *Across* processes, `memory.db` had a single owner: the **T2
+daemon** ([RDR-120](rdr/rdr-120-storage-substrate-split.md)). Other processes reached T2 through it over a local RPC
 (`nexus.daemon.t2_client.T2Client`) rather than opening the WAL writer
 lock directly.
 

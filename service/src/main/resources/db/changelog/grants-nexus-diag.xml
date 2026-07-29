@@ -44,6 +44,36 @@
       role on the DBA's schedule — so a missing role here is a clean skip, and
       runAlways="true" self-heals the grants on the first boot after the role
       appears. GRANT is naturally idempotent; re-execution is safe.
+
+    WHY BOTH ERA TESTS LIVE IN THE DO $$ BODY, NOT IN <preConditions>
+    (nexus-ixsxa, 2026-07-27 — found by the first-ever execution of a Liquibase
+    rollback round trip, SchemaRollbackRoundTripIntegrationTest):
+      NEVER put <preConditions onFail="MARK_RAN"> on a runAlways changeset.
+      MARK_RAN is recorded by INSERTING a DATABASECHANGELOG row, not by
+      updating in place — ExecType.MARK_RAN carries ranBefore=false, and
+      MarkChangeSetRanGenerator branches on exactly that flag to choose
+      InsertStatement over UpdateStatement (liquibase-core 4.29.0). runAlways
+      re-evaluates the precondition every boot (ShouldRunChangeSetFilter
+      accepts it unconditionally), so an unmet precondition appends one row per
+      boot, without bound. RERAN carries ranBefore=true and updates in place,
+      which is why the other runAlways changesets do not accumulate.
+      The two changesets below are ERA-EXCLUSIVE on the same probe (the view
+      absent vs present), so as preconditions exactly ONE of them MARK_RANs on
+      every boot of every cluster — the legacy era grew grants-nexus-diag-2 and
+      the view era grew grants-nexus-diag-1. Unbounded growth either way, and it
+      also skews any rollback depth arithmetic, since rollbackCount counts ROWS.
+      runOnChange is NOT the fix: ShouldRunChangeSetFilter would then reject the
+      changeset outright once ran, so the precondition is never re-evaluated —
+      that silently forfeits both self-heal properties this file depends on (a
+      later-created nexus_diag never gets granted, and the view-era REVOKE never
+      fires when the provisioning path creates the view, leaving the RDR-182 s5
+      content boundary permanently unenforced). The era genuinely is a per-boot
+      runtime question, so runAlways is correct and the era test belongs in the
+      body — where the nexus_diag role test already lives, in the same shape.
+      Editing these bodies is checksum-safe BECAUSE they are runAlways:
+      ValidatingVisitor skips the MD5SUM comparison for shouldAlwaysRun() and
+      shouldRunOnChange() changesets. That exemption does NOT extend to the
+      shipped one-shot changesets elsewhere in this changelog.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -52,16 +82,12 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="grants-nexus-diag-1" author="nexus-ykzbj.8" runAlways="true">
-        <preConditions onFail="MARK_RAN">
-            <sqlCheck expectedResult="0">
-                SELECT count(*) FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'
-            </sqlCheck>
-        </preConditions>
         <comment>
             SELECT-only grants for the nexus_diag diagnostic role (RDR-182
-            P2.1). Conditional on the role existing (clean skip otherwise;
+            P2.1). LEGACY-era: applies only while nexus.diag_chash_conformance
+            is absent — the era test is the second guard in the body below, NOT
+            a preCondition (nexus-ixsxa; see the header note on MARK_RAN row
+            growth). Conditional on the role existing (clean skip otherwise;
             self-heals every startup via runAlways). ALTER DEFAULT PRIVILEGES
             runs as this migration connection's role (nexus_admin — the
             creator of every schema table), so future tables are covered
@@ -74,6 +100,18 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
         RAISE NOTICE 'nexus_diag absent — diagnostic grants skipped (created by pg_provision/DBA; self-heals next boot)';
+        RETURN;
+    END IF;
+
+    -- ERA GUARD (nexus-ixsxa). Was a preCondition onFail=MARK_RAN; that
+    -- INSERTS a changelog row per boot on a runAlways changeset. Here it costs
+    -- one catalog lookup and records RERAN, updating the single row in place.
+    IF EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'
+    ) THEN
+        RAISE NOTICE 'view era — legacy table grants skipped; grants-nexus-diag-2 owns the content boundary';
         RETURN;
     END IF;
 
@@ -97,13 +135,6 @@ $$;
     </changeSet>
 
     <changeSet id="grants-nexus-diag-2" author="nexus-9bufb" runAlways="true">
-        <preConditions onFail="MARK_RAN">
-            <sqlCheck expectedResult="1">
-                SELECT count(*) FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'
-            </sqlCheck>
-        </preConditions>
         <comment>
             Amendment A6 (nexus-9bufb): VIEW-era grants. Once the superuser
             provisioning path has created nexus.diag_chash_conformance, the
@@ -112,7 +143,9 @@ $$;
             original grants, so it can revoke them), keep schema USAGE, the
             counts view, and the Liquibase journal. Idempotent + runAlways:
             self-heals every boot, and re-revokes anything the legacy
-            changeset era granted.
+            changeset era granted. The era test is the second guard in the body
+            below, NOT a preCondition (nexus-ixsxa; see the header note on
+            MARK_RAN row growth).
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
@@ -121,6 +154,21 @@ DECLARE
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
         RAISE NOTICE 'nexus_diag absent — view-era diagnostic grants skipped';
+        RETURN;
+    END IF;
+
+    -- ERA GUARD (nexus-ixsxa). MUST precede every REVOKE below: in the legacy
+    -- era there is no counts view to replace the direct table SELECT, so
+    -- revoking here would BLIND the diagnostic role rather than narrow it.
+    -- Was a preCondition onFail=MARK_RAN, which INSERTS a changelog row per
+    -- boot on a runAlways changeset; as a body guard this records RERAN and
+    -- updates the single row in place.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'
+    ) THEN
+        RAISE NOTICE 'legacy era — nexus.diag_chash_conformance absent; view-era revokes skipped';
         RETURN;
     END IF;
 

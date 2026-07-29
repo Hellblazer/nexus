@@ -155,22 +155,20 @@ Clients honour these env-var overrides:
 
 | Variable | Effect | Default |
 |----------|--------|---------|
-| `NX_T2_ADDR` | TCP `host:port` for the T2 daemon (e.g. `host.docker.internal:55459`). Used by dev containers reaching the host's loopback. | discovery file |
-| `NX_T2_SOCK` | UDS path for the T2 daemon (Linux-only when bind-mounted from the host into a container). Mutually exclusive with `NX_T2_ADDR`. | discovery file |
 | `NX_SERVICE_URL` | Full base URL of the nexus-service (T3 vectors over `/v1/vectors`). Used by dev containers and managed-cloud clients. | `storage_service_addr.<uid>` lease, then `https://api.conexus-nexus.com` |
 | `NX_SERVICE_TOKEN` | Bearer token for the nexus-service. | local: from `pg_credentials`; managed: user-supplied |
-| `NX_STORAGE_BACKEND` | Global storage-backend switch (RDR-152). `service` routes T2 stores + T3 vectors through the Java/Postgres nexus-service; `sqlite` is the legacy local opt-out (SQLite + the T2 daemon, still supported per RDR-164 CA-5). | `service` (hard default since RDR-152/155) |
+| `NX_STORAGE_BACKEND` | Global storage-backend switch (RDR-152). `service` routes T2 stores + T3 vectors through the Java/Postgres nexus-service; `sqlite` is the legacy local opt-out, now without its daemon (see the note below). | `service` (hard default since RDR-152/155) |
 | `NX_STORAGE_BACKEND_<STORE>` | Per-store override of `NX_STORAGE_BACKEND`, taking precedence over the global value. Known `<STORE>` suffixes: `T1`, `CATALOG`, `VECTORS`, `TAXONOMY`, `ASPECT_QUEUE` (e.g. `NX_STORAGE_BACKEND_VECTORS=service`). Each is `service` or `sqlite`. | inherits `NX_STORAGE_BACKEND` |
 | `NX_LOCAL` | Force local mode (local nexus-service, bge-768) even when cloud credentials exist. | unset (cloud mode if credentials present) |
 
 > Note: the retired `nx daemon t3` ChromaDB path and its `NX_T3_ADDR` override no longer route T3 serving; T3 traffic goes to the nexus-service via `NX_SERVICE_URL`.
 
-When the T2 env vars are unset, the client falls back to the discovery
-file. If no daemon is reachable, the CLI raises
-`T2DaemonNotReachableError` with a hint to run
-`nx daemon t2 ensure-running` or `install --autostart`. See
-[Container Integration](container-integration.md) for the full
-operator-facing matrix of transport choices per platform.
+> Note: `NX_T2_ADDR` and `NX_T2_SOCK` are **gone**, not deprecated — nothing
+> reads them. They addressed the SQLite T2 daemon, which is retired along with
+> its discovery file (`t2_addr.<uid>`) and the whole `nx daemon t2` verb group.
+> T2 is served by the nexus-service, so a dev container reaches it through
+> `NX_SERVICE_URL` like every other tier. See
+> [Container Integration](container-integration.md) for the transport matrix.
 
 ## Storage Service (Postgres) Prerequisites
 
@@ -367,7 +365,6 @@ Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode,
 | `nx-mcp` (core MCP) | `mcp` | `~/.config/nexus/logs/mcp.log` | RotatingFileHandler 10 MB × 5 |
 | `nx-mcp-catalog` | `mcp` | `~/.config/nexus/logs/mcp.log` | Shares log with core MCP |
 | `nx console` | `console` | `~/.config/nexus/logs/console.log` | RotatingFileHandler 10 MB × 5 |
-| T2 daemon (`nx daemon t2 start`) | `t2_daemon` | `<config_dir>/logs/t2_daemon.log` | RotatingFileHandler 10 MB × 5; honours `--config-dir` |
 
 ### Log Files
 
@@ -377,7 +374,6 @@ Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode,
 | `~/.config/nexus/dolt-server.log` | Dolt server process | Dolt native format |
 | `~/.config/nexus/logs/mcp.log` | MCP servers (via `logging_setup`) | `%(asctime)s %(name)s %(levelname)s %(message)s` |
 | `~/.config/nexus/logs/console.log` | Console server (via `logging_setup`) | Same as above |
-| `~/.config/nexus/logs/t2_daemon.log` | T2 daemon (via `logging_setup`) | Same as above; records `t2_daemon_started` / `t2_daemon_stop_requested` / `t2_daemon_stopped` lifecycle + crashes |
 
 ### Suppressed Loggers
 

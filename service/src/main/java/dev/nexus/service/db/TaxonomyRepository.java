@@ -585,6 +585,63 @@ public final class TaxonomyRepository {
                    "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID))));
     }
 
+    /**
+     * Render a timestamp for the wire as UTC ISO-8601 with explicit seconds.
+     *
+     * <p>NOT {@code OffsetDateTime.toString()} (nexus-onjvy). That renders in whatever
+     * offset the value carries — on a developer box the same instant comes back as
+     * "2026-04-08T17:00-07:00" rather than "2026-04-09T00:00:00Z" — and it ELIDES ZERO
+     * SECONDS. Both properties break the client, which compares and displays these as
+     * strings: a lexicographic comparison across mixed offsets is simply wrong, and
+     * "T00:00Z" sorts differently from "T00:00:00Z". This class already
+     * declares {@code UTC_SECOND} for exactly this shape; it just was not being used
+     * on these reads.
+     */
+    private static String utcIso(Object ts) {
+        if (!(ts instanceof OffsetDateTime odt)) return null;
+        return UTC_SECOND.format(odt.withOffsetSameInstant(ZoneOffset.UTC));
+    }
+
+    /**
+     * Full assignment rows for the given doc_ids, quality columns included (nexus-onjvy).
+     *
+     * <p>{@link #getAssignmentsForDocs} projects DOC_ID and TOPIC_ID only, and no other
+     * route returned the rest — so {@code similarity}, {@code assigned_at} and
+     * {@code source_collection} were WRITTEN by the assign path and readable by nobody.
+     * In service mode an operator could not ask how confident an assignment was, when it
+     * was made, or which collection it came from.
+     *
+     * <p>A SEPARATE ROUTE rather than a widened projection, deliberately:
+     * {@code getAssignmentsForDocs} is consumed as a {@code {doc_id: topic_id}} map on
+     * the client, so widening it would change a return TYPE that existing callers
+     * destructure. Additive is the non-breaking shape, and the two reads have genuinely
+     * different costs — the map read stays cheap for the hot path.
+     */
+    public List<Map<String, Object>> getAssignmentDetails(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                       TOPIC_ASSIGNMENTS.SIMILARITY,
+                       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .orderBy(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> m = new LinkedHashMap<>();
+                   m.put("doc_id",            r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                   m.put("topic_id",          r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
+                   m.put("assigned_by",       r.get(TOPIC_ASSIGNMENTS.ASSIGNED_BY));
+                   m.put("similarity",        r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
+                   m.put("source_collection", r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
+                   m.put("assigned_at",       utcIso(r.get(TOPIC_ASSIGNMENTS.ASSIGNED_AT)));
+                   return m;
+               }));
+    }
+
     /** Return doc_ids labeled with a given topic label. */
     public List<String> getDocIdsForLabel(String tenant, String label) {
         return tenantScope.withTenant(tenant, ctx ->
@@ -1313,8 +1370,33 @@ public final class TaxonomyRepository {
     }
 
     /**
-     * Hub detection data: returns per-topic DF + total_chunks + label + collection + source set.
+     * Hub detection data: returns per-topic DF + total_chunks + label + collection + source set,
+     * plus the staleness aggregates behind {@code --warn-stale} (nexus-onjvy).
      * Python-side computes ICF, stopword matching, and score.
+     *
+     * <p>STALENESS (RDR-077 C-2 semantics, previously SQLite-only). Per hub, over the
+     * source collections actually contributing to it:
+     * <ul>
+     *   <li>{@code max_last_discover_at} — MAX(taxonomy_meta.last_discover_at), NULLs
+     *       excluded by MAX, exactly as the retired SQLite oracle did.</li>
+     *   <li>{@code never_discovered_count} — contributing collections with a NULL
+     *       last_discover_at PLUS those with no taxonomy_meta row at all. Both are
+     *       "never discovered" from the command's point of view.</li>
+     *   <li>{@code is_stale} — the hub has assignments newer than the latest discover,
+     *       or any contributing collection was never discovered.</li>
+     * </ul>
+     *
+     * <p>{@code is_stale} IS COMPUTED HERE rather than client-side, deliberately, even
+     * though ICF and score are computed client-side. The oracle compared ISO-8601
+     * strings lexicographically, which was sound on SQLite's TEXT timestamps. Over HTTP
+     * the values cross as {@code OffsetDateTime.toString()}, which ELIDES ZERO SECONDS
+     * ("2026-04-09T00:00Z", not "...T00:00:00Z") — so the same lexicographic comparison
+     * would silently misorder timestamps that differ only in whether seconds were zero.
+     * Comparing real TIMESTAMPTZ values server-side avoids reintroducing that trap; the
+     * client passes the verdict through.
+     *
+     * <p>One extra query, not N+1: taxonomy_meta is fetched once for every collection
+     * referenced by any hub, then folded per topic in memory.
      *
      * @param minCollections minimum distinct source_collections (DF threshold)
      */
@@ -1352,6 +1434,25 @@ public final class TaxonomyRepository {
                 sourcesMap.computeIfAbsent(tid, k -> new ArrayList<>()).add(sc);
             }
 
+            // taxonomy_meta for every collection any hub draws from, in one query.
+            // Only non-null last_discover_at values are kept: a collection with a NULL
+            // timestamp and one with no taxonomy_meta row at all are both "never
+            // discovered" here, and the oracle counted them together too (its
+            // never_count summed the NULLs and the missing rows). So a single
+            // "absent from this map" test covers both states.
+            var contributing = sourcesMap.values().stream()
+                .flatMap(List::stream).distinct().toList();
+            java.util.Map<String, OffsetDateTime> discoverAt = new java.util.HashMap<>();
+            if (!contributing.isEmpty()) {
+                for (var r : ctx.select(TAXONOMY_META.COLLECTION, TAXONOMY_META.LAST_DISCOVER_AT)
+                        .from(TAXONOMY_META)
+                        .where(TAXONOMY_META.COLLECTION.in(contributing))
+                        .fetch()) {
+                    OffsetDateTime at = r.get(TAXONOMY_META.LAST_DISCOVER_AT);
+                    if (at != null) discoverAt.put(r.get(TAXONOMY_META.COLLECTION), at);
+                }
+            }
+
             List<Map<String, Object>> result = new ArrayList<>();
             for (var r : rows) {
                 long tid = r.get("topic_id", Long.class);
@@ -1362,8 +1463,30 @@ public final class TaxonomyRepository {
                 m.put("df", r.get("df", Integer.class));
                 m.put("total_chunks", r.get("total_chunks", Integer.class));
                 Object lastAt = r.get("last_assigned_at");
-                m.put("last_assigned_at", lastAt != null ? lastAt.toString() : null);
-                m.put("source_collections", sourcesMap.getOrDefault(tid, List.of()));
+                m.put("last_assigned_at", utcIso(lastAt));
+                List<String> sources = sourcesMap.getOrDefault(tid, List.of());
+                m.put("source_collections", sources);
+
+                OffsetDateTime maxDiscover = null;
+                int neverCount = 0;
+                for (String coll : new java.util.LinkedHashSet<>(sources)) {
+                    OffsetDateTime at = discoverAt.get(coll);
+                    if (at == null) {
+                        // NULL last_discover_at, or no taxonomy_meta row at all.
+                        neverCount++;
+                        continue;
+                    }
+                    if (maxDiscover == null || at.isAfter(maxDiscover)) maxDiscover = at;
+                }
+
+                boolean isStale = neverCount > 0;
+                if (!isStale && maxDiscover != null
+                        && lastAt instanceof OffsetDateTime assignedAt) {
+                    isStale = assignedAt.isAfter(maxDiscover);
+                }
+                m.put("max_last_discover_at", utcIso(maxDiscover));
+                m.put("never_discovered_count", neverCount);
+                m.put("is_stale", isStale);
                 result.add(m);
             }
             return result;

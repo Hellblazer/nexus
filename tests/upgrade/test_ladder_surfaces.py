@@ -20,7 +20,6 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from tests.conftest import engine_substrate_selected
 
 import nexus.db.migrations as migrations
 import nexus.upgrade_ladder.registry as ladder_registry
@@ -90,7 +89,6 @@ def test_yes_flag_reaches_the_rungs_consent_channel(
 
     seen: list[bool] = []
     monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(_consent()))
-    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_cycle_supervised_daemons_to_current", lambda **_kw: None)
@@ -126,7 +124,6 @@ def test_yes_flag_is_not_visible_to_the_daemons_the_upgrade_spawns(
     import os
 
     at_spawn: dict[str, str | None] = {}
-    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: None)
@@ -428,12 +425,13 @@ def test_deferred_walk_notices_but_exits_cleanly(
 # Skipped rather than left red or force-fitted: porting the ladder's
 # engine-backed rung semantics is its own piece of work, not a disposition.
 # Carved out as residue on nexus-aqbrk.
-@pytest.mark.skipif(
-    engine_substrate_selected(),
+@pytest.mark.skip(
     reason="nexus-aqbrk residue: asserts a LADDER RungOutcome.DEFERRED, and the "
            "ladder ledger is unconditionally engine-backed (upgrade.py:210, "
            "RDR-186 .15) so no storage-backend pin reaches it. Needs its own "
-           "port of the ladder's engine-backed rung semantics.",
+           "port of the ladder's engine-backed rung semantics. Unconditional "
+           "since nexus-i711w Stage 1b deleted the SQLite substrate this "
+           "used to skip against.",
 )
 @pytest.mark.usefixtures("local_t2_backend")
 def test_upgrade_invocation_executes_each_migration_step_exactly_once(
@@ -460,7 +458,6 @@ def test_upgrade_invocation_executes_each_migration_step_exactly_once(
     with (
         patch("nexus.commands.upgrade._db_path", return_value=db),
         patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        patch("nexus.commands.upgrade._quiesce_daemon"),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
     ):
         result = CliRunner().invoke(main, ["upgrade"])

@@ -165,7 +165,19 @@ jobs:
           # platform variation, budget slightly over. New legitimately-
           # conditional tests must bump these consciously, in the same
           # change that adds them.
-          NX_GATE_FLOOR: "455"
+          #
+          # 455 -> 452 (nexus-w6h2m, 2026-07-28): the cloud_mode carve-out
+          # DESELECTS 3 tests that were passing when this floor was pinned —
+          # back when the gate ran in cloud mode and the service embedded
+          # voyage. They cannot pass against a bge-768 local service, which is
+          # what a local service IS (RDR-160). Deselected tests land in
+          # pytest's `deselected` bucket, not `passed`, so the reachable
+          # maximum drops by exactly 3 and leaving the floor at 455 would have
+          # left 1 test of slack — the guard would trip on the first
+          # legitimately-conditional skip and read as a regression. Lowered by
+          # exactly the carve-out size, no more: the same rule that says
+          # additions bump it consciously says removals do too.
+          NX_GATE_FLOOR: "452"
           NX_GATE_BUDGET: "25"
         run: |
           set -euo pipefail

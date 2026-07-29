@@ -14,21 +14,32 @@ Run locally with:
     PATH=$JAVA_HOME/bin:$PATH \\
     uv run pytest -m integration tests/db/test_http_chash_integration.py -v
 
-POST-RDR-187 CONTRACT (nexus-piwya.3/.10 — supersedes the nexus-gmiaf.16 router
-MVV this file originally pinned): nexus.chash_index is DROPPED; the chunks
-tables ARE the chash-keyed store. The /v1/chash/* HTTP shape survives until
-nexus-piwya.11 with these semantics, which this family pins end-to-end:
+POST-RDR-187 CONTRACT (nexus-piwya.3/.10, then .11 — supersedes the
+nexus-gmiaf.16 router MVV this file originally pinned): nexus.chash_index is
+DROPPED; the chunks tables ARE the chash-keyed store.
 
-  a) upsert/upsert_many are DEPRECATED no-ops — accepted (200) but nothing
-     materializes; chash membership is derived from REAL chunk rows only
+THE DEPRECATION WINDOW IS CLOSED (nexus-piwya.11, engine-service-v0.1.53,
+2026-07-24). This header used to say the /v1/chash/* shape "survives until
+nexus-piwya.11" with no-op write semantics. .11 landed — it 410s the write
+endpoints, deletes the shims, and DROPs staging.chash_index — but this file was
+not updated with it, so five tests went on pinning the pre-.11 no-ops and stood
+red on the local-service gate (nexus-k7te2). Current semantics, per
+ChashHandler's own route table:
+
+  a) upsert / upsert_many are 410 GONE. Not no-ops — the one-release no-op
+     window closed with the DROP of the router table. The 410 body names the
+     retirement so a stale client's failure is self-diagnosing.
   b) lookup / count / distinct_collections / is_empty / registered_chashes
      are served from the chunks tables (the 3-table UNION probe)
-  c) delete_collection / delete_stale are DEPRECATED no-ops returning
-     deleted:0 — they must NOT escalate into content (chunk) deletion
+  c) delete_collection is STILL a deprecated no-op returning deleted:0;
+     delete_stale is 410 GONE. The two differ — do not collapse them. Both
+     must NOT escalate into content (chunk) deletion, and that property is
+     asserted on both paths because it belongs to the chunks tables, not to
+     the dead router, and so outlives the endpoints it was written against.
   d) rename_collection stays REAL: re-homes chunks_<dim>.collection
-  e) import is an HONEST no-op (imported:0) — the ETL leg is retired
-     (the orchestrator skips it; an old client sees visible divergence,
-     never fabricated success)
+  e) import is 410 GONE. It was an HONEST no-op (imported:0) for one release
+     so an old client's verify-fill saw visible divergence rather than
+     fabricated success; the 410 is the stronger form of that same honesty.
   f) Cross-tenant RLS holds on every derived read
   g) Phase E: tenant comes from the bearer, not the X-Nexus-Tenant header
      (the unset-GUC fail-closed property lives at the repo layer —
@@ -57,6 +68,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tests.db._service_fixture import (
@@ -314,18 +326,30 @@ class TestChashMVV:
     """Post-RDR-187 MVV for the /v1/chash/* compatibility surface
     (nexus-piwya.3/.10; supersedes the nexus-gmiaf.16 router MVV)."""
 
-    def test_a_deprecated_upsert_is_an_honest_noop(self, chash_store):
-        """a) upsert is accepted (200) but materializes NOTHING — chash
-        membership derives from real chunk rows only. Runs FIRST: also pins
-        is_empty()==True on the untouched store (fresh-install guard)."""
+    def test_a_retired_upsert_is_410_gone(self, chash_store):
+        """a) upsert is 410 Gone (nexus-piwya.11 closed the no-op window).
+
+        Runs FIRST: also pins is_empty()==True on the untouched store
+        (fresh-install guard).
+
+        This test used to assert the no-op contract — accepted 200,
+        materializes nothing. That window closed when piwya.11 landed the
+        engine-side retirement and DROPped the router table, so the honest
+        assertion is now the 410. The body is checked, not just the status:
+        the retirement's whole point is that a stale client's failure is
+        self-diagnosing, and a bare 410 from some unrelated layer would not
+        prove that.
+        """
         assert chash_store.is_empty() is True
 
-        chash_store.upsert(chash=_ch("sha256abc001"), collection=_coll("a1"))
-        chash_store.upsert(chash=_ch("sha256abc001"), collection=_coll("a2"))
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            chash_store.upsert(chash=_ch("sha256abc001"), collection=_coll("a1"))
+        assert exc.value.response.status_code == 410
+        assert "RDR-187" in exc.value.response.text
 
-        assert chash_store.lookup(_ch("sha256abc001")) == [], (
-            "deprecated /v1/chash/upsert must not materialize rows"
-        )
+        # And the refusal materialized nothing — the property the old no-op
+        # test protected survives the change in mechanism.
+        assert chash_store.lookup(_ch("sha256abc001")) == []
         assert chash_store.is_empty() is True
 
     def test_a2_lookup_unknown_returns_empty(self, chash_store):
@@ -335,10 +359,13 @@ class TestChashMVV:
         assert chash_store.lookup(_ch("no-such-content")) == []
         assert chash_store.lookup("nosuch00000000000000000000000000") == []
 
-    def test_b_deprecated_upsert_many_is_a_noop(self, chash_store):
-        """b) upsert_many is accepted but writes nothing."""
+    def test_b_retired_upsert_many_is_410_gone(self, chash_store):
+        """b) upsert_many is 410 Gone (nexus-piwya.11)."""
         chashes = [_ch(f"hash{i:04d}") for i in range(5)]
-        chash_store.upsert_many(chashes=chashes, collection=_coll("b"))
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            chash_store.upsert_many(chashes=chashes, collection=_coll("b"))
+        assert exc.value.response.status_code == 410
+        assert "RDR-187" in exc.value.response.text
 
         assert chash_store.count_for_collection(_coll("b")) == 0
 
@@ -390,19 +417,42 @@ class TestChashMVV:
         colls2 = {r["collection"] for r in chash_store.lookup(ch2)}
         assert colls2 == {new}
 
-    def test_f_delete_stale_is_a_noop(self, chash_store, service):
-        """f) delete_stale is a deprecated no-op: returns 0 and the real
-        chunk row survives (no derived copy left to heal)."""
+    def test_f_retired_delete_stale_is_410_and_never_touches_content(
+        self, chash_store, service,
+    ):
+        """f) delete_stale is 410 Gone (nexus-piwya.11) AND the real chunk row
+        survives.
+
+        The status flip is the boring half. The load-bearing half is the
+        second assertion, which is why this test is rewritten rather than
+        deleted: the retired write path must never escalate into deleting
+        CONTENT. That is a property of the chunks tables, not of the dead
+        router, so it outlives the endpoint it was written against. A 410
+        satisfies it trivially today — the point is that it keeps being
+        checked if anything ever re-implements this route.
+        """
         coll = _coll("f")
         chash = _seed_chunk(service, text="rdr187 delete-stale guard", collection=coll)
 
-        assert chash_store.delete_stale(chash=chash, collection=coll) == 0
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            chash_store.delete_stale(chash=chash, collection=coll)
+        assert exc.value.response.status_code == 410
+        assert "RDR-187" in exc.value.response.text
+
         assert chash_store.count_for_collection(coll) == 1
         assert chash_store.lookup(chash), "chunk must remain lookup-visible"
 
-    def test_f2_delete_stale_absent_returns_zero(self, chash_store):
-        """f2) delete_stale on an absent PK returns 0 (idempotent)."""
-        assert chash_store.delete_stale(chash=_ch("ghost"), collection="nowhere") == 0
+    def test_f2_retired_delete_stale_is_410_even_for_an_absent_pk(self, chash_store):
+        """f2) delete_stale is 410 regardless of whether the PK exists.
+
+        Previously this pinned idempotency (absent PK -> 0). A retired route
+        must refuse UNIFORMLY: a 410 for a present key and a quiet success for
+        an absent one would let a stale client conclude the endpoint still
+        works whenever it happened to ask about something missing.
+        """
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            chash_store.delete_stale(chash=_ch("ghost"), collection="nowhere")
+        assert exc.value.response.status_code == 410
 
     def test_g_lookup_and_count_serve_seeded_chunks(self, chash_store, service):
         """g) The derived read path: a chunk written via the public vector API
@@ -458,18 +508,25 @@ class TestChashMVV:
             "RLS must isolate: default tenant must not see the evil-tenant chunk"
         )
 
-    def test_j_import_is_an_honest_noop(self, chash_store):
-        """j) The ETL import endpoint is an HONEST no-op (RDR-187): reports
-        imported:0 and materializes nothing — an old client's verify-fill
-        sees visible divergence, never fabricated success. The paired client
+    def test_j_retired_import_is_410_gone(self, chash_store):
+        """j) The ETL import endpoint is 410 Gone (nexus-piwya.11).
+
+        It was an HONEST no-op (imported:0) for one release so an old client's
+        verify-fill would see visible divergence rather than fabricated
+        success. That window closed; the 410 is the stronger form of the same
+        honesty — divergence a stale client cannot misread. The paired client
         release skips the leg entirely (nexus-piwya.10: the orchestrator's
-        chash ETL + verify-fill legs are retired)."""
-        imported = chash_store.import_rows([{
-            "chash": _ch("etl_sha001"),
-            "collection": _coll("j"),
-            "created_at": "2024-03-15T08:00:00Z",
-        }])
-        assert imported == 0, "deprecated import must report imported:0"
+        chash ETL + verify-fill legs are retired).
+        """
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            chash_store.import_rows([{
+                "chash": _ch("etl_sha001"),
+                "collection": _coll("j"),
+                "created_at": "2024-03-15T08:00:00Z",
+            }])
+        assert exc.value.response.status_code == 410
+        assert "RDR-187" in exc.value.response.text
+
         assert chash_store.lookup(_ch("etl_sha001")) == []
         assert chash_store.count_for_collection(_coll("j")) == 0
 

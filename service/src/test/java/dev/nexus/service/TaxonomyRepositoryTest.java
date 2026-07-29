@@ -1169,6 +1169,135 @@ class TaxonomyRepositoryTest {
         assertThat(repo.assignMany(TENANT_A, null)).isZero();
     }
 
+    // ── Hub staleness (nexus-onjvy) ────────────────────────────────────────────
+
+    /**
+     * Seed one hub: a topic with projection assignments from two source collections
+     * (DF=2), assigned at {@code assignedAt}. Returns the topic id.
+     */
+    private long seedHub(String tenant, String label, String assignedAt,
+                         String sourceA, String sourceB) {
+        long topicId = repo.insertTopic(tenant, label, null, COL_A, 0, null, null);
+        repo.assignTopic(tenant, label + "-doc-a", topicId, "projection", 0.5, sourceA, assignedAt);
+        repo.assignTopic(tenant, label + "-doc-b", topicId, "projection", 0.5, sourceB, assignedAt);
+        return topicId;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> hubRow(List<Map<String, Object>> hubs, long topicId) {
+        return hubs.stream()
+            .filter(h -> Long.valueOf(topicId).equals(((Number) h.get("topic_id")).longValue()))
+            .findFirst().orElseThrow(() ->
+                new AssertionError("topic " + topicId + " did not surface as a hub — the "
+                    + "staleness assertions below would be vacuous"));
+    }
+
+    @Test @Order(64)
+    void detectHubs_staleWhenAssignmentsNewerThanLatestDiscover() {
+        // nexus-onjvy gap 3: warn_stale was accepted and SILENTLY DROPPED over HTTP.
+        // RDR-077 C-2 semantics: compare against MAX(last_discover_at) across ALL
+        // contributing source collections, not a single row.
+        final String tenant = "tax-hub-stale-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-stale", "2026-04-10T13:04:00Z", srcA, srcB);
+        // Both collections discovered BEFORE the hub's latest assignment.
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-09T00:00:00Z");
+        repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("is_stale")).as("assignments postdate every discover").isEqualTo(true);
+        assertThat(hub.get("max_last_discover_at")).isEqualTo("2026-04-09T00:00:00Z");
+        assertThat(hub.get("never_discovered_count")).isEqualTo(0);
+    }
+
+    @Test @Order(65)
+    void detectHubs_notStaleWhenAnyContributingCollectionDiscoveredLater() {
+        // THE C-2 CORRECTNESS POINT: MAX aggregates over ALL contributing collections.
+        // Updating ONE of the two to postdate the hub's latest assignment clears
+        // staleness — a single-row lookup would have kept it stale.
+        final String tenant = "tax-hub-fresh-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-fresh", "2026-04-10T13:04:00Z", srcA, srcB);
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-11T00:00:00Z");
+        repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("is_stale")).as("the MAX postdates the assignments").isEqualTo(false);
+        assertThat(hub.get("max_last_discover_at"))
+            .as("MAX picks the later of the two, not the first row seen")
+            .isEqualTo("2026-04-11T00:00:00Z");
+        assertThat(hub.get("never_discovered_count")).isEqualTo(0);
+    }
+
+    @Test @Order(66)
+    void detectHubs_neverDiscoveredCollectionCountsAndForcesStale() {
+        // A contributing collection with NO taxonomy_meta row at all is "never
+        // discovered" and makes the hub stale regardless of the other's timestamp.
+        final String tenant = "tax-hub-never-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-never", "2026-04-10T13:04:00Z", srcA, srcB);
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-30T00:00:00Z");  // well after
+        // srcB deliberately never recorded.
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("never_discovered_count")).isEqualTo(1);
+        assertThat(hub.get("is_stale"))
+            .as("a never-discovered contributor is stale even though MAX postdates")
+            .isEqualTo(true);
+    }
+
+    // ── Assignment detail projection (nexus-onjvy) ─────────────────────────────
+
+    @Test @Order(67)
+    void getAssignmentDetails_returnsTheQualityColumnsForDocsCannotRead() {
+        // nexus-onjvy gap 1: similarity / assigned_at / source_collection were WRITTEN
+        // by assignTopic and projected by no route — getAssignmentsForDocs selects
+        // doc_id + topic_id only, which is asserted here so the two stay distinct.
+        final String tenant = "tax-detail-" + System.nanoTime();
+        long topicId = repo.insertTopic(tenant, "detail-topic", null, COL_A, 0, null, null);
+        repo.assignTopic(tenant, "detail-doc", topicId, "projection",
+            0.8712345, "code__detail_src", "2026-04-14T10:00:00Z");
+
+        var details = repo.getAssignmentDetails(tenant, List.of("detail-doc"));
+
+        assertThat(details).hasSize(1);
+        var row = details.get(0);
+        assertThat(row.get("doc_id")).isEqualTo("detail-doc");
+        assertThat(((Number) row.get("topic_id")).longValue()).isEqualTo(topicId);
+        assertThat(row.get("assigned_by")).isEqualTo("projection");
+        assertThat(((Number) row.get("similarity")).doubleValue()).isEqualTo(0.8712345);
+        assertThat(row.get("source_collection")).isEqualTo("code__detail_src");
+        assertThat(row.get("assigned_at")).isEqualTo("2026-04-14T10:00:00Z");
+
+        // The cheap map read is deliberately NOT widened: callers destructure it as
+        // {doc_id: topic_id}, so widening would change a return type they depend on.
+        var map = repo.getAssignmentsForDocs(tenant, List.of("detail-doc"));
+        assertThat(map).hasSize(1);
+        assertThat(map.get(0).keySet())
+            .as("for_docs stays a two-key projection")
+            .containsExactlyInAnyOrder("doc_id", "topic_id");
+    }
+
+    @Test @Order(68)
+    void getAssignmentDetails_isTenantScopedAndEmptyForUnknownDocs() {
+        final String tenant = "tax-detail-rls-" + System.nanoTime();
+        final String other  = "tax-detail-other-" + System.nanoTime();
+        long mine = repo.insertTopic(tenant, "mine-topic", null, COL_A, 0, null, null);
+        long theirs = repo.insertTopic(other, "their-topic", null, COL_A, 0, null, null);
+        repo.assignTopic(tenant, "shared-doc-id", mine, "projection", 0.1, "code__mine", null);
+        repo.assignTopic(other, "shared-doc-id", theirs, "projection", 0.9, "code__theirs", null);
+
+        var out = repo.getAssignmentDetails(tenant, List.of("shared-doc-id"));
+
+        assertThat(out).as("the other tenant's row for the same doc_id must not leak")
+            .hasSize(1);
+        assertThat(out.get(0).get("source_collection")).isEqualTo("code__mine");
+        assertThat(repo.getAssignmentDetails(tenant, List.of("no-such-doc"))).isEmpty();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /** Build a {@code Map<String,Object>} from alternating key/value varargs (mixed value types). */

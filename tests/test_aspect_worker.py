@@ -38,9 +38,6 @@ import pytest
 
 from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
-from tests.conftest import engine_substrate_selected
-
-_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 @pytest.fixture(autouse=True)
@@ -61,9 +58,10 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     RDR-128 P1 (kg8sj): the enqueue hook now routes through
     ``t2_index_write`` (daemon-or-direct), so isolate that too — here it
-    writes directly to the tmp DB (daemon routing is covered by
-    ``tests/test_rdr128_p1_index_write_routing.py``). ``t2_ctx`` stays
-    patched for the tests that open the queue directly.
+    writes directly to the tmp DB. The daemon-routing half was covered by
+    ``tests/test_rdr128_p1_index_write_routing.py``, deleted with the T2
+    daemon's SQLite substrate in nexus-i711w. ``t2_ctx`` stays patched for
+    the tests that open the queue directly.
     """
     import nexus.mcp_infra as infra
     db_path = tmp_path / "worker_t2.db"
@@ -480,48 +478,6 @@ class TestEnqueueHook:
             rows = db.aspect_queue.list_pending()
         assert rows == []
         assert get_worker() is None  # no lazy start either
-
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: the hook's IN-PROCESS worker autostart is the "
-        "local/SQLite-backend leg of _ensure_aspect_worker; on the service "
-        "backend the hook routes to the leased aspect-worker DAEMON "
-        "(RDR-173 P2) and get_worker() stays None by design — the "
-        "in-process leg dies at the RDR-155 P4b flip",
-    )
-    def test_hook_starts_worker_on_first_supported_enqueue(
-        self, _isolate_t2: Path, monkeypatch,
-    ) -> None:
-        """The hook lazy-starts the worker on the first supported
-        enqueue. Subsequent enqueues do not re-start."""
-        # Exercises the hook's auto-spawn path specifically, so opt back into
-        # autostart (conftest disables it suite-wide to drop the per-test
-        # worker-stop teardown tax — nexus test-suite trim).
-        monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "1")
-        from nexus.aspect_worker import (
-            aspect_extraction_enqueue_hook,
-            get_worker,
-            stop_worker,
-        )
-
-        try:
-            assert get_worker() is None
-            aspect_extraction_enqueue_hook(
-                source_path="/p1.pdf",
-                collection="knowledge__delos",
-                content="x",
-            )
-            w1 = get_worker()
-            assert w1 is not None
-            assert w1.is_running()
-            aspect_extraction_enqueue_hook(
-                source_path="/p2.pdf",
-                collection="knowledge__delos",
-                content="y",
-            )
-            assert get_worker() is w1
-        finally:
-            stop_worker(timeout=2.0)
 
 
 class TestGap2SourcePathNormalization:
@@ -1263,58 +1219,6 @@ class TestRetryLadderRouting:
             self._row(_RETRY_MAX_ATTEMPTS), sqlite3.OperationalError("database is locked"),
         )
         assert db.aspect_queue.calls[0][0] == "failed"
-
-
-class TestRetryLadderIntegration:
-    """End-to-end: a retryable failure cycles the ladder to terminal at the cap."""
-
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: this test relies on the SQLite queue stub "
-        "IGNORING the backoff interval (no next_retry_at column) so the "
-        "ladder burns to terminal in unit-test time; the engine stamps a "
-        "real next_retry_at (base 30s, doubling) server-side, so the "
-        "burn-the-ladder shortcut dies at the RDR-155 P4b flip — the real "
-        "backoff ladder is exercised by the --fullstack rehearsal",
-    )
-    def test_retryable_failure_climbs_to_terminal_at_cap(self, _isolate_t2: Path) -> None:
-        import sqlite3
-
-        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS, AspectExtractionWorker
-
-        with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("knowledge__delos", "/retry.pdf")
-
-        def fake_extract(content, source_path, collection, **_kw):  # noqa: ANN001, ANN202
-            raise sqlite3.OperationalError("database is locked")
-
-        # SQLite stub ignores the backoff interval (no next_retry_at column), so
-        # the row is immediately re-claimable and the worker burns the whole
-        # retry budget quickly before going terminal — proving the ladder ran
-        # (old behaviour was a single-shot terminal fail at retry_count==1).
-        with patch("nexus.aspect_worker._extract_aspects", fake_extract):
-            worker = AspectExtractionWorker(poll_interval=0.02)
-            worker.start()
-            try:
-                _wait_until(
-                    lambda: _row_status(_isolate_t2, "/retry.pdf") == "failed",
-                    timeout=10.0,
-                )
-            finally:
-                worker.stop(timeout=5.0)
-
-        with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.conn.execute(
-                "SELECT status, retry_count FROM aspect_extraction_queue WHERE source_path = ?",
-                ("/retry.pdf",),
-            ).fetchone()
-        assert row[0] == "failed"
-        # Exact boundary (single worker => deterministic): the row is retried at
-        # claim-time counts 0..cap-1 (cap mark_retry calls, each +1), then the
-        # claim-time count == cap trips terminal mark_failed (+1 more). Final
-        # retry_count is therefore cap+1 — proving the full ladder ran, not a
-        # single-shot fail (which would terminate at retry_count == 1).
-        assert row[1] == _RETRY_MAX_ATTEMPTS + 1
 
 
 # ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────

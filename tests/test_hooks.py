@@ -10,14 +10,10 @@ import pytest
 from nexus.hooks import session_end, session_end_flush, session_start
 
 
-def _no_daemon(**_kwargs):
-    """Force ``t2_index_write``'s direct-fallback path (RDR-128 P3).
-
-    SessionEnd flush routes its T2 writes through the daemon; tests have
-    no daemon, so make the reachability probe fail and let the write land
-    on the autouse-isolated tmp ``memory.db``."""
-    from nexus.daemon.t2_client import T2DaemonNotReachableError
-    raise T2DaemonNotReachableError("no daemon in tests")
+# NO _no_daemon stub: it forced `t2_index_write`'s direct-fallback path by
+# making the daemon reachability probe fail (RDR-128 P3). That router — probe
+# and all — was removed in nexus-i711w Stage 2 sub-stage B, so the SessionEnd
+# flush already writes directly to the autouse-isolated tmp `memory.db`.
 
 
 # ── session_start ────────────────────────────────────────────────────────────
@@ -163,8 +159,7 @@ class TestSessionEndFlush:
         sessions.mkdir()
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        with patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
-            output = session_end_flush()
+        output = session_end_flush()
 
         assert "Flushed 0" in output
         assert "Expired 0" in output
@@ -190,9 +185,8 @@ def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
     sessions.mkdir()
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-    with patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
-        runner = CliRunner()
-        result = runner.invoke(hook_group, ["session-end-flush"])
+    runner = CliRunner()
+    result = runner.invoke(hook_group, ["session-end-flush"])
 
     assert result.exit_code == 0
     assert "Flushed 0" in result.output

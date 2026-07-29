@@ -604,7 +604,10 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # 22 -> 15: RDR-155 P4b P2 deleted the migration machinery's counted
     # connect sites (driver/wire_reid/remap_cascade/guided_upgrade/
     # vector_etl/t2_schema) + health.py's divergence ro-connect.
-    assert result.epsilon_allow_connects == 15, (
+    # 15 -> 14: nexus-i711w Stage 2 sub-stage B deleted the `nx daemon t2`
+    # verb group from commands/daemon.py, taking its single epsilon-allow
+    # raw-connect with it. DOWNWARD-only recount; never bump upward.
+    assert result.epsilon_allow_connects == 14, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

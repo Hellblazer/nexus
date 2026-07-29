@@ -47,7 +47,7 @@ You control which (if any) of the above are reachable by deciding whether to set
 ## 5. Data export and deletion
 
 - **Export** — `nx store export <collection>` produces a `.nxexp` archive of any T3 collection. `nx memory get` returns memory entries.
-- **Delete** — `nx store delete`, `nx memory delete`, `nx catalog gc`, and `nx daemon t2 uninstall --remove-data` (full T2 wipe) all remove data permanently.
+- **Delete** — `nx store delete`, `nx memory delete`, `nx catalog gc`, and the `daemon_uninstall` MCP tool with `remove_data=true` (full wipe of the nexus data directory) all remove data permanently.
 - **Uninstall** — removing Conexus and deleting `~/.config/nexus/` plus `~/.local/share/nexus/` removes everything Conexus persisted.
 
 ## 6. Children's privacy

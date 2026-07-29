@@ -225,15 +225,24 @@ class ChangelogBulkGrantConformanceTest {
 
     /**
      * The one allowlisted occurrence (grants-nexus-diag.xml, changeset
-     * grants-nexus-diag-1) must still actually be gated by the view-absence
-     * preCondition that makes it safe — a view-owned-by-superuser-once-it-
-     * exists hazard the same as #1402, but here avoided by never running the
-     * bulk form once the view is present. If that gate is ever removed, this
-     * assertion (not just the presence of the filename in the allowlist)
-     * must fail.
+     * grants-nexus-diag-1) must still actually be gated on the view's ABSENCE
+     * — a view-owned-by-superuser-once-it-exists hazard the same as #1402, but
+     * here avoided by never running the bulk form once the view is present. If
+     * that gate is ever removed, this assertion (not just the presence of the
+     * filename in the allowlist) must fail.
+     *
+     * <p><strong>The gate MOVED, it was not removed (nexus-ixsxa).</strong> It
+     * was a whole-changeset {@code <preConditions expectedResult="0">}; it is
+     * now an early {@code RETURN} guard inside the {@code DO $$} body. A
+     * precondition on a {@code runAlways} changeset resolves
+     * {@code onFail=MARK_RAN}, which Liquibase records by INSERTING a
+     * DATABASECHANGELOG row — one per boot, without bound. The safety property
+     * is identical, and the guard is now evaluated in the same transaction as
+     * the grants it gates. ORDER is asserted explicitly here, because a guard
+     * sitting after the bulk grant would gate nothing at all.
      */
     @Test
-    void allowlistedOccurrence_isStillGatedByViewAbsencePrecondition() throws IOException,
+    void allowlistedOccurrence_isStillGatedByViewAbsence() throws IOException,
             URISyntaxException {
         Path file = changelogResourceDir().resolve("grants-nexus-diag.xml");
         String content = Files.readString(file);
@@ -246,14 +255,26 @@ class ChangelogBulkGrantConformanceTest {
             ? content.substring(changesetIdx, nextChangesetIdx)
             : content.substring(changesetIdx);
 
-        assertThat(changesetBody)
-            .as("grants-nexus-diag-1 must remain gated on the diag view's absence")
-            .contains("<preConditions")
-            .contains("expectedResult=\"0\"")
-            .contains("diag_chash_conformance");
-        assertThat(changesetBody)
-            .as("bulk ON ALL TABLES must still be present in the gated changeset")
-            .containsPattern(BULK_GRANT_PATTERN);
+        java.util.regex.Matcher bulk = BULK_GRANT_PATTERN.matcher(changesetBody);
+        assertThat(bulk.find())
+            .as("bulk ON ALL TABLES must still be present in the gated changeset — "
+                + "without it this test guards nothing")
+            .isTrue();
+
+        // "IF EXISTS (" deliberately does not match the role guard's
+        // "IF NOT EXISTS (" that precedes it.
+        int guardIdx = changesetBody.indexOf("IF EXISTS (");
+        assertThat(guardIdx)
+            .as("grants-nexus-diag-1 must remain gated on the diag view's absence: an "
+                + "IF EXISTS(...diag_chash_conformance...) THEN RETURN guard in the body")
+            .isNotNegative();
+        assertThat(changesetBody.substring(guardIdx))
+            .as("the era guard must test for the diag view and RETURN before granting")
+            .contains("diag_chash_conformance")
+            .contains("RETURN;");
+        assertThat(guardIdx)
+            .as("the era guard must PRECEDE the bulk grant — a guard after it gates nothing")
+            .isLessThan(bulk.start());
     }
 
     private static Path changelogResourceDir() throws URISyntaxException {

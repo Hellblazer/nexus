@@ -28,9 +28,6 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
 from tests._catalog_fixture_ops import ActiveCatalog
-from tests.conftest import engine_substrate_selected
-
-_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # nexus-aqbrk: the dies-roster that used to cover 18 tests here was
 # OVER-BROAD, and its reason was wrong. It read "rich SQLite Catalog stack
@@ -53,22 +50,19 @@ _ENGINE_SUBSTRATE = engine_substrate_selected()
 #   understood: tracked in nexus-t0nrd with what has already been ruled out
 #   (the aspect store round-trips identically on both substrates, so the
 #   divergence is in the CLI verb, not document_aspects).
-_service_mode_has_no_uninitialised_catalog = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="'Catalog not initialized' is a local-only state; in service mode "
-    "make_catalog_reader always returns a handle (nexus-aqbrk)",
-)
-
-_needs_diagnosis_nexus_t0nrd = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
+#
+# nexus-i711w Stage 1b (2026-07-28): the SQLite substrate is gone, so what
+# remains is the t0nrd marker, now UNCONDITIONAL — a skipif whose predicate
+# has one value is worse than saying "this does not run". Three of its five
+# survive here because their bodies are portable and therefore still specify
+# what a t0nrd fix must satisfy; the two that seeded through sqlite3 /
+# document_aspects.conn were deleted and are recorded on the bead. The other
+# two markers went with their tests: the local-only "Catalog not initialized"
+# assertion is unsatisfiable on the only remaining substrate, and
+# _rich_catalog_dies_at_flip had already been emptied by the aqbrk correction.
+_needs_diagnosis_nexus_t0nrd = pytest.mark.skip(
     reason="nexus-t0nrd: engine-substrate behaviour of the enrich write path "
     "not yet diagnosed — tracked, not retired",
-)
-
-_rich_catalog_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded CLI "
-    "catalog iteration) dies at the RDR-155 P4b flip",
 )
 
 
@@ -153,14 +147,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # RDR-128 P3: the `enrich aspects delete` command now routes through
     # mcp_infra.t2_index_write, whose direct-fallback opens
     # T2Database(mcp_infra.default_db_path()). Force that fallback (no
-    # daemon in tests) at the test db_path so the routed write lands here.
+    # at the test db_path so the write lands here.
     monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
 
-    def _no_daemon(**_kwargs):
-        from nexus.daemon.t2_client import T2DaemonNotReachableError
-        raise T2DaemonNotReachableError("no daemon in tests")
-
-    monkeypatch.setattr("nexus.daemon.t2_client.make_t2_client", _no_daemon)
+    # (No daemon stub needed: `t2_index_write` stopped routing through the T2
+    # daemon in nexus-i711w Stage 2 sub-stage B, so the SQLite write already
+    # lands directly on db_path.)
 
     return catalog_dir, db_path, cat
 
@@ -641,113 +633,6 @@ class TestDefaultExtraction:
             count = len(db.document_aspects.list_by_collection("knowledge__delos"))
         assert count == 2
 
-    @_needs_diagnosis_nexus_t0nrd
-    def test_per_doc_write_failure_skips_and_continues_batch(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """nexus-24rf9: a single per-doc aspect write failure (classically
-        'database is locked' under multi-writer WAL contention, even with
-        RDR-129 B1's 30s busy_timeout) must be logged, counted, and
-        SKIPPED — the batch continues and every other doc's already-paid
-        LLM extraction is preserved, rather than an uncaught exception
-        aborting the whole run."""
-        import sqlite3
-
-        _, db_path, cat = env
-        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
-
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection, **_kw: _make_record(
-                source_path=source_path,
-            ),
-        )
-
-        # First routed write raises a lock error; the second succeeds.
-        import nexus.mcp_infra as _mi
-        real = _mi.t2_index_write
-        state = {"n": 0}
-
-        def _flaky(write_fn):
-            state["n"] += 1
-            if state["n"] == 1:
-                raise sqlite3.OperationalError("database is locked")
-            return real(write_fn)
-
-        monkeypatch.setattr(_mi, "t2_index_write", _flaky)
-
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich,
-            ["aspects", "knowledge__delos", "--validate-sample", "0"],
-        )
-        # The batch did NOT abort on the first doc's write failure.
-        assert result.exit_code == 0, result.output
-        # The failure is surfaced (loud, not silent) in the summary…
-        assert "1 skipped (write-failure)" in result.output
-        # …and the surviving doc's row persisted (batch continued past it).
-        from nexus.db.t2 import T2Database
-        with T2Database(db_path) as db:
-            count = len(db.document_aspects.list_by_collection("knowledge__delos"))
-        assert count == 1
-
-    @_needs_diagnosis_nexus_t0nrd
-    def test_extract_fail_skips_without_upsert(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """RDR-096 P1.3 (closes #331's symptom): when ``extract_aspects``
-        returns ``ExtractFail``, the loop logs + skips with NO row
-        written. Per-collection summary reports the skip count and
-        the by_reason breakdown.
-        """
-        from nexus.aspect_extractor import ExtractFail
-        _, db_path, cat = env
-        _register_entries(cat, [
-            "/papers/good.pdf",
-            "/papers/ghost-stale.pdf",
-            "/papers/ghost-empty.pdf",
-        ])
-
-        def fake_extract(content, source_path, collection, **_kw):
-            if "good" in source_path:
-                return _make_record(source_path=source_path)
-            if "ghost-stale" in source_path:
-                return ExtractFail(
-                    uri=f"chroma://{collection}/{source_path}",
-                    reason="empty",
-                    detail="no chunks for ghost-stale",
-                )
-            return ExtractFail(
-                uri=f"chroma://{collection}/{source_path}",
-                reason="unreachable",
-                detail="get_collection failed",
-            )
-
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.extract_aspects", fake_extract,
-        )
-
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich,
-            ["aspects", "knowledge__delos", "--validate-sample", "0"],
-        )
-        assert result.exit_code == 0, result.output
-
-        # Exactly one row in document_aspects (the good entry) — no
-        # null-field rows from the two ExtractFail entries.
-        from nexus.db.t2 import T2Database
-        with T2Database(db_path) as db:
-            count = db.document_aspects.conn.execute(
-                "SELECT COUNT(*) FROM document_aspects",
-            ).fetchone()[0]
-        assert count == 1
-
-        # Summary surfaces both extracted and skip counts with reasons.
-        assert "1 extracted" in result.output
-        assert "2 skipped (read-failure)" in result.output
-        assert "empty=1" in result.output
-        assert "unreachable=1" in result.output
 
     def test_null_fields_record_counted_separately(
         self, env, monkeypatch: pytest.MonkeyPatch,
@@ -1000,31 +885,6 @@ class TestValidateSample:
         belong in the default-rate decision."""
         from nexus.commands.enrich import _DEFAULT_VALIDATE_SAMPLE_PCT
         assert _DEFAULT_VALIDATE_SAMPLE_PCT == 5
-
-
-# ── Catalog missing ─────────────────────────────────────────────────────────
-
-
-class TestCatalogMissing:
-    @_service_mode_has_no_uninitialised_catalog
-    def test_uninitialized_catalog_aborts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """When the catalog is not initialized, the command aborts
-        with a clear instruction to run 'nx catalog setup'.
-
-        Bypasses the env fixture (which initializes the catalog) by
-        pointing catalog_path at a non-existent directory directly.
-        """
-        empty_dir = tmp_path / "no-catalog-here"
-        import nexus.config
-        monkeypatch.setattr(nexus.config, "catalog_path", lambda: empty_dir)
-
-        runner = CliRunner()
-        result = runner.invoke(enrich, ["aspects", "knowledge__delos"])
-        assert result.exit_code == 0
-        assert "Catalog not initialized" in result.output
-        assert "nx catalog setup" in result.output
 
 
 # ── Group structure ─────────────────────────────────────────────────────────

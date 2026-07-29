@@ -82,10 +82,8 @@ from __future__ import annotations
 
 import os
 import secrets
-import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -160,46 +158,59 @@ class PgBinaries:
 
 
 def _install_hint() -> str:
-    """Return a platform-appropriate install hint."""
-    if sys.platform == "darwin":
-        return (
-            "Install PostgreSQL 17 with Homebrew:\n"
-            "  brew install postgresql@17\n"
-            "  brew services start postgresql@17\n"
-            "Then re-run `nx init --service`."
-        )
+    """How to obtain the bundle. Deliberately platform-independent.
+
+    This used to print ``brew install postgresql@17`` (and apt/dnf on Linux),
+    which is the one thing this project never does — and it was the message
+    users and tests actually saw whenever discovery failed. Acquiring a HOST
+    PostgreSQL cannot fix a missing nexus bundle: the shipped bundle is a
+    specific PG17 built by ``scripts/build_pg_bundle.sh`` carrying pgvector,
+    and a Homebrew or distro install is a different PostgreSQL with a different
+    contrib set.
+    """
     return (
-        "Install PostgreSQL 17:\n"
-        "  # Debian/Ubuntu:\n"
-        "  sudo apt-get install postgresql-17\n"
-        "  # RHEL/Fedora:\n"
-        "  sudo dnf install postgresql-server\n"
-        "Then re-run `nx init --service`."
+        "nexus ships its own PostgreSQL; it never uses a host install.\n"
+        "  nx init --service        # downloads + verifies the signed PG bundle\n"
+        "Or point NEXUS_PG_BIN at an already-extracted bundle's bin/ directory."
     )
 
 
-# nexus is aligned on PG17 (matches the deployed conexus stack; nexus-41bso).
-# 16/15 remain as fallbacks so an existing host install still works.
-_CANDIDATE_DIRS: list[Path] = [
-    Path("/opt/homebrew/opt/postgresql@17/bin"),
-    Path("/opt/homebrew/opt/postgresql@16/bin"),
-    Path("/opt/homebrew/opt/postgresql@15/bin"),
-    Path("/usr/lib/postgresql/17/bin"),
-    Path("/usr/lib/postgresql/16/bin"),
-    Path("/usr/lib/postgresql/15/bin"),
-]
+#: nexus is aligned on PG17 (matches the deployed conexus stack; nexus-41bso).
+#:
+#: THERE ARE NO HOST-PG FALLBACK LEGS, and re-adding one is a policy violation
+#: rather than a convenience (Hal, 2026-07-07 and 2026-07-27). ``discover_pg_binaries``
+#: previously probed, in order, ``/opt/homebrew/opt/postgresql@{17,16,15}/bin``
+#: and ``/usr/lib/postgresql/{17,16,15}/bin``, then ``initdb`` on PATH.
+#:
+#: Why they had to go, beyond policy tidiness: those legs silently substitute a
+#: DIFFERENT PostgreSQL for the one nexus builds. The shipped bundle carries
+#: exactly ``pg_trgm``, ``plpgsql`` and ``vector``; a host install carries the
+#: full distro contrib set and may carry no pgvector at all. Resolving to it
+#: turns a missing-bundle error into a late, confusing failure at
+#: ``CREATE EXTENSION vector`` or a green test run against a substrate no user
+#: has. It also made every skip gate in the test suite answer "does this BOX
+#: have a PostgreSQL?" instead of "can we obtain OUR substrate?", which silently
+#: disabled 58 integration tests on any box without a host install (2026-07-27).
+#:
+#: The two carve-outs are exactly the two legs that remain: the ``NEXUS_PG_BIN``
+#: operator override, and the extracted bundle under the config dir. Enforced by
+#: tests/db/test_no_host_pg_fallback.py.
+_NO_HOST_FALLBACK = True
 
 
 def discover_pg_binaries() -> PgBinaries:
-    """Locate PostgreSQL binaries.
+    """Locate the PostgreSQL binaries nexus provides. NEVER a host install.
 
-    Search order:
-    1. ``NEXUS_PG_BIN`` env var override.
-    2. Fixed candidate directories (macOS Homebrew, Linux system).
-    3. ``initdb`` on PATH via ``shutil.which`` (Linux PATH-based).
+    Search order, and it is exhaustive:
 
-    Raises :class:`PgBinaryNotFoundError` with an install hint when nothing
-    is found.
+    1. ``NEXUS_PG_BIN`` env var override (carve-out #1).
+    2. The extracted ship-alongside PG bundle under the config dir.
+
+    There is no third leg. Host PostgreSQL is never used, never probed, and
+    never falls through — see :data:`_NO_HOST_FALLBACK`.
+
+    Raises :class:`PgBinaryNotFoundError` naming how to obtain the bundle when
+    neither leg resolves.
     """
     # 1. Explicit override — highest priority (tests + custom installs).
     #    If the env var is set but the directory does not contain the required
@@ -217,7 +228,7 @@ def discover_pg_binaries() -> PgBinaries:
         raise PgBinaryNotFoundError(
             f"NEXUS_PG_BIN is set to '{env_override}' but the following required "
             f"binaries are missing: {', '.join(missing)}\n"
-            "Fix NEXUS_PG_BIN or unset it to use auto-discovery.\n"
+            "Fix NEXUS_PG_BIN or unset it to use the bundle.\n"
             + _install_hint()
         )
 
@@ -237,34 +248,18 @@ def discover_pg_binaries() -> PgBinaries:
             _log.debug("pg_binaries_from_bundle", bin_dir=str(bundle_bin))
             return bins
         # The bundle cache directory exists with a valid completion marker but
-        # its binaries are gone (manually deleted / partial corruption). Falling
-        # through to host PG silently would pick the WRONG PostgreSQL on a
-        # local-distribution machine and fail late at CREATE EXTENSION vector.
-        # Warn loud about why the bundle was not used (no silent downgrade).
+        # its binaries are gone (manually deleted / partial corruption). There
+        # is nothing to fall through TO, which is the point — a partial bundle
+        # raises below rather than quietly becoming some other PostgreSQL.
         _log.warning(
             "pg_bundle_incomplete_cache",
             bin_dir=str(bundle_bin),
             missing=bins.missing_names(),
         )
 
-    # 2. Fixed candidate directories.
-    for d in _CANDIDATE_DIRS:
-        bins = PgBinaries.from_dir(d)
-        if bins.all_present():
-            _log.debug("pg_binaries_found", bin_dir=str(d))
-            return bins
-
-    # 3. PATH-based discovery via shutil.which.
-    initdb_path = shutil.which("initdb")
-    if initdb_path:
-        d = Path(initdb_path).parent
-        bins = PgBinaries.from_dir(d)
-        if bins.all_present():
-            _log.debug("pg_binaries_from_path", bin_dir=str(d))
-            return bins
-
+    # NO THIRD LEG. See _NO_HOST_FALLBACK.
     raise PgBinaryNotFoundError(
-        "No PostgreSQL binaries found.\n" + _install_hint()
+        "No nexus PostgreSQL bundle found.\n" + _install_hint()
     )
 
 
@@ -342,16 +337,18 @@ def check_pgvector_available(bins: PgBinaries) -> None:
     # bundle candidates[0] is pg_config's build-time absolute sharedir, a path
     # that does not exist on the target machine and so misleads the user.
     probed = ", ".join(str(c / "extension" / "vector.control") for c in candidates)
+    # Reachable only via the two sanctioned legs now that host-PG discovery is
+    # gone (see _NO_HOST_FALLBACK), so the remedy is about THOSE, not about
+    # building pgvector against some Homebrew major. The shipped bundle always
+    # carries pgvector; if this fires for the bundle, the bundle is damaged.
     raise PgVectorNotInstalledError(
         f"The pgvector extension is not installed for the PostgreSQL at "
         f"{bins.bin_dir} (no vector.control under any of: {probed}).\n"
-        "The Homebrew 'pgvector' formula targets the default postgresql "
-        "major — for a versioned install (e.g. postgresql@17) build from "
-        "source against THIS pg_config:\n"
-        f"  git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git\n"
-        f"  cd pgvector && PG_CONFIG={pg_config} make && "
-        f"PG_CONFIG={pg_config} make install\n"
-        "then re-run: nx init --service"
+        "nexus ships a PostgreSQL with pgvector built in, so this means either:\n"
+        "  - NEXUS_PG_BIN points at a PostgreSQL that lacks pgvector. Unset it "
+        "to use the bundle, or point it at a bundle's bin/ directory.\n"
+        "  - the extracted bundle is damaged. Re-acquire it:\n"
+        "      nx init --service"
     )
 
 

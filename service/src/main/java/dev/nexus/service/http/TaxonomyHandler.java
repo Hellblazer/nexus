@@ -47,6 +47,7 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/assignments/assign_many batch upsert assignments
  *   GET   /v1/taxonomy/assignments/docs    doc_ids for topic_id=
  *   POST  /v1/taxonomy/assignments/for_docs assignments for doc_ids list
+ *   POST  /v1/taxonomy/assignments/details full assignment rows incl. quality cols (nexus-onjvy)
  *   GET   /v1/taxonomy/assignments/by_label doc_ids for label=
  *   POST  /v1/taxonomy/assignments/purge_doc purge assignments for doc
  *   POST  /v1/taxonomy/purge_collection    purge all rows for collection=
@@ -138,6 +139,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/assignments/assign_many"   -> handleAssignMany(exchange, tenant, method);
                 case "/assignments/docs"          -> handleGetDocIds(exchange, tenant, method);
                 case "/assignments/for_docs"      -> handleGetAssignmentsForDocs(exchange, tenant, method);
+                case "/assignments/details"       -> handleGetAssignmentDetails(exchange, tenant, method);
                 case "/assignments/by_label"      -> handleGetDocsByLabel(exchange, tenant, method);
                 case "/assignments/purge_doc"     -> handlePurgeDoc(exchange, tenant, method);
                 // Collection ops
@@ -468,6 +470,21 @@ public final class TaxonomyHandler implements HttpHandler {
             ? lst.stream().map(Object::toString).toList()
             : List.of();
         HttpUtil.send(ex, 200, json(repo.getAssignmentsForDocs(tenant, docIds)));
+    }
+
+    /**
+     * Full assignment rows including similarity / assigned_at / source_collection
+     * (nexus-onjvy). Separate from {@code /assignments/for_docs}, which returns a
+     * {doc_id: topic_id} map that existing callers destructure as such.
+     */
+    private void handleGetAssignmentDetails(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> lst
+            ? lst.stream().map(Object::toString).toList()
+            : List.of();
+        HttpUtil.send(ex, 200, json(repo.getAssignmentDetails(tenant, docIds)));
     }
 
     private void handleGetDocsByLabel(HttpExchange ex, String tenant, String method) throws IOException {

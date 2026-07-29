@@ -54,7 +54,13 @@ _CANARIES = [
 #: the per-file verification could not see it. Pinning the child makes the test
 #: hermetic AND fast: it stops spawning a database and a JVM to check that four
 #: environment variables were unset.
-_CHILD_ENV = {"NX_TEST_T2_SUBSTRATE": "sqlite"}
+_CHILD_ENV = {"NX_TEST_T2_SUBSTRATE": "none"}
+#: "none", not "sqlite" (nexus-lom9g / i711w): the requirement is "provision
+#: NO T2 substrate", which =sqlite only ever expressed by accident. RDR-158 P4
+#: deletes the SQLite backend, and on a tree without it =sqlite silently stops
+#: meaning anything — every child boots a PG + JVM and errors at
+#: _engine_substrate._wait_tcp's 60s timeout, exactly the collision the block
+#: above measured. Verified by simulating the post-i711w world.
 
 #: The DIRECT proof, run in the same polluted subprocess (nexus-aqbrk).
 #:

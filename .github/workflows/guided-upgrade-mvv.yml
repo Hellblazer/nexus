@@ -25,23 +25,24 @@ name: Guided-upgrade MVV (weekly + on migration-path changes)
 # anonymous HF 429s chronically (same flake prime-bge-onnx retired for
 # host-side jobs).
 
+# ── AUTOMATIC TRIGGERS REMOVED 2026-07-27 (nexus-x7xjj) ──────────────────────
+# THIS GATE'S SUBJECT NO LONGER EXISTS. The header above says it protects the
+# deprecation window for a migration tool "DELETED in release N+1 (RDR-155
+# P4b)". P4b P2 landed in 88d91bd5 (2026-07-24) and deleted it, along with the
+# --guided / --cold / --hole-punch journeys this workflow drives. run.sh now
+# refuses them outright:
+#
+#   RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade,
+#   deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal
+#   (nexus-8nlj4).
+#
+# So every run since 2026-07-24 has exited 2 before doing any work. Dispatch
+# only rather than deleted, so the bge-asset wiring and container-isolation
+# setup survive for nexus-8nlj4's replacement journey, which is cut-time gated
+# on stranded_install.LAST_MIGRATION_CAPABLE. Restoring the schedule/push block
+# below is the one-line revert.
 on:
-  schedule:
-    - cron: "41 10 * * 1"   # Mondays 10:41 UTC — off the nightly-gate + release-hour paths
   workflow_dispatch:
-  push:
-    branches: [develop]
-    paths:
-      - "src/nexus/migration/**"
-      - "src/nexus/commands/guided_upgrade_cmd.py"
-      - "src/nexus/commands/migrate_cmd.py"
-      - "src/nexus/commands/storage_cmd.py"
-      - "src/nexus/db/pg_provision.py"
-      - "src/nexus/db/pg_bundle.py"
-      - "src/nexus/daemon/binary_install.py"
-      - "src/nexus/daemon/storage_service_daemon.py"
-      - "tests/e2e/migration-rehearsal/**"
-      - ".github/workflows/guided-upgrade-mvv.yml"
 
 permissions:
   contents: read

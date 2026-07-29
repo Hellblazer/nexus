@@ -108,8 +108,13 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         verb/name/scope in Python), this client sends ``match_text`` built
         here so the service stores the correct FTS payload.
         """
-        from nexus.db.t2.plan_library import (  # noqa: PLC0415 — deferred to avoid circular import (plan_library)
+        # nexus-i711w Stage 2 Phase 0: the scope helpers were only RE-EXPORTED
+        # by plan_library (they live in nexus.plans.scope), and match-text
+        # synthesis now has its own home. Neither import touches a dying module.
+        from nexus.plans.match_text import (  # noqa: PLC0415 — deferred to avoid circular import
             _synthesize_match_text,
+        )
+        from nexus.plans.scope import (  # noqa: PLC0415 — deferred to avoid circular import
             _infer_scope_tags,
             _normalize_scope_string,
             _SCOPE_AGNOSTIC_SENTINELS,
@@ -345,7 +350,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         stored hash suffixes and the ``"all"`` sentinel raw, which the matcher
         then reads as a scope literally named ``all`` (nexus-aqbrk).
         """
-        from nexus.db.t2.plan_library import (  # noqa: PLC0415 — deferred to avoid circular import (plan_library)
+        from nexus.plans.scope import (  # noqa: PLC0415 — deferred to avoid circular import
             normalize_scope_tags,
         )
 

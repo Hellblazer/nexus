@@ -17,25 +17,21 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import engine_substrate_selected
 
 from nexus.db.t2.document_aspects import AspectRecord, DocumentAspects
 
-_ENGINE_SUBSTRATE = engine_substrate_selected()
-
 
 def _seed_engine_catalog_docs(*tumblers: str) -> None:
-    """Seed catalog_documents rows for the aspects doc_id FK (engine only).
+    """Seed catalog_documents rows for the aspects doc_id FK.
 
     The engine enforces fk_doc_aspects_catalog_doc: a non-null
     document_aspects.doc_id must match a catalog_documents(tenant_id,
     tumbler) row or the upsert 409s. Seed through the client's
     fidelity-import surface (HttpCatalogClient POST /import/document —
-    RDR-155 P4b P0a': store surfaces, not psql). No-op on the SQLite
-    substrate, whose schema never carried the FK.
+    RDR-155 P4b P0a': store surfaces, not psql). This used to no-op on the
+    SQLite substrate, whose schema never carried the FK; that substrate is
+    gone (nexus-i711w), so the seed is unconditional.
     """
-    if not _ENGINE_SUBSTRATE:
-        return
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
     client = HttpCatalogClient()

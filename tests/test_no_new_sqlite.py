@@ -125,7 +125,8 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/catalog_cmds/backfill.py": 3,
     "src/nexus/commands/catalog_cmds/report.py": 3,
     "src/nexus/commands/collection.py": 1,
-    "src/nexus/commands/daemon.py": 1,
+    # commands/daemon.py entry removed (nexus-i711w Stage 2 sub-stage B): its
+    # single override died with the `nx daemon t2` verb group. DOWNWARD-only edit.
     "src/nexus/commands/doc.py": 3,
     "src/nexus/commands/doctor.py": 6,
     # enrich.py 9 -> 8 (nexus-70x7y): the aspects-promote-field write path

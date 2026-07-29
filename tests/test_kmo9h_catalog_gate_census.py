@@ -98,14 +98,14 @@ def test_is_initialized_census_is_closed():
 #: factory entirely — the pre-fix ``document_aspects._resolve_doc_id``
 #: shape, which read the FROZEN migration-source catalog on migrated
 #: service-mode boxes with no gate at all. Allowed sites:
-#: - daemon/t2_daemon.py: the T2 daemon IS the local single-writer that
-#:   CatalogWriter proxies to in SQLite mode — local by definition.
+#: (daemon/t2_daemon.py held one — the T2 daemon WAS the local single-writer
+#: CatalogWriter proxied to in SQLite mode. Removed with the daemon in
+#: nexus-i711w Stage 2 sub-stage B. DOWNWARD-only edit.)
 #: - db/collection_purge.py: local-mode fan-out branch only (service mode
 #:   returns earlier at the atomic engine cascade — verified nexus-e9ru2).
 #: - db/embed_migrate.py: Chroma-era tool on frozen sources; dies at P4b.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101).
 _RAW_ALLOWED: dict[str, int] = {
-    "daemon/t2_daemon.py": 1,
     "db/collection_purge.py": 1,
     "db/embed_migrate.py": 1,
     "catalog/synthesizer.py": 1,

@@ -425,9 +425,9 @@ def test_coverage_cmd_no_guard_service_mode(cat) -> None:
         assert "content_type" in r
         assert "total" in r
         assert "linked" in r
-    # Verify cat is HttpCatalogClient — accessing _db must raise RuntimeError (service mode)
-    try:
+    # Verify cat is HttpCatalogClient — accessing _db must raise the guarded
+    # AttributeError, NOT a RuntimeError (nexus-xj744; hasattr() only swallows
+    # AttributeError, so the guard must not break the probe idiom it exists to
+    # protect). Contract pinned by tests/db/test_raw_handle_guard_contract.py.
+    with pytest.raises(AttributeError, match="service mode"):
         _ = cat._db
-        raise AssertionError("Expected RuntimeError from HttpCatalogClient._db property")
-    except RuntimeError:
-        pass  # expected: _db property raises RuntimeError in service mode
