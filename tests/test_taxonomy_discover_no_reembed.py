@@ -38,8 +38,9 @@ import pytest
 
 from nexus.commands.taxonomy_cmd import discover_for_collection
 
-pytestmark = pytest.mark.usefixtures("local_catalog_backend")
-
+# Unpinned from local_catalog_backend in nexus-i711w Stage 2 sub-stage C-store:
+# these tests never touched the catalog's local machinery (the pin was blanket
+# aqbrk residue), so they run unchanged against whichever catalog is live.
 _N_DOCS = 6  # > the n < 5 early return
 
 #: The fake collection's name. Deliberately NOT a voyage-* or bge-* token: the
