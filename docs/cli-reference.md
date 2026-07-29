@@ -796,21 +796,21 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot restorable via `nx catalog undelete`.
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot to `.deleted-backups/` (inspectable, but there is no in-product restore verb — see `list-backups` below).
 
-### nx catalog list-backups / undelete / vacuum-backups
+### nx catalog list-backups / vacuum-backups
 
 ```
 nx catalog list-backups
-nx catalog undelete BACKUP
 nx catalog vacuum-backups [--older-than-days N] [--no-dry-run]
 ```
 
 Lifecycle verbs over the JSONL snapshots that destructive catalog verbs (`delete`, `gc`, `prune-stale`, `link-bulk-delete`) write under `$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` BEFORE deleting (RDR-106).
 
-- `list-backups` shows each recoverable snapshot: filename, originating verb, timestamp, row count, reason.
-- `undelete BACKUP` restores the documents (and their inbound/outbound links) from a snapshot. `BACKUP` is a filename inside `.deleted-backups/` or an absolute path. Documents are restored with their ORIGINAL tumblers (the minting path is bypassed) as `DocumentRegistered` events, links via idempotent `link_if_absent`; re-running on an already-restored backup is a no-op.
-- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes. Vacuumed rows are no longer recoverable via `undelete`.
+- `list-backups` shows each snapshot: filename, originating verb, timestamp, row count, reason.
+- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes.
+
+> **No in-product restore.** `nx catalog undelete` was removed in 7.0.0. Restoring re-emitted documents through the local catalog's low-level event log, which has no service-mode equivalent, and the local catalog itself is gone. Snapshots are still written before every destructive verb and are still plain JSONL you can inspect and re-import by hand — but treat the destructive verbs as **not reversible in-product** when deciding whether to run them.
 
 ### nx catalog remediate-paths
 
@@ -834,7 +834,7 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
 ```
 
-Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes an `undelete`-restorable backup snapshot before deleting.
+Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes a JSONL backup snapshot before deleting (no in-product restore verb — see `list-backups`).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -849,14 +849,6 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 ### nx catalog list / stats / owners / delete
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
-
-### nx catalog dedupe-owners
-
-```
-nx catalog dedupe-owners [--apply] [--json]
-```
-
-Consolidate orphan owners (nexus-tmbh). Classifies each curator owner as `alias` (synthetic `<repo>-<hash>` names mapping to a canonical repo owner: each doc is aliased via `documents.alias_of`, matched by file_path; rows stay so external references keep resolving), `remove` (`int-cce-*` / `int-prov-*` / `pdf-e2e-*` test leakage predating RDR-060's autouse fixture; documents, links, and the owner row deleted with JSONL tombstones), or `skip` (everything else, manual review). Dry-run by default; `--apply` commits, then `nx catalog sync` pushes the audit trail. `--json` emits the full plan.
 
 ### nx catalog backfill-owner-id
 

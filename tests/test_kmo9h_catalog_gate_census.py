@@ -34,8 +34,13 @@ _SRC = Path(nexus.__file__).parent
 #: Exact allowlist: file (relative to src/nexus) -> occurrence count of
 #: ``Catalog.is_initialized`` (any receiver spelled ``*Catalog``). Every
 #: entry is deliberate:
-#: - catalog/factory.py: the SQLite-branch presence checks INSIDE the
+#: - catalog/factory.py: the SQLite-branch presence check INSIDE the
 #:   factory — the single place presence semantics live (f1itv contract).
+#:   2 -> 1 (nexus-i711w Stage 2 sub-stage C-store): make_catalog_admin held
+#:   the second one and was deleted with the two deep-maintenance verbs it
+#:   served (dedupe-owners, undelete). A SHRINK, caught by this census's own
+#:   exact-equality assert rather than by the author — which is the argument
+#:   for two-sided ledgers over one-sided counts (cf. nexus-th15h).
 #: - catalog/catalog.py: the definition + intra-class uses.
 #: - commands/catalog.py: SQLite-opt-out-only guards (service mode
 #:   bypasses via storage_backend_for / refuses setup divergence).
@@ -52,7 +57,7 @@ _SRC = Path(nexus.__file__).parent
 #: - indexer.py: the CORRECT service-aware form (catalog_service_mode
 #:   boolean) — the pattern the sweep normalized everything else to.
 _ALLOWED: dict[str, int] = {
-    "catalog/factory.py": 2,
+    "catalog/factory.py": 1,
     "collection_audit.py": 1,  # sqlite-only branch AFTER the service check (e9ru2)
     "commands/catalog.py": 2,
     "commands/catalog_cmds/doctor.py": 4,

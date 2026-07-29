@@ -27,6 +27,20 @@ Mixed sites (read AND write) hold BOTH a reader and a writer. That is the
 gate-resolved design (re-gate Critical): the two typed factories make the
 read/write distinction visible and enforceable instead of relying on a
 lint that cannot tell a read-only Catalog from a write-capable one.
+
+There was a THIRD factory, ``make_catalog_admin``, handing back a full
+read+write local Catalog for two deep-maintenance verbs (``dedupe-owners
+--apply``, ``undelete``). It is gone (nexus-i711w Stage 2 sub-stage C-store,
+Hal ruling 2026-07-29: unsupported, not reimplemented) and so are both verbs.
+Worth keeping the reason it existed AND the reason it was dangerous, because
+the shape recurs: those verbs mutated through the catalog's low-level event
+log rather than the whitelisted write ops, so they had no service-mode
+expression and the admin opener handed back a direct writer on ``.catalog.db``
+— the FROZEN migration source — while the authoritative catalog lived in
+Postgres. That is the split-brain GH #1419.4 surfaced: at one backup timestamp
+``.catalog.db`` showed 532 docs / 13 links against PG's 592 / 52. It was made
+to refuse loudly (nexus-aoqnb) rather than route; deleting the local catalog
+removes the writer the refusal was guarding against.
 """
 from __future__ import annotations
 
@@ -126,19 +140,6 @@ def _is_catalog_service_mode() -> bool:
     return storage_backend_for("catalog") == StorageBackend.SERVICE
 
 
-class CatalogAdminServiceModeError(RuntimeError):
-    """Raised by :func:`make_catalog_admin` in service mode (nexus-aoqnb).
-
-    This error has no retry — the verb has no service-mode implementation, and
-    the local file it would touch is a frozen migration source. It once had a
-    sibling, ``CatalogAdminDaemonLiveError`` ("stop the T2 daemon and retry"),
-    kept deliberately separate so a caller could not offer the daemon-stop
-    remedy for a situation it does not fix. That sibling retired with the daemon
-    (nexus-i711w Stage 2 sub-stage B): with no daemon there is no competing
-    writer to stop, so this is the only way deep maintenance is refused.
-    """
-
-
 def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
     """Return a read-only catalog, or ``None`` when uninitialised.
 
@@ -177,71 +178,6 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
         # the sole actor and the one-time build is safe.
         Catalog(path, db_path)._db.close()
     return Catalog(path, db_path, read_only=True)
-
-
-def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog]:
-    """Return a FULL read+write rich Catalog for deep-maintenance commands.
-
-    RDR-146 P1.2 escape hatch. A small set of ``nx catalog`` maintenance
-    commands (``dedupe-owners``, ``undelete``) operate through low-level
-    catalog internals — raw ``_db`` transactions, ``_append_jsonl``, the
-    event log, ``_projector`` — via free functions (``dedupe.apply_plan``,
-    ``catalog_backup.restore_documents``). Those operations are NOT
-    expressible as the 22 whitelisted daemon write ops, so they cannot
-    route through :class:`CatalogWriter`, and the read-only reader rejects
-    their writes.
-
-    This factory hands back a full local rich Catalog so those commands
-    work. It is the deep-maintenance analogue of routing ``sync`` / ``pull``
-    / ``compact`` through the daemon: a rare, interactive, whole-catalog
-    operation that needs exclusive low-level access. Like those, it should
-    be run with the daemon quiesced to respect the single-writer invariant
-    (the commands warn / are interactive). Returns ``None`` when the catalog
-    is uninitialised. Constructed here (the ``catalog/`` allowlist) so the
-    boundary lint stays satisfied; callers must NOT bare-construct Catalog.
-    """
-    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    # nexus-aoqnb: SERVICE-MODE REFUSAL, checked before anything else.
-    #
-    # make_catalog_writer/make_catalog_reader both route to the HTTP client in
-    # service mode; this admin opener did NOT, so it handed back a direct
-    # writer on ``.catalog.db`` — the FROZEN migration source — while the
-    # authoritative catalog lives in Postgres. Its two callers are
-    # `nx catalog dedupe-owners --apply` and the backup restore verb, i.e. the
-    # two that MUTATE. On a migrated box the operator would see a successful
-    # restore whose documents landed in a file nothing reads.
-    #
-    # That is the split-brain writer GH #1419.4 asked to be ruled out: at one
-    # backup timestamp .catalog.db showed 532 docs/13 links against PG's
-    # 592/52. Refuse loudly rather than routing: these verbs mutate through the
-    # catalog's low-level event log, not the 22 daemon write ops, so there is
-    # no equivalent service path to send them to — a silent no-op or a partial
-    # port would both be worse than saying so.
-    if _is_catalog_service_mode():
-        raise CatalogAdminServiceModeError(
-            "Deep-maintenance catalog commands (dedupe-owners --apply, restore) "
-            "are unavailable in service mode. They mutate the local "
-            "`.catalog.db` through the catalog's low-level event log, and on a "
-            "migrated install that file is a FROZEN migration source — the "
-            "authoritative catalog is in Postgres, so the write would land "
-            "where nothing reads it and report success.\n"
-            "There is no service-mode equivalent for these verbs yet "
-            "(nexus-aoqnb). Do not work around this by unsetting the backend: "
-            "that would resurrect the two-writer split-brain."
-        )
-
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        return None
-    # NO live-daemon probe: the RDR-146 P1.2 single-writer guard refused to open
-    # a second full ``.catalog.db`` writer while a T2 daemon — the sole
-    # legitimate one — was up. That daemon is retired (nexus-i711w Stage 2
-    # sub-stage B), so no competing writer can exist for it to find, and its
-    # recovery text named `nx daemon t2 stop` / `start`, both gone. The
-    # service-mode arm above still refuses these verbs outright, which is where
-    # the real two-writer risk now lives.
-    return Catalog(path, path / ".catalog.db")
 
 
 class CatalogWriter:

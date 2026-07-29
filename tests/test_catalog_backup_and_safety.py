@@ -13,9 +13,16 @@ Pins:
   requires ``--no-dry-run --confirm`` to actually delete.
 - RDR-106 Option A: every destructive verb writes a JSONL backup
   snapshot to ``$catalog_dir/.deleted-backups/`` BEFORE the actual
-  delete. ``nx catalog undelete`` re-emits the documents (and their
-  links) via event-sourced ``DocumentRegistered`` / ``LinkCreated``
-  events.
+  delete.
+
+  Only the SNAPSHOT half is pinned here now, and it is unchanged. The
+  restore half — ``nx catalog undelete``, which re-emitted the documents
+  and their links via event-sourced ``DocumentRegistered`` /
+  ``LinkCreated`` events — was deleted in nexus-i711w Stage 2 sub-stage
+  C-store, together with the local rich Catalog whose low-level event log
+  it wrote through. Snapshots are still taken before every destructive
+  verb and are still managed by ``list-backups`` / ``vacuum-backups``;
+  what is gone is the in-product path back from one.
 """
 from __future__ import annotations
 
@@ -236,7 +243,7 @@ def test_link_bulk_delete_confirm_actually_removes(cat: Catalog) -> None:
     )
 
 
-# ── RDR-106 Option A: backup-before-delete + undelete ──────────────────────
+# ── RDR-106 Option A: backup-before-delete ─────────────────────────────────
 
 
 def test_delete_writes_backup_before_deleting(
@@ -267,48 +274,6 @@ def test_delete_writes_backup_before_deleting(
         rec.get("kind") == "document" and rec.get("tumbler") == str(t)
         for rec in lines
     )
-
-
-def test_undelete_round_trips_document_via_event_log(
-    cat: Catalog,
-) -> None:
-    """delete + undelete round-trip preserves the document AND its links."""
-    owner = cat.register_owner("o", "repo", repo_hash="h")
-    a = cat.register(
-        owner, "alice.md", content_type="prose", file_path="alice.md",
-    )
-    b = cat.register(
-        owner, "bob.md", content_type="prose", file_path="bob.md",
-    )
-    cat.link(a, b, "cites", created_by="test")
-    cat.link(b, a, "relates", created_by="test")
-
-    # Delete A (writes backup).
-    runner = CliRunner()
-    result = runner.invoke(main, ["catalog", "delete", str(a), "--yes"])
-    assert result.exit_code == 0
-    assert cat.resolve(a) is None
-
-    # Find the backup file.
-    backup_dir = cat._dir / ".deleted-backups"
-    backups = list(backup_dir.glob("catalog-delete-*.jsonl"))
-    assert len(backups) == 1
-    backup_name = backups[0].name
-
-    # Restore.
-    result = runner.invoke(main, ["catalog", "undelete", backup_name])
-    assert result.exit_code == 0, result.output
-    assert "Restored 1 document" in result.output
-    # Document is back.
-    restored = cat.resolve(a)
-    assert restored is not None
-    assert restored.title == "alice.md"
-    # Links re-emitted.
-    out_links = cat.links_from(a)
-    in_links = cat.links_to(a)
-    assert any(l.link_type == "cites" for l in out_links)
-    assert any(l.link_type == "relates" for l in in_links)
-
 
 def test_list_backups_shows_recent_snapshots(cat: Catalog) -> None:
     """``nx catalog list-backups`` enumerates JSONL files newest-first."""
