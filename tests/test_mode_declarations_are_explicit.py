@@ -13,7 +13,9 @@ analysis is out of scope (RDR-109 §Phase 1, step 4).
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import pathlib
 import re
 
 import pytest
@@ -24,6 +26,9 @@ from tests.conftest import (
 )
 
 VOYAGE_RE = re.compile(r"voyage-(context|code)-3")
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_TESTS_DIR = _REPO_ROOT / "tests"
 
 
 def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
@@ -94,7 +99,14 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # `cloud_mode` would add a live-credential dependency to a fully mocked test,
 # which is the opposite of what that fixture is for. Rationale also recorded
 # beside the entry in conftest.py.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 73
+# 73 -> 69 (nexus-i711w liveness burn-down, 2026-07-29): -4 entries that named
+# no test file at all. 88d91bd5 (RDR-155 P4b P2) deleted the Chroma migration
+# machinery, taking test_detection.py, test_vector_etl.py, test_pregate.py and
+# test_quiesce.py with it; their exclusions survived because the ratchet below
+# only counts entries and never asked whether they still resolved. This is a
+# SHRINK -- the direction the ratchet already sanctions -- and it removes
+# nothing that was excluding anything.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 69
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
@@ -128,7 +140,21 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 73
 # red on develop: like the RDR-185 P4 pair above, the authoring run used a
 # path-scoped selection, and this lint only fires on a whole-session
 # collection. Rationale in conftest.py beside the entries.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 58
+# 58 -> 37 (nexus-i711w liveness burn-down, 2026-07-29): -21 entries that named
+# tests which no longer exist. Same cause as the FILES shrink above -- 88d91bd5
+# deleted tests/migration/test_driver.py, test_vector_etl.py,
+# test_collision_audit.py, tests/upgrade/test_substrate_{leg,rung}.py,
+# test_rollback_via_map.py, and friends. All 21 were verified GONE, not moved
+# (no surviving definition of any of those test names anywhere under tests/),
+# so every one is a clean drop rather than a retarget.
+#
+# Why this mattered rather than being cosmetic: the assertion below is exact
+# equality, so 21 dead entries were 21 slots a future exclusion could be
+# swapped into with no ceiling bump and no written rationale -- precisely the
+# grandfathering this ratchet exists to prevent. The two liveness tests added
+# below close that hole permanently; keep them passing rather than lowering
+# these constants to match whatever the sets happen to contain.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 37
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
@@ -149,4 +175,117 @@ def test_mode_lint_exclude_nodeids_ratchet() -> None:
         "This set may only shrink (promote a test to `cloud_mode`) or grow "
         "with a documented per-entry rationale plus a conscious bump of "
         "`_MODE_LINT_EXCLUDE_NODEIDS_CEILING` in this file."
+    )
+
+
+def _defs_in(body: list[ast.stmt]) -> set[str]:
+    """Names defined DIRECTLY in *body* (not nested further down)."""
+    return {
+        n.name
+        for n in body
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def _why_unresolved(path: pathlib.Path, parts: list[str]) -> str | None:
+    """Reason *parts* names no real test in *path*, or None if it resolves.
+
+    Checks nodeid SHAPE, not merely name presence: pytest addresses a method
+    as ``file::Class::test`` and a module-level test as ``file::test``, so a
+    two-part entry naming a method is malformed and would never match a
+    collected item. Scoping the lookup to the right body catches that, where
+    a flat "is this name defined anywhere in the file" scan would not.
+
+    ``ast`` rather than a regex throughout: a comment or docstring that
+    merely mentions the name must not be allowed to count as a definition.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    leaf = parts[-1].split("[", 1)[0]
+
+    if len(parts) == 2:
+        if leaf not in _defs_in(tree.body):
+            return f"file defines no module-level `def {leaf}`"
+        return None
+
+    if len(parts) == 3:
+        cls = next(
+            (
+                n
+                for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == parts[1]
+            ),
+            None,
+        )
+        if cls is None:
+            return f"file has no top-level `class {parts[1]}`"
+        if leaf not in _defs_in(cls.body):
+            return f"`class {parts[1]}` defines no `def {leaf}`"
+        return None
+
+    return (
+        f"unexpected nodeid shape ({len(parts)} segments); expected "
+        "`file::test` or `file::Class::test`"
+    )
+
+
+def test_mode_lint_exclude_nodeids_all_resolve() -> None:
+    """Every excluded nodeid must still name a test that exists.
+
+    The ratchet above counts entries; it never asks whether they point at
+    anything. A stale nodeid does not fail on its own -- it simply stops
+    matching -- which produces two distinct failures, both of which had
+    already happened when this test was written (nexus-i711w):
+
+    * A RENAME silently downgrades a granted exclusion into a non-exclusion.
+      9c0cff18 renamed a taxonomy-tripwire test out from under its entry and
+      left the RDR-109 lint red on develop, discoverable only on a
+      whole-session collection.
+    * A DELETION leaves a dead slot that still satisfies the count. 88d91bd5
+      orphaned 21 of 58 entries. Because the ratchet asserts exact equality,
+      each dead slot was a free exclusion a later edit could swap into with
+      no bump and no rationale -- exactly the grandfathering the ratchet is
+      built to prevent.
+
+    Filesystem + AST, deliberately NOT the collected session: a
+    collection-based check would inherit the same whole-session blind spot
+    that hid both incidents, and would call almost every entry dead under a
+    path-scoped run like ``pytest tests/upgrade/``.
+    """
+    dead: list[str] = []
+    for entry in sorted(_MODE_LINT_EXCLUDE_NODEIDS):
+        parts = entry.split("::")
+        path = _REPO_ROOT / parts[0]
+        if not path.is_file():
+            dead.append(f"{entry}\n        -> no such file")
+            continue
+        if (why := _why_unresolved(path, parts)) is not None:
+            dead.append(f"{entry}\n        -> {why}")
+
+    assert not dead, (
+        f"{len(dead)} mode-lint nodeid exclusion(s) no longer resolve:\n  "
+        + "\n  ".join(dead)
+        + "\n\nAn exclusion that points at nothing grants nothing. RETARGET "
+        "the entry if the test was renamed or moved -- that is not a new "
+        "grant, so leave `_MODE_LINT_EXCLUDE_NODEIDS_CEILING` alone. DELETE "
+        "the entry and lower the ceiling if the test is gone. Never leave it "
+        "dead: the ceiling asserts exact equality, so a dead slot is a free, "
+        "unrationalised exclusion for whoever edits this set next."
+    )
+
+
+def test_mode_lint_exclude_files_all_resolve() -> None:
+    """Every excluded basename must still name a real test file.
+
+    Same failure class as the nodeid liveness check above; 88d91bd5 left 4
+    of these dead. Matched on basename rather than path because that is what
+    the lint itself matches on.
+    """
+    basenames = {p.name for p in _TESTS_DIR.rglob("test_*.py")}
+    dead = sorted(f for f in _MODE_LINT_EXCLUDE_FILES if f not in basenames)
+    assert not dead, (
+        f"{len(dead)} mode-lint file exclusion(s) name no test file under "
+        "tests/:\n  "
+        + "\n  ".join(dead)
+        + "\n\nRetarget if the file was renamed, or delete the entry and "
+        "lower `_MODE_LINT_EXCLUDE_FILES_CEILING` if it is gone."
     )
