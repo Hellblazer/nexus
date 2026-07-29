@@ -921,16 +921,15 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ### nx catalog doctor
 
 ```
-nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift]
-                  [--strict-not-in-t3] [--chunk-size-distribution] [--chunk-text-dedup]
+nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
-- `--replay-equality`: synthesizer + projector round-trip against live SQLite (Phase 1).
-- `--t3-doc-id-coverage`: every non-orphan T3 chunk carries a `doc_id` matching the event log (Phase 2).
+
+> `--replay-equality`, `--t3-doc-id-coverage` and `--strict-not-in-t3` were removed in 7.0.0. All three read their expectations out of the local `events.jsonl`, and replay-equality diffed a projection rebuilt from it against the local `.catalog.db` — artifacts that do not exist in service mode, where the catalog is owned by the nexus service. They already refused there; they are now gone along with the local catalog.
+
 - `--collections-drift`: every T3 collection and every distinct `documents.physical_collection` has a row in the collections projection (Phase 6 release gate).
-- `--strict-not-in-t3` (modifier for `--t3-doc-id-coverage`): treat "event log claims a chunk T3 doesn't have" as a hard failure instead of a warning (warning is the default so legitimate deletions don't permanently red the doctor).
 - `--chunk-size-distribution`: per-collection chunk-size stats (p50/p95/p99/max); FAIL on any chunk over `MAX_DOCUMENT_BYTES`, WARN when >5% of chunks are micro-chunks (<100 bytes).
 - `--chunk-text-dedup`: chunk-text-hash duplication ratios — within-collection dupes >5% signal a chunker bug; >100 cross-collection dupes flag a cross-ingest investigation lead.
 - `--t3-vs-catalog`: projection-vs-T3 triage — T3 collections with no catalog documents (orphan), projected collections with 0 chunks (zombie), and catalog documents whose `physical_collection` is gone from T3.
@@ -948,20 +947,6 @@ nx catalog verify [--collection NAME] [--heal] [--json]
 Reconcile catalog tumblers against their T3 collections: reports *ghost* tumblers, catalog entries whose `meta.doc_id` has no matching row in T3. Ghosts most commonly survive from 4.9.7/4.9.8 installs where an oversize `store_put` silently truncated before the #244 guard landed; fresh writes cannot create new ones. The sweep is cheap (one batched id-existence probe per 300-id page; no ANN, no payload). Entries without a `doc_id` are skipped as unverifiable.
 
 `--heal` enters an interactive loop per ghost: drop the tumbler, print the `nx store put` template that would repopulate it, skip, or quit. `--json` emits a machine-parseable `{collection: [{tumbler, title, doc_id}]}` map on stdout (CI-friendly). Collections that cannot be read are reported to stderr as SKIPPED, never silently folded in as "all ghosts" or "no ghosts" (nexus-ou4tb), and the exit code marks the verify incomplete.
-
-### nx catalog synthesize-log
-
-```
-nx catalog synthesize-log [--check] [--dry-run] [--no-verify] [--force]
-```
-
-Rebuild `events.jsonl` from the catalog's JSONL state in place: the companion to `nx catalog doctor` for catalogs stuck in bootstrap-fallback mode (sparse event log vs `documents.jsonl`). The lossless alternative to `rm -rf catalog && nx catalog setup`, which would discard user-authored typed links and owner registrations (not reconstructible from T3 alone).
-
-- `--check`: detect fallback mode without writing; exit 0 when healthy, 1 when fallback is active.
-- Default run is a no-op unless fallback is active; `--force` synthesizes anyway, harvesting existing event-log doc_ids first so T3 chunk metadata referencing them does not go stale.
-- `--dry-run`: print per-event-type counts, write nothing.
-
-Safety: snapshots the entire catalog directory to a sibling before writing (retained even on PASS, for forensics), writes atomically (tmp + fsync + rename), then verifies via the doctor's replay-equality check. On verify FAIL the failed state is rotated aside and the snapshot restored; three artifacts remain for forensics. `--no-verify` skips the verification (only when you have verified independently).
 
 ### nx catalog orphan-backfill
 

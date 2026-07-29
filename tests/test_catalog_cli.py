@@ -2340,15 +2340,20 @@ class TestWhh61DoctorCarve:
     helpers not moving, or import-bound ``_get_catalog``.
     """
 
-    DOCTOR_COMMANDS = ["doctor", "synthesize-log"]
+    # ``synthesize-log`` and the local-event-log helpers
+    # (_run_replay_equality, _snapshot_table, _check_bootstrap_status,
+    # _run_t3_doc_id_coverage and their printers) were deleted in nexus-i711w
+    # Stage 2 sub-stage C-store; what remains is the service-capable half.
+    DOCTOR_COMMANDS = ["doctor"]
     SAMPLE_MOVED_HELPERS = [
-        "_run_replay_equality", "_snapshot_table", "_check_bootstrap_status",
-        "_run_name_vs_embed_dim", "_percentile", "_run_t3_doc_id_coverage",
+        "_run_name_vs_embed_dim", "_percentile",
         "_run_collections_drift", "_run_chunk_size_distribution",
         "_run_chunk_text_dedup", "_run_t3_vs_catalog",
-        "_print_replay_equality_text", "_expected_dim_for_model_token",
-        # threshold constants moved with the helpers:
-        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM", "_ORPHAN_RATIO_WARN_THRESHOLD",
+        "_expected_dim_for_model_token",
+        # threshold constants moved with the helpers. (_ORPHAN_RATIO_WARN_
+        # THRESHOLD was the t3-doc-id-coverage warn gate and died with that
+        # check — it had no other user.)
+        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM",
     ]
 
     def test_prune_deprecated_keys_stayed_in_catalog(self):
