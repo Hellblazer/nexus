@@ -2032,12 +2032,10 @@ available as an advanced pre-stage/override (below).
 
 `nx init` provisions and starts the service backend and offers to register the
 OS autostart unit (prompt, default yes; `--yes` accepts, `--no-autostart`
-declines — see [nx init](#nx-init)). In the default all-SERVICE config T2
-(notes/plans) is served by the same service, so there is **no** separate
-`nx daemon t2 install` step. The deprecated `nx init --service` flag still works
-but plain `nx init` is the path now. (`nx daemon t2 install --autostart` remains
-available as an explicit opt-in for a SQLite T2 backend, e.g.
-`NX_STORAGE_BACKEND=sqlite`.)
+declines — see [nx init](#nx-init)). T2 (notes/plans) is served by the same
+service, so there is no separate T2 install step — the `nx daemon t2` verb
+group is retired (see below). The deprecated `nx init --service` flag still
+works but plain `nx init` is the path now.
 
 Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 
@@ -2045,14 +2043,11 @@ T3 (the permanent vector store) serves through the native nexus-service over
 Postgres + pgvector in **both** local and cloud mode (`nx daemon service`); the
 legacy `nx daemon t3` ChromaDB daemon is a retired serving path.
 
-On the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`), the conexus
-plugin's SessionStart hook auto-spawns the SQLite T2 daemon via
-`nx daemon t2 ensure-running` on every Claude Code session start (a silent
-no-op in the default service config, where T2 is served by the nexus-service).
-For a SQLite T2 daemon that survives reboots independent of Claude Code, use
-`nx daemon t2 install --autostart`. In the default service config the service's
-own autostart unit (`nx daemon service install --autostart`, or accepting the
-`nx init` prompt) covers reboot-persistence for every tier.
+The service's own autostart unit (`nx daemon service install --autostart`, or
+accepting the `nx init` prompt) covers reboot-persistence for every tier. The
+plugin's SessionStart hook no longer spawns anything for T2 — the
+`nx daemon t2 ensure-running` call it used to make is retired with the rest of
+that verb group (see below).
 
 ### nx daemon restart-stale
 
@@ -2093,162 +2088,24 @@ This runs automatically on the first `nx` invocation after a version change
 (long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
 `nx doctor` or this verb is the path there).
 
-### nx daemon t2 start
+### nx daemon t2 — RETIRED
 
-Start the T2 daemon in the foreground. The daemon IS this Python
-process (asyncio event loop until SIGTERM/SIGINT). Run under
-launchd / systemd via `nx daemon t2 install --autostart` for
-production use; direct foreground invocation is for debugging or
-explicit one-shot starts.
+The entire `nx daemon t2` verb group (`start`, `stop`, `status`,
+`ensure-running`, `install --autostart`, `uninstall --autostart`) has been
+removed. It ran a SQLite-backed T2 daemon that arbitrated a single writer
+across the host CLI, the MCP server, and dev-container clients. T2 is served
+by the nexus-service over Postgres, which is the write arbiter, so there is
+nothing left for it to arbitrate.
 
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override (default: `~/.config/nexus/`) |
-| `--db-path PATH` | Override the memory.db path (default: `nexus.config.default_db_path()`) |
+**If you have a leftover autostart unit** from a pre-retirement install
+(`com.nexus.t2.plist` on macOS, `nexus-t2.service` on Linux), it will try to
+run `nx daemon t2 start` on every boot and fail. `nx upgrade` removes it for
+you on the next run — on every install, not just service-backed ones. To
+check by hand: `launchctl list | grep com.nexus.t2` (macOS) or
+`systemctl --user list-unit-files | grep nexus-t2` (Linux).
 
-Fails fast with `T2DaemonError` if another T2 daemon already holds
-the spawn lock on the same config_dir.
-
-### nx daemon t2 stop
-
-Send SIGTERM to the running T2 daemon. Reads the PID from the
-discovery file at `~/.config/nexus/t2_addr.<uid>` and signals it.
-Idempotent — exits cleanly if no daemon is running.
-
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override |
-
-### nx daemon t2 status
-
-Print the T2 daemon discovery JSON: PID, UDS path, TCP host/port,
-daemon version, start time.
-
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override |
-| `--json` | Output raw JSON (default: pretty-print) |
-
-The recorded PID is probed for liveness (`os.kill(pid, 0)`). A discovery
-file whose PID is no longer running is reported as `STALE` (with `--json`,
-an `"alive": false` field) and exits 1, so a daemon that died leaving a
-stale discovery file is not reported as running. Exit code 1 also when no
-discovery file exists — except in service mode: when the memory store is
-in SERVICE mode and no local T2 discovery file exists, the command reports
-that T2 is served by the nexus-service (no local daemon expected) and
-exits 0 instead of erroring (GH #1405).
-
-The output also includes `restarts_in_window` (RDR-140 P4): the number
-of cold respawns the crash-loop guard has recorded in the current window
-(see `ensure-running` below). A rising count across successive `status`
-calls is the crash-loop signal. `0` once the daemon converges.
-
-### nx daemon t2 ensure-running
-
-Idempotent: silent no-op if the T2 daemon is already running on the
-named config_dir, otherwise spawns it in the background (detached
-subprocess) and polls the discovery file until reachable (or the
-timeout expires).
-
-Service mode (RDR-176; nexus-daemon-6.6.1-service-mode-skip): when the
-memory store is in SERVICE mode, the SQLite T2 tier is a frozen
-migration source and the Java service is the live substrate — no
-client ever connects to a local T2 daemon. `ensure-running` detects
-this up front and returns immediately (`SERVICE_MODE_SKIP`, exit 0)
-without attempting a spawn. Prior to 6.6.1 this check was missing:
-every session-start call cold-spawned a process that exited instantly
-by design, and repeated calls across concurrent MCP sessions could
-trip the crash-loop guard below with a misleading
-"crash-loop suppressed" error even though nothing was actually broken.
-
-Stale discovery files left behind by crashed daemons trigger a
-fresh spawn rather than a false-positive — the probe is
-`os.kill(pid, 0)` against the discovery-file PID.
-
-Version-aware (nexus-5ldk1): a live daemon whose `daemon_version`
-differs from the installed `conexus` is treated as stale. The command
-gracefully cycles it (SIGTERM drains in-flight RPC, then respawns) so
-the running daemon matches the installed code. This is why `nx upgrade`,
-`scripts/reinstall-tool.sh`, and the plugin / `.mcpb` session-start
-hooks all call `ensure-running` after an install: the daemon comes up on
-the new version without a manual restart. A daemon already matching the
-installed version is left untouched.
-
-Crash-loop guard (RDR-140 P4). Each cold respawn driven by
-`ensure-running` is recorded in a sentinel file beside the discovery
-file. After `_CRASHLOOP_MAX_RESTARTS` (default 5) respawns within
-`_CRASHLOOP_WINDOW_S` (default 300s) without the daemon converging,
-`ensure-running` stops respawning, logs once at `error`
-(`t2_daemon_crash_loop_suppressed`), and exits 1, instead of an endless
-crash-loop with a traceback per attempt. The counter clears when a
-spawned daemon becomes reachable, and re-arms for a fresh window once the
-prior restarts age out.
-
-Scope: this guard bounds the `ensure-running`-driven respawn path (the
-dominant source of churn, since the plugin / `.mcpb` session-start hooks
-call `ensure-running` on every MCP-server boot). It does NOT bound the
-launchd / systemd path: `install --autostart` runs `nx daemon t2 start`
-directly, which never consults the sentinel, so a daemon failing under
-`KeepAlive` is rate-limited only by the supervisor's own throttle
-(launchd `ThrottleInterval`, systemd `RestartSec`). Known limitation: a
-daemon that becomes briefly reachable then dies repeatedly (flapping)
-resets the counter each cycle, so the guard fires only for a daemon that
-never reaches the discovery-written state within the spawn timeout.
-Inspect the daemon log, then re-run `ensure-running` after fixing the
-root cause.
-
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override |
-| `--timeout SECONDS` | Wait up to N seconds for spawn (default: 5.0) |
-| `--quiet` | Suppress "already running" / "spawned" messages; only print errors |
-
-Exit codes:
-- `0`: reachable (already running OR successfully spawned)
-- `1`: spawned but did not become reachable within `--timeout`
-
-Used by the conexus plugin's SessionStart hook; safe to invoke from any
-post-install script that needs the daemon up before running other
-commands.
-
-### nx daemon t2 install --autostart
-
-Write a launchd plist (macOS) or systemd user unit (Linux) so the
-T2 daemon starts at login / boot and respawns on crash.
-
-| Flag | Description |
-|------|-------------|
-| `--autostart` | Required. Confirms intent to write an OS autostart entry. |
-| `--force` | Overwrite an existing plist / unit file when its content differs from the freshly rendered template. |
-
-The plist / unit file lands in the per-user autostart directory:
-
-- macOS: `~/Library/LaunchAgents/com.nexus.t2.plist` (`KeepAlive=true`, `RunAtLoad=true`)
-- Linux: `~/.config/systemd/user/nexus-t2.service` (`Restart=on-failure`, `WantedBy=default.target`)
-
-After write, the command activates the unit:
-
-- macOS: `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.nexus.t2.plist`
-- Linux: `systemctl --user enable --now nexus-t2.service`
-
-Logs:
-- macOS: `~/Library/Logs/nexus-t2.log` / `nexus-t2.err`
-- Linux: `journalctl --user -u nexus-t2.service`
-
-Idempotent — running twice doesn't duplicate the plist or the
-service unit. Re-render and re-activate on `conexus` upgrades by
-running `nx daemon t2 install --autostart` again (the rendered
-template's `__NX_BIN__` resolves to the current `nx` binary path).
-
-### nx daemon t2 uninstall --autostart
-
-Reverse of `install --autostart`: deactivate via
-`launchctl bootout` (macOS) / `systemctl --user disable --now`
-(Linux) then unlink the plist / unit file.
-
-| Flag | Description |
-|------|-------------|
-| `--autostart` | Required. |
+Reboot-persistence for every tier is now the service's own unit:
+`nx daemon service install --autostart`, or accepting the `nx init` prompt.
 
 ### nx daemon service start / stop / status
 

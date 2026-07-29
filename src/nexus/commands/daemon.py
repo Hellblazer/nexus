@@ -38,7 +38,7 @@ _log = structlog.get_logger(__name__)
 
 @click.group("daemon")
 def daemon_group() -> None:
-    """Manage storage daemons (t2, service, aspect-worker)."""
+    """Manage storage daemons (service, aspect-worker)."""
 
 
 # ---------------------------------------------------------------------------
