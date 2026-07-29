@@ -1,4 +1,23 @@
 #!/usr/bin/env bash
+#
+# ############################################################################
+# ## KNOWN RED — DEAD BY CONSTRUCTION. See nexus-uvn3t before running.       ##
+# ##                                                                        ##
+# ## This harness asserts PLIST.exists() after the first MCP tool call (the  ##
+# ## `check(...)` at "LaunchAgent written into sandbox"). The path that WROTE##
+# ## that unit — nexus.mcp._first_run.ensure_installed_and_running — was     ##
+# ## deleted with the T2 daemon in nexus-i711w Stage 2 sub-stage B, so the   ##
+# ## unit is never written and the two daemon_uninstall legs below assert    ##
+# ## against a unit that never existed. Nothing in CI runs this, so it fails ##
+# ## only at a release cut, by a human.                                      ##
+# ##                                                                        ##
+# ## The dead `nx daemon t2 stop` in cleanup() was repointed at the storage  ##
+# ## service so the teardown works; the STRUCTURAL death above was left for  ##
+# ## nexus-uvn3t to dispose of, because deleting a documented pre-release    ##
+# ## gate is not a review-fix decision. Do not read the repointed cleanup as ##
+# ## evidence this script is maintained.                                     ##
+# ############################################################################
+#
 # RDR-126 P6-A (nexus-awh4q): isolated "clean machine" verification of the
 # first-run banner + daemon_uninstall code paths, WITHOUT a fresh OS account
 # and WITHOUT touching your real ~/.claude, your live T2 daemon, or your
@@ -38,8 +57,10 @@ echo "[p6] sandbox HOME = $SANDBOX"
 
 cleanup() {
   local rc=$?
-  # Best-effort: stop any sandbox daemon spawned by ensure-running, then nuke.
-  HOME="$SANDBOX" PATH="$SANDBOX/bin:$PATH" nx daemon t2 stop >/dev/null 2>&1 || true
+  # Best-effort: stop any sandbox daemon, then nuke. (`nx daemon t2 stop`
+  # was here until nexus-i711w Stage 2 sub-stage B retired the T2 daemon and
+  # its whole verb group.)
+  HOME="$SANDBOX" PATH="$SANDBOX/bin:$PATH" nx daemon service stop >/dev/null 2>&1 || true
   rm -rf "$SANDBOX"
   echo "[p6] cleanup done (sandbox removed)"
   return $rc

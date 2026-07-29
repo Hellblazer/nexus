@@ -325,26 +325,55 @@ class TestCheckServiceLaunchagentStray:
 
 class TestCheckT2LaunchagentStray:
     """nx doctor backstop for the automatic stray-com.nexus.t2-LaunchAgent
-    removal — surfaces the condition even outside a version transition."""
+    removal — surfaces the condition even outside a version transition.
 
-    def test_local_mode_yields_no_result(self):
-        from nexus.db.storage_mode import StorageBackend
+    CONTRACT FLIPPED at nexus-i711w Stage 2 sub-stage B, deliberately, and
+    for the same reason `unload_stale_t2_launchagent`'s service-mode gate
+    was removed: with the T2 daemon deleted, no box of any mode can start
+    one or reinstall the unit, so a surviving unit is stray EVERYWHERE.
+    The old `test_local_mode_yields_no_result` asserted the gate that left
+    SQLite-mode boxes — the ones most likely to carry a unit — with silent
+    auto-removal and no doctor visibility. Its replacement below pins the
+    NEW contract. Do not restore the storage-mode gate.
+    """
 
+    def test_sqlite_mode_ALSO_reports_after_the_daemon_retired(
+        self, tmp_path, monkeypatch
+    ):
+        """The flip. A SQLite-mode box with a unit must be TOLD, not skipped.
+
+        The env pin is load-bearing, not decoration: conftest's autouse
+        ``_pin_t2_substrate`` sets ``NX_STORAGE_BACKEND=service`` for the whole
+        suite, so without it this test runs in SERVICE mode — where the OLD
+        gate also fell through — and would stay green if someone restored the
+        gate. Verified by mutation (sub-stage B critic pass).
+        """
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        dest = tmp_path / "com.nexus.t2.plist"
         with patch(
-            "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SQLITE,
-        ), patch("nexus.commands.daemon._autostart_unit_installed") as probe:
+            "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
+        ):
             results = _check_t2_launchagent_stray()
-        assert results == []
-        probe.assert_not_called()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert str(dest) in r.detail
 
-    def test_service_mode_no_agent_returns_ok(self):
-        from nexus.db.storage_mode import StorageBackend
-
+    def test_storage_mode_is_not_consulted_at_all(self, tmp_path):
+        """Non-vacuity guard for the flip above: a re-introduced gate would
+        have to call `storage_backend_for`, so assert nothing does."""
         with patch(
             "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SERVICE,
-        ), patch(
+        ) as backend, patch(
+            "nexus.commands.daemon._autostart_unit_installed",
+            return_value=tmp_path / "com.nexus.t2.plist",
+        ):
+            _check_t2_launchagent_stray()
+        backend.assert_not_called()
+
+    def test_no_agent_returns_ok(self):
+        with patch(
             "nexus.commands.daemon._autostart_unit_installed", return_value=None,
         ):
             results = _check_t2_launchagent_stray()
@@ -352,14 +381,9 @@ class TestCheckT2LaunchagentStray:
         assert results[0].ok is True
         assert results[0].fatal is False
 
-    def test_service_mode_with_agent_returns_soft_warn(self, tmp_path):
-        from nexus.db.storage_mode import StorageBackend
-
+    def test_with_agent_returns_soft_warn(self, tmp_path):
         dest = tmp_path / "com.nexus.t2.plist"
         with patch(
-            "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SERVICE,
-        ), patch(
             "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
         ):
             results = _check_t2_launchagent_stray()
@@ -372,9 +396,29 @@ class TestCheckT2LaunchagentStray:
         assert r.fix_suggestions
         assert any("restart-stale" in s for s in r.fix_suggestions)
 
+    def test_every_fix_suggestion_names_a_LIVE_verb(self, tmp_path):
+        """The defect this replaces: `nx daemon t2 uninstall --autostart` was
+        suggested here after the whole `t2` verb group was deleted."""
+        from click.testing import CliRunner
+
+        from nexus.cli import main as cli
+
+        dest = tmp_path / "com.nexus.t2.plist"
+        with patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
+        ):
+            results = _check_t2_launchagent_stray()
+        suggestions = results[0].fix_suggestions
+        assert suggestions, "a warn result with no fix is useless"
+        for s in suggestions:
+            argv = s.split("#", 1)[0].split()
+            assert argv[0] == "nx"
+            res = CliRunner().invoke(cli, [*argv[1:], "--help"])
+            assert res.exit_code == 0, f"dead verb in fix_suggestions: {s!r}\n{res.output}"
+
     def test_probe_failure_degrades_silently(self):
         with patch(
-            "nexus.db.storage_mode.storage_backend_for",
+            "nexus.commands.daemon._autostart_unit_installed",
             side_effect=RuntimeError("boom"),
         ):
             results = _check_t2_launchagent_stray()

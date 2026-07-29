@@ -69,7 +69,7 @@ Run this checklist inside THAT window:
      ~/Library/LaunchAgents — the daemon is host-level, not per-profile.
      This is the one part that touches your real host; daemon_uninstall in
      step 5 is what cleans it back up. If you want to keep your normal
-     daemon, run 'nx daemon t2 install --autostart' afterwards.)
+     autostart, run 'nx daemon service install --autostart' afterwards.)
   7. Record any gotchas in docs/desktop-deployment.md (MVV section).
 
 When done, quit this Claude window, then:  scripts/p6-desktop-profile.sh cleanup

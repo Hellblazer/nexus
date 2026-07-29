@@ -8,10 +8,12 @@ command bodies ``t2_install_cmd`` / ``t2_uninstall_cmd`` in
 **in-process** with a structured return value by:
 
 - ``nexus.mcp._first_run.ensure_installed_and_running`` — first-run on
-  MCP startup, which needs to know whether it installed fresh
+  MCP startup, which needed to know whether it installed fresh
   (``NEWLY_INSTALLED``) or found an existing unit (``ALREADY_PRESENT``)
   to drive the first-run banner's two text variants and surface the
-  unit path; and
+  unit path. RETIRED with the T2 daemon (nexus-i711w Stage 2 sub-stage
+  B); see the tombstone at ``mcp/_first_run.py``. The structured return
+  value survives it, for the callers below; and
 - the ``daemon_uninstall`` MCP tool (RDR-126 §4); and
 - the ``nx daemon t2 install/uninstall`` CLI, which becomes a thin
   wrapper that translates these results into ``click.echo`` / exit codes.
@@ -82,6 +84,20 @@ class UninstallResult:
     dest: Path
     warnings: tuple[str, ...] = field(default_factory=tuple)
     survivors: tuple[str, ...] = field(default_factory=tuple)
+    #: Whether the OS DEACTIVATION (``launchctl bootout`` /
+    #: ``systemctl --user disable --now``) actually succeeded — as distinct
+    #: from ``status``, which reports only that the unit FILE is gone. The
+    #: two diverge on exactly the case that matters: a failed or missing
+    #: deactivator is downgraded to a warning and the file is removed
+    #: anyway, so ``REMOVED`` alone cannot tell a caller whether a running
+    #: process was terminated. ``uninstall_daemon`` derives
+    #: ``daemon_stopped`` from THIS, not from ``status`` (nexus-i711w Stage
+    #: 2 sub-stage B review, High-2): reporting "daemon stopped" in the one
+    #: case where the daemon demonstrably survived is worse than the
+    #: over-pessimism it replaced. ``True`` on the NOT_INSTALLED path —
+    #: there was nothing to deactivate — which is why callers must AND it
+    #: with ``status``.
+    deactivated: bool = True
 
 
 class InstallerError(Exception):
@@ -104,8 +120,10 @@ class ActivationError(InstallerError):
 
 def _render_for_service() -> tuple[Path, str]:
     """Resolve the destination path and rendered unit body for the storage
-    SERVICE tier (RDR-174 P2.1) — mirrors :func:`_render_for_t2`, swapping the
-    template filename. The unit execs ``nx daemon service start --foreground``.
+    SERVICE tier (RDR-174 P2.1). It was written as a mirror of the since-deleted
+    ``_render_for_t2`` (nexus-i711w Stage 2 sub-stage B), swapping the template
+    filename; it is now the only renderer. The unit execs
+    ``nx daemon service start --foreground``.
     """
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -306,9 +324,10 @@ def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
 
     RDR-165 eu4u4: the complete teardown must stop the engine-service + embedded
     Postgres, not only the T2 daemon (the installer.py gap where uninstall only
-    ran ``nx daemon t2 stop``). Same shell-out rationale as
-    :func:`_stop_daemon_best_effort` (lifecycle is daemon-command territory, not
-    installer logic; RDR-126 §2) and routes through the existing service-stop
+    ran ``nx daemon t2 stop``). Same shell-out rationale as the since-deleted
+    ``_stop_daemon_best_effort`` (see its tombstone above): lifecycle is
+    daemon-command territory, not installer logic (RDR-126 §2). Routes through
+    the existing service-stop
     command, which relinquishes the storage_service lease via the shared
     ``service_registry.py`` primitive (RDR-149 — no duplicated lifecycle here).
     A no-running-service exit is reported as a warning, never raised.
@@ -394,7 +413,16 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     #    stopped now that ``nx daemon t2 stop`` is gone (nexus-i711w Stage 2
     #    sub-stage B): launchctl bootout kills the running job, systemctl
     #    disable --now stops it. NOT_INSTALLED means there was nothing to stop.
-    daemon_stopped = unit_result.status is UninstallStatus.REMOVED
+    #
+    #    ANDed with ``deactivated``, NOT derived from ``status`` alone: a
+    #    failed/missing deactivator is downgraded to a warning and the unit
+    #    file removed anyway, so ``REMOVED`` comes back in the one case where
+    #    the daemon demonstrably SURVIVED. Claiming "daemon stopped" there is
+    #    wrong in the dangerous direction — worse than the old code's
+    #    permanent "stop not confirmed", which was merely pessimistic.
+    daemon_stopped = (
+        unit_result.status is UninstallStatus.REMOVED and unit_result.deactivated
+    )
 
     # 2. Stop the engine-service + Postgres stack (best-effort) — RDR-165 eu4u4.
     #    A complete teardown must leave no running storage backend.
@@ -493,14 +521,17 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         return UninstallResult(status=UninstallStatus.NOT_INSTALLED, dest=dest)
 
     warnings: list[str] = []
+    deactivated = True
     cmd = _deactivate_cmd(dest, tier=tier)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             detail = (result.stderr or "").strip() or (result.stdout or "").strip()
             warnings.append(f"{' '.join(cmd)} exited {result.returncode}: {detail}")
+            deactivated = False
     except FileNotFoundError as exc:
         warnings.append(f"{cmd[0]} not found ({exc}); removing file anyway.")
+        deactivated = False
 
     dest.unlink()
 
@@ -522,6 +553,7 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         dest=dest,
         warnings=tuple(warnings),
         survivors=survivors,
+        deactivated=deactivated,
     )
 
 

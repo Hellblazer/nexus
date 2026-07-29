@@ -56,10 +56,12 @@ def put_cmd(
     instead of inserting a near-duplicate. Without it, the default upsert
     keyed on (project, title) is unchanged.
 
-    RDR-120 P6 follow-up (nexus-w6txl): routes through the T2 daemon
-    so host CLI + Cowork-bridged MCP + dev-container CLI all share
-    the same arbitrated state. Requires the T2 daemon running; start
-    it with ``nx daemon t2 start``.
+    RDR-120 P6 follow-up (nexus-w6txl): shares one arbitrated state
+    across host CLI + Cowork-bridged MCP + dev-container CLI. That
+    arbitration was the T2 daemon's job until nexus-i711w Stage 2
+    sub-stage B retired it; the storage service does it now, so there
+    is nothing for the caller to start by hand. ``--help`` advertised
+    the deleted ``nx daemon t2 start`` until that sub-stage's review.
     """
     if content == "-":
         content = sys.stdin.read()

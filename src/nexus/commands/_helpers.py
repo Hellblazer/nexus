@@ -101,14 +101,34 @@ def t2_handle() -> Iterator[Any]:
 
     # SQLite mode reached here via the T2 daemon, which arbitrated the single
     # SQLite writer across host CLI + MCP + dev-container processes. The daemon
-    # is retired (nexus-i711w Stage 2 sub-stage B) and there is no other
-    # arbiter, so this branch FAILS LOUD rather than quietly opening a second
-    # unarbitrated writer — the WAL-racing bug RDR-120 P6 existed to prevent.
-    # The branch itself goes with storage_mode in sub-stage A, at which point
-    # the SERVICE path above becomes unconditional.
+    # is retired (nexus-i711w Stage 2 sub-stage B), so this branch FAILS LOUD.
+    #
+    # WHY FAIL LOUD RATHER THAN OPEN SQLITE DIRECTLY — the reason is NOT "the
+    # branch is going away in sub-stage A anyway"; that is the scope-bleed
+    # justification this staged deletion exists to forbid. It is that restoring
+    # function here would mean constructing a raw ``T2Database(default_db_path())``
+    # from the CLI, which this helper has NEVER done — pre-retirement it held a
+    # ``T2Client``, not a connection. That is a NEW raw-SQLite site, and the
+    # no-new-SQLite directive (2026-07-18) makes raising
+    # ``tests/test_no_new_sqlite.py``'s EPSILON_CENSUS an explicit Hal decision
+    # recorded on a bead, not a repair an implementer may make in passing.
+    #
+    # KNOWN AND DELIBERATE ASYMMETRY: the MCP side does keep direct SQLite arms
+    # (``mcp_infra.t2_ctx``, ``mcp_infra.t2_index_write``). Those are GRANDFATHERED
+    # census entries that retire with the stores in sub-stage A — not a licence
+    # for a new one here. The practical consequence is real and worth stating
+    # plainly: on a box holding ``NX_STORAGE_BACKEND=sqlite`` (the RDR-152
+    # copy-not-move rollback lever), MCP ``memory_put`` still writes while
+    # ``nx memory`` exits 1. That asymmetry, and whether the CLI should instead
+    # reuse the grandfathered arm, is tracked on nexus-vw7zk.
+    #
+    # NOTE this blocks READS (``nx memory list/get/search``) as well as writes —
+    # the yielded handle is the only path to the store, so there is no read-only
+    # half to preserve without the same new connection.
     raise click.ClickException(
-        "The T2 daemon that arbitrated SQLite-mode writes has been retired, and "
-        "this install is not on the storage service. Run `nx doctor` and, if it "
-        "reports a pending substrate migration, `nx upgrade` to converge onto "
-        "Postgres."
+        "The T2 daemon that arbitrated SQLite-mode access has been retired, and "
+        "this install is not on the storage service, so `nx memory` and `nx "
+        "config` cannot reach T2 storage (reads included). Run `nx doctor` and, "
+        "if it reports a pending substrate migration, `nx upgrade` to converge "
+        "onto Postgres."
     )

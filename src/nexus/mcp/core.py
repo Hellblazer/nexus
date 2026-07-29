@@ -6165,10 +6165,17 @@ async def nx_plan_audit(
     annotations={"destructiveHint": True, "idempotentHint": True},
 )
 def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
-    """Remove the background nexus T2 daemon installed on first run (RDR-126 §4).
+    """Tear down the nexus storage stack's OS-level install (RDR-126 §4).
 
-    Removes the OS autostart unit (LaunchAgent on macOS, systemd user unit
-    on Linux), stops the running daemon, and clears the first-run marker.
+    Removes BOTH OS autostart units — the storage-service unit, and any
+    legacy ``com.nexus.t2`` unit left behind by an install that predates the
+    T2 daemon's retirement (nexus-i711w Stage 2 sub-stage B) — then stops the
+    engine-service + Postgres stack and clears the first-run marker.
+
+    The T2 daemon this tool was originally written for no longer exists, and
+    nothing installs its unit any more; removing a stale one is why the
+    removal half survives. There is likewise no first-run daemon auto-install
+    to undo.
 
     Destructive: by default this only DESCRIBES what would be removed and
     asks you to re-call with ``confirm=true``. Nothing is removed until
@@ -6177,9 +6184,11 @@ def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
     Args:
         confirm: Must be true to actually remove anything. When false
             (default), returns a description of what would be removed.
-        remove_data: When true (and ``confirm=true``), ALSO deletes the
-            entire nexus data directory (``~/.config/nexus/``) — your
-            notes, plans, and search index. Irreversible.
+        remove_data: When true (and ``confirm=true``), ALSO deletes the nexus
+            CONFIG directory (``~/.config/nexus/``, or ``NEXUS_CONFIG_DIR``) —
+            your notes, plans, and the catalog. Irreversible. It does NOT
+            touch ``~/.local/share/nexus/``, which holds the Chroma store and
+            the embedding-model cache; remove that separately for a full wipe.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
