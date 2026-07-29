@@ -116,8 +116,6 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         )
         from nexus.plans.scope import (  # noqa: PLC0415 — deferred to avoid circular import
             _infer_scope_tags,
-            _normalize_scope_string,
-            _SCOPE_AGNOSTIC_SENTINELS,
             normalize_scope_tags,
         )
 
@@ -130,10 +128,12 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             stored_scope_tags = normalize_scope_tags(scope_tags)
         elif scope_tags is None:
             stored_scope_tags = _infer_scope_tags(plan_json)
-            if not stored_scope_tags and project:
-                candidate = _normalize_scope_string(project.strip())
-                if candidate and candidate not in _SCOPE_AGNOSTIC_SENTINELS:
-                    stored_scope_tags = candidate
+            # No project-column fallback here either — see PlanLibrary.save_plan
+            # for the measurement (nexus-89uc4). This twin mirrored #1069
+            # verbatim, which is why deleting only the SQLite copy would have
+            # read as a fix and changed nothing: service mode constructs THIS
+            # class (db/t2/__init__.py), and after nexus-i711w it is the only
+            # save path there is.
         else:
             stored_scope_tags = ""
 

@@ -301,12 +301,14 @@ class PlanLibrary:
                 RDR-078 dimensional-identity / currying fields. All optional.
             scope_tags: RDR-091 Phase 2a scope-tag string (comma-separated,
                 sorted, normalized). When ``None`` (default), the value is
-                inferred from ``plan_json`` via :func:`_infer_scope_tags`,
-                with a fallback to the ``project`` column for corpus:all
-                plans (#1069). When ``""`` (explicit empty), the plan is
-                stored as scope-agnostic without any project fallback.
-                A non-empty value is normalized via
-                :func:`_normalize_scope_string` before storage.
+                inferred from ``plan_json`` via :func:`_infer_scope_tags`;
+                if nothing is inferable the plan is stored SCOPE-AGNOSTIC.
+                There is no project-column fallback — #1069 added one and
+                nexus-89uc4 removed it, because a project-shaped tag is a
+                conflict to ``_scope_fit`` and made those plans strictly less
+                reachable than agnostic. ``""`` (explicit empty) also stores
+                agnostic. A non-empty value is normalized via
+                :func:`normalize_scope_tags` before storage.
         """
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         # RDR-092 Phase 3: synthesise the hybrid match_text alongside
@@ -328,20 +330,20 @@ class PlanLibrary:
         elif scope_tags is None:
             # Truly unset: infer from plan_json retrieval steps.
             stored_scope_tags = _infer_scope_tags(plan_json)
-            # #1069 project-column fallback: when inference yields '' (e.g.
-            # corpus:all plans have no specific retrieval scope to infer from)
-            # AND the caller supplied a non-agnostic project, derive scope_tags
-            # from the project value instead.  Apply the same normalization /
-            # sentinel-drop path so project='all' and project='' never leak.
-            if not stored_scope_tags and project:
-                candidate = _normalize_scope_string(project.strip())
-                if candidate and candidate not in _SCOPE_AGNOSTIC_SENTINELS:
-                    stored_scope_tags = candidate
-            # Residual: a grown corpus:all plan whose plans.project is also
-            # empty still saves with scope_tags=''.  The three remaining
-            # attractor layers from #1069 (grown-plan floor at 0.55, verb-
-            # synonym fold, empty-project residual) are tracked in the
-            # follow-on bead and are out of scope for this fix.
+            # NO project-column fallback. #1069 added one — when inference
+            # yielded '' it derived scope_tags from `project` — and nexus-89uc4
+            # measured that it made those plans STRICTLY LESS REACHABLE than
+            # leaving them agnostic. `_scope_fit` compares against
+            # collection-name shape `<content_type>__<owner>`; a bare project
+            # token matches neither of its directions, so the derived tag reads
+            # as a CONFLICT and the plan is dropped:
+            #
+            #     _scope_fit('nexus', 'rdr__nexus') = None   dropped
+            #     _scope_fit('',      'rdr__nexus') = 0.0    kept
+            #
+            # Agnostic ('') already IS the neutral-and-kept behaviour the
+            # fallback was reaching for. Do not reintroduce a project-derived
+            # tag without first making the two namespaces agree.
         else:
             # Caller explicitly passed scope_tags="" to force scope-agnostic.
             stored_scope_tags = ""

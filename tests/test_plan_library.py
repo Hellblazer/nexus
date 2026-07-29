@@ -911,14 +911,31 @@ def test_search_plans_still_matches_raw_description(
     assert "semantic" in results[0]["query"]
 
 
-# ── #1069: project-column fallback for corpus:all plans (save_plan) ────────
+# ── nexus-89uc4: the #1069 project-column fallback is GONE ──────────────────
+#
+# #1069 made save_plan derive scope_tags from the `project` column when
+# plan_json had no inferable retrieval scope (the corpus:all case). The derived
+# value is in a DIFFERENT NAMESPACE from what the matcher compares against:
+# `_scope_fit` prefix-matches collection-name shape `<content_type>__<owner>`,
+# and a bare project token satisfies neither of its two directions. Measured:
+#
+#     _scope_fit('nexus', 'rdr__nexus') = None   <- conflict, plan DROPPED
+#     _scope_fit('',      'rdr__nexus') = 0.0    <- agnostic, plan KEPT
+#
+# So the fallback converted "kept as neutral" into "dropped as conflicting",
+# for exactly the corpus:all population it was written to serve. It made those
+# plans strictly LESS reachable than doing nothing. Removed in both save paths
+# (PlanLibrary and HttpPlanLibrary — the twin mirrored it verbatim).
 
 
-def test_save_plan_corpus_all_with_project_derives_scope_from_project(
+def test_save_plan_corpus_all_with_project_stays_agnostic(
     plan_db: T2Database,
 ) -> None:
-    """save_plan with corpus:all plan_json + a populated project arg must
-    derive scope_tags from the project column, not store '' (#1069).
+    """A corpus:all plan with a populated project stays scope-AGNOSTIC.
+
+    Inverted from test_save_plan_corpus_all_with_project_derives_scope_from_
+    project, which pinned the #1069 behaviour and therefore pinned the defect
+    (nexus-89uc4).
     """
     corpus_all_json = (
         '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
@@ -929,17 +946,47 @@ def test_save_plan_corpus_all_with_project_derives_scope_from_project(
         project="canon-chat",
     )
     row = plan_db.plans.get_plan(row_id)
-    assert row["scope_tags"] == "canon-chat", (
-        "corpus:all plan with project='canon-chat' must store 'canon-chat' "
-        "as scope_tags, not empty string"
+    assert row["scope_tags"] == "", (
+        "a corpus:all plan must stay agnostic; deriving 'canon-chat' from the "
+        "project column produces a tag the matcher can only read as a CONFLICT"
     )
+
+
+def test_corpus_all_plan_survives_a_scoped_caller(
+    plan_db: T2Database,
+) -> None:
+    """The property the fix exists for: such a plan is KEPT, not dropped.
+
+    Asserting the stored value is '' is necessary but not sufficient — what
+    broke was reachability. This pins the matcher outcome directly, so the test
+    fails if a future change reintroduces any project-shaped tag, whatever it
+    is spelled.
+    """
+    from nexus.plans.matcher import _scope_fit
+
+    corpus_all_json = (
+        '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
+    )
+    row_id = plan_db.save_plan(
+        query="cross-corpus question with a project attached",
+        plan_json=corpus_all_json,
+        project="nexus",
+    )
+    stored = plan_db.plans.get_plan(row_id)["scope_tags"]
+
+    for scope_pref in ("rdr__nexus", "knowledge__conexus", "code__nexus-1-1"):
+        assert _scope_fit(stored, scope_pref) == 0.0, (
+            f"stored scope_tags {stored!r} must be NEUTRAL against "
+            f"{scope_pref!r} (0.0 = kept). A project-derived tag yields None "
+            f"= conflict = dropped, which is the nexus-89uc4 defect."
+        )
 
 
 def test_save_plan_corpus_all_without_project_stays_empty(
     plan_db: T2Database,
 ) -> None:
-    """save_plan with corpus:all plan_json and NO project must still store ''
-    — the project-column fallback only fires when project is populated (#1069).
+    """corpus:all with NO project stores '' — unchanged by nexus-89uc4, now
+    true for the simpler reason that nothing derives from project at all.
     """
     corpus_all_json = (
         '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
@@ -953,31 +1000,21 @@ def test_save_plan_corpus_all_without_project_stays_empty(
     assert row["scope_tags"] == ""
 
 
-def test_save_plan_corpus_all_project_normalized(
-    plan_db: T2Database,
-) -> None:
-    """Project-column fallback applies _normalize_scope_string and drops
-    agnostic sentinels. A project named 'all' must not leak the sentinel (#1069).
-    """
-    corpus_all_json = (
-        '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
-    )
-    row_id = plan_db.save_plan(
-        query="global agnostic plan",
-        plan_json=corpus_all_json,
-        project="all",
-    )
-    row = plan_db.plans.get_plan(row_id)
-    assert row["scope_tags"] == "", (
-        "project='all' is an agnostic sentinel and must NOT contribute to scope_tags"
-    )
+# test_save_plan_corpus_all_project_normalized was REMOVED with the fallback
+# (nexus-89uc4). Its subject was the sentinel-drop INSIDE the fallback —
+# project='all' must not leak the 'all' sentinel into scope_tags. With no
+# project ever contributing, that assertion is subsumed by
+# test_save_plan_corpus_all_with_project_stays_agnostic above, which covers
+# every project value rather than just the sentinel.
 
 
 def test_save_plan_specific_corpus_unaffected_by_project(
     plan_db: T2Database,
 ) -> None:
-    """Plans with specific corpus retrieval steps still infer from those steps;
-    the project fallback must not override inference (#1069 non-regression).
+    """Plans with specific corpus retrieval steps still infer from those steps.
+
+    Kept through nexus-89uc4: inference is the surviving mechanism, and this is
+    the only test that guards it against the project argument.
     """
     row_id = plan_db.save_plan(
         query="search rdr corpus",
@@ -986,7 +1023,7 @@ def test_save_plan_specific_corpus_unaffected_by_project(
     )
     row = plan_db.plans.get_plan(row_id)
     assert row["scope_tags"] == "rdr__arcaneum", (
-        "specific-corpus plan must infer from retrieval steps, not fall back to project"
+        "specific-corpus plan must infer from retrieval steps, not from project"
     )
 
 
