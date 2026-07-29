@@ -14,10 +14,21 @@
 # Claude.app is running — quit your primary Claude Desktop first.
 #
 # PREREQUISITE: this is the POST-RELEASE half of P6. The Desktop .mcpb resolves
-# `conexus` from PyPI, so it only carries the RDR-126 banner / daemon_uninstall
-# code once this work is merged AND a release is cut. Running it before then
-# verifies nothing about this PR. The automated, pre-release half is
-# scripts/p6-clean-run.sh.
+# `conexus` from PyPI, so it only carries the RDR-126 daemon_uninstall code once
+# this work is merged AND a release is cut. Running it before then verifies
+# nothing about this PR.
+#
+# THERE IS NO LONGER A PRE-RELEASE HALF. scripts/p6-clean-run.sh was deleted
+# (nexus-uvn3t): it asserted a first-run LaunchAgent install and banner that the
+# T2 daemon retirement removed (nexus-i711w Stage 2 sub-stage B). Do not expect
+# an automated gate to have covered this surface before you get here.
+#
+# SCOPE NARROWED WITH IT: the .mcpb first run now installs nothing and prints no
+# banner, so what this profile verifies is the install + a memory round-trip +
+# daemon_uninstall. Note daemon_uninstall is a HOST-level teardown (both
+# autostart units, the engine-service + Postgres stack, the first-run marker) —
+# it is not scoped to the isolated profile, which only isolates Claude Desktop
+# itself. See docs/desktop-deployment.md § Minimum Viable Validation.
 #
 # Usage:
 #   scripts/p6-desktop-profile.sh launch     # create + open the isolated profile
