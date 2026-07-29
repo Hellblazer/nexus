@@ -34,13 +34,13 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 
 # nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
 # JSONL / .catalog.db projection), which service mode deliberately opens
 # read-only as a frozen migration source (RDR-176 P1 Gap 2).
-pytestmark = pytest.mark.usefixtures("local_catalog_backend")
 
 
 @pytest.fixture
@@ -53,15 +53,20 @@ def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def cat(catalog_env: Path) -> Catalog:
-    return Catalog(catalog_env, catalog_env / ".catalog.db")
+def cat(catalog_env: Path) -> ActiveCatalog:
+    # nexus-i711w C-store: route seeding at the ACTIVE catalog. Service mode
+    # opens the local .catalog.db READ-ONLY (frozen migration source,
+    # RDR-176 P1 Gap 2), so a direct Catalog handle dies on "attempt to
+    # write a readonly database". The subject here is the verb, not the
+    # substrate.
+    return ActiveCatalog()
 
 
 # ── nexus-6ims: prune-stale uses owner.repo_root for relative paths ────────
 
 
 def test_prune_stale_resolves_relative_paths_against_owner_root(
-    cat: Catalog, tmp_path: Path,
+    cat: ActiveCatalog, tmp_path: Path,
 ) -> None:
     """A relative file_path that exists under the owner's repo_root
     must NOT be classified as stale, regardless of the cwd from
@@ -99,7 +104,7 @@ def test_prune_stale_resolves_relative_paths_against_owner_root(
 
 
 def test_prune_stale_skips_relative_paths_when_owner_has_no_repo_root(
-    cat: Catalog, tmp_path: Path,
+    cat: ActiveCatalog, tmp_path: Path,
 ) -> None:
     """nexus-6ims fail-safe: owner.repo_root empty → refuse to
     classify; skip with a structured warning. Better to leave a
@@ -121,7 +126,7 @@ def test_prune_stale_skips_relative_paths_when_owner_has_no_repo_root(
 
 
 def test_prune_stale_classifies_truly_missing_absolute_path_as_stale(
-    cat: Catalog, tmp_path: Path,
+    cat: ActiveCatalog, tmp_path: Path,
 ) -> None:
     """Absolute path that doesn't exist on disk → classified as stale
     (the original happy-path of the verb still works)."""
@@ -139,7 +144,7 @@ def test_prune_stale_classifies_truly_missing_absolute_path_as_stale(
 # ── nexus-tnz3: catalog gc dry-run is the default ──────────────────────────
 
 
-def test_gc_default_is_dry_run(cat: Catalog) -> None:
+def test_gc_default_is_dry_run(cat: ActiveCatalog) -> None:
     """nexus-tnz3: 4.29.1 made dry-run the default. ``nx catalog gc``
     with no flags must NOT delete."""
     owner = cat.register_owner("repo", "repo", repo_hash="abc")
@@ -155,7 +160,7 @@ def test_gc_default_is_dry_run(cat: Catalog) -> None:
     assert "would be deleted" in result.output
 
 
-def test_gc_no_dry_run_alone_is_still_report_only(cat: Catalog) -> None:
+def test_gc_no_dry_run_alone_is_still_report_only(cat: ActiveCatalog) -> None:
     """``--no-dry-run`` without ``--confirm`` still report-only."""
     owner = cat.register_owner("repo", "repo", repo_hash="abc")
     t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
@@ -168,7 +173,7 @@ def test_gc_no_dry_run_alone_is_still_report_only(cat: Catalog) -> None:
     assert cat.resolve(t) is not None
 
 
-def test_gc_no_dry_run_plus_confirm_actually_deletes(cat: Catalog) -> None:
+def test_gc_no_dry_run_plus_confirm_actually_deletes(cat: ActiveCatalog, catalog_env: Path) -> None:
     """Both flags required: ``--no-dry-run --confirm``."""
     owner = cat.register_owner("repo", "repo", repo_hash="abc")
     t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
@@ -181,7 +186,7 @@ def test_gc_no_dry_run_plus_confirm_actually_deletes(cat: Catalog) -> None:
     assert result.exit_code == 0
     assert cat.resolve(t) is None
     # Backup snapshot should have been written.
-    backup_dir = cat._dir / ".deleted-backups"
+    backup_dir = catalog_env / ".deleted-backups"
     assert backup_dir.exists()
     assert any(backup_dir.glob("catalog-gc-*.jsonl"))
 
@@ -189,7 +194,7 @@ def test_gc_no_dry_run_plus_confirm_actually_deletes(cat: Catalog) -> None:
 # ── nexus-9nim: link-bulk-delete --confirm safety rail ─────────────────────
 
 
-def test_link_bulk_delete_default_is_dry_run(cat: Catalog) -> None:
+def test_link_bulk_delete_default_is_dry_run(cat: ActiveCatalog) -> None:
     """nexus-9nim: 4.29.1 default flipped to dry-run."""
     owner = cat.register_owner("o", "repo", repo_hash="h")
     a = cat.register(owner, "A", content_type="prose", file_path="a.md")
@@ -207,7 +212,7 @@ def test_link_bulk_delete_default_is_dry_run(cat: Catalog) -> None:
 
 
 def test_link_bulk_delete_no_confirm_is_still_report_only(
-    cat: Catalog,
+    cat: ActiveCatalog,
 ) -> None:
     owner = cat.register_owner("o", "repo", repo_hash="h")
     a = cat.register(owner, "A", content_type="prose", file_path="a.md")
@@ -222,7 +227,7 @@ def test_link_bulk_delete_no_confirm_is_still_report_only(
     assert len(cat.links_from(a)) == 1
 
 
-def test_link_bulk_delete_confirm_actually_removes(cat: Catalog) -> None:
+def test_link_bulk_delete_confirm_actually_removes(cat: ActiveCatalog, catalog_env: Path) -> None:
     owner = cat.register_owner("o", "repo", repo_hash="h")
     a = cat.register(owner, "A", content_type="prose", file_path="a.md")
     b = cat.register(owner, "B", content_type="prose", file_path="b.md")
@@ -237,7 +242,7 @@ def test_link_bulk_delete_confirm_actually_removes(cat: Catalog) -> None:
     assert "Removed 1 link" in result.output
     assert len(cat.links_from(a)) == 0
     # Backup snapshot.
-    backup_dir = cat._dir / ".deleted-backups"
+    backup_dir = catalog_env / ".deleted-backups"
     assert any(
         p for p in backup_dir.glob("catalog-link-bulk-delete-*.jsonl")
     )
@@ -247,7 +252,8 @@ def test_link_bulk_delete_confirm_actually_removes(cat: Catalog) -> None:
 
 
 def test_delete_writes_backup_before_deleting(
-    cat: Catalog,
+    cat: ActiveCatalog,
+    catalog_env: Path,
 ) -> None:
     """``nx catalog delete <tumbler> --yes`` writes a JSONL snapshot
     BEFORE calling delete_document."""
@@ -262,7 +268,7 @@ def test_delete_writes_backup_before_deleting(
     )
     assert result.exit_code == 0, result.output
     assert cat.resolve(t) is None
-    backup_dir = cat._dir / ".deleted-backups"
+    backup_dir = catalog_env / ".deleted-backups"
     backups = list(backup_dir.glob("catalog-delete-*.jsonl"))
     assert len(backups) == 1, "expected exactly one delete backup"
     # Backup carries the deleted document.
@@ -275,7 +281,7 @@ def test_delete_writes_backup_before_deleting(
         for rec in lines
     )
 
-def test_list_backups_shows_recent_snapshots(cat: Catalog) -> None:
+def test_list_backups_shows_recent_snapshots(cat: ActiveCatalog) -> None:
     """``nx catalog list-backups`` enumerates JSONL files newest-first."""
     owner = cat.register_owner("o", "repo", repo_hash="h")
     t = cat.register(
@@ -290,7 +296,7 @@ def test_list_backups_shows_recent_snapshots(cat: Catalog) -> None:
     assert "rows=1" in result.output
 
 
-def test_vacuum_backups_dry_run_default(cat: Catalog) -> None:
+def test_vacuum_backups_dry_run_default(cat: ActiveCatalog, catalog_env: Path) -> None:
     """``nx catalog vacuum-backups`` defaults to dry-run."""
     owner = cat.register_owner("o", "repo", repo_hash="h")
     t = cat.register(
@@ -303,12 +309,13 @@ def test_vacuum_backups_dry_run_default(cat: Catalog) -> None:
     result = runner.invoke(main, ["catalog", "vacuum-backups"])
     assert result.exit_code == 0
     assert "Would remove 0 backup file" in result.output
-    backup_dir = cat._dir / ".deleted-backups"
+    backup_dir = catalog_env / ".deleted-backups"
     assert any(backup_dir.glob("*.jsonl"))
 
 
 def test_vacuum_backups_actually_removes_old_files(
-    cat: Catalog,
+    cat: ActiveCatalog,
+    catalog_env: Path,
 ) -> None:
     """Files older than the retention window are removed when
     ``--no-dry-run`` is passed."""
@@ -319,7 +326,7 @@ def test_vacuum_backups_actually_removes_old_files(
     runner = CliRunner()
     runner.invoke(main, ["catalog", "delete", str(t), "--yes"])
 
-    backup_dir = cat._dir / ".deleted-backups"
+    backup_dir = catalog_env / ".deleted-backups"
     backups = list(backup_dir.glob("*.jsonl"))
     assert len(backups) == 1
     # Backdate the file beyond retention.
@@ -335,7 +342,8 @@ def test_vacuum_backups_actually_removes_old_files(
 
 
 def test_prune_stale_writes_backup_for_truly_stale(
-    cat: Catalog, tmp_path: Path,
+    cat: ActiveCatalog, tmp_path: Path,
+    catalog_env: Path,
 ) -> None:
     """When prune-stale --no-dry-run --confirm runs, it writes a
     backup snapshot covering the deleted entries."""
@@ -351,5 +359,5 @@ def test_prune_stale_writes_backup_for_truly_stale(
     ])
     assert result.exit_code == 0
     assert "deleted 1" in result.output.lower()
-    backup_dir = cat._dir / ".deleted-backups"
+    backup_dir = catalog_env / ".deleted-backups"
     assert any(backup_dir.glob("catalog-prune-stale-*.jsonl"))

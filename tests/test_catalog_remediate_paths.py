@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.cli import main
 from nexus.commands.catalog_cmds.remediation import (
     _build_basename_index,
@@ -30,7 +31,6 @@ from nexus.commands.catalog_cmds.remediation import (
 # nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
 # JSONL / .catalog.db projection), which service mode deliberately opens
 # read-only as a frozen migration source (RDR-176 P1 Gap 2).
-pytestmark = pytest.mark.usefixtures("local_catalog_backend")
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -53,7 +53,13 @@ def catalog_env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def initialized_catalog(catalog_env):
-    cat = Catalog.init(catalog_env)
+    # nexus-i711w C-store: seed and re-read through the ACTIVE catalog.
+    # Service mode opens the local .catalog.db READ-ONLY (frozen migration
+    # source), so a direct Catalog handle cannot seed; and the verb under
+    # test reads via _get_catalog(), so a local seed would be invisible to
+    # it — the bucket-2 false-negative _catalog_fixture_ops exists to stop.
+    Catalog.init(catalog_env)
+    cat = ActiveCatalog()
     cat.register_owner("test-papers", "curator")
     return cat
 
@@ -204,10 +210,11 @@ def _register_paper(cat: Catalog, title: str, file_path: str,
                     physical_collection: str = "") -> str:
     """Helper: register a paper entry with a custom file_path. Returns tumbler."""
     from nexus.catalog.tumbler import Tumbler
-    owner_row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners WHERE name = 'test-papers'",
-    ).fetchone()
-    owner = Tumbler.parse(owner_row[0])
+    # Was a raw "SELECT tumbler_prefix FROM owners WHERE name = 'test-papers'".
+    # list_owners() has the same shape on both backends (nexus-i711w C-store).
+    match = [o for o in cat.list_owners() if o["name"] == "test-papers"]
+    assert match, "owner 'test-papers' not registered"
+    owner = Tumbler.parse(match[0]["tumbler_prefix"])
     tumbler = cat.register(
         owner=owner, title=title, content_type="paper",
         file_path=file_path,
@@ -251,7 +258,7 @@ class TestRemediatePathsCLI:
 
         from nexus.catalog.tumbler import Tumbler
         # Re-open the catalog so we read the freshly-written JSONL state.
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         expected = (papers_dir / "ml" / "sage.pdf").resolve()
         assert entry.file_path == str(expected)
@@ -291,7 +298,7 @@ class TestRemediatePathsCLI:
         assert "1 ambiguous" in result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         assert entry.file_path == "dup.pdf"  # unchanged
 
@@ -313,7 +320,7 @@ class TestRemediatePathsCLI:
         assert result.exit_code == 0, result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         assert "very/deep/nested" in entry.file_path
 
@@ -331,7 +338,7 @@ class TestRemediatePathsCLI:
         assert "1 no candidate found" in result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         assert entry.file_path == "missing.pdf"
         assert entry.meta.get("status") != "missing"
@@ -348,7 +355,7 @@ class TestRemediatePathsCLI:
         assert result.exit_code == 0, result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         assert entry.meta.get("status") == "missing"
 
@@ -373,7 +380,7 @@ class TestRemediatePathsCLI:
         ])
         assert result.exit_code == 0, result.output
 
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         # SAGE was scoped in → updated to abspath.
         sage = cat2.resolve(t1)
         assert sage.file_path.endswith("sage.pdf")
@@ -407,10 +414,11 @@ def _register_paper_with_meta(
     going through the (still-evolving) DT ingest path.
     """
     from nexus.catalog.tumbler import Tumbler
-    owner_row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners WHERE name = 'test-papers'",
-    ).fetchone()
-    owner = Tumbler.parse(owner_row[0])
+    # Was a raw "SELECT tumbler_prefix FROM owners WHERE name = 'test-papers'".
+    # list_owners() has the same shape on both backends (nexus-i711w C-store).
+    match = [o for o in cat.list_owners() if o["name"] == "test-papers"]
+    assert match, "owner 'test-papers' not registered"
+    owner = Tumbler.parse(match[0]["tumbler_prefix"])
     tumbler = cat.register(
         owner=owner, title=title, content_type="paper",
         file_path=file_path, meta=meta,
@@ -473,7 +481,7 @@ class TestRemediateViaDevonthink:
         assert "via DEVONthink" in result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         assert entry.file_path == str(real_pdf)
 
@@ -510,7 +518,7 @@ class TestRemediateViaDevonthink:
         assert result.exit_code == 0, result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         # Basename scan succeeded → file_path now absolute under papers_dir.
         assert entry.file_path.endswith("sage.pdf")
@@ -553,7 +561,7 @@ class TestRemediateViaDevonthink:
         assert result.exit_code == 0, result.output
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         # Basename scan against papers_dir found sage.pdf.
         assert entry.file_path.endswith("sage.pdf")
@@ -666,6 +674,6 @@ class TestRemediateViaDevonthink:
         assert "dry-run" in result.output.lower()
 
         from nexus.catalog.tumbler import Tumbler
-        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat2 = ActiveCatalog()
         entry = cat2.resolve(Tumbler.parse(tumbler))
         assert entry.file_path == "/old/missing/doc.pdf"  # untouched
