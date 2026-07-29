@@ -21,59 +21,12 @@ from typing import Any
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-class _ActiveCatalog:
-    """Read+write handle over whichever catalog substrate is live.
-
-    nexus-i711w Stage 2 sub-stage C-store. This file used to construct a local
-    ``Catalog`` directly and seed it with raw SQL, so it could only ever run
-    against SQLite (hence its old ``local_catalog_backend`` pin).
-
-    The factory deliberately hands back a read-ONLY reader and a write-ONLY
-    writer (RDR-146 P1.2) so a dataclass-returning read can never accidentally
-    round-trip the wire; its own docstring says mixed read+write sites hold
-    BOTH. This is that pairing, for tests. Dispatching on
-    ``CATALOG_WRITE_OPS`` — the same whitelist the writer proxy is built from —
-    means the split stays honest rather than being papered over: an op that is
-    not a sanctioned write simply is not routed to the writer.
-
-    The payoff is coverage, not convenience: the same test bodies now exercise
-    whichever catalog is real, and the SERVICE manifest path had no
-    batching-or-authority coverage at all before this.
-    """
-
-    def __init__(self) -> None:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
-
-        # Set FIRST: __getattr__ consults it, so a miss during construction
-        # would otherwise recurse.
-        self._write_ops = frozenset(CATALOG_WRITE_OPS)
-        self._reader = make_catalog_reader()
-        self._writer = make_catalog_writer()
-        # Bind the write ops as REAL attributes, not just __getattr__ misses:
-        # unittest.mock.patch.object refuses to patch an attribute the class
-        # only synthesises dynamically, and several tests here patch a write
-        # op to force its failure path.
-        for _op in self._write_ops:
-            if hasattr(self._writer, _op):
-                object.__setattr__(self, _op, getattr(self._writer, _op))
-
-    def __getattr__(self, name: str):
-        if name in self.__dict__.get("_write_ops", ()):
-            return getattr(self.__dict__["_writer"], name)
-        return getattr(self.__dict__["_reader"], name)
-
-    def close(self) -> None:
-        for h in (self.__dict__.get("_writer"), self.__dict__.get("_reader")):
-            if h is not None and hasattr(h, "close"):
-                h.close()
-
-
-def _make_catalog(tmp_path: Path) -> _ActiveCatalog:
+def _make_catalog(tmp_path: Path) -> ActiveCatalog:
     """Initialise the (autouse-isolated) catalog dir and return a live handle.
 
     ``tmp_path`` is kept in the signature so the 40-odd call sites did not have
@@ -83,10 +36,10 @@ def _make_catalog(tmp_path: Path) -> _ActiveCatalog:
     from nexus.config import catalog_path
 
     Catalog.init(catalog_path())
-    return _ActiveCatalog()
+    return ActiveCatalog()
 
 
-def _seed_doc(cat: _ActiveCatalog, collection: str) -> str:
+def _seed_doc(cat: ActiveCatalog, collection: str) -> str:
     """Register a document through the ACTIVE writer; return its tumbler.
 
     Replaces a raw ``INSERT INTO documents``. The old helper took the tumbler
@@ -106,7 +59,7 @@ def _seed_doc(cat: _ActiveCatalog, collection: str) -> str:
     return str(tumbler)
 
 
-def _chunk_count(cat: "_ActiveCatalog", doc: str) -> int:
+def _chunk_count(cat: ActiveCatalog, doc: str) -> int:
     """The documents.chunk_count cache, read through the public reader.
 
     Replaces ``SELECT chunk_count FROM documents WHERE tumbler=?``. Distinct
@@ -738,9 +691,6 @@ class TestManifestWriteBatchHook:
         # to append_manifest_chunks otherwise. Patch both so the
         # warning-on-exception contract is exercised regardless of
         # which branch fires.
-        # Patch the INSTANCE, not the type: _ActiveCatalog composes the live
-        # writer's ops onto itself per instance, so the class carries no such
-        # attribute to patch.
         with patch.object(
             cat, "append_manifest_chunks",
             side_effect=RuntimeError("induced manifest failure"),
