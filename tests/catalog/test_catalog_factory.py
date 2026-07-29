@@ -194,32 +194,6 @@ def _run_daemon_in_thread(daemon, ready: threading.Event, stop_evt: threading.Ev
         loop.close()
 
 
-class TestWriterDaemonRouted:
-    def test_routes_through_daemon_when_up(self, tmp_path: Path) -> None:
-        cd = Path(tempfile.mkdtemp(prefix="nxwr-", dir="/tmp"))
-        try:
-            from nexus.daemon.t2_daemon import T2Daemon
-
-            daemon = T2Daemon(config_dir=cd, db_path=tmp_path / "memory.db")
-            ready, stop_evt = threading.Event(), threading.Event()
-            th = threading.Thread(
-                target=_run_daemon_in_thread, args=(daemon, ready, stop_evt), daemon=True
-            )
-            th.start()
-            assert ready.wait(timeout=10)
-            try:
-                writer = make_catalog_writer(config_dir=cd)
-                assert writer.routed is True
-                owner = writer.register_owner(
-                    "acme", "project", repo_hash="h1", repo_root="/tmp/acme"
-                )
-                assert isinstance(owner, Tumbler)
-                writer.close()
-            finally:
-                stop_evt.set()
-                th.join(timeout=10)
-        finally:
-            shutil.rmtree(cd, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

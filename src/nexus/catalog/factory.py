@@ -296,36 +296,20 @@ class CatalogWriter:
         self._connect()
 
     def _connect(self) -> None:
-        from nexus.daemon.t2_client import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            T2DaemonNotReachableError,
-            T2SchemaVersionMismatchError,
-            make_t2_client,
-        )
+        # WAS DAEMON-ROUTED (RDR-128 class). The T2 daemon existed so a single
+        # writer held memory.db's WAL slot; that is a SQLite problem and the
+        # daemon is gone with it (nexus-i711w Stage 2 sub-stage B). This writer
+        # is therefore always direct now.
+        #
+        # The direct Catalog it falls to is ITSELF on the Stage 2 DELETE list
+        # (the rich SQLite catalog, sub-stage C) — this class collapses to
+        # service-only there. Left standing here so sub-stage B is about the
+        # daemon and nothing else.
+        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        client = None
-        try:
-            client = make_t2_client(config_dir=self._config_dir)
-            client.database.hello()  # force lazy connect; raises if down/skewed
-            self._client = client
-            self._routed = True
-            return
-        except (T2DaemonNotReachableError, T2SchemaVersionMismatchError) as exc:
-            if client is not None:
-                client.close()
-            # Documented-irreducible availability fallback (RDR-128 class):
-            # with no reachable daemon, this process is the sole writer, so
-            # a direct Catalog does not violate single-writer. Logged so the
-            # degraded path is visible.
-            _log.warning(
-                "catalog_writer_daemon_unreachable_fallback",
-                error=str(exc),
-                hint="start the T2 daemon (`nx daemon t2 start`) to route catalog writes",
-            )
-            from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-            path = catalog_path()
-            self._direct = Catalog(path, path / ".catalog.db")
-            self._routed = False
+        path = catalog_path()
+        self._direct = Catalog(path, path / ".catalog.db")
+        self._routed = False
 
     @property
     def routed(self) -> bool:
