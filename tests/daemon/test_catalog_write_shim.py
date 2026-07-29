@@ -240,104 +240,15 @@ def _make_local_catalog():
     return Catalog(d, d / ".catalog.db")
 
 
-# ---------------------------------------------------------------------------
-# Layer 2 — daemon dispatch composition
-# ---------------------------------------------------------------------------
-
-
-class TestDaemonHostsCatalogWrite:
-    def test_start_merges_catalog_write_ops(self, config_dir: Path, db_path: Path) -> None:
-        from nexus.daemon.t2_daemon import T2Daemon
-
-        daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
-
-        async def _drive() -> dict[str, object]:
-            await daemon.start()
-            try:
-                return dict(daemon._dispatch_table)
-            finally:
-                await daemon.stop()
-
-        table = _run(_drive())
-        for op in CATALOG_WRITE_OPS:
-            assert f"{CATALOG_WRITE_PREFIX}{op}" in table
-        # Low-level catalog reads still present under the catalog.* namespace.
-        assert any(k.startswith("catalog.") for k in table)
-
-
-# ---------------------------------------------------------------------------
-# Layer 3 — end-to-end over real sockets
-# ---------------------------------------------------------------------------
-
-
-def _run(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-
-def _run_daemon_in_thread(daemon, ready: threading.Event, stop_evt: threading.Event):
-    async def _main() -> None:
-        await daemon.start()
-        ready.set()
-        while not stop_evt.is_set():
-            await asyncio.sleep(0.05)
-        await daemon.stop()
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_main())
-    finally:
-        loop.close()
-
-
-class TestEndToEndWrites:
-    def test_register_and_link_round_trip_through_daemon(
-        self, config_dir: Path, db_path: Path, tmp_path: Path
-    ) -> None:
-        from nexus.daemon.t2_client import make_t2_client
-        from nexus.daemon.t2_daemon import T2Daemon
-
-        daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
-        ready, stop_evt = threading.Event(), threading.Event()
-        th = threading.Thread(
-            target=_run_daemon_in_thread, args=(daemon, ready, stop_evt), daemon=True
-        )
-        th.start()
-        assert ready.wait(timeout=10), "daemon did not start"
-
-        try:
-            client = make_t2_client(config_dir=config_dir)
-            owner = client.catalog_write.register_owner(
-                "acme", "project", repo_hash="h1", repo_root="/tmp/acme"
-            )
-            assert isinstance(owner, Tumbler)
-
-            d1 = client.catalog_write.register(
-                owner, "Doc One", content_type="paper", file_path="/tmp/acme/a.md"
-            )
-            d2 = client.catalog_write.register(
-                owner, "Doc Two", content_type="paper", file_path="/tmp/acme/b.md"
-            )
-            assert isinstance(d1, Tumbler) and isinstance(d2, Tumbler)
-            assert str(d1) != str(d2)
-
-            linked = client.catalog_write.link(d1, d2, "cites", "tester")
-            assert linked is True
-
-            client.close()
-        finally:
-            stop_evt.set()
-            th.join(timeout=10)
-
-        # Fresh local read sees the daemon-committed writes (reads stay local).
-        from nexus.catalog.catalog import Catalog
-        from nexus.config import catalog_path
-
-        cat = Catalog(catalog_path(), catalog_path() / ".catalog.db")
-        e1 = cat.resolve(d1)
-        assert e1 is not None and e1.title == "Doc One"
-        links = cat.links_from(d1)
-        assert any(str(getattr(l, "to_tumbler", getattr(l, "to_t", ""))) == str(d2) for l in links)
+# NO Layer 2 / Layer 3 (daemon dispatch composition + end-to-end over sockets):
+# both hosted the shim inside a live T2Daemon and drove it through a real
+# T2Client. Daemon and client are deleted (nexus-i711w Stage 2 sub-stage B).
+#
+# The Layer 1 shim unit tests above SURVIVE and are the reason this file does:
+# `CATALOG_WRITE_OPS` is still load-bearing for the non-daemon
+# `catalog/factory.py` (CatalogWriter and HttpCatalogWriter both enforce the
+# whitelist) and for `catalog/catalog_protocol.py`. The RPC-only helpers it
+# sits beside (make_write_shim, build_catalog_write_dispatch,
+# CATALOG_WRITE_PREFIX, encode_tumbler_args, decode_return) now have no
+# production consumer; their removal, and moving the surviving tuple out of
+# `daemon/` where it no longer belongs, is tracked separately.

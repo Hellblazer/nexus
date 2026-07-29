@@ -1188,28 +1188,33 @@ def unload_stale_service_launchagent(config_dir: Path) -> list[str]:
 
 
 def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
-    """Remove a service-mode box's stray ``com.nexus.t2`` LaunchAgent.
+    """Remove a stray ``com.nexus.t2`` LaunchAgent left by an older install.
 
-    ``config_dir`` is accepted but not read: the storage-mode flag and the
-    autostart unit are both process/filesystem-global, not config-dir
-    scoped. Kept as a parameter purely so this leg's call signature
-    matches its siblings (:func:`converge_engine`, :func:`heal_diag_view`)
-    at every call site (the finish pass, ``nx daemon restart-stale``,
-    ``nx init --service``) without a special case.
+    ``config_dir`` is accepted but not read: the autostart unit is
+    filesystem-global, not config-dir scoped. Kept as a parameter purely so
+    this leg's call signature matches its siblings
+    (:func:`converge_engine`, :func:`heal_diag_view`) at every call site
+    (the finish pass, ``nx daemon restart-stale``, ``nx init --service``)
+    without a special case.
 
-    Gated on the SAME oracle ``t2_daemon.py`` itself checks
-    (:func:`nexus.db.storage_mode.storage_backend_for` — env-based, no
-    filesystem probe needed) — so this leg fires exactly when the T2
-    daemon would have declined to start anyway. Local-mode boxes (or any
-    box where the T2 tier is the live substrate) are untouched: a local
-    ``nx daemon t2 install --autostart`` round-trip must keep recreating
-    the agent (verified in the test suite), never fought by this leg.
+    NO LONGER GATED ON SERVICE MODE (nexus-i711w Stage 2 sub-stage B). The
+    gate used to read ``storage_backend_for("memory") == SERVICE``, mirroring
+    the oracle ``t2_daemon.py`` itself checked, so that a local-mode box could
+    keep its unit — on such a box the T2 daemon was the live substrate and a
+    local ``nx daemon t2 install --autostart`` round-trip legitimately
+    recreated the agent.
+
+    That reasoning died with the daemon. No box of any storage mode can start
+    a T2 daemon now, and no box can reinstall the unit, so a surviving unit is
+    stale EVERYWHERE — it fires ``nx daemon t2 start``, a command that no
+    longer exists, on every boot forever. Keeping the service-mode gate would
+    have left exactly the SQLite-mode boxes, the ones most likely to carry a
+    unit, unfixed.
 
     Delegates the actual removal to
-    :func:`nexus.daemon.installer.uninstall_autostart` (``tier="t2"``) —
-    the SAME launchctl-bootout + plist-removal primitive ``nx daemon t2
-    uninstall --autostart`` already uses; no hand-typed duplicate of the
-    launchd mechanics here.
+    :func:`nexus.daemon.installer.uninstall_autostart` (``tier="t2"``), whose
+    "t2" default survives the daemon for this caller's sake; no hand-typed
+    duplicate of the launchd mechanics here.
 
     Never raises. Mirrors :func:`heal_diag_view`'s two-tier discipline:
     a failure just DETERMINING applicability (can't read the storage-mode
@@ -1221,14 +1226,6 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     line — there IS something a human needs to act on in that case.
     """
     try:
-        from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred, circular-dep avoidance
-            StorageBackend,
-            storage_backend_for,
-        )
-
-        if storage_backend_for("memory") != StorageBackend.SERVICE:
-            return []
-
         from nexus.commands.daemon import _autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
 
         if _autostart_unit_installed() is None:
@@ -1247,9 +1244,10 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     except Exception as exc:  # noqa: BLE001 — a CONFIRMED-present agent failed to remove; loud, never a crash
         _log.warning("t2_launchagent_unload_failed", error=str(exc))
         return [
-            f"NEEDS HUMAN: service mode detected a stray T2 autostart unit "
+            f"NEEDS HUMAN: found a stray T2 autostart unit "
             f"({_T2_AUTOSTART_UNIT_KIND}) but could not remove it ({exc}) — "
-            "run `nx daemon t2 uninstall --autostart` yourself"
+            f"delete it yourself; it fires a `nx daemon t2 start` that no "
+            f"longer exists on every boot"
         ]
 
     if result.status != UninstallStatus.REMOVED:
@@ -1257,8 +1255,8 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
 
     actions = [
         f"removed the stray T2 autostart unit ({_T2_AUTOSTART_UNIT_KIND}; "
-        "service mode — the T2 daemon is never started; storage is the "
-        f"engine service): {result.dest}"
+        "the T2 daemon is retired — storage is the engine service): "
+        f"{result.dest}"
     ]
     actions.extend(f"NOTE: {w}" for w in result.warnings)
     return actions

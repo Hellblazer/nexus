@@ -147,14 +147,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # RDR-128 P3: the `enrich aspects delete` command now routes through
     # mcp_infra.t2_index_write, whose direct-fallback opens
     # T2Database(mcp_infra.default_db_path()). Force that fallback (no
-    # daemon in tests) at the test db_path so the routed write lands here.
+    # at the test db_path so the write lands here.
     monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
 
-    def _no_daemon(**_kwargs):
-        from nexus.daemon.t2_client import T2DaemonNotReachableError
-        raise T2DaemonNotReachableError("no daemon in tests")
-
-    monkeypatch.setattr("nexus.daemon.t2_client.make_t2_client", _no_daemon)
+    # (No daemon stub needed: `t2_index_write` stopped routing through the T2
+    # daemon in nexus-i711w Stage 2 sub-stage B, so the SQLite write already
+    # lands directly on db_path.)
 
     return catalog_dir, db_path, cat
 

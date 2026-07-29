@@ -457,18 +457,24 @@ def test_epsilon_allow_connect_counted_as_population(tmp_path):
     assert [v for v in result.violations if v.file == str(target)] == []
 
 
-def test_daemon_construction_is_allowlisted(tmp_path):
-    """db/ AND daemon/ are construction-allowlisted (the daemon is the
-    legitimate single writer). Under the RDR-128 P3 enforcement flip,
-    removing daemon/ from the allowlist must reveal strictly more
-    VIOLATIONS — the daemon's own (un-annotated) ``T2Database(...)``
-    constructions become hard violations once unallowlisted."""
+def test_construction_allowlist_is_load_bearing(tmp_path):
+    """The construction allowlist must actually exempt something.
+
+    Was ``test_daemon_construction_is_allowlisted``, asserting that removing
+    ``daemon/`` revealed strictly more violations. That premise died with
+    t2_daemon.py (nexus-i711w Stage 2 sub-stage B) — no daemon/ file
+    constructs a T2Database now, so the prefix exempted nothing and was
+    dropped from the allowlist entirely.
+
+    Re-pointed at ``db/``, the one surviving prefix, so this keeps proving the
+    allowlist is load-bearing rather than decorative: emptying it must reveal
+    strictly more violations. An allowlist that exempts nothing is a lint whose
+    exemption logic is never exercised."""
     default = _check().total_violations
-    db_only = _check(
-        construction_allowlist_prefixes=("src/nexus/db/",)
-    ).total_violations
-    assert db_only > default, (
-        "daemon/ T2Database construction(s) should be exempt by default"
+    none_allowed = _check(construction_allowlist_prefixes=()).total_violations
+    assert none_allowed > default, (
+        "the construction allowlist exempts nothing — either the lint's "
+        "exemption path is dead, or db/ stopped constructing T2Database"
     )
 
 

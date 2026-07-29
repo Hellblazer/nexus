@@ -30,24 +30,18 @@ def default_db_path() -> Path:
 
 @contextmanager
 def t2_handle() -> Iterator[Any]:
-    """Open a T2 handle via the running T2 daemon.
+    """Open a T2 handle for the user-facing CLI memory / plan commands.
 
-    RDR-120 P6 follow-up (nexus-w6txl): user-facing CLI memory / plan
-    commands route through ``T2Client`` so multi-process operators
-    (host CLI + Cowork-bridged MCP server + dev-container CLI) share
-    a single arbitrated SQLite writer rather than each opening their
-    own connection and racing the WAL.
+    RDR-120 P6 follow-up (nexus-w6txl) routed these through a ``T2Client`` so
+    multi-process operators (host CLI + Cowork-bridged MCP server +
+    dev-container CLI) shared a single arbitrated SQLite writer rather than
+    each opening its own connection and racing the WAL. The daemon that
+    arbitrated them is retired (nexus-i711w Stage 2 sub-stage B); in service
+    mode Postgres is the arbiter and the concern does not arise.
 
-    Returns a context-managed ``T2Client`` connected to the running
-    T2 daemon. Raises ``T2DaemonNotReachableError`` if the daemon is
-    not running; the message names ``nx daemon t2 start`` as the
-    operator fix.
-
-    Tests monkeypatch this helper to yield an in-process
-    ``T2Database`` fixture; the call sites use ``.memory.<method>``
-    on the yielded object, which is identical between
-    ``T2Database.memory`` (a :class:`MemoryStore`) and
-    ``T2Client.memory`` (a :class:`_StoreProxy`).
+    Yields a service-backed ``T2Database``. Tests monkeypatch this helper to
+    yield an in-process ``T2Database`` fixture; call sites use
+    ``.memory.<method>`` on the yielded object either way.
 
     Operator/debug paths that MUST work when the daemon is offline
     (``nx upgrade``, ``nx doctor``, ``_session_end_launcher``, etc.)

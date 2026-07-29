@@ -1487,27 +1487,54 @@ class TestUnloadStaleServiceLaunchagent:
 
 
 class TestUnloadStaleT2Launchagent:
-    """nexus-c0vby (GH #1405 defect 2): service mode must never leave a
-    respawning com.nexus.t2 LaunchAgent behind."""
+    """nexus-c0vby (GH #1405 defect 2): no box may be left with a respawning
+    com.nexus.t2 LaunchAgent behind."""
 
-    def test_local_mode_untouched(self, tmp_path):
-        """Local mode (or the default env) is not service-backed for
-        'memory' -- the T2 daemon IS the live substrate there, so this
-        leg must never touch the agent, regardless of whether one is
-        installed."""
+    def test_local_mode_ALSO_removed_after_the_daemon_retired(self, tmp_path):
+        """CONTRACT FLIPPED by nexus-i711w Stage 2 sub-stage B.
+
+        This test used to assert the OPPOSITE — that local mode was left
+        untouched — and it was right to: the T2 daemon was the live substrate
+        on a SQLite-mode box, so its LaunchAgent was legitimate there, and a
+        local `nx daemon t2 install --autostart` round-trip was expected to
+        keep recreating it.
+
+        The daemon is retired. No box of any storage mode can start one, and
+        none can reinstall the unit, so a surviving unit is stale EVERYWHERE —
+        it fires `nx daemon t2 start`, a command that no longer exists, on
+        every boot forever. Keeping the service-mode gate would have left
+        exactly the SQLite-mode boxes — the ones most likely to be carrying a
+        unit — unfixed.
+        """
+        from pathlib import Path
+
+        from nexus.daemon.installer import UninstallResult, UninstallStatus
         from nexus.db.storage_mode import StorageBackend
 
+        dest = tmp_path / "com.nexus.t2.plist"
         with patch(
             "nexus.db.storage_mode.storage_backend_for",
             return_value=StorageBackend.SQLITE,
         ), patch(
-            "nexus.commands.daemon._autostart_unit_installed"
-        ) as probe, patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=Path(dest),
+        ), patch(
+            "nexus.daemon.installer.uninstall_autostart",
+            return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest),
+        ) as uninstall:
+            actions = unload_stale_t2_launchagent(tmp_path)
+        uninstall.assert_called_once_with(tier="t2")
+        assert len(actions) == 1
+        assert "com.nexus.t2" in actions[0]
+
+    def test_no_agent_installed_is_noop(self, tmp_path):
+        """The probe, not the storage mode, is what gates the removal now."""
+        with patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=None,
+        ), patch(
             "nexus.daemon.installer.uninstall_autostart"
         ) as uninstall:
             actions = unload_stale_t2_launchagent(tmp_path)
         assert actions == []
-        probe.assert_not_called()
         uninstall.assert_not_called()
 
     def test_service_mode_no_agent_installed_is_noop(self, tmp_path):

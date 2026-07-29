@@ -80,13 +80,16 @@ CATALOG_PHASE_ALLOWLIST_PREFIX: str = "src/nexus/catalog/"
 BANNED_CONSTRUCTORS: tuple[str, ...] = ("T2Database", "T3Database")
 
 
-#: Prefixes allowed to construct ``T2Database`` / ``T3Database``
-#: directly: the substrate that defines them (``db/``) and the daemon
-#: that runs them (``daemon/``). Distinct from the connect-allowlist
-#: (which includes ``catalog/`` P0-P4 but not ``daemon/``).
+#: Prefixes allowed to construct ``T2Database`` / ``T3Database`` directly:
+#: the substrate that defines them (``db/``). Distinct from the
+#: connect-allowlist (which includes ``catalog/`` P0-P4).
+#:
+#: ``daemon/`` was here as "the daemon that runs them". It ran nothing after
+#: nexus-i711w Stage 2 sub-stage B deleted t2_daemon.py, and no daemon/ file
+#: constructs a T2Database any more, so the prefix is dropped rather than left
+#: standing as unused permission.
 T2DATABASE_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/db/",
-    "src/nexus/daemon/",
 )
 
 
@@ -107,26 +110,32 @@ CATALOG_BANNED_CONSTRUCTORS: tuple[str, ...] = ("Catalog",)
 
 
 #: Prefixes allowed to construct ``Catalog`` directly: the module that
-#: defines it (``catalog/``) and the substrate/daemon that run it
-#: (``db/``, ``daemon/``). Every other site is a consumer that must
-#: route catalog writes through the daemon client — those are the
-#: cutover surface counted by ``catalog_constructions``.
+#: defines it (``catalog/``) and the substrate that runs it (``db/``).
+#: Every other site is a consumer that must route catalog writes through
+#: the factory — those are the cutover surface counted by
+#: ``catalog_constructions``.
+#:
+#: ``daemon/`` dropped with t2_daemon.py (nexus-i711w Stage 2 sub-stage B):
+#: no daemon/ file constructs a Catalog any more.
 CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/db/",
-    "src/nexus/daemon/",
     "src/nexus/catalog/",
 )
 
 
 #: nexus-qnp5s: allowlist for ``._db`` attribute accesses.
-#: Only the catalog module itself and the daemon (which legitimately owns the
-#: catalog write handle via t2_daemon.py) may access ``._db`` internally.
-#: All consumer code must call the public API (curator_owner_tumbler_by_name,
+#: Only the catalog module itself may access ``._db`` internally. All consumer
+#: code must call the public API (curator_owner_tumbler_by_name,
 #: chunk_counts_for_docs, links_from_batch, etc.) which works on both
 #: SQLite Catalog and HttpCatalogClient.
+#:
+#: ``src/nexus/daemon/`` was here because t2_daemon.py owned the catalog write
+#: handle. That module is deleted (nexus-i711w Stage 2 sub-stage B) and no
+#: daemon/ file accesses ``._db`` any more, so the prefix is dropped rather
+#: than left standing — an allowlist entry nothing needs is permission granted
+#: to whatever lands there next.
 CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/catalog/",
-    "src/nexus/daemon/",  # t2_daemon.py legitimately owns the catalog write handle
 )
 
 #: nexus-qnp5s: baseline for ``._db`` accesses outside the catalog module.

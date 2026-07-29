@@ -730,13 +730,9 @@ class TestSessionEndFlushViaLease:
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.setenv("NX_SESSION_ID", live_session_id)
 
-        def _no_daemon(**_kwargs):
-            from nexus.daemon.t2_client import T2DaemonNotReachableError
-            raise T2DaemonNotReachableError("no daemon in tests")
-
-        import unittest.mock as mock
-        with mock.patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
-            output = session_end_flush()
+        # (No daemon stub: `t2_index_write` stopped routing through the T2 daemon
+        # in nexus-i711w Stage 2 sub-stage B; the flush writes directly.)
+        output = session_end_flush()
 
         assert "Flushed 1" in output, (
             f"expected the flagged entry to be flushed via the published lease, got: {output!r}"
@@ -757,13 +753,9 @@ class TestSessionEndFlushViaLease:
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        def _no_daemon(**_kwargs):
-            from nexus.daemon.t2_client import T2DaemonNotReachableError
-            raise T2DaemonNotReachableError("no daemon in tests")
-
-        import unittest.mock as mock
-        with mock.patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
-            output = session_end_flush()
+        # (No daemon stub: `t2_index_write` stopped routing through the T2 daemon
+        # in nexus-i711w Stage 2 sub-stage B; the flush writes directly.)
+        output = session_end_flush()
 
         assert "Flushed 0" in output
 
