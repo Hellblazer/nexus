@@ -189,96 +189,20 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
     )
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
-def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
-    inject_local_t3: T3Database,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RDR-172 / nexus-pyn35: when no catalog tumbler was minted, store_put
-    forwards ``doc_id=''`` — the blank sentinel the service NULL-coerces
-    (``nullIfBlank``), which satisfies the FK and still extracts from the
-    queued content. It must NOT fall back to the chunk natural-id.
-
-    PINNED to the local catalog (nexus-aqbrk). The premise is an ABSENT
-    catalog: the test points NEXUS_CATALOG_PATH at an uninitialised dir so
-    the store hook mints nothing and returns ``('', False)``. That state
-    cannot exist in service mode — ``make_catalog_reader()`` always returns
-    a ``_SharedServiceCatalogHandle``, the hook registers, and it returned
-    ``('1.1.1', True)``. Unsatisfiable rather than wrong: this is the
-    canonical shape nexus-aqbrk's own description names ("assert
-    make_catalog_reader() is None means 'no catalog file' under SQLite").
-
-    SERVICE HALF IS OWNED: tests/test_e9ru2_catalog_gate_sweep.py
-    ::test_register_or_lookup_fresh_box_no_local_catalog_created — service
-    mode on a virgin box registers to the SERVICE and creates NO local
-    catalog, which is the deliberate counterpart behaviour (nexus-e9ru2).
-    """
-    import hashlib
-
-    from nexus.mcp.core import store_put
-    local_t3 = inject_local_t3
-
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
-
-    content = "# No-catalog finding\n\nNo tumbler should be minted here."
-    captured: dict[str, str] = {}
-
-    def _capture_fire_document(
-        source_path: str, collection: str, doc_content: str,
-        *, doc_id: str = "", **_kw,
-    ) -> None:
-        captured["doc_id"] = doc_id
-
-    # Spy on the real hook so we can distinguish the LEGITIMATE no-catalog
-    # return ('' because Catalog.is_initialized is False) from a swallowed
-    # exception that would ALSO leave catalog_doc_id='' (substantive-critic
-    # finding): both forward doc_id='', so without this spy a future refactor
-    # that broke the hook would pass vacuously.
-    # nexus-b6enc: MCP store_put now calls the TRACKED variant (created
-    # flag drives the ghost-register compensation); spy on that.
-    from nexus.catalog.store_hook import catalog_store_hook_tracked as _real_hook
-    spy: dict[str, object] = {}
-
-    def _spy_hook(*a, **k):
-        rv = _real_hook(*a, **k)
-        spy["calls"] = spy.get("calls", 0) + 1  # type: ignore[operator]
-        spy["ret"] = rv
-        return rv
-
-    with patch("nexus.catalog.store_hook.catalog_store_hook_tracked",
-               side_effect=_spy_hook), \
-         patch("nexus.mcp.core._get_t3", return_value=local_t3), \
-         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
-         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
-         patch("nexus.mcp.core._hooks.fire_document",
-               side_effect=_capture_fire_document), \
-         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
-        result = store_put(
-            content=content,
-            collection="knowledge",
-            title="pyn35-no-catalog",
-            tags="test",
-        )
-    assert "Stored" in result, f"store_put failed: {result}"
-
-    # The hook actually RAN and RETURNED '' — this is the no-catalog path,
-    # not a never-called or raised path that defaulted to '' by accident.
-    assert spy.get("calls") == 1, "catalog_store_hook must actually run once"
-    assert spy.get("ret") == ("", False), (
-        f"hook must return ('', False) on the no-catalog path, got {spy.get('ret')!r}"
-    )
-
-    chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
-    assert captured.get("doc_id") == "", (
-        "no-catalog path must forward an empty doc_id (the blank->NULL "
-        f"sentinel), got {captured.get('doc_id')!r}"
-    )
-    assert captured.get("doc_id") != chunk_id, (
-        "must not fall back to the chunk natural-id when no tumbler exists"
-    )
-
-
+# test_mcp_store_put_forwards_blank_doc_id_when_no_catalog was REMOVED in
+# nexus-i711w Stage 2 sub-stage C-store. Its premise was an ABSENT catalog —
+# it pointed NEXUS_CATALOG_PATH at an uninitialised dir so the store hook
+# minted nothing and returned ('', False). That state cannot exist once the
+# local catalog is gone: make_catalog_reader() always returns a
+# _SharedServiceCatalogHandle, so the hook registers and returns a real
+# tumbler. Unsatisfiable rather than wrong, and its own docstring said so
+# while it was still pinned.
+#
+# The behaviour it guarded is NOT lost. The blank-doc_id forwarding contract
+# is still pinned below by ..._when_catalog_hook_raises (same assertion, a
+# reachable trigger), and the service-side counterpart it named lives in
+# tests/test_e9ru2_catalog_gate_sweep.py::
+# test_register_or_lookup_fresh_box_no_local_catalog_created.
 def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
     inject_local_t3: T3Database,
     catalog_env: Path,

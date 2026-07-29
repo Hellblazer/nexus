@@ -796,21 +796,21 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot restorable via `nx catalog undelete`.
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot to `.deleted-backups/` (inspectable, but there is no in-product restore verb — see `list-backups` below).
 
-### nx catalog list-backups / undelete / vacuum-backups
+### nx catalog list-backups / vacuum-backups
 
 ```
 nx catalog list-backups
-nx catalog undelete BACKUP
 nx catalog vacuum-backups [--older-than-days N] [--no-dry-run]
 ```
 
 Lifecycle verbs over the JSONL snapshots that destructive catalog verbs (`delete`, `gc`, `prune-stale`, `link-bulk-delete`) write under `$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` BEFORE deleting (RDR-106).
 
-- `list-backups` shows each recoverable snapshot: filename, originating verb, timestamp, row count, reason.
-- `undelete BACKUP` restores the documents (and their inbound/outbound links) from a snapshot. `BACKUP` is a filename inside `.deleted-backups/` or an absolute path. Documents are restored with their ORIGINAL tumblers (the minting path is bypassed) as `DocumentRegistered` events, links via idempotent `link_if_absent`; re-running on an already-restored backup is a no-op.
-- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes. Vacuumed rows are no longer recoverable via `undelete`.
+- `list-backups` shows each snapshot: filename, originating verb, timestamp, row count, reason.
+- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes.
+
+> **No in-product restore.** `nx catalog undelete` was removed in 7.0.0. Restoring re-emitted documents through the local catalog's low-level event log, which has no service-mode equivalent, and the local catalog itself is gone. Snapshots are still written before every destructive verb and are still plain JSONL you can inspect and re-import by hand — but treat the destructive verbs as **not reversible in-product** when deciding whether to run them.
 
 ### nx catalog remediate-paths
 
@@ -834,7 +834,7 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
 ```
 
-Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes an `undelete`-restorable backup snapshot before deleting.
+Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes a JSONL backup snapshot before deleting (no in-product restore verb — see `list-backups`).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -849,14 +849,6 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 ### nx catalog list / stats / owners / delete
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
-
-### nx catalog dedupe-owners
-
-```
-nx catalog dedupe-owners [--apply] [--json]
-```
-
-Consolidate orphan owners (nexus-tmbh). Classifies each curator owner as `alias` (synthetic `<repo>-<hash>` names mapping to a canonical repo owner: each doc is aliased via `documents.alias_of`, matched by file_path; rows stay so external references keep resolving), `remove` (`int-cce-*` / `int-prov-*` / `pdf-e2e-*` test leakage predating RDR-060's autouse fixture; documents, links, and the owner row deleted with JSONL tombstones), or `skip` (everything else, manual review). Dry-run by default; `--apply` commits, then `nx catalog sync` pushes the audit trail. `--json` emits the full plan.
 
 ### nx catalog backfill-owner-id
 
@@ -929,16 +921,15 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ### nx catalog doctor
 
 ```
-nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift]
-                  [--strict-not-in-t3] [--chunk-size-distribution] [--chunk-text-dedup]
+nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
-- `--replay-equality`: synthesizer + projector round-trip against live SQLite (Phase 1).
-- `--t3-doc-id-coverage`: every non-orphan T3 chunk carries a `doc_id` matching the event log (Phase 2).
+
+> `--replay-equality`, `--t3-doc-id-coverage` and `--strict-not-in-t3` were removed in 7.0.0. All three read their expectations out of the local `events.jsonl`, and replay-equality diffed a projection rebuilt from it against the local `.catalog.db` — artifacts that do not exist in service mode, where the catalog is owned by the nexus service. They already refused there; they are now gone along with the local catalog.
+
 - `--collections-drift`: every T3 collection and every distinct `documents.physical_collection` has a row in the collections projection (Phase 6 release gate).
-- `--strict-not-in-t3` (modifier for `--t3-doc-id-coverage`): treat "event log claims a chunk T3 doesn't have" as a hard failure instead of a warning (warning is the default so legitimate deletions don't permanently red the doctor).
 - `--chunk-size-distribution`: per-collection chunk-size stats (p50/p95/p99/max); FAIL on any chunk over `MAX_DOCUMENT_BYTES`, WARN when >5% of chunks are micro-chunks (<100 bytes).
 - `--chunk-text-dedup`: chunk-text-hash duplication ratios — within-collection dupes >5% signal a chunker bug; >100 cross-collection dupes flag a cross-ingest investigation lead.
 - `--t3-vs-catalog`: projection-vs-T3 triage — T3 collections with no catalog documents (orphan), projected collections with 0 chunks (zombie), and catalog documents whose `physical_collection` is gone from T3.
@@ -956,20 +947,6 @@ nx catalog verify [--collection NAME] [--heal] [--json]
 Reconcile catalog tumblers against their T3 collections: reports *ghost* tumblers, catalog entries whose `meta.doc_id` has no matching row in T3. Ghosts most commonly survive from 4.9.7/4.9.8 installs where an oversize `store_put` silently truncated before the #244 guard landed; fresh writes cannot create new ones. The sweep is cheap (one batched id-existence probe per 300-id page; no ANN, no payload). Entries without a `doc_id` are skipped as unverifiable.
 
 `--heal` enters an interactive loop per ghost: drop the tumbler, print the `nx store put` template that would repopulate it, skip, or quit. `--json` emits a machine-parseable `{collection: [{tumbler, title, doc_id}]}` map on stdout (CI-friendly). Collections that cannot be read are reported to stderr as SKIPPED, never silently folded in as "all ghosts" or "no ghosts" (nexus-ou4tb), and the exit code marks the verify incomplete.
-
-### nx catalog synthesize-log
-
-```
-nx catalog synthesize-log [--check] [--dry-run] [--no-verify] [--force]
-```
-
-Rebuild `events.jsonl` from the catalog's JSONL state in place: the companion to `nx catalog doctor` for catalogs stuck in bootstrap-fallback mode (sparse event log vs `documents.jsonl`). The lossless alternative to `rm -rf catalog && nx catalog setup`, which would discard user-authored typed links and owner registrations (not reconstructible from T3 alone).
-
-- `--check`: detect fallback mode without writing; exit 0 when healthy, 1 when fallback is active.
-- Default run is a no-op unless fallback is active; `--force` synthesizes anyway, harvesting existing event-log doc_ids first so T3 chunk metadata referencing them does not go stale.
-- `--dry-run`: print per-event-type counts, write nothing.
-
-Safety: snapshots the entire catalog directory to a sibling before writing (retained even on PASS, for forensics), writes atomically (tmp + fsync + rename), then verifies via the doctor's replay-equality check. On verify FAIL the failed state is rotated aside and the snapshot restored; three artifacts remain for forensics. `--no-verify` skips the verification (only when you have verified independently).
 
 ### nx catalog orphan-backfill
 

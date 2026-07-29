@@ -249,59 +249,9 @@ class TestUnlinkEventOrderingAfterCommit:
         assert link_deleted_idx > commit_idx, (
             f"LinkDeleted emitted before db.commit; sequence: {sequence}"
         )
-
-
-# ── C4: doctor links snapshot strips id by NAME, not position ───────────
-
-
-class TestDoctorLinksSnapshotByName:
-    def test_snapshot_table_excludes_named_columns(self, tmp_path):
-        from nexus.commands.catalog_cmds.doctor import _snapshot_table
-
-        # Build a CatalogDB and seed one link.
-        db = CatalogDB(tmp_path / ".catalog.db")
-        db.execute(
-            "INSERT OR REPLACE INTO owners "
-            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("1.1", "x", "repo", "h", "d", ""),
-        )
-        db.execute(
-            "INSERT INTO documents "
-            "(tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, "
-            "indexed_at, metadata, source_mtime, source_uri) "
-            "VALUES (?, ?, '', 0, '', '', '', '', 0, '', '', '{}', 0, '')",
-            ("1.1.1", "doc1"),
-        )
-        db.execute(
-            "INSERT INTO links "
-            "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata) "
-            "VALUES (?, ?, ?, '', '', 'manual', '', '{}')",
-            ("1.1.1", "1.1.1", "self"),
-        )
-        db.commit()
-
-        rows_with_id = _snapshot_table(db._conn, "links")
-        rows_without_id = _snapshot_table(
-            db._conn, "links", exclude_cols=["id"],
-        )
-        assert len(rows_with_id[0]) == len(rows_without_id[0]) + 1
-        # The excluded column must be id (not a positional slice).
-        cur = db._conn.execute("PRAGMA table_info(links)")
-        cols = [r[1] for r in cur.fetchall()]
-        id_index = cols.index("id")
-        # rows_with_id[0][id_index] is the autoincrement; without_id
-        # must have all columns except that one.
-        with_minus_id = (
-            rows_with_id[0][:id_index] + rows_with_id[0][id_index + 1:]
-        )
-        assert rows_without_id[0] == with_minus_id
-        db.close()
-
-
-# ── I-projector: _v0_document_deleted prefers tumbler ────────────────────
+# TestDoctorLinksSnapshotByName removed (nexus-i711w Stage 2 sub-stage C-store):
+# its subject was doctor's _snapshot_table column-exclusion-by-name, and that
+# helper died with _run_replay_equality, its only caller.
 
 
 class TestV0DocumentDeletedUsesTumbler:

@@ -31,6 +31,7 @@ import structlog
 from structlog.testing import capture_logs
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.commands.index import _CatalogBackedRegistry
 from nexus.repos import _read_repos_json
 
@@ -54,7 +55,10 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    # nexus-i711w C-store: the ACTIVE catalog. Service mode opens the local
+    # .catalog.db read-only (frozen migration source), so a direct handle
+    # cannot seed.
+    return ActiveCatalog()
 
 
 @pytest.fixture
@@ -63,9 +67,6 @@ def repo(tmp_path: Path) -> Path:
     r.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=r, check=True)
     return r
-
-
-@pytest.mark.usefixtures("local_catalog_backend")
 class TestCriticalThreeModelVersionV1:
     """CRITICAL-3, against a WRITABLE local catalog.
 
@@ -94,13 +95,10 @@ class TestCriticalThreeModelVersionV1:
             docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
         )
 
-        row = cat._db.execute(
-            "SELECT model_version FROM collections "
-            "WHERE name = 'knowledge__myrepo-1-1__voyage-context-3__v1'"
-        ).fetchone()
+        row = cat.get_collection("knowledge__myrepo-1-1__voyage-context-3__v1")
         assert row is not None
-        assert row[0] == "v1", (
-            f"Expected conformant 'v1' form; saw {row[0]!r}. "
+        assert row["model_version"] == "v1", (
+            f"Expected conformant 'v1' form; saw {row['model_version']!r}. "
             "Indicates the model_version='1' bug regressed."
         )
 
@@ -127,12 +125,9 @@ class TestCriticalThreeModelVersionV1:
         adapter.update(repo, docs_collection=col_name)
 
         # model_version must still be 'v1'.
-        row = cat._db.execute(
-            "SELECT model_version FROM collections WHERE name = ?",
-            (col_name,),
-        ).fetchone()
+        row = cat.get_collection(col_name)
         assert row is not None
-        assert row[0] == "v1"
+        assert row["model_version"] == "v1"
 
 
 class TestCriticalFourMalformedReposJsonNotDeleted:
@@ -205,9 +200,6 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
             except (json.JSONDecodeError, ValueError):
                 # Or raise — also acceptable.
                 pass
-
-
-@pytest.mark.usefixtures("local_catalog_backend")
 class TestCriticalFiveTOCTOUOwnerRace:
     """CRITICAL-5, against a WRITABLE local catalog. Same pin, same reason.
 
@@ -262,10 +254,9 @@ class TestCriticalFiveTOCTOUOwnerRace:
         # Catalog must have exactly ONE owner row for this repo_hash.
         from nexus.repo_identity import _repo_identity
         _, repo_hash = _repo_identity(repo)
-        rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?",
-            (repo_hash,),
-        ).fetchall()
+        # Was a raw SELECT on owners. list_owners() carries repo_hash and
+        # has the same shape on both backends (nexus-i711w C-store).
+        rows = [o for o in cat.list_owners() if o["repo_hash"] == repo_hash]
         assert len(rows) == 1, (
             f"Expected 1 owner row for repo_hash={repo_hash!r}; "
             f"saw {len(rows)}: {rows}. TOCTOU race created duplicates."
@@ -302,10 +293,9 @@ class TestCriticalFiveTOCTOUOwnerRace:
         )
         assert str(first) == str(second)
 
-        rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?",
-            (repo_hash,),
-        ).fetchall()
+        # Was a raw SELECT on owners. list_owners() carries repo_hash and
+        # has the same shape on both backends (nexus-i711w C-store).
+        rows = [o for o in cat.list_owners() if o["repo_hash"] == repo_hash]
         assert len(rows) == 1
 
     def test_curator_owners_exempt_from_repo_hash_recheck(

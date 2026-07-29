@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 
@@ -24,7 +25,6 @@ from nexus.db.http_vector_client import HttpVectorClient
 # of this change silently did nothing.
 pytestmark = [
     pytest.mark.usefixtures("cloud_mode"),
-    pytest.mark.usefixtures("local_catalog_backend"),
 ]
 
 
@@ -188,7 +188,13 @@ class TestConsolidateCommand:
     def test_consolidate_dry_run(self, mock_t3_fn, tmp_path, monkeypatch):
         catalog_dir = tmp_path / "catalog"
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        cat = Catalog.init(catalog_dir)
+        Catalog.init(catalog_dir)
+        # Seed through the ACTIVE writer, not a local Catalog object: the CLI
+        # under test reads via _get_catalog(), so seeding the local
+        # .catalog.db while the verb reads the service catalog produces the
+        # bucket-2 "No entries with corpus='test'" false negative that
+        # tests/_catalog_fixture_ops exists to prevent (nexus-aqbrk).
+        cat = ActiveCatalog()
         owner = cat.register_owner("papers", "curator")
         cat.register(owner, "Paper A", content_type="paper", corpus="test",
                      physical_collection="docs__La")

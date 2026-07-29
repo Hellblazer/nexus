@@ -27,7 +27,6 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pytest
 
-from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 # nexus-i711w Stage 2 Phase 0: the twin now imports the compute
 # statics from taxonomy_compute directly, so delegation spies must
 # patch the twin's OWN namespace — patching CatalogTaxonomy no
@@ -1253,7 +1252,7 @@ class _FakeCentroidStore:
         return self._envelope([r for r in self._records if r["collection"] != collection])
 
     def nearest(self, embedding, collection, *, cross_collection=False):
-        from nexus.db.t2.catalog_taxonomy import AssignResult
+        from nexus.db.t2.taxonomy_compute import AssignResult
         import numpy as _np
         rows = ([r for r in self._records if r["collection"] != collection]
                 if cross_collection else
@@ -1275,28 +1274,10 @@ class _FakeCentroidStore:
         self.closed = True
 
 
-def _seed_oracle_chroma(records: list[dict]):
-    """Build an in-memory vector client with a taxonomy__centroids
-    collection seeded from the same records, for oracle-vs-http equality
-    checks. The pre-clear is a no-op safeguard on the per-instance
-    InMemoryVectorClient (the retired EphemeralClient shared in-process
-    backend state)."""
-    cl = make_vector_test_client()
-    try:
-        cl.delete_collection("taxonomy__centroids")
-    except Exception:
-        pass
-    coll = cl.create_collection(
-        "taxonomy__centroids", metadata={"hnsw:space": "cosine"}, embedding_function=None,
-    )
-    coll.add(
-        ids=[f"{r['collection']}:{r['topic_id']}" for r in records],
-        embeddings=[r["embedding"] for r in records],
-        metadatas=[{"topic_id": int(r["topic_id"]), "collection": r["collection"],
-                    "label": r.get("label", ""), "doc_count": r.get("doc_count", 0)}
-                   for r in records],
-    )
-    return cl
+# _seed_oracle_chroma stood here: it built an in-memory centroid collection
+# so the Http outputs could be compared against the SQLite CatalogTaxonomy
+# oracle. Both the oracle and its last caller are gone (nexus-i711w Stage 2
+# sub-stage C).
 
 
 class TestComputeAndAssign:
@@ -1316,16 +1297,33 @@ class TestComputeAndAssign:
         embeddings = [[0.9, 0.1, 0.0], [0.2, 0.95, 0.0]]
         http_out = store.compute_assignments("c", doc_ids, embeddings)
 
-        cl = _seed_oracle_chroma(self._CENTROIDS)
-        oracle_out = CatalogTaxonomy.compute_assignments("c", doc_ids, embeddings, cl)
-
-        # Shape + topic_id + assigned_by parity; similarity to float precision.
-        assert [a["topic_id"] for a in http_out] == [a["topic_id"] for a in oracle_out] == [1, 2]
+        # ORACLE RETIRED (nexus-i711w Stage 2 sub-stage C). This compared the
+        # Http output against CatalogTaxonomy.compute_assignments; the SQLite
+        # oracle is deleted, which is what Phase 0 (nexus-tdkg1.1) froze the
+        # supplemental contract for. The expected values were always literal,
+        # so the assertions keep their teeth without the second term.
+        assert [a["topic_id"] for a in http_out] == [1, 2]
         assert all(a["assigned_by"] == "centroid" for a in http_out)
         assert all(a["similarity"] is None and a["source_collection"] is None for a in http_out)
         assert [set(a) for a in http_out] == [
             {"doc_id", "topic_id", "assigned_by", "similarity", "source_collection"}
         ] * 2
+
+    def test_compute_assignments_empty_when_no_centroids(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        """No centroids for the collection -> empty (the old no-op-returns-0 case).
+
+        PORTED from tests/test_taxonomy.py, where it exercised
+        ``CatalogTaxonomy.compute_assignments`` — a category-(c) chroma-coupled
+        static deleted with its class (nexus-i711w Stage 2 sub-stage C). The
+        CONTRACT is not the class's: an unknown collection must come back empty
+        rather than raise or assign to a foreign centroid. The Http twin had no
+        coverage for it, so this moved rather than died.
+        """
+        store = self._store(client, records=[])
+        out = store.compute_assignments("never__discovered", ["x"], [[0.1, 0.0, 0.0]])
+        assert out == []
 
     def test_compute_assignments_projection_matches_oracle(self, client: HttpTaxonomyStore) -> None:
         store = self._store(client)
@@ -1333,15 +1331,13 @@ class TestComputeAndAssign:
         embeddings = [[0.05, 0.05, 0.99]]  # nearest the foreign 'other' centroid (topic 9)
         http_out = store.compute_assignments("c", doc_ids, embeddings, cross_collection=True)
 
-        cl = _seed_oracle_chroma(self._CENTROIDS)
-        oracle_out = CatalogTaxonomy.compute_assignments(
-            "c", doc_ids, embeddings, cl, cross_collection=True,
-        )
-        assert http_out[0]["topic_id"] == oracle_out[0]["topic_id"] == 9
+        # ORACLE RETIRED (see above). The projection target is literal; the
+        # similarity is pinned to the MEASURED value the oracle agreed on, so the
+        # contract survives the oracle rather than lapsing to "any float".
+        assert http_out[0]["topic_id"] == 9
         assert http_out[0]["assigned_by"] == "projection"
         assert http_out[0]["source_collection"] == "c"
-        # raw cosine similarity (1 - distance), matches oracle to float precision
-        assert http_out[0]["similarity"] == pytest.approx(oracle_out[0]["similarity"], abs=1e-5)
+        assert http_out[0]["similarity"] == pytest.approx(0.99745893, abs=1e-5)
 
     def test_compute_assignments_empty_when_no_centroids(self, client: HttpTaxonomyStore) -> None:
         store = self._store(client, records=[])
@@ -1373,12 +1369,8 @@ class TestComputeAndAssign:
         new_metas = [{"topic_id": 1}]
         pairs = store.compute_cross_links("c", new_centroids, new_metas)
 
-        cl = _seed_oracle_chroma(self._CENTROIDS)
-        # compute_cross_links takes the COLLECTION (not the client, unlike
-        # compute_assignments).
-        coll = cl.get_collection("taxonomy__centroids", embedding_function=None)
-        oracle_pairs = CatalogTaxonomy.compute_cross_links("c", new_centroids, new_metas, coll)
-        assert pairs == oracle_pairs == [(1, 9)]
+        # ORACLE RETIRED (see above).
+        assert pairs == [(1, 9)]
 
     def test_compute_discovered_topics_delegates(self, client, monkeypatch) -> None:
         called = {}

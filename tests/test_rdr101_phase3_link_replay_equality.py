@@ -16,7 +16,8 @@ irreversibility cutover depends on:
    touch link rows on either path.
 3. The links table's autoincrement ``id`` PK is reassigned on every
    ``INSERT OR REPLACE``. The doctor's snapshot already excludes ``id``
-   by name (``LINKS_EXCLUDE`` in ``_run_replay_equality``); this verifies
+   by name (this file's own ``_snapshot_table`` helper mirrors what the
+   doctor's deleted ``_run_replay_equality`` used to exclude); this verifies
    that a merge sequence which churns the ``id`` does not break replay-
    equality.
 4. Under the gate, link tombstones never double-emit. The legacy path

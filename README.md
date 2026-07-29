@@ -39,9 +39,9 @@ The plugin ships 13 specialized agents, 45 skills (RDR lifecycle, plan-centric r
 
 ### Claude Cowork
 
-Works automatically once the conexus plugin is installed in Claude Code on the host. State round-trips bidirectionally with the host CLI through the T2 daemon.
+Works automatically once the conexus plugin is installed in Claude Code on the host. State round-trips bidirectionally with the host CLI through the storage service.
 
-For the full deployment story across all three surfaces (install, daemon lifecycle, drift detection, uninstall), see [docs/desktop-deployment.md](https://github.com/Hellblazer/nexus/blob/main/docs/desktop-deployment.md).
+For the full deployment story across all three surfaces (install, service lifecycle, drift detection, uninstall), see [docs/desktop-deployment.md](https://github.com/Hellblazer/nexus/blob/main/docs/desktop-deployment.md).
 
 ## What it does
 

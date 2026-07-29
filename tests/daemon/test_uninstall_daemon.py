@@ -109,6 +109,49 @@ class TestConfirmedUninstall:
         assert report.data_removed is False
         assert config_dir.exists()
 
+    def test_failed_deactivation_does_NOT_report_the_daemon_stopped(
+        self, _env: Path
+    ) -> None:
+        """nexus-i711w sub-stage B review, High-2.
+
+        ``uninstall_autostart`` downgrades a non-zero ``launchctl bootout``
+        to a warning and removes the unit file anyway, so it returns REMOVED
+        even when deactivation FAILED — i.e. in the one case where a running
+        daemon demonstrably survived. Deriving ``daemon_stopped`` from the
+        status alone therefore reported "daemon stopped" precisely when it
+        had not been. It must now be ANDed with ``deactivated``.
+        """
+        unit = _env / "units" / "com.nexus.t2.plist"
+        assert unit.exists()
+
+        with patch.object(installer.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 3  # `Boot-out failed: 3: No such process`
+            mock_run.return_value.stderr = "Boot-out failed: 3: No such process"
+            mock_run.return_value.stdout = ""
+            report = installer.uninstall_daemon(confirm=True)
+
+        # The unit file is still removed — that half is deliberate.
+        assert report.unit_status is installer.UninstallStatus.REMOVED
+        assert not unit.exists()
+        # But the report must not claim the daemon was stopped.
+        assert report.daemon_stopped is False
+        assert "daemon stop not confirmed" in report.message
+        assert "daemon stopped" not in report.message
+        # And the operator must be told WHY, not left to infer it.
+        assert any("exited 3" in w for w in report.warnings), report.warnings
+
+    def test_successful_deactivation_still_reports_stopped(self, _env: Path) -> None:
+        """Non-vacuity partner for the test above: the AND must not have
+        turned ``daemon_stopped`` into a constant False."""
+        with patch.object(installer.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.stdout = ""
+            report = installer.uninstall_daemon(confirm=True)
+
+        assert report.daemon_stopped is True
+        assert "daemon stopped" in report.message
+
     def _install_service_unit(self) -> None:
         with patch.object(daemon_cmd.subprocess, "run") as mock_run:
             mock_run.return_value.returncode = 0

@@ -835,24 +835,6 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # test pins mode explicitly via T3Database(local_mode=...), not the
     # ambient cloud_mode fixture.
     "test_local_daemon_client_embed.py",
-    # RDR-159 P0 detection classifier: voyage tokens are collection-NAME
-    # fixtures driving the support matrix; every test pins deployment mode
-    # explicitly via the ``voyage_key_present`` argument, never the ambient
-    # cloud_mode fixture (the classifier is a pure deployment-mode function).
-    "test_detection.py",
-    # RDR-166 nexus-hxry2 vector-ETL: voyage tokens are collection-NAME segments
-    # driving same-model passthrough vs cross-model routing (_is_same_model_
-    # passthrough / _migrate_one). The ETL never embeds — the server does — so
-    # these tests are deployment-mode-agnostic; they pin behavior via explicit
-    # target_name / collection names, never the ambient cloud_mode fixture.
-    "test_vector_etl.py",
-    # RDR-159 P1d pre-gate + P1c quiesce: voyage tokens are collection-NAME /
-    # wired-model-set fixtures driving the support gate and the count-mismatch
-    # attribution message; mode is pinned explicitly via the injected
-    # WiredModelSource / ``voyage_key_present`` argument, never the ambient
-    # cloud_mode fixture.
-    "test_pregate.py",
-    "test_quiesce.py",
     # RDR-169 G5 bridge address-field tests: voyage tokens appear only as
     # collection-NAME fixtures (knowledge__test__voyage-context-3__v1) in fully
     # mocked HttpVectorClient / _ServiceCollectionStub unit tests. The server
@@ -1141,38 +1123,23 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
     #
-    # RDR-185 ladder — reason: "string-literal-as-name". Every one of these
-    # builds a conformant RDR-103 collection NAME (or a
-    # CollectionClassification carrying the name's model SEGMENT) and asserts
-    # on planning/rollback/re-id behaviour keyed off that segment. None calls
-    # a Voyage embedder: the rung tests inject fakes for every collaborator,
-    # and the local bge-768 path is what actually runs. cloud_mode would
-    # change nothing they assert.
+    # RDR-185 ladder — reason: "string-literal-as-name". Builds a conformant
+    # RDR-103 collection NAME (or a CollectionClassification carrying the
+    # name's model SEGMENT) and asserts on planning/rollback/re-id behaviour
+    # keyed off that segment. It does not call a Voyage embedder: the rung
+    # tests inject fakes for every collaborator, and the local bge-768 path
+    # is what actually runs. cloud_mode would change nothing it asserts.
     #
-    # The mislabel pair is the sharpest case FOR the exclusion: their whole
-    # subject is a name whose voyage token LIES (a pre-RDR-109 collection
-    # named voyage-context-3 whose stored vectors measure as local bge-768,
-    # bead nexus-j5diu). Opting them into cloud_mode would assert the
-    # opposite of their point.
-    #
-    # The six P2 entries (test_rollback_via_map, test_substrate_leg) were
-    # already offending before P4 and went unnoticed because this arc ran
-    # narrow, path-scoped selections — this lint only fires when the full
-    # session is collected, so `pytest tests/upgrade/` alone never sees it.
+    # This began as nine entries. Eight (test_rollback_via_map ×2,
+    # test_substrate_leg ×4, test_substrate_rung ×2) were dropped in the
+    # nexus-i711w liveness burn-down: 88d91bd5 deleted those files with the
+    # Chroma migration machinery, and the entries had been dead ever since.
     # nexus-r5f3c — reason: "string-literal-as-config-value". The test's
     # subject is the SUPERVISOR's env-plumbing gate: a legacy config with
     # local.embed_model="voyage-context-3" must still plumb the credential
     # chain (the mirror of the bge-blocks-plumb case). Popen is mocked; no
     # embedder or cloud call exists. cloud_mode would change nothing.
     "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_voyage_configured_model_still_plumbs",
-    "tests/upgrade/test_rollback_via_map.py::test_cross_model_rollback_deletes_from_recorded_target",
-    "tests/upgrade/test_rollback_via_map.py::test_cross_model_conformant_ids_roll_back_via_target_names",
-    "tests/upgrade/test_substrate_leg.py::test_execute_cross_model_leg_targets_remapped_collection",
-    "tests/upgrade/test_substrate_leg.py::test_reid_only_leg_passes_through_stored_vectors",
-    "tests/upgrade/test_substrate_leg.py::test_mis_provenanced_vector_falls_back_to_reembed",
-    "tests/upgrade/test_substrate_leg.py::test_pure_reembed_leg_rolls_back_via_plan_target_names",
-    "tests/upgrade/test_substrate_rung.py::test_measured_768_mislabel_is_planned_without_a_voyage_key",
-    "tests/upgrade/test_substrate_rung.py::test_genuine_voyage_without_a_key_is_still_the_credential_case",
     "tests/upgrade/test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_live_never_cached",
     #
     # REAL keyed integration tests (-m integration, @requires_voyage_key):
@@ -1186,21 +1153,22 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_integration.py::test_cce_query_retrieves_cce_indexed_markdown",
     "tests/test_integration.py::test_t3_put_embedding_model_in_search_metadata",
     #
-    # nexus-pebfx.2: Java-SOURCE-PARSING parity tests — they regex the
-    # EmbedderRouter/embedder .java files for RDR-103 model tokens and
-    # cross-check Python _MODEL_DIMS. The voyage tokens are registry
-    # labels being compared, not embedder behavior; no embedder runs and
-    # no mode-dependent code path is exercised ("canonical-set" class).
-    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_cloud_mode_dispatch_tokens_are_known_models",
     # nexus-e0w01 / nexus-gednd (2026-07-13): "string-literal-as-name" class —
     # the voyage token appears only inside RDR-103-conformant collection-NAME
     # strings; the frecency test pins the service path via
     # NX_STORAGE_BACKEND_VECTORS + a mocked HttpVectorClient (no embedder
     # runs), and the tripwire tests mock get_t3/compute_assignments entirely.
+    # RENAMED, not added (nexus-i711w Stage 2 sub-stage C): the first tripwire
+    # entry below was `::test_local_path_failure_records_hook_failures_row`
+    # until 9c0cff18 ported it to the service arm and renamed it. The reason
+    # class is unchanged — `_force_service_path` mocks get_t3 and the captured
+    # t2's compute_assignments, so still no embedder runs — but the old nodeid
+    # no longer resolved, which silently converted a granted exclusion into a
+    # non-exclusion and left this lint red on develop. Retargeting the pointer
+    # keeps the count at 58; no ceiling bump is warranted for a rename.
     "tests/test_frecency_service_mode.py::TestFrecencyRdrCollection::test_rdr_collection_included_in_frecency_update",
-    "tests/test_taxonomy_hook_tripwire.py::test_local_path_failure_records_hook_failures_row",
+    "tests/test_taxonomy_hook_tripwire.py::test_service_path_failure_records_hook_failures_row",
     "tests/test_taxonomy_hook_tripwire.py::test_tripwire_persist_failure_never_propagates",
-    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
     #
     # #1060: pure collection-NAME validation (length/charset) — references a
     # legacy voyage-named collection as realistic input but makes no cloud-mode
@@ -1226,16 +1194,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_http_vector_client_parity.py::TestUpdateSourcePath::test_rewrites_matching_rows_and_returns_count",
     "tests/test_http_vector_client_parity.py::TestCollectionMetadata::test_returns_t3_parity_keys",
     #
-    # RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade driver's two-leg test
-    # uses a conformant voyage-named collection STRING to assert the composite
-    # read client routes it to the cloud leg + that distinct dims (384, 1024)
-    # are extracted. The engine is fully mocked; no embedder runs and no
-    # mode-dependent path executes ("string-literal-as-name" class).
-    # (renamed test_two_leg_composes_collections_and_dims -> _reopens_both_legs_
-    # for_landing in the RDR-180 land-then-transform rewrite, nexus-jxizy.10.7 —
-    # same fully-mocked engine, same string-literal-as-name rationale.)
-    "tests/migration/test_driver.py::test_two_leg_reopens_both_legs_for_landing",
-    #
     # nexus-gc2ze + nexus-c9xr2/u37lw wave (2026-07-04): all
     # "string-literal-as-name" — a REAL HttpCatalogClient/HttpVectorClient
     # over a FAKED transport; the voyage token appears only inside
@@ -1247,14 +1205,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_uses_verbatim_passthrough",
-    #
-    # nexus-gilf2: the cross-model remap-target test asserts the driver derives
-    # voyage target NAMES (voyage-code-3 / voyage-context-3) in cloud mode. Mode
-    # is pinned explicitly by patching ``voyage_key_available`` (via the
-    # ``voyage_key=True`` engine patch), not the ambient cloud_mode fixture —
-    # the target resolver is a pure deployment-mode function, same rationale as
-    # the ``test_detection.py`` file exclusion ("string-literal-as-name" class).
-    "tests/migration/test_driver.py::test_cross_model_target_is_voyage_in_cloud_mode",
     #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /
@@ -1285,43 +1235,12 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
     #
-    # nexus-5b9v0: the target-name collision guard tests build
-    # CollectionClassification/message fixtures naming real conformant
-    # collections (code__1-3__voyage-code-3__v1 etc.) to assert the pre-flight
-    # collision detector fires and its message names the colliding sources
-    # correctly. The voyage tokens are collection-NAME/model-label DATA the
-    # guard reasons about structurally (classify_collections is fully mocked);
-    # no embedder runs and no mode-dependent path executes
-    # ("string-literal-as-name" class, same rationale as test_driver.py's
-    # existing exclusions above).
-    # (renamed ..._blocked_before_sequence -> ..._before_land_then_transform in
-    # the RDR-180 rewrite, nexus-jxizy.10.7 — voyage_key pinned False, engine
-    # fully mocked.)
-    "tests/migration/test_driver.py::test_target_name_collision_blocked_before_land_then_transform",
-    "tests/migration/test_driver.py::test_target_name_collision_between_two_remapped_collections",
-    "tests/migration/test_driver.py::test_target_name_no_collision_when_targets_distinct",
-    "tests/migration/test_driver.py::test_target_name_collision_three_way",
-    "tests/migration/test_driver.py::test_target_name_collision_message_carries_classification_metadata",
-    "tests/migration/test_driver.py::test_target_name_collision_message_flags_likely_stale_source",
-    "tests/commands/test_migrate_cost_guardrail.py::TestRunMigrationCollisionGuard::test_target_name_collision_renders_as_click_exception",
-    #
-    # nexus-p9vqa / nexus-772h2 (nx migration-audit + dual-world false-clean
-    # regression): both build CollisionAuditReport / CollectionClassification
-    # fixtures and conformant collection-NAME strings (code__1-3__voyage-code-3__v1)
-    # as the audit's opaque input data. classify_collections / read+vector
-    # clients are fully monkeypatched — no embedder runs and no mode-dependent
-    # path executes ("string-literal-as-name" class, same rationale as the
-    # test_driver.py collision exclusions above).
-    "tests/migration/test_collision_audit.py::test_false_clean_regression_merge_only_visible_in_no_key_world",
-    "tests/test_migration_audit_cmd.py::test_json_output_is_machine_readable",
-    #
     # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
     # mocked /v1/vectors/collections response using conformant collection-
     # NAME strings (code__nexus-1-1__voyage-code-3__v1,
     # knowledge__nexus-1-1__voyage-context-3__v1) purely as PgReadClient
     # list_collections() parsing test data. No embedder runs and no
-    # mode-dependent path executes ("string-literal-as-name" class, same
-    # rationale as the test_driver.py collision exclusions above).
+    # mode-dependent path executes ("string-literal-as-name" class).
     "tests/migration/test_pg_read.py::TestListCollections::test_returns_name_objects",
     #
     # nexus-vgq89 burn-down (2026-07-15): test_collection_cmd.py promoted

@@ -1845,17 +1845,21 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
     above. Framed as a soft warning (this is benign log noise, not data
     loss), never a hard failure.
 
-    Silent (``[]``) on the common cases: local mode (the T2 tier is the
-    live substrate there — nothing stray to report), or service mode with
-    no autostart unit installed. Any probe failure ALSO degrades
-    silently — best-effort, must never break ``nx doctor``.
+    NOT gated on storage mode (nexus-i711w Stage 2 sub-stage B). It used to
+    return ``[]`` outside service mode, on the reasoning that in local mode
+    "the T2 tier is the live substrate there — nothing stray to report".
+    That reasoning died with the daemon: no box of ANY mode can start a T2
+    daemon or reinstall the unit, so a surviving unit is stray EVERYWHERE.
+    Keeping the gate would have given a SQLite-mode box — the one most
+    likely to be carrying a unit — the silent auto-removal in
+    :func:`~nexus.upgrade_finish.unload_stale_t2_launchagent` (un-gated in
+    the same commit) and zero ``nx doctor`` visibility, which is the inverse
+    of the argument that un-gated the removal. The two must agree on scope.
+
+    Silent (``[]``) only when the probe itself fails — best-effort, must
+    never break ``nx doctor``.
     """
     try:
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
-
-        if storage_backend_for("memory") != StorageBackend.SERVICE:
-            return []
-
         from nexus.commands.daemon import _autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
 
         unit_path = _autostart_unit_installed()
@@ -1865,7 +1869,7 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
 
     if unit_path is None:
         return [HealthResult(
-            label="T2 autostart unit (service mode)",
+            label="T2 autostart unit",
             ok=True,
             detail="no stray T2 autostart unit installed",
         )]
@@ -1873,18 +1877,23 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
     from nexus.upgrade_finish import _T2_AUTOSTART_UNIT_KIND  # noqa: PLC0415 — deferred to avoid circular import
 
     return [HealthResult(
-        label="T2 autostart unit (service mode)",
+        label="T2 autostart unit",
         ok=False,
         warn=True,
         detail=(
             f"a T2 autostart unit ({_T2_AUTOSTART_UNIT_KIND}) is installed "
-            f"at {unit_path} but service mode never starts the T2 daemon — "
-            "its OS-level restart policy respawns an immediately-exiting "
-            "process indefinitely (log noise)"
+            f"at {unit_path} but the T2 daemon it starts no longer exists — "
+            "its OS-level restart policy respawns an immediately-failing "
+            "`nx daemon t2 start` indefinitely (log noise)"
         ),
+        # ONE suggestion, not two: `nx daemon t2 uninstall --autostart` was
+        # the direct removal verb and died with the daemon (sub-stage B), so
+        # naming it here sent the operator at a command that now exits
+        # "No such command 't2'" — on precisely the pre-retirement-upgrade
+        # box this check exists to help. Pinned by
+        # test_every_fix_suggestion_names_a_LIVE_verb.
         fix_suggestions=[
             "nx daemon restart-stale  # removes the stray unit (GH #1405)",
-            "nx daemon t2 uninstall --autostart  # removes it directly",
         ],
     )]
 

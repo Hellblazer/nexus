@@ -48,7 +48,8 @@ live_venv_processes() {
 
 if [[ "$CYCLE_DAEMONS" == "1" ]]; then
     echo "Stopping nx-owned daemons before the venv swap (--cycle-daemons)…"
-    nx daemon t2 stop 2>/dev/null || true
+    # No `nx daemon t2 stop`: the T2 daemon was retired in nexus-i711w Stage 2
+    # sub-stage B and the whole `t2` verb group deleted with it.
     nx daemon service stop 2>/dev/null || true
     sleep 1
 fi
@@ -181,15 +182,13 @@ if [[ -d "$TOOL_BIN" ]]; then
     done
 fi
 
-# nexus-5ldk1: a running T2 daemon froze its code at start and now predates
-# this reinstall. Bring it to the freshly-installed version so the reinstall
-# is live, not pending a manual `nx daemon t2 stop && ensure-running`.
-# ensure-running is version-aware: no-op on a current daemon, graceful cycle
-# on a stale one. Best-effort; never fails the reinstall.
-if command -v nx >/dev/null 2>&1; then
-    nx daemon t2 ensure-running --quiet --timeout=10 2>/dev/null || \
-        echo "(note: daemon cycle skipped/failed; run 'nx daemon t2 ensure-running' manually)"
-fi
+# nexus-5ldk1 is CLOSED BY DELETION (nexus-i711w Stage 2 sub-stage B): the
+# stale-code-after-reinstall problem it describes was the T2 DAEMON freezing
+# its code at start, and that daemon no longer exists. The `nx daemon t2
+# ensure-running` cycle that lived here died with the verb group — left in
+# place it fired its `||` branch on EVERY reinstall, telling the operator to
+# run a command that now exits "No such command 't2'". The surviving storage
+# service is cycled by the --cycle-daemons block below.
 
 # nexus-q3xrx: restart the storage service when --cycle-daemons stopped it
 # (best-effort — boxes without an initialized service stack skip cleanly).

@@ -50,12 +50,14 @@ def runner() -> CliRunner:
 @pytest.fixture(autouse=True)
 def _clear_module_state() -> None:
     from nexus.db import migrations
-    from nexus.db.t2 import catalog_taxonomy, memory_store, plan_library
+    from nexus.db.t2 import memory_store, plan_library
 
     migrations._upgrade_done.clear()
     memory_store._migrated_paths.clear()
     plan_library._migrated_paths.clear()
-    catalog_taxonomy._migrated_paths.clear()
+    # catalog_taxonomy._migrated_paths: the module is deleted (nexus-i711w
+    # Stage 2 sub-stage C). Its per-path migration guard went with it; the
+    # taxonomy base-schema DDL now lives in db/migrations.py.
 
 
 # NO _no_real_daemon_nudge fixture: it existed only to stop these in-process

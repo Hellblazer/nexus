@@ -67,54 +67,103 @@ PRIVATE_HANDLE_CENSUS: dict[str, int] = {
     # Guarded: :86 by is_service_backed(t3); :1200 by
     # _require_supported_taxonomy_backend(t3, db.taxonomy) refusing the
     # split-backend config before the raw path.
-    "src/nexus/commands/taxonomy_cmd.py": 2,
+    # 2 -> 1: the `db.taxonomy._lock` / `.conn` reach-ins died with the raw
+    # CatalogTaxonomy branches they guarded (nexus-i711w Stage 2 sub-stage C).
+    # The survivor is `t3._client`, a T3 handle — unrelated to the T2 retirement.
+    "src/nexus/commands/taxonomy_cmd.py": 1,
     # T3Database's own module: db._client_for / db._client on instances of the
     # class defined in this file. Self-access in substance, not syntax.
     "src/nexus/db/t3.py": 2,
-    # Guarded: instance-based check (HttpVectorClient has no ._client) returns
-    # cleanly before both sites; taxonomy-via-chroma is unsupported on service.
-    "src/nexus/mcp_infra.py": 2,
+    # 2 -> 0 (nexus-i711w Stage 2 sub-stage C): both `get_t3()._client` sites
+    # lived in taxonomy_assign_batch_hook's raw arm, which the instance-based
+    # is_service_backed check already returned before on every shipping
+    # install. The arm is deleted, so the reach-ins are gone rather than
+    # merely guarded. Entry kept at 0 rather than dropped: a named zero says
+    # "this file was audited and is clean", which a missing key does not.
+    "src/nexus/mcp_infra.py": 0,
 }
 
 
+def _scan_tree(path: Path) -> list[tuple[int, str, str]]:
+    """(lineno, attr, receiver) for one file, NON-self receivers only.
+
+    Split out of ``_non_self_private_accesses`` so the non-vacuity test can
+    drive it with a known sample instead of asserting a floor on live debt.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, OSError, UnicodeDecodeError):
+        return []
+    hits: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if node.attr not in _PRIVATE_HANDLE_ATTRS:
+            continue
+        recv = node.value
+        # self.<attr> — the owning class using its own handle.
+        if isinstance(recv, ast.Name) and recv.id == "self":
+            continue
+        name = (
+            recv.id if isinstance(recv, ast.Name)
+            else getattr(getattr(recv, "func", None), "id", None) or "<expr>"
+        )
+        hits.append((node.lineno, node.attr, name))
+    return hits
+
+
 def _non_self_private_accesses() -> dict[str, list[tuple[int, str, str]]]:
-    """(lineno, attr, receiver) per file, for NON-self receivers only."""
+    """(lineno, attr, receiver) per file across SRC, for NON-self receivers."""
     found: dict[str, list[tuple[int, str, str]]] = {}
     for path in SRC.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, OSError, UnicodeDecodeError):
-            continue
-        hits: list[tuple[int, str, str]] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Attribute):
-                continue
-            if node.attr not in _PRIVATE_HANDLE_ATTRS:
-                continue
-            recv = node.value
-            # self.<attr> — the owning class using its own handle.
-            if isinstance(recv, ast.Name) and recv.id == "self":
-                continue
-            name = (
-                recv.id if isinstance(recv, ast.Name)
-                else getattr(getattr(recv, "func", None), "id", None) or "<expr>"
-            )
-            hits.append((node.lineno, node.attr, name))
+        hits = _scan_tree(path)
         if hits:
             found[path.relative_to(REPO_ROOT).as_posix()] = hits
     return found
 
 
-def test_scanner_is_not_vacuous() -> None:
-    """Every assertion below iterates the scan. If the AST walk silently
-    stopped matching (attribute renamed, path drift), an empty result would
-    make the real guards pass by doing nothing."""
-    live = _non_self_private_accesses()
-    assert live, "scanner found ZERO private-handle accesses — it is broken"
-    total = sum(len(v) for v in live.values())
-    assert total >= 5, f"implausibly few sites ({total}); scan likely broken"
+def test_scanner_is_not_vacuous(tmp_path: Path) -> None:
+    """Prove the AST walk still matches, WITHOUT asserting a floor on live debt.
+
+    This used to read ``total >= 5`` over the real tree. That conflated two
+    different things — "the scanner works" and "the debt is large" — and the
+    second is what the SQLite retirement exists to drive to zero. Each
+    deletion pass pushed the count toward the floor, so the check's own
+    failure mode became "the arc succeeded", and the only way to keep the
+    suite green was to ratchet a non-vacuity assert downward: precisely the
+    move the project bans (nexus-i711w Stage 2 sub-stage C).
+
+    Re-grounded on a synthetic sample, it stays meaningful at a census of
+    zero — which is where this ledger is headed.
+    """
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "class Owner:\n"
+        "    def use(self):\n"
+        "        return self._client\n"        # self-access: must NOT match
+        "\n"
+        "def reach(other):\n"
+        "    return other._client\n",           # non-self: MUST match
+        encoding="utf-8",
+    )
+    hits = _scan_tree(sample)
+    assert hits == [(6, "_client", "other")], (
+        f"scanner no longer matches a known non-self private-handle access: {hits}. "
+        "The attribute set or the AST walk has drifted, and every guard below "
+        "would pass by doing nothing."
+    )
+
+
+def test_scanner_still_sees_the_live_tree() -> None:
+    """Companion to the synthetic check: the walk is actually pointed at src/.
+
+    A scanner that works on a tmp file but resolves SRC to nothing would still
+    make the guards vacuous. This asserts reachability, not a debt floor, so
+    it survives the census reaching zero.
+    """
+    assert any(SRC.rglob("*.py")), f"SRC does not resolve to python sources: {SRC}"
 
 
 def test_self_access_is_excluded() -> None:

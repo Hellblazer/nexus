@@ -55,3 +55,8 @@ mechanize, it matters enough to ship.
   schema directly, so the type-scoped builtins (`type-scoped-search`,
   `find-by-author`) stay effectively unreachable — the practical half of the
   reachability fix is inert even once the wheel ships.
+- `conexus/hooks/hooks.json` — nexus-i711w: the SessionStart hook that ran
+  `nx daemon t2 ensure-running` on EVERY session start, for every plugin user,
+  silenced by `|| true`. The verb is deleted with the T2 daemon, so until this
+  ships that hook keeps firing a command that no longer exists — harmless only
+  because of the `|| true` that hid it in the first place.

@@ -10,7 +10,7 @@ Attribute                  Class                       Responsibility
 =========================  ==========================  =================================================================
 ``db.memory``              ``MemoryStore``             Persistent notes, FTS5 search, access tracking, heat-weighted TTL
 ``db.plans``               ``PlanLibrary``             Plan templates, plan search, plan TTL
-``db.taxonomy``            ``CatalogTaxonomy``         Topic clustering, topic assignment
+``db.taxonomy``            ``HttpTaxonomyStore``       Topic clustering, topic assignment
 ``db.telemetry``           ``Telemetry``               Relevance log (query/chunk/action), retention-based expiry
 ``db.chash_index``         ``ChashIndex``              chash → (collection, doc_id) global lookup (RDR-086)
 ``db.document_aspects``    ``DocumentAspects``         Per-document structured aspects table (RDR-089)
@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     # therefore stops here without pulling sklearn -> scipy -> numpy
     # via CatalogTaxonomy.
     from nexus.db.t2.catalog import CatalogStore
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
     from nexus.db.t2.chash_index import ChashIndex
     from nexus.db.t2.memory_store import AccessPolicy, MemoryStore
     from nexus.db.t2.plan_library import PlanLibrary
@@ -251,7 +251,6 @@ __all__ = [
     "AccessPolicy",
     "AspectExtractionQueue",
     "CatalogStore",
-    "CatalogTaxonomy",
     "ChashIndex",
     "DocumentAspects",
     "MemoryStore",
@@ -274,7 +273,6 @@ def __getattr__(name: str) -> Any:  # PEP 562
         "AspectExtractionQueue": "nexus.db.t2.aspect_extraction_queue",
         "CatalogStore":          "nexus.db.t2.catalog",
         "MemoryStore":           "nexus.db.t2.memory_store",
-        "CatalogTaxonomy":       "nexus.db.t2.catalog_taxonomy",
         "ChashIndex":            "nexus.db.t2.chash_index",
         "DocumentAspects":       "nexus.db.t2.document_aspects",
         "PlanLibrary":           "nexus.db.t2.plan_library",
@@ -356,7 +354,6 @@ class T2Database:
         # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
         # CatalogTaxonomy.
         from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
@@ -423,6 +420,7 @@ class T2Database:
         # or NX_STORAGE_BACKEND unset).  nexus-gmiaf.7 replaces the
         # NotImplementedError branch with HttpMemoryStore(...).
         from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore as _HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
         if storage_backend_for("memory") == StorageBackend.SERVICE:
             # RDR-152 nexus-gmiaf.7: thin Python HTTP client over the Java service.
@@ -439,15 +437,33 @@ class T2Database:
             self.plans: PlanLibrary = HttpPlanLibrary()  # type: ignore[assignment]
         else:
             self.plans: PlanLibrary = PlanLibrary(path)
-        # RDR-152 nexus-gmiaf.14: taxonomy service seam.
-        # NX_STORAGE_BACKEND_TAXONOMY=service routes to HttpTaxonomyStore.
-        # CatalogTaxonomy takes a MemoryStore reference for the
-        # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
-        if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.taxonomy: CatalogTaxonomy = HttpTaxonomyStore()  # type: ignore[assignment]
-        else:
-            self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
+        # RDR-152 nexus-gmiaf.14 seam, COLLAPSED in nexus-i711w Stage 2
+        # sub-stage C: HttpTaxonomyStore is the only taxonomy store, because
+        # the SQLite CatalogTaxonomy it used to select is deleted.
+        #
+        # EAGER on the service path, deferred otherwise. Two constraints meet
+        # here and only this shape satisfies both:
+        #
+        #  * Constructing unconditionally would RAISE for =sqlite callers that
+        #    never touch ``.taxonomy`` — and those callers are sub-stage A's
+        #    subject (the SQLite chash / catalog rename data plane), not this
+        #    one. Failing them here is scope bleed across a boundary this
+        #    staged deletion exists to hold.
+        #  * Deferring unconditionally changes WHEN the service endpoint is
+        #    first resolved, and other subsystems turned out to depend on that
+        #    incidentally: making it fully lazy broke an unrelated catalog
+        #    store-hook path in test_memory. That dependency is undocumented
+        #    and fragile, but a deletion sub-stage is the wrong place to
+        #    discover and re-plumb it.
+        #
+        # So: on SERVICE (every shipping install) construction happens exactly
+        # when it always did, and nothing observes a change. Off it, the store
+        # is left unbuilt and the property raises on first ACCESS.
+        self._taxonomy: Any = (
+            _HttpTaxonomyStore()
+            if storage_backend_for("taxonomy") == StorageBackend.SERVICE
+            else None
+        )
 
         # RDR-152 nexus-gmiaf.12: telemetry service seam.
         # NX_STORAGE_BACKEND_TELEMETRY=service routes to HttpTelemetryStore.
@@ -509,6 +525,48 @@ class T2Database:
         # avoid the default resolution through ``nexus.config``.
         self._catalog_db_path_override: Path | None = catalog_db_path
         self._catalog: Any = None
+
+    @property
+    def taxonomy(self) -> "HttpTaxonomyStore":
+        """Lazy-construct the taxonomy store on first access.
+
+        Service-only since nexus-i711w Stage 2 sub-stage C. A ``=sqlite``
+        request RAISES here rather than quietly returning the service store:
+        silently handing back a different substrate than the caller asked for
+        is the silent-fallback class the project bans, and it would be at its
+        worst here — the caller would believe it was reading its own local,
+        never-migrated topics while actually reading the service's.
+
+        Raising on ACCESS rather than on construction is what keeps this inside
+        the sub-stage: only code that actually reaches for a SQLite taxonomy
+        fails, not every =sqlite T2Database.
+        """
+        if self._taxonomy is None:
+            from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+
+            if storage_backend_for("taxonomy") != StorageBackend.SERVICE:
+                raise RuntimeError(
+                    "NX_STORAGE_BACKEND[_TAXONOMY]=sqlite selects a taxonomy "
+                    "store that no longer exists: the SQLite CatalogTaxonomy "
+                    "was deleted in the RDR-158 P4 retirement. Unset it "
+                    "(service is the default) and run `nx upgrade` if you "
+                    "still hold unmigrated SQLite topics."
+                )
+            self._taxonomy = HttpTaxonomyStore()
+        return self._taxonomy
+
+    @taxonomy.setter
+    def taxonomy(self, store: Any) -> None:
+        """Allow injection, which the plain attribute this replaced supported.
+
+        Every other domain store is a plain assignable attribute, and callers
+        (notably the cascade's service-mode spies) swap them to observe routing.
+        Making taxonomy lazy must not quietly remove that seam — a read-only
+        property would force those callers to reach into ``_taxonomy``, which is
+        strictly worse than keeping the public spelling they already use.
+        """
+        self._taxonomy = store
 
     @property
     def catalog(self) -> "CatalogStore":
@@ -717,7 +775,13 @@ class T2Database:
         self.document_aspects.close()
         self.chash_index.close()
         self.telemetry.close()
-        self.taxonomy.close()
+        # Lazy since sub-stage C: close what was BUILT, never force
+        # construction. Going through the property here would build (and for a
+        # =sqlite caller, raise from) a store this T2Database never used —
+        # turning close() into the one call that cannot fail cleanly.
+        if self._taxonomy is not None:
+            self._taxonomy.close()
+            self._taxonomy = None
         self.plans.close()
         self.memory.close()
 
@@ -910,6 +974,15 @@ class T2Database:
             # raw SQL UPDATE on the shared SQLite file would diverge from
             # the service's Postgres tables, so we route through the
             # domain-store API when the seam is active.
+            #
+            # The else branch SURVIVES nexus-i711w sub-stage C deliberately. It
+            # touches neither CatalogTaxonomy nor self.taxonomy — it is raw SQL
+            # on this method's own dedicated connection, against tables a
+            # legacy memory.db still carries (their DDL moved to
+            # db/migrations.py with the rest of the base schema). The store
+            # class died; the tables and this cascade did not. Retiring the
+            # SQLite cascade is sub-stage A's subject, alongside the chash /
+            # aspects / telemetry legs it shares a transaction with.
             if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
                 tax_counts = self.taxonomy.rename_collection(old, new)
                 counts["tax_topics"] = tax_counts.get("topics", 0)

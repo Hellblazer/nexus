@@ -9,10 +9,13 @@ connection, ``self._lock``, or a chroma client: every function is a pure
 transform over numpy arrays + Python lists, and every return value is JSON
 round-trippable so it can cross the daemon RPC boundary.
 
-The SQLite ``CatalogTaxonomy`` and the live ``HttpTaxonomyStore`` both reach
-these symbols; ``CatalogTaxonomy`` re-exports them (binding the functions as
-static methods and re-importing the NamedTuples / constants) so existing call
-sites and the ``CatalogTaxonomy.X`` monkeypatch surface are unchanged.
+``HttpTaxonomyStore`` reaches these symbols directly, and so should you.
+
+THE RE-EXPORT IS GONE. ``CatalogTaxonomy`` used to bind these functions as
+static methods and re-import the NamedTuples / constants, so ``CatalogTaxonomy.X``
+worked as both a call site and a monkeypatch surface. That class is deleted
+(nexus-i711w Stage 2 sub-stage C) and with it the second path to these symbols.
+Take them from this module directly, and monkeypatch them here.
 
 HARD INVARIANT (RF-158-2 category c): the chroma-coupled statics
 (``_create_centroid_collection``, ``_centroid_records_for``, ``_batched_upsert``,

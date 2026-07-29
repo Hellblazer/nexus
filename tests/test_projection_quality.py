@@ -314,7 +314,7 @@ class TestAssignSingleReturnsNamedTuple:
     def test_assign_single_returns_namedtuple(
         self, db: T2Database, chroma_client: Any,
     ) -> None:
-        from nexus.db.t2.catalog_taxonomy import AssignResult
+        from nexus.db.t2.taxonomy_compute import AssignResult
 
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1

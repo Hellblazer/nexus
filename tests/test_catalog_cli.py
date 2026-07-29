@@ -499,7 +499,9 @@ class TestLinksFilterCommand:
         # Register dedupes by (owner, file_path), so two tumblers sharing
         # a file_path only arise when the file is registered under
         # distinct owners, which is exactly what re-indexing after
-        # owner-rename produces (before `dedupe-owners` reconciles).
+        # owner-rename produces. (`dedupe-owners` used to reconcile these;
+        # it was deleted in nexus-i711w Stage 2 sub-stage C-store, so the
+        # duplicate-tumbler condition below is now permanent, not transient.)
         owner_a = Tumbler.parse("1.1")
         owner_b_id = cat.register_owner("second-repo", "repo", repo_hash="deadbeef")
         owner_b = Tumbler.parse(str(owner_b_id))
@@ -1740,18 +1742,16 @@ class TestSeam3OwnersCarve:
     binding ``_get_catalog`` at import time (which would break the
     ``patch("nexus.commands.catalog._get_catalog", …)`` test seam).
 
-    Note the two commands take different catalog-access paths: ``owners``
-    reads via ``_get_catalog()`` (defended by the patch seam below), while
-    ``dedupe-owners`` opens an admin catalog via ``make_catalog_admin()`` and
-    is NOT covered by that patch target — its behavioural coverage lives in
-    ``test_catalog_dedupe.py`` through ``NEXUS_CATALOG_PATH`` env plumbing.
+    ``owners`` reads via ``_get_catalog()``, defended by the patch seam below.
+    (The group's other verb, ``dedupe-owners``, was deleted in nexus-i711w
+    Stage 2 sub-stage C-store along with the admin factory it opened.)
     """
 
     def test_owner_commands_registered_on_group(self):
         from nexus.cli import main
         catalog_group = main.commands["catalog"]
         assert "owners" in catalog_group.commands
-        assert "dedupe-owners" in catalog_group.commands
+        assert "dedupe-owners" not in catalog_group.commands
 
     def test_owner_commands_defined_in_carved_module(self):
         """The callbacks live in catalog_cmds.owners, not commands.catalog."""
@@ -1759,10 +1759,6 @@ class TestSeam3OwnersCarve:
         from nexus.commands.catalog_cmds import owners as owners_mod
         catalog_group = main.commands["catalog"]
         assert catalog_group.commands["owners"].callback is owners_mod.owners_cmd.callback
-        assert (
-            catalog_group.commands["dedupe-owners"].callback
-            is owners_mod.dedupe_owners_cmd.callback
-        )
 
     def test_owners_command_routes_get_catalog_through_module(self):
         """Patching commands.catalog._get_catalog is observed by the carved
@@ -1912,14 +1908,14 @@ class TestWhh61BackupsCarve:
     Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
     ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
 
-    Note the two access paths: ``list-backups`` / ``vacuum-backups`` read via
-    ``_get_catalog()`` (defended by the patch-seam pins below), while
-    ``undelete`` opens an admin catalog via ``make_catalog_admin()`` — pinned
-    here by its daemon-live guard; its full restore round-trip lives in
-    ``test_catalog_backup_and_safety.py`` via ``NEXUS_CATALOG_PATH`` plumbing.
+    ``list-backups`` / ``vacuum-backups`` read via ``_get_catalog()``, defended
+    by the patch-seam pins below. (The group's third verb, ``undelete``, was
+    deleted in nexus-i711w Stage 2 sub-stage C-store along with the admin
+    factory it opened; the snapshots it restored are still written and still
+    managed by the two surviving verbs.)
     """
 
-    BACKUP_COMMANDS = ["list-backups", "undelete", "vacuum-backups"]
+    BACKUP_COMMANDS = ["list-backups", "vacuum-backups"]
 
     def test_backup_commands_registered_on_group(self):
         from nexus.cli import main
@@ -1971,28 +1967,6 @@ class TestWhh61BackupsCarve:
         assert result.exit_code == 0, result.output
         vac.assert_called_once()
         assert vac.call_args.args[0] is fake
-
-    def test_undelete_surfaces_admin_path_guard(self):
-        """undelete uses the admin path (make_catalog_admin), not _get_catalog.
-        Pin the CLI-layer guard: an admin-path refusal surfaces as a
-        ClickException, not a traceback.
-
-        Was pinned against CatalogAdminDaemonLiveError until that retired with
-        the T2 daemon (nexus-i711w Stage 2 sub-stage B); re-pointed at the
-        surviving refusal so the CLI-layer contract keeps its guard."""
-        from unittest.mock import patch
-
-        from nexus.catalog.factory import CatalogAdminServiceModeError
-        from nexus.cli import main
-
-        with patch(
-            "nexus.catalog.factory.make_catalog_admin",
-            side_effect=CatalogAdminServiceModeError("no service-mode equivalent"),
-        ):
-            result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
-        assert result.exit_code != 0
-        assert "no service-mode equivalent" in result.output
-
 
 class TestWhh61CollectionsCarve:
     """Contract pins for the nexus-whh61.4 collections command carve.
@@ -2366,15 +2340,20 @@ class TestWhh61DoctorCarve:
     helpers not moving, or import-bound ``_get_catalog``.
     """
 
-    DOCTOR_COMMANDS = ["doctor", "synthesize-log"]
+    # ``synthesize-log`` and the local-event-log helpers
+    # (_run_replay_equality, _snapshot_table, _check_bootstrap_status,
+    # _run_t3_doc_id_coverage and their printers) were deleted in nexus-i711w
+    # Stage 2 sub-stage C-store; what remains is the service-capable half.
+    DOCTOR_COMMANDS = ["doctor"]
     SAMPLE_MOVED_HELPERS = [
-        "_run_replay_equality", "_snapshot_table", "_check_bootstrap_status",
-        "_run_name_vs_embed_dim", "_percentile", "_run_t3_doc_id_coverage",
+        "_run_name_vs_embed_dim", "_percentile",
         "_run_collections_drift", "_run_chunk_size_distribution",
         "_run_chunk_text_dedup", "_run_t3_vs_catalog",
-        "_print_replay_equality_text", "_expected_dim_for_model_token",
-        # threshold constants moved with the helpers:
-        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM", "_ORPHAN_RATIO_WARN_THRESHOLD",
+        "_expected_dim_for_model_token",
+        # threshold constants moved with the helpers. (_ORPHAN_RATIO_WARN_
+        # THRESHOLD was the t3-doc-id-coverage warn gate and died with that
+        # check — it had no other user.)
+        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM",
     ]
 
     def test_prune_deprecated_keys_stayed_in_catalog(self):

@@ -447,103 +447,10 @@ class TestEnsureConsistentEventSourced:
             cat_b._db.close()
 
 
-# ── Doctor --replay-equality reads events.jsonl ──────────────────────────
-
-
-@pytest.mark.usefixtures("local_catalog_backend")
-class TestDoctorReplayEqualityEventLog:
-    """``doctor --replay-equality`` over events.jsonl.
-
-    nexus-aqbrk: PINNED, same reason, and this verb family is named
-    explicitly in ``local_catalog_backend``'s own contract — the doctor
-    replay/consistency verbs "operate on the LOCAL catalog (event log /
-    JSONL / projection); in service mode the live catalog is owned by the
-    nexus service" (nexus-kmo9h). Already the disposition used for the same
-    verb in tests/test_doc_indexer.py earlier in this arc.
-    """
-    """``nx catalog doctor --replay-equality`` reads ``events.jsonl`` when
-    it exists and has content — pre-fix it always called
-    ``synthesize_from_jsonl``, so once ``NEXUS_EVENT_SOURCED=1`` was on by
-    default the verb measured the wrong source of truth."""
-
-    def test_doctor_uses_events_jsonl_when_present(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        # Round-4 review (reviewer E): the previous test was
-        # discrimination-free — synthesize_from_jsonl and
-        # EventLog.replay produced the same projection for the
-        # scenario, so a regression that always called the synthesizer
-        # would still pass. This test writes events.jsonl content that
-        # the synthesizer CANNOT reproduce (a link with no entry in
-        # links.jsonl), then projects through the doctor and asserts
-        # the link IS present in the projected DB. Only the
-        # events.jsonl path can produce that output.
-        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
-
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "test-catalog"
-        Catalog.init(d)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(d))
-        cat = Catalog(d, d / ".catalog.db")
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose", file_path="a.md")
-        b = cat.register(owner, "b.md", content_type="prose", file_path="b.md")
-        cat.link(a, b, "cites", "agent-1")
-        cat._db.close()
-
-        # Sanity: links.jsonl must contain the link (event-sourced
-        # path still writes legacy JSONL for back-compat).
-        links_text = (d / "links.jsonl").read_text()
-        assert "cites" in links_text
-
-        # Now strip the link from links.jsonl so the synthesizer
-        # branch CANNOT reproduce it. Only the events.jsonl branch
-        # carries the LinkCreated event.
-        (d / "links.jsonl").write_text("")
-
-        report = _run_replay_equality()
-        assert report["event_source"] == "events.jsonl", report
-        # The projected DB has the link because we replayed
-        # events.jsonl. The live DB also has it (it was committed
-        # there at link() time). So replay-equality holds for links.
-        # If the doctor had instead called synthesize_from_jsonl
-        # against the empty links.jsonl, the projected DB would have
-        # NO link rows, and replay-equality would FAIL with
-        # only_in_live=[the link]. We check for pass=True as the
-        # discriminating assertion.
-        assert report["pass"] is True, (
-            "Doctor must replay events.jsonl, not synthesize from the "
-            "(now-empty) links.jsonl. Report:\n" + str(report)
-        )
-
-    def test_doctor_falls_back_to_synthesizer_when_no_events(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        from nexus.commands.catalog_cmds.doctor import _run_replay_equality
-
-        # PR ζ flipped NEXUS_EVENT_SOURCED default to ON; the doctor
-        # synthesizer fallback is the legacy path, so pin explicitly.
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
-        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
-        d = tmp_path / "test-catalog"
-        Catalog.init(d)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(d))
-        cat = Catalog(d, d / ".catalog.db")
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        cat.register(owner, "a.md", content_type="prose", file_path="a.md")
-        cat._db.close()
-
-        # events.jsonl shouldn't exist yet (no shadow, no event-sourced).
-        events_path = d / "events.jsonl"
-        assert (
-            not events_path.exists() or events_path.stat().st_size == 0
-        )
-        report = _run_replay_equality()
-        assert report["pass"] is True, report
-        assert report["event_source"] == "synthesized"
-
-
-# ── Legacy update() carries alias_of through INSERT OR REPLACE ───────────
+# TestDoctorReplayEqualityEventLog removed (nexus-i711w Stage 2 sub-stage
+# C-store): doctor --replay-equality read events.jsonl and diffed the
+# rebuilt projection against .catalog.db. Both artifacts are local-only and
+# the check was deleted with them.
 
 
 class TestLegacyUpdateAliasOfColumn:

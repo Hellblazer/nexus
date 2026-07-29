@@ -942,22 +942,6 @@ class TestTaxonomyServiceModeGuard:
         )
         # If we reach here, the hook returned cleanly (no AttributeError escaped).
 
-    def test_fetch_or_embed_returns_none_in_service_mode(self, monkeypatch):
-        """_fetch_or_embed must return None immediately in service mode
-        (HttpVectorClient has no ._client; the guard prevents AttributeError)."""
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-
-        from nexus import mcp_infra
-        result = mcp_infra._fetch_or_embed(
-            doc_ids=["chunk-001"],
-            collection="knowledge__nexus-test__all-minilm-l6-v2__v1",
-            contents=["Test content."],
-        )
-        assert result is None, (
-            "_fetch_or_embed must return None in service mode — "
-            "HttpVectorClient has no ._client, so the Chroma fetch path must be skipped."
-        )
 
 
 class TestGetEmbeddings:

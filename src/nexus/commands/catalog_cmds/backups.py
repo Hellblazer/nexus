@@ -2,17 +2,23 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Backup-snapshot commands for the ``nx catalog`` group (nexus-whh61.4).
 
-Carved verbatim out of ``commands.catalog``: ``list-backups`` / ``undelete`` /
+Carved verbatim out of ``commands.catalog``: ``list-backups`` /
 ``vacuum-backups`` — the lifecycle verbs over the JSONL snapshots that
 destructive catalog verbs write before deleting (RDR-106). Behaviour-
-preserving; ``register`` attaches all three to the shared ``catalog`` group so
+preserving; ``register`` attaches both to the shared ``catalog`` group so
 ``nx catalog list-backups`` (etc.) resolve exactly as before.
 
 ``_get_catalog`` is reached through the ``nexus.commands.catalog`` module
 object inside each body — keeping this module's imports acyclic and preserving
-the ``patch("nexus.commands.catalog._get_catalog", …)`` test seam. ``undelete``
-opens an admin catalog directly (``make_catalog_admin``), mirroring the
-original.
+the ``patch("nexus.commands.catalog._get_catalog", …)`` test seam.
+
+``undelete`` was REMOVED in nexus-i711w Stage 2 sub-stage C-store. Restoring a
+snapshot re-emitted events through the local rich Catalog's low-level event log
+— deep maintenance with no service-mode expression, so it already refused
+there. Hal ruled it unsupported rather than reimplemented (2026-07-29). The
+snapshots themselves are unaffected: they are still WRITTEN before every
+destructive verb, and ``list-backups`` / ``vacuum-backups`` still manage them.
+What is gone is the in-product restore path, not the backup.
 """
 from __future__ import annotations
 
@@ -48,54 +54,6 @@ def list_backups_cmd() -> None:
         )
 
 
-@click.command("undelete")
-@click.argument("backup")
-def undelete_cmd(backup: str) -> None:
-    """Restore documents (and their links) from a backup snapshot.
-
-    BACKUP is either a filename inside ``.deleted-backups/`` or an
-    absolute path. Documents are re-emitted as DocumentRegistered
-    events in events.jsonl (event-sourced; full audit trail);
-    inbound and outbound links are re-emitted as LinkCreated events
-    via ``link_if_absent`` (idempotent).
-
-    Documents are restored with their ORIGINAL tumblers — the tumbler
-    minting path is bypassed. Re-running this on an already-restored
-    backup is a no-op (DocumentRegistered on existing tumbler is
-    idempotent via INSERT OR REPLACE).
-    """
-    from nexus.catalog.catalog_backup import restore_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.catalog.factory import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-        CatalogAdminServiceModeError,
-        make_catalog_admin,
-    )
-    # Deep-maintenance: restore_documents re-emits events through the
-    # catalog's low-level event log, not the 22 daemon write ops (RDR-146).
-    try:
-        cat = make_catalog_admin()
-    except CatalogAdminServiceModeError as exc:
-        # nexus-aoqnb: no retry exists for this one — the verb has no
-        # service-mode implementation and the local file is frozen. Surfaced
-        # as a clean CLI error, never a traceback.
-        raise click.ClickException(str(exc)) from exc
-    if cat is None:
-        raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' first."
-        )
-    if backup.startswith("/"):
-        backup_path = Path(backup)
-    else:
-        backup_path = cat._dir / ".deleted-backups" / backup
-    if not backup_path.exists():
-        raise click.ClickException(f"Backup not found: {backup_path}")
-
-    docs, links = restore_documents(cat, backup_path)
-    click.echo(
-        f"Restored {docs} document(s) and {links} link(s) "
-        f"from {backup_path.name}."
-    )
-
-
 @click.command("vacuum-backups")
 @click.option(
     "--older-than-days", default=30, show_default=True,
@@ -108,9 +66,8 @@ def undelete_cmd(backup: str) -> None:
 def vacuum_backups_cmd(older_than_days: int, dry_run: bool) -> None:
     """Drop old backup snapshots past the retention window.
 
-    Default retention is 30 days. Removed files are gone for good —
-    after vacuum, the rows in those backups are no longer recoverable
-    via ``nx catalog undelete``.
+    Default retention is 30 days. Removed files are gone for good — the
+    snapshot is the only copy of the rows a destructive verb deleted.
     """
     from nexus.catalog.catalog_backup import vacuum_old_backups  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -133,5 +90,4 @@ def vacuum_backups_cmd(older_than_days: int, dry_run: bool) -> None:
 def register(group: click.Group) -> None:
     """Attach the backup-snapshot commands to the shared ``catalog`` group."""
     group.add_command(list_backups_cmd)
-    group.add_command(undelete_cmd)
     group.add_command(vacuum_backups_cmd)
