@@ -689,142 +689,24 @@ def taxonomy_assign_batch_hook(
             )
         return
 
-    if is_local_mode():
-        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-        if any(fnmatch(collection, pat) for pat in exclude):
-            return
-
-    if not embeddings:
-        embeddings = _fetch_or_embed(doc_ids, collection, contents)
-        if not embeddings:
-            return
-
-    try:
-        # RDR-128 P1 (nexus-fkq5q): compute assignments client-side (the
-        # ChromaDB client can't cross the RPC boundary), then persist the
-        # serializable result through the daemon so the indexer does not
-        # open memory.db directly.
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 — deferred to avoid circular import (db.t2.catalog_taxonomy)
-
-        chroma_client = get_t3()._client
-        same = CatalogTaxonomy.compute_assignments(
-            collection, doc_ids, embeddings, chroma_client,
-            cross_collection=False,
-        )
-        cross = CatalogTaxonomy.compute_assignments(
-            collection, doc_ids, embeddings, chroma_client,
-            cross_collection=True,
-        )
-        assignments = same + cross
-        if assignments:
-            t2_index_write(
-                lambda db: db.taxonomy.persist_assignments(assignments)
-            )
-        if cross:
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().debug(
-                "taxonomy_cross_collection_batch",
-                collection=collection,
-                cross_assigned=len(cross),
-            )
-    except Exception as exc:  # noqa: BLE001 — taxonomy assign best-effort; tripwire-recorded
-        _record_taxonomy_tripwire(
-            collection, doc_ids, f"local path: {type(exc).__name__}: {exc}",
-        )
+    # NO RAW PATH BELOW THIS POINT. A ~40-line twin stood here: it read
+    # ``get_t3()._client`` and called ``CatalogTaxonomy.compute_assignments``
+    # twice (same + cross), then persisted via ``t2_index_write``. It was
+    # already unreachable on every shipping install — the guard above returns
+    # unconditionally whenever T3 is service-backed, which is the default in
+    # BOTH local and cloud mode since RDR-152 — and its two entry points
+    # (``._client`` on an HttpVectorClient, and CatalogTaxonomy itself) are
+    # deleted in nexus-i711w Stage 2 sub-stage C. Reaching this line at all
+    # would now mean a non-service T3 handle, which no longer exists.
 
 
-def _fetch_or_embed(
-    doc_ids: list[str],
-    collection: str,
-    contents: list[str],
-) -> list[list[float]] | None:
-    """Fetch existing T3 embeddings for *doc_ids* in *collection*.
-
-    Falls back to local MiniLM embedding of *contents* when T3 is
-    unavailable or returns no embedding for a given id. Returns None
-    if no embeddings can be produced (callers no-op in that case).
-    Used by ``taxonomy_assign_batch_hook`` when called from MCP
-    ``store_put`` with ``embeddings=None``.
-
-    Returns None immediately in service mode (HttpVectorClient has no
-    ._client; taxonomy-via-chroma is not supported on the service path).
-    """
-    # RDR-152 Seam B guard — see taxonomy_assign_batch_hook for rationale.
-    # RDR-155 P4a.2: instance-based (env flag no longer tracks the handle type).
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
-    if is_service_backed(get_t3()):
-        return None
-
-    import numpy as np  # noqa: PLC0415 — numpy heavy dep deferred to function scope
-
-    fetched: list[list[float] | None] = [None] * len(doc_ids)
-    try:
-        chroma_client = get_t3()._client
-        coll = chroma_client.get_collection(collection, embedding_function=None)
-        result = coll.get(ids=doc_ids, include=["embeddings"])
-        result_ids = result.get("ids", [])
-        result_embs = result.get("embeddings")
-        if result_embs is not None:
-            id_index = {d: i for i, d in enumerate(doc_ids)}
-            for j, rid in enumerate(result_ids):
-                idx = id_index.get(rid)
-                if idx is None:
-                    continue
-                emb = result_embs[j]
-                if emb is not None and len(emb) > 0:
-                    fetched[idx] = list(emb)
-    except Exception:  # noqa: BLE001 — T3 embedding fetch best-effort; logged at debug, falls back
-        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug(
-            "taxonomy_t3_embedding_fetch_failed",
-            collection=collection,
-            exc_info=True,
-        )
-
-    missing = [i for i, e in enumerate(fetched) if e is None]
-    if missing and contents:
-        try:
-            from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import (db.local_ef)
-            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-            local_inputs = [contents[i] for i in missing if i < len(contents)]
-            local_embs = ef(local_inputs)
-            for k, i in enumerate(missing):
-                if i < len(contents) and k < len(local_embs):
-                    fetched[i] = list(np.array(local_embs[k], dtype=np.float32))
-        except Exception:  # noqa: BLE001 — local-embed fallback best-effort; logged at debug
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().debug(
-                "taxonomy_local_embed_fallback_failed", exc_info=True,
-            )
-
-    if any(e is None for e in fetched):
-        return None
-    return [e for e in fetched if e is not None]
-
-
-# ── Chash dual-write (RDR-086 Phase 1.2; migrated to batch hook in RDR-095) ──
-
-
-# RDR-187 (nexus-piwya.4): chash_dual_write_batch_hook is RETIRED. The chunks
-# tables ARE the chash-keyed store (the /v1/chash/* reads are served from
-# them, nexus-piwya.3), so there is no derived copy left to dual-write —
-# and no dual-write means the orphan-leak class (292,656 dangling router
-# rows in production) structurally cannot recur. The engine's write
-# endpoints remain accept-and-no-op for one release (old clients in the
-# mixed-version window), and tests/test_hook_drift_guard.py pins that the
-# hook name never reappears in src.
-
-
-# nexus-duoak.7: file-agnostic consumers run once per upload flush in the
-# batched indexer (fire_batch(grain="flush")) instead of once per file —
-# their cost is round-trip-dominated, not row-dominated. Default-grain
-# callers (grain="all") still fire them exactly as before.
-taxonomy_assign_batch_hook.batch_grain = "flush"
-# manifest joined the flush grain in nexus-u2kwq: the batched indexer's
-# aggregate call carries per-chunk doc_id + file-local chunk_index
-# (injected by _fire_flush_grain_hooks), so by_doc grouping and position
-# enumeration work unchanged; grain="all" callers (MCP store_put, legacy
-# inline paths) still fire it per document exactly as before.
+# _fetch_or_embed lived here. It fetched T3 embeddings for a batch and fell
+# back to a local MiniLM encode, and its ONLY caller was the raw taxonomy-assign
+# path deleted above (nexus-i711w Stage 2 sub-stage C). The service branch does
+# its own re-fetch via ``get_t3().get_embeddings`` with a count-skew guard and
+# tripwire (nexus-reskd / nexus-h8rf6.11), so nothing was left to call this —
+# one of its own tests asserted it returns None in service mode, i.e. a no-op on
+# the only surviving path.
 
 
 # ── Manifest-write failure surfacing (GH #1371) ──────────────────────────────

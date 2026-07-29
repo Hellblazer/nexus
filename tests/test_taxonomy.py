@@ -6,6 +6,7 @@ import itertools
 import os
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -429,29 +430,33 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     through (test-validator finding, fkq5q gate).
     """
     import nexus.mcp_infra as mi
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 
     computed = [{
         "doc_id": "d1", "topic_id": 7, "assigned_by": "centroid",
         "similarity": None, "source_collection": None,
     }]
 
-    # Bypass chroma: same-collection returns the known list, cross returns [].
-    monkeypatch.setattr(
-        CatalogTaxonomy, "compute_assignments",
-        staticmethod(lambda *a, **k: [] if k.get("cross_collection") else computed),
-    )
     # The hook does `from nexus.config import is_local_mode` at call time,
     # so patch the source module (not mcp_infra).
     import nexus.config as _cfg
     monkeypatch.setattr(_cfg, "is_local_mode", lambda: False)  # skip exclude gate
+    monkeypatch.setattr(mi, "get_t3", lambda: MagicMock())
+    # nexus-i711w sub-stage C: the raw arm this test used to drive (patching
+    # CatalogTaxonomy.compute_assignments and handing the hook a ._client
+    # handle) is deleted. The ROUTING contract it guards is unchanged — the
+    # surviving service arm still computes and persists inside ONE
+    # t2_index_write lambda — so the driver moves to that arm and compute is
+    # stubbed on the store the lambda receives.
     monkeypatch.setattr(
-        mi, "get_t3", lambda: type("T", (), {"_client": object()})(),
+        "nexus.db.http_vector_client.is_service_backed", lambda _t3: True
     )
 
     captured: dict = {}
 
     class _FakeTaxonomy:
+        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection):  # noqa: ANN001, ANN201
+            return [] if cross_collection else computed
+
         def persist_assignments(self, assignments):  # noqa: ANN001
             captured["assignments"] = assignments
             return len(assignments)
