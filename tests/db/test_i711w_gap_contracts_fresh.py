@@ -445,3 +445,51 @@ class TestItem21LinkMergeCoDiscoveredBy:
             f"second creator must be folded into meta['co_discovered_by']; "
             f"got meta={lk.meta!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 19 — alias_of POPULATION (Hal ruling 2026-07-30: pin the write path
+# now; alias FOLLOWING stays nexus-ekaxn's, where resolve()/resolve_alias
+# are documented no-ops service-side)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestItem19AliasOfPopulation:
+    """set_alias() writes alias_of on the engine and the entry surfaces it.
+
+    # nexus-i711w.1 item 19
+    The local projector populated ``alias_of`` from DocumentAliased events;
+    that machinery dies with the src. The service write path is
+    ``HttpCatalogClient.set_alias`` -> POST /update {tumbler, alias_of}
+    (http_catalog_client.py:1142-1143), and the read side maps the column
+    back at ``_to_entry`` (:194). This pins exactly that round trip —
+    population, not following.
+    """
+
+    def test_set_alias_populates_alias_of_on_the_entry(self, cat, owner):
+        src = cat.register(
+            title="i711w1-item19-alias-src",
+            owner=str(owner),
+            physical_collection="code__i711w1-item19__v1",
+            file_path="src/alias_src.py",
+        )
+        canonical = cat.register(
+            title="i711w1-item19-canonical",
+            owner=str(owner),
+            physical_collection="code__i711w1-item19__v1",
+            file_path="src/alias_dst.py",
+        )
+        # Pre-state guard (non-vacuity): fresh registration carries no alias.
+        before = cat.resolve(str(src))
+        assert before is not None and before.alias_of == "", (
+            f"pre-state: expected empty alias_of, got {before.alias_of!r}"
+        )
+
+        cat.set_alias(src, canonical)
+
+        after = cat.resolve(str(src))
+        assert after is not None, "aliased entry must still resolve (population, not deletion)"
+        assert after.alias_of == str(canonical), (
+            f"alias_of must surface the canonical tumbler: "
+            f"expected {canonical!s}, got {after.alias_of!r}"
+        )
