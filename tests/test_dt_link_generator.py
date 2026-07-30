@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.dt_link_generator import generate_dt_links
 
 
 @pytest.fixture
 def cat(tmp_path):
+    from nexus.catalog.catalog import Catalog
     d = tmp_path / "catalog"
     d.mkdir()
     return Catalog(d, d / ".catalog.db")

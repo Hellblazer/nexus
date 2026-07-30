@@ -19,7 +19,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 
@@ -161,6 +160,7 @@ def http_client(fake_server):
 @pytest.fixture
 def sqlite_cat(tmp_path):
     """A fresh SQLite Catalog with seed data for all new method tests."""
+    from nexus.catalog.catalog import Catalog
     db_path = tmp_path / ".catalog.db"
     cat = Catalog(tmp_path, db_path)
     # Seed owners — epsilon-allow: test fixture seeds raw rows for unit-testing
@@ -396,6 +396,7 @@ _REQUIRED_METHODS = [
 def test_sqlite_catalog_has_method(method_name):
     """SQLite Catalog must have every method that HttpCatalogClient provides
     (nexus-qnp5s public API parity)."""
+    from nexus.catalog.catalog import Catalog
     assert hasattr(Catalog, method_name), (
         f"Catalog is missing {method_name!r} — consumers cannot use uniform API"
     )

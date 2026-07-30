@@ -18,7 +18,6 @@ import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 from nexus.db.t3 import T3Database
@@ -47,6 +46,7 @@ def t3_db():
 
 @pytest.fixture()
 def catalog(tmp_path):
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
     db_path = tmp_path / "catalog.sqlite"

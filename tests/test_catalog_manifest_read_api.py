@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -33,6 +32,7 @@ def _make_catalog(tmp_path: Path) -> ActiveCatalog:
     to change; the actual location comes from ``catalog_path()``, which
     conftest's autouse ``_isolate_catalog`` already redirects per test.
     """
+    from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path
 
     Catalog.init(catalog_path())

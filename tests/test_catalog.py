@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.catalog.catalog import Catalog, _SPAN_PATTERN
 from nexus.catalog.tumbler import Tumbler
 from tests.conftest import make_vector_test_client
 from tests._t2_fixture_ops import require_sqlite_substrate
@@ -16,6 +15,7 @@ from tests._t2_fixture_ops import require_sqlite_substrate
 
 @pytest.fixture
 def cat(tmp_path):
+    from nexus.catalog.catalog import Catalog
     d = tmp_path / "catalog"
     d.mkdir()
     return Catalog(d, d / ".catalog.db")
@@ -37,6 +37,7 @@ def cat_with_two_docs(cat_with_owner):
 
 @pytest.fixture
 def span_env(tmp_path):
+    from nexus.catalog.catalog import Catalog
     d = tmp_path / "catalog"
     d.mkdir()
     cat = Catalog(d, d / ".catalog.db")
@@ -483,6 +484,7 @@ class TestAliasResolution:
         upgraded silently on open. Simulated by creating a documents
         table with the pre-migration schema and then re-opening via
         Catalog."""
+        from nexus.catalog.catalog import Catalog
         # nexus-aqbrk: this hand-builds a PRE-MIGRATION SQLite schema and
         # asserts the on-open ALTER adds the column. There is no service-mode
         # analogue — PG's catalog schema is Liquibase-managed and there is no
@@ -614,6 +616,7 @@ class TestUpdate:
 
 class TestEnsureConsistent:
     def test_malformed_jsonl_no_crash(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         d = tmp_path / "catalog"
         d.mkdir(parents=True)
         (d / "owners.jsonl").write_text("NOT-JSON\n")
@@ -678,6 +681,7 @@ class TestSpanPattern:
         ("3:100-250", True),
     ])
     def test_span_pattern(self, span, expected):
+        from nexus.catalog.catalog import _SPAN_PATTERN
         assert (_SPAN_PATTERN.match(span) is not None) == expected
 
 
@@ -823,6 +827,7 @@ class TestLinkAuditStaleSpans:
 
 class TestRebuild:
     def test_rebuild_from_jsonl(self, cat_with_owner):
+        from nexus.catalog.catalog import Catalog
         cat, owner = cat_with_owner
         doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
         cat2 = Catalog(cat._dir, cat._dir / ".catalog.db2")
@@ -831,6 +836,7 @@ class TestRebuild:
         assert entry is not None and entry.title == "a.py"
 
     def test_rebuild_excludes_tombstoned(self, cat_with_owner):
+        from nexus.catalog.catalog import Catalog
         cat, owner = cat_with_owner
         doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
         tombstone = {"tumbler": str(doc), "_deleted": True, "title": "", "author": "",
@@ -854,6 +860,7 @@ class TestRebuild:
         (PRAGMA foreign_keys=ON only enforces new writes, not existing
         rows).
         """
+        from nexus.catalog.catalog import Catalog
         cat, owner = cat_with_owner
         doc = cat.register(owner, "ghost.py", content_type="code", file_path="ghost.py")
         # Plant a manifest row for the doc.
@@ -896,6 +903,7 @@ class TestEnsureConsistentDegradedFlag:
         assert cat.degraded is False
 
     def test_degraded_true_on_rebuild_failure(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         d = tmp_path / "catalog"
         d.mkdir()
         (d / "documents.jsonl").write_text("{}\n")
@@ -1299,6 +1307,7 @@ class TestUpdateGuard:
 
     @pytest.fixture
     def cat_with_repo_owner(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         d = tmp_path / "catalog"
         d.mkdir()
         cat = Catalog(d, d / ".catalog.db")
@@ -1395,6 +1404,7 @@ class TestUpdateGuard:
         assert entry.source_uri == bogus
 
     def test_update_curator_owner_skips_guard(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         d = tmp_path / "catalog"
         d.mkdir()
         cat = Catalog(d, d / ".catalog.db")
@@ -1423,6 +1433,7 @@ class TestOwnerRepoRootDefensive:
         otherwise let ``os.path.abspath`` inside ``_normalize_source_uri``
         fall back to CWD-anchoring, silently reintroducing the bug.
         """
+        from nexus.catalog.catalog import Catalog
         d = tmp_path / "catalog"
         d.mkdir()
         cat = Catalog(d, d / ".catalog.db")
@@ -1490,6 +1501,7 @@ class TestStaleSourceRatioAgeBased:
         cat._db.commit()
 
     def test_ratio_counts_docs_older_than_30_days(self, tmp_path) -> None:
+        from nexus.catalog.catalog import Catalog
         from datetime import UTC, datetime
 
         cat = Catalog(tmp_path, tmp_path / ".catalog.db")
@@ -1504,6 +1516,7 @@ class TestStaleSourceRatioAgeBased:
         assert meta["stale_source_ratio"] == pytest.approx(2 / 3)
 
     def test_ratio_none_when_no_dated_docs(self, tmp_path) -> None:
+        from nexus.catalog.catalog import Catalog
         cat = Catalog(tmp_path, tmp_path / ".catalog.db")
         coll = "docs__nodate"
         # Empty / unparseable indexed_at → excluded from the denominator → None.
@@ -1516,6 +1529,7 @@ class TestStatsChunkCount:
     rows) for parity with the Java /stats catalog_stats view."""
 
     def test_stats_includes_chunk_count(self, tmp_path) -> None:
+        from nexus.catalog.catalog import Catalog
         cat = Catalog(tmp_path, tmp_path / ".catalog.db")
         # Parent documents (document_chunks.doc_id references documents.tumbler).
         for tumbler in ("a.1", "a.2"):
@@ -1541,5 +1555,6 @@ class TestStatsChunkCount:
         assert s["chunk_count"] == 3
 
     def test_stats_chunk_count_zero_when_empty(self, tmp_path) -> None:
+        from nexus.catalog.catalog import Catalog
         cat = Catalog(tmp_path, tmp_path / ".catalog.db")
         assert cat.stats()["chunk_count"] == 0

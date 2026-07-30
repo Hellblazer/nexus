@@ -30,7 +30,6 @@ from unittest.mock import patch
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
@@ -48,6 +47,7 @@ def _pin_local_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     Catalog.init(catalog_dir)
@@ -85,6 +85,7 @@ class _FailingT3:
 
 
 def _catalog_rows(catalog_env: Path, title: str) -> list:
+    from nexus.catalog.catalog import Catalog
     cat = Catalog(catalog_env, catalog_env / ".catalog.db")
     try:
         return cat._db.execute(
@@ -96,6 +97,7 @@ def _catalog_rows(catalog_env: Path, title: str) -> list:
 
 
 def _manifest_rows(catalog_env: Path, tumbler: str) -> list:
+    from nexus.catalog.catalog import Catalog
     cat = Catalog(catalog_env, catalog_env / ".catalog.db")
     try:
         return cat._db.execute(
@@ -142,6 +144,7 @@ class TestMcpGhostRegisterCompensation:
     ) -> None:
         """A row the register DEDUPED onto (by_doc_id hit) pre-existed
         this call and must NEVER be deleted by the compensation."""
+        from nexus.catalog.catalog import Catalog
         content = "dedup content survives"
         chash = hashlib.sha256(content.encode()).hexdigest()
         cat = Catalog(catalog_env, catalog_env / ".catalog.db")
@@ -248,6 +251,7 @@ class TestStorePutManifestDirectUnit:
         """The VERIFY leg: a write path that silently no-ops (the exact
         C3 damage shape) must RAISE, never return clean. Mutation
         target: deleting the 'did not land' raise makes this fail."""
+        from nexus.catalog.catalog import Catalog
         from nexus.catalog.store_hook import store_put_manifest_direct
 
         cat = Catalog(catalog_env, catalog_env / ".catalog.db")
@@ -393,6 +397,7 @@ class TestPromoteGhostRegisterCompensation:
     def test_t3_failure_preserves_preexisting_deduped_row(
         self, catalog_env: Path, tmp_path: Path,
     ) -> None:
+        from nexus.catalog.catalog import Catalog
         content = "promote dedup content survives"
         chash = hashlib.sha256(content.encode()).hexdigest()
         cat = Catalog(catalog_env, catalog_env / ".catalog.db")
@@ -582,6 +587,7 @@ class TestStoreDeleteAsymmetry:
     ) -> None:
         """A non-store_put-origin doc (file_path set) sharing the chunk
         id must survive — cleanup is scoped to the store_put signature."""
+        from nexus.catalog.catalog import Catalog
         content = "file backed content"
         chash = hashlib.sha256(content.encode()).hexdigest()
         cat = Catalog(catalog_env, catalog_env / ".catalog.db")

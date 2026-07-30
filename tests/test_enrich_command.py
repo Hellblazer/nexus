@@ -10,7 +10,6 @@ import pytest
 from tests._catalog_fixture_ops import ActiveCatalog
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.commands.enrich import enrich
 from nexus.db.http_vector_client import HttpVectorClient
@@ -434,6 +433,7 @@ def _exact(cat, title: str):
 
 
 def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
     return catalog_dir, cat

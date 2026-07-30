@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from tests._catalog_fixture_ops import ActiveCatalog, count_documents
 
@@ -44,6 +43,7 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
     ``ActiveCatalog`` routes both halves through the same factories the hook
     uses, so the same test body now covers whichever catalog is real.
     """
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
     return catalog_dir, ActiveCatalog()

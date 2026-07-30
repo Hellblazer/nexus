@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +19,7 @@ def git_identity(monkeypatch):
 
 class TestInit:
     def test_creates_structure(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(tmp_path / "catalog")
         catalog_dir = tmp_path / "catalog"
         assert (catalog_dir / ".git").exists()
@@ -29,10 +29,12 @@ class TestInit:
         assert ".catalog.db" in (catalog_dir / ".gitignore").read_text()
 
     def test_creates_db(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(tmp_path / "catalog")
         assert (tmp_path / "catalog" / ".catalog.db").exists()
 
     def test_initial_commit_exists(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         Catalog.init(tmp_path / "catalog")
         result = subprocess.run(
             ["git", "log", "--oneline"],
@@ -43,6 +45,7 @@ class TestInit:
         assert "init catalog" in result.stdout.lower()
 
     def test_init_with_remote(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         bare = tmp_path / "bare"
         subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True)
         Catalog.init(tmp_path / "catalog", remote=str(bare))
@@ -54,6 +57,7 @@ class TestInit:
         assert str(bare) in result.stdout
 
     def test_init_idempotent(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         Catalog.init(tmp_path / "catalog")
         # Second init should not fail
         cat = Catalog.init(tmp_path / "catalog")
@@ -62,19 +66,23 @@ class TestInit:
 
 class TestIsInitialized:
     def test_true_after_init(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         Catalog.init(tmp_path / "catalog")
         assert Catalog.is_initialized(tmp_path / "catalog")
 
     def test_false_on_empty_dir(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         (tmp_path / "catalog").mkdir()
         assert not Catalog.is_initialized(tmp_path / "catalog")
 
     def test_false_on_nonexistent(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         assert not Catalog.is_initialized(tmp_path / "nonexistent")
 
 
 class TestSync:
     def test_sync_commits_changes(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(tmp_path / "catalog")
         cat.register_owner("test", "curator")
         cat.sync("add test owner")
@@ -86,11 +94,13 @@ class TestSync:
         assert "add test owner" in result.stdout
 
     def test_sync_nothing_to_commit(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(tmp_path / "catalog")
         # Should not raise when nothing changed
         cat.sync("no changes")
 
     def test_sync_pushes_to_remote(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         bare = tmp_path / "bare"
         subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True)
         cat = Catalog.init(tmp_path / "catalog", remote=str(bare))
@@ -116,6 +126,7 @@ class TestSync:
 
 class TestPull:
     def test_pull_triggers_rebuild(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(tmp_path / "catalog")
         owner = cat.register_owner("test", "curator")
         doc = cat.register(owner, "paper.pdf", content_type="paper")

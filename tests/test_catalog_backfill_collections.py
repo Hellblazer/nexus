@@ -23,7 +23,6 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 
 
@@ -34,6 +33,7 @@ def runner() -> CliRunner:
 
 @pytest.fixture()
 def catalog(tmp_path):
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
     db_path = tmp_path / "catalog.sqlite"

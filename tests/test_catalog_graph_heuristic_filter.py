@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_links import (
     _HEURISTIC_LINK_TYPES,
     _filter_link_types,
@@ -44,6 +43,7 @@ def _make_catalog(tmp_path: Path) -> ActiveCatalog:
     this file seeds through the same factories the graph reader uses rather
     than pinning to the local catalog.
     """
+    from nexus.catalog.catalog import Catalog
     cat_dir = tmp_path / "catalog"
     Catalog.init(cat_dir)
     return ActiveCatalog()

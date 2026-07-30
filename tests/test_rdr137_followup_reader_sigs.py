@@ -32,7 +32,6 @@ from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 from structlog.testing import capture_logs
 
-from nexus.catalog.catalog import Catalog
 from nexus.registry import RepoRegistry
 from nexus.repos import _shim_log_level, from_catalog, read_dual
 
@@ -50,6 +49,7 @@ def _enable_debug_logging():
 
 @pytest.fixture
 def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
+    from nexus.catalog.catalog import Catalog
     cfg = tmp_path / "config"
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True)

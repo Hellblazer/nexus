@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
@@ -37,6 +36,7 @@ def git_identity(monkeypatch):
 
 
 def _make_catalog(tmp_path: Path) -> Catalog:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
     return cat
@@ -186,6 +186,7 @@ class TestMergeCorpus:
 class TestConsolidateCommand:
     @patch("nexus.commands.catalog._make_t3")
     def test_consolidate_dry_run(self, mock_t3_fn, tmp_path, monkeypatch):
+        from nexus.catalog.catalog import Catalog
         catalog_dir = tmp_path / "catalog"
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         Catalog.init(catalog_dir)

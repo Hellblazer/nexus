@@ -57,7 +57,6 @@ from collections.abc import Callable
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
@@ -129,14 +128,20 @@ def _missing_client_params(method_name: str) -> list[str]:
     client's `**kwargs`, if any, is excluded from the satisfying set by
     `_explicit_named_params`, so the silent class is surfaced rather than hidden.
     """
-    local = _LOCAL_METHODS[method_name]
+    local = _CANONICAL_METHODS[method_name]
     client = _CLIENT_METHODS[method_name]
     local_params = _explicit_named_params(local)
     client_params = set(_explicit_named_params(client))
     return [p for p in local_params if p not in client_params]
 
 
-_LOCAL_METHODS = _public_methods(Catalog)
+# Canonical (name, kind) source is the Protocol pair, NOT the local `Catalog`
+# class (nexus-i711w): the local class is being deleted, and
+# `test_catalog_protocol_fidelity.py` pins — while it still exists — that the
+# Protocol signatures mirror it exactly, so this re-point is equivalence-
+# preserving on the day it was made (verified: 70/70 methods, zero
+# (name, kind) divergence).
+_CANONICAL_METHODS = {**_public_methods(CatalogReader), **_public_methods(CatalogWriter)}
 _CLIENT_METHODS = _public_methods(HttpCatalogClient)
 
 
@@ -176,8 +181,15 @@ def test_client_is_not_missing_any_caller_facing_method() -> None:
 
     A method missing entirely is a distinct, harder failure than a signature divergence;
     pin it so a future deletion is caught here rather than at runtime.
+
+    Local-`Catalog`-anchored (all 88 public methods, wider than the Protocol
+    pair) — retires with the src in the nexus-i711w deletion commit; the
+    surviving missing-method guard is the parametrized conformance family,
+    which KeyErrors on any Protocol method absent from the client.
     """
-    missing = sorted(name for name in _LOCAL_METHODS if name not in _CLIENT_METHODS)
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
+    missing = sorted(name for name in _public_methods(Catalog) if name not in _CLIENT_METHODS)
     assert missing == [], (
         f"HttpCatalogClient is missing caller-facing Catalog methods: {missing}"
     )
@@ -189,7 +201,12 @@ def test_no_unguarded_public_classmethods() -> None:
     Pin the known set so a NEW public classmethod on either class trips here and forces
     a conscious decision about whether it belongs in the conformance surface, rather than
     silently dropping out of coverage. `Catalog.init` is the factory; the client has none.
+
+    The `Catalog` half retires with the src (nexus-i711w); the client half is
+    the surviving pin.
     """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
     assert _public_classmethods(Catalog) == {"init"}
     assert _public_classmethods(HttpCatalogClient) == set()
 

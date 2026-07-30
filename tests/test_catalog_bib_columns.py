@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog, CatalogEntry
 from nexus.catalog.tumbler import read_documents
 from tests._t2_fixture_ops import require_sqlite_substrate
 
@@ -35,6 +34,7 @@ def git_identity(monkeypatch):
 
 
 def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
     return catalog_dir, cat
@@ -54,6 +54,7 @@ _ALL_EIGHT = {
 
 class TestCatalogEntryDataclass:
     def test_has_all_eight_bib_fields(self) -> None:
+        from nexus.catalog.catalog import CatalogEntry
         from nexus.catalog.tumbler import Tumbler
 
         entry = CatalogEntry(
@@ -213,6 +214,7 @@ class TestUpdatePreservesAndSetsBibColumns:
         # nexus-i711w. Leg (a) — that update() round-trips all eight on a
         # FRESH schema — is substrate-independent and is covered by the other
         # tests in this class, which run on both.
+        from nexus.catalog.catalog import Catalog
         require_sqlite_substrate("re-opens a hand-built legacy schema to assert the on-open ALTER")
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         # (a) fresh schema — CREATE TABLE already ships all 8 columns.

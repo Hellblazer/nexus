@@ -28,7 +28,6 @@ import pytest
 from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 
-from nexus.catalog.catalog import Catalog
 from nexus.context import _repo_collections
 from nexus.registry import RepoRegistry
 
@@ -62,6 +61,7 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     fixture's ``cat`` is what ``_repo_collections`` opens via
     ``nexus.config.catalog_path()``.
     """
+    from nexus.catalog.catalog import Catalog
     cfg = tmp_path / "config"
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True)

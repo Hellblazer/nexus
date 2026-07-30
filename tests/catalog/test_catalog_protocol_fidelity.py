@@ -18,7 +18,6 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
@@ -81,9 +80,20 @@ def _name_kinds(method: Callable) -> list[tuple[str, inspect._ParameterKind]]:
 _READER = _protocol_methods(CatalogReader)
 _WRITER = _protocol_methods(CatalogWriter)
 _UNION = {**_READER, **_WRITER}
-_LOCAL = {
-    n: m for n, m in inspect.getmembers(Catalog, inspect.isfunction) if not n.startswith("_")
-}
+
+
+def _local_members() -> dict[str, Callable]:
+    """Canonical local ``Catalog`` surface, resolved lazily.
+
+    Function-local import so this file still COLLECTS after the local catalog
+    is deleted (nexus-i711w): only the three fidelity tests anchored to the
+    local class touch it, and they retire in the same commit as the src.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
+    return {
+        n: m for n, m in inspect.getmembers(Catalog, inspect.isfunction) if not n.startswith("_")
+    }
 
 
 # Catalog return types that carry typed objects consumers do ATTRIBUTE access on. A
@@ -118,11 +128,12 @@ def test_client_return_types_match_local_typed_returns() -> None:
         n: m for n, m in inspect.getmembers(HttpCatalogClient, inspect.isfunction)
         if not n.startswith("_")
     }
+    local = _local_members()
     offenders: dict[str, dict[str, str]] = {}
     for name in _UNION:
-        if name not in _LOCAL or name not in client:
+        if name not in local or name not in client:
             continue
-        local_ret = _return_annotation(_LOCAL[name])
+        local_ret = _return_annotation(local[name])
         client_ret = _return_annotation(client[name])
         local_typed = any(t in local_ret for t in _TYPED_RETURNS)
         client_collapsed = ("dict" in client_ret or "Any" in client_ret) and not any(
@@ -138,7 +149,8 @@ def test_client_return_types_match_local_typed_returns() -> None:
 
 def test_every_protocol_method_exists_on_local_catalog() -> None:
     """No Protocol method is a typo or a renamed/removed local method."""
-    unknown = sorted(name for name in _UNION if name not in _LOCAL)
+    local = _local_members()
+    unknown = sorted(name for name in _UNION if name not in local)
     assert unknown == [], f"Protocol declares methods absent from Catalog: {unknown}"
 
 
@@ -148,10 +160,11 @@ def test_protocol_param_names_and_kinds_match_canonical() -> None:
     Annotations/defaults are intentionally not compared (the Protocol elides them; the
     canonical signatures live on `Catalog`). Names + kinds are the conformance dimension.
     """
+    local = _local_members()
     mismatches = {
-        name: {"protocol": _name_kinds(method), "canonical": _name_kinds(_LOCAL[name])}
+        name: {"protocol": _name_kinds(method), "canonical": _name_kinds(local[name])}
         for name, method in _UNION.items()
-        if name in _LOCAL and _name_kinds(method) != _name_kinds(_LOCAL[name])
+        if name in local and _name_kinds(method) != _name_kinds(local[name])
     }
     assert mismatches == {}, f"Protocol drifted from canonical Catalog signatures: {mismatches}"
 

@@ -20,7 +20,6 @@ import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
@@ -76,6 +75,7 @@ class TestCollectionGCCli:
     def catalog_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> Catalog:
+        from nexus.catalog.catalog import Catalog
         catalog_dir = tmp_path / "catalog"
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         Catalog.init(catalog_dir)

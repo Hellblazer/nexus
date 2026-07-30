@@ -38,7 +38,7 @@ import inspect
 
 import pytest
 
-from nexus.catalog.catalog import Catalog, Tumbler
+from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from tests.catalog.test_http_catalog_client import (
     CHUNK_SHA_A,
@@ -581,6 +581,8 @@ def _seed_local(cat: Catalog, s: Seeds) -> None:
 
 @pytest.fixture(scope="module")
 def local_catalog(tmp_path_factory: pytest.TempPathFactory):
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
     base = tmp_path_factory.mktemp("nexus-8y1tm-catalog")
     catalog_dir = base / "catalog"
     catalog_dir.mkdir()
@@ -656,6 +658,8 @@ def test_shape_parity(
 
 
 def _shared_public_surface() -> set[str]:
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
     def pub(cls: type) -> set[str]:
         return {
             n for n, m in inspect.getmembers(cls, callable)

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +17,7 @@ def git_identity(monkeypatch):
 
 
 def _make_catalog(tmp_path: Path) -> Catalog:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
     return cat

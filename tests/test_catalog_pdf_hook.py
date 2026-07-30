@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog, count_documents, only_document
 
 
@@ -27,6 +26,7 @@ def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
     return catalog_dir, ActiveCatalog()

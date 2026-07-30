@@ -24,7 +24,6 @@ import pytest
 from tests._catalog_fixture_ops import active_reader
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
@@ -95,6 +94,7 @@ def registry(tmp_path: Path, code_repo: Path) -> RepoRegistry:
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     Catalog.init(catalog_dir)

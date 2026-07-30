@@ -15,12 +15,12 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog import orphan_backfill as ob
-from nexus.catalog.catalog import Catalog
 
 
 @pytest.fixture
 def cat(tmp_path: Path) -> Catalog:
     """Tmp-path Catalog + minimal owner needed by orphan-backfill."""
+    from nexus.catalog.catalog import Catalog
     catalog_env = tmp_path / "catalog"
     catalog_env.mkdir()
     c = Catalog(catalog_env, catalog_env / ".catalog.db")

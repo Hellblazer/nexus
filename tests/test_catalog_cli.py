@@ -9,7 +9,6 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
@@ -69,6 +68,7 @@ def catalog_env(tmp_path, monkeypatch):
 @pytest.fixture
 def initialized_catalog(catalog_env):
     """Return a facade over the LIVE catalog, init'd with one owner."""
+    from nexus.catalog.catalog import Catalog
     Catalog.init(catalog_env)
     cat = ActiveCatalog()
     cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
@@ -77,6 +77,7 @@ def initialized_catalog(catalog_env):
 
 class TestInitCommand:
     def test_init(self, catalog_env):
+        from nexus.catalog.catalog import Catalog
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "init"])
         assert result.exit_code == 0
@@ -1201,6 +1202,7 @@ class TestVerifyCommand:
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
         """--heal with `d` (drop) removes the ghost tumbler from the catalog."""
+        from nexus.catalog.catalog import Catalog
         self._register_with_doc_id(
             initialized_catalog, "1.1", "Ghost",
             "knowledge__thing", "7777aaaaaaaaaaaa",
@@ -1596,6 +1598,7 @@ class TestCollectionNameCommand:
     def test_emits_conformant_name_for_registered_repo(
         self, catalog_env, tmp_path, monkeypatch,
     ):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(catalog_env)
         repo = tmp_path / "myproject"
         repo.mkdir()
@@ -1624,6 +1627,7 @@ class TestCollectionNameCommand:
     def test_emits_conformant_name_for_code(
         self, catalog_env, tmp_path, monkeypatch,
     ):
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(catalog_env)
         repo = tmp_path / "myproject"
         repo.mkdir()
@@ -1650,6 +1654,7 @@ class TestCollectionNameCommand:
     def test_rejects_unknown_content_type(
         self, catalog_env, tmp_path, monkeypatch,
     ):
+        from nexus.catalog.catalog import Catalog
         Catalog.init(catalog_env)
         repo = tmp_path / "anywhere"
         repo.mkdir()
@@ -1668,6 +1673,7 @@ class TestCollectionNameCommand:
         the CLI surfaces that as a non-zero exit with a clear message
         instructing the user to index first.
         """
+        from nexus.catalog.catalog import Catalog
         Catalog.init(catalog_env)
         repo = tmp_path / "fresh"
         repo.mkdir()
@@ -1711,6 +1717,7 @@ class TestCollectionNameCommand:
     ):
         """When ``--repo`` is omitted, the command resolves the current
         working directory."""
+        from nexus.catalog.catalog import Catalog
         cat = Catalog.init(catalog_env)
         repo = tmp_path / "myproject"
         repo.mkdir()
@@ -1763,6 +1770,7 @@ class TestSeam3OwnersCarve:
     def test_owners_command_routes_get_catalog_through_module(self):
         """Patching commands.catalog._get_catalog is observed by the carved
         ``owners`` command — proves module-routed (not import-bound) access."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -1853,6 +1861,7 @@ class TestKgyozLinksCarve:
         """End-to-end through the group: patching
         commands.catalog._get_catalog is observed by the carved link-audit
         command — proves module-routed (not import-bound) access."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -1874,6 +1883,7 @@ class TestKgyozLinksCarve:
         """End-to-end through the group for the most complex carved command:
         the `links` flat-query + JSON render path runs intact (guards against
         an intra-body line drop that the __module__ pin would miss)."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -1934,6 +1944,7 @@ class TestWhh61BackupsCarve:
     def test_list_backups_routes_get_catalog_through_module(self):
         """End-to-end: patching commands.catalog._get_catalog is observed by
         the carved list-backups command — proves module-routed access."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -1951,6 +1962,7 @@ class TestWhh61BackupsCarve:
     def test_vacuum_backups_routes_get_catalog_through_module(self):
         """Symmetric to list-backups: vacuum-backups also routes _get_catalog
         through the module object (would fail if bound at import time)."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -1998,6 +2010,7 @@ class TestWhh61CollectionsCarve:
         """End-to-end: patching commands.catalog._get_catalog + _get_catalog_writer
         is observed by the carved backfill-collections command — proves
         module-routed access. Empty T3 + empty catalog → nothing to backfill."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -2044,6 +2057,7 @@ class TestWhh61MigrationCarve:
     def test_migrate_fallback_routes_get_catalog_through_module(self):
         """Patching commands.catalog._get_catalog is observed by the carved
         migrate-fallback — proves the direct->module-routed conversion."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -2066,6 +2080,7 @@ class TestWhh61MigrationCarve:
         """Deeper pin: the dry-run proposal path runs intact through the
         carved body (guards an intra-body line drop the early-exit pin and
         __module__ pin would miss)."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -2134,6 +2149,7 @@ class TestWhh61MaintenanceCarve:
         """End-to-end: patching commands.catalog._get_catalog is observed by
         the carved gc command — proves module-routed access. Empty catalog →
         no orphans."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -2196,6 +2212,7 @@ class TestWhh61RemediationCarve:
     def test_prune_stale_routes_get_catalog_through_module(self):
         """End-to-end: patching commands.catalog._get_catalog is observed by
         the carved prune-stale command — proves module-routed access."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -2249,6 +2266,7 @@ class TestWhh61ReportCarve:
     def test_stats_routes_get_catalog_through_module(self):
         """End-to-end: patching commands.catalog._get_catalog is observed by
         the carved stats command — proves module-routed access."""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main
@@ -2315,6 +2333,7 @@ class TestWhh61IntegrityCarve:
         the carved verify command — proves module-routed access. (The shared
         _make_t3 routing is pinned structurally above and exercised by the
         real verify suite, which reaches the t3 path with non-empty docs.)"""
+        from nexus.catalog.catalog import Catalog
         from unittest.mock import MagicMock, patch
 
         from nexus.cli import main

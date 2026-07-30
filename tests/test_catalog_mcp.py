@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
@@ -53,6 +52,7 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     SQLite arm's factories resolve the same directory that was just
     initialised.
     """
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))

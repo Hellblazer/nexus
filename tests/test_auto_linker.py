@@ -8,7 +8,6 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.auto_linker import LinkContext, auto_link, read_link_contexts
 
 
@@ -77,6 +76,7 @@ def _make_catalog(tmp_path: Path, monkeypatch=None):
     one catalog while the code under test read another, so the link count came
     back 0 instead of 1.
     """
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     # NB: keep the handle Catalog.init RETURNS. Re-opening the same dir with
     # Catalog(dir, db) yields a READ-ONLY handle under the engine substrate

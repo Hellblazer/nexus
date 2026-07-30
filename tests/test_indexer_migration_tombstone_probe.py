@@ -35,7 +35,6 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
-from nexus.catalog.catalog import Catalog
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.storage_mode import StorageBackend
 from nexus.registry import RepoRegistry
@@ -65,6 +64,7 @@ def _pin_service(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def catalog(tmp_path: Path) -> Catalog:
+    from nexus.catalog.catalog import Catalog
     return Catalog.init(tmp_path / "catalog")
 
 

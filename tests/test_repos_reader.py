@@ -25,7 +25,6 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.registry import RepoRegistry
 from nexus.repos import (
@@ -76,6 +75,7 @@ def cat(tmp_path: Path) -> ActiveCatalog:
     The seeding ops used here (``ensure_owner_for_repo``, ``register_collection``)
     are both on ``CATALOG_WRITE_OPS``, so they route on either arm.
     """
+    from nexus.catalog.catalog import Catalog
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir(exist_ok=True)
     Catalog.init(cat_dir)

@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
@@ -59,6 +58,7 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     is span resolution through the manifest, not the substrate, so route the
     seeding at the active writer and let the body stand.
     """
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))

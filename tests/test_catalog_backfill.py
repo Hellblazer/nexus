@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 
 
@@ -44,6 +43,7 @@ def git_identity(monkeypatch):
 
 @pytest.fixture
 def catalog_env(tmp_path, monkeypatch):
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     Catalog.init(catalog_dir)

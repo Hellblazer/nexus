@@ -33,7 +33,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
@@ -46,6 +45,7 @@ from nexus.cli import main
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Initialised catalog with NEXUS_CATALOG_PATH pointed at it."""
+    from nexus.catalog.catalog import Catalog
     cat_dir = tmp_path / "catalog"
     Catalog.init(cat_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))

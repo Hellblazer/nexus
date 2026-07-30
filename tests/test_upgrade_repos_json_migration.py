@@ -18,7 +18,6 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog
 
-from nexus.catalog.catalog import Catalog
 from nexus.commands.upgrade import _migrate_repos_json_to_catalog
 from nexus.registry import RepoRegistry
 
@@ -35,6 +34,7 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def cat(cfg: Path) -> Catalog:
+    from nexus.catalog.catalog import Catalog
     cat_dir = cfg / "catalog"
     # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
     # through the factories, so a local-only handle left the service

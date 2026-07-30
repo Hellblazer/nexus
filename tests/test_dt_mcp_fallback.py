@@ -25,7 +25,6 @@ from unittest.mock import patch
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.dt_link_generator import generate_dt_links
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.dt_writeback import writeback_record
@@ -33,6 +32,7 @@ from nexus.dt_writeback import writeback_record
 
 @pytest.fixture
 def cat(tmp_path):
+    from nexus.catalog.catalog import Catalog
     d = tmp_path / "catalog"
     d.mkdir()
     return Catalog(d, d / ".catalog.db")

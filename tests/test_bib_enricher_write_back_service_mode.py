@@ -45,7 +45,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.factory import _ServiceCatalogWriter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.tumbler import Tumbler
@@ -430,6 +429,7 @@ class TestBibColumnDualBackendParity:
     def test_local_and_service_backends_produce_identical_bib_columns_after_enrich_apply(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch, reader, writer,
     ) -> None:
+        from nexus.catalog.catalog import Catalog
         monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
         monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")

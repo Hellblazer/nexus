@@ -21,7 +21,6 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click.testing import CliRunner
 
 from nexus import mcp_infra
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.mcp_infra import (
@@ -58,6 +57,7 @@ def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # flip (which sets NX_STORAGE_BACKEND=service globally and re-routed
     # the catalog hooks at the engine tenant — pre-existing engine-run
     # failure of test_cli_store_put_writes_manifest_linkage).
+    from nexus.catalog.catalog import Catalog
     monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -70,6 +70,7 @@ def test_cli_store_put_writes_manifest_linkage(
     local_t3: T3Database,
     catalog_env: Path,
 ) -> None:
+    from nexus.catalog.catalog import Catalog
     from nexus.cli import main
 
     f = tmp_path / "doc.md"

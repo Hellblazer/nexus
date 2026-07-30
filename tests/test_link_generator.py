@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.config import catalog_path
 from tests._catalog_fixture_ops import ActiveCatalog
@@ -22,6 +21,7 @@ class TestRdrFilepathLinks:
     """generate_rdr_filepath_links uses resolve_path for relative file_path."""
 
     def _make_catalog(self, tmp_path: Path) -> Catalog:
+        from nexus.catalog.catalog import Catalog
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
         (cat_dir / "owners.jsonl").touch()
@@ -110,6 +110,7 @@ class TestIncrementalRdrFilepathLinking:
     """Incremental mode for generate_rdr_filepath_links via new_tumblers parameter."""
 
     def _make_catalog(self, tmp_path: Path) -> Catalog:
+        from nexus.catalog.catalog import Catalog
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
         (cat_dir / "owners.jsonl").touch()
@@ -174,6 +175,7 @@ class TestCitationLinksNoneMeta:
     """generate_citation_links must tolerate entries with meta=None (nexus-8d6e)."""
 
     def _make_catalog(self, tmp_path: Path) -> Catalog:
+        from nexus.catalog.catalog import Catalog
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
         (cat_dir / "owners.jsonl").touch()
@@ -223,6 +225,7 @@ class TestProseFilepathLinks:
     """
 
     def _make_catalog(self, tmp_path: Path) -> Catalog:
+        from nexus.catalog.catalog import Catalog
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
         (cat_dir / "owners.jsonl").touch()
@@ -373,6 +376,7 @@ class TestPdfCorpusLinks:
     """
 
     def _make_catalog(self, tmp_path: Path) -> Catalog:
+        from nexus.catalog.catalog import Catalog
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
         (cat_dir / "owners.jsonl").touch()
@@ -467,6 +471,7 @@ class TestPdfCorpusLinks:
 #    via writer. Lock the split so it can't regress to a single-object call.
 class TestCitationLinksReaderWriterSplit:
     def _seed_citing_pair(self, tmp_path: Path) -> Path:
+        from nexus.catalog.catalog import Catalog
         import sqlite3 as _sqlite  # noqa: F401
         cat_dir = tmp_path / "catalog"
         cat = Catalog.init(cat_dir)
@@ -496,6 +501,7 @@ class TestCitationLinksReaderWriterSplit:
         tests the same split on whichever catalog is live, which is strictly
         more faithful than the raw pair it replaces.
         """
+        from nexus.catalog.catalog import Catalog
         # Seed through the ACTIVE catalog, not _seed_citing_pair: that helper
         # seeds a LOCAL Catalog, which the factories below would not read in
         # service mode (bucket-2 — the seed is invisible and the count is 0).
@@ -527,6 +533,7 @@ class TestCitationLinksReaderWriterSplit:
     def test_write_on_reader_without_writer_fails_loud(self, tmp_path: Path) -> None:
         """Passing only a read-only reader (no writer) must fail at the write,
         not silently no-op — the regression that the split prevents."""
+        from nexus.catalog.catalog import Catalog
         import sqlite3
         cat_dir = self._seed_citing_pair(tmp_path)
         reader = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)

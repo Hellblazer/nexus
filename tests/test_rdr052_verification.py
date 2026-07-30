@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
@@ -34,6 +33,7 @@ def t3():
 
 @pytest.fixture()
 def catalog(tmp_path, monkeypatch):
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
     repo_owner = cat.register_owner("nexus", "repo", repo_hash="aabb1122")
@@ -309,6 +309,7 @@ class TestTumblerHierarchy:
         assert result == (Tumbler.parse(expected) if expected else None)
 
     def test_resolve_chunk_ghost_element(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         catalog_dir = tmp_path / "catalog"
         catalog_dir.mkdir()
         cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
@@ -321,6 +322,7 @@ class TestTumblerHierarchy:
         assert result["physical_collection"] == "code__nexus"
 
     def test_resolve_chunk_out_of_range(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         catalog_dir = tmp_path / "catalog"
         catalog_dir.mkdir()
         cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
@@ -333,6 +335,7 @@ class TestTumblerHierarchy:
             Tumbler.parse("1.-1.42")
 
     def test_descendants_any_depth(self, tmp_path):
+        from nexus.catalog.catalog import Catalog
         catalog_dir = tmp_path / "catalog"
         catalog_dir.mkdir()
         cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")

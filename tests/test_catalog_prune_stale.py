@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
@@ -56,6 +55,7 @@ def initialized_catalog(catalog_env):
     # source), so a direct Catalog handle cannot seed; and the verb under
     # test reads via _get_catalog(), so a local seed would be invisible to
     # it — the bucket-2 false-negative _catalog_fixture_ops exists to stop.
+    from nexus.catalog.catalog import Catalog
     Catalog.init(catalog_env)
     cat = ActiveCatalog()
     cat.register_owner("rdr", "design")

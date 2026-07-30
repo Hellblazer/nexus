@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from tests._catalog_fixture_ops import ActiveCatalog, active_reader
 
 
@@ -35,6 +34,7 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
     engine substrate the assertions read an empty local file while
     ``_catalog_hook`` wrote the service catalog.
     """
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
     return catalog_dir, ActiveCatalog()

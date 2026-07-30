@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.corpus import is_conformant_collection_name
 from nexus.registry import RepoRegistry
 
@@ -41,6 +40,7 @@ def catalog(tmp_path):
     Also creates the ``.git/`` and ``documents.jsonl`` markers that
     ``Catalog.is_initialized`` checks so the helper's gate succeeds.
     """
+    from nexus.catalog.catalog import Catalog
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
     (cat_dir / ".git").mkdir()

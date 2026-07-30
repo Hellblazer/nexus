@@ -37,7 +37,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.indexer_utils import build_staleness_cache
 from tests.catalog.test_http_catalog_client import (
@@ -51,6 +50,7 @@ from tests.catalog.test_http_catalog_client import (
 
 
 def _make_local_catalog(tmp_path: Path) -> Catalog:
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
     db_path = tmp_path / "catalog.sqlite"

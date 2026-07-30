@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.config import catalog_path
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._t2_fixture_ops import require_sqlite_substrate
@@ -35,6 +34,7 @@ def papers_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Fresh Catalog with a papers-curator owner registered. Returns
     (catalog, owner_tumbler).
     """
+    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -93,6 +93,7 @@ class TestCatalogPapersCuratorIsolation:
         to bypass the catalog API) so it asserts the SCAN finds the
         class, not that the API rejects it (separate test below).
         """
+        from nexus.catalog.catalog import Catalog
         cat, owner = papers_owner
         # nexus-aqbrk: the ONLY test here that cannot run on the service
         # catalog. It deliberately bypasses the register API to create a row
