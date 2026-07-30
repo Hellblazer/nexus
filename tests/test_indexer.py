@@ -17,31 +17,37 @@ from tests.conftest import make_vector_test_client
 # fixture sets credentials and forces ``is_local_mode()`` to False so
 # the assertions hold regardless of the host environment.
 #
-# local_catalog_backend (nexus-aqbrk): this module drives the indexer with a
+# CATALOG SEAM (nexus-i711w C-store; supersedes the nexus-aqbrk
+# ``local_catalog_backend`` module pin): this module drives the indexer with a
 # FULLY STUBBED config — ``_patches`` replaces ``nexus.config.load_config``
 # with ``_DEFAULT_CONFIG`` and ``get_credential`` with a fixed fake, and the
-# autouse ``_legacy_vector_backend`` fixture below pins vectors to chroma. It
-# is a local-mode indexing journey end to end. Under the engine substrate the
-# CATALOG store alone still resolved to SERVICE, and a stubbed config carries
-# no ``service_url`` — so ``_prune_deleted_files`` -> ``chashes_for_collection``
-# reached HttpCatalogClient with an EMPTY base_url and died on
-# ``httpx.UnsupportedProtocol``, which reads as broken endpoint resolution
-# rather than a missing pin. Same shape and same disposition as
-# test_catalog_e2e (commit f4030fe5).
+# autouse ``_legacy_vector_backend`` fixture below pins vectors to chroma —
+# so the service catalog's endpoint resolution can never work here BY
+# CONSTRUCTION (the aqbrk finding: ``_prune_deleted_files`` ->
+# ``chashes_for_collection`` reached HttpCatalogClient with a garbage
+# base_url and died on ``httpx.UnsupportedProtocol``). The old module pin
+# expressed "the catalog resolves to nothing" INCIDENTALLY (SQLite backend +
+# an uninitialised tmp config dir); that pin retires with the SQLite catalog
+# itself, so ``_patches`` now states the same thing EXPLICITLY:
+#   - ``make_catalog_reader`` -> None — the catalog-absent no-op contract
+#     every ``_run_index`` journey here was written against (migration,
+#     prune, self-heal and head-hash writes all None-guard), and
+#   - ``_catalog_hook`` -> {} — its graceful catalog-absent return value
+#     (the "Registering N catalog entries" phases are emitted by
+#     ``_run_index`` around the call, so the on_phase assertions still
+#     exercise real code).
 #
-# NOT scope reduction — the service-mode indexer->catalog journey is a
-# different journey this file never covered, and it IS covered: 33 tests in
-# tests/test_catalog_indexer_hook.py run the hook through ActiveCatalog
+# NOT scope reduction — the indexer->catalog journey on the LIVE substrate is
+# covered where it can actually run: tests/test_catalog_indexer_hook.py
+# drives ``_catalog_hook`` through tests/_catalog_fixture_ops.ActiveCatalog
 # (owner create/reuse, register/update, batching, fairness yields, per-file
-# fallbacks), and the specific call that failed here has direct service-path
-# coverage in tests/catalog/test_http_catalog_client.py::test_chashes_for_
-# collection plus the tests/catalog/test_shape_parity_tripwire.py entry that
-# asserts both implementations agree.
+# fallbacks), and the catalog->GC round trip is exercised against the ACTIVE
+# catalog by test_prune_deleted_files_round_trip_with_real_catalog below.
 #
 # ONE list, not a second assignment: a second ``pytestmark = ...`` REPLACES
 # the first rather than appending (it silently no-opped a pin in
 # test_catalog_consolidation.py — commit 0eefc06a).
-pytestmark = pytest.mark.usefixtures("cloud_mode", "local_catalog_backend")
+pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
@@ -105,6 +111,20 @@ def _patches(db, *, cfg=None, extra=None):
         "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.db.make_t3": {"return_value": db},
         "voyageai.Client": {},
+        # Catalog seam (nexus-i711w, see module header): the stubbed config
+        # above severs service-catalog endpoint resolution, so the catalog is
+        # explicitly ABSENT for these journeys — reader None makes migration/
+        # prune/self-heal take their documented catalog-absent no-op paths,
+        # and the hook returns its documented empty doc_id map. Both call
+        # sites import from nexus.catalog.factory / resolve
+        # nexus.indexer._catalog_hook at CALL time, so these targets hold.
+        # PORT-VERIFY: no journey below asserts _catalog_hook side effects
+        # (the "Registering N catalog entries" phases are emitted by
+        # _run_index around the call) — if one starts failing on a missing
+        # doc_id, it was silently depending on the hook and needs its own
+        # explicit fixture, not a weaker patch.
+        "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
+        "nexus.indexer._catalog_hook": {"return_value": {}},
     }
     if extra: patches.update(extra)
     mocks, stack = {}, []
@@ -169,9 +189,13 @@ def test_run_index_raises_credentials_missing_without_credentials(tmp_path, monk
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # Reader None (nexus-i711w seam): the non-conformant registry names
+    # (code__repo/docs__repo) re-route through _repo_collection_or_legacy
+    # BEFORE the credentials check; keep it on the no-catalog synth path.
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.ripgrep_cache.build_cache"), \
          patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3") as mt3:
         with pytest.raises(CredentialsMissingError): _run_index(repo, reg)
     mt3.assert_not_called()
@@ -191,6 +215,7 @@ def test_cache_path_includes_repo_hash(tmp_path, monkeypatch):
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.ripgrep_cache.build_cache", side_effect=lambda r, cp, s: seen.append(cp)), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
         with pytest.raises(CredentialsMissingError): _run_index(a, reg)
         with pytest.raises(CredentialsMissingError): _run_index(b, reg)
@@ -210,6 +235,7 @@ def test_run_index_skips_hidden_files(tmp_path, monkeypatch):
     seen: list[Path] = []
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.ripgrep_cache.build_cache", side_effect=lambda r, cp, s: seen.extend(f for _, f in s)), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
         with pytest.raises(CredentialsMissingError): _run_index(repo, reg)
     assert all(".git" not in str(p) for p in seen)
@@ -274,8 +300,12 @@ def test_frecency_only_updates_frecency_score(tmp_path):
     col = MagicMock(); col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock(); db.get_or_create_collection.return_value = col
     db.get_collection.return_value = col
+    # Catalog absent (nexus-i711w, module-header seam): reader None routes
+    # the doc_id map AND the manifest path to their legacy fallbacks, which
+    # is the state this test was written against.
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
         _run_index_frecency_only(repo, _reg())
     kw = db.update_chunks.call_args_list[0].kwargs
@@ -303,13 +333,17 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
     db.get_collection.return_value = col
     db.get_collection.return_value = col
 
-    # Mock the catalog map so the file resolves to a known doc_id.
+    # Mock the catalog map so the file resolves to a known doc_id. The
+    # reader is pinned to None (nexus-i711w seam) so the manifest-based
+    # chunk resolution is skipped and the legacy where-filter — this
+    # test's subject — is what fires.
     with patch(
         "nexus.indexer._build_frecency_doc_id_map",
         return_value={src: "1.1.1"},
     ), \
          patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
         _run_index_frecency_only(repo, _reg())
     where = col.get.call_args.kwargs["where"]
@@ -341,6 +375,7 @@ def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path)
     ), \
          patch("nexus.frecency.batch_frecency", return_value={src: 0.42}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
         _run_index_frecency_only(repo, _reg())
     where = col.get.call_args.kwargs["where"]
@@ -356,6 +391,7 @@ def test_frecency_only_skips_unindexed_files(tmp_path):
     db.get_collection.return_value = col
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
         _run_index_frecency_only(repo, _reg())
     db.update_chunks.assert_not_called()
@@ -367,7 +403,11 @@ def test_frecency_only_raises_credentials_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    with pytest.raises(CredentialsMissingError): _run_index_frecency_only(repo, _reg())
+    # Reader None (nexus-i711w seam): the rdr_collection fallback at
+    # _run_index_frecency_only:1716 resolves _repo_collection_or_legacy
+    # BEFORE the credential check; keep it on the no-catalog synth path.
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
+        with pytest.raises(CredentialsMissingError): _run_index_frecency_only(repo, _reg())
 
 
 # ── Debug logging ────────────────────────────────────────────────────────────
@@ -470,7 +510,11 @@ def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     repo = tmp_path / "repo"; repo.mkdir(); (repo / ".git").mkdir()
     stats = {"rdr_indexed": rdr_indexed, "rdr_current": 0, "rdr_failed": 0}
     runner = CliRunner()
+    # Reader None (nexus-i711w seam): the command's catalog-backed registry
+    # adapter (_open_catalog_or_none) degrades to its repos.json fallback,
+    # matching the uninitialised-catalog state this test always ran in.
     with patch("nexus.commands.index._registry_path", return_value=tmp_path / "r.json"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.indexer.index_repository", return_value=stats):
         r = runner.invoke(main, ["index", "repo", str(repo)])
     assert r.exit_code == 0
@@ -1225,29 +1269,43 @@ def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
     ]
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="nexus-mqd6t: the engine's chashesForCollection misses the "
+    "tombstone filter — a deleted doc's chunks stay in the T3 GC alive-set. "
+    "CONFIRMED LIVE by this port against the real engine (2026-07-30), the "
+    "second independent confirmation after the i711w.1 item-13 xfails. "
+    "Flips with mqd6t's engine fix.",
+)
 def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     """RDR-108 Phase 4 / nexus-dyxe integration test: exercise the full
-    catalog -> T3 round trip with a real SQLite-backed Catalog and a
-    real ``chromadb.EphemeralClient`` collection. Document deletion via
-    FK CASCADE drops manifest rows; the next GC sweep removes the now-
-    orphaned T3 chunks while leaving live chunks intact.
+    catalog -> T3 round trip with the ACTIVE catalog (whichever backend the
+    factories resolve — the engine under the service substrate) and a real
+    ``chromadb.EphemeralClient`` collection. Document deletion drops the
+    document's manifest rows (FK CASCADE on either substrate); the next GC
+    sweep removes the now-orphaned T3 chunks while leaving live chunks
+    intact.
 
-    This locks the contract that ``chashes_for_collection`` returns
-    correctly-truncated chashes that match T3 chunk metadata's
-    ``chunk_text_hash[:32]``, end-to-end."""
+    This locks the contract that ``chashes_for_collection`` returns chashes
+    that match T3 chunk metadata's ``chunk_text_hash`` (full 64-hex,
+    RDR-180), end-to-end.
+
+    Ported off the local SQLite catalog (nexus-i711w C-store): the raw-SQL
+    INSERT existed only to pin the literal tumblers "1.1.1"/"1.1.2", which
+    nothing here asserts on — registration now goes through the same write
+    factories production uses and the minted tumblers are captured instead
+    (same conversion as 085009fe's ``_register_doc_active``).
+    """
     import hashlib
 
-
-    from nexus.catalog.catalog import Catalog
     from nexus.indexer import _prune_deleted_files
+    from tests._catalog_fixture_ops import ActiveCatalog
 
-    # Real Catalog with real SQLite.
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    cat = Catalog(catalog_dir=catalog_dir, db_path=tmp_path / "catalog.sqlite")
+    cat = ActiveCatalog()
 
     # Two documents in the same physical_collection; each carries one
-    # chunk. We will delete the first document and verify GC sweeps
+    # chunk. We will delete the second document and verify GC sweeps
     # exactly its chunk.
     coll_name = "code__rt-test__voyage-code-3__v1"
     live_text = "def live(): return 1\n"
@@ -1255,27 +1313,26 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     live_chash = hashlib.sha256(live_text.encode()).hexdigest()
     orphan_chash = hashlib.sha256(orphan_text.encode()).hexdigest()
 
-    for tumbler, fname in (("1.1.1", "live.py"), ("1.1.2", "gone.py")):
-        cat._db.execute(  # epsilon-allow: integration fixture seeds documents
-            "INSERT INTO documents "
-            "(tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (tumbler, fname, "", 0, "code", f"/tmp/{fname}",
-             "", coll_name, 1, "", "", "{}", 0.0, "", ""),
-        )
-    cat._db.commit()
+    # PORT-VERIFY: register kwargs mirror 085009fe's _register_doc_active
+    # but with content_type="code" (that port used "text"); the engine arm
+    # must accept it and key chashes_for_collection off physical_collection.
+    owner = cat.register_owner("rt-test", "curator")
+    tumblers: dict[str, str] = {}
+    for fname in ("live.py", "gone.py"):
+        tumblers[fname] = str(cat.register(
+            owner,
+            fname,
+            content_type="code",
+            file_path=f"/tmp/{fname}",
+            physical_collection=coll_name,
+            chunk_count=1,
+        ))
 
-    cat.write_manifest("1.1.1", [
-        {"chash": live_chash, "position": 0, "chunk_index": 0,
-         "line_start": 1, "line_end": 1, "char_start": 0,
-         "char_end": len(live_text)},
+    cat.write_manifest(tumblers["live.py"], [
+        {"chash": live_chash, "position": 0},
     ])
-    cat.write_manifest("1.1.2", [
-        {"chash": orphan_chash, "position": 0, "chunk_index": 0,
-         "line_start": 1, "line_end": 1, "char_start": 0,
-         "char_end": len(orphan_text)},
+    cat.write_manifest(tumblers["gone.py"], [
+        {"chash": orphan_chash, "position": 0},
     ])
 
     # Real ChromaDB EphemeralClient with both chunks present.
@@ -1300,11 +1357,16 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
         def get_collection(self, name):
             return chroma.get_collection(name)
 
-    # Delete the second document. FK CASCADE removes its manifest rows.
-    cat._db.execute(  # epsilon-allow: integration fixture forces FK CASCADE
-        "DELETE FROM documents WHERE tumbler = ?", ("1.1.2",),
-    )
-    cat._db.commit()
+    # Delete the second document through the public write op. FK CASCADE
+    # removes its manifest rows (server-side on the engine, SQLite FK
+    # locally) — the same mechanism the raw DELETE used to force.
+    # PORT-VERIFY: asserts the engine's delete_document cascades
+    # document_chunks such that chashes_for_collection stops returning the
+    # orphan chash. If this fails, that is a PRODUCT finding (GC would never
+    # sweep deleted docs' chunks in service mode), not a test to bend.
+    # Truthiness, not ``is True``: the original raw-SQL DELETE asserted
+    # nothing about a return; this only pins "the delete found its doc".
+    assert cat.delete_document(tumblers["gone.py"])
 
     _prune_deleted_files(coll_name, "docs__unused", _DBShim(), catalog=cat)
 
@@ -1331,12 +1393,18 @@ def test_registry_c2_fallback(tmp_path):
     # indexer falls back to ``_repo_collection_or_legacy`` which now
     # synthesises a conformant 4-segment name from the path-derived
     # identity instead of returning the pre-Phase-5 legacy 2-segment shape.
-    expected = _repo_collection_or_legacy(repo, "docs")
     names: list[str] = []
     col = MagicMock(); col.get.return_value = {"metadatas": [], "ids": []}
     db = MagicMock(); db.get_or_create_collection.side_effect = lambda n: (names.append(n), col)[1]
     db.get_collection.side_effect = lambda n: (names.append(n), col)[1]
-    with _patches(db): _run_index(repo, reg)
+    with _patches(db):
+        # Computed INSIDE the seam (nexus-i711w): with the reader pinned to
+        # None both this call and _run_index's internal one take the same
+        # no-catalog synth path, keeping the comparison substrate-free (the
+        # old placement outside the patches relied on the sqlite pin +
+        # uninitialised dir to reach the same branch).
+        expected = _repo_collection_or_legacy(repo, "docs")
+        _run_index(repo, reg)
     assert expected in names
 
 
@@ -1424,7 +1492,11 @@ def test_index_code_file_returns_zero_when_all_chunks_empty(tmp_path):
 @pytest.mark.parametrize("force_val,expected", [(True, True), (False, False)])
 def test_index_repository_passes_force(tmp_path, registry, force_val, expected):
     repo = tmp_path / "repo"; repo.mkdir()
-    with patch("nexus.indexer._run_index") as m: m.return_value = {}; index_repository(repo, registry, force=force_val) if force_val else index_repository(repo, registry)
+    # Reader None (nexus-i711w seam): index_repository's post-run
+    # _set_owner_head_hash None-guards instead of resolving a live catalog.
+    with patch("nexus.indexer._run_index") as m, \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
+        m.return_value = {}; index_repository(repo, registry, force=force_val) if force_val else index_repository(repo, registry)
     assert m.call_args.kwargs.get("force", False) is expected
 
 
@@ -1496,7 +1568,13 @@ def _run_pdf(tmp_path, col_meta=None, n=1):
     prep = [(f"id{i}", f"Page {i}", {"source_title":"T","page_number":i,"source_path":str(f),
              "corpus":"docs__repo","embedding_model":"voyage-context-3","store_type":"prose",
              "source_agent":"nexus-indexer"}) for i in range(1, n+1)]
+    # Reader None (nexus-i711w seam): _index_pdf_file is the ONE wrapper
+    # that installs DEFAULT post-store hooks when hooks=None
+    # (indexer.py:2179), and the catalog store hook resolves the factory at
+    # fire time. None keeps it on its documented skip path, as the retired
+    # local-catalog pin did incidentally.
     with patch("nexus.doc_indexer._pdf_chunks", return_value=prep), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.doc_indexer._embed_with_fallback", return_value=([[0.1]*3]*n, "voyage-context-3")):
         return _index_pdf_file(f, repo, "docs__repo", "voyage-context-3",
                                col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
@@ -1806,6 +1884,7 @@ def test_frecency_update_paginates(tmp_path):
     db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
         _run_index_frecency_only(repo, _reg())
     ids = set()
@@ -1892,7 +1971,10 @@ def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_pa
 @pytest.mark.parametrize("side_effect", [None, RuntimeError("boom"), CredentialsMissingError("x")])
 def test_lock_file_deleted_after_index(tmp_path, registry, side_effect):
     repo = tmp_path / "repo"; repo.mkdir(); ld = tmp_path / "locks"; ld.mkdir()
+    # Reader None (nexus-i711w seam): keeps the post-run head-hash write a
+    # None-guard no-op, as it was under the retired local-catalog pin.
     with patch("nexus.indexer._repo_lock_path", side_effect=lambda r: ld / "test.lock"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.indexer._run_index", side_effect=side_effect):
         if side_effect is None: index_repository(repo, registry)
         elif isinstance(side_effect, CredentialsMissingError):
@@ -1904,7 +1986,9 @@ def test_lock_file_deleted_after_index(tmp_path, registry, side_effect):
 def test_stale_lock_removed_before_acquire(tmp_path, registry):
     repo = tmp_path / "repo"; repo.mkdir(); ld = tmp_path / "locks"; ld.mkdir()
     lf = ld / "test.lock"; lf.write_text(str(999999999))
-    with patch("nexus.indexer._repo_lock_path", side_effect=lambda r: lf), patch("nexus.indexer._run_index"):
+    with patch("nexus.indexer._repo_lock_path", side_effect=lambda r: lf), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.indexer._run_index"):
         index_repository(repo, registry)
     assert not lf.exists()
 

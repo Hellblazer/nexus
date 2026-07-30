@@ -19,6 +19,41 @@ migration:
     directly without invoking the migration path.
 
 Tests pin the decision tree per the bead's scope (`nexus-yqnr.6`).
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2 C-store). ``_migrate_legacy_collections``
+is LIVE in service mode — first index after a guided upgrade probes T3 for
+legacy shapes and, when found, renames via the ONE-call engine cascade — so the
+verb contract ports. The split here is per decision-tree case:
+
+  PORT (``active_catalog`` + ``service_repo_with_owner``): the NO-RENAME
+  cases — steady state (2), both-exist skip (3), greenfield (4), catalog-None
+  and owner-unregistered no-ops. These exercise ``owner_for_repo`` +
+  ``collection_for`` on whichever catalog is live (the engine in this suite),
+  with the injected ``t3`` remaining the canonical vector-test substitute the
+  ``make_t3(_client=...)`` seam documents.
+
+  PINNED (``local_catalog`` + ``local_repo_with_owner``): every test that
+  EXECUTES decision-tree case 1 (the rename). The executed leg is the
+  SQLite-era client-side fan-out (T2 cascade -> ``t3_db.rename_collection`` ->
+  catalog cascade) driven with an injected local Catalog + in-memory T3; in
+  service mode ``collection_rename.py`` branches to a single transactional
+  ``client.rename_collection_cascade(old, new)`` on the engine and never calls
+  ``t3_db.rename_collection``, so the injected pairing is meaningless there —
+  and the unit suite's engine substrate cannot SEED pgvector chunks (no
+  embedding model provisioned; the same wall recorded on
+  tests/db/test_i711w_gap_xfails.py's item-13 verb test), so the case-1 trigger
+  (probe finds legacy chunks PRESENT in the engine's T3) is unreachable. These
+  retire with the local catalog fan-out, in the same commit as the src.
+
+  GAP-CANDIDATE (recorded, not silently dropped): once the local fan-out is
+  deleted, decision-tree case 1 — rename fires, one Upgraded message, registry
+  rewrite, conformant-name return on post-rename projection failure — has NO
+  test executing it against a real engine. The service-arm coverage that
+  exists is the client ROUTING contract (tests/test_collection_rename_
+  service_mode.py, MagicMock cascade) and the engine's rename txn itself; the
+  decision tree above them is unpinned. Needs a new engine-backed test that
+  seeds chunk rows via SQL (bypassing server-side embed), per rule-5 of the
+  substrate-port discipline.
 """
 from __future__ import annotations
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
@@ -28,11 +63,11 @@ from unittest.mock import patch
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.corpus import is_conformant_collection_name
 from nexus.db.t3 import T3Database
 from nexus.indexer import _legacy_collection_name
 from nexus.registry import RepoRegistry
+from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
@@ -40,34 +75,11 @@ from tests.conftest import make_vector_test_client
 # fixture sets credentials and forces ``is_local_mode()`` to False so
 # the assertions hold regardless of the host environment.
 #
-# nexus-aqbrk: ``local_catalog_backend`` FOLDED INTO the existing mark, not
-# added as a second ``pytestmark`` — a second assignment REPLACES rather than
-# appends, which would silently drop the cloud_mode pin this file depends on.
-#
-# WHY PINNED. This file tests the SQLite-era data-plane rename: the FAN-OUT of
-# T2 cascade -> T3 native modify(name=) -> catalog cascade, driven from the
-# client with an injected local Catalog and an in-memory T3. Service mode does
-# not have that shape at all — collection_rename.py:124 branches to a single
-# transactional ``client.rename_collection_cascade(old, new)`` on the engine,
-# which re-homes the pgvector chunks inside the same transaction and never
-# calls ``t3_db.rename_collection``. So the injected local T3 is not merely
-# unused there, it is meaningless.
-#
-# That branch is also why the failures LOOKED like test-setup drift: the tests
-# pass ``cat=<local Catalog>``, the service branch checks
-# ``hasattr(client, "rename_collection_cascade")``, a local Catalog has no such
-# method, so it silently falls back to ``make_catalog_reader()`` and asks the
-# SERVICE to rename a collection only the local fixtures ever knew about ->
-# "HTTP 404: collection not found: code__myproject-cafef00d".
-#
-# SERVICE HALF IS OWNED, and substantively:
-#   tests/test_collection_rename_service_mode.py — single-endpoint routing,
-#     count mapping, atomic-failure -> ClickException, and both guard paths
-#     (unknown source, target collision) asserting the endpoint is NOT called
-#   tests/test_t2_rename_cascade_service_mode.py — per-store routing for
-#     chash / aspects / queue / highlights, each paired with a
-#     ``sqlite_not_updated_in_service_mode`` counterpart
-pytestmark = pytest.mark.usefixtures("cloud_mode", "local_catalog_backend")
+# nexus-i711w C-store: the module-wide ``local_catalog_backend`` pin moved
+# into the ``local_catalog`` fixture so only the DIE-set tests carry it —
+# a single module ``pytestmark`` assignment REPLACES rather than appends
+# (the nexus-aqbrk lesson), so cloud_mode stays the one module mark.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
 def _collection_name(repo):
@@ -76,13 +88,14 @@ def _collection_name(repo):
 
 @pytest.fixture()
 def t3():
-    """T3 backed by ``EphemeralClient`` with a ChromaDB default
+    """T3 backed by the canonical vector-test client with a local
     embedding function (no Voyage API key required).
 
-    NOTE: ``make_vector_test_client()`` shares process-level state
-    across instances (the name is misleading), so the fixture clears
-    every collection on entry to keep tests isolated. Mirrors the
-    pattern used in ``test_t3_strict_collection_naming.py``.
+    This is NOT dying machinery: ``make_t3(_client=...)`` documents the
+    injected-client T3Database facade as the canonical test substitute
+    (RDR-155 P4b P2). The fixture clears every collection on entry to
+    keep tests isolated (the client shares process-level state across
+    instances). Mirrors ``test_t3_strict_collection_naming.py``.
     """
     client = make_vector_test_client()
     ef = MiniLMDirectEmbeddingFunction()
@@ -97,23 +110,72 @@ def t3():
 
 
 @pytest.fixture()
-def catalog(tmp_path: Path) -> Catalog:
+def local_catalog(tmp_path: Path, local_catalog_backend):
+    """A real LOCAL SQLite ``Catalog`` — DIE-set tests only.
+
+    ``local_catalog_backend`` is requested so the pin is explicit: it keeps
+    ``storage_backend_for("catalog")`` on SQLITE, which is what routes
+    ``rename_collection_data_plane`` down the client-side fan-out these
+    tests observe. Retirement note: this fixture and its tests go with the
+    local catalog itself (nexus-i711w), in the same commit as the src.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying import stays body-local so the file still collects post-deletion
+
     cat_dir = tmp_path / "catalog"
     cat = Catalog.init(cat_dir)
     return cat
 
 
 @pytest.fixture()
-def repo_with_owner(catalog: Catalog, tmp_path: Path, monkeypatch) -> Path:
-    """A registered repo with a known repo_hash that
-    ``_migrate_legacy_collections`` can resolve."""
+def local_repo_with_owner(local_catalog, tmp_path: Path, monkeypatch) -> Path:
+    """A repo registered in the LOCAL catalog with a known repo_hash that
+    ``_migrate_legacy_collections`` can resolve. DIE-set companion of
+    ``service_repo_with_owner``."""
     repo = tmp_path / "myproject"
     repo.mkdir()
-    catalog.register_owner(
+    local_catalog.register_owner(
         name="myproject",
         owner_type="repo",
         repo_hash="cafef00d",
         repo_root=str(repo),
+    )
+    monkeypatch.setattr(
+        "nexus.repo_identity._repo_identity",
+        lambda r: ("myproject", "cafef00d"),
+    )
+    return repo
+
+
+@pytest.fixture()
+def active_catalog() -> ActiveCatalog:
+    """Seed and read through whichever catalog is live (nexus-i711w Stage 2).
+
+    The migration helper only calls reads (``owner_for_repo``,
+    ``collection_for``) on it outside decision-tree case 1, and
+    ``ActiveCatalog`` proxies both to the live reader.
+    """
+    return ActiveCatalog()
+
+
+@pytest.fixture()
+def service_repo_with_owner(active_catalog, tmp_path: Path, monkeypatch) -> Path:
+    """A repo whose owner is registered in the LIVE catalog under a pinned
+    tumbler prefix, so the conformant-name assertions stay literal.
+
+    ``tumbler_prefix="1.1"`` uses the ETL/migration path of
+    ``register_owner`` (accepted by the service client; each test runs in
+    a freshly minted tenant so the prefix is always free). The local
+    ``Catalog.register_owner`` has no such kwarg — this fixture is for the
+    PORTED tests, which run against the live (engine) catalog.
+    """
+    repo = tmp_path / "myproject"
+    repo.mkdir()
+    active_catalog.register_owner(
+        name="myproject",
+        owner_type="repo",
+        repo_hash="cafef00d",
+        repo_root=str(repo),
+        tumbler_prefix="1.1",  # PORT-VERIFY: deterministic owner segment "1-1"
     )
     monkeypatch.setattr(
         "nexus.repo_identity._repo_identity",
@@ -148,10 +210,19 @@ def _seed_collection_with_chunk(t3: T3Database, name: str) -> None:
 
 
 # ── Greenfield-with-legacy: rename happens once, message emitted once ──────
+#
+# PINNED (DIE set) — every test in this section EXECUTES decision-tree
+# case 1, whose executed leg is the local client-side fan-out (T2 cascade ->
+# ``t3_db.rename_collection`` -> catalog cascade). See the module docstring's
+# substrate note: the service arm folds all of that into one engine call the
+# injected local T3 never sees, and the engine's own vector store cannot be
+# seeded from the unit suite, so these retire with the local catalog
+# (nexus-i711w) — with the case-1 decision-tree contract recorded as a
+# GAP-CANDIDATE for an engine-backed successor test.
 
 
 def test_migration_greenfield_legacy_renamed_to_conformant(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """Repo has legacy ``code__myproject-cafef00d`` from a pre-RDR-103
     index. Migration renames to conformant
@@ -159,14 +230,14 @@ def test_migration_greenfield_legacy_renamed_to_conformant(
     """
     from nexus.indexer import _migrate_legacy_collections
 
-    legacy = _collection_name(repo_with_owner)
+    legacy = _collection_name(local_repo_with_owner)
     _seed_collection_with_chunk(t3, legacy)
-    registry.add(repo_with_owner)  # legacy shape, no catalog
+    registry.add(local_repo_with_owner)  # legacy shape, no catalog
     messages: list[str] = []
 
     result = _migrate_legacy_collections(
-        repo_with_owner,
-        cat=catalog, t3_db=t3, registry=registry,
+        local_repo_with_owner,
+        cat=local_catalog, t3_db=t3, registry=registry,
         on_message=messages.append,
     )
 
@@ -180,18 +251,18 @@ def test_migration_greenfield_legacy_renamed_to_conformant(
 
 
 def test_migration_renames_t3_collection(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """Post-migration, T3 has the conformant collection but NOT the
     legacy. Native modify(name=) preserved the data."""
     from nexus.indexer import _migrate_legacy_collections
 
-    legacy = _collection_name(repo_with_owner)
+    legacy = _collection_name(local_repo_with_owner)
     _seed_collection_with_chunk(t3, legacy)
-    registry.add(repo_with_owner)
+    registry.add(local_repo_with_owner)
 
     _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
     )
 
     conformant = "code__1-1__voyage-code-3__v1"
@@ -200,20 +271,20 @@ def test_migration_renames_t3_collection(
 
 
 def test_migration_updates_registry_to_conformant(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """Registry's ``code_collection`` field is rewritten so subsequent
     indexer runs see the conformant name directly."""
     from nexus.indexer import _migrate_legacy_collections
 
-    _seed_collection_with_chunk(t3, _collection_name(repo_with_owner))
-    registry.add(repo_with_owner)
+    _seed_collection_with_chunk(t3, _collection_name(local_repo_with_owner))
+    registry.add(local_repo_with_owner)
 
     _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
     )
 
-    info = registry.get(repo_with_owner)
+    info = registry.get(local_repo_with_owner)
     assert info is not None
     assert info["code_collection"] == "code__1-1__voyage-code-3__v1"
 
@@ -222,43 +293,53 @@ def test_migration_updates_registry_to_conformant(
 
 
 def test_migration_idempotent_no_message_second_run(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """Second invocation against the same repo emits no upgrade
-    message (legacy already absent in T3)."""
+    message (legacy already absent in T3).
+
+    PINNED (DIE set): the FIRST run executes the case-1 rename via the
+    local fan-out. The second-run steady-state contract on its own is
+    ported below (``test_migration_returns_conformant_when_steady_state``
+    reaches the same case-2 branch without the rename prologue).
+    """
     from nexus.indexer import _migrate_legacy_collections
 
-    _seed_collection_with_chunk(t3, _collection_name(repo_with_owner))
-    registry.add(repo_with_owner)
+    _seed_collection_with_chunk(t3, _collection_name(local_repo_with_owner))
+    registry.add(local_repo_with_owner)
 
     # First run does the rename.
     _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
     )
 
     # Second run: legacy absent in T3, conformant present, no message.
     messages: list[str] = []
     _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
         on_message=messages.append,
     )
     assert messages == []
 
 
 def test_migration_returns_conformant_when_steady_state(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    service_repo_with_owner: Path, active_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """Steady state: only the conformant collection exists. The
-    helper still returns the conformant name for the caller to use."""
+    helper still returns the conformant name for the caller to use.
+
+    PORTED (nexus-i711w C-store): resolves the owner + conformant name
+    through the LIVE catalog; no rename executes on this branch.
+    """
     from nexus.indexer import _migrate_legacy_collections
 
     conformant = "docs__1-1__voyage-context-3__v1"
     _make_collection(t3, conformant)
     # Registry is empty / has conformant docs already.
-    registry.add(repo_with_owner, cat=catalog)
+    registry.add(service_repo_with_owner, cat=active_catalog)
 
     result = _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        service_repo_with_owner, cat=active_catalog, t3_db=t3, registry=registry,
     )
     assert result["docs"] == conformant
 
@@ -267,24 +348,27 @@ def test_migration_returns_conformant_when_steady_state(
 
 
 def test_migration_skips_when_both_collections_exist(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    service_repo_with_owner: Path, active_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """If a prior interrupted run left both legacy and conformant in
     T3, the migration must NOT attempt the rename (would fail because
     target already exists). The helper returns the conformant name and
     the legacy collection is left untouched.
+
+    PORTED (nexus-i711w C-store): case 3 never calls the data plane, so
+    the whole decision runs against the live catalog + injected T3.
     """
     from nexus.indexer import _migrate_legacy_collections
 
-    legacy = _collection_name(repo_with_owner)
+    legacy = _collection_name(service_repo_with_owner)
     conformant = "code__1-1__voyage-code-3__v1"
     _seed_collection_with_chunk(t3, legacy)
     _make_collection(t3, conformant)
-    registry.add(repo_with_owner)
+    registry.add(service_repo_with_owner)
 
     messages: list[str] = []
     result = _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        service_repo_with_owner, cat=active_catalog, t3_db=t3, registry=registry,
         on_message=messages.append,
     )
 
@@ -301,7 +385,7 @@ def test_migration_skips_when_both_collections_exist(
 
 
 def test_migration_uses_atomic_rename_not_per_doc_retarget(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """The migration must use the data-plane atomic rename
     (``rename_collection_data_plane``), NOT a per-document
@@ -311,11 +395,18 @@ def test_migration_uses_atomic_rename_not_per_doc_retarget(
 
     Test surface: spy on both possible code paths and assert the
     atomic one fires.
+
+    PINNED (DIE set): the spy target ``t3.rename_collection`` IS the
+    local fan-out observable — the service branch never calls it by
+    design. The service-arm form of this same atomicity contract is
+    tests/test_collection_rename_service_mode.py::
+    test_service_mode_uses_single_endpoint_and_maps_counts (one cascade
+    call, ``t3.rename_collection.assert_not_called()``).
     """
     from nexus.indexer import _migrate_legacy_collections
 
-    _seed_collection_with_chunk(t3, _collection_name(repo_with_owner))
-    registry.add(repo_with_owner)
+    _seed_collection_with_chunk(t3, _collection_name(local_repo_with_owner))
+    registry.add(local_repo_with_owner)
 
     rename_calls = []
     original = t3.rename_collection
@@ -326,12 +417,12 @@ def test_migration_uses_atomic_rename_not_per_doc_retarget(
 
     with patch.object(t3, "rename_collection", side_effect=spy):
         _migrate_legacy_collections(
-            repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+            local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
         )
 
     # Exactly one atomic rename invocation for the code collection.
     assert len(rename_calls) == 1
-    assert rename_calls[0][0] == _collection_name(repo_with_owner)
+    assert rename_calls[0][0] == _collection_name(local_repo_with_owner)
     assert rename_calls[0][1] == "code__1-1__voyage-code-3__v1"
 
 
@@ -344,6 +435,9 @@ def test_migration_no_op_when_catalog_uninitialized(
     """Catalog is None: migration is a no-op. Returns an empty map so
     the caller falls back to its own resolution (registry or legacy
     helper). The legacy collection in T3 is untouched.
+
+    PORTED (nexus-i711w C-store): substrate-neutral — ``cat=None`` short-
+    circuits before any catalog access.
     """
     from nexus.indexer import _migrate_legacy_collections
 
@@ -367,12 +461,17 @@ def test_migration_no_op_when_catalog_uninitialized(
 
 
 def test_migration_no_op_when_owner_unregistered(
-    catalog: Catalog, tmp_path: Path, t3, registry: RepoRegistry, monkeypatch,
+    active_catalog, tmp_path: Path, t3, registry: RepoRegistry, monkeypatch,
 ) -> None:
     """Catalog initialized but no owner row for this repo: migration
     is a no-op. Returns an empty map so the caller's existing fallback
     handles this run. The _catalog_hook registers the owner later;
-    subsequent runs will migrate."""
+    subsequent runs will migrate.
+
+    PORTED (nexus-i711w C-store): the live catalog (a fresh per-test
+    tenant on the engine arm) genuinely has no owner for this hash, so
+    ``owner_for_repo`` returns None through the real read path.
+    """
     from nexus.indexer import _migrate_legacy_collections
 
     repo = tmp_path / "unregistered"
@@ -385,7 +484,7 @@ def test_migration_no_op_when_owner_unregistered(
     _seed_collection_with_chunk(t3, legacy)
 
     result = _migrate_legacy_collections(
-        repo, cat=catalog, t3_db=t3, registry=registry,
+        repo, cat=active_catalog, t3_db=t3, registry=registry,
     )
 
     assert result == {}
@@ -396,21 +495,25 @@ def test_migration_no_op_when_owner_unregistered(
 
 
 def test_migration_returns_conformant_rdr_on_greenfield(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    service_repo_with_owner: Path, active_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """Greenfield repo: catalog has owner, registry is empty, T3 has
     no collections yet. The migration must return the conformant rdr
     name so the indexer creates the conformant collection on first
     write rather than re-creating a legacy one. This pins the case-4
     branch (neither legacy nor conformant exists).
+
+    PORTED (nexus-i711w C-store): ``collection_for`` resolves v1 for a
+    never-registered tuple through the live catalog (the service arm's
+    /collections/for_tuple 404 -> v1 contract, nexus-njrcn.2).
     """
     from nexus.indexer import _migrate_legacy_collections
 
     # No collections in T3, no registry entry beyond the empty repo.
-    registry.add(repo_with_owner)
+    registry.add(service_repo_with_owner)
 
     result = _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        service_repo_with_owner, cat=active_catalog, t3_db=t3, registry=registry,
     )
     assert result["rdr"] == "rdr__1-1__voyage-context-3__v1"
     assert result["code"] == "code__1-1__voyage-code-3__v1"
@@ -421,7 +524,7 @@ def test_migration_returns_conformant_rdr_on_greenfield(
 
 
 def test_migration_returns_conformant_when_register_fails_after_rename(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """If ``rename_collection_data_plane`` succeeds (data is now at
     conformant in T3) but the subsequent ``register_collection``
@@ -433,16 +536,16 @@ def test_migration_returns_conformant_when_register_fails_after_rename(
     """
     from nexus.indexer import _migrate_legacy_collections
 
-    legacy = _collection_name(repo_with_owner)
+    legacy = _collection_name(local_repo_with_owner)
     _seed_collection_with_chunk(t3, legacy)
-    registry.add(repo_with_owner)
+    registry.add(local_repo_with_owner)
 
     with patch.object(
-        catalog, "register_collection",
+        local_catalog, "register_collection",
         side_effect=RuntimeError("simulated projection failure"),
     ):
         result = _migrate_legacy_collections(
-            repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+            local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
         )
 
     # Conformant name returned: data lives there now.
@@ -456,24 +559,24 @@ def test_migration_returns_conformant_when_register_fails_after_rename(
 
 
 def test_migration_handles_code_and_docs_independently(
-    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+    local_repo_with_owner: Path, local_catalog, t3, registry: RepoRegistry,
 ) -> None:
     """The decision tree applies per content_type. A repo with a
     legacy code collection AND a steady-state conformant docs
     collection migrates only the code one and emits one message."""
     from nexus.indexer import _migrate_legacy_collections
 
-    legacy_code = _collection_name(repo_with_owner)
+    legacy_code = _collection_name(local_repo_with_owner)
     conformant_docs = "docs__1-1__voyage-context-3__v1"
     _seed_collection_with_chunk(t3, legacy_code)
     _make_collection(t3, conformant_docs)
-    registry.add(repo_with_owner)
+    registry.add(local_repo_with_owner)
     # Make registry's docs_collection point to conformant manually.
-    registry.update(repo_with_owner, docs_collection=conformant_docs)
+    registry.update(local_repo_with_owner, docs_collection=conformant_docs)
 
     messages: list[str] = []
     result = _migrate_legacy_collections(
-        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        local_repo_with_owner, cat=local_catalog, t3_db=t3, registry=registry,
         on_message=messages.append,
     )
 
