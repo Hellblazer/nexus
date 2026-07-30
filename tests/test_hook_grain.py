@@ -96,38 +96,60 @@ class TestLockedRegistryGrainPassthrough:
 
 
 class TestFlushGrainOutcomeEquivalence:
-    """Critic S2: lock in the 'file-agnostic' claim with real stores —
-    aggregating N files' chunks into one flush-grain call must produce
-    the same rows as N per-file calls."""
+    """Critic S2: lock in the 'file-agnostic' claim with the real store
+    client — aggregating N files' chunks into one flush-grain call must
+    produce the same rows as N per-file calls. Ported to HttpChashIndex
+    against the in-process fake ChashHandler (nexus-i711w: the SQLite
+    ChashIndex died with the 7.0.0 wave); the equivalence now also pins
+    the client-side dedup (nexus-85z0y) collapsing the shared-text
+    duplicate inside the aggregate batch."""
 
-    def test_chash_aggregate_equals_per_file(self, tmp_path) -> None:
+    def test_chash_aggregate_equals_per_file(self) -> None:
         import hashlib
-        from nexus.db.t2.chash_index import ChashIndex
+        import threading
+        from http.server import HTTPServer
 
-        mk = lambda s: hashlib.sha256(s.encode()).hexdigest()
-        file_a = [mk(f"a{i}") for i in range(4)]
-        file_b = [mk(f"b{i}") for i in range(3)]
-        file_c = [mk("a0")]  # duplicate of a chunk in file_a (shared text)
-
-        per_file = ChashIndex(tmp_path / "per_file.db")
-        for chunk_set in (file_a, file_b, file_c):
-            per_file.upsert_many(chashes=chunk_set, collection="code__x")
-
-        aggregate = ChashIndex(tmp_path / "aggregate.db")
-        aggregate.upsert_many(
-            chashes=file_a + file_b + file_c, collection="code__x"
+        from nexus.db.t2.http_chash_index import HttpChashIndex
+        from tests.db.test_http_chash_index import (
+            _STORE,
+            _STORE_LOCK,
+            TOKEN,
+            _FakeChashHandler,
+            _free_port,
         )
 
-        def rows(ix: ChashIndex) -> set[tuple[str, str]]:
-            cur = ix.conn.execute(
-                "SELECT chash, physical_collection FROM chash_index"
-            )
-            return set(cur.fetchall())
+        port = _free_port()
+        server = HTTPServer(("127.0.0.1", port), _FakeChashHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base_url = f"http://127.0.0.1:{port}"
+        with _STORE_LOCK:
+            _STORE.clear()
+        try:
+            mk = lambda s: hashlib.sha256(s.encode()).hexdigest()
+            file_a = [mk(f"a{i}") for i in range(4)]
+            file_b = [mk(f"b{i}") for i in range(3)]
+            file_c = [mk("a0")]  # duplicate of a chunk in file_a (shared text)
 
-        assert rows(aggregate) == rows(per_file)
-        assert len(rows(aggregate)) == 7  # 4 + 3 unique; the dup collapses
-        per_file.close()
-        aggregate.close()
+            per_file = HttpChashIndex(base_url=base_url, _token=TOKEN)
+            for chunk_set in (file_a, file_b, file_c):
+                per_file.upsert_many(chashes=chunk_set, collection="code__per_file")
+            per_file.close()
+
+            aggregate = HttpChashIndex(base_url=base_url, _token=TOKEN)
+            aggregate.upsert_many(
+                chashes=file_a + file_b + file_c, collection="code__aggregate"
+            )
+            aggregate.close()
+
+            with _STORE_LOCK:
+                per_rows = {ch for (ch, coll) in _STORE if coll == "code__per_file"}
+                agg_rows = {ch for (ch, coll) in _STORE if coll == "code__aggregate"}
+            assert agg_rows == per_rows
+            assert len(agg_rows) == 7  # 4 + 3 unique; the dup collapses
+        finally:
+            with _STORE_LOCK:
+                _STORE.clear()
+            server.shutdown()
 
     def test_flush_grain_failure_contract_documented(self) -> None:
         # Critic S1 companion: a flush-grain consumer failure affects the

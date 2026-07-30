@@ -582,58 +582,39 @@ def _run_trim_telemetry(days: int) -> None:
     Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
     audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
     # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
     # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
     # nothing reads, printed "Trimmed N rows", and left the live PG audit tables
     # growing untrimmed. The engine has exposed the operation the whole time
     # (POST /v1/telemetry/{search,hook_failures}/trim -> TelemetryRepository
-    # .trimSearchTelemetry / .trimHookFailures); only this call site never
-    # routed to it. Same branch shape already used by _run_tier_writes below.
-    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-        import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    # .trimSearchTelemetry / .trimHookFailures). Seam COLLAPSED (nexus-i711w
+    # Stage 2 sub-stage A): HttpTelemetryStore is the only telemetry store —
+    # the SQLite arm died with the store.
+    import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-        try:
-            store = HttpTelemetryStore()
-            deleted_search = store.trim_search_telemetry(days=days)
-            deleted_hooks = store.trim_hook_failures(days=days)
-        except (httpx.HTTPError, RuntimeError) as exc:
-            # Same class as _report_aspect_queue_service above (review
-            # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
-            # ServiceEndpointUnresolvableError (a RuntimeError, not an
-            # httpx error) when it cannot. This branch originally had NO
-            # handling at all, so an unresolvable endpoint or a transport blip
-            # crashed `nx doctor --trim` outright.
-            #
-            # Reporting nothing trimmed would be the false-clean this whole
-            # commit exists to remove — say UNKNOWN and exit non-zero so a
-            # scripted caller cannot mistake a failed trim for a completed one.
-            click.echo(
-                f"Error: telemetry trim unavailable ({exc}). Nothing was "
-                "trimmed and the live retention state is UNKNOWN.",
-                err=True,
-            )
-            raise click.exceptions.Exit(2)
-    else:
-        from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-        db_path = default_db_path()
-        if not db_path.exists():
-            # Only truthful in sqlite mode. Reaching this in service mode was
-            # the second false-clean here: no local file meant "nothing to
-            # trim" even though the real tables were elsewhere and untrimmed.
-            click.echo("T2 database not found — nothing to trim.")
-            return
-        telemetry = Telemetry(db_path)
-        try:
-            deleted_search = telemetry.trim_search_telemetry(days=days)
-            deleted_hooks = telemetry.trim_hook_failures(days=days)
-        finally:
-            telemetry.close()
+    try:
+        store = HttpTelemetryStore()
+        deleted_search = store.trim_search_telemetry(days=days)
+        deleted_hooks = store.trim_hook_failures(days=days)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # Same class as _report_aspect_queue_service above (review
+        # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
+        # ServiceEndpointUnresolvableError (a RuntimeError, not an
+        # httpx error) when it cannot. This branch originally had NO
+        # handling at all, so an unresolvable endpoint or a transport blip
+        # crashed `nx doctor --trim` outright.
+        #
+        # Reporting nothing trimmed would be the false-clean this whole
+        # commit exists to remove — say UNKNOWN and exit non-zero so a
+        # scripted caller cannot mistake a failed trim for a completed one.
+        click.echo(
+            f"Error: telemetry trim unavailable ({exc}). Nothing was "
+            "trimmed and the live retention state is UNKNOWN.",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
     for table, deleted in (
         ("search_telemetry", deleted_search),
         ("hook_failures", deleted_hooks),

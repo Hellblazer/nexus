@@ -415,15 +415,25 @@ class TestGcPreRdr096:
 
 
 class TestRequeueFailed:
-    """`nx aspects requeue-failed` bulk-recovers terminal-failed queue rows."""
+    """`nx aspects requeue-failed` bulk-recovers terminal-failed queue rows.
+
+    Substrate (nexus-i711w): the queue is ``HttpAspectQueue`` against the
+    hermetic engine substrate (fresh tenant per test) — the SQLite
+    ``AspectExtractionQueue`` these tests used to seed died with the SQLite
+    T2 stores. Status is observed through the queue's public read surfaces
+    (``list_failed`` / ``list_pending``) instead of raw SQL.
+    """
 
     @pytest.fixture
-    def _sqlite_t2(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Pin the aspect queue to SQLite on a tmp DB and route the CLI's read
-        (default_db_path) + daemon write (t2_index_write) at it."""
+    def _queue_t2(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Route the CLI's read (default_db_path) + write (t2_index_write) at
+        a tmp-pathed T2Database. The queue is engine-side; deliberately NO
+        ``touch()`` of the local file — the verb's old local-file existence
+        gate silently no-opped requeue-failed on any box without the legacy
+        memory.db (porter-b defect, fixed in this commit), and running
+        against an absent file pins that fix."""
         from nexus.db.t2 import T2Database
 
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path", lambda: db_path,
@@ -439,75 +449,76 @@ class TestRequeueFailed:
         return db_path
 
     def _seed_failed(self, db_path: Path) -> None:
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-        store = AspectExtractionQueue(db_path)
-        for coll, sp in [("knowledge__a", "x.pdf"), ("knowledge__a", "y.pdf"),
-                         ("knowledge__b", "z.pdf")]:
-            store.enqueue(coll, sp, content="c")
-            store.mark_failed(coll, sp, "boom")
-        store.enqueue("knowledge__a", "ok.pdf")  # stays pending
-        store.close()
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            q = db.aspect_queue
+            for coll, sp in [("knowledge__a", "x.pdf"), ("knowledge__a", "y.pdf"),
+                             ("knowledge__b", "z.pdf")]:
+                q.enqueue(coll, sp, content="c")
+                # Claim first (pending -> in_progress) so mark_failed mirrors
+                # the worker's real state transitions on the engine.
+                claimed = q.claim_next()
+                assert claimed is not None and claimed.source_path == sp
+                q.mark_failed(coll, sp, "boom")
+            q.enqueue("knowledge__a", "ok.pdf")  # stays pending
 
     def _status(self, db_path: Path, source_path: str) -> str:
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-        store = AspectExtractionQueue(db_path)
-        try:
-            row = store.conn.execute(
-                "SELECT status FROM aspect_extraction_queue WHERE source_path = ?",
-                (source_path,),
-            ).fetchone()
-            return row[0] if row else "<absent>"
-        finally:
-            store.close()
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            q = db.aspect_queue
+            if any(r.source_path == source_path for r in q.list_failed()):
+                return "failed"
+            if any(r.source_path == source_path for r in q.list_pending()):
+                return "pending"
+            return "<absent>"
 
-    def test_dry_run_reports_without_writing(self, _sqlite_t2: Path) -> None:
-        self._seed_failed(_sqlite_t2)
+    def test_dry_run_reports_without_writing(self, _queue_t2: Path) -> None:
+        self._seed_failed(_queue_t2)
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert res.exit_code == 0, res.output
         assert "Would re-enqueue 3 failed row(s)" in res.output
         # Dry-run writes nothing: the rows stay failed.
-        assert self._status(_sqlite_t2, "x.pdf") == "failed"
+        assert self._status(_queue_t2, "x.pdf") == "failed"
 
-    def test_requeue_resets_failed_to_pending(self, _sqlite_t2: Path) -> None:
-        self._seed_failed(_sqlite_t2)
+    def test_requeue_resets_failed_to_pending(self, _queue_t2: Path) -> None:
+        self._seed_failed(_queue_t2)
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
         assert "Re-enqueued 3 failed row(s)" in res.output
         for sp in ("x.pdf", "y.pdf", "z.pdf"):
-            assert self._status(_sqlite_t2, sp) == "pending"
+            assert self._status(_queue_t2, sp) == "pending"
 
-    def test_collection_scope(self, _sqlite_t2: Path) -> None:
-        self._seed_failed(_sqlite_t2)
+    def test_collection_scope(self, _queue_t2: Path) -> None:
+        self._seed_failed(_queue_t2)
         res = CliRunner().invoke(
             aspects_group, ["requeue-failed", "--collection", "knowledge__a"],
         )
         assert res.exit_code == 0, res.output
         assert "Re-enqueued 2 failed row(s) in knowledge__a" in res.output
-        assert self._status(_sqlite_t2, "x.pdf") == "pending"   # knowledge__a
-        assert self._status(_sqlite_t2, "z.pdf") == "failed"    # knowledge__b untouched
+        assert self._status(_queue_t2, "x.pdf") == "pending"   # knowledge__a
+        assert self._status(_queue_t2, "z.pdf") == "failed"    # knowledge__b untouched
 
-    def test_limit_caps_requeue_count(self, _sqlite_t2: Path) -> None:
-        self._seed_failed(_sqlite_t2)  # 3 failed rows
+    def test_limit_caps_requeue_count(self, _queue_t2: Path) -> None:
+        self._seed_failed(_queue_t2)  # 3 failed rows
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "2"])
         assert res.exit_code == 0, res.output
         assert "Re-enqueued 2 failed row(s)" in res.output
         # Exactly 2 of the 3 flip to pending (oldest-enqueued first); 1 stays failed.
-        statuses = [self._status(_sqlite_t2, sp) for sp in ("x.pdf", "y.pdf", "z.pdf")]
+        statuses = [self._status(_queue_t2, sp) for sp in ("x.pdf", "y.pdf", "z.pdf")]
         assert statuses.count("pending") == 2
         assert statuses.count("failed") == 1
 
-    def test_limit_rejects_nonpositive(self, _sqlite_t2: Path) -> None:
-        self._seed_failed(_sqlite_t2)
+    def test_limit_rejects_nonpositive(self, _queue_t2: Path) -> None:
+        self._seed_failed(_queue_t2)
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "0"])
         assert res.exit_code == 1
         assert "--limit must be a positive integer" in res.output
-        assert self._status(_sqlite_t2, "x.pdf") == "failed"  # nothing written
+        assert self._status(_queue_t2, "x.pdf") == "failed"  # nothing written
 
-    def test_no_failed_rows_message(self, _sqlite_t2: Path) -> None:
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-        store = AspectExtractionQueue(_sqlite_t2)
-        store.enqueue("knowledge__a", "only-pending.pdf")
-        store.close()
+    def test_no_failed_rows_message(self, _queue_t2: Path) -> None:
+        from nexus.db.t2 import T2Database
+        with T2Database(_queue_t2) as db:
+            db.aspect_queue.enqueue("knowledge__a", "only-pending.pdf")
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
         assert "no failed rows" in res.output

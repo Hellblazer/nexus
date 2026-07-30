@@ -464,18 +464,15 @@ def test_http_store_matches_contract_return_shapes(label, http_path):
 _SQLITE_ORACLES = {
     "memory": "nexus.db.t2.memory_store:MemoryStore",
     "plans": "nexus.db.t2.plan_library:PlanLibrary",
-    "telemetry": "nexus.db.t2.telemetry:Telemetry",
-    "chash_index": "nexus.db.t2.chash_index:ChashIndex",
     "document_aspects": "nexus.db.t2.document_aspects:DocumentAspects",
-    "document_highlights": "nexus.db.t2.document_highlights:DocumentHighlights",
-    "aspect_queue": "nexus.db.t2.aspect_extraction_queue:AspectExtractionQueue",
-    # taxonomy: oracle DELETED (nexus-i711w Stage 2 sub-stage C). This block's
-    # own docstring anticipated it — "after RDR-158 P4 there is no oracle left
-    # to capture from". Taxonomy is simply the first to reach that state; the
-    # remaining eight go with their stores in sub-stage A. The frozen
-    # T2_STORE_RETURNS entry for taxonomy STAYS: it is now the contract of
-    # record rather than a mirror of a live oracle, which is exactly what it
-    # was frozen to become.
+    # taxonomy: oracle DELETED (nexus-i711w Stage 2 sub-stage C); telemetry,
+    # chash_index, document_highlights and aspect_queue followed with their
+    # stores in sub-stage A. This block's own docstring anticipated it —
+    # "after RDR-158 P4 there is no oracle left to capture from". The frozen
+    # T2_STORE_RETURNS entries for all of them STAY: each is now the contract
+    # of record rather than a mirror of a live oracle, which is exactly what
+    # it was frozen to become. memory / plans / document_aspects go in
+    # sub-stage A3, and the whole block dies with them.
     "scratch": "nexus.db.t1:T1Database",
 }
 

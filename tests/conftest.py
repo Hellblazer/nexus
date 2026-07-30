@@ -1081,7 +1081,8 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # behavior.
     "test_dt_content_layer_d.py",
     "test_dt_mcp_fallback.py",
-    "test_document_highlights.py",
+    # test_document_highlights.py entry removed (nexus-i711w Stage 2
+    # sub-stage A): the file died with the SQLite store. DOWNWARD-only edit.
     "test_dt_highlights_layer_e.py",
     "test_dt_capture_cmd.py",
     "test_migrations_rdr108_phase1c.py",

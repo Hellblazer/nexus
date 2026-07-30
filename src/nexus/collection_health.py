@@ -262,9 +262,7 @@ def _default_chash_coverage_fn(col: str) -> float | None:
     Introduced in RDR-087 Phase 4.6 (nexus-c2op) after RDR-086 added
     the chash_index surface. Pure SQL composition — no new primitives.
     """
-    from nexus.config import default_db_path  # noqa: PLC0415 — function-local import avoids config/db import cost at module load
     from nexus.db import make_t3  # noqa: PLC0415 — function-local import defers heavy db/T3 init until called
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — function-local import defers config/db import cost at module load
 
     # RDR-152 nexus-gmiaf.16 seam, applied here at RDR-155 P4b P3: this call
     # site opened the SQLite ChashIndex unconditionally while collection_audit.
@@ -274,15 +272,10 @@ def _default_chash_coverage_fn(col: str) -> float | None:
     # from a client-local SQLite file with no counterpart behind it, so the
     # ratio it reported described nothing. Reads are the surviving half of the
     # /v1/chash surface (writes are 410 Gone) and serve from the chunks tables.
-    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — function-local import defers the HTTP store import until called
-        idx: Any = HttpChashIndex()
-    else:
-        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — function-local import defers T2 chash-index init until called
-        db_path = default_db_path()
-        if not db_path.exists():
-            return None
-        idx = ChashIndex(db_path)
+    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpChashIndex is the
+    # only chash index — the SQLite arm died with the store.
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — function-local import defers the HTTP store import until called
+    idx: Any = HttpChashIndex()
     try:
         chash_count = idx.count_for_collection(col)
     finally:

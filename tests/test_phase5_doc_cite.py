@@ -61,14 +61,44 @@ def test_parse_json_payload_tolerates_surrounding_log_lines() -> None:
     assert _parse_json_payload(payload) == {"results": [1, 2, 3], "ok": True}
 
 
+# ── In-file fake chash index ─────────────────────────────────────────────────
+
+
+class _FakeChashIndex:
+    """In-file stand-in for the chash-index interface ``nx doc cite``
+    consumes: ``is_empty`` (the fresh-install short-circuit) and
+    ``lookup`` (via ``Catalog.resolve_chash`` for excerpts), plus
+    ``close``. The SQLite ChashIndex was deleted with the 7.0.0 wave
+    (nexus-i711w); the HTTP twin's wire contract is pinned in
+    tests/db/test_http_chash_index.py."""
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], str] = {}
+
+    def upsert(self, *, chash: str, collection: str) -> None:
+        self.rows[(chash, collection)] = "2026-01-01T00:00:00+00:00"
+
+    def lookup(self, chash: str) -> list[dict[str, str]]:
+        return [
+            {"collection": coll, "created_at": ts}
+            for (ch, coll), ts in self.rows.items()
+            if ch == chash
+        ]
+
+    def is_empty(self) -> bool:
+        return not self.rows
+
+    def close(self) -> None:
+        pass
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
 def cite_env(tmp_path: Path):
-    """Catalog + T3 + ChashIndex with one resolvable chunk."""
+    """Catalog + T3 + fake chash index with one resolvable chunk."""
     from nexus.catalog.catalog import Catalog
-    from nexus.db.t2.chash_index import ChashIndex
 
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
@@ -83,7 +113,7 @@ def cite_env(tmp_path: Path):
         metadatas=[{"chunk_text_hash": chash_hex, "source_path": "p.pdf"}],
     )
 
-    chash_index = ChashIndex(tmp_path / "t2.db")
+    chash_index = _FakeChashIndex()
     chash_index.upsert(
         chash=chash_hex, collection="knowledge__cite",
     )
@@ -212,13 +242,13 @@ class TestCiteEmptyIndexShortCircuit:
     ):
         from nexus.catalog.catalog import Catalog
         from nexus.commands.doc import cite_cmd
-        from nexus.db.t2.chash_index import ChashIndex
 
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
         cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-        # Empty chash_index (no rows).
-        chash_index = ChashIndex(tmp_path / "t2.db")
+        # Empty chash index (no rows) — is_empty() True trips the exit-2
+        # fresh-install short-circuit.
+        chash_index = _FakeChashIndex()
         t3 = make_vector_test_client()
         try:
             with patch(

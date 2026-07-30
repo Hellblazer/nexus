@@ -28,11 +28,6 @@ import pytest
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
-def _make_queue(tmp_path: Path) -> "AspectExtractionQueue":
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-    return AspectExtractionQueue(tmp_path / "q.db")
-
-
 def _make_db(tmp_path: Path) -> "T2Database":
     from nexus.db.t2 import T2Database
     return T2Database(tmp_path / "t2.db")

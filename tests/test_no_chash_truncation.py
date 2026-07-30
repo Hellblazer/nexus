@@ -43,11 +43,8 @@ _ALLOWLIST: tuple[tuple[str, str], ...] = (
         "deliberate dual-width cache tolerance: tries full width first, falls back "
         "to the legacy 32-prefix for pre-rekey rows (read-only)",
     ),
-    (
-        "db/t2/chash_index.py",
-        "SQLite-era migration-source debt (RDR-186): its consumers operate on "
-        "same-era truncated ids; frozen, never a destination",
-    ),
+    # db/t2/chash_index.py entry removed (nexus-i711w Stage 2 sub-stage A):
+    # the file died with the SQLite chash index. DOWNWARD-only edit.
     (
         "db/migrations.py",
         "SQLite-era migration-source debt (RDR-186): frozen legacy schema history",

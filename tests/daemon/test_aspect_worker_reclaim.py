@@ -36,7 +36,6 @@ from nexus.daemon.aspect_worker_daemon import (
     _DEFAULT_RECLAIM_INTERVAL,
     AspectWorkerDaemon,
 )
-from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
 
 
 class _FakeWorker:
@@ -98,45 +97,6 @@ def test_reclaim_interval_defaults_to_sweep_cadence_not_stale_window(tmp_path: P
         stale_timeout_seconds=300,  # large threshold
     )
     assert d._reclaim_interval == _DEFAULT_RECLAIM_INTERVAL  # not 300
-
-
-def test_reclaim_resets_stranded_row_and_drain_recovers(tmp_path: Path) -> None:
-    """RF-5 END-TO-END against the REAL SQLite queue (review CRITICAL-1): a row
-    stranded in_progress past the stale window is actually reset to pending by
-    the daemon's reclaim loop, and is_drained() recovers once it is re-processed.
-    Proves the state transition, not just that reclaim_stale was called."""
-    db = tmp_path / "q.db"
-    q = AspectExtractionQueue(db)
-    q.enqueue("knowledge__o__m__v1", "/p/doc.pdf", content_hash="h", content="c")
-    claimed = q.claim_next()                     # → in_progress, last_attempt_at = now
-    assert claimed is not None
-    assert q.pending_count() == 0
-    assert q.is_drained() is False               # an in_progress (non-failed) row blocks drain
-    # Backdate the claim so it is unambiguously stale (avoids second-granularity flake).
-    q.conn.execute("UPDATE aspect_extraction_queue SET last_attempt_at = datetime('now','-1 hour')")
-    q.conn.commit()
-
-    # The daemon opens its OWN handle on the same DB (stop() closes it).
-    d = AspectWorkerDaemon(
-        config_dir=tmp_path, tenant="default", worker_factory=_FakeWorker,
-        queue_factory=lambda: AspectExtractionQueue(db),
-        reclaim_interval=0.03, stale_timeout_seconds=60,
-    )
-    d.start()
-    try:
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and q.pending_count() == 0:
-            time.sleep(0.02)
-        assert q.pending_count() == 1            # the stranded row was RESET to pending
-    finally:
-        d.stop()
-
-    # Re-process the now-pending row (the extraction a live worker would do).
-    again = q.claim_next()
-    assert again is not None
-    q.mark_done(again.collection, again.source_path)
-    assert q.is_drained() is True                # is_drained recovers after the full cycle
-    q.close()
 
 
 def test_reclaim_failure_does_not_kill_the_loop(tmp_path: Path) -> None:

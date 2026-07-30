@@ -3,7 +3,6 @@
 """RDR-108 Phase 1 S1 -- AspectWorker stop-and-drain protocol (nexus-he24).
 
 Tests for:
-  - AspectExtractionQueue.is_drained() precondition check
   - AspectExtractionWorker.drain(timeout=...) drains and blocks
   - drain() raises DrainTimeoutError when stuck in_progress rows remain
   - drain() is idempotent on an already-drained queue
@@ -13,11 +12,18 @@ Tests for:
   - Thread-join timeout warning (S-5, nexus-1091)
   - Default timeout is 120s (SIG-3, nexus-1091)
   - MCP-vs-CLI lock detection (SIG-5, nexus-1091)
+
+Substrate (nexus-i711w Stage 2 sub-stage A): the SQLite
+``AspectExtractionQueue`` died with the SQLite T2 stores; the queue is now
+``HttpAspectQueue`` unconditionally, backed here by the hermetic engine
+substrate (autouse ``_pin_t2_substrate`` -> ``t2_service_env``, fresh tenant
+per test). The queue's own state-machine semantics (pending/in_progress/
+failed vs. is_drained) are owned engine-side by
+``service/src/test/java/dev/nexus/service/AspectRepositoryTest.java``; this
+file tests the drain ORCHESTRATION in ``nexus.aspect_worker`` on top of it.
 """
 from __future__ import annotations
 
-import os
-import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -61,64 +67,33 @@ def locks_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def queue_path(tmp_path: Path) -> Path:
-    """Return a tmp SQLite path with the schema initialised."""
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+    """Vestigial local T2 path handed to T2Database / drain_worker.
 
-    q = AspectExtractionQueue(tmp_path / "t2.db")
-    q.close()
+    Post-i711w the aspect queue lives engine-side (``HttpAspectQueue``), so
+    no schema initialisation happens here — the path only satisfies the
+    ``queue_path`` parameter shape and the facade's local-path plumbing.
+    """
     return tmp_path / "t2.db"
 
 
-@pytest.fixture()
-def queue(queue_path: Path):
-    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-
-    q = AspectExtractionQueue(queue_path)
-    yield q
-    q.close()
-
-
-# -- is_drained() -------------------------------------------------------------
-
-
-class TestIsDrained:
-    def test_empty_queue_is_drained(self, queue) -> None:
-        assert queue.is_drained() is True
-
-    def test_pending_row_is_not_drained(self, queue) -> None:
-        queue.enqueue("knowledge__test", "/doc1.pdf")
-        assert queue.is_drained() is False
-
-    def test_in_progress_row_is_not_drained(self, queue) -> None:
-        queue.enqueue("knowledge__test", "/doc1.pdf")
-        queue.claim_next()
-        # Row is now in_progress
-        assert queue.is_drained() is False
-
-    def test_failed_row_counts_as_drained(self, queue) -> None:
-        """Failed rows are terminal -- drain treats them as resolved."""
-        queue.enqueue("knowledge__test", "/doc1.pdf")
-        queue.claim_next()
-        queue.mark_failed("knowledge__test", "/doc1.pdf", "boom")
-        assert queue.is_drained() is True
-
-    def test_mixed_failed_and_pending_is_not_drained(self, queue) -> None:
-        queue.enqueue("knowledge__test", "/doc1.pdf")
-        queue.enqueue("knowledge__test", "/doc2.pdf")
-        queue.claim_next()
-        queue.mark_failed("knowledge__test", "/doc1.pdf", "boom")
-        # doc2 is still pending
-        assert queue.is_drained() is False
+# TestIsDrained (the SQLite queue's own is_drained() state-machine semantics)
+# died with the SQLite AspectExtractionQueue (nexus-i711w Stage 2 sub-stage A).
+# The surviving contract is engine-side, pinned by AspectRepositoryTest.java
+# (enqueue/claim/markFailed vs isDrained) and exercised end-to-end through the
+# Python client by the TestDrain cases below against the hermetic engine.
 
 
 # -- RDR-173 P4.1 (nexus-4st62): service-aware drain ---------------------------
 
 
 class TestServiceModeDrain:
-    """drain_worker must poll the SERVICE queue (HttpAspectQueue.is_drained())
-    when the aspect-queue backend is SERVICE — not a local-sqlite
-    AspectExtractionQueue, which is empty/stale in service mode and yields a
-    spurious 'drained' (the nx aspects drain / migration-gate inertness gap)."""
+    """drain_worker must poll the SERVICE queue (HttpAspectQueue.is_drained()).
+
+    Historically this class guarded the RDR-173 P4.1 routing seam (SERVICE
+    backend -> HttpAspectQueue, never the local-sqlite queue). The seam is
+    COLLAPSED (nexus-i711w): HttpAspectQueue is the only queue, so the
+    negative guard is structurally impossible to violate; the poll/timeout/
+    lock-skip contracts below are still live drain_worker behaviour."""
 
     def test_drain_polls_http_queue_in_service_mode(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
@@ -126,7 +101,6 @@ class TestServiceModeDrain:
         from nexus.aspect_worker import drain_worker
         from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
-        from nexus.db.t2 import aspect_extraction_queue as sqmod
 
         monkeypatch.setattr(
             smod, "storage_backend_for",
@@ -147,10 +121,6 @@ class TestServiceModeDrain:
                 calls["http_closed"] = True
 
         monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-        # Guard: the local sqlite queue must NOT be opened in service mode.
-        def _boom(*a, **k):
-            raise AssertionError("service mode must not open local AspectExtractionQueue")
-        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
 
         # queue_path is irrelevant in service mode; pass an unused path.
         drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
@@ -158,15 +128,6 @@ class TestServiceModeDrain:
         assert calls["http_built"] == 1, "service mode must construct HttpAspectQueue"
         assert calls["http_is_drained"] >= 1, "must poll the SERVICE queue's is_drained()"
         assert calls["http_closed"] is True, "must close the http queue"
-
-    def test_only_failed_rows_is_drained(self, queue) -> None:
-        queue.enqueue("knowledge__test", "/doc1.pdf")
-        queue.enqueue("knowledge__test", "/doc2.pdf")
-        queue.claim_next()
-        queue.mark_failed("knowledge__test", "/doc1.pdf", "err1")
-        queue.claim_next()
-        queue.mark_failed("knowledge__test", "/doc2.pdf", "err2")
-        assert queue.is_drained() is True
 
     def test_drain_timeout_raises_DrainTimeoutError_with_pending_count(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
@@ -181,7 +142,6 @@ class TestServiceModeDrain:
         from nexus.aspect_worker import DrainTimeoutError, drain_worker
         from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
-        from nexus.db.t2 import aspect_extraction_queue as sqmod
 
         monkeypatch.setattr(
             smod, "storage_backend_for",
@@ -204,9 +164,6 @@ class TestServiceModeDrain:
                 pass
 
         monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-        def _boom(*a, **k):
-            raise AssertionError("service mode must not open local AspectExtractionQueue")
-        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
 
         with pytest.raises(DrainTimeoutError) as exc_info:
             drain_worker(
@@ -239,7 +196,6 @@ class TestServiceModeDrain:
         from nexus.aspect_worker import DrainTimeoutError, drain_worker
         from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
-        from nexus.db.t2 import aspect_extraction_queue as sqmod
 
         monkeypatch.setattr(
             smod, "storage_backend_for",
@@ -261,9 +217,6 @@ class TestServiceModeDrain:
                 pass
 
         monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueueInProgressOnly)
-        def _boom(*a, **k):
-            raise AssertionError("service mode must not open local AspectExtractionQueue")
-        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
 
         with pytest.raises(DrainTimeoutError) as exc_info:
             drain_worker(
@@ -293,7 +246,6 @@ class TestServiceModeDrain:
         from nexus.aspect_worker import drain_worker
         from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
-        from nexus.db.t2 import aspect_extraction_queue as sqmod
 
         monkeypatch.setattr(
             smod, "storage_backend_for",
@@ -316,9 +268,6 @@ class TestServiceModeDrain:
                 pass
 
         monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-        def _boom(*a, **k):
-            raise AssertionError("service mode must not open local AspectExtractionQueue")
-        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
 
         # Must NOT raise: the loop should see False, False, True and return.
         drain_worker(
@@ -344,7 +293,6 @@ class TestServiceModeDrain:
         from nexus.aspect_worker import drain_worker
         from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
-        from nexus.db.t2 import aspect_extraction_queue as sqmod
 
         monkeypatch.setattr(
             smod, "storage_backend_for",
@@ -366,9 +314,6 @@ class TestServiceModeDrain:
                 pass
 
         monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-        def _boom(*a, **k):
-            raise AssertionError("service mode must not open local AspectExtractionQueue")
-        monkeypatch.setattr(sqmod, "AspectExtractionQueue", _boom)
 
         # Must NOT raise DrainBlockedByActiveWorker — lock is ignored in SERVICE mode.
         drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
@@ -432,7 +377,7 @@ class TestStopSignal:
         finally:
             infra_mod.t2_ctx = original_t2_ctx
 
-    def test_stop_claiming_is_idempotent(self, queue) -> None:
+    def test_stop_claiming_is_idempotent(self) -> None:
         from nexus.aspect_worker import AspectExtractionWorker
 
         worker = AspectExtractionWorker(poll_interval=0.05)
@@ -686,7 +631,7 @@ class TestThreadJoinTimeoutWarning:
         """
         import nexus.mcp_infra as infra_mod
         from nexus.aspect_worker import drain_worker, ensure_worker_started
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
         original_t2_ctx = infra_mod.t2_ctx
         infra_mod.t2_ctx = lambda: T2Database(queue_path)
@@ -711,12 +656,14 @@ class TestThreadJoinTimeoutWarning:
 
             # Patch the queue to appear drained immediately so drain_worker
             # skips the polling loop and goes straight to the thread-join.
-            _orig_is_drained = AspectExtractionQueue.is_drained
+            # (HttpAspectQueue is the only queue post-i711w; drain_worker
+            # constructs one internally, so a class-attribute patch reaches it.)
+            _orig_is_drained = HttpAspectQueue.is_drained
 
             def _always_drained(self_):
                 return True
 
-            AspectExtractionQueue.is_drained = _always_drained  # type: ignore[method-assign]
+            HttpAspectQueue.is_drained = _always_drained  # type: ignore[method-assign]
 
             try:
                 drain_worker(
@@ -726,7 +673,7 @@ class TestThreadJoinTimeoutWarning:
                     _locks_dir=locks_dir,
                 )
             finally:
-                AspectExtractionQueue.is_drained = _orig_is_drained  # type: ignore[method-assign]
+                HttpAspectQueue.is_drained = _orig_is_drained  # type: ignore[method-assign]
                 barrier.set()  # Let the hanging thread exit
 
         finally:
@@ -768,8 +715,28 @@ class TestDrainTimeoutDefault:
 
 
 class TestMCPLockDetection:
+    """SIG-5 lock-file detection in drain_worker (LOCAL/non-service branch).
+
+    The file-lock check only runs when ``storage_backend_for("aspect_queue")``
+    is not SERVICE (in SERVICE mode PG's FOR UPDATE SKIP LOCKED owns
+    cross-process claim safety — see TestServiceModeDrain). The test env
+    runs the engine substrate (backend=service), which would silently skip
+    the check and make these tests vacuous, so each test pins the
+    non-service branch explicitly. The branch — and this pin — dies with
+    the NX_STORAGE_BACKEND=sqlite opt-out (RDR-186 .18).
+    """
+
+    @pytest.fixture()
+    def _local_mode(self, monkeypatch) -> None:
+        from nexus.db import storage_mode as smod
+
+        monkeypatch.setattr(
+            smod, "storage_backend_for",
+            lambda key: smod.StorageBackend.SQLITE,
+        )
+
     def test_drain_no_lock_dir_proceeds_normally(
-        self, queue_path: Path
+        self, queue_path: Path, _local_mode: None,
     ) -> None:
         """When _locks_dir does not exist, drain proceeds without error.
         Supports environments where the locks dir has not been created.
@@ -780,7 +747,7 @@ class TestMCPLockDetection:
         drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=nonexistent)
 
     def test_drain_skips_own_pid_lock_file(
-        self, queue_path: Path, locks_dir: Path
+        self, queue_path: Path, locks_dir: Path, _local_mode: None,
     ) -> None:
         """A lock file for the current process's own PID is not a
         cross-process conflict; drain proceeds normally.
@@ -800,3 +767,20 @@ class TestMCPLockDetection:
 
         # Must not raise -- own-PID lock is skipped.
         drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
+
+    def test_drain_blocked_by_live_foreign_worker_lock(
+        self, queue_path: Path, locks_dir: Path, _local_mode: None,
+    ) -> None:
+        """The positive SIG-5 case: a lock file for a LIVE foreign PID makes
+        drain_worker raise DrainBlockedByActiveWorker before touching the
+        queue. PID 1 (launchd/init) is always alive and always foreign; the
+        permission-denied probe result is deliberately treated as alive.
+        """
+        from nexus.aspect_worker import DrainBlockedByActiveWorker, drain_worker
+
+        (locks_dir / "aspect_worker.1").write_text("1")
+
+        with pytest.raises(DrainBlockedByActiveWorker) as exc_info:
+            drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
+
+        assert exc_info.value.blocking_pid == 1

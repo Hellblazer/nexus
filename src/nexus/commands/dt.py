@@ -277,16 +277,12 @@ def _open_highlights_store():
     Mirrors ``plan.py``'s ``_open_plan_library`` routing (RDR-179 pattern);
     the HTTP store has full method parity (upsert/get/get_by_source_uri).
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — command-local import
+    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A):
+    # HttpDocumentHighlightsStore is the only highlights store — the SQLite
+    # arm died with the store.
+    from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — command-local import
 
-    if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — command-local import
-
-        return HttpDocumentHighlightsStore()
-    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import
-    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — command-local import
-
-    return DocumentHighlights(default_db_path())
+    return HttpDocumentHighlightsStore()
 
 
 def _ingest_highlights_record(uuid: str) -> bool:
@@ -302,10 +298,7 @@ def _ingest_highlights_record(uuid: str) -> bool:
     ``False``; highlight ingest never aborts the index batch.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
-    from nexus.db.t2.document_highlights import (  # noqa: PLC0415 — command-local import (db.t2.document_highlights)
-        DocumentHighlights,
-        HighlightRecord,
-    )
+    from nexus.db.t2.records import HighlightRecord  # noqa: PLC0415 — command-local import (db.t2.records)
     from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
     dt_uri = f"x-devonthink-item://{uuid}"

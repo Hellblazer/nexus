@@ -3151,6 +3151,62 @@ CREATE TABLE IF NOT EXISTS topic_links (
 """
 
 
+# Rehomed VERBATIM from the deleted SQLite ``telemetry.py`` (nexus-i711w
+# Stage 2 sub-stage A): the store class died, but this bootstrap path must
+# keep materialising the tables for the SQLite-source tests that outlive it
+# until Stage 4 deletes migrations.py wholesale — at which point this text
+# dies with the file.
+_TELEMETRY_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS relevance_log (
+    id         INTEGER PRIMARY KEY,
+    query      TEXT NOT NULL,
+    chunk_id   TEXT NOT NULL,
+    collection TEXT,
+    action     TEXT NOT NULL,
+    session_id TEXT,
+    timestamp  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_relevance_log_query
+    ON relevance_log(query);
+CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
+    ON relevance_log(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_relevance_log_session
+    ON relevance_log(session_id);
+
+-- nexus-24p05: cumulative-deletes retention markers (the verify-fill
+-- watermark's rollback detector; local-mode twin of nexus.retention_markers).
+CREATE TABLE IF NOT EXISTS retention_markers (
+    relation      TEXT    PRIMARY KEY,
+    total_deleted INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT    NOT NULL
+);
+
+-- RDR-087 Phase 2: per-call threshold-filter telemetry.
+-- Schema duplicated from migrations.migrate_search_telemetry so that
+-- fresh T2Database constructions get the table even before apply_pending
+-- runs. IF NOT EXISTS makes construction idempotent with the migration.
+-- ``kept_count`` matches the RDR-087 spec; 4.6.0 shipped this column as
+-- ``dropped_count`` — the 4.6.1 rename migration upgrades existing DBs.
+CREATE TABLE IF NOT EXISTS search_telemetry (
+    ts             TEXT    NOT NULL,
+    query_hash     TEXT    NOT NULL,
+    collection     TEXT    NOT NULL,
+    raw_count      INTEGER NOT NULL,
+    kept_count     INTEGER NOT NULL,
+    top_distance   REAL,
+    threshold      REAL,
+    PRIMARY KEY (ts, query_hash, collection)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_tel_collection
+    ON search_telemetry(collection);
+CREATE INDEX IF NOT EXISTS idx_search_tel_ts
+    ON search_telemetry(ts);
+
+"""
+
+
 def _create_base_tables(conn: sqlite3.Connection) -> None:
     """Execute all domain base-schema SQL via CREATE TABLE IF NOT EXISTS.
 
@@ -3159,7 +3215,6 @@ def _create_base_tables(conn: sqlite3.Connection) -> None:
     """
     from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
     from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
-    from nexus.db.t2.telemetry import _TELEMETRY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
 
     conn.executescript(_MEMORY_SCHEMA_SQL)
     conn.executescript(_PLANS_SCHEMA_SQL)

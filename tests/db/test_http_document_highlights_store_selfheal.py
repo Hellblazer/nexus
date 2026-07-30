@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from nexus.db.t2.document_highlights import HighlightRecord
+from nexus.db.t2.records import HighlightRecord
 from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
 
 # ── Rotatable-bearer fake highlights service ────────────────────────────────

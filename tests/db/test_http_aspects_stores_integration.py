@@ -485,7 +485,7 @@ class TestDocumentHighlightsMVV:
 
     def test_e_highlights_round_trip(self, highlights_store) -> None:
         """e) upsert/get/get_by_source_uri/list round-trip."""
-        from nexus.db.t2.document_highlights import HighlightRecord
+        from nexus.db.t2.records import HighlightRecord
         record = HighlightRecord(
             doc_id="doc-highlights-inttest-e",
             source_uri="file:///papers/highlights-e.pdf",

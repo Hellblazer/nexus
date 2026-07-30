@@ -78,15 +78,20 @@ DDL_CENSUS: dict[str, int] = {
     # because it describes the migration SOURCE — a legacy memory.db still
     # carries those tables and the SQLite -> PG reader must materialise and
     # read them — while the STORE CLASS that happened to declare it is gone.
-    "src/nexus/db/migrations.py": 29,             # the sanctioned-until-retired T2 registry
-    "src/nexus/db/t2/aspect_extraction_queue.py": 3,
+    # 29 -> 32 (nexus-i711w Stage 2 sub-stage A): _TELEMETRY_SCHEMA_SQL's
+    # 3 CREATEs moved here VERBATIM from the deleted telemetry.py (whose
+    # 4-count entry below is removed; the 4th was an index-comment mirror).
+    # Same shape as the taxonomy move above: the SOURCE schema outlives the
+    # store class because the bootstrap path must materialise it until
+    # Stage 4 deletes migrations.py wholesale. Repo total DOWN, nothing new.
+    "src/nexus/db/migrations.py": 32,             # the sanctioned-until-retired T2 registry
+    # aspect_extraction_queue.py (3), chash_index.py (2),
+    # document_highlights.py (1), telemetry.py (4): entries removed —
+    # files deleted (nexus-i711w Stage 2 sub-stage A). DOWNWARD-only edits.
     "src/nexus/db/t2/catalog.py": 9,
-    "src/nexus/db/t2/chash_index.py": 2,
     "src/nexus/db/t2/document_aspects.py": 1,
-    "src/nexus/db/t2/document_highlights.py": 1,
     "src/nexus/db/t2/memory_store.py": 3,
     "src/nexus/db/t2/plan_library.py": 3,
-    "src/nexus/db/t2/telemetry.py": 4,
     # wire_reid.py entry removed (RDR-155 P4b P2): file deleted with the
     # migration machinery.
 }
@@ -105,9 +110,9 @@ ALTER_CENSUS: dict[str, int] = {
     "src/nexus/commands/enrich.py": 1,            # nexus-70x7y: comment saying the runtime statement is GONE — not own debt
     "src/nexus/db/admin_sql.py": 2,                # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex + docstring — not SQLite debt
     "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
-    "src/nexus/db/t2/aspect_extraction_queue.py": 2,
+    # aspect_extraction_queue.py (2) + chash_index.py (1) entries removed —
+    # files deleted (nexus-i711w Stage 2 sub-stage A). DOWNWARD-only edits.
     "src/nexus/db/t2/catalog.py": 9,              # 8 real + 1 self-referential SQL comment
-    "src/nexus/db/t2/chash_index.py": 1,
     "src/nexus/db/t2/memory_store.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
     "src/nexus/db/t2/plan_library.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
     "src/nexus/health.py": 1,                     # PG/Liquibase RLS syntax in a comment (health.py:1673) — not SQLite debt

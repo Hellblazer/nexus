@@ -68,31 +68,13 @@ def test_long_body_opening_with_sentinel_phrase_is_kept() -> None:
 
 # ── _ingest_highlights_record ───────────────────────────────────────────────
 
-def _register_real_doc(tmp_path, monkeypatch, collection: str) -> str:
-    """Register a REAL catalog document and return its tumbler (nexus-aqbrk).
-
-    The highlights store enforces a foreign key to catalog_documents.tumbler on
-    the engine. _patch_catalog's MagicMock hands back a FABRICATED tumbler
-    ("1.2.3") that was never registered anywhere, so the write failed the FK
-    with an HTTP 409 — invisible on the SQLite arm, which has no such
-    constraint.
-
-    Must run BEFORE _patch_catalog: that helper repoints make_catalog_reader at
-    the mock, so ActiveCatalog would resolve to the mock afterwards.
-    """
-    from nexus.catalog.catalog import Catalog
-
-    from tests._catalog_fixture_ops import ActiveCatalog
-
-    cat_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
-    cat = ActiveCatalog()
-    owner = cat.register_owner("dt-highlights", "curator")
-    return str(cat.register(
-        owner, "A DT Doc", content_type="paper",
-        file_path="dt/a.pdf", physical_collection=collection,
-    ))
+# _register_real_doc DELETED (nexus-i711w Stage 2 sub-stage A2): it existed so
+# writes could satisfy the ENGINE's FK to catalog_documents.tumbler
+# (nexus-aqbrk) when the tests round-tripped through a real store. Both former
+# callers now route through _FakeHttpHighlights (the SQLite DocumentHighlights
+# they exercised is deleted; HttpDocumentHighlightsStore is the only store),
+# so no real registration is needed here. The FK contract itself stays pinned
+# by the engine-side store/repository tests.
 
 
 def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
@@ -119,27 +101,32 @@ def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
 
 
 def test_ingest_highlights_record_writes_store(tmp_path, monkeypatch) -> None:
+    """The ingest helper resolves the catalog entry, builds the record, and
+    writes it through the highlights store — then the SAME store seam reads it
+    back. Ported (nexus-i711w Stage 2 sub-stage A2) off the deleted SQLite
+    DocumentHighlights/T2-facade round-trip onto the
+    HttpDocumentHighlightsStore construction seam with a stateful fake; the
+    real HTTP round-trip is pinned in tests/db/test_http_aspects_stores.py."""
     from nexus.commands import dt as dt_mod
-    from nexus.db.t2.document_highlights import DocumentHighlights
 
     _coll = "knowledge__dt__voyage-context-3__v1"
-    real_tumbler = _register_real_doc(tmp_path, monkeypatch, _coll)
-    _patch_catalog(monkeypatch, tmp_path, tumbler=real_tumbler, collection=_coll)
-    monkeypatch.setattr("nexus.config.default_db_path", lambda: tmp_path / "memory.db")
+    _patch_catalog(monkeypatch, tmp_path, tumbler="1.7", collection=_coll)
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_highlights",
                         lambda u: "## Highlights\n- x")
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_mentions",
                         lambda u: None)
+    fake = _FakeHttpHighlights()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_highlights_store.HttpDocumentHighlightsStore",
+        lambda: fake,
+    )
 
     assert dt_mod._ingest_highlights_record("ABC") is True
-    # nexus-aqbrk: read through the T2 FACADE, not a raw DocumentHighlights —
-    # the latter always opens local SQLite, while the write routed to whichever
-    # store is live.
-    from nexus.db.t2 import T2Database
-
-    with T2Database(tmp_path / "memory.db") as _t2:
-        rec = _t2.document_highlights.get(real_tumbler)
+    # Read back through the same store seam the show command uses.
+    rec = dt_mod._open_highlights_store().get("1.7")
     assert rec is not None
+    assert rec.doc_id == "1.7"
+    assert rec.collection == _coll
     assert rec.highlights_md == "## Highlights\n- x"
     assert rec.source_uri == "x-devonthink-item://ABC"
 
@@ -199,26 +186,25 @@ def test_no_highlights_flag_skips_ingest(runner, fake_gather, monkeypatch) -> No
 
 
 def test_highlights_show_command(runner, tmp_path, monkeypatch) -> None:
+    """`nx dt highlights <tumbler>` reads through _open_highlights_store and
+    renders the record; a miss is a clean error. Ported (nexus-i711w Stage 2
+    sub-stage A2) off the deleted SQLite DocumentHighlights/T2-facade seeding
+    onto the HttpDocumentHighlightsStore construction seam."""
     from nexus.cli import main
-    from nexus.db.t2.document_highlights import DocumentHighlights, HighlightRecord
+    from nexus.db.t2.records import HighlightRecord
 
-    db = tmp_path / "memory.db"
-    # nexus-aqbrk: seed through the T2 FACADE against a REAL tumbler. The raw
-    # DocumentHighlights(db) form always writes local SQLite, while `nx dt
-    # highlights` reads via the facade — so on the engine arm the row was
-    # invisible. The tumbler must exist for the engine's FK.
-    real_tumbler = _register_real_doc(tmp_path, monkeypatch, "c")
-    from nexus.db.t2 import T2Database
-
-    with T2Database(db) as _t2:
-        _t2.document_highlights.upsert(HighlightRecord(
-            doc_id=real_tumbler, source_uri="x-devonthink-item://ABC",
-            collection="c",
-            highlights_md="## Highlights\n- the point", mentions_md="",
-            ingested_at="2026-05-30T00:00:00Z",
-        ))
-    monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-    result = runner.invoke(main, ["dt", "highlights", real_tumbler])
+    fake = _FakeHttpHighlights()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_highlights_store.HttpDocumentHighlightsStore",
+        lambda: fake,
+    )
+    fake.upsert(HighlightRecord(
+        doc_id="1.2", source_uri="x-devonthink-item://ABC",
+        collection="c",
+        highlights_md="## Highlights\n- the point", mentions_md="",
+        ingested_at="2026-05-30T00:00:00Z",
+    ))
+    result = runner.invoke(main, ["dt", "highlights", "1.2"])
     assert result.exit_code == 0, result.output
     assert "the point" in result.output
     # unknown tumbler -> clean error
@@ -231,21 +217,29 @@ def test_highlights_show_command(runner, tmp_path, monkeypatch) -> None:
 
 
 class _FakeHttpHighlights:
+    """Stateful stand-in for HttpDocumentHighlightsStore: records calls AND
+    round-trips upserted records so write-then-read tests exercise the same
+    store seam the production paths share (nexus-i711w Stage 2 sub-stage A2)."""
+
     def __init__(self) -> None:
         self.upserts: list = []
         self.gets: list = []
+        self._by_doc: dict = {}
+        self._by_uri: dict = {}
 
     def upsert(self, record) -> bool:
         self.upserts.append(record)
+        self._by_doc[record.doc_id] = record
+        self._by_uri[record.source_uri] = record
         return True
 
     def get(self, doc_id):
         self.gets.append(("get", doc_id))
-        return None
+        return self._by_doc.get(doc_id)
 
     def get_by_source_uri(self, uri):
         self.gets.append(("uri", uri))
-        return None
+        return self._by_uri.get(uri)
 
 
 def test_ingest_routes_to_http_store_in_service_mode(

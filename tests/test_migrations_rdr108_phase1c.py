@@ -704,82 +704,17 @@ class TestAspectQueuePKMigration:
         conn.close()
 
 
-# ── AspectExtractionQueue post-migration accessor API ─────────────────────────
-
-
-class TestQueuePostMigrationAPI:
-    """After migration, mark_done(doc_id) and claim_next returning doc_id."""
-
-    @pytest.fixture()
-    def migrated_queue_path(self, tmp_path: Path) -> Path:
-        """Return path to a migrated aspect_extraction_queue DB."""
-        from nexus.db.migrations import migrate_aspect_extraction_queue_pk_to_doc_id
-
-        mem_db = tmp_path / "memory.db"
-        cat_db = tmp_path / ".catalog.db"
-        conn = _make_memory_db(mem_db)
-        cat_conn = _make_catalog_db(cat_db)
-        _insert_catalog_doc(
-            cat_conn,
-            tumbler="nexus-api01",
-            file_path="/papers/api.pdf",
-            physical_collection="knowledge__delos",
-        )
-        cat_conn.commit()
-        cat_conn.close()
-        migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=cat_db)
-        conn.close()
-        return mem_db
-
-    def test_enqueue_and_claim_returns_doc_id(self, migrated_queue_path: Path) -> None:
-        """After migration, enqueue + claim_next returns a QueueRow with doc_id populated."""
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-
-        q = AspectExtractionQueue(migrated_queue_path)
-        q.enqueue(
-            "knowledge__delos",
-            "/papers/api.pdf",
-            doc_id="nexus-api01",
-        )
-        row = q.claim_next()
-        assert row is not None
-        assert row.doc_id == "nexus-api01"
-        q.close()
-
-    def test_mark_done_by_doc_id(self, migrated_queue_path: Path) -> None:
-        """mark_done(doc_id=...) deletes the row by doc_id on a migrated table."""
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-
-        q = AspectExtractionQueue(migrated_queue_path)
-        q.enqueue(
-            "knowledge__delos",
-            "/papers/api.pdf",
-            doc_id="nexus-api01",
-        )
-        row = q.claim_next()
-        assert row is not None
-        deleted = q.mark_done(doc_id="nexus-api01")
-        assert deleted == 1
-
-        # Queue should now be empty
-        assert q.pending_count() == 0
-        q.close()
-
-    def test_mark_done_legacy_collection_source_path(self, migrated_queue_path: Path) -> None:
-        """mark_done(collection, source_path) still works after migration (backward compat)."""
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-
-        q = AspectExtractionQueue(migrated_queue_path)
-        q.enqueue(
-            "knowledge__delos",
-            "/papers/api.pdf",
-            doc_id="nexus-api01",
-        )
-        q.claim_next()
-        # Legacy call form
-        deleted = q.mark_done(collection="knowledge__delos", source_path="/papers/api.pdf")
-        assert deleted == 1
-        q.close()
+# ── AspectExtractionQueue post-migration accessor API — DELETED ───────────────
+#
+# TestQueuePostMigrationAPI (3 tests: enqueue+claim returns doc_id, mark_done
+# by doc_id, legacy mark_done(collection, source_path)) DELETED in nexus-i711w
+# Stage 2 sub-stage A2: its subject was the SQLite AspectExtractionQueue's
+# post-PK-migration accessor API, and that store died this same commit. The
+# surviving queue's equivalent contract (claim_next -> QueueRow.doc_id,
+# mark_done) is pinned in tests/db/test_http_aspects_stores.py
+# (TestHttpAspectQueue) plus the engine-side AspectRepository tests. The PK
+# migration functions themselves stay covered by the classes above, which run
+# against raw sqlite3 connections (migration SOURCE, not the store).
 
 
 # ── DocumentAspects post-migration accessor API ───────────────────────────────

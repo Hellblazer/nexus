@@ -627,13 +627,15 @@ def aspects_requeue_failed(
         click.echo("--limit must be a positive integer.", err=True)
         raise SystemExit(1)
 
+    # No local-file existence gate: the queue is engine-side (HttpAspectQueue
+    # is the only queue since nexus-i711w Stage 2 sub-stage A), so the local
+    # memory.db file's absence says nothing about whether failed rows exist.
+    # The old gate no-opped the verb on any box without the legacy file
+    # (porter-b defect report, 2026-07-30).
     mem_path = default_db_path()
-    if not mem_path.exists():
-        click.echo("aspect_extraction_queue: T2 database not found.")
-        return
 
     # Read is concurrent-safe (no single-writer concern); the facade routes
-    # to the active backend (SQLite reader or the PG-service HTTP client).
+    # to the PG-service HTTP client.
     with T2Database(mem_path) as db:  # epsilon-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
         failed = db.aspect_queue.list_failed(collection)
 

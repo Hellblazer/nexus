@@ -254,7 +254,7 @@ def expire_cmd() -> None:
     with t2_handle() as db:
         count = db.memory.expire()
         try:
-            from nexus.db.t2.telemetry import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
+            from nexus.db.t2.records import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
             db.telemetry.expire_relevance_log(days=RELEVANCE_LOG_RETENTION_DAYS)
         except Exception:  # noqa: BLE001 — best-effort relevance_log purge; safe default (memory expiry already landed), facade logged the structured error
             # The relevance_log purge is best-effort; the facade

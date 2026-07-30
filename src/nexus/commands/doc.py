@@ -576,12 +576,11 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
 
     The Catalog is constructed from the conventional catalog path under
     ``default_db_path()``'s parent, matching ``mcp_infra.get_catalog``.
-    T3 comes from ``nexus.db.make_t3``. ChashIndex opens the same T2
-    path used by every other T2 store.
+    T3 comes from ``nexus.db.make_t3``. The chash index is
+    ``HttpChashIndex`` (the /v1/chash read surface).
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # RDR-152 nexus-gmiaf.16 seam, applied at RDR-155 P4b P3: this trio fed
     # `cat.resolve_chash(...)` a SQLite ChashIndex unconditionally. Post-RDR-187
@@ -590,12 +589,10 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
     # half of /v1/chash and answer from the chunks tables.
     cat: Any = make_catalog_reader()
     t3: Any = make_t3()
-    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        chash_index: Any = HttpChashIndex()
-    else:
-        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        chash_index = ChashIndex(default_db_path())
+    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpChashIndex is the
+    # only chash index — the SQLite arm died with the store.
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    chash_index: Any = HttpChashIndex()
     return cat, t3, chash_index
 
 

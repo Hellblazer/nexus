@@ -26,8 +26,35 @@ from tests.conftest import make_vector_test_client
 # ── Shared seed helper ───────────────────────────────────────────────────────
 
 
+class _FakeChashIndex:
+    """In-file stand-in for the chash-index interface the doc commands
+    consume via ``Catalog.resolve_chash`` (``lookup``) plus the lifecycle
+    pair ``is_empty``/``close``. The SQLite ChashIndex was deleted with
+    the 7.0.0 wave (nexus-i711w); the HTTP twin's wire contract is
+    pinned in tests/db/test_http_chash_index.py."""
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], str] = {}
+
+    def upsert(self, *, chash: str, collection: str) -> None:
+        self.rows[(chash, collection)] = "2026-01-01T00:00:00+00:00"
+
+    def lookup(self, chash: str) -> list[dict[str, str]]:
+        return [
+            {"collection": coll, "created_at": ts}
+            for (ch, coll), ts in self.rows.items()
+            if ch == chash
+        ]
+
+    def is_empty(self) -> bool:
+        return not self.rows
+
+    def close(self) -> None:
+        pass
+
+
 def _seed_catalog_and_t3(tmp_path: Path):
-    """Create a Catalog, T3 EphemeralClient, and T2 ChashIndex. Return
+    """Create a Catalog, T3 EphemeralClient, and fake chash index. Return
     (cat, t3, chash_index, chash_hex) after seeding one resolvable chunk.
 
     ``make_vector_test_client()`` is a process-shared singleton — drop
@@ -36,7 +63,6 @@ def _seed_catalog_and_t3(tmp_path: Path):
     instances.
     """
     from nexus.catalog.catalog import Catalog
-    from nexus.db.t2.chash_index import ChashIndex
 
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
@@ -55,7 +81,7 @@ def _seed_catalog_and_t3(tmp_path: Path):
         metadatas=[{"chunk_text_hash": chash, "source_path": "paper.pdf"}],
     )
 
-    chash_index = ChashIndex(tmp_path / "t2.db")
+    chash_index = _FakeChashIndex()
     chash_index.upsert(chash=chash, collection="knowledge__phase4")
     return cat, t3, chash_index, chash
 

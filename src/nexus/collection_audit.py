@@ -414,21 +414,13 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     (T2 file missing, T3 unavailable); calling code treats this
     the same as ratio=None (schema absent vs backfill needed).
     """
-    from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    # RDR-152 nexus-gmiaf.16 seam: route through HttpChashIndex when the
-    # chash_index backend is the service, avoiding SQLite direct-open.
-    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        idx = HttpChashIndex()
-    else:
-        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        db_path = default_db_path()
-        if not db_path.exists():
-            return None
-        idx = ChashIndex(db_path)
+    # RDR-152 nexus-gmiaf.16 seam, COLLAPSED (nexus-i711w Stage 2 sub-stage
+    # A): HttpChashIndex is the only chash index — the SQLite arm died with
+    # the store.
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    idx = HttpChashIndex()
 
     # Review remediation (Reviewer B/I-1, B/S-3, C/I-4): open ChashIndex
     # once for the whole coverage computation instead of opening + closing

@@ -25,7 +25,10 @@ The three sites, and what each printed BEFORE:
                            operators at this check for backlog visibility.
 
 Every test below asserts on the SERVICE-mode branch specifically. The sqlite
-branches are covered by their own existing suites and are unchanged.
+branches (and the SQLite telemetry/queue/highlights stores behind them) were
+DELETED in nexus-i711w Stage 2 sub-stage A — the service branch is now the
+only branch, which makes the never-opens-sqlite assertions here the tripwire
+that the frozen-file read path stays dead.
 """
 from __future__ import annotations
 
@@ -120,15 +123,18 @@ class TestTrimTelemetryRoutes:
         site never routed to it."""
         from nexus.commands import doctor as doctor_mod
 
+        # nexus-i711w Stage 2 sub-stage A2: the SQLite Telemetry class is
+        # deleted, so "never opens the frozen SQLite" is asserted at the
+        # sqlite3.connect seam (same shape as the aspect-queue tests below).
         with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
-             patch("nexus.db.t2.telemetry.Telemetry") as sqlite_store:
+             patch("sqlite3.connect") as sqlite_connect:
             http_store.return_value.trim_search_telemetry.return_value = 7
             http_store.return_value.trim_hook_failures.return_value = 3
             doctor_mod._run_trim_telemetry(days=30)
 
         http_store.return_value.trim_search_telemetry.assert_called_once_with(days=30)
         http_store.return_value.trim_hook_failures.assert_called_once_with(days=30)
-        sqlite_store.assert_not_called(), "service mode must not open the frozen SQLite"
+        sqlite_connect.assert_not_called(), "must not open the frozen SQLite"
 
     def test_missing_local_file_does_not_report_nothing_to_trim(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, service_mode: None,
@@ -203,7 +209,9 @@ class TestAspectQueueCheckRoutes:
         a failing queue look error-free — the same class again — so the absence
         is stated."""
         from nexus.commands import doctor as doctor_mod
-        from nexus.db.t2.aspect_extraction_queue import QueueRow
+        # nexus-i711w Stage 2 sub-stage A2: QueueRow rehomed to records when
+        # the SQLite aspect_extraction_queue module was deleted.
+        from nexus.db.t2.records import QueueRow
 
         row = QueueRow(
             collection="knowledge__x", source_path="/p.pdf",

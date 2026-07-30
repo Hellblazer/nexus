@@ -110,6 +110,14 @@ class HighlightRecord:
     ingested_at: str
 
 
+#: The relevance_log retention horizon — THE single source for the sweep's
+#: default. Rehomed from the deleted SQLite ``telemetry.py`` (nexus-i711w
+#: Stage 2 sub-stage A); surviving consumers are ``T2Database.trim_telemetry``
+#: and ``nx memory expire``. ``HttpTelemetryStore.expire_relevance_log``'s
+#: literal ``days: int = 90`` default mirrors this number.
+RELEVANCE_LOG_RETENTION_DAYS: int = 90
+
+
 def _safe_json_list(s: str | None) -> list:
     if not s:
         return []

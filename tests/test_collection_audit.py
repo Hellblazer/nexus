@@ -314,33 +314,47 @@ class TestLiveDistanceProbe:
 # ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
 
 
+class _FakeChashIndex:
+    """Stand-in for ``HttpChashIndex`` — the only chash index since
+    nexus-i711w Stage 2 sub-stage A deleted the SQLite ``ChashIndex``.
+    ``compute_chash_coverage`` constructs it via the function-local
+    ``nexus.db.t2.http_chash_index.HttpChashIndex`` seam, so tests
+    monkeypatch that attribute with a factory returning this fake."""
+
+    def __init__(self, count: int = 0, chashes: set[str] | None = None) -> None:
+        self._count = count
+        self._chashes = chashes or set()
+        self.closed = False
+
+    def count_for_collection(self, collection: str) -> int:
+        return self._count
+
+    def registered_chashes_for_collection(self, collection: str) -> set[str]:
+        return set(self._chashes)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class TestChashCoverageSection:
     """Audit section 5 ratio + missing_sample shape.
 
     The production ``compute_chash_coverage`` hits T3 for the total
-    chunk count. We exercise the pure-T2 path by stubbing make_t3's
-    collection.count() so the test is deterministic without network.
+    chunk count and the HTTP chash index for the indexed-row count. Both
+    are stubbed (``_FakeChashIndex`` + a fake T3) so the test is
+    deterministic without network. (Ported off the deleted SQLite
+    ``ChashIndex`` seed in nexus-i711w Stage 2 sub-stage A2.)
     """
-
-    def _seed_chash_index(self, db_path: Path, rows: list[tuple[str, str, str]]):
-        """Seed ``chash_index`` rows: (chash, collection, doc_id)."""
-        from nexus.db.t2.chash_index import ChashIndex
-
-        idx = ChashIndex(db_path)
-        try:
-            for chash, coll, doc_id in rows:
-                idx.upsert(chash=chash, collection=coll)
-        finally:
-            idx.close()
-
 
     def test_empty_t3_collection_returns_none_ratio(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
         from nexus.collection_audit import compute_chash_coverage
 
-        db_path = tmp_path / "memory.db"
-        self._seed_chash_index(db_path, [])
+        idx = _FakeChashIndex(count=0)
+        monkeypatch.setattr(
+            "nexus.db.t2.http_chash_index.HttpChashIndex", lambda: idx,
+        )
 
         class _FakeCol:
             def count(self): return 0
@@ -348,12 +362,7 @@ class TestChashCoverageSection:
             def get_or_create_collection(self, _n): return _FakeCol()
             # nexus-8lbe: compute_chash_coverage now uses get_collection
             def get_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
 
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__empty")
@@ -361,6 +370,7 @@ class TestChashCoverageSection:
         assert cov.total_chunks == 0
         assert cov.indexed_rows == 0
         assert cov.ratio is None
+        assert idx.closed, "coverage probe must close the chash index"
 
 
     def test_missing_t3_collection_does_not_create_zombie(
@@ -382,8 +392,10 @@ class TestChashCoverageSection:
 
         from nexus.collection_audit import compute_chash_coverage
 
-        db_path = tmp_path / "memory.db"
-        self._seed_chash_index(db_path, [])
+        monkeypatch.setattr(
+            "nexus.db.t2.http_chash_index.HttpChashIndex",
+            lambda: _FakeChashIndex(count=0),
+        )
 
         get_or_create_calls: list[str] = []
 
@@ -397,9 +409,6 @@ class TestChashCoverageSection:
             def get_collection(self, name):
                 raise _ChromaNotFoundError(f"Collection {name} not found")
 
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__never_created")

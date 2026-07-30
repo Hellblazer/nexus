@@ -330,7 +330,7 @@ class AspectExtractionWorker:
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
         """
-        from nexus.db.t2.aspect_extraction_queue import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
+        from nexus.db.t2.records import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
         from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra <-> aspect_worker)
         from nexus.migration.state import is_migrating as _migration_in_progress  # noqa: PLC0415 — deferred to avoid circular import (migration.state)
         while not self._stop_event.is_set():
@@ -930,10 +930,10 @@ def drain_worker(
          to inspect stuck ``in_progress`` rows.
 
     Args:
-        queue_path: Path to the T2 SQLite database file.  Used to open a
-            short-lived read-only connection for the ``is_drained()`` poll
-            separate from the worker's own T2 context so this function does
-            not compete for locks.
+        queue_path: Legacy path parameter, retained for signature stability.
+            The queue is engine-side (``HttpAspectQueue``, nexus-i711w Stage 2
+            sub-stage A); the ``is_drained()`` poll goes over HTTP and no
+            local connection is opened from this path.
         timeout: Seconds to wait for the queue to drain.  Default 120s.
             RDR-089 P1.3 measured ~26.5s median extraction time with a
             tail to 90s for the scholarly-paper-v1 extractor.  120s
@@ -1001,12 +1001,10 @@ def drain_worker(
     # yields a spurious "drained" — leaving ``nx aspects drain`` and the
     # migration drain gate inert in service mode. Poll the SERVICE queue's
     # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
-    if _is_service_mode:
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
-        queue = HttpAspectQueue()
-    else:
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
-        queue = AspectExtractionQueue(queue_path)
+    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpAspectQueue is
+    # the only queue — the SQLite AspectExtractionQueue died with the store.
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
+    queue = HttpAspectQueue()
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.
@@ -1045,42 +1043,35 @@ def drain_worker(
                 return
 
         # Timeout: count stuck rows for the error message.
-        # SERVICE mode: HttpAspectQueue has no .conn; use pending_count() via
-        # HTTP.  pending_count() counts only 'pending' rows — NOT in_progress.
-        # A crashed worker leaves rows in in_progress with NO lock held (FOR
-        # UPDATE locks are transaction-scoped; they are released when the
-        # transaction ends, which happens when the worker process dies).  Those
-        # orphaned rows are recovered by reclaim_stale(), not by a held lock.
-        # Consequence: if the drain times out because rows are stuck
-        # in_progress (the common crashed-worker scenario), pending_count()
-        # returns 0 even though is_drained() is still False.  We detect this
-        # gap and include an honest operator hint in the error detail.
-        # LOCAL mode: keep the existing status != 'failed' count (pending +
-        # in_progress) via a direct SQLite query.
-        if _is_service_mode:
-            pending = queue.pending_count()
-            if pending == 0:
-                # is_drained() returned False at timeout, but pending_count()
-                # is 0 — rows are stuck in in_progress (crashed-worker case).
-                # pending_count() is a pending-only proxy and cannot see them.
-                detail = (
-                    "Note (service mode): pending_count is 0, but is_drained() "
-                    "is still False — rows may be stuck in in_progress from a "
-                    "crashed worker. A running aspect-worker's stale-reclaim "
-                    "loop resets them to pending automatically; ensure one is "
-                    "up ('nx daemon aspect-worker start', or it spawns on the "
-                    "next aspect enqueue), then retry the drain."
-                )
-                stuck_count = 0
-            else:
-                detail = None
-                stuck_count = pending
+        # The queue is HttpAspectQueue (the SQLite arm died in nexus-i711w
+        # Stage 2 sub-stage A, taking the raw `status != 'failed'` count
+        # with it). pending_count() counts only 'pending' rows — NOT
+        # in_progress. A crashed worker leaves rows in in_progress with NO
+        # lock held (FOR UPDATE locks are transaction-scoped; they are
+        # released when the transaction ends, which happens when the worker
+        # process dies). Those orphaned rows are recovered by
+        # reclaim_stale(), not by a held lock. Consequence: if the drain
+        # times out because rows are stuck in_progress (the common
+        # crashed-worker scenario), pending_count() returns 0 even though
+        # is_drained() is still False. We detect this gap and include an
+        # honest operator hint in the error detail.
+        pending = queue.pending_count()
+        if pending == 0:
+            # is_drained() returned False at timeout, but pending_count()
+            # is 0 — rows are stuck in in_progress (crashed-worker case).
+            # pending_count() is a pending-only proxy and cannot see them.
+            detail = (
+                "Note (service mode): pending_count is 0, but is_drained() "
+                "is still False — rows may be stuck in in_progress from a "
+                "crashed worker. A running aspect-worker's stale-reclaim "
+                "loop resets them to pending automatically; ensure one is "
+                "up ('nx daemon aspect-worker start', or it spawns on the "
+                "next aspect enqueue), then retry the drain."
+            )
+            stuck_count = 0
         else:
-            stuck = queue.conn.execute(
-                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
-            ).fetchone()
-            stuck_count = stuck[0] if stuck else 0
             detail = None
+            stuck_count = pending
         raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout, detail=detail)
     finally:
         queue.close()

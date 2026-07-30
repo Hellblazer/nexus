@@ -106,7 +106,7 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # only counts entries and never asked whether they still resolved. This is a
 # SHRINK -- the direction the ratchet already sanctions -- and it removes
 # nothing that was excluding anything.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 68
+_MODE_LINT_EXCLUDE_FILES_CEILING = 67
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).

@@ -497,62 +497,46 @@ class TestDoctorTrimTelemetry:
     rows older than the retention window. Default 30d; --days validates min=1.
     """
 
-    def _seed_and_trim(
-        self, runner: CliRunner, tmp_path: Path, *,
-        ages_days: list[int], trim_days: int,
-    ) -> tuple["object", int]:
-        """Seed rows at the given ages (days before now) and run the trim."""
-        from datetime import UTC, datetime, timedelta
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
+    def _spy_and_trim(
+        self, runner: CliRunner, *, trim_days: int | None,
+    ) -> tuple["object", "object"]:
+        """Run the trim against a spy HttpTelemetryStore (nexus-i711w Stage 2
+        sub-stage A: the verb's SQLite arm died; trim row-selection semantics
+        are engine-side now, so the CLI contract pinned here is flag wiring +
+        per-table output rendering)."""
+        from unittest.mock import MagicMock
 
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        now = datetime.now(UTC)
-        for i, age in enumerate(ages_days):
-            ts = (now - timedelta(days=age)).isoformat()
-            conn.execute(
-                "INSERT INTO search_telemetry "
-                "(ts, query_hash, collection, raw_count, kept_count, "
-                "top_distance, threshold) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ts, f"hash{i:02d}", f"coll__{i}", 3, 2, 0.30, 0.45),
-            )
-        conn.commit()
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(
-                main, ["doctor", "--trim-telemetry", "--days", str(trim_days)],
-            )
-        remaining_conn = sqlite3.connect(str(db_path))
-        remaining = remaining_conn.execute(
-            "SELECT COUNT(*) FROM search_telemetry"
-        ).fetchone()[0]
-        remaining_conn.close()
-        return result, remaining
+        spy = MagicMock()
+        spy.trim_search_telemetry.return_value = 1
+        spy.trim_hook_failures.return_value = 0
+        args = ["doctor", "--trim-telemetry"]
+        if trim_days is not None:
+            args += ["--days", str(trim_days)]
+        with patch(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            return_value=spy,
+        ):
+            result = runner.invoke(main, args)
+        return result, spy
 
     def test_trims_rows_older_than_default_30d(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner,
     ) -> None:
-        """Default 30d retention: rows at t-45d deleted, t-15d and t-0 kept."""
-        result, remaining = self._seed_and_trim(
-            runner, tmp_path, ages_days=[45, 15, 0], trim_days=30,
-        )
+        """Default 30d retention reaches the store as days=30; count rendered."""
+        result, spy = self._spy_and_trim(runner, trim_days=None)
         assert result.exit_code == 0, result.output
-        assert remaining == 2
+        spy.trim_search_telemetry.assert_called_once_with(days=30)
+        spy.trim_hook_failures.assert_called_once_with(days=30)
         assert "Trimmed 1 search_telemetry" in result.output
 
     def test_aggressive_retention_days_7(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner,
     ) -> None:
-        """``--days 7`` trims t-45d and t-15d; only t-0 survives."""
-        result, remaining = self._seed_and_trim(
-            runner, tmp_path, ages_days=[45, 15, 0], trim_days=7,
-        )
+        """``--days 7`` is passed through to both engine-side trims."""
+        result, spy = self._spy_and_trim(runner, trim_days=7)
         assert result.exit_code == 0, result.output
-        assert remaining == 1
+        spy.trim_search_telemetry.assert_called_once_with(days=7)
+        spy.trim_hook_failures.assert_called_once_with(days=7)
 
     def test_empty_table_is_safe(
         self, runner: CliRunner, tmp_path: Path,
@@ -578,15 +562,10 @@ class TestDoctorTrimTelemetry:
         )
         assert result.exit_code != 0
 
-    def test_no_db_file_handled_gracefully(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """Trim against a missing DB reports 'not found' without crashing."""
-        db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--trim-telemetry"])
-        assert result.exit_code == 0
-        assert "not found" in result.output.lower()
+    # test_no_db_file_handled_gracefully DELETED (nexus-i711w Stage 2
+    # sub-stage A): the "T2 database not found — nothing to trim" arm was a
+    # SQLite-mode gate; the verb now always trims the engine-side tables and
+    # a missing local file is meaningless to it.
 
 
 _WARN_CHAR = "\u2717"  # ✗
