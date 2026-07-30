@@ -52,7 +52,11 @@ class TestOrphanAuditServiceModeDegradation:
         monkeypatch.setattr(ca, "_open_t2", lambda: None)
         monkeypatch.setattr(ca, "compute_chash_coverage", lambda collection: None)
 
-        report = ca.run_collection_audit("code__i711w-audit__voyage-code-3__v1")
+        # Collection name deliberately avoids the voyage-* embedder tokens: the
+        # audit path under test is embedder-agnostic, and a voyage literal
+        # would trip the RDR-109 whole-session mode lint for a test that
+        # asserts nothing about cloud-mode behaviour.
+        report = ca.run_collection_audit("code__i711w-audit__bge-m3__v1")
 
         # Degraded (no rows) — but EXPLICITLY degraded, not silently clean.
         assert report.orphans == []

@@ -607,7 +607,7 @@ class TestHttpCatalogClientRoundTrip:
         assert client.doc_count() == 7
 
     def test_register_returns_tumbler(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         # Positional owner+title as in Catalog.register signature
         t = client.register("1.1", "My Paper", content_type="paper")
         assert isinstance(t, Tumbler)
@@ -618,7 +618,7 @@ class TestHttpCatalogClientRoundTrip:
     ) -> None:
         # nexus-9dvqy: 2500 docs page at 1000 (1000+1000+500); tumblers come
         # back aligned 1:1 with docs in input order across the concatenation.
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(2500)]
         page_sizes: list[int] = []
 
@@ -646,7 +646,7 @@ class TestHttpCatalogClientRoundTrip:
         # nexus-9dvqy: a whole-page failure must not sink the run — it falls
         # back to per-doc register() (POST /doc/register), preserving per-file
         # isolation and still returning aligned tumblers.
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
         single_calls: list[str] = []
 
@@ -1198,13 +1198,13 @@ class TestHttpCatalogClientRoundTrip:
         assert n == 2
 
     def test_register_owner(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         # Uses POST /owners/upsert
         t = client.register_owner(name="acme")
         assert isinstance(t, Tumbler)
 
     def test_ensure_owner_for_repo(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         t = client.ensure_owner_for_repo(repo="/tmp/myrepo")
         assert isinstance(t, Tumbler)
 
@@ -1658,7 +1658,7 @@ class TestResolveChunk:
     def test_resolve_chunk_returns_full_dict(self) -> None:
         """Happy path: a real 4-segment chunk tumbler resolves to the
         document + chunk metadata dict."""
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         server, base_url = start_fake_server()
         try:
@@ -1689,7 +1689,7 @@ class TestResolveChunk:
         """A plain 3-segment document tumbler short-circuits to None locally
         with no wire round-trip — mirroring the local
         ``Catalog.resolve_chunk``'s ``if tumbler.chunk is None: return None``."""
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         server, base_url = start_fake_server()
         try:
@@ -1703,7 +1703,7 @@ class TestResolveChunk:
 
     def test_resolve_chunk_missing_document_returns_none(self) -> None:
         """A 404 from the server (document not found) maps to None."""
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         server, base_url = start_fake_server()
         try:

@@ -54,7 +54,7 @@ _ALL_EIGHT = {
 
 class TestCatalogEntryDataclass:
     def test_has_all_eight_bib_fields(self) -> None:
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         from nexus.catalog.tumbler import Tumbler
 
         entry = CatalogEntry(

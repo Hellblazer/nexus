@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     # nexus type spans the three, so the alias degrades to Any rather than
     # inventing a Protocol for three annotation sites.
     ClientAPI = Any
-    from nexus.catalog.catalog import CatalogEntry
+    from nexus.catalog.types import CatalogEntry
 
 _log = structlog.get_logger(__name__)
 

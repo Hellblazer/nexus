@@ -169,7 +169,7 @@ def _register_or_lookup_doc_id(
     writer = None
     try:
         from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.catalog)
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.catalog)
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
@@ -1197,7 +1197,7 @@ def _markdown_chunks(
     :func:`nexus.indexer_utils.detect_git_metadata`. Empty dict outside
     a git repo (nexus-2my fix #3).
     """
-    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     if git_meta is None:
         from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
@@ -1688,7 +1688,7 @@ def _catalog_markdown_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         # nexus-e9ru2 (sibling of nexus-f1itv): no local is_initialized
@@ -1825,7 +1825,7 @@ def index_markdown(
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     # Normalize to absolute so staleness checks are path-form-independent.
     md_path = md_path.resolve()

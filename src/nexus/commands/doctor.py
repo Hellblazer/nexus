@@ -1819,7 +1819,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix_paths:
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

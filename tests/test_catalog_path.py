@@ -368,25 +368,25 @@ class TestMakeRelative:
     """
 
     def test_relativizes_path_under_root(self, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import make_relative
+        from nexus.catalog.types import make_relative
 
         root = tmp_path / "repo"
         assert make_relative(root / "src" / "foo.py", root) == "src/foo.py"
 
     def test_returns_original_if_not_under_root(self, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import make_relative
+        from nexus.catalog.types import make_relative
 
         root = tmp_path / "repo"
         other = tmp_path / "other" / "bar.py"
         assert make_relative(other, root) == str(other)
 
     def test_returns_original_string_for_relative_input(self) -> None:
-        from nexus.catalog.catalog import make_relative
+        from nexus.catalog.types import make_relative
 
         assert make_relative("src/foo.py", Path("/repo")) == "src/foo.py"
 
     def test_accepts_string_input(self, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import make_relative
+        from nexus.catalog.types import make_relative
 
         root = tmp_path / "repo"
         assert make_relative(str(root / "src" / "foo.py"), root) == "src/foo.py"

@@ -264,7 +264,7 @@ def catalog_register(
         import json as _json  # noqa: PLC0415 — deliberate function-local import
         from pathlib import Path as _Path  # noqa: PLC0415 — deliberate function-local import
 
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — function-local import avoids catalog import at module load
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — function-local import avoids catalog import at module load
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         # Relativize absolute file_path if it falls under a known repo

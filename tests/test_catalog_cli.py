@@ -625,7 +625,7 @@ class TestDeleteCommand:
         """
         from unittest.mock import MagicMock, patch
 
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.catalog.tumbler import Tumbler
 

@@ -187,7 +187,7 @@ class TestCitationLinksNoneMeta:
         """Entries with meta=None (legacy rows) are skipped without crashing."""
         from unittest.mock import patch
 
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         from nexus.catalog.tumbler import Tumbler
 
         cat = self._make_catalog(tmp_path)

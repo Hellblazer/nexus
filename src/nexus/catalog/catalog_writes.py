@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.catalog import catalog as _cat_mod
+from nexus.catalog.types import _normalize_source_uri
 from nexus.catalog.events import (
     CollectionSupersededPayload as _CollectionSupersededPayload,
     DocumentAliasedPayload as _DocumentAliasedPayload,
@@ -499,7 +500,7 @@ class _WriteOps:
             owner_addr = entry.tumbler.owner_address()
             owner_repo_root = cat._owner_repo_root(owner_addr)
             if "source_uri" in fields or "file_path" in fields:
-                rec_dict["source_uri"] = _cat_mod._normalize_source_uri(
+                rec_dict["source_uri"] = _normalize_source_uri(
                     rec_dict["source_uri"], rec_dict.get("file_path", ""),
                     repo_root=owner_repo_root,
                 )

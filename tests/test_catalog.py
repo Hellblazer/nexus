@@ -307,7 +307,7 @@ class TestSourceUriRegistration:
         scheme requires landing the reader first AND updating this
         lock.
         """
-        from nexus.catalog.catalog import _KNOWN_URI_SCHEMES
+        from nexus.catalog.types import _KNOWN_URI_SCHEMES
         assert _KNOWN_URI_SCHEMES == frozenset({
             "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
             "nx-orphan-backfill",

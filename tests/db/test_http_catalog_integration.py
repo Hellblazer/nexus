@@ -521,7 +521,7 @@ class TestRegisterAndResolve:
     """
 
     def test_register_owner_returns_tumbler(self, cat) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         t = cat.register_owner(
             name="inttest-repo",
             owner_type="curator",
@@ -531,7 +531,7 @@ class TestRegisterAndResolve:
         assert str(t) == "1.1"
 
     def test_register_document_assigns_tumbler(self, cat) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         t = cat.register(
             "1.1",
             "Integration Test Paper",
@@ -563,7 +563,7 @@ class TestRegisterAndResolve:
         assert str(t1) == str(t2)
 
     def test_resolve_round_trip(self, cat) -> None:
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         t = cat.register(
             "1.1",
             "Resolve Round Trip",
@@ -975,7 +975,7 @@ class TestCrossTenantRLS:
             owner_type="curator",
             tumbler_prefix="2.1",
         )
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         assert isinstance(t, Tumbler)
 
     def test_tenant_a_cannot_see_tenant_b_doc(self, cat, cat_b) -> None:
@@ -1318,7 +1318,7 @@ class TestLinkQueryDirectionTumbler:
         mcp/catalog.py dual-handle sites (`l if isinstance(l, dict) else l.to_dict()`)
         keep working because CatalogLink.to_dict() exists.
         """
-        from nexus.catalog.catalog import CatalogLink  # noqa: PLC0415
+        from nexus.catalog.types import CatalogLink  # noqa: PLC0415
 
         a, b = link_query_docs
         links = cat.link_query(direction="out", tumbler=str(a))

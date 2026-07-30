@@ -10,7 +10,7 @@ from pathlib import Path
 
 import structlog
 
-from nexus.catalog.catalog import CatalogEntry
+from nexus.catalog.types import CatalogEntry
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.tumbler import Tumbler
 

@@ -716,7 +716,7 @@ def test_to_entry_covers_every_catalog_entry_field() -> None:
     import dataclasses as _dc
 
     from nexus.catalog import http_catalog_client as _hcc
-    from nexus.catalog.catalog import CatalogEntry
+    from nexus.catalog.types import CatalogEntry
 
     src = inspect.getsource(_hcc._to_entry)
     missing = [

@@ -601,7 +601,7 @@ def register_cmd(
     content_type: str, file_path: str, source_uri: str, corpus: str,
 ) -> None:
     """Register a document in the catalog."""
-    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -1090,8 +1090,8 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
 
                 from nexus.catalog.catalog import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                     _default_registry_path,
-                    make_relative,
                 )
+                from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                 from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
                 # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed
