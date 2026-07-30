@@ -157,7 +157,8 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/upgrade.py": 3,
     "src/nexus/console/routes/health.py": 1,
     "src/nexus/context.py": 1,
-    "src/nexus/db/t2/chash_etl.py": 1,
+    # chash_etl.py entry removed (nexus-i711w Stage 2 sub-stage A): the file
+    # died with the SQLite->PG ETL readers. DOWNWARD-only edit.
     "src/nexus/doc_indexer.py": 1,
     # health.py 2 -> 1 (RDR-155 P4b P2): the migration-divergence check's
     # read-only connect died with the migration-report doctor rows.

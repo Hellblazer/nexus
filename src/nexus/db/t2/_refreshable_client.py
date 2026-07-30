@@ -178,7 +178,8 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
     or a supervisor lease, even though the caller already told us where to
     connect and only the token is missing. This broke real callers: three
     integration-test fixtures (``tests/db/test_http_memory_store_integration.py``,
-    ``tests/db/test_mvv_memory_service.py``, ``tests/db/test_memory_etl.py``)
+    ``tests/db/test_mvv_memory_service.py``, and the since-deleted
+    ``tests/db/test_memory_etl.py``)
     construct ``HttpMemoryStore(base_url=<explicit>, tenant=...)`` relying on
     ``NX_SERVICE_TOKEN`` alone, with no ``NX_SERVICE_PORT`` set in the parent
     process's environment (only in a subprocess env dict for the JVM child).

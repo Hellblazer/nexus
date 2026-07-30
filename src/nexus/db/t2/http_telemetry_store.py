@@ -20,7 +20,10 @@ Interface parity (bead nexus-gmiaf.12, RDR-152 P2.2):
     log_search_batch, query_collection_stats,
     trim_search_telemetry, rename_collection, close
 
-ETL-only import methods (used by telemetry_etl.py):
+ETL-only import methods (sole caller telemetry_etl.py was deleted with the
+SQLite->PG ETL readers, nexus-i711w Stage 2 sub-stage A; these retire with
+the 7.0.0 wave — see ``_ETL_DYING_WITH_THE_WAVE`` in
+tests/db/test_http_t2_store_parity.py):
     import_relevance_row, import_search_row, import_tier_write,
     import_nx_answer_run, import_hook_failure, import_frecency_row
 

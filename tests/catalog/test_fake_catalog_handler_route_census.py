@@ -215,18 +215,18 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "— unit-tested against a mocked _post, not the live fake server"
     ),
     "/import/chunk": (
-        "ETL bulk-import path called via raw client._post() from "
-        "src/nexus/db/t2/catalog_etl.py, not through a named "
-        "HttpCatalogClient method — outside the Catalog/HttpCatalogClient "
-        "shared-surface parity gate by construction; exercised by the "
-        "RDR-159/RDR-176 migration test suites, not this harness"
+        "ETL bulk-import path, formerly called via raw client._post() from "
+        "the since-deleted src/nexus/db/t2/catalog_etl.py (nexus-i711w "
+        "Stage 2 sub-stage A) — outside the Catalog/HttpCatalogClient "
+        "shared-surface parity gate by construction; the engine route "
+        "retires with RDR-187 .11"
     ),
     "/import/collection": (
-        "ETL bulk-import path called via raw client._post() from "
-        "src/nexus/db/t2/catalog_etl.py, not through a named "
-        "HttpCatalogClient method — outside the Catalog/HttpCatalogClient "
-        "shared-surface parity gate by construction; exercised by the "
-        "RDR-159/RDR-176 migration test suites, not this harness"
+        "ETL bulk-import path, formerly called via raw client._post() from "
+        "the since-deleted src/nexus/db/t2/catalog_etl.py (nexus-i711w "
+        "Stage 2 sub-stage A) — outside the Catalog/HttpCatalogClient "
+        "shared-surface parity gate by construction; the engine route "
+        "retires with RDR-187 .11"
     ),
 }
 

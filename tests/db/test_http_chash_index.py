@@ -529,8 +529,10 @@ class TestImportEndpoint:
         longer possible post-adoption (the mixin's httpx.Client has no
         baked base_url, so a relative-path call from outside the store
         fails outright). ``import_rows()`` is the public wrapper this now
-        exercises, mirroring what ``chash_etl.py`` / ``migration/orchestrator.py``
-        call in production.
+        exercises, mirroring what the since-deleted ``chash_etl.py`` /
+        ``migration/orchestrator.py`` called in production. The method itself
+        retires with the 7.0.0 wave (``_ETL_DYING_WITH_THE_WAVE`` in
+        test_http_t2_store_parity.py); this test retires with it.
         """
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
         ts = "2024-01-15T10:30:00Z"
