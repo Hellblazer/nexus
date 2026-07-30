@@ -36,20 +36,12 @@ New code should prefer the domain methods over the facade:
     db.memory.search("fts query", project="myproj")   # preferred
     db.search("fts query", project="myproj")          # facade delegate
 
-Concurrency model (RDR-063 Phase 2):
-
-* Each store opens its own ``sqlite3.Connection`` against the shared
-  file and guards it with its own ``threading.Lock``. Reads in one
-  domain are never blocked by writes in another domain (the Phase 1
-  global Python mutex is gone). Concurrent writes across domains
-  still serialize at SQLite's single-writer WAL lock — ``busy_timeout``
-  absorbs brief contention without raising ``OperationalError``.
-* All connections run in WAL mode with a 5-second ``busy_timeout``,
-  so cross-domain write coordination happens in SQLite rather than
-  Python.
-* Telemetry writes from MCP hooks no longer block ``memory.search``.
-* ``taxonomy.discover_topics`` holds only ``taxonomy._lock`` for
-  INSERTs — never acquires ``memory._lock``.
+Concurrency model: every store is an HTTP client; write serialization
+is the engine's (Postgres MVCC + per-endpoint transactions). The
+RDR-063 Phase 2 SQLite WAL/per-store-lock model this docstring used to
+describe died with the SQLite stores (RDR-158 P4) — the surviving
+in-process lock is ``RENAME_LOCK`` (RDR-138), which serializes the
+rename cascade against queue/aspect mutators.
 
 Schema is engine-owned (Liquibase) since RDR-158 P4 Stage 4
 (nexus-i711w): the client-side SQLite migration chain is deleted, and the
@@ -262,40 +254,11 @@ class T2Database:
         """
         self._taxonomy = store
 
-    def stored_schema_version(self) -> str:
-        """Return the ``_nexus_version`` row's ``cli_version`` value.
-
-        RDR-120 P3b: surfaced via the daemon's ``database.hello`` op so
-        clients can validate version compatibility on first connect.
-        Returns ``"0.0.0"`` when the row is missing (uninitialised DB).
-        """
-        conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        try:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
-                ).fetchone()
-            except sqlite3.OperationalError:
-                return "0.0.0"
-            return row[0] if row else "0.0.0"
-        finally:
-            conn.close()
-
-    def hello(self, client_schema_version: str | None = None) -> dict[str, str]:
-        """Connection handshake: report the daemon's stored schema version.
-
-        RDR-120 P3b (nexus-e9x4l): T2Client invokes ``database.hello``
-        on first connect with its built-against schema version. The
-        daemon echoes the daemon-side version; the client compares and
-        raises ``T2SchemaVersionMismatchError`` on disagreement. The
-        ``client_schema_version`` argument is accepted but not validated
-        daemon-side — the comparison happens on the client because the
-        client is the layer that knows what wire shape it expects.
-        """
-        return {
-            "daemon_schema_version": self.stored_schema_version(),
-            "client_schema_version": client_schema_version or "",
-        }
+    # NO stored_schema_version()/hello(): deleted in the yrm0i/nrxs9 final
+    # reviews (RDR-158 P4 Stage 5). They were the T2 daemon's RDR-120 P3b
+    # version-handshake RPC surface; the daemon and its T2Client caller died
+    # in Stage 2 sub-stage B, leaving a callerless raw sqlite3.connect —
+    # the last one in the facade.
 
     # NO bootstrap_schema: deleted in RDR-158 P4 Stage 4 (nexus-i711w) with
     # ``nexus/db/migrations.py``. The engine owns schema via Liquibase; the

@@ -2542,51 +2542,23 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
          "dry-run output first.",
 )
 def backfill_source_collection_cmd(apply_: bool) -> None:
-    """Backfill topic_assignments.source_collection for legacy hdbscan/
-    centroid rows.
+    """RETIRED: the legacy source_collection backfill has no live substrate.
 
-    RDR-087 Phase 4.1. Fills NULL source_collection by copying from
-    topics.collection where the clustering path (hdbscan/centroid)
-    guarantees correctness. Projection rows are untouched; auto-matched
-    rows stay NULL (ambiguous source).
+    \b
+    RDR-087 Phase 4.1 filled NULL ``source_collection`` on legacy
+    hdbscan/centroid ``topic_assignments`` rows via raw SQL under the
+    SQLite store's lock. The store died in the RDR-158 P4 retirement and
+    the read-then-UPDATE sequence has no engine API; the verb was also
+    live-broken post-deletion (its store arm required a raw ``.conn``) and
+    carried zero test coverage — found by the nrxs9/yrm0i final reviews.
+    Legacy rows needing the backfill exist only on pre-migration installs:
+    run it on the last migration-capable 6.x release before migrating.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.taxonomy_backfill import backfill_source_collection  # noqa: PLC0415 - deferred to avoid circular import at module load
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        raise click.ClickException(f"T2 database not found: {db_path}")
-
-    t2 = T2Database(db_path)  # epsilon-allow: backfill passes the taxonomy store across a fn boundary for a read-then-UPDATE under its _lock; not a routable single-store RPC op (RDR-128 P3 documented-irreducible)
-    try:
-        # Pass the store (not the raw conn) so _lock is held for the
-        # read + UPDATE sequence (review gate C-1).
-        report = backfill_source_collection(t2.taxonomy, apply=apply_)
-    finally:
-        t2.close()
-
-    mode = "DRY-RUN" if report.dry_run else "APPLIED"
-    click.echo(f"topic_assignments source_collection backfill ({mode})")
-    click.echo(f"  total rows:           {report.total_rows:>8}")
-    click.echo(
-        f"  non-null before:      {report.non_null_before:>8}  "
-        f"({report.coverage_before:.1%} coverage)"
+    raise click.UsageError(
+        "taxonomy backfill-source-collection is retired: it ran raw SQL "
+        "over the local SQLite topic_assignments, which was deleted in the "
+        "RDR-158 P4 retirement, and the engine exposes no equivalent "
+        "read-then-update API. If a pre-migration install still holds "
+        "legacy NULL source_collection rows, run the backfill on the last "
+        "migration-capable 6.x release before migrating."
     )
-    click.echo(
-        f"  eligible (NULL):      {report.eligible_rows:>8}"
-    )
-    for cat, count in sorted(report.eligible_by_category.items()):
-        click.echo(f"    by assigned_by={cat:<10}  {count:>8}")
-    if report.dry_run:
-        click.echo(
-            f"  projected after apply: "
-            f"{report.non_null_before + report.eligible_rows:>8}  "
-            f"({report.coverage_projected:.1%} coverage)"
-        )
-        click.echo("Run with --apply to commit.")
-    else:
-        click.echo(
-            f"  updated:              {report.updated_rows:>8}  "
-            f"({report.coverage_after:.1%} coverage)"
-        )

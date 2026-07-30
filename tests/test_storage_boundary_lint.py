@@ -641,7 +641,10 @@ def test_dual_population_baseline_locked():
     # T3-step T2Database construction (commands/upgrade.py, the RDR-128 P3
     # documented-irreducible bootstrap open) died with the local-SQLite
     # migration leg and db/migrations.py.
-    assert result.t2database_constructions == 25, (
+    # 25 -> 24: RDR-158 P4 Stage 5 final reviews — taxonomy
+    # backfill-source-collection retired with its annotated construction.
+    # DOWNWARD-only.
+    assert result.t2database_constructions == 24, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 

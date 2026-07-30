@@ -648,7 +648,10 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # 26 -> 25: RDR-158 P4 Stage 4 (nexus-i711w) — _run_upgrade's T3-step
     # T2Database construction died with the local migration leg; lockstep
     # with test_storage_boundary_lint's copy. DOWNWARD-only.
-    assert result.t2database_constructions == 25, (
+    # 25 -> 24: RDR-158 P4 Stage 5 final reviews — taxonomy
+    # backfill-source-collection retired with its annotated construction.
+    # DOWNWARD-only.
+    assert result.t2database_constructions == 24, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

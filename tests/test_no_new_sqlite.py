@@ -174,7 +174,10 @@ EPSILON_CENSUS: dict[str, int] = {
     # on a `db.taxonomy._lock` / `.conn` raw-cursor read inside an
     # `_has_raw_access` branch. Those branches are deleted, so the debt is
     # gone rather than relabelled.
-    "src/nexus/commands/taxonomy_cmd.py": 3,
+    # taxonomy_cmd.py 3 -> 2 (RDR-158 P4 Stage 5 final reviews): the
+    # backfill-source-collection verb retired (live-broken raw-conn arm,
+    # zero coverage); its epsilon-allow'd T2Database construction died.
+    "src/nexus/commands/taxonomy_cmd.py": 2,
     # tier_status.py entry removed (nexus-7bomn Stage 3): the local
     # tier_writes reader died with the opt-out.
     # commands/upgrade.py (3) entry removed — RDR-158 P4 Stage 4

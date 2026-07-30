@@ -66,16 +66,17 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
     that the post-Phase-5 strict-naming guard would later reject.
     """
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415
-        from nexus.config import catalog_path  # noqa: PLC0415
+        # RDR-158 P4 (nrxs9 final review Critical-1): this branch imported
+        # the deleted local ``Catalog``, so the broad except silently forced
+        # EVERY session onto the path-derived fallback. The service catalog
+        # carries the same lookup.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
 
-        cat_dir = catalog_path()
-        if Catalog.is_initialized(cat_dir):
-            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-            try:
-                return cat.collection_for_repo(repo_root, "rdr").render()
-            except LookupError:
-                pass  # owner not registered yet, fall through
+        cat = make_catalog_reader()
+        try:
+            return cat.collection_for_repo(repo_root, "rdr").render()
+        except LookupError:
+            pass  # owner not registered yet, fall through
     except Exception:
         pass
     try:
