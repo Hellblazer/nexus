@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 __all__ = [
     "ActiveCatalog",

@@ -51,7 +51,7 @@ from typing import Any, Optional
 import structlog
 
 from nexus.catalog.catalog import Catalog
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 _log = structlog.get_logger(__name__)
 

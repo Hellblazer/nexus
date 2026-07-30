@@ -32,48 +32,14 @@ from typing import Any, Callable
 
 from nexus.catalog.tumbler import Tumbler
 
-#: The mutating ops the daemon hosts on behalf of the rich Catalog.
-#: This is a closed whitelist, not a denylist: adding a method to the
-#: rich Catalog does NOT auto-expose it. Every entry must be a method on
-#: :class:`nexus.catalog.catalog.Catalog`; the
-#: ``test_every_write_op_exists_on_rich_catalog`` regression locks that.
-#:
-#: RDR-146 P1.0 served the first 16 (the hot indexer/MCP write path).
-#: P1.2 (nexus-5p2ci.21) added the last 6 after an AST inventory of all
-#: 49 cutover sites found admin/maintenance writes outside the original
-#: 16 (the ``nx catalog`` surface + ``collection_rename``):
-#:   - rename_collection / bulk_unlink / update_documents_collection_batch
-#:     are per-document mutations that round-trip framed JSON cleanly.
-#:   - sync / pull / compact are git + whole-JSONL maintenance the daemon
-#:     (the single writer) must run; routing them keeps the single-writer
-#:     invariant intact (no direct .catalog.db writer survives the
-#:     cutover).
-CATALOG_WRITE_OPS: tuple[str, ...] = (
-    "register_owner",
-    "ensure_owner_for_repo",
-    "register",
-    "register_many",
-    "update",
-    "link",
-    "link_if_absent",
-    "unlink",
-    "delete_document",
-    "register_collection",
-    "delete_collection_projection",
-    "supersede_collection",
-    "set_owner_head_hash",
-    "write_manifest",
-    "append_manifest_chunks",
-    "atomic_manifest_replace",
-    "resync_chunk_count_cache",
-    # P1.2 admin/maintenance additions:
-    "rename_collection",
-    "bulk_unlink",
-    "update_documents_collection_batch",
-    "sync",
-    "pull",
-    "compact",
-)
+# ``CATALOG_WRITE_OPS`` moved to :mod:`nexus.catalog.catalog_protocol`
+# (nexus-i711w terminal-deletion pre-flight, 2026-07-30): it is the
+# writer-surface whitelist the CatalogWriter Protocol is checked against,
+# and this shim dies with the local catalog while the whitelist's
+# surviving consumers (factory routing, the conformance/fidelity anchors,
+# the test fixture ops) do not. Re-exported here until this module is
+# deleted.
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS  # noqa: F401
 
 #: Per-op parameter names whose inbound value is a Tumbler and must be
 #: coerced ``str`` -> Tumbler daemon-side. PER OP, not a global set: the

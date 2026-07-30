@@ -36,7 +36,7 @@ CHUNK_SHA_A = "2ccea837b4713a233eea0914ad7adda8bcbbbeccd9ac45e217cab14843229eb2"
 CHUNK_SHA_B = "6756d390c50dd95257ad481c8ab3669f93838ed7e8f3cf334a8bbf1281d8e3b2"  # sha256("fake-chunk-B")
 CHASH_A = CHUNK_SHA_A
 CHASH_B = CHUNK_SHA_B
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

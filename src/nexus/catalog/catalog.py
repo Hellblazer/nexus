@@ -319,11 +319,10 @@ from nexus.corpus import (
 _log = structlog.get_logger()
 
 
-def _default_registry_path() -> Path:
-    """Return the default path to the repo registry JSON file."""
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance; config imports catalog helpers
-
-    return nexus_config_dir() / "repos.json"
+# ``_default_registry_path`` moved to :mod:`nexus.catalog.types`
+# (nexus-i711w pre-flight): surviving commands/catalog.py + mcp/catalog.py
+# import it. Re-exported until this module is deleted.
+from nexus.catalog.types import _default_registry_path  # noqa: E402,F401
 
 
 # ``make_relative`` moved to :mod:`nexus.catalog.types` (nexus-npywj) —

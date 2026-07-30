@@ -19,7 +19,7 @@ import inspect
 from collections.abc import Callable
 
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 # The 19 audited service-mode divergences (RDR-168 Research Finding #1: 18 breaking +
 # link_if_absent silent). Every one MUST be in the Protocol, or the conformance test

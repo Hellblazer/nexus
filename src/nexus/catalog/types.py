@@ -237,3 +237,12 @@ class CatalogLink:
         }
 
 
+def _default_registry_path() -> Path:
+    """Return the default path to the repos.json registry.
+
+    Moved verbatim from ``catalog.py`` (nexus-i711w pre-flight, 2026-07-30):
+    surviving ``commands/catalog.py`` + ``mcp/catalog.py`` import it.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — config import kept lazy, matching the original call pattern
+
+    return nexus_config_dir() / "repos.json"

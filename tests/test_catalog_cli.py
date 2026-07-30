@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog, unroutable_write_target
 
