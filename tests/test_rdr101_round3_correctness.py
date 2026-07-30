@@ -149,7 +149,7 @@ class TestLinkEventSourced:
     def test_link_merge_overwrites_via_insert_or_replace(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        """GAP nexus-i711w.1 item 5 — PINNED, not ported, not deleted.
+        """GAP nexus-i711w.1 item 21 — PINNED, not ported, not deleted.
 
         The link-merge UPSERT contract: a second ``link()`` on the same
         composite key must MERGE (adding the new creator to

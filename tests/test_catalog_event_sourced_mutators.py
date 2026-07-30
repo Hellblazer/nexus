@@ -366,7 +366,7 @@ class TestDeleteDocumentEventSourced:
     def test_delete_cascades_to_document_chunks(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        """GAP nexus-i711w.1 item 6 — PINNED, not ported, not deleted.
+        """GAP nexus-i711w.1 item 8 — PINNED, not ported, not deleted.
 
         ``delete_document`` must cascade-purge the ``document_chunks``
         manifest. This test and the legacy-path one below are the two
@@ -420,7 +420,7 @@ class TestDeleteDocumentEventSourced:
     def test_delete_cascades_to_document_chunks_legacy_path(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        """GAP nexus-i711w.1 item 6 (legacy-path half) — PINNED.
+        """GAP nexus-i711w.1 item 8 (legacy-path half) — PINNED.
 
         nexus-8g79.7: same cascade for the non-event-sourced path."""
         monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
@@ -540,7 +540,7 @@ class TestRenameCollectionEventSourced:
     def test_rename_preserves_enriched_bib_columns(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        """GAP nexus-i711w.1 item 7 — PINNED, not ported, not deleted.
+        """GAP nexus-i711w.1 item 5 — PINNED, not ported, not deleted.
 
         bib_* preservation across ``rename_collection``. Owed by the
         service substrate, asserted by nothing live.
@@ -575,7 +575,7 @@ class TestRenameCollectionEventSourced:
 
 @pytest.mark.usefixtures("local_catalog_backend")
 class TestUpdateDocumentCollectionEventSourced:
-    """GAP nexus-i711w.1 items 8 and 10 — PINNED, not ported, not deleted.
+    """GAP nexus-i711w.1 items 6 and 7 — PINNED, not ported, not deleted.
 
     bib_* preservation across ``update_document_collection`` (item 8) and
     ``update_documents_collection_batch`` (item 10). Both are owed by the
