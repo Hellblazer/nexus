@@ -65,3 +65,9 @@ mechanize, it matters enough to ship.
   silenced by `|| true`. The verb is deleted with the T2 daemon, so until this
   ships that hook keeps firing a command that no longer exists — harmless only
   because of the `|| true` that hid it in the first place.
+- `conexus/hooks/scripts/rdr_hook.py` — nexus-i711w (nrxs9 final review
+  Critical-1): the RDR-collection resolver imported the DELETED local
+  `Catalog`, so a broad except silently forced every session onto the
+  path-derived fallback name. Repointed to the service catalog's
+  `collection_for_repo`. Until this ships, sessions on the pinned tag keep
+  using the fallback — same behaviour as before the fix, no new breakage.

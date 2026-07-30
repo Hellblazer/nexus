@@ -78,6 +78,33 @@ def upgrade(
         # INSIDE the rung; pending state is reported by `nx doctor`.
         with _standing_consent(assume_yes):
             _run_ladder(dry_run=dry_run, auto_mode=auto_mode)
+
+        # RE-WIRED (Hal decision, 2026-07-30): these three post-upgrade
+        # steps lost their caller when Stage 4 deleted _run_upgrade's
+        # local-SQLite leg — collateral, not a decision. Same gating as
+        # before the deletion; all three are substrate-independent and
+        # best-effort.
+        #
+        # nexus-b03o: post-upgrade advisory — pre-4.32 local-mode installs
+        # wrote 384d MiniLM vectors into collections named for voyage-*
+        # (1024d); mislabeled collections persist until the operator runs
+        # `nx collection rename`. Advisory only — never fails the upgrade.
+        if not auto_mode and not skip_t3:
+            _emit_name_vs_embed_dim_advisory()
+
+        # RDR-137 Phase 5.2 (nexus-tts0d.19): one-shot migration of
+        # ~/.config/nexus/repos.json into the catalog. Idempotent: no-op
+        # when the file is already absent. Safety: refuses to delete on
+        # any catalog-vs-registry disagreement (per OQ-7 lock).
+        if not auto_mode:
+            _migrate_repos_json_to_catalog(dry_run=dry_run)
+
+        # Refresh nexus-managed git hooks across every registered repo so a
+        # stanza change (e.g. a new pgrep guard) lands everywhere in one
+        # upgrade instead of a per-repo `nx hooks update`. Best-effort,
+        # non-auto, non-dry-run; only touches already-managed hooks.
+        if not auto_mode and not dry_run:
+            _refresh_all_git_hooks()
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
