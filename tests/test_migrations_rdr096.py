@@ -20,6 +20,16 @@ The catalog ``documents`` table inline migration (in
 
 AspectRecord + DocumentAspects also widen to round-trip ``source_uri``
 through the store.
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). ``nexus.catalog.catalog_db`` is
+already imported INSIDE the two test bodies that use it, never at module scope,
+so this file keeps COLLECTING after the local catalog is deleted. The other 12
+tests are T2 ``document_aspects`` — orthogonal to the catalog — and needed no
+change. ``TestCatalogDocumentsSourceUriMigration`` is the local-only pair and
+carries ``local_catalog_backend``: its subject is ``CatalogDB.__init__``'s
+inline ``ALTER TABLE documents ADD COLUMN source_uri`` self-migration, which
+has no service-mode expression (the engine's column is Liquibase-managed), so
+it retires with ``nexus/catalog/catalog_db.py`` rather than porting.
 """
 from __future__ import annotations
 
@@ -175,7 +185,17 @@ class TestDocumentAspectsSourceUriMigration:
 # ── catalog documents inline migration ──────────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestCatalogDocumentsSourceUriMigration:
+    """nexus-i711w: PINNED to the local SQLite catalog.
+
+    Both tests drive ``CatalogDB``'s inline ``source_uri`` self-migration on a
+    hand-crafted pre-4.16.0 ``documents`` table. That DDL-on-open behaviour is
+    the local projection's own; the engine's ``source_uri`` column is
+    Liquibase-managed, so there is no service-mode assertion to port to. They
+    retire with ``nexus/catalog/catalog_db.py``.
+    """
+
     def test_inline_migration_adds_source_uri_to_existing_db(
         self, tmp_path: Path,
     ) -> None:

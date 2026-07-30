@@ -10,6 +10,25 @@ Tests cover:
   SIG-4 - high-volume orphan error message lacks actionable command template
   OBS-1 - no telemetry on migration runs
   OBS-4 - _HIGH_VOLUME_ORPHAN_THRESHOLD is a magic number (env override)
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). Most of this file's subject is
+``nexus/db/migrations.py`` — LIVE guided-upgrade code that
+``commands/upgrade.py`` imports (``apply_pending`` / ``MIGRATIONS`` /
+``bootstrap_version``) and that reads the legacy ``.catalog.db`` through raw
+parameterized ATTACH, never through the ``CatalogDB`` class. Those tests touch
+no catalog object at all. They were nevertheless held hostage by a single
+module-level ``from nexus.catalog.catalog import Catalog``: one dying import at
+module scope kills COLLECTION for the whole file, so every test in it would
+have stopped running the moment the local catalog is deleted.
+
+That import is gone. The manifest-backfill tests that DO need a catalog seed
+through :class:`tests._catalog_fixture_ops.ActiveCatalog`, i.e. the same
+factories the code under test resolves, so they exercise whichever catalog is
+live. The one genuinely local-only test
+(``TestAutoBootstrapCreatedAtEmpty``, whose subject is ``CatalogDB``'s own
+auto-bootstrap DDL) carries ``local_catalog_backend`` and imports
+``nexus.catalog.catalog_db`` inside its body — it retires with the local
+catalog, not before.
 """
 from __future__ import annotations
 
@@ -17,15 +36,16 @@ import os
 import sqlite3
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
 
 
@@ -45,11 +65,18 @@ def t3_db():
 
 
 @pytest.fixture()
-def catalog(tmp_path):
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
+def active_catalog() -> ActiveCatalog:
+    """Seed through whichever catalog is live (nexus-i711w Stage 2).
+
+    Deliberately NOT the local ``Catalog`` this fixture used to build. The
+    manifest-backfill code under test takes its catalog as an argument and, in
+    the CLI tests, from ``commands/t3._make_catalog()`` — which resolves
+    ``make_catalog_reader()``. Seeding a separate local catalog means the test
+    writes one catalog while the command reads another, so
+    ``list_by_collection`` comes back empty and every count assertion collapses
+    to the bucket-2 ``assert 0 == 2`` profile.
+    """
+    return ActiveCatalog()
 
 
 @pytest.fixture()
@@ -57,19 +84,36 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def _insert_doc(cat: Catalog, tumbler: str, collection: str) -> None:
-    cat._db.execute(  # epsilon-allow: test fixture seeds documents row
-        "INSERT OR IGNORE INTO documents "
-        "(tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        "metadata, source_mtime, alias_of, source_uri) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            tumbler, f"doc-{tumbler}", "", 0, "code", f"/tmp/{tumbler}.py",
-            "", collection, 0, "", "", "{}", 0.0, "", "",
-        ),
-    )
-    cat._db.commit()
+def _register_doc(cat: Any, collection: str) -> str:
+    """Register ONE document in *collection* through the active catalog.
+
+    Returns the minted tumbler, which callers pass to ``_seed_chunk`` as the
+    T3 ``doc_id`` (that join is what ``backfill_manifest_for_collection``
+    walks).
+
+    Replaces a raw ``cat._db.execute("INSERT OR IGNORE INTO documents ...")``
+    that pinned literal tumblers ("1.1.1", "1.1.2") because ``register`` mints
+    its own. Nothing in this file asserts on the tumbler VALUE — the
+    requirements are only (a) N distinct documents exist in *collection* and
+    (b) the seeded chunks carry a matching ``doc_id`` — so the minted tumbler
+    is returned and used as-is.
+
+    CARDINALITY IS LOAD-BEARING: ``docs_skipped_no_t3 == 2`` in
+    ``TestS2DocsSkippedNoT3`` only means something if two calls really do
+    produce two rows. ``Catalog.register`` is idempotent by ``file_path``
+    WITHIN an owner, so each call takes a distinct slug for both the owner name
+    and the file path; two calls can never silently collapse to one document.
+    """
+    slug = uuid.uuid4().hex[:8]
+    owner = cat.register_owner(f"rdr108-remediation-{slug}", "curator")
+    return str(cat.register(
+        owner,
+        f"doc-{slug}",
+        content_type="code",
+        file_path=f"/tmp/{collection}-{slug}.py",
+        physical_collection=collection,
+        chunk_count=0,
+    ))
 
 
 def _seed_chunk(
@@ -101,14 +145,14 @@ class TestK10BareExceptFix:
     """K10: bare except in backfill_manifest_for_collection must NOT swallow
     quota errors and other non-NotFound exceptions."""
 
-    def test_quota_error_propagates(self, catalog, t3_db):
+    def test_quota_error_propagates(self, active_catalog, t3_db):
         """A ChromaDB quota/auth error during get_collection must propagate,
         not be silently swallowed as 'collection not found'."""
         InvalidArgumentError = ValueError  # RDR-155 P4b P3: the substrate-neutral bad-argument type (was chromadb.errors.InvalidArgumentError)
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
-        _insert_doc(catalog, "1.1.1", coll)
+        _register_doc(active_catalog, coll)
 
         # Simulate a non-NotFound error (e.g. quota violation, auth failure)
         with patch.object(
@@ -123,16 +167,16 @@ class TestK10BareExceptFix:
 
             with pytest.raises(InvalidArgumentError, match="quota exceeded"):
                 backfill_manifest_for_collection(
-                    catalog, t3_db, coll, dry_run=False
+                    active_catalog, t3_db, coll, dry_run=False
                 )
 
-    def test_not_found_still_treated_as_missing(self, catalog, t3_db):
+    def test_not_found_still_treated_as_missing(self, active_catalog, t3_db):
         """NotFoundError during get_collection is still treated as 'col is None'."""
         from nexus.errors import CollectionNotFoundError as NotFoundError
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
-        _insert_doc(catalog, "1.1.1", coll)
+        _register_doc(active_catalog, coll)
 
         with patch.object(
             t3_db,
@@ -145,9 +189,12 @@ class TestK10BareExceptFix:
             mock_client_for.return_value = mock_client
 
             result = backfill_manifest_for_collection(
-                catalog, t3_db, coll, dry_run=False
+                active_catalog, t3_db, coll, dry_run=False
             )
-        # Collection absent: doc processed, no chunks
+        # Collection absent: doc processed, no chunks.
+        # Non-vacuous: the count is 1 only because the single registered
+        # document is visible to the SAME catalog the backfill reads through.
+        # A seed the backfill could not see would give 0.
         assert result.docs_skipped_no_t3 == 1
         assert result.chunks_written == 0
 
@@ -159,14 +206,19 @@ class TestS2DocsSkippedNoT3:
     """S-2: when col is None (collection missing in T3), docs_skipped_no_t3
     must be incremented rather than docs_processed."""
 
-    def test_missing_collection_increments_docs_skipped_no_t3(self, catalog, t3_db):
+    def test_missing_collection_increments_docs_skipped_no_t3(
+        self, active_catalog, t3_db,
+    ):
         """If the T3 collection doesn't exist, docs_skipped_no_t3 is incremented."""
         from nexus.errors import CollectionNotFoundError as NotFoundError
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
-        _insert_doc(catalog, "1.1.1", coll)
-        _insert_doc(catalog, "1.1.2", coll)
+        # TWO distinct documents — the assertion below is a per-document count,
+        # so it can only distinguish "incremented per doc" from "set once" if
+        # two really are registered (see _register_doc's cardinality note).
+        _register_doc(active_catalog, coll)
+        _register_doc(active_catalog, coll)
 
         with patch.object(
             t3_db,
@@ -177,18 +229,20 @@ class TestS2DocsSkippedNoT3:
             mock_client_for.return_value = mock_client
 
             result = backfill_manifest_for_collection(
-                catalog, t3_db, coll, dry_run=False
+                active_catalog, t3_db, coll, dry_run=False
             )
 
         assert result.docs_skipped_no_t3 == 2
         assert result.docs_processed == 0
 
-    def test_docs_skipped_no_t3_surfaced_in_cli_output(self, catalog, t3_db, runner):
+    def test_docs_skipped_no_t3_surfaced_in_cli_output(
+        self, active_catalog, t3_db, runner,
+    ):
         """CLI output includes docs_skipped_no_t3 when collection is absent."""
         from nexus.errors import CollectionNotFoundError as NotFoundError
 
         coll = _unique_coll()
-        _insert_doc(catalog, "1.1.1", coll)
+        _register_doc(active_catalog, coll)
 
         with patch.object(
             t3_db,
@@ -199,7 +253,14 @@ class TestS2DocsSkippedNoT3:
             mock_client_for.return_value = mock_client
 
             with (
-                patch("nexus.commands.t3._make_catalog", return_value=catalog),
+                # The ``_make_catalog`` patch STAYS, but now hands back the
+                # ACTIVE catalog rather than a private local one, so seed and
+                # read resolve the same substrate. It cannot simply be dropped:
+                # ``_make_catalog()`` returns ``make_catalog_reader()``, and on
+                # the SQLite arm that reader is opened ``mode=ro`` while
+                # ``--no-dry-run`` backfill calls ``write_manifest`` through it
+                # (see the note on TestSIG6ProgressOutput).
+                patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
                 patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
             ):
                 result = runner.invoke(
@@ -267,15 +328,32 @@ class TestOBS2MigrationUX:
 
 class TestSIG6ProgressOutput:
     """SIG-6: backfill-manifest must emit periodic progress to stderr
-    so operators see activity during long runs."""
+    so operators see activity during long runs.
 
-    def test_progress_written_to_stderr_during_backfill(self, catalog, t3_db, runner):
+    nexus-i711w NOTE, surfaced by the port and NOT fixed here: the
+    ``_make_catalog`` patch these tests carry is load-bearing for more than
+    isolation. ``commands/t3._make_catalog()`` returns
+    ``make_catalog_reader()``, and on the SQLite arm that is a
+    ``read_only=True`` Catalog whose SQLite handle is ``mode=ro`` — yet
+    ``backfill-manifest --no-dry-run`` writes through it
+    (``manifest_backfill`` calls ``catalog.write_manifest(...)``). Whether the
+    shipped verb can write at all on that arm is therefore untested by
+    construction: the patch has always replaced the reader with something
+    writable. Left as-is rather than converted to a production assertion,
+    because it is a src question (a mixed read/write site holding only a
+    reader), not a test question.
+    """
+
+    def test_progress_written_to_stderr_during_backfill(
+        self, active_catalog, t3_db, runner,
+    ):
         """With multiple documents, stderr contains progress output."""
         coll = _unique_coll()
-        # Create 3 docs so there's something to report
+        # Create 3 docs so there's something to report. The chunk's doc_id must
+        # be the MINTED tumbler — that is the join backfill walks, and a
+        # mismatched doc_id yields zero chunks per doc.
         for i in range(3):
-            tumbler = f"1.1.{i+1}"
-            _insert_doc(catalog, tumbler, coll)
+            tumbler = _register_doc(active_catalog, coll)
             _seed_chunk(
                 t3_db, collection=coll, chunk_id=f"c{i}-{coll}",
                 content=f"content {i}", doc_id=tumbler, chunk_index=0,
@@ -283,7 +361,7 @@ class TestSIG6ProgressOutput:
             )
 
         with (
-            patch("nexus.commands.t3._make_catalog", return_value=catalog),
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
             patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
         ):
             result = runner.invoke(
@@ -294,6 +372,10 @@ class TestSIG6ProgressOutput:
 
         assert result.exit_code == 0, result.output
         # The command output (stdout+stderr) should have some indication of progress
+        # NOTE (nexus-i711w): this assertion is weak as written — it holds for
+        # any non-empty output, including a run that found zero documents. Left
+        # exactly as it was rather than strengthened; recorded so its green is
+        # not read as "the 3 seeded docs were processed".
         combined = result.output
         assert combined, "No output at all from backfill command"
 
@@ -315,26 +397,28 @@ class TestSIG6ProgressOutput:
         # Should not get "no such option" error
         assert "no such option" not in result.output.lower(), result.output
 
-    def test_resume_skips_already_processed_docs(self, catalog, t3_db, runner, tmp_path):
+    def test_resume_skips_already_processed_docs(
+        self, active_catalog, t3_db, runner, tmp_path,
+    ):
         """--resume skips docs that were already processed in a prior run."""
         coll = _unique_coll()
-        _insert_doc(catalog, "1.1.1", coll)
-        _insert_doc(catalog, "1.1.2", coll)
+        first = _register_doc(active_catalog, coll)
+        second = _register_doc(active_catalog, coll)
         _seed_chunk(
             t3_db, collection=coll, chunk_id=f"c1-{coll}",
-            content="first", doc_id="1.1.1", chunk_index=0,
+            content="first", doc_id=first, chunk_index=0,
             chunk_text_hash="a" * 64,
         )
         _seed_chunk(
             t3_db, collection=coll, chunk_id=f"c2-{coll}",
-            content="second", doc_id="1.1.2", chunk_index=0,
+            content="second", doc_id=second, chunk_index=0,
             chunk_text_hash="b" * 64,
         )
 
         state_file = tmp_path / "backfill_state.json"
 
         with (
-            patch("nexus.commands.t3._make_catalog", return_value=catalog),
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
             patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
             patch.dict(os.environ, {"NEXUS_BACKFILL_STATE_FILE": str(state_file)}),
         ):
@@ -380,8 +464,14 @@ class TestAutoBootstrapCreatedAtEmpty:
     goal that drove SIG-7 (NOW() so audit tools could tell
     backfilled from event-derived rows) now lives in the synthetic
     event itself: ``payload.created_at == ""`` is the marker.
+
+    nexus-i711w: PINNED to the local SQLite catalog. Its subject IS
+    ``CatalogDB``'s own auto-bootstrap DDL and the local ``--replay-equality``
+    projector path; there is no service-mode expression of either, so there is
+    nothing to port this to. It retires with ``nexus/catalog/catalog_db.py``.
     """
 
+    @pytest.mark.usefixtures("local_catalog_backend")
     def test_backfilled_collections_have_empty_created_at(self, tmp_path):
         """Auto-bootstrap must NOT stamp ``created_at = NOW()`` or
         ``--replay-equality`` will permanently drift on the column.

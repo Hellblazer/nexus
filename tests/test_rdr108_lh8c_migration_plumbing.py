@@ -13,6 +13,25 @@ CG-2 apply_pending no-catalog is a no-op AND is retry-able
 SG-4 high-volume orphan threshold boundary (exactly 10 rows)
 S-3  _has_doc_id_pk double-checked lock: hasattr inside the lock
 O-5  INSERT OR IGNORE replaces anti-join in collections backfill
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). This file already imports every dying
+module INSIDE the test bodies that need it — there is no module-level catalog
+import — so it keeps COLLECTING after the local catalog is deleted, and the
+substrate work here is only about saying which tests go with it.
+
+  - SURVIVES (K3 / K5 / K8 / K11 / CG-2 / SG-4 / K2-wiring): the subject is
+    ``nexus/db/migrations.py``, live guided-upgrade code that
+    ``commands/upgrade.py`` imports. It reads the legacy ``.catalog.db``
+    through a raw PARAMETERIZED ATTACH (``migrations._attach_catalog``), never
+    through the ``CatalogDB`` class, so the hand-rolled ``_make_catalog_db``
+    fixture below is a fixture of the MIGRATION SOURCE — a frozen legacy file
+    shape — not of the catalog implementation. It must stay after the local
+    catalog goes, or ``nx upgrade`` loses its coverage on every existing
+    install.
+  - SURVIVES (K2 CLI, S-3): no catalog involvement at all.
+  - DIES (K1, O-5): the subject is ``CatalogDB``'s own DDL. Both classes carry
+    ``local_catalog_backend`` so the retirement is explicit rather than
+    inferred.
 """
 from __future__ import annotations
 
@@ -142,8 +161,15 @@ def _insert_queue(
 # ── K1: ON DELETE CASCADE on document_chunks ─────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestK1OnDeleteCascade:
-    """K1: document_chunks.doc_id FK must have ON DELETE CASCADE."""
+    """K1: document_chunks.doc_id FK must have ON DELETE CASCADE.
+
+    nexus-i711w: PINNED — the subject is ``CatalogDB``'s own schema and its
+    inline old-schema migration. The engine holds the same FK in Liquibase, so
+    there is nothing to port these to; they retire with
+    ``nexus/catalog/catalog_db.py``.
+    """
 
     def _insert_doc_and_chunk(self, db: object) -> None:
         """Insert a test document and a chunk row."""
@@ -946,8 +972,14 @@ class TestS3LockPattern:
 # ── O-5: INSERT OR IGNORE in collections backfill ────────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestO5InsertOrIgnore:
-    """O-5: Collections backfill must use INSERT OR IGNORE, not WHERE NOT IN anti-join."""
+    """O-5: Collections backfill must use INSERT OR IGNORE, not WHERE NOT IN anti-join.
+
+    nexus-i711w: PINNED — asserts on the source text and behaviour of
+    ``CatalogDB.__init__``'s collections auto-bootstrap. Retires with
+    ``nexus/catalog/catalog_db.py``.
+    """
 
     def test_backfill_uses_insert_or_ignore_in_source(self) -> None:
         """CatalogDB.__init__ source must use INSERT OR IGNORE for collections backfill."""
