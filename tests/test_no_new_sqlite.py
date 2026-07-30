@@ -125,21 +125,30 @@ ALTER_CENSUS: dict[str, int] = {
 #: Each is standing debt: the override was self-granted by comment, which
 #: the directive retires going forward.
 EPSILON_CENSUS: dict[str, int] = {
-    "src/nexus/_session_end_launcher.py": 1,
+    # _session_end_launcher.py entry removed (nexus-7bomn Stage 3): the
+    # pre-fork sqlite tier summary died with the =sqlite opt-out.
     # aspect_promotion.py entry removed (nexus-70x7y): all six raw-.conn
     # overrides died with the retired promotion verb; the surviving read path
     # delegates to the configured store. DOWNWARD-only edit.
-    "src/nexus/collection_audit.py": 2,
-    "src/nexus/collection_health.py": 3,
+    # collection_audit.py entries removed (nexus-7bomn Stage 3): the raw
+    # taxonomy reads died with the opt-out; sections degrade to empty.
+    # collection_health.py 3 -> 1 (nexus-7bomn Stage 3): the projection-rank
+    # and hub-score raw reads died; the telemetry-stats T2 open survives.
+    "src/nexus/collection_health.py": 1,
     "src/nexus/commands/_helpers.py": 1,
-    "src/nexus/commands/aspects.py": 7,
+    # aspects.py 7 -> 3 (nexus-7bomn Stage 3): gc / gc-fixtures raw sweeps
+    # became unconditional guided refusals.
+    "src/nexus/commands/aspects.py": 3,
     "src/nexus/commands/catalog.py": 1,
     "src/nexus/commands/catalog_cmds/report.py": 3,
     "src/nexus/commands/collection.py": 1,
     # commands/daemon.py entry removed (nexus-i711w Stage 2 sub-stage B): its
     # single override died with the `nx daemon t2` verb group. DOWNWARD-only edit.
     "src/nexus/commands/doc.py": 3,
-    "src/nexus/commands/doctor.py": 6,
+    # doctor.py 6 -> 2 (nexus-7bomn Stage 3): the local-SQLite legs of
+    # --check-schema / plan-library / aspect-queue / tier-discipline died
+    # with the opt-out; the read-only frozen-source diagnostics remain.
+    "src/nexus/commands/doctor.py": 2,
     # enrich.py 9 -> 8 (nexus-70x7y): the aspects-promote-field write path
     # carried one raw-connection override; only the read-only --history
     # open remains. DOWNWARD-only edit.
@@ -158,9 +167,11 @@ EPSILON_CENSUS: dict[str, int] = {
     # `_has_raw_access` branch. Those branches are deleted, so the debt is
     # gone rather than relabelled.
     "src/nexus/commands/taxonomy_cmd.py": 3,
-    "src/nexus/commands/tier_status.py": 1,
+    # tier_status.py entry removed (nexus-7bomn Stage 3): the local
+    # tier_writes reader died with the opt-out.
     "src/nexus/commands/upgrade.py": 3,
-    "src/nexus/console/routes/health.py": 1,
+    # console/routes/health.py entry removed (nexus-7bomn Stage 3): the
+    # console aspect-queue sqlite reader died with the opt-out.
     "src/nexus/context.py": 1,
     # chash_etl.py entry removed (nexus-i711w Stage 2 sub-stage A): the file
     # died with the SQLite->PG ETL readers. DOWNWARD-only edit.
@@ -169,18 +180,25 @@ EPSILON_CENSUS: dict[str, int] = {
     # read-only connect died with the migration-report doctor rows.
     "src/nexus/health.py": 1,
     "src/nexus/indexer.py": 1,
-    "src/nexus/mcp_infra.py": 4,
-    "src/nexus/merge_candidates.py": 2,
+    # mcp_infra.py 4 -> 3 (nexus-7bomn Stage 3): t2_index_write's SQLite
+    # arm collapsed to the service singleton.
+    "src/nexus/mcp_infra.py": 3,
+    # merge_candidates.py entries removed (nexus-7bomn Stage 3): the raw
+    # taxonomy analysis died; the verb reports itself unavailable.
     # orchestrator.py entry removed (RDR-187/nexus-piwya.10): the chash
     # ETL source read carried the file's one epsilon-allow connect.
     # migration/* + rungs/t2_schema.py entries removed (RDR-155 P4b P2):
     # files deleted with the migration machinery. DOWNWARD-only edit.
-    "src/nexus/operators/aspect_sql.py": 6,
+    # operators/aspect_sql.py entries removed (nexus-7bomn Stage 3): the
+    # SQLite operator legs died; the service HTTP path is unconditional.
     # storage_boundary_lint.py 10 -> 9 (nexus-i711w terminal deletion): the
     # catalog-DB baseline docstrings were rewritten when both catalog access
     # baselines dropped to 0, removing one prose self-mention of the token.
     # DOWNWARD-only edit.
-    "src/nexus/storage_boundary_lint.py": 9,      # defines the token; matches its own docs
+    # storage_boundary_lint.py 9 -> 8 (nexus-7bomn Stage 3): the
+    # T2_RAW_HANDLE_BASELINE docstring no longer cites the epsilon-allow
+    # guard idiom (the has_raw_access guard died with the =sqlite opt-out).
+    "src/nexus/storage_boundary_lint.py": 8,      # defines the token; matches its own docs
     "src/nexus/taxonomy.py": 1,
 }
 

@@ -1958,11 +1958,11 @@ heuristic (`how` / `what` → research; `why` → review), tags confident matche
 `backfill` and wh-fallback rows `backfill-low-conf`, and lists each low-conf
 row (id, inferred verb, original query) for operator review.
 
-These verbs mutate row content via raw SQL against the local T2 SQLite, so in
-service mode the whole group refuses (the local file is the frozen
-pre-migration snapshot; repairing it would be a silent no-op against the live
-library). Set `NX_STORAGE_BACKEND=sqlite` to deliberately repair the local
-file.
+These verbs mutated row content via raw SQL against the local T2 SQLite.
+The group was deleted with the SQLite plan library (RDR-158 P4), and the
+`NX_STORAGE_BACKEND=sqlite` escape hatch that could reach the local file is
+retired (P3 — setting it is a hard error). The local file, where present, is
+a frozen pre-migration snapshot.
 
 ---
 

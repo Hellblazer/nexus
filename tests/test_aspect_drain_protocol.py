@@ -99,14 +99,8 @@ class TestServiceModeDrain:
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
         from nexus.aspect_worker import drain_worker
-        from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
 
-        monkeypatch.setattr(
-            smod, "storage_backend_for",
-            lambda key: smod.StorageBackend.SERVICE
-            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
-        )
         calls = {"http_is_drained": 0, "http_closed": False, "http_built": 0}
 
         class _FakeHttpQueue:
@@ -140,14 +134,8 @@ class TestServiceModeDrain:
         unconditionally, which raises AttributeError on HttpAspectQueue.
         """
         from nexus.aspect_worker import DrainTimeoutError, drain_worker
-        from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
 
-        monkeypatch.setattr(
-            smod, "storage_backend_for",
-            lambda key: smod.StorageBackend.SERVICE
-            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
-        )
         _STUCK = 3
 
         class _FakeHttpQueue:
@@ -194,14 +182,8 @@ class TestServiceModeDrain:
         and the stale-reclaim recovery so the operator knows the action.
         """
         from nexus.aspect_worker import DrainTimeoutError, drain_worker
-        from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
 
-        monkeypatch.setattr(
-            smod, "storage_backend_for",
-            lambda key: smod.StorageBackend.SERVICE
-            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
-        )
 
         class _FakeHttpQueueInProgressOnly:
             def __init__(self, *a, **k) -> None:
@@ -244,14 +226,8 @@ class TestServiceModeDrain:
         """OBS-1 (poll loop): drain_worker must keep polling until is_drained()
         returns True — False x 2 then True must succeed without error."""
         from nexus.aspect_worker import drain_worker
-        from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
 
-        monkeypatch.setattr(
-            smod, "storage_backend_for",
-            lambda key: smod.StorageBackend.SERVICE
-            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
-        )
         _answers = iter([False, False, True])
 
         class _FakeHttpQueue:
@@ -280,25 +256,17 @@ class TestServiceModeDrain:
     def test_drain_skips_mcp_lock_check_in_service_mode(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
-        """SIG-1: the MCP file-lock check must be skipped in SERVICE mode.
+        """SIG-1 heritage: a foreign worker lock file must never block drain.
 
-        In service mode the MCP process writes a local aspect_worker lock via
-        ensure_worker_started. If _check_mcp_worker_lock ran, drain_worker would
-        always raise DrainBlockedByActiveWorker while the MCP server is running,
-        defeating the primary migration use case.
-
-        Write a PID-1 lock file (always-alive, always-foreign) — in local mode
-        this would block drain. In SERVICE mode drain must succeed.
+        On the service queue PG's FOR UPDATE SKIP LOCKED owns cross-process
+        claim safety; the SQLite-era file-lock pre-check died with the
+        =sqlite opt-out (RDR-158 P3, nexus-7bomn). This pins that a stray
+        lock file (PID 1: always alive, always foreign) cannot re-block a
+        drain if anyone reintroduces a lock check.
         """
         from nexus.aspect_worker import drain_worker
-        from nexus.db import storage_mode as smod
         from nexus.db.t2 import http_aspect_queue as hmod
 
-        monkeypatch.setattr(
-            smod, "storage_backend_for",
-            lambda key: smod.StorageBackend.SERVICE
-            if key == "aspect_queue" else smod.StorageBackend.SQLITE,
-        )
 
         # Place a PID-1 lock file — would block drain in LOCAL mode.
         (locks_dir / "aspect_worker.1").write_text("1")
@@ -315,7 +283,7 @@ class TestServiceModeDrain:
 
         monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
 
-        # Must NOT raise DrainBlockedByActiveWorker — lock is ignored in SERVICE mode.
+        # Must NOT raise — lock files are ignored.
         drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
 
     def test_cli_drain_surfaces_detail_hint_on_timeout(self, monkeypatch) -> None:
@@ -714,73 +682,3 @@ class TestDrainTimeoutDefault:
 # -- MCP-vs-CLI lock detection (SIG-5) ----------------------------------------
 
 
-class TestMCPLockDetection:
-    """SIG-5 lock-file detection in drain_worker (LOCAL/non-service branch).
-
-    The file-lock check only runs when ``storage_backend_for("aspect_queue")``
-    is not SERVICE (in SERVICE mode PG's FOR UPDATE SKIP LOCKED owns
-    cross-process claim safety — see TestServiceModeDrain). The test env
-    runs the engine substrate (backend=service), which would silently skip
-    the check and make these tests vacuous, so each test pins the
-    non-service branch explicitly. The branch — and this pin — dies with
-    the NX_STORAGE_BACKEND=sqlite opt-out (RDR-186 .18).
-    """
-
-    @pytest.fixture()
-    def _local_mode(self, monkeypatch) -> None:
-        from nexus.db import storage_mode as smod
-
-        monkeypatch.setattr(
-            smod, "storage_backend_for",
-            lambda key: smod.StorageBackend.SQLITE,
-        )
-
-    def test_drain_no_lock_dir_proceeds_normally(
-        self, queue_path: Path, _local_mode: None,
-    ) -> None:
-        """When _locks_dir does not exist, drain proceeds without error.
-        Supports environments where the locks dir has not been created.
-        """
-        from nexus.aspect_worker import drain_worker
-
-        nonexistent = Path("/tmp/__nexus_locks_nonexistent_12345__")
-        drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=nonexistent)
-
-    def test_drain_skips_own_pid_lock_file(
-        self, queue_path: Path, locks_dir: Path, _local_mode: None,
-    ) -> None:
-        """A lock file for the current process's own PID is not a
-        cross-process conflict; drain proceeds normally.
-
-        When drain_worker is called from within the same process that
-        started the worker (e.g., during testing or from within the MCP
-        process itself), the own-PID lock must not trigger
-        DrainBlockedByActiveWorker.
-        """
-        import os
-
-        from nexus.aspect_worker import drain_worker
-
-        own_pid = os.getpid()
-        lock_file = locks_dir / f"aspect_worker.{own_pid}"
-        lock_file.write_text(str(own_pid))
-
-        # Must not raise -- own-PID lock is skipped.
-        drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
-
-    def test_drain_blocked_by_live_foreign_worker_lock(
-        self, queue_path: Path, locks_dir: Path, _local_mode: None,
-    ) -> None:
-        """The positive SIG-5 case: a lock file for a LIVE foreign PID makes
-        drain_worker raise DrainBlockedByActiveWorker before touching the
-        queue. PID 1 (launchd/init) is always alive and always foreign; the
-        permission-denied probe result is deliberately treated as alive.
-        """
-        from nexus.aspect_worker import DrainBlockedByActiveWorker, drain_worker
-
-        (locks_dir / "aspect_worker.1").write_text("1")
-
-        with pytest.raises(DrainBlockedByActiveWorker) as exc_info:
-            drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
-
-        assert exc_info.value.blocking_pid == 1

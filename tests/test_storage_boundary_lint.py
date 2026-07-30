@@ -567,7 +567,14 @@ def test_dual_population_baseline_locked():
     # collection_audit._open_catalog_conn to `return None`, retiring its
     # epsilon-allow ro-connect on the local .catalog.db. DOWNWARD-only
     # recount; never bump upward.
-    assert result.epsilon_allow_connects == 12, (
+    # 12 -> 5: RDR-158 P3 (nexus-7bomn) removed the =sqlite opt-out and
+    # collapsed the selector-guarded SQLite arms: the console health-route
+    # reader, the session-end pre-fork tier summary, tier-status's local
+    # reader, doctor's --check-schema / aspect-queue / tier-discipline
+    # local legs, and _t2_diagnostic_connect's writable-WAL arm (its
+    # read-only frozen-source arm survives and is counted). DOWNWARD-only
+    # recount; never bump upward.
+    assert result.epsilon_allow_connects == 5, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
@@ -612,7 +619,16 @@ def test_dual_population_baseline_locked():
     # promotion's raw DDL. The runtime promotion verb is retired (schema changes
     # go through Liquibase in every mode), so the write construction is gone;
     # only the read-only `--history` open survives.
-    assert result.t2database_constructions == 34, (
+    #
+    # RDR-158 P3 (nexus-7bomn): 34 -> 26. DOWNWARD. The =sqlite opt-out
+    # collapse deleted eight annotated constructions with their arms:
+    # operators/aspect_sql.py's three per-operator SQLite legs,
+    # merge_candidates._open_t2 (the verb is an unconditional refusal),
+    # collection_audit._open_t2 (taxonomy sections degrade to empty),
+    # mcp_infra.t2_index_write's SQLite arm, and the session-end launcher's
+    # pre-fork reader; commands/_helpers.t2_handle keeps its (annotated)
+    # service-routing construction.
+    assert result.t2database_constructions == 26, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 
@@ -1173,11 +1189,21 @@ def test_t2_raw_handle_short_epsilon_reason_does_not_suppress(tmp_path):
 
 
 def test_t2_raw_handle_db_and_daemon_allowlisted(tmp_path):
-    """src/nexus/db/ and src/nexus/daemon/ legitimately hold raw handles and
-    are excluded; widening the allowlist to empty must count strictly more."""
+    """The raw-handle population is ZERO even with the allowlist off.
+
+    This used to assert widening the allowlist (db/ + daemon/) counted
+    strictly MORE — those trees legitimately held raw handles while the
+    SQLite stores existed. RDR-158 P3 (nexus-7bomn) collapsed the last
+    guarded consumer reaches and the stores themselves are gone, so the
+    census is empty repo-wide; pin THAT, so any new raw reach — inside
+    or outside the allowlist — moves a number somebody must explain."""
     wide = _raw_handle_check(t2_raw_handle_access_allowlist_prefixes=())
     narrow = _raw_handle_check()
-    assert wide.t2_raw_handle_accesses > narrow.t2_raw_handle_accesses
+    assert wide.t2_raw_handle_accesses == 0, (
+        f"new raw-handle reaches appeared: "
+        f"{[(v.file, v.line, v.symbol) for v in wide.t2_raw_handle_access_sites]}"
+    )
+    assert narrow.t2_raw_handle_accesses == 0
 
 
 def test_t2_raw_handle_never_exceeds_baseline():

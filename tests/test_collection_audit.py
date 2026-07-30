@@ -55,70 +55,16 @@ def runner() -> CliRunner:
 
 
 def _seed_t2(path: Path) -> None:
-    """Build a T2 DB with topics, topic_assignments, and search_telemetry
-    seeded for a ``code__main`` collection under audit plus a few others
-    so cross-projection + hub queries have data."""
-    from nexus.db.storage_mode import has_raw_access
+    """No-op: the audit's T2 diagnostic sections are degraded by design.
+
+    The topics / topic_assignments / search_telemetry seeding this built
+    died with the SQLite stores (nexus-9613q.4 degrade contract; RDR-158
+    P3 nexus-7bomn removed the selector). Kept as a seam so the CLI tests
+    below keep their call shape.
+    """
     from nexus.db.t2 import T2Database
 
     db = T2Database(path)
-    if not has_raw_access(db.taxonomy):
-        # Engine substrate (RDR-155 P4b P0a'): the audit's T2 diagnostic
-        # sections are service-mode-degraded by design (nexus-9613q.4), so
-        # there is nothing meaningful to seed — callers that assert on
-        # SQLite-populated sections carry a dies-roster skip instead.
-        db.close()
-        return
-    c = db.taxonomy.conn
-    c.executemany(
-        "INSERT OR IGNORE INTO topics "
-        "(id, label, collection, created_at) VALUES (?, ?, ?, ?)",
-        [
-            (1, "auth",    "code__main",    "2026-04-01"),
-            (2, "search",  "code__main",    "2026-04-01"),
-            (3, "db",      "docs__alpha",   "2026-04-01"),
-            (4, "misc",    "code__other",   "2026-04-01"),
-            (5, "hub-A",   "code__main",    "2026-04-01"),  # high-src hub
-            (6, "hub-B",   "code__main",    "2026-04-01"),
-        ],
-    )
-    # topic_assignments:
-    # - topic 3 (docs__alpha) gets multiple chunks from code__main → cross-projection pair.
-    # - topic 4 (code__other) gets 1 chunk from code__main → another pair.
-    # - topics 5 and 6 get chunks from many source collections → they're cross-coll hubs.
-    c.executemany(
-        "INSERT INTO topic_assignments "
-        "(doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        [
-            # code__main → docs__alpha/db (3 shared docs, avg sim 0.7)
-            ("cm1", 3, "projection", 0.8, "2026-04-01", "code__main"),
-            ("cm2", 3, "projection", 0.7, "2026-04-01", "code__main"),
-            ("cm3", 3, "projection", 0.6, "2026-04-01", "code__main"),
-            # code__main → code__other/misc (1 shared doc, avg sim 0.5)
-            ("cm4", 4, "projection", 0.5, "2026-04-01", "code__main"),
-            # Hub-A (topic 5) gets chunks from 3 source collections → hub
-            ("cm5", 5, "projection", 0.9, "2026-04-01", "code__main"),
-            ("hx",  5, "projection", 0.9, "2026-04-01", "docs__alpha"),
-            ("hy",  5, "projection", 0.9, "2026-04-01", "code__other"),
-            # Hub-B (topic 6) gets chunks from 2 source collections
-            ("cm6", 6, "projection", 0.85, "2026-04-01", "code__main"),
-            ("hy2", 6, "projection", 0.85, "2026-04-01", "code__other"),
-        ],
-    )
-    c.commit()
-    # search_telemetry: seed 15 rows for code__main in the last 30d
-    # with top_distance values spread across buckets.
-    now = datetime.now(UTC)
-    tel_rows = []
-    dists = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 1.05,
-             1.25, 0.15, 0.25, 0.35, 0.45]  # 15 samples
-    for i, d in enumerate(dists):
-        ts = (now - timedelta(days=1)).isoformat()
-        tel_rows.append(
-            (ts, f"hash{i:04d}", "code__main", 5, 3, d, 0.45),
-        )
-    db.telemetry.log_search_batch(tel_rows)
     db.close()
 
 

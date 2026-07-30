@@ -28,7 +28,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from nexus.commands.catalog import catalog
 
 
@@ -211,10 +210,6 @@ class TestPurge:
         # Only 5 canonical entries should remain (5 myproject, 3 elsewhere → 5).
         _assert_survivors("rdr__myproject", expected=5)
         # And the surviving rows all point at the canonical home.
-        if storage_backend_for("catalog") is StorageBackend.SQLITE:
-            homes = {e.source_uri for e in _docs_in("rdr__myproject")}
-            for uri in homes:
-                assert "/projects/myproject/" in uri, uri
 
     def test_canonical_home_override_when_contaminant_dominates(
         self, env: Catalog,
@@ -257,10 +252,6 @@ class TestPurge:
         # Only the 3 legit entries should remain.
         _assert_survivors("rdr__inverted", expected=3)
         # And the survivors all match the canonical substring.
-        if storage_backend_for("catalog") is StorageBackend.SQLITE:
-            homes = {e.source_uri for e in _docs_in("rdr__inverted")}
-            for uri in homes:
-                assert "/projects/legit/" in uri
 
     def test_canonical_home_substring_no_match_errors(
         self, env: Catalog,

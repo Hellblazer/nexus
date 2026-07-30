@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.storage_mode import has_raw_access
 from tests._t2_fixture_ops import memory_row
 
 
@@ -100,15 +99,6 @@ def _read_tier_writes(db: Path) -> list[tuple]:
     rewritten to stop asking. When a read route lands, the assertion fails
     loudly instead of silently going green.
     """
-    if has_raw_access(_telemetry_store(db)):
-        conn = sqlite3.connect(str(db))
-        try:
-            return list(conn.execute(
-                "SELECT tool, tier, agent, project, target_title FROM tier_writes "
-                "ORDER BY id"
-            ))
-        finally:
-            conn.close()
 
     from nexus.db.t2 import T2Database
 
@@ -128,22 +118,18 @@ def _telemetry_store(db: Path):
 def _assert_target_title(got: str | None, expected: str) -> None:
     """Assert ``target_title`` at its real value on each substrate.
 
-    NOT an xfail and NOT a dropped assertion: in service mode the column is
-    write-only (see :func:`_read_tier_writes`), so the honest expectation is
-    ``None``, stated against the bead. If a read route lands and this starts
-    returning the title, THIS ASSERTION FAILS — which is the point. A silent
-    green would let the gap close without anyone restoring the real check.
+    NOT an xfail and NOT a dropped assertion: on the service backend the
+    column is write-only (see :func:`_read_tier_writes`), so the honest
+    expectation is ``None``, stated against the bead. If a read route lands
+    and this starts returning the title, THIS ASSERTION FAILS — which is
+    the point. A silent green would let the gap close without anyone
+    restoring the real check.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
-
-    if storage_backend_for("telemetry") is StorageBackend.SQLITE:
-        assert got == expected
-    else:
-        assert got is None, (
-            f"nexus-onjvy looks RESOLVED — tier_writes.target_title read back "
-            f"as {got!r}. Restore the unconditional 'target == {expected!r}' "
-            f"assertion and drop this branch."
-        )
+    assert got is None, (
+        f"nexus-onjvy looks RESOLVED — tier_writes.target_title read back "
+        f"as {got!r}. Restore the unconditional 'target == {expected!r}' "
+        f"assertion and drop this branch."
+    )
 
 
 class TestSignatureAcceptsKwargs:

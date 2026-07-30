@@ -357,14 +357,17 @@ FROM python:3.13-slim
 RUN pip install --no-cache-dir conexus==<host nx --version>
 ```
 
-## Legacy (SQLite backend)
+## Legacy (SQLite backend) — RETIRED
 
-> **Everything in this section applies only when
-> `NX_STORAGE_BACKEND=sqlite` is explicitly set** (globally or
-> per-store). That is the RDR-152 rollback opt-out, not the default —
-> the ETL copies data to Postgres and never deletes from SQLite until
-> the Phase-4 decommission, so the flag remains a pure routing switch.
-> New setups should not start here.
+> **`NX_STORAGE_BACKEND=sqlite` no longer selects anything.** RDR-158 P4
+> (nexus-i711w) deleted the SQLite T2 stores and the local catalog, and
+> P3 (nexus-7bomn) retired the opt-out itself: setting the variable —
+> globally or per-store — is now a **hard error** carrying the
+> stranded-install redirect. Pre-migration SQLite files on disk are
+> frozen migration sources; to migrate them, install the last
+> migration-capable 6.x release, run `nx upgrade` there, then upgrade
+> back. The subsections below are retained as history of what the flag
+> used to select.
 
 ### The T2 daemon container transport is GONE
 
@@ -388,8 +391,9 @@ gone with the daemon.
 install, it will try to run `nx daemon t2 start` on every boot and fail;
 `nx upgrade` removes it on the next run.
 
-What `NX_STORAGE_BACKEND=sqlite` still selects is the local SQLite *files* as
-a read path — it no longer selects a daemon, because there is none.
+`NX_STORAGE_BACKEND=sqlite` no longer selects even the local SQLite
+*files*: the read path was deleted with the stores, and the flag
+hard-errors (RDR-158 P3).
 
 T3 never had a daemon transport in this mode either — the retired
 `NX_T3_ADDR` ChromaDB daemon address is dead; T3 has served through

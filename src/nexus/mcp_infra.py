@@ -332,24 +332,12 @@ def t2_index_write(write_fn):
     existed to stop ``nx index repo`` from opening ``memory.db`` directly and
     holding its single WAL writer slot — a SQLite-only problem. The engine owns
     write serialization, so the daemon, its reachability probe and its
-    version-skew arm are gone (nexus-i711w Stage 2 sub-stage B).
-
-    THE DIRECT SQLITE PATH BELOW STAYS FOR NOW, deliberately. It is not daemon
-    machinery — it is the SQLite arm, which sub-stage A removes along with the
-    stores themselves. Collapsing it here as well was scope bleed: it broke the
-    collection-rename cascade tests that legitimately pin the SQLite backend
-    today, which is exactly the signal that this belonged to a different
-    sub-stage.
+    version-skew arm are gone (nexus-i711w Stage 2 sub-stage B), and the
+    direct-SQLite arm that outlived them went with the ``=sqlite`` opt-out
+    (RDR-158 P3, nexus-7bomn).
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
-
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        with _service_t2_lock:
-            return _service_t2_write_locked(write_fn)
-
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    with T2Database(default_db_path()) as db:  # epsilon-allow: SQLite arm, retired with the stores in nexus-i711w sub-stage A
-        return write_fn(db)
+    with _service_t2_lock:
+        return _service_t2_write_locked(write_fn)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────

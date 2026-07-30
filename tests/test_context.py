@@ -37,39 +37,19 @@ def _seed_topics(taxonomy: Any, rows: list[dict[str, Any]]) -> list[int]:
     review_status verbatim. Returns the topic ids in row order so callers
     can link children via ``parent_id``.
     """
-    from nexus.db.storage_mode import has_raw_access
-
     ids: list[int] = []
-    if has_raw_access(taxonomy):
-        for r in rows:
-            cur = taxonomy.conn.execute(
-                "INSERT INTO topics "
-                "(label, parent_id, collection, doc_count, created_at, review_status) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    r["label"],
-                    r.get("parent_id"),
-                    r["collection"],
-                    r["doc_count"],
-                    r.get("created_at", "2026-01-01T00:00:00Z"),
-                    r.get("review_status", "accepted"),
-                ),
-            )
-            ids.append(cur.lastrowid)
-        taxonomy.conn.commit()
-    else:
-        for r in rows:
-            ids.append(taxonomy.import_topic(
-                src_id=next_import_seed_id(),
-                label=r["label"],
-                parent_id=r.get("parent_id"),
-                collection=r["collection"],
-                centroid_hash=None,
-                doc_count=r["doc_count"],
-                created_at=r.get("created_at", "2026-01-01T00:00:00Z"),
-                review_status=r.get("review_status", "accepted"),
-                terms=None,
-            ))
+    for r in rows:
+        ids.append(taxonomy.import_topic(
+            src_id=next_import_seed_id(),
+            label=r["label"],
+            parent_id=r.get("parent_id"),
+            collection=r["collection"],
+            centroid_hash=None,
+            doc_count=r["doc_count"],
+            created_at=r.get("created_at", "2026-01-01T00:00:00Z"),
+            review_status=r.get("review_status", "accepted"),
+            terms=None,
+        ))
     return ids
 
 

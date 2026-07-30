@@ -60,16 +60,6 @@ def _seed_topic(tax, *, src_id: int, label: str, collection: str,
     """Seed one topics row on either substrate: raw SQLite INSERT on the
     legacy backend, the fidelity-import surface on the engine (the settled
     seeding idiom — cf. tests/db/test_telemetry_retention_marker.py)."""
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        cur = tax.conn.execute(
-            "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, '2026-04-16T00:00:00Z')",
-            (label, collection, centroid_hash, doc_count, "[]"),
-        )
-        tax.conn.commit()
-        return cur.lastrowid
     return tax.import_topic(
         src_id=src_id, label=label, parent_id=None, collection=collection,
         centroid_hash=centroid_hash, doc_count=doc_count,
@@ -79,16 +69,6 @@ def _seed_topic(tax, *, src_id: int, label: str, collection: str,
 
 def _seed_assignment(tax, *, doc_id: str, topic_id: int, assigned_by: str,
                      source_collection: str) -> None:
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        tax.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-            "VALUES (?, ?, ?, ?)",
-            (doc_id, topic_id, assigned_by, source_collection),
-        )
-        tax.conn.commit()
-        return
     tax.import_assignment(
         doc_id=doc_id, topic_id=topic_id, assigned_by=assigned_by,
         similarity=None, assigned_at=None, source_collection=source_collection,
@@ -96,16 +76,6 @@ def _seed_assignment(tax, *, doc_id: str, topic_id: int, assigned_by: str,
 
 
 def _seed_link(tax, *, from_topic_id: int, to_topic_id: int, link_count: int) -> None:
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        tax.conn.execute(
-            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-            "VALUES (?, ?, ?, ?)",
-            (from_topic_id, to_topic_id, link_count, "[]"),
-        )
-        tax.conn.commit()
-        return
     tax.import_topic_link(
         from_topic_id=from_topic_id, to_topic_id=to_topic_id,
         link_count=link_count, link_types="[]",
@@ -113,16 +83,6 @@ def _seed_link(tax, *, from_topic_id: int, to_topic_id: int, link_count: int) ->
 
 
 def _seed_meta(tax, *, collection: str, doc_count: int = 10) -> None:
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        tax.conn.execute(
-            "INSERT INTO taxonomy_meta (collection, last_discover_doc_count, last_discover_at) "
-            "VALUES (?, ?, ?)",
-            (collection, doc_count, "2026-04-14T12:00:00Z"),
-        )
-        tax.conn.commit()
-        return
     tax.import_taxonomy_meta(
         collection=collection, last_discover_doc_count=doc_count,
         last_discover_at="2026-04-14T12:00:00Z",

@@ -11,7 +11,6 @@ from nexus.db.t2 import T2Database, _sanitize_fts5
 from tests._t2_fixture_ops import (
     backdate_memory,
     memory_row,
-    require_sqlite_substrate as _require_sqlite_substrate,
     rewrite_memory_row,
     seed_relevance,
     set_memory_access_count,
@@ -56,14 +55,6 @@ from tests._t2_fixture_ops import (
 # the migration-guard test can be reframed for GHA stability.
 import os
 
-_skip_on_gha_flake = pytest.mark.skipif(
-    os.environ.get("GITHUB_ACTIONS") == "true"
-    and not os.environ.get("NEXUS_RUN_FLAKY_TESTS"),
-    reason=(
-        "GHA-runner pressure flake (nexus-9eaz family). Passes locally "
-        "and in isolation; opt in with NEXUS_RUN_FLAKY_TESTS=1."
-    ),
-)
 
 _OLD_FTS_SCHEMA = """PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS memory (
@@ -99,44 +90,7 @@ def _backdate(db: T2Database, title: str, days: float = 0, seconds: float = 0) -
     backdate_memory(db, "proj", title, days=days, seconds=seconds)
 
 
-def _create_old_schema_db(path: Path) -> None:
-    conn = sqlite3.connect(str(path))
-    conn.executescript(_OLD_FTS_SCHEMA)
-    conn.execute(
-        "INSERT INTO memory (project, title, session, agent, content, tags, timestamp, ttl) "
-        "VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)",
-        ("testproj", "RDR-007-design.md", "generic body content", "rdr", "2026-01-01T00:00:00Z", 30),
-    )
-    conn.commit()
-    conn.close()
-
-
 # ── context manager ──────────────────────────────────────────────────────────
-
-def test_context_manager_closes_on_exit(tmp_path: Path) -> None:
-    _require_sqlite_substrate()
-    with T2Database(tmp_path / "cm.db") as db:
-        row_id = db.put(project="test", title="cm-entry", content="hello")
-        assert row_id is not None
-    # Phase 2: each store owns its own connection. Probe the memory
-    # store's connection to verify the facade closed its children.
-    # nexus-aqbrk: ProgrammingError specifically, not bare Exception — the
-    # service-backed store's .conn guard raises AttributeError, which a bare
-    # `pytest.raises(Exception)` would have accepted as proof of a close that
-    # never happened.
-    with pytest.raises(sqlite3.ProgrammingError):
-        db.memory.conn.execute("SELECT 1")
-
-
-def test_context_manager_closes_on_exception(tmp_path: Path) -> None:
-    _require_sqlite_substrate()
-    with pytest.raises(ValueError, match="intentional"):
-        with T2Database(tmp_path / "cm_exc.db") as db:
-            db.put(project="test", title="exc-entry", content="before error")
-            raise ValueError("intentional")
-    with pytest.raises(sqlite3.ProgrammingError):
-        db.memory.conn.execute("SELECT 1")
-
 
 def test_context_manager_does_not_suppress_exception(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="propagated"):
@@ -157,15 +111,6 @@ def test_get_missing_args_raises_valueerror(db: T2Database, kwargs: dict) -> Non
 
 
 # ── WAL mode ─────────────────────────────────────────────────────────────────
-
-def test_wal_mode_enabled(db: T2Database) -> None:
-    _require_sqlite_substrate()
-    # WAL is per-database-file — any store's connection reports the
-    # same mode. Probe memory since it's the first store constructed
-    # by the facade.
-    mode = db.memory.conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() == "wal"
-
 
 # ── expire ───────────────────────────────────────────────────────────────────
 
@@ -453,55 +398,7 @@ def test_search_title_with_project_filter(db: T2Database) -> None:
     assert results[0]["project"] == "proj_a"
 
 
-def test_search_title_update_triggers_reindex(db: T2Database) -> None:
-    # nexus-aqbrk: an out-of-band UPDATE is the only way to rename a row —
-    # `put` upserts on (project, title), so the title IS the key. What this
-    # asserts is the SQLite AFTER UPDATE trigger that rebuilds memory_fts;
-    # the service side has no equivalent seam to drive (PG maintains its
-    # tsvector inside the same statement), so there is no service-mode
-    # rewrite of this test, only its deletion with the trigger in i711w.
-    _require_sqlite_substrate()
-    db.put(project="proj", title="olduniquetitleword.md", content="content")
-    assert len(db.search("olduniquetitleword")) == 1
-
-    db.memory.conn.execute(
-        "UPDATE memory SET title='newuniquetitleword.md' "
-        "WHERE project='proj' AND title='olduniquetitleword.md'"
-    )
-    db.memory.conn.commit()
-
-    assert db.search("olduniquetitleword") == []
-    assert len(db.search("newuniquetitleword")) == 1
-
-
 # ── FTS5 migration (old schema without title) ───────────────────────────────
-
-def test_fts_migration_enables_title_search(tmp_path: Path) -> None:
-    _require_sqlite_substrate()
-    db_path = tmp_path / "old_schema.db"
-    _create_old_schema_db(db_path)
-
-    conn = sqlite3.connect(str(db_path))
-    fts_schema = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
-    ).fetchone()[0]
-    assert "title" not in fts_schema
-    conn.close()
-
-    with T2Database(db_path) as db:
-        fts_new = db.memory.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'"
-        ).fetchone()[0]
-        assert "title" in fts_new
-
-        db.put(project="testproj", title="RDR-999-migration.md", content="unrelated body")
-
-        results = db.search("RDR-007")
-        assert len(results) == 1 and results[0]["title"] == "RDR-007-design.md"
-
-        results2 = db.search("RDR-999")
-        assert len(results2) == 1 and results2[0]["title"] == "RDR-999-migration.md"
-
 
 def test_fts_migration_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "new_schema.db"
@@ -687,63 +584,6 @@ def test_expire_also_purges_relevance_log(db: T2Database) -> None:
 # migration guard (_migrate_plans_if_needed / _migrated_paths), which died
 # with the store. The facade constructs HttpPlanLibrary unconditionally and
 # runs no per-store SQLite migrations.
-
-@_skip_on_gha_flake
-def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None:
-    """10 threads constructing T2Database on the same path run migrations exactly once.
-
-    This is the regression test for F2 (round 2) — the race where two
-    concurrent constructors could both enter the migration functions.
-    """
-    _require_sqlite_substrate()
-    import threading
-
-    from nexus.db.t2 import plan_library
-
-    path = tmp_path / "concurrent.db"
-    with plan_library._migrated_lock:
-        plan_library._migrated_paths.discard(str(path.resolve()))
-
-    call_count = {"n": 0}
-    count_lock = threading.Lock()
-    # See test_migration_guard_sequential_construction for the rationale —
-    # _migrate_plans_if_needed is on PlanLibrary and guarded by
-    # plan_library._migrated_lock (per-domain guard, Phase 2).
-    original = PlanLibrary._migrate_plans_if_needed
-
-    def counting(self):
-        with count_lock:
-            call_count["n"] += 1
-        return original(self)
-
-    monkeypatch.setattr(PlanLibrary, "_migrate_plans_if_needed", counting)
-
-    barrier = threading.Barrier(10, timeout=10)
-    errors: list[Exception] = []
-    dbs: list[T2Database] = []
-    dbs_lock = threading.Lock()
-
-    def worker():
-        try:
-            barrier.wait()
-            db = T2Database(path)
-            with dbs_lock:
-                dbs.append(db)
-        except Exception as exc:
-            errors.append(exc)
-
-    threads = [threading.Thread(target=worker) for _ in range(10)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert not errors, f"Concurrent construction raised: {errors}"
-    assert call_count["n"] == 1, (
-        f"Migration ran {call_count['n']} times across 10 concurrent "
-        f"constructions — expected exactly 1 (the guard lock failed)"
-    )
-
 
 def test_get_returns_post_increment_access_count(db: T2Database) -> None:
     """get() return value reflects the incremented access_count, not stale."""

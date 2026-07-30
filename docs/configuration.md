@@ -157,8 +157,8 @@ Clients honour these env-var overrides:
 |----------|--------|---------|
 | `NX_SERVICE_URL` | Full base URL of the nexus-service (T3 vectors over `/v1/vectors`). Used by dev containers and managed-cloud clients. | `storage_service_addr.<uid>` lease, then `https://api.conexus-nexus.com` |
 | `NX_SERVICE_TOKEN` | Bearer token for the nexus-service. | local: from `pg_credentials`; managed: user-supplied |
-| `NX_STORAGE_BACKEND` | Global storage-backend switch (RDR-152). `service` routes T2 stores + T3 vectors through the Java/Postgres nexus-service; `sqlite` is the legacy local opt-out, now without its daemon (see the note below). | `service` (hard default since RDR-152/155) |
-| `NX_STORAGE_BACKEND_<STORE>` | Per-store override of `NX_STORAGE_BACKEND`, taking precedence over the global value. Known `<STORE>` suffixes: `T1`, `CATALOG`, `VECTORS`, `TAXONOMY`, `ASPECT_QUEUE` (e.g. `NX_STORAGE_BACKEND_VECTORS=service`). Each is `service` or `sqlite`. | inherits `NX_STORAGE_BACKEND` |
+| `NX_STORAGE_BACKEND` | Storage-backend env guard (RDR-152/158). `service` (the default and only backend) routes T2 stores + T3 vectors through the Java/Postgres nexus-service. `sqlite` is RETIRED (RDR-158 P3): setting it is a hard error carrying the stranded-install redirect — the SQLite stores were deleted; to migrate old local data, install the last migration-capable 6.x release, run `nx upgrade` there, then upgrade back. | `service` |
+| `NX_STORAGE_BACKEND_<STORE>` | Per-store override of `NX_STORAGE_BACKEND`, taking precedence over the global value. Known `<STORE>` suffixes: `T1`, `CATALOG`, `VECTORS`, `TAXONOMY`, `ASPECT_QUEUE` (e.g. `NX_STORAGE_BACKEND_VECTORS=service`). `service` is the only accepted value; `=sqlite` hard-errors (RDR-158 P3). | inherits `NX_STORAGE_BACKEND` |
 | `NX_LOCAL` | Force local mode (local nexus-service, bge-768) even when cloud credentials exist. | unset (cloud mode if credentials present) |
 
 > Note: the retired `nx daemon t3` ChromaDB path and its `NX_T3_ADDR` override no longer route T3 serving; T3 traffic goes to the nexus-service via `NX_SERVICE_URL`.

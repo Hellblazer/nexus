@@ -69,7 +69,29 @@ from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.aspects import aspects_group
 from nexus.commands.upgrade import upgrade
 
-@click.group()
+class _StorageBackendGuardGroup(click.Group):
+    """Render the retired-=sqlite hard error as a clean CLI message.
+
+    RDR-158 P3 (nexus-7bomn): ``storage_backend_for`` raises
+    ``StorageModeFlagError`` — with the stranded-install redirect — from
+    deep inside whatever verb first touches storage. Without this catch the
+    redirect reaches the user as a raw Python traceback, defeating the
+    message's whole purpose. Caught here (once, at the group boundary)
+    rather than per-verb so every entry point renders it identically;
+    ``UsageError`` keeps Click's normal "Error: <msg>" + exit-code-2
+    contract and never swallows any other exception class.
+    """
+
+    def invoke(self, ctx: click.Context):
+        from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
+
+        try:
+            return super().invoke(ctx)
+        except StorageModeFlagError as exc:
+            raise click.UsageError(str(exc)) from exc
+
+
+@click.group(cls=_StorageBackendGuardGroup)
 @click.version_option(package_name="conexus", prog_name="nx")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable debug logging.")
 @click.pass_context

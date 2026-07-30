@@ -21,7 +21,6 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
 
 # Import src_ids start >= 1e9: import_topic preserves ids WITHOUT advancing
@@ -35,26 +34,17 @@ def _seed(db_path: Path) -> None:
     with T2Database(db_path) as db:
         ids = []
         for label in ("t1", "t2", "t3"):
-            if has_raw_access(db.taxonomy):
-                cur = db.taxonomy.conn.execute(
-                    "INSERT INTO topics (label, collection, doc_count, created_at) "
-                    "VALUES (?, 'docs__alpha', 1, '2026-01-01T00:00:00Z')",
-                    (label,),
-                )
-                db.taxonomy.conn.commit()
-                ids.append(cur.lastrowid)
-            else:
-                ids.append(db.taxonomy.import_topic(
-                    src_id=next_import_seed_id(),
-                    label=label,
-                    parent_id=None,
-                    collection="docs__alpha",
-                    centroid_hash=None,
-                    doc_count=1,
-                    created_at="2026-01-01T00:00:00Z",
-                    review_status="pending",
-                    terms=None,
-                ))
+            ids.append(db.taxonomy.import_topic(
+                src_id=next_import_seed_id(),
+                label=label,
+                parent_id=None,
+                collection="docs__alpha",
+                centroid_hash=None,
+                doc_count=1,
+                created_at="2026-01-01T00:00:00Z",
+                review_status="pending",
+                terms=None,
+            ))
         db.taxonomy.upsert_topic_links(
             [
                 {"from_topic_id": ids[0], "to_topic_id": ids[1], "link_count": 1, "link_types": ["cites"]},

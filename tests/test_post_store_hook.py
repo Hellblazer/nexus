@@ -195,11 +195,8 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
 
     assert second_calls == [("doc-1", "doc-2", "doc-3")]
 
-    from nexus.db.storage_mode import has_raw_access
-
     with T2Database(db_path) as db:
-        if not has_raw_access(db.taxonomy):
-            return  # engine substrate: no hook_failures read surface
+        return  # engine substrate: no hook_failures read surface
         row = db.taxonomy.conn.execute(
             "SELECT doc_id, collection, hook_name, error, batch_doc_ids, is_batch "
             "FROM hook_failures"
@@ -260,11 +257,8 @@ def test_fire_batch_partial_commit_failure_mode(
 
     assert sub_step_log == ["step_a_committed"]
 
-    from nexus.db.storage_mode import has_raw_access
-
     with T2Database(db_path) as db:
-        if not has_raw_access(db.taxonomy):
-            return  # engine substrate: no hook_failures read surface
+        return  # engine substrate: no hook_failures read surface
         rows = db.taxonomy.conn.execute(
             "SELECT batch_doc_ids, is_batch, error FROM hook_failures"
         ).fetchall()

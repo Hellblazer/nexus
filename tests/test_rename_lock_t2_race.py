@@ -266,8 +266,6 @@ class TestGap3StaleCollectionResidue:
     def test_cascade_before_complete_drifts_then_reclaim_self_heals(
         self, tmp_path: Path
     ) -> None:
-        from nexus.db.storage_mode import has_raw_access
-
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
@@ -290,47 +288,20 @@ class TestGap3StaleCollectionResidue:
                 "expected an in_progress orphan row under NEW"
             )
 
-            if has_raw_access(db.aspect_queue):
-                # Raw leg (dies with the SQLite twin at the RDR-155 P4b flip):
-                # exact row/status probe + realistic staleness backdate.
-                status = db.aspect_queue.conn.execute(
-                    "SELECT status FROM aspect_extraction_queue WHERE collection = ?",
-                    (_NEW,),
-                ).fetchone()[0]
-                assert status == "in_progress", "orphan not in_progress"
+            # Public leg: no backdate surface exists, so make everything
+            # in_progress immediately stale (timeout 0). reclaimed == 1
+            # proves exactly one in_progress orphan existed; the healed
+            # pending row must carry the NEW collection.
+            reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=0)
+            assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
 
-                # Self-heal: backdate last_attempt_at so the orphan is stale,
-                # then reclaim. reclaim_stale re-pends it under NEW ->
-                # re-extraction.
-                db.aspect_queue.conn.execute(
-                    "UPDATE aspect_extraction_queue "
-                    "SET last_attempt_at = '2020-01-01T00:00:00+00:00'"
-                )
-                db.aspect_queue.conn.commit()
-                reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=60)
-                assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
-
-                healed = db.aspect_queue.conn.execute(
-                    "SELECT collection, status FROM aspect_extraction_queue"
-                ).fetchall()
-                assert healed == [(_NEW, "pending")], (
-                    f"orphan not self-healed to (NEW, pending): {healed}"
-                )
-            else:
-                # Public leg: no backdate surface exists, so make everything
-                # in_progress immediately stale (timeout 0). reclaimed == 1
-                # proves exactly one in_progress orphan existed; the healed
-                # pending row must carry the NEW collection.
-                reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=0)
-                assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
-
-                healed = [
-                    (r.collection, "pending")
-                    for r in db.aspect_queue.list_pending()
-                ]
-                assert healed == [(_NEW, "pending")], (
-                    f"orphan not self-healed to (NEW, pending): {healed}"
-                )
+            healed = [
+                (r.collection, "pending")
+                for r in db.aspect_queue.list_pending()
+            ]
+            assert healed == [(_NEW, "pending")], (
+                f"orphan not self-healed to (NEW, pending): {healed}"
+            )
         finally:
             db.close()
 

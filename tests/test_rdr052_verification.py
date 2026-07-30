@@ -185,26 +185,13 @@ class TestPlanTTLEnforcement:
     def _save_backdated(db, query: str, *, days_old: int, ttl: int | None):
         """Land a plan whose created_at is *days_old* days in the past.
 
-        SQLite leg: save + raw-conn backdate (the historical idiom).
-        Service leg: the store has no raw handle; use the fidelity-import
-        surface (``import_plan``) which persists ``created_at`` verbatim
-        (RDR-155 P4b P0a', idiom: has_raw_access branch).
+        The store has no raw handle; use the fidelity-import surface
+        (``import_plan``) which persists ``created_at`` verbatim
+        (RDR-155 P4b P0a'; the SQLite raw-conn backdate leg died with the
+        =sqlite opt-out).
         """
         from datetime import UTC, datetime, timedelta
 
-        from nexus.db.storage_mode import has_raw_access
-
-        if has_raw_access(db.plans):
-            row_id = db.save_plan(
-                query=query, plan_json='{}',
-                **({} if ttl is None else {"ttl": ttl}),
-            )
-            db.plans.conn.execute(
-                f"UPDATE plans SET created_at = datetime('now', '-{days_old} days') WHERE id = ?",
-                (row_id,),
-            )
-            db.plans.conn.commit()
-            return row_id
         created_at = (
             datetime.now(UTC) - timedelta(days=days_old)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")

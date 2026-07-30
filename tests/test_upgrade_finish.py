@@ -1509,19 +1509,22 @@ class TestUnloadStaleT2Launchagent:
         from pathlib import Path
 
         from nexus.daemon.installer import UninstallResult, UninstallStatus
-        from nexus.db.storage_mode import StorageBackend
 
         dest = tmp_path / "com.nexus.t2.plist"
+        # The =sqlite backend no longer exists to pin (RDR-158 P3), so the
+        # "ALSO in local mode" claim is expressed as its non-vacuity guard:
+        # a re-introduced storage-mode gate would have to CONSULT the
+        # resolver, so assert nothing does.
         with patch(
             "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SQLITE,
-        ), patch(
+        ) as backend, patch(
             "nexus.commands.daemon._autostart_unit_installed", return_value=Path(dest),
         ), patch(
             "nexus.daemon.installer.uninstall_autostart",
             return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest),
         ) as uninstall:
             actions = unload_stale_t2_launchagent(tmp_path)
+        backend.assert_not_called()
         uninstall.assert_called_once_with(tier="t2")
         assert len(actions) == 1
         assert "com.nexus.t2" in actions[0]

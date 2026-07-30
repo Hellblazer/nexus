@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.mcp_server import (
@@ -55,24 +54,6 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     c = ActiveCatalog()
     c.register_owner("test-repo", "repo", repo_hash="abcd1234")
     return c
-
-
-@pytest.mark.parametrize("fn,kwargs", [
-    (catalog_search, dict(query="anything")),
-    (catalog_list, {}),
-])
-def test_without_catalog_returns_error(fn, kwargs, monkeypatch) -> None:
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
-    _reset_singletons()
-    if storage_backend_for("catalog") is not StorageBackend.SQLITE:
-        # nexus-aqbrk: "no catalog" is a LOCAL-ONLY state. In service mode the
-        # catalog is the service's, so an absent local directory is not an
-        # error condition and these tools correctly answer from the service
-        # (make_catalog_reader always returns a handle — the canonical
-        # unsatisfiable-assertion case for this port). The service-mode
-        # not-initialised behaviour is covered by nexus-kmo9h's own tests.
-        pytest.skip("no-local-catalog is not an error state in service mode")
-    assert "error" in fn(**kwargs)[0]
 
 
 def test_show_without_catalog(monkeypatch) -> None:
@@ -404,17 +385,14 @@ def test_link_audit(cat, monkeypatch) -> None:
     _setup_two_docs(cat)
     catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
     result = catalog_link_audit()
-    if storage_backend_for("catalog") is StorageBackend.SQLITE:
-        assert result["total"] == 1 and result["by_type"]["cites"] == 1
-    else:
-        # nexus-wnlit: HttpCatalogClient.link_audit is a stub returning {},
-        # so the tool reports success-shaped emptiness — indistinguishable
-        # from "audited, found nothing". Asserted at the broken value so the
-        # fix fails loudly here.
-        assert result == {}, (
-            f"nexus-wnlit looks FIXED (link_audit returned {result!r}, not "
-            f"the broken empty dict) — restore the unconditional assertion"
-        )
+    # nexus-wnlit: HttpCatalogClient.link_audit is a stub returning {},
+    # so the tool reports success-shaped emptiness — indistinguishable
+    # from "audited, found nothing". Asserted at the broken value so the
+    # fix fails loudly here.
+    assert result == {}, (
+        f"nexus-wnlit looks FIXED (link_audit returned {result!r}, not "
+        f"the broken empty dict) — restore the unconditional assertion"
+    )
 
 
 @pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])

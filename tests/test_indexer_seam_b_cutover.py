@@ -615,7 +615,12 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # `_open_catalog_conn` collapsed to an unconditional `return None`, taking
     # its `.catalog.db` epsilon-allow connect with it (lockstep with
     # test_storage_boundary_lint's copy). DOWNWARD-only recount.
-    assert result.epsilon_allow_connects == 12, (
+    # 12 -> 5: RDR-158 P3 (nexus-7bomn) — the =sqlite opt-out collapse
+    # deleted the selector-guarded connect arms (console health reader,
+    # session-end pre-fork summary, tier-status local reader, three doctor
+    # local legs, _t2_diagnostic_connect's writable-WAL arm); lockstep with
+    # test_storage_boundary_lint's copy. DOWNWARD-only recount.
+    assert result.epsilon_allow_connects == 5, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-
@@ -628,7 +633,11 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # aspects-promote-field WRITE open with it; only the read-only --history
     # open survives. Kept in lockstep with test_storage_boundary_lint's copy —
     # same number, same commit (see the derive-don't-paste note above).
-    assert result.t2database_constructions == 34, (
+    # 34 -> 26: RDR-158 P3 (nexus-7bomn) deleted eight annotated
+    # constructions with their =sqlite arms (aspect_sql x3, merge_candidates,
+    # collection_audit, mcp_infra sqlite arm, session-end pre-fork reader);
+    # lockstep with test_storage_boundary_lint's copy. DOWNWARD-only.
+    assert result.t2database_constructions == 26, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

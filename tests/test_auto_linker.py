@@ -42,12 +42,6 @@ def _assert_auto_link(count: int, cat, source_t, *, expected: int = 1) -> None:
     identity?), and which side is right is Hal's call, not a defect to fix
     under a test port.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
-
-    if storage_backend_for("catalog") is StorageBackend.SQLITE:
-        assert count == expected
-        assert len(cat.links_from(source_t, link_type="relates")) == expected
-        return
 
     assert count == 0, (
         f"auto_link returned {count} on the service arm. If nexus-wji11 has "

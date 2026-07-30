@@ -46,22 +46,12 @@ def _insert_topic(
     explicit id (RDR-155 P4b P0a' — raw-conn seeding routed through the
     import surface instead of psql).
     """
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(db.taxonomy):
-        db.taxonomy.conn.execute(
-            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (topic_id, label, collection, created_at),
-        )
-        db.taxonomy.conn.commit()
-    else:
-        db.taxonomy.import_topic(
-            src_id=topic_id, label=label, parent_id=None,
-            collection=collection, centroid_hash=None, doc_count=0,
-            created_at=_full_iso(created_at), review_status="pending",
-            terms=None,
-        )
+    db.taxonomy.import_topic(
+        src_id=topic_id, label=label, parent_id=None,
+        collection=collection, centroid_hash=None, doc_count=0,
+        created_at=_full_iso(created_at), review_status="pending",
+        terms=None,
+    )
 
 
 def _unique_topic_base() -> int:
@@ -447,21 +437,11 @@ class TestICF:
         # Insert a legacy NULL row directly (simulate pre-migration state).
         # SQLite: raw INSERT. Engine: the fidelity import surface writes the
         # NULL similarity/source_collection verbatim — same legacy shape.
-        from nexus.db.storage_mode import has_raw_access
-
         _insert_topic(db, topic_id=B + 99, collection="code__any", label="legacy")
-        if has_raw_access(db.taxonomy):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "VALUES ('docLegacy', ?, 'projection')",
-                (B + 99,),
-            )
-            db.taxonomy.conn.commit()
-        else:
-            db.taxonomy.import_assignment(
-                doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
-                similarity=None, assigned_at=None, source_collection=None,
-            )
+        db.taxonomy.import_assignment(
+            doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
+            similarity=None, assigned_at=None, source_collection=None,
+        )
         db.taxonomy.clear_icf_cache()
 
         icf = db.taxonomy.compute_icf_map()
@@ -759,29 +739,17 @@ def _seed_projection_assignments(db: T2Database, rows: list[dict]) -> None:
     hundreds of sequential per-row round-trips (the RDR-155 P4b P0a'
     read-timeout / engine-wedge mechanism).
     """
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(db.taxonomy):
-        for r in rows:
-            db.taxonomy.assign_topic(
-                r["doc_id"], r["topic_id"],
-                assigned_by="projection",
-                similarity=r["similarity"],
-                source_collection=r["source_collection"],
-                assigned_at=r["assigned_at"],
-            )
-    else:
-        db.taxonomy.import_rows_batch(
-            "assignment",
-            [
-                {
-                    **r,
-                    "assigned_by": "projection",
-                    "assigned_at": _full_iso(r["assigned_at"]),
-                }
-                for r in rows
-            ],
-        )
+    db.taxonomy.import_rows_batch(
+        "assignment",
+        [
+            {
+                **r,
+                "assigned_by": "projection",
+                "assigned_at": _full_iso(r["assigned_at"]),
+            }
+            for r in rows
+        ],
+    )
 
 
 @pytest.fixture()

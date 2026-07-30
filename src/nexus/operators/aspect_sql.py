@@ -188,16 +188,6 @@ def _build_filter_predicate(field: str, query: str) -> tuple[str, list]:
 _VALID_SOURCES = ("auto", "aspects", "llm")
 
 
-def _is_service_mode() -> bool:
-    """Return True when document_aspects is routed to the Java service backend.
-
-    Used by ``try_filter`` and by the ``_query_*`` SQL-execution helpers to
-    pick the HTTP service path (nexus-l9hd8) vs the local SQLite path.
-    """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
-    return storage_backend_for("document_aspects") == StorageBackend.SERVICE
-
-
 def _get_http_aspects_client():
     """Return a new ``HttpDocumentAspectsStore`` configured from environment.
 
@@ -207,6 +197,14 @@ def _get_http_aspects_client():
     Tenant resolution order: ``NX_SERVICE_TENANT`` env → ``"default"``.
     """
     import os  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    # RDR-158 P3 (nexus-7bomn): validation only — this helper constructs the
+    # Http store directly (bypassing T2Database's validation seam), so a
+    # stranded NX_STORAGE_BACKEND[_DOCUMENT_ASPECTS]=sqlite export must
+    # hard-error here rather than be silently ignored on the operator path.
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
+
+    storage_backend_for("document_aspects")
     from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — deferred to avoid circular import
     tenant = os.environ.get("NX_SERVICE_TENANT", "default")
     return HttpDocumentAspectsStore(tenant=tenant)
@@ -540,77 +538,51 @@ def _query_filter(
     source_path string for caller back-compat.
     """
     from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import
 
-    pred_sql, pred_params = _build_filter_predicate(field, query)
+    # Validates *field* / *query* (raises ValueError for unsupported
+    # fields, which try_filter's except catch turns into LLM fallback);
+    # the last param is always the LIKE pattern the service expects.
+    _, pred_params = _build_filter_predicate(field, query)
 
     # Derive URIs for every ident up front; idents whose
     # ``uri_for`` returns None are unreachable post-source_path-drop
     # (the migration's audit guarantees no NULL/empty source_uri
     # rows so a None here is a caller-side issue, not a row issue).
     ident_to_uri: dict[tuple[str, str], str] = {}
-    uri_to_ident: dict[str, tuple[str, str]] = {}
     for c, sp in idents:
         u = uri_for(c, sp) or ""
         if not u:
             continue
         ident_to_uri[(c, sp)] = u
-        uri_to_ident[u] = (c, sp)
 
     keep: list[tuple[str, str]] = []
     matches: dict[tuple[str, str], bool] = {}
     uris: dict[tuple[str, str], str] = {}
     if ident_to_uri:
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
-        if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-            # nexus-l9hd8: service mode — call the real HTTP endpoint.
-            # The predicate pattern mirrors _build_filter_predicate output;
-            # the service uses ILIKE (case-insensitive) to match SQLite's
-            # default case-insensitive LIKE behaviour.
-            _log.debug("aspect_sql.filter_service_path", field=field, query=query)
-            client = _get_http_aspects_client()
-            try:
-                uri_list = list(ident_to_uri.values())
-                # Build predicate pattern identical to _build_filter_predicate.
-                # Service expects the LIKE pattern string (e.g. "%paxos%").
-                _, pred_params_list = _build_filter_predicate(field, query)
-                predicate = pred_params_list[-1]  # last param is always the LIKE pattern
-                matched_uris = set(client.operator_filter(uri_list, field, predicate))
-            except Exception as exc:
-                # Transport errors (RuntimeError from missing NX_SERVICE_PORT,
-                # httpx.HTTPStatusError, ConnectError) are re-raised as ValueError
-                # so try_filter's ``except ValueError`` catch triggers graceful
-                # LLM fallback for source="auto" (nexus-l9hd8 Sig-2 fix).
-                raise ValueError(f"service operator_filter failed: {exc}") from exc
-            finally:
-                client.close()
-            for ident, u in ident_to_uri.items():
-                if u in matched_uris:
-                    matches[ident] = True
-                    uris[ident] = u
-        else:
-            # Batch in 300s to leave plenty of headroom under SQLite's
-            # 999-param default cap.
-            with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-                conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
-                uri_list = list(ident_to_uri.values())
-                for chunk_start in range(0, len(uri_list), 300):
-                    batch = uri_list[chunk_start:chunk_start + 300]
-                    placeholders = ",".join(["?"] * len(batch))
-                    sql = (
-                        f"SELECT source_uri "
-                        f"FROM document_aspects "
-                        f"WHERE source_uri IN ({placeholders}) "
-                        f"  AND {pred_sql}"
-                    )
-                    params: list[Any] = list(batch) + list(pred_params)
-                    for (uri,) in conn.execute(sql, params).fetchall():
-                        ident = uri_to_ident.get(uri)
-                        if ident is None:
-                            continue
-                        matches[ident] = True
-                        uris[ident] = uri
+        # nexus-l9hd8: call the real HTTP endpoint. The predicate pattern
+        # mirrors _build_filter_predicate output; the service uses ILIKE
+        # (case-insensitive) to match SQLite's historical case-insensitive
+        # LIKE behaviour. (The local-SQLite leg died with the =sqlite
+        # opt-out, RDR-158 P3 nexus-7bomn.)
+        _log.debug("aspect_sql.filter_service_path", field=field, query=query)
+        client = _get_http_aspects_client()
+        try:
+            uri_list = list(ident_to_uri.values())
+            # Service expects the LIKE pattern string (e.g. "%paxos%").
+            predicate = pred_params[-1]  # last param is always the LIKE pattern
+            matched_uris = set(client.operator_filter(uri_list, field, predicate))
+        except Exception as exc:
+            # Transport errors (RuntimeError from missing NX_SERVICE_PORT,
+            # httpx.HTTPStatusError, ConnectError) are re-raised as ValueError
+            # so try_filter's ``except ValueError`` catch triggers graceful
+            # LLM fallback for source="auto" (nexus-l9hd8 Sig-2 fix).
+            raise ValueError(f"service operator_filter failed: {exc}") from exc
+        finally:
+            client.close()
+        for ident, u in ident_to_uri.items():
+            if u in matched_uris:
+                matches[ident] = True
+                uris[ident] = u
 
     rationale = []
     for c, sp in idents:
@@ -636,21 +608,13 @@ def _query_filter(
 def _query_groupby(
     idents: list[tuple[str, str]], field: str,
 ) -> dict[str, list[tuple[str, str]]]:
-    """Execute the groupby SQL. Return {key_value: [idents]}."""
-    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import
-
+    """Execute the groupby via the aspects service. Return {key_value: [idents]}."""
     if field.startswith("extras."):
-        extras_key = field[len("extras."):]
-        select_expr = "json_extract(extras, ?)"
-        select_params: list[Any] = [f"$.{extras_key}"]
         col_type = "scalar_text"
     else:
         col_type = _ASPECT_COLUMN_TYPES.get(field)
         if col_type is None:
             raise ValueError(f"unknown aspect field: {field!r}")
-        select_expr = field
-        select_params = []
 
     # nexus-ocu9.11: source_path column dropped at 4.31.0; key on
     # source_uri instead. The operator's input idents still carry
@@ -662,49 +626,28 @@ def _query_groupby(
     groups: dict[str, list[tuple[str, str]]] = {}
     fetched: dict[tuple[str, str], Any] = {}
     ident_to_uri: dict[tuple[str, str], str] = {}
-    uri_to_ident: dict[str, tuple[str, str]] = {}
     for c, sp in idents:
         u = uri_for(c, sp) or ""
         if not u:
             continue
         ident_to_uri[(c, sp)] = u
-        uri_to_ident[u] = (c, sp)
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
-    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        # nexus-l9hd8: service mode — call the real HTTP endpoint.
-        _log.debug("aspect_sql.groupby_service_path", field=field)
-        client = _get_http_aspects_client()
-        try:
-            uri_list = list(ident_to_uri.values())
-            uri_to_value = client.operator_groupby(uri_list, field)
-        except Exception as exc:
-            # Transport errors re-raised as ValueError so try_groupby's
-            # ``except ValueError`` catch triggers LLM fallback for source="auto".
-            raise ValueError(f"service operator_groupby failed: {exc}") from exc
-        finally:
-            client.close()
-        for ident, u in ident_to_uri.items():
-            if u in uri_to_value:
-                fetched[ident] = uri_to_value[u]
-    else:
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-            conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
-            uri_list = list(ident_to_uri.values())
-            for chunk_start in range(0, len(uri_list), 300):
-                batch = uri_list[chunk_start:chunk_start + 300]
-                placeholders = ",".join(["?"] * len(batch))
-                params: list[Any] = list(select_params) + list(batch)
-                sql = (
-                    f"SELECT source_uri, {select_expr} "
-                    f"FROM document_aspects "
-                    f"WHERE source_uri IN ({placeholders})"
-                )
-                for uri, value in conn.execute(sql, params).fetchall():
-                    ident = uri_to_ident.get(uri)
-                    if ident is None:
-                        continue
-                    fetched[ident] = value
+    # nexus-l9hd8: call the real HTTP endpoint. (The local-SQLite leg died
+    # with the =sqlite opt-out, RDR-158 P3 nexus-7bomn.)
+    _log.debug("aspect_sql.groupby_service_path", field=field)
+    client = _get_http_aspects_client()
+    try:
+        uri_list = list(ident_to_uri.values())
+        uri_to_value = client.operator_groupby(uri_list, field)
+    except Exception as exc:
+        # Transport errors re-raised as ValueError so try_groupby's
+        # ``except ValueError`` catch triggers LLM fallback for source="auto".
+        raise ValueError(f"service operator_groupby failed: {exc}") from exc
+    finally:
+        client.close()
+    for ident, u in ident_to_uri.items():
+        if u in uri_to_value:
+            fetched[ident] = uri_to_value[u]
 
     for ident in idents:
         value = fetched.get(ident)
@@ -729,23 +672,8 @@ def _query_groupby(
 def _query_confidence_aggregate(
     idents: list[tuple[str, str]], reducer_kind: str,
 ) -> float | None:
-    """Run the SQL aggregate (AVG / MIN / MAX) over confidence.
-
-    Paginates over the input identities at 300-id batches (SQLite
-    parameter cap). MIN / MAX accumulate by Python folding (still
-    O(N) wall-clock but exact). AVG accumulates the sum and count
-    across batches and divides at the end (single pass, exact
-    arithmetic on floats).
-    """
-    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import
-
-    op_map = {
-        "avg_confidence": "AVG",
-        "max_confidence": "MAX",
-        "min_confidence": "MIN",
-    }
-    if reducer_kind not in op_map:
+    """Run the AVG / MIN / MAX confidence aggregate via the aspects service."""
+    if reducer_kind not in ("avg_confidence", "max_confidence", "min_confidence"):
         return None
 
     # nexus-ocu9.11: source_path column dropped; key the WHERE on
@@ -753,60 +681,27 @@ def _query_confidence_aggregate(
     # mapping (it folds into a scalar), so we just collect URIs.
     from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred to avoid circular import
 
-    sum_acc = 0.0
-    count_acc = 0
-    min_acc: float | None = None
-    max_acc: float | None = None
-
     uris_for_query: list[str] = []
     for c, sp in idents:
         u = uri_for(c, sp) or ""
         if u:
             uris_for_query.append(u)
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
-    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        # nexus-l9hd8: service mode — call the real HTTP endpoint.
-        _log.debug("aspect_sql.confidence_aggregate_service_path", reducer_kind=reducer_kind)
-        client = _get_http_aspects_client()
-        try:
-            return client.operator_confidence_aggregate(uris_for_query, reducer_kind)
-        except Exception as exc:
-            # Transport errors re-raised as ValueError so try_aggregate's
-            # ``except (ValueError, TypeError)`` catch triggers LLM fallback
-            # for source="auto" (nexus-l9hd8 Sig-2 fix).
-            raise ValueError(
-                f"service operator_confidence_aggregate failed: {exc}"
-            ) from exc
-        finally:
-            client.close()
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-        conn = db.document_aspects.conn  # epsilon-allow: SQLite-only branch; service path handled above via storage_backend_for (nexus-l9hd8)
-        for chunk_start in range(0, len(uris_for_query), 300):
-            batch = uris_for_query[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["?"] * len(batch))
-            sql = (
-                f"SELECT confidence FROM document_aspects "
-                f"WHERE source_uri IN ({placeholders}) "
-                f"  AND confidence IS NOT NULL"
-            )
-            params: list[Any] = list(batch)
-            for (value,) in conn.execute(sql, params).fetchall():
-                if value is None:
-                    continue
-                v = float(value)
-                sum_acc += v
-                count_acc += 1
-                min_acc = v if min_acc is None else min(min_acc, v)
-                max_acc = v if max_acc is None else max(max_acc, v)
-
-    if count_acc == 0:
-        return None
-    if reducer_kind == "avg_confidence":
-        return sum_acc / count_acc
-    if reducer_kind == "min_confidence":
-        return min_acc
-    return max_acc  # max_confidence
+    # nexus-l9hd8: call the real HTTP endpoint. (The local-SQLite fold leg
+    # died with the =sqlite opt-out, RDR-158 P3 nexus-7bomn.)
+    _log.debug("aspect_sql.confidence_aggregate_service_path", reducer_kind=reducer_kind)
+    client = _get_http_aspects_client()
+    try:
+        return client.operator_confidence_aggregate(uris_for_query, reducer_kind)
+    except Exception as exc:
+        # Transport errors re-raised as ValueError so try_aggregate's
+        # ``except (ValueError, TypeError)`` catch triggers LLM fallback
+        # for source="auto" (nexus-l9hd8 Sig-2 fix).
+        raise ValueError(
+            f"service operator_confidence_aggregate failed: {exc}"
+        ) from exc
+    finally:
+        client.close()
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

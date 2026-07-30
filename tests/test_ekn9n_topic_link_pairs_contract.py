@@ -30,7 +30,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
 from nexus.scoring import _TOPIC_LINKED_BOOST, apply_topic_boost
 from nexus.types import SearchResult
@@ -47,14 +46,6 @@ def db(tmp_path: Path) -> T2Database:
 
 def _seed_topic(db: T2Database, label: str, collection: str) -> int:
     """Insert one topic and return its id (substrate-neutral)."""
-    if has_raw_access(db.taxonomy):
-        cur = db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (label, collection, 1, "2026-07-28T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
-        return int(cur.lastrowid)
     return db.taxonomy.import_topic(
         src_id=next_import_seed_id(),
         label=label,

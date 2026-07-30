@@ -29,21 +29,11 @@ def test_expire_bumps_cumulative_marker(tmp_path):
     # expireRelevanceLog marker bump); the SQLite twin has no import
     # surface, so its leg seeds raw — that branch dies with the twin at
     # the RDR-155 P4b flip.
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(db.telemetry):
-        for i in range(3):
-            db.telemetry.conn.execute(
-                "INSERT INTO relevance_log (query, chunk_id, action, timestamp) "
-                "VALUES (?, ?, 'click', ?)", (f"q{i}", f"c{i}", old),
-            )
-        db.telemetry.conn.commit()
-    else:
-        for i in range(3):
-            db.telemetry.import_relevance_row(
-                query=f"q{i}", chunk_id=f"c{i}", collection="",
-                action="click", session_id="", timestamp=old,
-            )
+    for i in range(3):
+        db.telemetry.import_relevance_row(
+            query=f"q{i}", chunk_id=f"c{i}", collection="",
+            action="click", session_id="", timestamp=old,
+        )
     db.telemetry.log_relevance("fresh", "cf", "click")
 
     assert db.telemetry.expire_relevance_log(days=90) == 3

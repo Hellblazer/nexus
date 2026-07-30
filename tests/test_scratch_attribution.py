@@ -14,7 +14,6 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from nexus.db.storage_mode import has_raw_access
 from tests.conftest import make_vector_test_client
 
 
@@ -62,17 +61,6 @@ def _read_tier_writes(db: Path) -> list[tuple]:
     stop asking. When a read route lands, the assertion fails loudly instead
     of silently going green.
     """
-    if has_raw_access(_telemetry_store(db)):
-        if not db.exists():
-            return []
-        conn = sqlite3.connect(str(db))
-        try:
-            return list(conn.execute(
-                "SELECT tool, tier, agent, target_title FROM tier_writes "
-                "ORDER BY id"
-            ))
-        finally:
-            conn.close()
 
     from nexus.db.t2 import T2Database
 

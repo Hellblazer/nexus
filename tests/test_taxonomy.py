@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 
 from nexus.db.inmemory_vector_store import InMemoryVectorClient
-from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.taxonomy import (
@@ -56,16 +55,6 @@ def _seed_topic(
     created_at: str = "2026-01-01T00:00:00Z",
 ) -> int:
     """Insert one topics row on either substrate; return its id."""
-    if has_raw_access(taxonomy):
-        cur = taxonomy.conn.execute(
-            "INSERT INTO topics "
-            "(label, parent_id, collection, doc_count, created_at, "
-            "review_status, terms) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (label, parent_id, collection, doc_count, created_at,
-             review_status, terms),
-        )
-        taxonomy.conn.commit()
-        return cur.lastrowid
     return taxonomy.import_topic(
         src_id=next_import_seed_id(),
         label=label,
@@ -90,16 +79,6 @@ def _seed_assignment(
     source_collection: str | None = None,
 ) -> None:
     """Insert one topic_assignments row on either substrate."""
-    if has_raw_access(taxonomy):
-        taxonomy.conn.execute(
-            "INSERT OR REPLACE INTO topic_assignments "
-            "(doc_id, topic_id, assigned_by, similarity, assigned_at, "
-            "source_collection) VALUES (?, ?, ?, ?, ?, ?)",
-            (doc_id, topic_id, assigned_by, similarity, assigned_at,
-             source_collection),
-        )
-        taxonomy.conn.commit()
-        return
     taxonomy.import_assignment(
         doc_id=doc_id,
         topic_id=topic_id,
@@ -281,11 +260,6 @@ def test_assign_batch_still_composes_compute_and_persist(
     # silently computed something different).
     mapping = db.taxonomy.get_assignments_for_docs(["batch-doc"])
     assert mapping.get("batch-doc") == expected[0]["topic_id"]
-    if has_raw_access(db.taxonomy):
-        row = db.taxonomy.conn.execute(
-            "SELECT assigned_by FROM topic_assignments WHERE doc_id='batch-doc'"
-        ).fetchone()
-        assert row[0] == expected[0]["assigned_by"]
 
 
 # test_compute_assignments_empty_when_no_centroids moved to
@@ -862,11 +836,6 @@ def test_assign_batch_assigns_multiple_docs(
     # Verify assignments exist in T2
     mapping = db.taxonomy.get_assignments_for_docs(new_ids)
     assert set(mapping) == set(new_ids)
-    if has_raw_access(db.taxonomy):
-        rows = db.taxonomy.conn.execute(
-            "SELECT assigned_by FROM topic_assignments WHERE doc_id LIKE 'new-doc-%'"
-        ).fetchall()
-        assert all(r[0] == "centroid" for r in rows)
 
 
 def test_assign_batch_no_centroids_returns_zero(
@@ -1030,18 +999,11 @@ def test_assigned_by_column_populated(
 
     # Assignments landed for the discovered docs on both substrates.
     assert db.taxonomy.get_assignments_for_docs(doc_ids)
-    if has_raw_access(db.taxonomy):
-        rows = db.taxonomy.conn.execute(
-            "SELECT DISTINCT assigned_by FROM topic_assignments"
-        ).fetchall()
-        assert len(rows) == 1
-        assert rows[0][0] == "hdbscan"
-    else:
-        # No public assigned_by read on the Http twin; manual_assignments
-        # (the assigned_by='manual' slice) being empty pins the provenance
-        # is not 'manual'.
-        state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
-        assert state["manual_assignments"] == {}
+    # No public assigned_by read on the Http twin; manual_assignments
+    # (the assigned_by='manual' slice) being empty pins the provenance
+    # is not 'manual'.
+    state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
+    assert state["manual_assignments"] == {}
 
 
 def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
@@ -2073,29 +2035,10 @@ class TestSplitTopic:
         emb_list = ef(texts)
         coll.add(ids=doc_ids, documents=texts, embeddings=emb_list)
 
-        # Seed a parent centroid in taxonomy__centroids (raw chroma leg
-        # only — on the engine substrate centroids route through the
-        # centroid port and split does not need the parent centroid to
-        # pre-exist).
-        import numpy as _np
-        if has_raw_access(db.taxonomy):
-            centroid_coll = chroma.get_or_create_collection(
-                "taxonomy__centroids",
-                embedding_function=None,
-                metadata={"hnsw:space": "cosine"},
-            )
-            parent_centroid = _np.array(emb_list).mean(axis=0).tolist()
-            centroid_coll.add(
-                ids=[f"test__split:{parent_id}"],
-                embeddings=[parent_centroid],
-                metadatas=[{
-                    "topic_id": parent_id,
-                    "label": "mixed-topic",
-                    "collection": "test__split",
-                    "doc_count": 30,
-                }],
-            )
-
+        # No parent-centroid pre-seed needed: on the engine substrate
+        # centroids route through the centroid port and split does not
+        # need the parent centroid to pre-exist (the raw-chroma seeding
+        # leg died with the =sqlite opt-out).
         child_count = db.taxonomy.split_topic(
             parent_id, k=2, chroma_client=chroma,
         )
@@ -2238,13 +2181,6 @@ class TestSplitTopic:
         pair = (min(src_id, tgt_id), max(src_id, tgt_id))
         count = _link_pairs(db.taxonomy, [src_id, tgt_id]).get(pair)
         assert count == 3  # three per-chunk projection rows
-        if has_raw_access(db.taxonomy):
-            row = db.taxonomy.conn.execute(
-                "SELECT link_types FROM topic_links "
-                "WHERE from_topic_id = ? AND to_topic_id = ?",
-                pair,
-            ).fetchone()
-            assert "projection" in row[0]
 
     def test_refresh_projection_links_merges_existing_types(
         self, db: T2Database,
@@ -2274,14 +2210,6 @@ class TestSplitTopic:
 
         # The pair still exists after the refresh on both substrates.
         assert (from_id, to_id) in _link_pairs(db.taxonomy, [from_id, to_id])
-        if has_raw_access(db.taxonomy):
-            row = db.taxonomy.conn.execute(
-                "SELECT link_types FROM topic_links "
-                "WHERE from_topic_id = ? AND to_topic_id = ?",
-                (from_id, to_id),
-            ).fetchone()
-            types = _json.loads(row[0])
-            assert set(types) == {"cites", "projection"}
 
     def test_refresh_projection_links_no_op_when_no_projections(
         self, db: T2Database,
@@ -2434,15 +2362,8 @@ class TestManualOpsCLI:
             assert db.taxonomy.get_assignments_for_docs(["my-doc-id"]) == {
                 "my-doc-id": topic_id,
             }
-            if has_raw_access(db.taxonomy):
-                row = db.taxonomy.conn.execute(
-                    "SELECT assigned_by FROM topic_assignments "
-                    "WHERE doc_id = 'my-doc-id'"
-                ).fetchone()
-                assert row[0] == "manual"
-            else:
-                state = db.taxonomy.read_rebuild_old_state("proj")
-                assert state["manual_assignments"].get("my-doc-id") == topic_id
+            state = db.taxonomy.read_rebuild_old_state("proj")
+            assert state["manual_assignments"].get("my-doc-id") == topic_id
 
     def test_assign_cli_unknown_label(self, tmp_path: Path) -> None:
         """nx taxonomy assign with unknown label prints error."""

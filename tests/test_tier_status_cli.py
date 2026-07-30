@@ -33,9 +33,9 @@ def _seed_t2(db_path: Path, rows: list[tuple]) -> None:
     ``TestServiceModeReadParity`` covers that path — so under the engine
     substrate the CLI read the service while the seed landed in a local file
     it never opened, and every assertion got "(no writes)". Routed through
-    ``seed_tier_write``, which branches once (raw INSERT on SQLite,
-    ``import_tier_write`` on the service arm) so the same seed reaches
-    whichever store is real.
+    ``seed_tier_write`` (``import_tier_write`` — its SQLite arm died with the
+    =sqlite opt-out, RDR-158 P3 nexus-7bomn) so the seed reaches the store
+    the CLI actually reads.
 
     ROWS ARE STAMPED ONE SECOND APART, deliberately. The service's import
     path is ``onConflictDoNothing`` on an ETL dedup key that does NOT include
@@ -68,11 +68,16 @@ def _seed_t2(db_path: Path, rows: list[tuple]) -> None:
 
 @pytest.fixture
 def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect default_db_path to a tmp file."""
-    from nexus.commands import _helpers, tier_status as ts_mod
+    """Redirect default_db_path to a tmp file.
+
+    RDR-158 P3 (nexus-7bomn): the CLI itself no longer opens a local DB —
+    ``tier_status.default_db_path`` died with the =sqlite opt-out, so only
+    the ``nexus.config`` indirection is patched. The path still isolates
+    ``_seed_t2``'s ``T2Database`` handle and ``_seed_local_t2``'s
+    deliberately-local file from any real install.
+    """
     db = tmp_path / "t.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-    monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
     return db
 
 
@@ -104,9 +109,9 @@ class TestDefaultSession:
     ) -> None:
         from nexus.commands.tier_status import tier_status_cmd
 
-        # Pre-create the DB so the no-session-resolvable check fires
-        # before the missing-DB check.
-        sqlite3.connect(str(isolated_t2)).close()
+        # RDR-158 P3 (nexus-7bomn): no DB pre-create needed — the missing-DB
+        # check died with the local =sqlite arm; session resolution is now
+        # unconditionally the first gate.
 
         # Ensure no session resolvable.
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -197,25 +202,11 @@ class TestEmptyOrMissing:
         assert result.exit_code == 0, result.output
         assert "no writes" in result.output
 
-    def test_missing_table_treated_as_zero(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """If tier_writes table doesn't exist (no recorder writes ever),
-        CLI prints zero rather than erroring on missing table."""
-        from nexus.commands import _helpers, tier_status as ts_mod
-        from nexus.commands.tier_status import tier_status_cmd
-
-        # Empty DB — no tier_writes table.
-        db = tmp_path / "empty.db"
-        sqlite3.connect(str(db)).close()
-        monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-        monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
-
-        result = CliRunner().invoke(
-            tier_status_cmd, ["--session", "any-sess"],
-        )
-        assert result.exit_code == 0, result.output
-        assert "no writes" in result.output
+    # test_missing_table_treated_as_zero DELETED (RDR-158 P3, nexus-7bomn):
+    # its entire subject was the local SQLite reader's lazy-migration gap
+    # ("tier_writes table may not exist yet"), which died with the =sqlite
+    # opt-out. The service arm has no missing-table state; the zero-rows
+    # case is owned by test_empty_session_prints_no_writes above.
 
 
 def _seed_local_t2(db_path: Path, rows: list[tuple]) -> None:

@@ -362,8 +362,8 @@ class TestRunRecording:
         ``_warn_telemetry_drop`` (best-effort telemetry), so
         ``warn.assert_not_called()`` is the backend-blind proof that the row
         landed (SQLite INSERT committed / service POST returned 2xx). Raw-row
-        content assertions stay behind ``has_raw_access`` at the call sites —
-        the Http store exposes no row-level read surface for nx_answer_runs."""
+        content assertions died with the raw SQLite store — the Http store
+        exposes no row-level read surface for nx_answer_runs."""
         from nexus.mcp import core as _core
 
         telemetry = db.telemetry
@@ -381,7 +381,6 @@ class TestRunRecording:
         return seen
 
     def test_record_run_trace_true(self, tmp_path):
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
@@ -394,16 +393,7 @@ class TestRunRecording:
             assert seen["question"] == "test question"
             assert seen["final_text"] == "the answer"
 
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT * FROM nx_answer_runs"
-                ).fetchone()
-                assert row is not None
-                assert row[1] == "test question"   # question
-                assert row[5] == "the answer"      # final_text
-
     def test_record_run_trace_false_redacts(self, tmp_path):
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
@@ -418,13 +408,6 @@ class TestRunRecording:
             assert seen["question"] == "[redacted]"
             assert seen["final_text"] == "[redacted]"
 
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT * FROM nx_answer_runs"
-                ).fetchone()
-                assert row[1] == "[redacted]"   # question
-                assert row[5] == "[redacted]"   # final_text
-
     def test_record_run_lands_via_t2_telemetry(self, tmp_path):
         """Regression for nexus-598n + nexus-pyzk7: the MCP call sites write
         through the telemetry *store* (``db.telemetry``), not a raw ``.conn``.
@@ -438,7 +421,6 @@ class TestRunRecording:
         backend-blind contract — asserted here on BOTH substrates via the
         no-silent-drop spy in ``_record_and_capture``.
         """
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         path = tmp_path / "mem.db"
@@ -453,12 +435,6 @@ class TestRunRecording:
             assert seen["question"] == "integration-probe"
             assert seen["plan_id"] == 7
             assert seen["step_count"] == 2
-
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT question, plan_id, step_count FROM nx_answer_runs"
-                ).fetchone()
-                assert row == ("integration-probe", 7, 2)
 
 
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
@@ -1880,7 +1856,6 @@ class TestNxAnswerCostStub:
 
     def test_cost_usd_recorded_as_zero(self, tmp_path):
         """_nx_answer_record_run stores cost_usd=0.0 (P5 stub — not real cost)."""
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
@@ -1893,13 +1868,6 @@ class TestNxAnswerCostStub:
             # tracking ships, this test documents the before state and must
             # be updated.
             assert seen["cost_usd"] == 0.0
-
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT cost_usd FROM nx_answer_runs"
-                ).fetchone()
-                assert row is not None
-                assert row[0] == 0.0
 
     def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
         """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""

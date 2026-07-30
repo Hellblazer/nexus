@@ -324,11 +324,23 @@ class T2Database:
         self.RENAME_LOCK: threading.RLock = threading.RLock()
 
         # ── Construct domain stores ───────────────────────────────────
+        # RDR-158 P3 (nexus-7bomn): the facade is the T2 entry seam, so it
+        # is where the retired =sqlite opt-out fails LOUD. The per-site
+        # selectors are collapsed (service is the only backend), which
+        # would leave a stranded shell's NX_STORAGE_BACKEND[_<STORE>]=sqlite
+        # silently ignored — the resolver raises the stranded-install
+        # redirect instead. Validates the facade's own stores only; the
+        # ``catalog`` / ``t1`` vars are validated where those tiers route
+        # (see storage_mode.T2_FACADE_STORES).
+        from nexus.db.storage_mode import T2_FACADE_STORES, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+
+        for _store in T2_FACADE_STORES:
+            storage_backend_for(_store)
+
         # RDR-152 nexus-gmiaf.4 routing seam, COLLAPSED in nexus-i711w
         # Stage 2 sub-stage A3: HttpMemoryStore is the only memory store —
         # the SQLite MemoryStore it used to select is deleted. Reads
         # NX_SERVICE_HOST / NX_SERVICE_PORT / NX_SERVICE_TOKEN from env.
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore as _HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
@@ -339,32 +351,14 @@ class T2Database:
         from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         self.plans: HttpPlanLibrary = HttpPlanLibrary()
         # RDR-152 nexus-gmiaf.14 seam, COLLAPSED in nexus-i711w Stage 2
-        # sub-stage C: HttpTaxonomyStore is the only taxonomy store, because
-        # the SQLite CatalogTaxonomy it used to select is deleted.
-        #
-        # EAGER on the service path, deferred otherwise. Two constraints meet
-        # here and only this shape satisfies both:
-        #
-        #  * Constructing unconditionally would RAISE for =sqlite callers that
-        #    never touch ``.taxonomy`` — and those callers are sub-stage A's
-        #    subject (the SQLite chash / catalog rename data plane), not this
-        #    one. Failing them here is scope bleed across a boundary this
-        #    staged deletion exists to hold.
-        #  * Deferring unconditionally changes WHEN the service endpoint is
-        #    first resolved, and other subsystems turned out to depend on that
-        #    incidentally: making it fully lazy broke an unrelated catalog
-        #    store-hook path in test_memory. That dependency is undocumented
-        #    and fragile, but a deletion sub-stage is the wrong place to
-        #    discover and re-plumb it.
-        #
-        # So: on SERVICE (every shipping install) construction happens exactly
-        # when it always did, and nothing observes a change. Off it, the store
-        # is left unbuilt and the property raises on first ACCESS.
-        self._taxonomy: Any = (
-            _HttpTaxonomyStore()
-            if storage_backend_for("taxonomy") == StorageBackend.SERVICE
-            else None
-        )
+        # sub-stage C (store) and Stage 3 (selector, nexus-7bomn):
+        # HttpTaxonomyStore is the only taxonomy store, constructed eagerly
+        # and unconditionally — the =sqlite arm that used to defer it is
+        # gone with the opt-out. Eager matters: making it lazy changed WHEN
+        # the service endpoint is first resolved and broke an unrelated
+        # catalog store-hook path in test_memory (see the sub-stage C
+        # history in git for the full account).
+        self._taxonomy: Any = _HttpTaxonomyStore()
 
         # RDR-152 nexus-gmiaf.12 seam, COLLAPSED in nexus-i711w Stage 2
         # sub-stage A: HttpTelemetryStore is the only telemetry store — the
@@ -411,32 +405,13 @@ class T2Database:
 
     @property
     def taxonomy(self) -> "HttpTaxonomyStore":
-        """Lazy-construct the taxonomy store on first access.
+        """The service-backed taxonomy store (constructed in ``__init__``).
 
-        Service-only since nexus-i711w Stage 2 sub-stage C. A ``=sqlite``
-        request RAISES here rather than quietly returning the service store:
-        silently handing back a different substrate than the caller asked for
-        is the silent-fallback class the project bans, and it would be at its
-        worst here — the caller would believe it was reading its own local,
-        never-migrated topics while actually reading the service's.
-
-        Raising on ACCESS rather than on construction is what keeps this inside
-        the sub-stage: only code that actually reaches for a SQLite taxonomy
-        fails, not every =sqlite T2Database.
+        Service-only since nexus-i711w Stage 2 sub-stage C; the =sqlite
+        lazy/raise arm this property used to carry died with the opt-out
+        (RDR-158 P3, nexus-7bomn — the facade constructor now validates
+        the env instead). The property survives for the setter below.
         """
-        if self._taxonomy is None:
-            from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-            if storage_backend_for("taxonomy") != StorageBackend.SERVICE:
-                raise RuntimeError(
-                    "NX_STORAGE_BACKEND[_TAXONOMY]=sqlite selects a taxonomy "
-                    "store that no longer exists: the SQLite CatalogTaxonomy "
-                    "was deleted in the RDR-158 P4 retirement. Unset it "
-                    "(service is the default) and run `nx upgrade` if you "
-                    "still hold unmigrated SQLite topics."
-                )
-            self._taxonomy = HttpTaxonomyStore()
         return self._taxonomy
 
     @taxonomy.setter
@@ -888,27 +863,12 @@ class T2Database:
         # facade is public API and the cascade below is the load-bearing
         # part: without this resolution, ``purge_assignments_for_doc`` never
         # runs and topic_assignments leak silently, which no FK covers.
+        # (The raw-SQLite lookup arm died with the stores; the public read's
+        # access_count increment is immaterial on a row about to be deleted.)
         if id is not None and (project is None or title is None):
-            # Function-local: this module deliberately keeps its top-level
-            # imports cheap for the CLI cold-start path (see the
-            # _sanitize_fts5 comment above).
-            from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — cold-start import discipline
-
-            if has_raw_access(self.memory):
-                # SQLite arm: indexed lookup on the raw connection, avoiding
-                # the access_count side-effect of ``memory.get(id=...)``.
-                with self.memory._lock:
-                    row = self.memory.conn.execute(
-                        "SELECT project, title FROM memory WHERE id = ?", (id,)
-                    ).fetchone()
-                if row is not None:
-                    project, title = row[0], row[1]
-            else:
-                # Service arm: the public read. Its access_count increment is
-                # immaterial on a row this call is about to delete.
-                entry = self.memory.get(id=id)
-                if entry is not None:
-                    project, title = entry["project"], entry["title"]
+            entry = self.memory.get(id=id)
+            if entry is not None:
+                project, title = entry["project"], entry["title"]
         deleted = self.memory.delete(project=project, title=title, id=id)
         if deleted and project and title:
             self.taxonomy.purge_assignments_for_doc(project=project, title=title)

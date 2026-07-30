@@ -71,7 +71,7 @@ class TestAspectsGcRefusesInsteadOfFalseClean:
         assert "orphan(s)" not in combined, (
             f"still printing an orphan count it never computed: {combined!r}"
         )
-        assert "sqlite mode" in combined
+        assert "retired" in combined
         assert "Traceback" not in combined
 
     def test_refusal_states_what_IS_guaranteed_and_what_is_not(

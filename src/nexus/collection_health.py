@@ -164,91 +164,28 @@ def _default_telemetry_stats_fn(col: str) -> dict[str, Any]:
 
 
 def _default_projection_rank_fn(cols: list[str]) -> dict[str, int]:
-    """Rank collections by their incoming cross-projection count.
+    """Projection-rank enrichment column — currently always empty.
 
-    Rank 1 = receives from the most distinct source collections.
-    Collections with no incoming projections are absent from the map;
-    the orchestrator treats that as ``None``.
+    Ranked collections by DISTINCT incoming projection sources via raw SQL
+    over the local SQLite ``topic_assignments``; that store was deleted in
+    the RDR-158 P4 retirement and the engine's taxonomy API does not expose
+    the aggregate yet (nexus-i711w.1 GAP). nexus-9613q.4: this is a
+    diagnostic ENRICHMENT column, so degrade-to-empty is the right contract
+    (the display renders absence) — contrast merge_candidates, whose raw
+    read WAS the command's output and which reports itself unavailable.
     """
-    t2 = _open_t2()
-    if t2 is None:
-        return {}
-    try:
-        from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — branch-local import only needed on the raw-access service-mode check
-        # nexus-9613q.4: this is a diagnostic ENRICHMENT column, so silent
-        # degrade-to-empty in service mode is the right contract (the display
-        # renders absence). Contrast merge_candidates, whose raw-taxonomy read
-        # IS the command's primary output, so it returns an explicit
-        # "unavailable in service mode" message instead. Do not "fix" this into
-        # a message without also revisiting that asymmetry.
-        if not has_raw_access(t2.taxonomy):
-            return {}  # service mode: projection-rank display unavailable
-        conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
-        rows = conn.execute(
-            "SELECT t.collection AS col, "
-            "COUNT(DISTINCT ta.source_collection) AS src_count "
-            "FROM topic_assignments ta "
-            "JOIN topics t ON ta.topic_id = t.id "
-            "WHERE t.collection IN ({}) "
-            "GROUP BY t.collection "
-            "ORDER BY src_count DESC".format(
-                ",".join("?" * len(cols)) or "''"
-            ),
-            cols,
-        ).fetchall()
-        return {row[0]: idx + 1 for idx, row in enumerate(rows)}
-    except Exception:  # noqa: BLE001 — diagnostic enrichment column; degrade to empty rank map rather than fail the report
-        return {}
-    finally:
-        t2.close()
+    return {}
 
 
 def _default_hub_score_fn(col: str) -> float | None:
-    """Ratio of *col*'s chunks assigned to top-10 cross-collection hubs.
+    """Hub-score enrichment column — currently always ``None``.
 
-    ``None`` when the taxonomy tables don't exist yet or the collection
-    has zero chunks.
+    Computed the top-10-hub assignment ratio via raw SQL over the local
+    SQLite ``topic_assignments``; same disposition as
+    :func:`_default_projection_rank_fn` (store deleted, no engine
+    aggregate yet, degrade-to-absent per nexus-9613q.4).
     """
-    t2 = _open_t2()
-    if t2 is None:
-        return None
-    try:
-        from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — branch-local import only needed on the raw-access service-mode check
-        if not has_raw_access(t2.taxonomy):
-            return None  # service mode: hub-score display unavailable
-        conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
-        # Top-10 hubs: topics whose assignments span the most distinct
-        # source collections. Ranks deterministically by
-        # ``(src_count DESC, topic_id ASC)``.
-        hub_rows = conn.execute(
-            "SELECT ta.topic_id "
-            "FROM topic_assignments ta "
-            "GROUP BY ta.topic_id "
-            "ORDER BY COUNT(DISTINCT ta.source_collection) DESC, ta.topic_id ASC "
-            "LIMIT 10"
-        ).fetchall()
-        if not hub_rows:
-            return None
-        hub_ids = tuple(r[0] for r in hub_rows)
-        total = conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE source_collection = ?",
-            (col,),
-        ).fetchone()[0] or 0
-        if total == 0:
-            return None
-        in_hubs = conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE source_collection = ? AND topic_id IN ({})".format(
-                ",".join("?" * len(hub_ids))
-            ),
-            (col, *hub_ids),
-        ).fetchone()[0] or 0
-        return in_hubs / total
-    except Exception:  # noqa: BLE001 — diagnostic hub-score column; degrade to None rather than fail the report
-        return None
-    finally:
-        t2.close()
+    return None
 
 
 def _default_chash_coverage_fn(col: str) -> float | None:

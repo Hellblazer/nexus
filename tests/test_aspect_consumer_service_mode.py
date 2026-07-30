@@ -684,14 +684,18 @@ class TestGcFixturesServiceModeGuard:
             f"Got unhandled exception traceback: {result.output!r}"
         )
 
-    def test_missing_db_still_exits_zero_in_service_mode(
+    def test_refusal_is_unconditional_even_without_a_local_db(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         service_mode: None,
     ) -> None:
-        """A missing T2 database exits 0 (nothing to clean) regardless of
-        service mode — the db-absent guard fires before the service guard."""
+        """The verb is a guided refusal regardless of local-file state.
+
+        The old db-absent early-exit ("nothing to do", exit 0) fired before
+        the service guard; with the local sweep deleted (RDR-158 P3,
+        nexus-7bomn) there is no local work the file's presence could
+        gate, so the refusal is the verb's entire behaviour."""
         mem_path = tmp_path / "does_not_exist.db"
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path",
@@ -699,7 +703,8 @@ class TestGcFixturesServiceModeGuard:
         )
         runner = CliRunner()
         result = runner.invoke(aspects_group, ["gc-fixtures", "--yes"])
-        assert result.exit_code == 0, (
-            f"Missing db must still exit 0; got: {result.exit_code}, output: {result.output!r}"
+        assert result.exit_code == 2, (
+            f"Expected the unconditional UsageError refusal (exit 2); "
+            f"got: {result.exit_code}, output: {result.output!r}"
         )
-        assert "nothing to do" in (result.output or "")
+        assert "retired" in (result.output or "")

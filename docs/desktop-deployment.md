@@ -15,11 +15,11 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 >
 > **One service.** T2 (notes/plans) and T3 both serve through the native
 > `nexus-service` (Postgres 17 + pgvector) — the RDR-152 hard default, and now
-> the only path. The SQLite T2 daemon is **retired** (`nexus-i711w`): nothing
-> auto-starts it and the verb group is gone. `NX_STORAGE_BACKEND=sqlite` still
-> selects the SQLite substrate for the migration source, but with the daemon
-> that arbitrated it removed, `nx memory`, `nx config`, `nx remediation` and
-> `nx service` fail loud under it (reads included). Migrating **forward** is
+> the only path. The SQLite T2 substrate is **deleted** (`nexus-i711w`) and
+> `NX_STORAGE_BACKEND=sqlite` is retired (RDR-158 P3): setting it is a hard
+> error carrying the stranded-install redirect — the on-disk SQLite files are
+> frozen migration sources readable only by the last migration-capable 6.x
+> release. Migrating **forward** is
 > unaffected — `nx doctor` and `nx upgrade` do not go through that path.
 
 ## Surface 1: Claude Code (terminal)

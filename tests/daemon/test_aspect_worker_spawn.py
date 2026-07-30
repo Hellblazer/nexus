@@ -128,25 +128,8 @@ def test_ensure_aspect_worker_service_mode_uses_daemon(monkeypatch) -> None:
     assert inproc_calls == []              # NO in-process thread in service mode
 
 
-def test_ensure_aspect_worker_local_mode_uses_in_process(monkeypatch) -> None:
-    monkeypatch.setattr(storage_mode, "storage_backend_for",
-                        lambda _s: storage_mode.StorageBackend.SQLITE)
-    daemon_calls: list = []
-    inproc_calls: list = []
-    monkeypatch.setattr("nexus.daemon.aspect_worker_daemon.ensure_aspect_worker_daemon",
-                        lambda **k: daemon_calls.append(k) or True)
-    monkeypatch.setattr(aw, "ensure_worker_started", lambda *a, **k: inproc_calls.append(1))
-
-    aw._ensure_aspect_worker()
-    assert inproc_calls == [1]             # in-process thread kept in local mode
-    assert daemon_calls == []              # NO daemon spawn in local mode
-
-
 def test_ensure_aspect_worker_spawn_failure_is_swallowed(monkeypatch) -> None:
     """The row is already enqueued; a daemon-spawn failure must not fail the store."""
-    monkeypatch.setattr(storage_mode, "storage_backend_for",
-                        lambda _s: storage_mode.StorageBackend.SERVICE)
-
     def _boom(**_k):
         raise RuntimeError("spawn blew up")
 

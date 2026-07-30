@@ -1537,8 +1537,9 @@ def get_t1_database(
         - No inherited session and no lease → mints a CLI-dedicated,
           persisted session id (see :func:`_cli_dedicated_session_id`) and
           returns a :class:`_CliDedicatedScratchStore` (self-healing wrapper).
-    * Explicit ``sqlite`` opt-out (or ``NX_T1_ISOLATED=1``)
-      → :class:`T1Database` (ChromaDB path, unchanged).
+    * ``NX_T1_ISOLATED=1`` → :class:`T1Database` (in-process ephemeral
+      scratch). The ``=sqlite`` opt-out that used to route here as well
+      hard-errors instead (RDR-158 P3, nexus-7bomn).
 
     The ``session_id`` and ``client`` arguments are forwarded to ``T1Database``
     on the Chroma path; they are ignored on the service path (session_id is
@@ -1551,7 +1552,7 @@ def get_t1_database(
     ``promote``, ``delete``, ``clear``, ``resolve_prefix_candidates``, and
     the ``session_id`` property.  All methods are available on every path.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-local import (factory-time backend selection)
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deliberate function-local import (factory-time env validation)
 
     # nexus-h8rf6 (shakeout finding 13): explicit isolation WINS over backend
     # routing. NX_T1_ISOLATED=1 is the documented escape hatch every T1 error
@@ -1562,59 +1563,62 @@ def get_t1_database(
     if os.environ.get("NX_T1_ISOLATED") == "1":
         return T1Database(session_id=session_id, client=client)
 
-    if storage_backend_for("t1") == StorageBackend.SERVICE:
-        from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — rare/branch-local import (SERVICE backend path only)
+    # RDR-158 P3 (nexus-7bomn): validation only — the =sqlite opt-out arm
+    # (T1Database at the tail of this factory) died with the opt-out; a
+    # stale NX_STORAGE_BACKEND[_T1]=sqlite export hard-errors here with the
+    # stranded-install redirect instead of being silently ignored.
+    storage_backend_for("t1")
+    from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — rare/branch-local import (SERVICE backend path only)
 
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local import (CLI-dedicated / lease path only)
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local import (CLI-dedicated / lease path only)
 
-        config_dir = nexus_config_dir()
+    config_dir = nexus_config_dir()
 
-        # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
-        # are the SAME decision Branch 0 (mcp.core._t1_lifespan) makes
-        # -- both now call the ONE shared implementation so they cannot
-        # silently diverge again. See resolve_t1_routing_tiers's docstring
-        # for the full "why one function, why not tier 3 too" reasoning.
-        decision = resolve_t1_routing_tiers(config_dir)
-        if decision.action == T1RoutingAction.USE_INHERITED:
-            return HttpScratchStore()  # type: ignore[return-value]
-        if decision.action == T1RoutingAction.USE_LEASED:
-            return HttpScratchStore(  # type: ignore[return-value]
-                session_id=decision.session_id, _session_token=decision.session_token
-            )
-
-        # nexus-rn3wo.1: bare CLI, no inherited live MCP session, and no
-        # published lease for a resolvable session id either
-        # (decision.action == MINT). Mint (or reuse) the CLI-dedicated
-        # persisted session id and self-heal on a rotated-token 401 from a
-        # racing sibling bare-CLI invocation. Deliberately IGNORES
-        # decision.session_id here -- the CLI-dedicated identity is a
-        # separate, generic, shared-across-bare-invocations identity, never
-        # tied to whatever (if anything) resolve_active_session_id() found;
-        # see resolve_t1_routing_tiers's docstring for why tier 3 stays
-        # caller-specific rather than unified too.
-        dedicated_id = _cli_dedicated_session_id(config_dir)
-        # nexus-jc33g: the dedicated-id file gave cross-invocation id
-        # continuity, but the TOKEN was re-minted unconditionally on every
-        # fresh bare-CLI process — a full extra round trip preceding every
-        # op (roughly DOUBLING the measured per-op latency). The token now
-        # rides the same published-lease mechanism the live-MCP sessions
-        # use (freshness-checked per nexus-ngcpo; 0600 atomic publish), so
-        # a fresh invocation borrows a still-fresh cached token and only
-        # mints when the cache is absent/expired — serialized under the
-        # per-id flock so racing bare-CLI starts converge on ONE mint
-        # instead of rotating each other (the CLI-vs-CLI churn the 401
-        # self-heal below existed to mop up).
-        # nexus-by875 (critic Critical): the construction-time mint/borrow is
-        # part of "the whole op" — it gets the same wall-clock deadline the
-        # per-op legs honor, bounding the lock wait and gating the mint-leg
-        # start. An in-flight leg still runs to its own httpx timeout; the
-        # budget bounds which legs may START.
-        deadline = time.monotonic() + _t1_cli_op_budget_seconds()
-        token, _minted, _ttl = _lock_guarded_mint_or_borrow(
-            dedicated_id, config_dir, context="CLI-dedicated session mint",
-            deadline=deadline,
+    # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
+    # are the SAME decision Branch 0 (mcp.core._t1_lifespan) makes
+    # -- both now call the ONE shared implementation so they cannot
+    # silently diverge again. See resolve_t1_routing_tiers's docstring
+    # for the full "why one function, why not tier 3 too" reasoning.
+    decision = resolve_t1_routing_tiers(config_dir)
+    if decision.action == T1RoutingAction.USE_INHERITED:
+        return HttpScratchStore()  # type: ignore[return-value]
+    if decision.action == T1RoutingAction.USE_LEASED:
+        return HttpScratchStore(  # type: ignore[return-value]
+            session_id=decision.session_id, _session_token=decision.session_token
         )
-        store = HttpScratchStore(session_id=dedicated_id, _session_token=token)
-        return _CliDedicatedScratchStore(dedicated_id, store, config_dir)  # type: ignore[return-value]
 
-    return T1Database(session_id=session_id, client=client)
+    # nexus-rn3wo.1: bare CLI, no inherited live MCP session, and no
+    # published lease for a resolvable session id either
+    # (decision.action == MINT). Mint (or reuse) the CLI-dedicated
+    # persisted session id and self-heal on a rotated-token 401 from a
+    # racing sibling bare-CLI invocation. Deliberately IGNORES
+    # decision.session_id here -- the CLI-dedicated identity is a
+    # separate, generic, shared-across-bare-invocations identity, never
+    # tied to whatever (if anything) resolve_active_session_id() found;
+    # see resolve_t1_routing_tiers's docstring for why tier 3 stays
+    # caller-specific rather than unified too.
+    dedicated_id = _cli_dedicated_session_id(config_dir)
+    # nexus-jc33g: the dedicated-id file gave cross-invocation id
+    # continuity, but the TOKEN was re-minted unconditionally on every
+    # fresh bare-CLI process — a full extra round trip preceding every
+    # op (roughly DOUBLING the measured per-op latency). The token now
+    # rides the same published-lease mechanism the live-MCP sessions
+    # use (freshness-checked per nexus-ngcpo; 0600 atomic publish), so
+    # a fresh invocation borrows a still-fresh cached token and only
+    # mints when the cache is absent/expired — serialized under the
+    # per-id flock so racing bare-CLI starts converge on ONE mint
+    # instead of rotating each other (the CLI-vs-CLI churn the 401
+    # self-heal below existed to mop up).
+    # nexus-by875 (critic Critical): the construction-time mint/borrow is
+    # part of "the whole op" — it gets the same wall-clock deadline the
+    # per-op legs honor, bounding the lock wait and gating the mint-leg
+    # start. An in-flight leg still runs to its own httpx timeout; the
+    # budget bounds which legs may START.
+    deadline = time.monotonic() + _t1_cli_op_budget_seconds()
+    token, _minted, _ttl = _lock_guarded_mint_or_borrow(
+        dedicated_id, config_dir, context="CLI-dedicated session mint",
+        deadline=deadline,
+    )
+    store = HttpScratchStore(session_id=dedicated_id, _session_token=token)
+    return _CliDedicatedScratchStore(dedicated_id, store, config_dir)  # type: ignore[return-value]
+

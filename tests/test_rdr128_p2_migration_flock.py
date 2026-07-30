@@ -122,56 +122,6 @@ def test_flock_not_stranded_after_holder_thread_finishes(tmp_path: Path) -> None
 # its fixture with the very function it is asserting about. Pinning against a
 # red owner would have claimed coverage that did not hold, so it was fixed
 # first.
-@pytest.mark.usefixtures("local_t2_backend")
-def test_bootstrap_schema_waits_on_held_migration_flock(tmp_path: Path) -> None:
-    """The daemon's startup migration (bootstrap_schema) takes the same
-    flock — while an external holder holds it, bootstrap_schema BLOCKS, then
-    completes once the lock frees."""
-    from nexus.db.migrations import t2_migration_flock
-    from nexus.db.t2 import T2Database
-
-    db = tmp_path / "memory.db"
-    hold_seconds = 0.4
-    holding = threading.Event()
-    release = threading.Event()
-
-    def _external_holder() -> None:
-        with t2_migration_flock(tmp_path):  # same dir as db
-            holding.set()
-            release.wait(timeout=10)
-
-    holder = threading.Thread(target=_external_holder)
-    holder.start()
-    assert holding.wait(timeout=5)
-
-    def _release_after() -> None:
-        time.sleep(hold_seconds)
-        release.set()
-
-    rel = threading.Thread(target=_release_after)
-    rel.start()
-
-    start = time.monotonic()
-    T2Database.bootstrap_schema(db)  # must wait for the flock, then succeed
-    elapsed = time.monotonic() - start
-
-    rel.join(timeout=5)
-    holder.join(timeout=5)
-
-    assert elapsed >= hold_seconds - 0.1, "bootstrap_schema did not wait on the flock"
-    # Migration actually ran.
-    check = sqlite3.connect(str(db))
-    try:
-        tables = {
-            r[0] for r in check.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-    finally:
-        check.close()
-    assert "_nexus_version" in tables
-
-
 # NO nx-upgrade quiesce-ordering section: it pinned the
 # quiesce -> migrate -> restore sequence around `nx upgrade`, and both ends of
 # that sequence (`_quiesce_daemon`, `_cycle_daemon_to_current`) retired with the

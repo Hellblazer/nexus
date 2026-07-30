@@ -8,14 +8,12 @@ docstring: the guard properties raise ``AttributeError`` and *never*
 and break the guard contract".
 
 That is not stylistic. ``hasattr()`` swallows only ``AttributeError``; anything
-else propagates. The whole sanctioned service-mode idiom is::
-
-    if not has_raw_access(store):
-        ...take the service branch...
-
-A guard raising ``RuntimeError`` turns that safe probe into a crash in service
-mode — the mechanism that exists to make the check safe becomes the thing that
-breaks it, and only in the deployment where it matters.
+else propagates. A guard raising ``RuntimeError`` turns a safe ``hasattr``
+probe into a crash — the mechanism that exists to make the check safe becomes
+the thing that breaks it. (The ``has_raw_access`` helper that packaged the
+probe died with its last caller when the =sqlite opt-out was removed,
+RDR-158 P3 nexus-7bomn; the AttributeError-only contract remains load-bearing
+for any direct ``hasattr`` probe.)
 
 ``HttpCatalogClient._db`` was violating this (found by the nexus-at2ff sweep,
 2026-07-25). It was latent — no live ``hasattr(cat, "_db")`` caller existed —
@@ -26,8 +24,6 @@ cannot reintroduce it.
 from __future__ import annotations
 
 import pytest
-
-from nexus.db.storage_mode import has_raw_access
 
 
 def _service_stores() -> list[tuple[str, object]]:
@@ -81,7 +77,7 @@ def test_guard_raises_attributeerror_not_runtimeerror(name: str, store: object) 
         # subclass of AttributeError-lookalike would slip through.
         assert not isinstance(exc.value, RuntimeError), (
             f"{name}.{attr} raised a RuntimeError. hasattr() does not swallow "
-            f"it, so has_raw_access({name}) CRASHES in service mode instead of "
+            f"it, so a hasattr({name}, ...) probe CRASHES instead of "
             f"returning False (nexus-xj744)."
         )
 
@@ -101,12 +97,3 @@ def test_hasattr_returns_false_rather_than_raising(name: str, store: object) -> 
             f"hasattr({name}, {attr!r}) did not return False — it either "
             f"raised (guard contract violated) or the attribute really exists."
         )
-
-
-@pytest.mark.parametrize("name,store", _service_stores(), ids=lambda v: v if isinstance(v, str) else "")
-def test_has_raw_access_is_false_for_every_service_store(name: str, store: object) -> None:
-    """The sanctioned probe must work on all of them."""
-    assert has_raw_access(store) is False, (
-        f"has_raw_access({name}) is not False — service-mode branches keyed on "
-        f"it would take the raw-SQLite path against a service-backed store."
-    )

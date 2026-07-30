@@ -157,14 +157,8 @@ def _assert_malformed_query_rejected(
     neither can drift unnoticed, and so the service arm's assertion FAILS
     the moment nexus-senub is fixed.
     """
-    from nexus.db.storage_mode import has_raw_access
-
     call = getattr(db, method)
 
-    if has_raw_access(db.memory):
-        with pytest.raises(ValueError, match="Invalid search query"):
-            call(*args)
-        return
 
     result = call(*args)
     assert result == [], (

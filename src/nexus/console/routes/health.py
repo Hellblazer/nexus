@@ -162,67 +162,19 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
 def _collect_aspect_queue_data() -> dict[str, Any]:
     """Return aspect_extraction_queue depth + per-status breakdown.
 
-    Returns ``{"present": False}`` when the T2 database or table is
-    missing (pre-RDR-089 install). ``{"present": True, "total": N,
-    "by_status": {status: count, ...}, "oldest_pending": iso_str|None,
-    "failed_count": N}`` otherwise.
+    nexus-k0luu: reads the SERVICE queue (PG) — the console used to read
+    the frozen SQLite queue on a migrated box and report it as current
+    (false-clean, second surface of the doctor fix). The SQLite reader
+    leg died with the =sqlite opt-out (RDR-158 P3, nexus-7bomn); the
+    resolver call below is validation only, so a stranded =sqlite export
+    hard-errors on this route rather than being silently ignored (the
+    service collector constructs HttpAspectQueue directly, bypassing
+    T2Database's validation seam).
     """
-    import sqlite3 as _sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.config import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    # nexus-k0luu (console twin of the doctor fix): without this branch the
-    # console reported the FROZEN SQLite queue as current on a migrated box,
-    # while the live queue was in PG. Same false-clean, second surface.
-    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
-        return _collect_aspect_queue_data_service()
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        return {"present": False}
-
-    try:
-        conn = _sqlite3.connect(str(db_path))  # epsilon-allow: console health probe — must operate when daemon offline; read-only schema-presence check
-    except _sqlite3.Error:
-        return {"present": False}
-
-    try:
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='aspect_extraction_queue'"
-        ).fetchone()
-        if not has_table:
-            return {"present": False}
-
-        total = conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue"
-        ).fetchone()[0]
-        by_status_rows = conn.execute(
-            "SELECT status, COUNT(*) FROM aspect_extraction_queue "
-            "GROUP BY status"
-        ).fetchall()
-        by_status = {status: int(count) for status, count in by_status_rows}
-
-        oldest = conn.execute(
-            "SELECT MIN(enqueued_at) FROM aspect_extraction_queue "
-            "WHERE status IN ('pending', 'processing')"
-        ).fetchone()
-        oldest_pending = oldest[0] if oldest and oldest[0] else None
-
-        failed_count = int(by_status.get("failed", 0))
-
-        return {
-            "present": True,
-            "total": int(total),
-            "by_status": by_status,
-            "oldest_pending": oldest_pending,
-            "failed_count": failed_count,
-        }
-    except _sqlite3.Error:
-        return {"present": False}
-    finally:
-        conn.close()
+    storage_backend_for("aspect_queue")
+    return _collect_aspect_queue_data_service()
 
 
 def _age_str(seconds: int) -> str:

@@ -13,10 +13,10 @@ operator-facing verb so upgrade docs and MigrationError messages can
 point to a concrete, runnable command.
 
 RDR-120 §A8 / nexus-yulol: ``gc-fixtures`` was carved out of the PK-swap
-migrations' Step 2 fixture-DELETE block. The substrate retains only
-the structurally-required PK swap; operators run the fixture cleanup
-explicitly against named patterns. ``_FIXTURE_COLLECTION_PATTERNS``
-lives here, not in ``nexus.db.migrations``.
+migrations' Step 2 fixture-DELETE block; it and ``aspects gc`` are
+unconditional guided refusals since the RDR-158 P4 retirement deleted
+the local SQLite stores they swept (the ``_FIXTURE_COLLECTION_PATTERNS``
+classifier died with the sweep).
 """
 from __future__ import annotations
 
@@ -24,29 +24,6 @@ import click
 import structlog
 
 _log = structlog.get_logger(__name__)
-
-
-#: Test-fixture collection prefixes/names recognised by ``gc-fixtures``.
-#: Patterns ending in ``-`` are LIKE-prefix matched; bare names are
-#: equality-matched. Operators with additional fixture collections
-#: should add them here.
-_FIXTURE_COLLECTION_PATTERNS: tuple[str, ...] = (
-    "knowledge__cli-",
-    "knowledge__nexus-integration-test",
-    "knowledge__reproducer",
-    "knowledge__pagtest",
-    "knowledge__pagend",
-)
-
-
-def _is_fixture_collection(collection: str) -> bool:
-    """Return True iff *collection* is a test-fixture name to hard-delete."""
-    for pat in _FIXTURE_COLLECTION_PATTERNS:
-        if pat.endswith("-") and collection.startswith(pat):
-            return True
-        if collection == pat:
-            return True
-    return False
 
 
 @click.group(name="aspects")
@@ -85,13 +62,9 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     """
     from nexus.aspect_worker import DrainTimeoutError, drain_worker  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import
 
     mem_path = default_db_path()
-    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
-        click.echo(f"Draining service aspect queue (timeout={timeout}s)...")
-    else:
-        click.echo(f"Draining aspect queue at {mem_path} (timeout={timeout}s)...")
+    click.echo(f"Draining service aspect queue (timeout={timeout}s)...")
 
     try:
         drain_worker(mem_path, timeout=timeout, poll_interval=poll_interval)
@@ -120,101 +93,43 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     "is a dry-run report only.",
 )
 def aspects_gc(apply: bool) -> None:
-    """Garbage-collect document_aspects rows whose source document was deleted.
+    """RETIRED: the source_uri-keyed orphan sweep has no service equivalent.
 
     \b
-    An aspect row is orphan when its ``source_uri`` no longer appears
-    in the catalog ``documents`` table. This happens whenever a
-    document is removed (``cat.delete_document``, source-file removal,
-    rename) without a corresponding cleanup of the aspect rows. The
-    catalog and T2 databases are separate SQLite files (see
-    ``docs/architecture.md``) so SQL cross-DB FK CASCADE is not
-    available; this verb is the periodic-sweep equivalent.
-
-    \b
-    Default is dry-run: reports the orphan count without writing.
-    Pass ``--apply`` to actually delete.
-
-    \b
-    Aspects with empty ``source_uri`` are NOT classified as orphans
-    (legacy / pre-RDR-096 P2.1 rows that lack the URI binding).
-    Address those via ``rename_collection`` or direct ``delete``
-    paths if needed.
-
-    \b
-    Examples:
-      nx aspects gc                  # dry-run report
-      nx aspects gc --apply          # actually delete
-
-    \b
-    Filed under nexus-urj4 (RDR-108 Phase 5 follow-up).
+    The sweep ATTACHed the local .catalog.db SQLite cache to the local T2 —
+    both substrates were deleted in the RDR-158 P4 retirement, so the verb
+    is an unconditional guided refusal (nexus-ingey precedent: refuse loud
+    rather than print a clean bill of health for a sweep that never ran).
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    # nexus-ingey: on the service backend HttpDocumentAspectsStore.delete_orphans
-    # is a documented (0, 0) noop, and (0, 0) is INDISTINGUISHABLE downstream from
-    # "examined every row, found nothing wrong" — this verb printed
-    # "examined 0 row(s) ... deleted 0 orphan(s)", which reads as a clean bill of
-    # health on a box the check never actually inspected. Refuse loud instead,
-    # mirroring the gc-fixtures guard below.
+    # nexus-ingey: on the service backend delete_orphans was a documented
+    # (0, 0) noop, and (0, 0) is INDISTINGUISHABLE downstream from
+    # "examined every row, found nothing wrong". Refuse loud instead.
     #
-    # State BOTH halves, because the honest answer is not simply "unavailable":
+    # State BOTH halves, because the honest answer is not simply
+    # "unavailable":
     #   - Rows orphaned by a DOCUMENT DELETE cannot accumulate on the service
     #     backend: fk-001-catalog-cross-store binds
     #     document_aspects (tenant_id, doc_id) -> catalog_documents
     #     (tenant_id, tumbler) ON DELETE CASCADE.
-    #   - The sweep THIS verb performs keys on source_uri, which that changeset
-    #     deliberately does NOT constrain ("a URI path string, not a catalog
-    #     tumbler reference"). So it has no service equivalent, and claiming a
-    #     clean sweep here would be a different lie from the one being fixed.
-    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        raise click.UsageError(
-            "aspects gc requires sqlite mode (document_aspects=service not "
-            "supported; the orphan sweep ATTACHes the .catalog.db SQLite cache, "
-            "which is unavailable over HTTP).\n"
-            "\n"
-            "On the service backend, aspect rows orphaned by a document delete "
-            "cannot accumulate: document_aspects.doc_id is FK-bound to "
-            "catalog_documents ON DELETE CASCADE (fk-001-catalog-cross-store).\n"
-            "\n"
-            "NOT covered by that FK: the source_uri-keyed sweep this verb "
-            "performs. source_uri is a path string, not a tumbler reference, and "
-            "is deliberately unconstrained — so this command can neither run nor "
-            "certify that class clean. Track: nexus-ingey."
-        )
-
-    mem_path = default_db_path()
-    cat_db = catalog_path() / ".catalog.db"
-
-    if not cat_db.exists():
-        click.echo(
-            f"No catalog at {cat_db}. Cannot identify orphans without "
-            "the live document set; run 'nx catalog setup' first.",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    with T2Database(mem_path) as db:  # epsilon-allow: aspects gc delete_orphans cross-DB ATTACHes the catalog database; not a routable single-store op (RDR-128 P3 documented-irreducible)
-        orphans, total = db.document_aspects.delete_orphans(
-            cat_db, dry_run=not apply,
-        )
-
-    verb = "would delete" if not apply else "deleted"
-    click.echo(
-        f"document_aspects: examined {total} row(s) with non-empty source_uri; "
-        f"{verb} {orphans} orphan(s) "
-        f"({orphans / total * 100:.1f}% orphan rate)"
-        if total > 0 else
-        f"document_aspects: examined 0 row(s) with non-empty source_uri; "
-        f"{verb} 0 orphan(s)"
+    #   - The sweep THIS verb performed keyed on source_uri, which that
+    #     changeset deliberately does NOT constrain ("a URI path string, not
+    #     a catalog tumbler reference"). So it has no service equivalent, and
+    #     claiming a clean sweep here would be a different lie from the one
+    #     being fixed.
+    raise click.UsageError(
+        "aspects gc is retired: the orphan sweep ATTACHed the local SQLite "
+        ".catalog.db to the local T2, and both substrates were deleted in "
+        "the RDR-158 P4 retirement (service/Postgres is the only backend).\n"
+        "\n"
+        "On the service backend, aspect rows orphaned by a document delete "
+        "cannot accumulate: document_aspects.doc_id is FK-bound to "
+        "catalog_documents ON DELETE CASCADE (fk-001-catalog-cross-store).\n"
+        "\n"
+        "NOT covered by that FK: the source_uri-keyed sweep this verb "
+        "performed. source_uri is a path string, not a tumbler reference, and "
+        "is deliberately unconstrained — so this command can neither run nor "
+        "certify that class clean. Track: nexus-ingey."
     )
-    if orphans > 0 and not apply:
-        click.echo(
-            "Re-run with --apply to actually delete the orphan rows."
-        )
 
 
 @aspects_group.command(name="gc-fixtures")
@@ -226,99 +141,23 @@ def aspects_gc(apply: bool) -> None:
     "command is a dry-run report only.",
 )
 def aspects_gc_fixtures(yes: bool) -> None:
-    """Hard-delete test-fixture aspect rows from document_aspects and
-    aspect_extraction_queue.
+    """RETIRED: fixture cleanup used raw SQLite cursors that no longer exist.
 
     \b
-    Recognises a small allowlist of test-fixture collection prefixes
-    (``knowledge__cli-*``, ``knowledge__nexus-integration-test``,
-    ``knowledge__reproducer``, ``knowledge__pagtest``,
-    ``knowledge__pagend``) that the test suite creates and that
-    should never persist into production. The PK-swap migrations
-    (4.30.0) used to drop these unconditionally; under RDR-120 §A8
-    that fixture cleanup is consumer-driven and explicit.
-
-    \b
-    Default is dry-run: reports the per-pattern row counts without
-    writing. Pass ``--yes`` to actually delete.
-
-    \b
-    Examples:
-      nx aspects gc-fixtures            # dry-run report
-      nx aspects gc-fixtures --yes      # actually delete
-
-    \b
-    Run this before ``nx upgrade`` if the PK-swap migration reports a
-    high-volume unmapped collection that matches one of the fixture
-    patterns. RDR-120 §A8 / nexus-yulol.
+    The verb issued raw SQL DELETEs against the local document_aspects and
+    aspect_extraction_queue SQLite tables (RDR-120 §A8 / nexus-yulol). Those
+    stores were deleted in the RDR-158 P4 retirement, so the verb is an
+    unconditional guided refusal. Track: nexus-gmiaf.37.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    raise click.UsageError(
+        "gc-fixtures is retired: fixture cleanup issued raw SQL DELETEs via "
+        "SQLite cursors, and the local SQLite document_aspects / "
+        "aspect_extraction_queue stores were deleted in the RDR-158 P4 "
+        "retirement (service/Postgres is the only backend; raw cursors are "
+        "unavailable over HTTP). Track: nexus-gmiaf.37"
+    )
 
-    mem_path = default_db_path()
-    if not mem_path.exists():
-        click.echo(f"No T2 database at {mem_path}; nothing to do.")
-        return
 
-    verb = "deleted" if yes else "would delete"
-    any_rows = False
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        raise click.UsageError(
-            "gc-fixtures requires sqlite mode "
-            "(document_aspects=service not supported; fixture cleanup uses raw "
-            "SQL DELETE via SQLite cursors which are unavailable over HTTP). "
-            "Track: nexus-gmiaf.37"
-        )
-
-    with T2Database(mem_path) as db:  # epsilon-allow: gc-fixtures issues raw multi-store DELETE via live cursors, no store method to route (RDR-128 P3 documented-irreducible)
-        # Both target stores expose ``conn`` directly (matching the
-        # existing module convention; their writers go through the
-        # store's lock, but the verb's serial DELETEs do not need the
-        # finer-grained guard). The aspect_extraction_queue table is
-        # post-RDR-108; older installs may not have it yet, so guard the
-        # presence check via PRAGMA.
-        stores = [
-            ("document_aspects", db.document_aspects.conn),  # epsilon-allow: guarded by storage_backend_for service-mode UsageError above (gmiaf.37)
-            ("aspect_extraction_queue", db.aspect_queue.conn),  # epsilon-allow: guarded by storage_backend_for service-mode UsageError above (gmiaf.37)
-        ]
-        for table, conn in stores:
-            present = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ).fetchone()
-            if not present:
-                continue
-            for pat in _FIXTURE_COLLECTION_PATTERNS:
-                if pat.endswith("-"):
-                    count_sql = (
-                        f"SELECT COUNT(*) FROM {table} WHERE collection LIKE ?"
-                    )
-                    delete_sql = (
-                        f"DELETE FROM {table} WHERE collection LIKE ?"
-                    )
-                    arg = pat + "%"
-                else:
-                    count_sql = (
-                        f"SELECT COUNT(*) FROM {table} WHERE collection = ?"
-                    )
-                    delete_sql = (
-                        f"DELETE FROM {table} WHERE collection = ?"
-                    )
-                    arg = pat
-
-                n = conn.execute(count_sql, (arg,)).fetchone()[0]
-                if n == 0:
-                    continue
-                any_rows = True
-                click.echo(f"  {table} / {pat}: {verb} {n} row(s)")
-                if yes:
-                    conn.execute(delete_sql, (arg,))
-                    conn.commit()
-    if not any_rows:
-        click.echo("No fixture rows found.")
-    elif not yes:
-        click.echo("Re-run with --yes to actually delete the fixture rows.")
 @aspects_group.command(name="backfill-source-uri")
 @click.option(
     "--apply",

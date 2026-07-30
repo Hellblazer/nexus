@@ -54,97 +54,45 @@ def t2_handle() -> Iterator[Any]:
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
-    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
-    # arbiter, so the SQLite single-writer T2 daemon is not in the picture —
-    # route directly to a service-backed T2Database (its ``.memory`` is an
-    # HttpMemoryStore with the same interface as ``T2Client.memory``). The
-    # daemon-client path below is the SQLite-mode arbiter only.
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-local import: circular-dep avoidance, db package imports commands surfaces
+    # RDR-152 nexus-fjwxh: the Java service (PG) is the write arbiter, so the
+    # SQLite single-writer T2 daemon is not in the picture — route directly to
+    # a service-backed T2Database (its ``.memory`` is an HttpMemoryStore with
+    # the same interface as ``T2Client.memory``). The daemon-client fail-loud
+    # arm this helper carried died with the =sqlite opt-out (RDR-158 P3,
+    # nexus-7bomn; its history — the vw7zk fail-loud ruling and the MCP/CLI
+    # asymmetry it accepted — is in git at df0c9c25).
+    import httpx  # noqa: PLC0415 — deliberate function-local import: branch-local, only used for the error taxonomy below
 
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        import httpx  # noqa: PLC0415 — deliberate function-local import: branch-local, only on SERVICE path
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import: circular-dep avoidance, db package imports commands surfaces
 
-        from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import: branch-local, only on SERVICE path
-
-        # Service mode routes T2Database to the HTTP service (PG arbiter), not a
-        # raw SQLite writer, so the RDR-128 single-writer concern does not apply.
-        #
-        # nexus-00en9: two distinct service-down failure points, both of which
-        # would otherwise reach Click as a raw traceback:
-        #  (a) PRE-YIELD construction — HttpMemoryStore resolves its endpoint via
-        #      resolve_service_config(), which raises RuntimeError fail-loud when
-        #      no lease/env is discoverable (the common "service never started"
-        #      case). Its message already names the operator fix.
-        #  (b) POST-YIELD RPC — the endpoint resolved (a lease existed) but the
-        #      service is unreachable/erroring when the actual RPC fires, raising
-        #      an httpx transport or status error.
-        try:
-            db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode routes to HTTP service, not a raw SQLite writer
-        except RuntimeError as exc:
-            raise click.ClickException(
-                f"T2 storage service unavailable: {exc}"
-            ) from exc
-        try:
-            yield db
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            # Narrow to transport/status failures (unreachable/erroring service).
-            # Decode/redirect/protocol httpx errors are service-side bugs that
-            # should keep their traceback during go-live, not be aliased to a
-            # reachability hint.
-            raise click.ClickException(
-                f"T2 storage service error: {exc}. "
-                "Check the storage service: nx doctor"
-            ) from exc
-        finally:
-            db.close()
-        return
-
-    # SQLite mode reached here via the T2 daemon, which arbitrated the single
-    # SQLite writer across host CLI + MCP + dev-container processes. The daemon
-    # is retired (nexus-i711w Stage 2 sub-stage B), so this branch FAILS LOUD.
+    # T2Database routes to the HTTP service (PG arbiter), not a raw SQLite
+    # writer, so the RDR-128 single-writer concern does not apply.
     #
-    # WHY FAIL LOUD RATHER THAN OPEN SQLITE DIRECTLY — the reason is NOT "the
-    # branch is going away in sub-stage A anyway"; that is the scope-bleed
-    # justification this staged deletion exists to forbid. It is that restoring
-    # function here would mean constructing a raw ``T2Database(default_db_path())``
-    # from the CLI, which this helper has NEVER done — pre-retirement it held a
-    # ``T2Client``, not a connection. That is a NEW raw-SQLite site, and the
-    # no-new-SQLite directive (2026-07-18) makes raising
-    # ``tests/test_no_new_sqlite.py``'s EPSILON_CENSUS an explicit Hal decision
-    # recorded on a bead, not a repair an implementer may make in passing.
-    #
-    # KNOWN AND DELIBERATE ASYMMETRY: the MCP side does keep direct SQLite arms
-    # (``mcp_infra.t2_ctx``, ``mcp_infra.t2_index_write``). Those are GRANDFATHERED
-    # census entries that retire with the stores in sub-stage A — not a licence
-    # for a new one here. The practical consequence is real and worth stating
-    # plainly: on a box holding ``NX_STORAGE_BACKEND=sqlite`` (the RDR-152
-    # copy-not-move rollback lever), MCP ``memory_put`` still writes while
-    # ``nx memory`` exits 1.
-    #
-    # DECIDED — Hal, 2026-07-28, on nexus-vw7zk: ACCEPT the fail-loud. Both
-    # alternatives invest in the substrate this arc exists to delete. Reusing the
-    # grandfathered ``mcp_infra`` arm would add a ``commands/`` -> ``mcp_infra``
-    # import that sub-stage A must then unpick; raising EPSILON_CENSUS would add
-    # a raw-SQLite site outright. Accepting adds nothing, and the whole branch
-    # goes in one piece in sub-stage A.
-    #
-    # THE COST IS NARROWER THAN IT READS, and this was measured rather than
-    # assumed: migrating FORWARD never touches this helper. ``nx upgrade`` and
-    # ``nx doctor`` construct ``T2Database`` directly (epsilon-allow), and the
-    # SQLite-mode E2E gate ``tests/e2e/t2-migration-sqlite/rehearse_t2.sh`` drives
-    # exactly those two verbs — it is unaffected. The migration rehearsals' SQLite
-    # legs (``seed_legacy.py``, ``rehearse_hole_punch.sh``) open ``T2Database``
-    # in-process, not via the CLI. What is dead is interactive browsing of a
-    # SQLite-mode store; the rollback lever itself still converges.
-    #
-    # NOTE this blocks READS (``nx memory list/get/search``) as well as writes —
-    # the yielded handle is the only path to the store, so there is no read-only
-    # half to preserve without the same new connection.
-    raise click.ClickException(
-        "The T2 daemon that arbitrated SQLite-mode access has been retired, and "
-        "this install is not on the storage service, so `nx memory`, `nx config`, "
-        "`nx remediation` and `nx service` cannot reach T2 storage (reads "
-        "included). Migrating forward is unaffected and is the supported path: "
-        "run `nx doctor` and, if it reports a pending substrate migration, "
-        "`nx upgrade` to converge onto Postgres."
-    )
+    # nexus-00en9: two distinct service-down failure points, both of which
+    # would otherwise reach Click as a raw traceback:
+    #  (a) PRE-YIELD construction — HttpMemoryStore resolves its endpoint via
+    #      resolve_service_config(), which raises RuntimeError fail-loud when
+    #      no lease/env is discoverable (the common "service never started"
+    #      case). Its message already names the operator fix.
+    #  (b) POST-YIELD RPC — the endpoint resolved (a lease existed) but the
+    #      service is unreachable/erroring when the actual RPC fires, raising
+    #      an httpx transport or status error.
+    try:
+        db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode routes to HTTP service, not a raw SQLite writer
+    except RuntimeError as exc:
+        raise click.ClickException(
+            f"T2 storage service unavailable: {exc}"
+        ) from exc
+    try:
+        yield db
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        # Narrow to transport/status failures (unreachable/erroring service).
+        # Decode/redirect/protocol httpx errors are service-side bugs that
+        # should keep their traceback during go-live, not be aliased to a
+        # reachability hint.
+        raise click.ClickException(
+            f"T2 storage service error: {exc}. "
+            "Check the storage service: nx doctor"
+        ) from exc
+    finally:
+        db.close()

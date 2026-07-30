@@ -30,34 +30,6 @@ import pytest
 from click.testing import CliRunner
 
 
-@pytest.fixture(autouse=True)
-def _pin_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the storage backend to SQLITE for the whole module.
-
-    RDR-164 P3 added a SERVICE branch to ``rename_collection_data_plane`` that
-    fans out to the Java service. The hard default is SERVICE (RDR-152), so
-    without this pin these local-fan-out tests would route into the service
-    branch. Service-mode coverage lives in
-    ``test_collection_rename_service_mode.py``.
-
-    Since nexus-i711w Stage 2 sub-stages A/A3 the pin no longer selects SQLite
-    T2 stores — those are deleted. Under the pin, ``T2Database.taxonomy``
-    RAISES on access and every cascade leg (chash / aspects / queue /
-    highlights / telemetry) is Http-only, so a REAL cascade run cannot
-    succeed here without the engine. Tests of the data-plane orchestration
-    therefore stub ``nexus.mcp_infra.t2_index_write`` (see
-    ``_stub_t2_cascade``) or inject spy stores on the T2Database instance;
-    the store-level ``document_aspects`` rename tests below run against the
-    suite's hermetic engine substrate directly.
-    """
-    from nexus.db.storage_mode import StorageBackend
-
-    monkeypatch.setattr(
-        "nexus.db.storage_mode.storage_backend_for",
-        lambda store: StorageBackend.SQLITE,
-    )
-
-
 @pytest.fixture
 def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHROMA_API_KEY", "test")

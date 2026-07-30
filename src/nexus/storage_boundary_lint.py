@@ -221,12 +221,12 @@ T2_RAW_HANDLE_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 #: nexus-9613q: baseline for un-annotated ``<x>.<t2_store>.conn|._lock``
-#: accesses outside db/ + daemon/. Now 0 (ENFORCED): every raw access in
-#: consumer code is either routed through a store method (nexus-9613q.3
-#: hook_registry → telemetry store) or guarded by ``has_raw_access`` /
-#: ``storage_backend_for`` with a ``# epsilon-allow:`` documenting the guard.
-#: A new un-annotated raw reach trips the baseline assertion and must either
-#: route, guard+annotate, or justify with an epsilon-allow reason.
+#: accesses outside db/ + daemon/. Now 0 (ENFORCED) — and since RDR-158 P3
+#: (nexus-7bomn) collapsed the last guarded consumer reaches with the
+#: =sqlite opt-out, the population is zero repo-wide: there is no raw
+#: handle anywhere (the Http stores' guard mixin raises AttributeError).
+#: A new un-annotated raw reach trips the baseline assertion and must
+#: either route through a store method or justify an epsilon-allow reason.
 T2_RAW_HANDLE_BASELINE: int = 0
 
 

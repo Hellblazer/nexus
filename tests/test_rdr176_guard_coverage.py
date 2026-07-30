@@ -99,16 +99,3 @@ def test_t2_diagnostic_connect_service_mode_is_read_only(
     assert _content_digest(db_path) == digest_before
 
 
-def test_t2_diagnostic_connect_sqlite_mode_is_writable_wal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Positive control: in sqlite mode the helper keeps the historical
-    writable WAL connection (the guard is mode-gated, not an unconditional ro)."""
-
-    db_path = _seed_legacy_db(tmp_path)
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-    conn = doctor._t2_diagnostic_connect(db_path, sqlite3)
-    try:
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-    finally:
-        conn.close()

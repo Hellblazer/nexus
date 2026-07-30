@@ -122,31 +122,6 @@ def _bucketize(distances: list[float], source: str) -> DistanceHistogram:
     )
 
 
-def compute_distance_histogram(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, days: int = 30,
-) -> DistanceHistogram:
-    """Histogram of ``top_distance`` from search_telemetry for *collection*.
-
-    10 fixed bins over [0.0, 2.0]. Empty table or <1 in-window rows →
-    ``DistanceHistogram(source="empty", sample_size=0)``. Use
-    :func:`sample_live_distances` + :func:`compute_live_distance_histogram`
-    for a live-probe fallback when telemetry is cold.
-    """
-    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-    rows = taxonomy_conn.execute(
-        "SELECT top_distance FROM search_telemetry "
-        "WHERE collection = ? AND ts >= ? "
-        "AND raw_count > 0 AND top_distance IS NOT NULL",
-        (collection, cutoff),
-    ).fetchall()
-    distances = [float(r[0]) for r in rows]
-    if not distances:
-        return DistanceHistogram(
-            buckets=[0] * _HIST_BINS, source="empty", sample_size=0,
-        )
-    return _bucketize(distances, "telemetry")
-
-
 def sample_live_distances(
     collection: str, t3: Any, *, n: int = _LIVE_PROBE_DEFAULT_N,
 ) -> list[float]:
@@ -244,42 +219,6 @@ def compute_live_distance_histogram(
 # ── Section 2: top-N cross-projections ──────────────────────────────────────
 
 
-def compute_cross_projections(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, top_n: int = 5,
-) -> list[ProjectionPair]:
-    """Top-*top_n* collections this one projects INTO.
-
-    Ranked by ``shared_topics * avg_similarity``. Requires
-    ``assigned_by='projection'`` rows with non-NULL ``similarity`` and
-    ``source_collection``.
-    """
-    rows = taxonomy_conn.execute(
-        "SELECT t.collection AS other, "
-        "       COUNT(DISTINCT ta.topic_id) AS shared, "
-        "       AVG(ta.similarity) AS avg_sim "
-        "FROM topic_assignments ta "
-        "JOIN topics t ON ta.topic_id = t.id "
-        "WHERE ta.source_collection = ? "
-        "  AND t.collection != ? "
-        "  AND ta.similarity IS NOT NULL "
-        "GROUP BY t.collection "
-        "ORDER BY shared * AVG(ta.similarity) DESC "
-        "LIMIT ?",
-        (collection, collection, top_n),
-    ).fetchall()
-    return [
-        ProjectionPair(
-            other_collection=r[0],
-            shared_topics=int(r[1]),
-            avg_similarity=float(r[2]),
-        )
-        for r in rows
-    ]
-
-
-# ── Section 3: orphan chunks ────────────────────────────────────────────────
-
-
 def compute_orphan_chunks(
     catalog_conn: sqlite3.Connection,
     collection: str,
@@ -308,59 +247,6 @@ def compute_orphan_chunks(
 
 
 # ── Section 4: hub-topic assignments ────────────────────────────────────────
-
-
-def compute_hub_assignments(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, top_n: int = 10,
-) -> list[HubAssignment]:
-    """Top-*top_n* cross-collection hub topics and this collection's share."""
-    hubs = taxonomy_conn.execute(
-        "SELECT ta.topic_id, COUNT(DISTINCT ta.source_collection) AS src_count "
-        "FROM topic_assignments ta "
-        "GROUP BY ta.topic_id "
-        "ORDER BY src_count DESC, ta.topic_id ASC "
-        "LIMIT ?",
-        (top_n,),
-    ).fetchall()
-    if not hubs:
-        return []
-    out: list[HubAssignment] = []
-    for topic_id, src_count in hubs:
-        meta = taxonomy_conn.execute(
-            "SELECT label, collection FROM topics WHERE id = ?",
-            (topic_id,),
-        ).fetchone()
-        if meta is None:
-            continue
-        label, topic_collection = meta
-        chunk_count = taxonomy_conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE topic_id = ? AND source_collection = ?",
-            (topic_id, collection),
-        ).fetchone()[0]
-        out.append(
-            HubAssignment(
-                topic_id=int(topic_id),
-                topic_label=label or "",
-                topic_collection=topic_collection or "",
-                source_collection_count=int(src_count),
-                chunks_in_hub=int(chunk_count or 0),
-            )
-        )
-    return out
-
-
-# ── Default production runners (dep-injected) ───────────────────────────────
-
-
-def _open_t2():
-    from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        return None
-    return T2Database(db_path)  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
 
 
 def _open_catalog_conn() -> sqlite3.Connection | None:
@@ -508,26 +394,21 @@ def run_collection_audit(
     nexus-fx2d: when *live* is True and the telemetry histogram is
     ``source="empty"``, run :func:`compute_live_distance_histogram`
     against *t3* (resolved via :func:`nexus.db.make_t3` when ``None``).
-    The telemetry path is always tried first so warm collections
-    stay cheap. Budget: ~10 s for N=25 probes against cloud T3.
+    Budget: ~10 s for N=25 probes against cloud T3.
+
+    The telemetry-histogram / cross-projection / hub-assignment sections
+    are always their neutral empty values now: they were raw SQL over the
+    local SQLite taxonomy/telemetry tables, which were deleted in the
+    RDR-158 P4 retirement, and the engine does not expose those aggregates
+    yet (nexus-i711w.1 GAP; degrade-to-absent per nexus-9613q.4 — these
+    are diagnostic enrichment sections, and the live-probe fallback below
+    still produces a real histogram on request).
     """
-    from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    t2 = _open_t2()
     cat_conn = _open_catalog_conn()
     try:
-        # nexus-9613q.4: in service mode t2.taxonomy is an HttpTaxonomyStore
-        # with no raw .conn; these are diagnostic SELECTs not on the public
-        # API, so degrade to the empty-telemetry result (live-probe fallback
-        # below still runs) instead of crashing on the missing attribute.
-        if t2 is not None and has_raw_access(t2.taxonomy):
-            conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
-            hist = compute_distance_histogram(conn, collection)
-            projections = compute_cross_projections(conn, collection)
-            hubs = compute_hub_assignments(conn, collection)
-        else:
-            hist = DistanceHistogram(buckets=[0] * _HIST_BINS, source="empty", sample_size=0)
-            projections = []
-            hubs = []
+        hist = DistanceHistogram(buckets=[0] * _HIST_BINS, source="empty", sample_size=0)
+        projections = []
+        hubs = []
         if cat_conn is not None:
             orphans = compute_orphan_chunks(cat_conn, collection)
             orphans_checked = True
@@ -535,8 +416,6 @@ def run_collection_audit(
             orphans = []
             orphans_checked = False
     finally:
-        if t2 is not None:
-            t2.close()
         if cat_conn is not None:
             cat_conn.close()
 

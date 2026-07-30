@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from tests._catalog_fixture_ops import ActiveCatalog, count_documents
 
 
@@ -59,15 +58,11 @@ class TestByDocId:
             meta={"doc_id": "abc123"},
         )
         entry = cat.by_doc_id("abc123")
-        if storage_backend_for("catalog") is StorageBackend.SQLITE:
-            assert entry is not None
-            assert entry.title == "Test Entry"
-        else:
-            # nexus-wji11: by_doc_id is a TUMBLER lookup on the engine.
-            assert entry is None, (
-                "nexus-wji11 looks RESOLVED — restore the unconditional "
-                "assertions here"
-            )
+        # nexus-wji11: by_doc_id is a TUMBLER lookup on the engine.
+        assert entry is None, (
+            "nexus-wji11 looks RESOLVED — restore the unconditional "
+            "assertions here"
+        )
 
     def test_not_found(self, tmp_path):
         catalog_dir, cat = _make_catalog(tmp_path)
@@ -79,14 +74,11 @@ class TestByDocId:
         cat.register(owner, "A", content_type="knowledge", meta={"doc_id": "id1"})
         cat.register(owner, "B", content_type="knowledge", meta={"doc_id": "id2"})
         entry = cat.by_doc_id("id1")
-        if storage_backend_for("catalog") is StorageBackend.SQLITE:
-            assert entry.title == "A"
-        else:
-            # nexus-wji11: by_doc_id is a TUMBLER lookup on the engine.
-            assert entry is None, (
-                "nexus-wji11 looks RESOLVED — restore the unconditional "
-                "assertion here"
-            )
+        # nexus-wji11: by_doc_id is a TUMBLER lookup on the engine.
+        assert entry is None, (
+            "nexus-wji11 looks RESOLVED — restore the unconditional "
+            "assertion here"
+        )
 
 
 class TestListByCollection:
@@ -133,17 +125,14 @@ class TestListByCollection:
                 file_path=f"/papers/p{i}.pdf",
             )
         capped = len(cat.list_by_collection("knowledge__delos", limit=3))
-        if storage_backend_for("catalog") is StorageBackend.SQLITE:
-            assert capped == 3
-        else:
-            # nexus-23wlw: the client sends limit=, the engine's
-            # documentsByCollection has no limit parameter at all, so the cap
-            # is silently dropped. Assert the broken value so the fix fails
-            # loudly here instead of going quietly green.
-            assert capped == 5, (
-                f"nexus-23wlw looks FIXED (limit=3 returned {capped}, not the "
-                f"broken 5) — restore `assert capped == 3`"
-            )
+        # nexus-23wlw: the client sends limit=, the engine's
+        # documentsByCollection has no limit parameter at all, so the cap
+        # is silently dropped. Assert the broken value so the fix fails
+        # loudly here instead of going quietly green.
+        assert capped == 5, (
+            f"nexus-23wlw looks FIXED (limit=3 returned {capped}, not the "
+            f"broken 5) — restore `assert capped == 3`"
+        )
         assert len(cat.list_by_collection("knowledge__delos", limit=None)) == 5
 
 
@@ -160,20 +149,15 @@ class TestStorePutHook:
             collection_name="knowledge__test",
         )
         entry = cat.by_doc_id("doc_abc123")
-        if storage_backend_for("catalog") is StorageBackend.SQLITE:
-            assert entry is not None
-            assert entry.title == "Test Knowledge"
-            assert entry.physical_collection == "knowledge__test"
-        else:
-            # nexus-wji11: on the engine by_doc_id is a TUMBLER lookup, so an
-            # entry carrying meta.doc_id is unreachable by that key. Whether
-            # that is a gap or a deliberate post-RDR-108 narrowing is the open
-            # question; either way the divergence is asserted, not hidden.
-            assert entry is None, (
-                "nexus-wji11 looks RESOLVED (by_doc_id found a meta.doc_id "
-                "entry in service mode) — settle the bead and restore the "
-                "unconditional assertions"
-            )
+        # nexus-wji11: on the engine by_doc_id is a TUMBLER lookup, so an
+        # entry carrying meta.doc_id is unreachable by that key. Whether
+        # that is a gap or a deliberate post-RDR-108 narrowing is the open
+        # question; either way the divergence is asserted, not hidden.
+        assert entry is None, (
+            "nexus-wji11 looks RESOLVED (by_doc_id found a meta.doc_id "
+            "entry in service mode) — settle the bead and restore the "
+            "unconditional assertions"
+        )
         # The registration itself must have landed on either substrate.
         assert any(
             e.title == "Test Knowledge"

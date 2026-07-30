@@ -6,7 +6,6 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import (
-    require_sqlite_substrate as _require_sqlite_substrate,
     seed_plan,
 )
 
@@ -467,41 +466,6 @@ def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None
     )
     row = plan_db.plans.get_plan(row_id)
     assert row["scope_tags"] == ""
-
-
-def test_save_plan_scope_tags_column_default_empty(plan_db: T2Database) -> None:
-    """The scope_tags column defaults to '' (load-bearing: pre-backfill rows)."""
-    # nexus-aqbrk: this drives a raw INSERT that omits the column, which no
-    # client-side service path can express — every service write goes through
-    # save_plan/import_plan, both of which always send scope_tags. The
-    # service-side twin of this guarantee is the column default in the plans
-    # Liquibase changeset plus HttpPlanLibrary._normalize's '' fallback for a
-    # NULL read; neither is reachable from here.
-    _require_sqlite_substrate()
-    # The INSERT below omits scope_tags, so the SQL DEFAULT '' fires.
-    # This pins the load-bearing default: any INSERT path that forgets
-    # scope_tags produces '' (treated as agnostic), not NULL.
-    plan_db.plans.conn.execute(
-        """
-        INSERT INTO plans (project, query, plan_json, outcome, tags, created_at)
-        VALUES ('', 'q', '{}', 'success', '', '2025-01-01T00:00:00Z')
-        """
-    )
-    plan_db.plans.conn.commit()
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE query = 'q'"
-    ).fetchone()
-    assert row[0] == ""
-
-
-# test_migration_idempotent_on_populated_table was DELETED (nexus-i711w
-# Stage 2 sub-stage A3): its subject was the ``repair_scope_tags`` backfill
-# (``nexus.plans.repair``), which died with the SQLite PlanLibrary — content
-# repairs on the retired local snapshot have no engine-side counterpart. The
-# surviving DDL half (``_add_plan_scope_tags`` adds the column, idempotently,
-# including on a table that already has it) stays pinned by
-# test_migration_adds_column_to_empty_plans_table and
-# test_save_plan_explicit_scope_tags_survive_backfill below.
 
 
 def test_migration_no_op_on_missing_plans_table(tmp_path: Path) -> None:

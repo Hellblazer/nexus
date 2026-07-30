@@ -72,88 +72,37 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
     """
     counts = CascadeCounts()
 
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    if storage_backend_for("catalog") == StorageBackend.SERVICE:
-        # RDR-164 P2: in service mode the entire in-Postgres cascade (T3 chunks,
-        # chash index, taxonomy topics/assignments/centroids, aspect family, and
-        # the catalog documents + registry row) is ONE atomic transaction on the
-        # Java service. Fold it into a single call instead of fanning out to
-        # per-store endpoints (which left orphans — nexus-tquoj/cugrk). Only
-        # pipeline.db (below) stays client-side (CA-4).
-        try:
-            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-            client = make_catalog_reader()
-            if client is None:  # service mode always returns a client; guard for a clear error
-                raise RuntimeError("catalog service client unavailable")
-            deleted = client.delete_collection(name)  # type: ignore[attr-defined]
-            # Preserve the local fan-out's taxonomy dict shape ({topics, assignments,
-            # links, meta}) so the CLI render (commands/collection.py) does not KeyError;
-            # add centroids (purged here, absent from the local path).
-            counts.taxonomy = {
-                "topics": deleted.get("topics", 0),
-                "assignments": deleted.get("topic_assignments", 0),
-                "links": 0,
-                "meta": deleted.get("taxonomy_meta", 0),
-                "centroids": (
-                    deleted.get("taxonomy_centroids_384", 0)
-                    + deleted.get("taxonomy_centroids_768", 0)
-                    + deleted.get("taxonomy_centroids_1024", 0)
-                ),
-            }
-            counts.chash_deleted = deleted.get("chash_index", 0)
-            counts.catalog_docs_deleted = deleted.get("catalog_documents", 0)
-            counts.catalog_projection_deleted = deleted.get("catalog_collections", 0)
-        except Exception as exc:  # noqa: BLE001 — best-effort, atomic on the service side
-            _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
-            counts.failures.append(f"service deleteCollection failed: {exc}")
-        return _purge_pipeline_db(name, counts)
-
-    # ── Local (sqlite/Chroma) mode: client-side fan-out (CA-5) ───────────────
-    from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred import (RDR-155 P4b P0c contract)
-
+    # RDR-164 P2: the entire in-Postgres cascade (T3 chunks,
+    # chash index, taxonomy topics/assignments/centroids, aspect family, and
+    # the catalog documents + registry row) is ONE atomic transaction on the
+    # Java service. Fold it into a single call instead of fanning out to
+    # per-store endpoints (which left orphans — nexus-tquoj/cugrk). Only
+    # pipeline.db (below) stays client-side (CA-4).
     try:
-        db.delete_collection(name)  # type: ignore[attr-defined]
-    except collection_not_found_errors():
-        counts.t3_absent = True
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    # Taxonomy + chash index, routed through the T2 daemon (single-writer).
-    # RDR-187 (nexus-piwya.4): in service mode the chash_index leg lands on
-    # the engine's accept-and-no-op /v1/chash/delete_collection (deleted:0)
-    # — deliberate: content deletion is the vector/catalog cascade's job,
-    # and the .3 review traced both purge paths as not depending on this
-    # call actually deleting. The call is KEPT for the frozen SQLite twin
-    # (pre-migration installs, RDR-158), where it still prunes real router
-    # rows.
-    try:
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        def _cascade(store):
-            return (
-                store.taxonomy.purge_collection(name),
-                store.chash_index.delete_collection(name),
-            )
-
-        counts.taxonomy, counts.chash_deleted = t2_index_write(_cascade)
-    except Exception as exc:  # noqa: BLE001 — best-effort cleanup
-        _log.warning("purge_cascade_t2_failed", collection=name, error=str(exc))
-        counts.failures.append(f"taxonomy/chash cascade failed: {exc}")
-
-    # Streaming-pipeline rows (otherwise the next index returns skip/0-chunks).
-    _purge_pipeline_db(name, counts)
-
-    # Catalog leg: DELETED (nexus-i711w). The local-catalog document/projection
-    # purge that lived here read and wrote the local SQLite catalog, which no
-    # longer exists; the service path above handles catalog rows inside the
-    # engine's atomic cascade (verified nexus-e9ru2). A box still running the
-    # =sqlite catalog opt-out (supported until Stage 3's 7bomn hard-error)
-    # must hear that its catalog rows were NOT cleaned — silence here is the
-    # exact regression class CascadeCounts exists to surface (FAIL LOUD,
-    # terminal-deletion critique Critical, 2026-07-30).
-    counts.failures.append(
-        "catalog rows not purged: the local SQLite catalog was deleted in "
-        "7.0.0 (nexus-i711w); run against the service catalog "
-        "(NX_STORAGE_BACKEND_CATALOG=service) or reconcile engine-side"
-    )
-    return counts
+        client = make_catalog_reader()
+        if client is None:  # service mode always returns a client; guard for a clear error
+            raise RuntimeError("catalog service client unavailable")
+        deleted = client.delete_collection(name)  # type: ignore[attr-defined]
+        # Preserve the local fan-out's taxonomy dict shape ({topics, assignments,
+        # links, meta}) so the CLI render (commands/collection.py) does not KeyError;
+        # add centroids (purged here, absent from the local path).
+        counts.taxonomy = {
+            "topics": deleted.get("topics", 0),
+            "assignments": deleted.get("topic_assignments", 0),
+            "links": 0,
+            "meta": deleted.get("taxonomy_meta", 0),
+            "centroids": (
+                deleted.get("taxonomy_centroids_384", 0)
+                + deleted.get("taxonomy_centroids_768", 0)
+                + deleted.get("taxonomy_centroids_1024", 0)
+            ),
+        }
+        counts.chash_deleted = deleted.get("chash_index", 0)
+        counts.catalog_docs_deleted = deleted.get("catalog_documents", 0)
+        counts.catalog_projection_deleted = deleted.get("catalog_collections", 0)
+    except Exception as exc:  # noqa: BLE001 — best-effort, atomic on the service side
+        _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
+        counts.failures.append(f"service deleteCollection failed: {exc}")
+    return _purge_pipeline_db(name, counts)

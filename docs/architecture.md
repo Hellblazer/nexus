@@ -93,16 +93,16 @@ BOTH local and managed-cloud modes. `make_t3()` returns an
 (`storage_service_addr.<uid>`). Start it via `nx daemon service start`. The
 older ChromaDB serving path (`nx daemon t3`) still registers but is the
 RETIRED serving route, kept only as the immutable migration source until
-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b deletes it. T2 domain stores hard-default to the same service
-backend ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)); the SQLite + FTS5 single-writer daemon ([RDR-120](rdr/rdr-120-storage-substrate-split.md)) remains
-only as the `NX_STORAGE_BACKEND=sqlite` opt-out path.
+[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b deletes it. T2 domain stores serve through the same service
+backend ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)); the SQLite + FTS5 substrate ([RDR-120](rdr/rdr-120-storage-substrate-split.md)) is
+deleted (RDR-158 P4) and its `NX_STORAGE_BACKEND=sqlite` opt-out hard-errors (P3).
 
 **One-service convergence.** Both tiers now serve through the native
 `nexus-service`: T3 vectors on Postgres + pgvector, and the T2 domain stores
 **hard-default to the service backend** as of [RDR-152](rdr/rdr-152-postgres-java-storage-service.md) (`nexus-gmiaf`).
-`NX_STORAGE_BACKEND[_<store>]=sqlite` is the explicit opt-out, and it no longer
-has a daemon behind it — the single-writer SQLite daemon is retired. One
-service backs both tiers.
+`NX_STORAGE_BACKEND[_<store>]=sqlite` is retired (RDR-158 P3 — a hard error
+with the stranded-install redirect); the SQLite stores and their single-writer
+daemon are deleted. One service backs both tiers.
 
 For container deployments (Claude Co-Work and similar): containers reach the
 host's nexus-service for BOTH tiers via ``NX_SERVICE_URL`` +

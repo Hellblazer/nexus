@@ -7,19 +7,12 @@ not expose directly. Under the engine substrate those stores are the
 ``Http*Store`` variants, which have no ``.conn`` at all — they raise a
 fail-loud ``AttributeError`` naming the fix (``_raw_handle_guard``).
 
-The established per-file idiom (test_taxonomy_rebuild_link_cleanup.py,
-test_nexus_lub_collection_delete_cascade.py) is an inline
-``has_raw_access(store)`` branch: raw SQL on the SQLite arm, the store's
-public ``import_*`` method on the service arm. That is correct but does not
-scale to 164 sites — the HttpMemoryStore cluster alone is 51 of them, all
-performing the same three operations. This module hoists those operations
-into named helpers so each call site becomes substrate-agnostic and the
-branch exists exactly once per operation.
-
-WHY THIS SHRINKS RATHER THAN GROWS: when nexus-i711w deletes the SQLite
-stores, every ``has_raw_access`` branch here collapses to its service arm
-and the helpers stay. Inline branches at 164 sites would each need the
-same collapse by hand.
+The helpers route every operation through the stores' public ``import_*``
+methods (``POST /v1/*/import``), whose whole purpose is writing
+timestamp/tracking fields VERBATIM rather than letting the service stamp
+them. The dual-substrate ``has_raw_access`` branches this module carried
+during the port collapsed to their service arms when the =sqlite opt-out
+died (RDR-158 P3, nexus-7bomn) — exactly the shrink the hoisting was for.
 
 READS ARE NOT BRANCHED. ``MemoryStore.get_all`` / ``HttpMemoryStore.get_all``
 both return the full column set (``access_count``, ``last_accessed``,
@@ -36,14 +29,12 @@ from typing import Any
 
 import pytest
 
-from nexus.db.storage_mode import StorageBackend, has_raw_access, storage_backend_for
 from nexus.db.t2 import T2Database
 
 __all__ = [
     "backdate_memory",
     "bootstrap_migration_source",
     "memory_row",
-    "require_sqlite_substrate",
     "seed_tier_write",
     "rewrite_memory_row",
     "seed_plan",
@@ -51,32 +42,6 @@ __all__ = [
     "set_memory_access_count",
     "utc_stamp",
 ]
-
-
-def require_sqlite_substrate(detail: str = "") -> None:
-    """Skip when the T2 substrate is the engine.
-
-    For tests that probe SQLite machinery with no service-mode counterpart —
-    WAL journal mode, FTS5 rebuild migrations, the sqlite3 connection
-    lifecycle, the cross-process migration guard, raw-INSERT column defaults.
-    These are not SQLite-shaped assertions about substrate-independent
-    behaviour; they are tests OF the SQLite substrate, and nexus-i711w deletes
-    them outright along with the stores they probe.
-
-    Resolved at call time via ``storage_backend_for`` rather than from
-    ``NX_TEST_T2_SUBSTRATE``, so it stays correct when the conftest pin flips
-    its default and the env var's meaning inverts.
-
-    Pass *detail* to say what specifically has no counterpart — the skip
-    reasons are audited per file, and an undifferentiated reason makes an
-    unintended skip indistinguishable from an intended one.
-    """
-    if storage_backend_for("memory") is StorageBackend.SQLITE:
-        return
-    reason = "probes SQLite-only machinery with no service-mode equivalent"
-    if detail:
-        reason = f"{reason}: {detail}"
-    pytest.skip(f"{reason} (deleted with the SQLite stores in nexus-i711w)")
 
 
 def utc_stamp(*, days: float = 0, seconds: float = 0) -> str:
@@ -131,29 +96,6 @@ def rewrite_memory_row(
         raise ValueError("rewrite_memory_row: nothing to rewrite")
 
     store = db.memory
-
-    if has_raw_access(store):
-        assignments: list[str] = []
-        params: list[Any] = []
-        if timestamp is not None:
-            assignments.append("timestamp = ?")
-            params.append(timestamp)
-        if access_count is not None:
-            assignments.append("access_count = ?")
-            params.append(access_count)
-        if last_accessed is not None:
-            assignments.append("last_accessed = ?")
-            params.append(last_accessed)
-        params.extend((project, title))
-        cur = store.conn.execute(
-            f"UPDATE memory SET {', '.join(assignments)} "
-            "WHERE project = ? AND title = ?",
-            params,
-        )
-        store.conn.commit()
-        if cur.rowcount == 0:
-            raise LookupError(f"no memory row {project!r}/{title!r} to rewrite")
-        return
 
     row = memory_row(db, project, title)
     if row is None:
@@ -250,19 +192,6 @@ def seed_tier_write(
     stamp = ts or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     store = db.telemetry
 
-    if has_raw_access(store):
-        from nexus.db.migrations import migrate_tier_writes
-
-        migrate_tier_writes(store.conn)
-        store.conn.execute(
-            "INSERT INTO tier_writes "
-            "(session_id, ts, tool, tier, agent, project, target_title) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, stamp, tool, tier, agent, project, target_title),
-        )
-        store.conn.commit()
-        return
-
     store.import_tier_write(
         session_id=session_id,
         ts=stamp,
@@ -298,17 +227,6 @@ def seed_plan(
     """
     store = db.plans
 
-    if has_raw_access(store):
-        plan_id = db.save_plan(
-            query=query, plan_json=plan_json, project=project,
-            outcome=outcome, tags=tags,
-        )
-        store.conn.execute(
-            "UPDATE plans SET created_at = ? WHERE id = ?", (created_at, plan_id)
-        )
-        store.conn.commit()
-        return plan_id
-
     return store.import_plan(
         project=project,
         query=query,
@@ -343,17 +261,6 @@ def seed_relevance(
     """
     stamp = utc_stamp(days=age_days)
     store = db.telemetry
-
-    if has_raw_access(store):
-        db.log_relevance(
-            query, chunk_id, action, session_id=session_id, collection=collection
-        )
-        store.conn.execute(
-            "UPDATE relevance_log SET timestamp = ? WHERE chunk_id = ?",
-            (stamp, chunk_id),
-        )
-        store.conn.commit()
-        return
 
     store.import_relevance_row(
         query=query,

@@ -12,7 +12,7 @@ All persistent data lives on the host machine running Conexus:
   - the local nexus-service's Postgres cluster on disk (local mode — embeddings + chunk text, embedded server-side with bge-768)
   - a managed nexus-service's Postgres (managed-cloud mode — only if you point Conexus at a hosted service)
   - `~/.local/share/nexus/chroma/` (legacy ChromaDB store, read only as the migration source for `nx upgrade`'s substrate rung)
-- **Memory entries** — anything you (or an agent) writes via `nx memory put` or the `memory_put` MCP tool. Stored locally in the bundled Postgres served by `nexus-service` (the hard default since conexus 6.0 / RDR-152); `~/.config/nexus/memory.db` (SQLite, FTS5) survives as the opt-in rollback backend (`NX_STORAGE_BACKEND=sqlite`). Either way the data stays on your machine unless you point Conexus at a hosted service.
+- **Memory entries** — anything you (or an agent) writes via `nx memory put` or the `memory_put` MCP tool. Stored locally in the bundled Postgres served by `nexus-service` (the hard default since conexus 6.0 / RDR-152); `~/.config/nexus/memory.db` (SQLite, FTS5), where present from an older install, is a frozen pre-migration snapshot — the `=sqlite` backend is retired (RDR-158). Either way the data stays on your machine unless you point Conexus at a hosted service.
 - **Catalog** — document registry and typed-link graph. Stored in `~/.config/nexus/catalog/` (JSONL + SQLite cache).
 - **Session scratch** — ephemeral working notes shared across agents within a session. In-memory ChromaDB; wiped at session end.
 - **Plan library** — saved query execution plans. Stored alongside memory entries (same backend and locality).

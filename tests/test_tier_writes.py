@@ -92,40 +92,27 @@ class TestRecorder:
         monkeypatch.setattr(infra, "t2_ctx", lambda: T2Database(db_path))
         monkeypatch.setenv("NX_SESSION_ID", "test-session-abc")
 
-        from nexus.db.storage_mode import has_raw_access
-
         spied: list[tuple] = []
-        if not has_raw_access(T2Database(db_path).telemetry):
-            # Service leg (RDR-155 P4b P0a'): spy the store boundary —
-            # record_tier_write's kwargs ARE the recorder contract.
-            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+        # Service leg (RDR-155 P4b P0a'): spy the store boundary —
+        # record_tier_write's kwargs ARE the recorder contract.
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
-            real = HttpTelemetryStore.record_tier_write
+        real = HttpTelemetryStore.record_tier_write
 
-            def _spy(store, **kw):
-                spied.append((kw.get("session_id"), kw.get("tool"),
-                              kw.get("tier"), kw.get("agent"),
-                              kw.get("project"), kw.get("target_title")))
-                return real(store, **kw)
+        def _spy(store, **kw):
+            spied.append((kw.get("session_id"), kw.get("tool"),
+                          kw.get("tier"), kw.get("agent"),
+                          kw.get("project"), kw.get("target_title")))
+            return real(store, **kw)
 
-            monkeypatch.setattr(HttpTelemetryStore, "record_tier_write", _spy)
+        monkeypatch.setattr(HttpTelemetryStore, "record_tier_write", _spy)
 
         _record_tier_write(
             tool="memory_put", tier="T2",
             agent="developer", project="nexus", target_title="my-finding",
         )
 
-        if spied:
-            row = spied[0]
-        else:
-            conn = sqlite3.connect(str(db_path))
-            try:
-                row = conn.execute(
-                    "SELECT session_id, tool, tier, agent, project, target_title "
-                    "FROM tier_writes"
-                ).fetchone()
-            finally:
-                conn.close()
+        row = spied[0]
         assert row == (
             "test-session-abc", "memory_put", "T2",
             "developer", "nexus", "my-finding",
@@ -164,32 +151,20 @@ class TestRecorder:
         import nexus.session as ses
         monkeypatch.setattr(ses, "read_claude_session_id", lambda: None)
 
-        from nexus.db.storage_mode import has_raw_access
-
         spied: list[str] = []
-        if not has_raw_access(T2Database(db_path).telemetry):
-            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
-            real = HttpTelemetryStore.record_tier_write
+        real = HttpTelemetryStore.record_tier_write
 
-            def _spy(store, **kw):
-                spied.append(kw.get("session_id"))
-                return real(store, **kw)
+        def _spy(store, **kw):
+            spied.append(kw.get("session_id"))
+            return real(store, **kw)
 
-            monkeypatch.setattr(HttpTelemetryStore, "record_tier_write", _spy)
+        monkeypatch.setattr(HttpTelemetryStore, "record_tier_write", _spy)
 
         _record_tier_write(tool="scratch_put", tier="T1")
 
-        if spied:
-            sid = spied[0]
-        else:
-            conn = sqlite3.connect(str(db_path))
-            try:
-                sid = conn.execute(
-                    "SELECT session_id FROM tier_writes"
-                ).fetchone()[0]
-            finally:
-                conn.close()
+        sid = spied[0]
         assert sid == "unknown"
 
 
@@ -206,46 +181,31 @@ class TestWiring:
 
     def _setup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         import nexus.mcp_infra as infra
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         db_path = tmp_path / "t.db"
         monkeypatch.setattr(infra, "t2_ctx", lambda: T2Database(db_path))
         monkeypatch.setenv("NX_SESSION_ID", "wire-test")
-        # Service leg (RDR-155 P4b P0a'): the aggregate query surface has
-        # no target_title, so spy the store boundary — record_tier_write's
-        # kwargs ARE the wiring contract these tests pin. Raw leg (dies
-        # with the twin at flip) keeps the exact-row SELECT.
+        # RDR-155 P4b P0a': the aggregate query surface has no
+        # target_title, so spy the store boundary — record_tier_write's
+        # kwargs ARE the wiring contract these tests pin.
         self._spied: list[tuple] = []
-        if not has_raw_access(T2Database(db_path).telemetry):
-            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
-            real = HttpTelemetryStore.record_tier_write
+        real = HttpTelemetryStore.record_tier_write
 
-            def _spy(store, **kw):
-                self._spied.append(
-                    (kw.get("tool"), kw.get("tier"), kw.get("project"),
-                     kw.get("target_title"))
-                )
-                return real(store, **kw)
+        def _spy(store, **kw):
+            self._spied.append(
+                (kw.get("tool"), kw.get("tier"), kw.get("project"),
+                 kw.get("target_title"))
+            )
+            return real(store, **kw)
 
-            monkeypatch.setattr(HttpTelemetryStore, "record_tier_write", _spy)
+        monkeypatch.setattr(HttpTelemetryStore, "record_tier_write", _spy)
         return db_path
 
     def _tier_writes(self, db_path: Path) -> list[tuple]:
-        if self._spied:
-            return list(self._spied)
-        try:
-            conn = sqlite3.connect(str(db_path))
-        except sqlite3.Error:
-            return list(self._spied)
-        try:
-            return list(conn.execute(
-                "SELECT tool, tier, project, target_title FROM tier_writes "
-                "ORDER BY id"
-            ))
-        finally:
-            conn.close()
+        return list(self._spied)
 
     def test_memory_put_records_T2(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

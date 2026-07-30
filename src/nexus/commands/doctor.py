@@ -26,17 +26,12 @@ def _t2_diagnostic_connect(db_path: Path, sqlite3: Any) -> Any:
     so a concurrent MCP writer does not trip lock errors during the check.
 
     ``sqlite3`` is passed in by the caller (each check imports it lazily to keep
-    CLI startup fast).
+    CLI startup fast). The WAL-opening sqlite-mode arm died with the =sqlite
+    opt-out (RDR-158 P3, nexus-7bomn) — read-only is the only correct posture
+    against a frozen migration source.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # epsilon-allow: nx doctor diagnostic — read-only inspection of the frozen migration source (service mode)
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
-    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only SELECT/counts safe under WAL
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # epsilon-allow: nx doctor diagnostic — read-only inspection of the frozen migration source (service mode)
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -47,47 +42,6 @@ def _check_line(label: str, ok: bool, detail: str = "") -> str:
         msg += f": {detail}"
     return msg
 
-
-#: Hook names the catalog registration path records under (nexus-ou4tb).
-_CATALOG_HOOK_NAMES: tuple[str, ...] = (
-    "catalog_index_hook",
-    "catalog_store_hook",
-    "catalog_pdf_hook",
-    "catalog_link_generation",
-)
-
-
-def _catalog_hook_failure_lines(conn, tables: set[str]) -> list[str]:
-    """Surface un-cataloged documents from the ``hook_failures`` audit table.
-
-    Returns a single OK line when there is nothing outstanding, or a WARN line
-    naming the count, the oldest occurrence, and the recovery command. Silent
-    (empty) when the table is absent — a not-yet-migrated T2 must not render a
-    scary unknown.
-    """
-    if "hook_failures" not in tables:
-        return []
-    placeholders = ",".join("?" * len(_CATALOG_HOOK_NAMES))
-    try:
-        row = conn.execute(
-            f"SELECT count(*), min(occurred_at) FROM hook_failures "
-            f"WHERE hook_name IN ({placeholders})",
-            _CATALOG_HOOK_NAMES,
-        ).fetchone()
-    except Exception:  # noqa: BLE001 — boundary catch: a doctor check must never crash the report
-        return []
-    count = int(row[0] or 0) if row else 0
-    if not count:
-        return [_check_line("Catalog registration", True, "no un-cataloged documents")]
-    since = (row[1] or "unknown") if row else "unknown"
-    return [
-        _check_line(
-            "Catalog registration",
-            False,
-            f"{count} document(s) indexed but NOT cataloged since {since} "
-            f"— run 'nx catalog rebuild'",
-        )
-    ]
 
 def _fix(lines: list[str], *fix_lines: str) -> None:
     """Append indented Fix: lines after a failure entry."""
@@ -106,154 +60,20 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
 
 
 def _run_check_schema() -> None:
-    """Validate T2 database schema and report pending migrations (RDR-076)."""
-    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
+    """Report where the T2 schema lives (RDR-076; service-backed since RDR-152).
 
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.migrations import MIGRATIONS, _parse_version, expected_t2_schema_version  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    # nexus-p0clh: in service mode the T2 schema lives in Postgres and is
-    # Liquibase-managed by the nexus-service (applied at startup), not the local
-    # SQLite migrations checked below. Report N/A honestly instead of the
-    # misleading "T2 database not found" (which reads as an error).
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        click.echo(
-            "T2 schema is service-backed (Postgres, Liquibase-managed) — "
-            "local SQLite schema check N/A in service mode."
-        )
-        return
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo("T2 database not found — nothing to check.")
-        return
-
-    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only PRAGMA/SELECT safe under WAL
-    conn.execute("PRAGMA busy_timeout=5000")
-    # CLI review: match the other T2 connection defaults. Opening without
-    # WAL here caused immediate lock errors when a concurrent MCP tool
-    # was writing during the check.
-    conn.execute("PRAGMA journal_mode=WAL")
-    lines: list[str] = []
-    all_ok = True
-
-    # Check expected tables (base tables and every domain store).
-    tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry", "chash_index", "hook_failures"):
-        ok = tbl in tables
-        lines.append(_check_line(f"Table {tbl}", ok))
-        if not ok:
-            all_ok = False
-
-    # CLI review: the FTS5 virtual tables are load-bearing for memory
-    # search + plan match. A schema without them passes the table
-    # check but fails at query time. Include them + critical indexes.
-    fts_names = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND sql LIKE '%USING fts5%'"
-        ).fetchall()
-    }
-    for fts in ("memory_fts",):
-        ok = fts in fts_names or fts in tables
-        lines.append(_check_line(f"FTS5 table {fts}", ok))
-        if not ok:
-            all_ok = False
-
-    # nexus-ou4tb: documents that reached T3 but never reached the catalog.
-    # These used to be logged at DEBUG and nowhere else, so an index run
-    # reported success while leaving documents with no doc_id, no manifest and
-    # no links — recoverable only by a rebuild nobody knew to run. The audit
-    # rows now exist; this is where a user finds out.
-    lines.extend(_catalog_hook_failure_lines(conn, tables))
-
-    index_names = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        ).fetchall()
-    }
-    expected_indexes = {
-        "idx_chash_index_collection",
-        "idx_topic_assignments_topic_id",
-    }
-    for idx in sorted(expected_indexes):
-        ok = idx in index_names
-        # Fail loud only for chash_index — the taxonomy index may not
-        # exist on pre-4.2 schemas that ran ad-hoc migrations; note it
-        # as a warning rather than a failure.
-        if idx == "idx_chash_index_collection":
-            lines.append(_check_line(f"Index {idx}", ok))
-            if not ok:
-                all_ok = False
-        else:
-            if not ok:
-                lines.append(f"  note: optional index {idx} missing")
-
-    # Check _nexus_version
-    has_ver = "_nexus_version" in tables
-    lines.append(_check_line("Version tracking table", has_ver))
-
-    if has_ver:
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        if row:
-            stored = row[0]
-            # RDR-170: report the canonical schema version (registry-aware),
-            # the same value apply_pending targets/stamps, and gate pending on
-            # the lower bound ONLY. The old upper bound (`<= cli_t`) made
-            # --check-schema report "Schema version: OK" while apply_pending was
-            # actively applying an ahead-of-release step on a frozen branch.
-            cli_ver = expected_t2_schema_version()
-            stored_t = _parse_version(stored)
-            pending = [
-                m
-                for m in MIGRATIONS
-                if _parse_version(m.introduced) > stored_t
-            ]
-            if pending:
-                all_ok = False
-                lines.append(
-                    _check_line(
-                        "Pending migrations",
-                        False,
-                        f"{len(pending)} pending (stored: v{stored}, CLI: v{cli_ver})",
-                    )
-                )
-                lines.append("    Fix: run 'nx upgrade'")
-            else:
-                lines.append(_check_line("Schema version", True, f"v{stored}"))
-        else:
-            all_ok = False
-            lines.append(_check_line("Version row", False, "missing"))
-    else:
-        all_ok = False
-        lines.append("    Fix: run 'nx upgrade'")
-
-    conn.close()
-
-    click.echo("T2 Schema Check:")
-    for line in lines:
-        click.echo(line)
-    if all_ok:
-        click.echo("\nAll checks passed.")
+    nexus-p0clh: the T2 schema lives in Postgres and is Liquibase-managed by
+    the nexus-service (applied at startup). The local-SQLite table/index/FTS5
+    census this check used to run died with the =sqlite opt-out (RDR-158 P3,
+    nexus-7bomn) — reporting N/A honestly beats a misleading "T2 database not
+    found" against a frozen migration source.
+    """
+    click.echo(
+        "T2 schema is service-backed (Postgres, Liquibase-managed) — "
+        "local SQLite schema check N/A in service mode."
+    )
 
 
-#: Minimum number of global-tier builtin plan rows expected after
-#: ``nx catalog setup`` has run on a fresh install. RDR-078 shipped 9;
-#: RDR-092 Phase 0a brought that to 12; RDR-097 Phase 1 added two
-#: more (hybrid-factual-lookup, traverse-then-generate) for 14 total.
-#: The check only fails below 9 so a partial install on an older
-#: plugin is still tolerated.
-_MIN_GLOBAL_BUILTIN_COUNT: int = 9
 
 
 def _resolve_claude_cache_dir(cwd: Path | None = None) -> Path:
@@ -474,106 +294,19 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
 
 
 def _run_check_plan_library() -> None:
-    """Report plan-library dimensional health. RDR-092 Phase 0c.2.
+    """Report where the plan library lives. RDR-092 Phase 0c.2.
 
-    Categories counted:
-
-      * **authored**: rows whose ``dimensions`` column is populated
-        AND whose ``tags`` do not include ``backfill`` (shipped YAML
-        seeds or grown plans with full identity).
-      * **backfilled**: rows whose ``tags`` contain ``backfill`` /
-        ``backfill-low-conf`` (Phase 0d heuristic migration output).
-      * **non-dimensional**: rows with ``dimensions IS NULL``
-        (legacy / pre-RDR-078 seeds that need ``nx plan repair``).
-
-    Exits non-zero when the global-tier builtin count
-    (``project='' AND tags LIKE '%builtin-template%'``) falls below
-    :data:`_MIN_GLOBAL_BUILTIN_COUNT`; that state signals the scoped
-    loader never seeded (typically ``nx catalog setup`` was never
-    re-run after the RDR-078 loader landed).
+    The plan library is service-backed (Postgres) — reported honestly as
+    N/A rather than a failure, matching --check-schema (nexus-p0clh);
+    without that a fresh install exits non-zero from the release-sandbox
+    smoke. The local-SQLite dimensional census (authored / backfilled /
+    non-dimensional counts + the global-builtin floor) died with the
+    =sqlite opt-out (RDR-158 P3, nexus-7bomn).
     """
-    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    # Match --check-schema's service-mode honesty (nexus-p0clh): in service
-    # mode the plan library lives in Postgres; the local-SQLite dimensional
-    # census below is N/A, not a failure. Without this branch a fresh
-    # service-mode install exits non-zero from the release-sandbox smoke.
-    if storage_backend_for("plans") == StorageBackend.SERVICE:
-        click.echo(
-            "Plan library is service-backed (Postgres) — local SQLite "
-            "dimensional census N/A in service mode."
-        )
-        return
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo("T2 database not found; nothing to check.")
-        click.echo("Fix: run 'nx catalog setup' to initialise the library.")
-        raise click.exceptions.Exit(1)
-
-    # Context manager guards against a raise inside the count loop
-    # leaking the connection (RDR-092 code-review S-3).
-    conn = _t2_diagnostic_connect(db_path, sqlite3)
-    try:
-
-        def _count(where: str) -> int:
-            row = conn.execute(
-                f"SELECT COUNT(*) FROM plans WHERE {where}"
-            ).fetchone()
-            return int(row[0] or 0)
-
-        total = _count("1=1")
-        non_dimensional = _count("dimensions IS NULL")
-        backfilled = _count(
-            "dimensions IS NOT NULL AND "
-            "(tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
-        )
-        authored = _count(
-            "dimensions IS NOT NULL AND "
-            "NOT (tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
-        )
-        global_builtin = _count(
-            "project = '' AND tags LIKE '%builtin-template%'"
-        )
-    finally:
-        conn.close()
-
-    click.echo("Plan library check:")
-    click.echo(f"  total rows:         {total}")
-    click.echo(f"  authored:           {authored}")
-    click.echo(f"  backfilled:         {backfilled}")
-    click.echo(f"  non-dimensional:    {non_dimensional}")
-    click.echo(f"  global-tier builtin count: {global_builtin}")
-    click.echo("")
-
-    failed = False
-    if global_builtin < _MIN_GLOBAL_BUILTIN_COUNT:
-        click.echo(
-            f"  FAIL: global-tier builtin count {global_builtin} "
-            f"< expected {_MIN_GLOBAL_BUILTIN_COUNT}",
-            err=True,
-        )
-        click.echo("    Fix: run 'nx catalog setup'.", err=True)
-        failed = True
-    if non_dimensional:
-        click.echo(
-            f"  WARN: {non_dimensional} non-dimensional row(s) "
-            "(legacy / pre-RDR-078 seeds).",
-            err=True,
-        )
-        click.echo(
-            "    Fix: run 'nx plan repair' to backfill dimensions "
-            "heuristically.",
-            err=True,
-        )
-
-    if not failed:
-        click.echo("All checks passed.")
-    else:
-        raise click.exceptions.Exit(1)
+    click.echo(
+        "Plan library is service-backed (Postgres) — local SQLite "
+        "dimensional census N/A in service mode."
+    )
 
 
 def _run_trim_telemetry(days: int) -> None:
@@ -691,96 +424,16 @@ def _run_check_aspect_queue() -> None:
 
     RDR-089 follow-up nexus-qeo8 introduced an async worker
     (``aspect_worker.py``) that drains this table on a daemon thread.
-    Without observability, a backlog grows silently. This check
-    surfaces (a) total rows, (b) per-status counts, (c) oldest
-    enqueued_at as a lag indicator, (d) failed rows with their last
-    error so a stuck worker is visible.
+    Without observability, a backlog grows silently.
+
+    nexus-k0luu: reads the SERVICE queue (PG). This check once had no
+    service branch — on a migrated box it read the FROZEN SQLite queue and
+    reported it as current while the live queue was in PG, which is worse
+    than useless here: `nx aspects requeue-failed` directs operators to
+    this very check for backlog visibility. The SQLite reader leg died
+    with the =sqlite opt-out (RDR-158 P3, nexus-7bomn).
     """
-    import sqlite3 as _sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance (nexus.commands._helpers)
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance; deferred CLI-startup cost
-
-    # nexus-k0luu: this check had no service branch — on a migrated box it read
-    # the FROZEN SQLite queue and reported it as current, while the live queue
-    # was in PG. That is worse than useless here: `nx aspects requeue-failed`
-    # directs operators to this very check for backlog visibility, so a real
-    # failed-row backlog rendered as a clean queue.
-    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
-        _report_aspect_queue_service()
-        return
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo("aspect_extraction_queue: T2 database not found.")
-        return
-
-    conn = _sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only aspect-queue inspection
-    try:
-        # Confirm the table exists (pre-RDR-089 dbs won't have it).
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='aspect_extraction_queue'"
-        ).fetchone()
-        if not has_table:
-            click.echo(
-                "aspect_extraction_queue: table not present "
-                "(no aspect-extraction work has been queued)."
-            )
-            return
-
-        total = conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue"
-        ).fetchone()[0]
-        click.echo(f"aspect_extraction_queue: {total} row(s) total")
-
-        if total == 0:
-            return
-
-        # Per-status breakdown.
-        click.echo("\nBy status:")
-        rows = conn.execute(
-            "SELECT status, COUNT(*) FROM aspect_extraction_queue "
-            "GROUP BY status ORDER BY status"
-        ).fetchall()
-        for status, count in rows:
-            click.echo(f"  {status:<12} {count:>6}")
-
-        # Oldest enqueued_at across all non-completed rows — the lag
-        # indicator. ``processing`` and ``pending`` both contribute
-        # to the worker's open-work view; we report MIN across them.
-        oldest = conn.execute(
-            "SELECT MIN(enqueued_at), source_path "
-            "FROM aspect_extraction_queue "
-            "WHERE status IN ('pending', 'processing')"
-        ).fetchone()
-        if oldest and oldest[0]:
-            click.echo(
-                f"\nOldest pending/processing: {oldest[0]} "
-                f"({oldest[1] or '?'})"
-            )
-
-        # Surface failed rows with their last_error so the operator
-        # sees stuck work without needing SQL.
-        failed = conn.execute(
-            "SELECT collection, source_path, retry_count, last_error "
-            "FROM aspect_extraction_queue "
-            "WHERE status = 'failed' "
-            "ORDER BY enqueued_at DESC LIMIT 20"
-        ).fetchall()
-        if failed:
-            click.echo(f"\nFailed rows (showing top {len(failed)}):")
-            for collection, source_path, retry_count, last_error in failed:
-                click.echo(
-                    f"  [{collection}] {source_path}  "
-                    f"(retries={retry_count})"
-                )
-                if last_error:
-                    # Truncate long errors but always show enough to
-                    # diagnose the failure class.
-                    err = (last_error or "").replace("\n", " ").strip()
-                    click.echo(f"    last_error: {err[:200]}")
-    finally:
-        conn.close()
+    _report_aspect_queue_service()
 
 
 # ── --check-t3-legacy-metadata (nexus-1714) ──────────────────────────────────
@@ -1042,10 +695,7 @@ def _run_check_tier_discipline() -> None:
     enforcement.
     """
     import os as _os  # noqa: PLC0415 — deferred to keep CLI startup fast
-    import sqlite3 as _sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
-    from pathlib import Path as _Path  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    from nexus.commands._helpers import default_db_path as _default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.session import read_claude_session_id as _read_claude_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     session_id = (
@@ -1057,91 +707,31 @@ def _run_check_tier_discipline() -> None:
         click.echo("  No current session resolvable (skip).")
         return
 
-    # nexus-59wjj critique Critical-1: the SERVICE check must come BEFORE the
-    # local-db existence gate. Service mode is the RDR-152 default and a fresh
-    # service-mode install may never create memory.db locally — gating on the
-    # local file made the service read below unreachable exactly where it
-    # matters (the check bailed with "T2 database not found (skip)").
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-        # nexus-59wjj: real counts via GET /v1/telemetry/tier_writes/query.
-        # On any failure (engine predates the route, service unreachable)
-        # fall back to the nexus-wyu1g honest message — never a false-clean
-        # "no writes seen" off the empty local table.
-        try:
-            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred: service-mode-only dependency
-
-            svc_rows = HttpTelemetryStore().query_tier_writes(session_id=session_id)
-        except Exception as exc:  # noqa: BLE001 — degrade to the honest failure-shaped message, never a silent 0
-            _log.debug("doctor_tier_discipline_service_read_failed", exc_info=True)
-            from nexus.db.t2.http_telemetry_store import tier_writes_read_failure_message  # noqa: PLC0415 — deferred: service-mode-only dependency
-
-            click.echo("Tier-discipline check:")
-            click.echo(
-                "  service-backed telemetry (Postgres) — local inspection N/A; "
-                + tier_writes_read_failure_message(exc)
-            )
-            return
-        by_tier_svc: dict[str, int] = {}
-        for _tool, tier, _agent, _project, n in svc_rows:
-            by_tier_svc[tier] = by_tier_svc.get(tier, 0) + n
-        total_svc = sum(by_tier_svc.values())
-        click.echo(f"Tier-discipline check (session {session_id}, service-backed):")
-        if total_svc == 0:
-            # Output parity with the local branch below (review Medium-2).
-            click.echo(
-                "  WARNING: zero tier writes recorded for this session. "
-                "Findings produced (if any) have not been persisted."
-            )
-            click.echo(
-                "  Run with `nx tier-status --session " + session_id +
-                "` for the structured view."
-            )
-            click.echo(
-                "  Pass --json for downstream tooling. Use `nx memory put`, "
-                "`nx scratch put`, or the MCP equivalents to write back."
-            )
-            return
-        click.echo(f"  total writes: {total_svc}")
-        for tier in ("T1", "T2", "T3", "plan"):
-            if by_tier_svc.get(tier, 0):
-                click.echo(f"    {tier:<6} {by_tier_svc[tier]}")
-        if not by_tier_svc.get("T2", 0) and not by_tier_svc.get("T3", 0):
-            # Same persistent-write-back nudge the local branch prints.
-            click.echo(
-                "  NOTE: writes are T1/plan only. No persistent (T2/T3) "
-                "write-back yet — durable findings are not surfaced."
-            )
-        return
-
-    db_path = _default_db_path()
-    if not _Path(db_path).exists():
-        click.echo("Tier-discipline check:")
-        click.echo(f"  T2 database not found at {db_path} (skip).")
-        return
-
-    conn = _sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only tier_writes inspection
+    # nexus-59wjj: real counts via GET /v1/telemetry/tier_writes/query.
+    # On any failure (engine predates the route, service unreachable) fall
+    # back to the nexus-wyu1g honest message — never a false-clean "no
+    # writes seen". (The local-SQLite tier_writes reader — and the 59wjj
+    # Critical-1 ordering hazard of gating on the local file's existence —
+    # died with the =sqlite opt-out, RDR-158 P3 nexus-7bomn.)
     try:
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='tier_writes'"
-        ).fetchone()
-        if not has_table:
-            click.echo("Tier-discipline check:")
-            click.echo("  tier_writes table not yet initialised (no writes seen).")
-            return
-        rows = conn.execute(
-            "SELECT tier, COUNT(*) FROM tier_writes "
-            "WHERE session_id = ? GROUP BY tier",
-            (session_id,),
-        ).fetchall()
-    finally:
-        conn.close()
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred: heavy import, keep CLI startup fast
 
-    by_tier = {tier: n for tier, n in rows}
+        svc_rows = HttpTelemetryStore().query_tier_writes(session_id=session_id)
+    except Exception as exc:  # noqa: BLE001 — degrade to the honest failure-shaped message, never a silent 0
+        _log.debug("doctor_tier_discipline_service_read_failed", exc_info=True)
+        from nexus.db.t2.http_telemetry_store import tier_writes_read_failure_message  # noqa: PLC0415 — deferred: heavy import, keep CLI startup fast
+
+        click.echo("Tier-discipline check:")
+        click.echo(
+            "  service-backed telemetry (Postgres) — local inspection N/A; "
+            + tier_writes_read_failure_message(exc)
+        )
+        return
+    by_tier: dict[str, int] = {}
+    for _tool, tier, _agent, _project, n in svc_rows:
+        by_tier[tier] = by_tier.get(tier, 0) + n
     total = sum(by_tier.values())
-
-    click.echo(f"Tier-discipline check (session {session_id}):")
+    click.echo(f"Tier-discipline check (session {session_id}, service-backed):")
     if total == 0:
         click.echo(
             "  WARNING: zero tier writes recorded for this session. "
@@ -1156,13 +746,11 @@ def _run_check_tier_discipline() -> None:
             "`nx scratch put`, or the MCP equivalents to write back."
         )
         return
-
     click.echo(f"  total writes: {total}")
     for tier in ("T1", "T2", "T3", "plan"):
-        n = by_tier.get(tier, 0)
-        if n:
-            click.echo(f"    {tier:<6} {n}")
-    if all(by_tier.get(t, 0) == 0 for t in ("T2", "T3")):
+        if by_tier.get(tier, 0):
+            click.echo(f"    {tier:<6} {by_tier[tier]}")
+    if not by_tier.get("T2", 0) and not by_tier.get("T3", 0):
         click.echo(
             "  NOTE: writes are T1/plan only. No persistent (T2/T3) "
             "write-back yet — durable findings are not surfaced."
