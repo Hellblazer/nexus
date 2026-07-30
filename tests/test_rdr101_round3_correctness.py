@@ -24,35 +24,103 @@ flip):
 6. Legacy ``update()`` ``INSERT OR REPLACE`` includes ``alias_of`` so an
    alias survives a subsequent update().
 7. Single ``Projector`` instance cached at ``Catalog.__init__``.
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). An earlier sweep recorded this file
+as a WHOLE-FILE DELETE because its four module-level imports all die, so it
+could not COLLECT after the deletion. That was OVERTURNED by subject: 3 of
+its 14 tests are about ``alias_of`` threading through ``update()``, which
+``HttpCatalogClient`` implements, and deleting the file would have silently
+dropped them. Measured disposition: 2 PORT, 1 PORT-BLOCKED, 1 GAP, 10 DIE.
+
+  - PORT (2 of the 3 attempted): two of ``TestLegacyUpdateAliasOfColumn``.
+    Kept in this file, so all four dying imports moved INSIDE the bodies that
+    still need them and the file still collects. The third,
+    ``test_alias_of_survives_legacy_update_through_alias``, is PORT-BLOCKED:
+    the service ``update`` does not follow aliases, so the port inverted the
+    assertion (measured, not predicted). It stays pinned and annotated.
+  - GAP (1): ``test_link_merge_overwrites_via_insert_or_replace`` — see its
+    own annotation.
+  - DIE (10): the link event-emission tests, the ``_ensure_consistent``
+    DELETE-and-replay cohort (already pinned at CLASS level before this
+    change — left exactly as it was), and the cached-``Projector`` test.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from nexus.catalog import events as ev
-from nexus.catalog.catalog import Catalog
-from nexus.catalog.catalog_db import CatalogDB
-from nexus.catalog.event_log import EventLog
-from nexus.catalog.projector import Projector
+from tests._catalog_fixture_ops import ActiveCatalog, unroutable_write_target
+
+
+@pytest.fixture()
+def active_catalog() -> ActiveCatalog:
+    """Seed and read through whichever catalog is live (nexus-i711w Stage 2)."""
+    return ActiveCatalog()
+
+
+def _slug() -> str:
+    """A per-test discriminator for owner names and file paths."""
+    return uuid.uuid4().hex[:8]
+
+
+def _local_catalog(tmp_path) -> tuple[Any, Path]:
+    """A real LOCAL SQLite ``Catalog`` rooted in *tmp_path*, plus its dir.
+
+    ONLY for the DIE and GAP cohorts; callers also carry
+    ``local_catalog_backend``.
+    """
+    from nexus.catalog.catalog import Catalog
+
+    d = tmp_path / "catalog"
+    d.mkdir()
+    return Catalog(d, d / ".catalog.db"), d
+
+
+def _alias_of(cat: Any, tumbler: Any) -> str:
+    """The ``alias_of`` of *tumbler*'s OWN row, not of what it points at.
+
+    ``resolve`` FOLLOWS the alias by default on both substrates, so
+    ``resolve(alias).alias_of`` hands back the canonical row's (empty)
+    ``alias_of`` and an assertion built on it is structurally unable to
+    observe the write it is about. Scanning ``all_documents`` for the exact
+    tumbler is the substrate-neutral form of the old
+    ``SELECT alias_of FROM documents WHERE tumbler = ?``.
+    """
+    rows = [d for d in cat.all_documents() if str(d.tumbler) == str(tumbler)]
+    assert len(rows) == 1, (
+        f"expected exactly one row for {tumbler}, got {len(rows)}"
+    )
+    return rows[0].alias_of
 
 
 # ── Link mutators event-sourced ──────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestLinkEventSourced:
-    """``link`` writes LinkCreated to events.jsonl under the gate."""
+    """``link`` writes LinkCreated to events.jsonl under the gate.
+
+    nexus-i711w Stage 2: DIE (5 of 6). Every test here asserts either the
+    ``events.jsonl`` line count for a link mutation or a projection replayed
+    from it — both local-only. The sixth
+    (``test_link_merge_overwrites_via_insert_or_replace``) is a GAP; see its
+    own annotation. Pinned at class level; the dying imports live in the
+    bodies.
+    """
 
     def test_link_emits_event_and_projects(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        from nexus.catalog import events as ev
+        from nexus.catalog.event_log import EventLog
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         a = cat.register(owner, "a.md", content_type="prose")
         b = cat.register(owner, "b.md", content_type="prose")
@@ -81,6 +149,22 @@ class TestLinkEventSourced:
     def test_link_merge_overwrites_via_insert_or_replace(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        """GAP nexus-i711w.1 item 5 — PINNED, not ported, not deleted.
+
+        The link-merge UPSERT contract: a second ``link()`` on the same
+        composite key must MERGE (adding the new creator to
+        ``co_discovered_by``), not be dropped. ``POST /link`` is a confirmed
+        UPSERT service-side, but the only existing service-side test scripts
+        a ``FakeCatalogHandler`` rather than exercising a real engine, so the
+        contract has no live assertion. Converting this test would move it
+        onto a substrate where nothing asserts the behaviour it is about;
+        deleting it loses the contract's only written record. It stays
+        pinned and is the SPECIFICATION SOURCE for i711w.1.
+        """
+        from nexus.catalog.catalog_db import CatalogDB
+        from nexus.catalog.event_log import EventLog
+        from nexus.catalog.projector import Projector
+
         # Two link() calls on the same composite key emit two
         # LinkCreated events. Replay through the projector's
         # INSERT OR REPLACE must converge on the SECOND payload's
@@ -88,9 +172,7 @@ class TestLinkEventSourced:
         # dropped the second event and the merged co_discovered_by
         # list would never reach SQLite.
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         a = cat.register(owner, "a.md", content_type="prose")
         b = cat.register(owner, "b.md", content_type="prose")
@@ -120,10 +202,11 @@ class TestLinkEventSourced:
     def test_unlink_emits_event_and_deletes_row(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        from nexus.catalog import events as ev
+        from nexus.catalog.event_log import EventLog
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         a = cat.register(owner, "a.md", content_type="prose")
         b = cat.register(owner, "b.md", content_type="prose")
@@ -144,10 +227,11 @@ class TestLinkEventSourced:
     def test_link_if_absent_emits_event(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        from nexus.catalog import events as ev
+        from nexus.catalog.event_log import EventLog
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         a = cat.register(owner, "a.md", content_type="prose")
         b = cat.register(owner, "b.md", content_type="prose")
@@ -172,10 +256,11 @@ class TestLinkEventSourced:
     def test_bulk_unlink_emits_events(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        from nexus.catalog import events as ev
+        from nexus.catalog.event_log import EventLog
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         a = cat.register(owner, "a.md", content_type="prose")
         b = cat.register(owner, "b.md", content_type="prose")
@@ -192,10 +277,12 @@ class TestLinkEventSourced:
     def test_full_replay_includes_links(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        from nexus.catalog.catalog_db import CatalogDB
+        from nexus.catalog.event_log import EventLog
+        from nexus.catalog.projector import Projector
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         a = cat.register(owner, "a.md", content_type="prose")
         b = cat.register(owner, "b.md", content_type="prose")
@@ -240,10 +327,10 @@ class TestEnsureConsistentEventSourced:
         # process B opens the catalog and must see the same state.
         # Pre-fix B would rebuild from JSONL only and miss any
         # divergence.
+        from nexus.catalog.catalog import Catalog
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat_a = Catalog(d, d / ".catalog.db")
+        cat_a, d = _local_catalog(tmp_path)
         owner = cat_a.register_owner("nexus", "repo", repo_hash="abab")
         a = cat_a.register(owner, "a.md", content_type="prose")
         cat_a._db.close()
@@ -268,11 +355,12 @@ class TestEnsureConsistentEventSourced:
         # is NOT in events.jsonl, then opens a Catalog against it, and
         # asserts the stale row is gone after _ensure_consistent
         # rebuilds from events.jsonl.
+        from nexus.catalog.catalog import Catalog
+        from nexus.catalog.catalog_db import CatalogDB
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
         # Step 1: write a real event-sourced state with one document.
-        cat_a = Catalog(d, d / ".catalog.db")
+        cat_a, d = _local_catalog(tmp_path)
         owner = cat_a.register_owner("nexus", "repo", repo_hash="abab")
         real = cat_a.register(owner, "real.md", content_type="prose")
         cat_a._db.close()
@@ -329,11 +417,11 @@ class TestEnsureConsistentEventSourced:
         # 10 legacy rows and replay only the 1 event, silently wiping
         # the catalog. The guardrail must detect this and fall through
         # to the legacy rebuild.
+        from nexus.catalog.catalog import Catalog
+
         monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, d = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         for i in range(10):
             cat.register(owner, f"doc-{i}.md", content_type="prose",
@@ -379,10 +467,11 @@ class TestEnsureConsistentEventSourced:
         # malformed event triggers NotImplementedError via a v: 1
         # path), the DELETEs must roll back, leaving SQLite in its
         # prior state.
+        from nexus.catalog.catalog import Catalog
+        from nexus.catalog.catalog_db import CatalogDB
+
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat_a = Catalog(d, d / ".catalog.db")
+        cat_a, d = _local_catalog(tmp_path)
         owner = cat_a.register_owner("nexus", "repo", repo_hash="abab")
         # Register enough documents that the bootstrap guardrail
         # (RDR-101 Phase 3 follow-up B floor at 1) unambiguously
@@ -465,17 +554,49 @@ class TestLegacyUpdateAliasOfColumn:
     pre-set alias_of via set_alias() and verify it survives an
     update(), and explicitly pass alias_of via **fields and verify
     the value lands (the round-4 rec_dict["alias_of"] threading
-    fix)."""
+    fix).
 
+    nexus-i711w Stage 2: 2 of the 3 RELOCATED onto the live substrate — the
+    subject is ``alias_of`` threading through ``update()``, and ``update`` /
+    the document read-back exist on both substrates, which is why the earlier
+    "whole-file delete" reading of this file was wrong. The third
+    (``test_alias_of_survives_legacy_update_through_alias``) is PORT-BLOCKED
+    on a measured substrate divergence; see its own annotation."""
+
+    @pytest.mark.usefixtures("local_catalog_backend")
     def test_alias_of_survives_legacy_update_through_alias(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        """nexus-i711w Stage 2: PORT-BLOCKED, pinned so it keeps passing.
+
+        This one WAS attempted, and the attempt is what measured it. Its
+        subject is resolve-follows-alias semantics INSIDE ``update()``: an
+        update addressed to an alias must land on the CANONICAL row and
+        leave the alias row's own fields alone. On the service arm the
+        assertion inverts — measured as
+        ``assert ('1.1.1', 99) == ('1.1.1', 0)``: the alias row itself took
+        the ``chunk_count=99``.
+
+        Settled from source, not guessed. ``HttpCatalogClient.update`` posts
+        ``/update`` keyed on the tumbler verbatim
+        (http_catalog_client.py:890) and ``CatalogRepository.updateDocument``
+        UPDATEs ``WHERE tumbler = ?`` with no alias hop
+        (CatalogRepository.java:485-501). The client's ``resolve`` also
+        ignores its own ``follow_alias`` parameter (line 877-888) and
+        ``resolve_alias`` degenerates to returning the input tumbler
+        (line 1144-1148). So alias FOLLOWING does not exist service-side at
+        all: converting this test would not port it, it would assert the
+        opposite behaviour.
+
+        Filed as a substrate divergence. The test stays here, unconverted,
+        as its only written record.
+        """
+        from nexus.catalog.catalog import Catalog
+
         # PR ζ flipped default to ES; this is a legacy-path test.
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        cat, _ = _local_catalog(tmp_path)
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         canonical = cat.register(owner, "canonical.md", content_type="prose")
         alias = cat.register(owner, "alias.md", content_type="prose")
@@ -496,101 +617,82 @@ class TestLegacyUpdateAliasOfColumn:
         ).fetchone()
         assert canon_row == ("", 99)
 
-    def test_explicit_alias_of_in_fields_lands(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        # Round-4 review (reviewer D): caller passes ``alias_of``
-        # explicitly. Pre-fix both event payload and legacy SQL
-        # VALUES read ``entry.alias_of``, silently dropping the
-        # caller-supplied value. Round-4 fix threads
-        # ``rec_dict["alias_of"]``.
-        #
-        # PR ζ flipped default to ES; this is a legacy-path test.
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
-        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose")
-        b = cat.register(owner, "b.md", content_type="prose")
+    def test_explicit_alias_of_in_fields_lands(self, active_catalog):
+        """A caller-supplied ``alias_of`` in ``**fields`` actually lands.
+
+        nexus-i711w Stage 2: RELOCATED onto the live substrate. ``update``
+        IS on ``CATALOG_WRITE_OPS``, so a plain ``ActiveCatalog`` routes it.
+
+        Round-4 review (reviewer D): caller passes ``alias_of``
+        explicitly. Pre-fix both event payload and legacy SQL
+        VALUES read ``entry.alias_of``, silently dropping the
+        caller-supplied value. Round-4 fix threads
+        ``rec_dict["alias_of"]``.
+        """
+        cat = active_catalog
+        slug = _slug()
+        owner = cat.register_owner(f"alias-explicit-{slug}", "repo", repo_hash=slug)
+        a = cat.register(
+            owner, "a.md", content_type="prose", file_path=f"{slug}/a.md",
+        )
+        b = cat.register(
+            owner, "b.md", content_type="prose", file_path=f"{slug}/b.md",
+        )
         cat.update(a, alias_of=str(b))
-        row = cat._db.execute(
-            "SELECT alias_of FROM documents WHERE tumbler = ?",
-            (str(a),),
-        ).fetchone()
-        assert row[0] == str(b), (
+        assert _alias_of(cat, a) == str(b), (
             "update(t, alias_of='X') silently dropped the value — "
             "rec_dict['alias_of'] is not threaded through"
         )
 
-    def test_explicit_alias_of_in_es_fields_lands(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        """RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8): the
-        legacy-path coverage of the round-4 ``rec_dict['alias_of']``
-        threading fix did not have an ES-mode counterpart. Without
-        this test, a regression in the ES write path that silently
-        drops caller-supplied ``alias_of`` would not be caught.
+    def test_explicit_alias_of_in_es_fields_lands(self, active_catalog):
+        """The same scenario, entered through the ES write path.
 
-        Run the same scenario under ``NEXUS_EVENT_SOURCED=1`` so the
-        update emits a ``DocumentRegistered`` event AND projects to
-        SQLite. Both surfaces must reflect the explicit ``alias_of``.
+        nexus-i711w Stage 2: RELOCATED onto the live substrate. The gate
+        distinction the test was built around (``NEXUS_EVENT_SOURCED=1`` vs
+        ``0``) is local-only, and so is the replay half, so on the live
+        substrate this collapses to the same statement as
+        ``test_explicit_alias_of_in_fields_lands``. Kept rather than dropped
+        because it is the ES-path entry the round-C follow-up added
+        deliberately, and because a future service-side ``update`` that
+        threads fields differently per code path would still be caught
+        twice rather than once.
+
+        RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8): the legacy-path
+        coverage of the round-4 ``rec_dict['alias_of']`` threading fix did
+        not have an ES-mode counterpart. Without this test, a regression in
+        the ES write path that silently drops caller-supplied ``alias_of``
+        would not be caught.
         """
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose")
-        b = cat.register(owner, "b.md", content_type="prose")
-        cat.update(a, alias_of=str(b))
-
-        # Live SQLite (post-projection).
-        live_row = cat._db.execute(
-            "SELECT alias_of FROM documents WHERE tumbler = ?",
-            (str(a),),
-        ).fetchone()
-        assert live_row[0] == str(b), (
-            "ES update(t, alias_of='X') silently dropped the value — "
-            "rec_dict['alias_of'] is not threaded through to the "
-            "event payload OR the projection"
+        cat = active_catalog
+        slug = _slug()
+        owner = cat.register_owner(f"alias-es-{slug}", "repo", repo_hash=slug)
+        a = cat.register(
+            owner, "a.md", content_type="prose", file_path=f"{slug}/a.md",
         )
-
-        # Replay the event log into a fresh DB and assert the
-        # projection still carries the alias_of. This confirms the
-        # event payload itself (not just the live SQLite write)
-        # carries the value.
-        from nexus.catalog.event_log import EventLog
-        from nexus.catalog.projector import Projector
-        from nexus.catalog.catalog_db import CatalogDB
-
-        replay_db = CatalogDB(tmp_path / "replay.db")
-        try:
-            Projector(replay_db).apply_all(EventLog(d).replay())
-            replay_row = replay_db.execute(
-                "SELECT alias_of FROM documents WHERE tumbler = ?",
-                (str(a),),
-            ).fetchone()
-            assert replay_row[0] == str(b), (
-                "ES event log does not carry alias_of — replay produces "
-                "a projection with empty alias_of, breaking replay-equality"
-            )
-        finally:
-            replay_db.close()
+        b = cat.register(
+            owner, "b.md", content_type="prose", file_path=f"{slug}/b.md",
+        )
+        cat.update(a, alias_of=str(b))
+        assert _alias_of(cat, a) == str(b), (
+            "update(t, alias_of='X') silently dropped the value — "
+            "rec_dict['alias_of'] is not threaded through to the write path"
+        )
 
 
 # ── Cached projector ─────────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestProjectorCached:
+    """nexus-i711w Stage 2: DIE. Asserts ``Catalog.__init__`` caches one
+    ``Projector`` — both classes die together."""
+
     def test_catalog_caches_projector_at_init(
         self, tmp_path,
     ):
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
+        from nexus.catalog.projector import Projector
+
+        cat, _ = _local_catalog(tmp_path)
         # Single instance, accessible via attribute.
         proj1 = cat._projector
         proj2 = cat._projector

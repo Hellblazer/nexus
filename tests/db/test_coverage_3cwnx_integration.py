@@ -30,6 +30,26 @@ service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java
 (@Order(143-145) coverageByContentType_* tests).
 This integration test uses the OS superuser (bypasses FORCE RLS) which is the
 correct setup for consumer-path correctness tests per tests/db/_service_fixture.py.
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). Disposition: 3 PORT, 1 DIE.
+
+Tests A, B and D already drive ``HttpCatalogClient.coverage_by_content_type``
+against the real service, so nothing about their ASSERTIONS needed porting.
+What coupled them to the dying substrate was the SEEDING: a single ``seeded``
+fixture that populated the HTTP catalog AND a SQLite ``CatalogStore``
+(``nexus.db.t2.catalog``), so all four tests dragged in the SQLite store and
+would have failed at fixture setup the moment it is deleted. The fixture is
+therefore SPLIT — ``seeded`` (HTTP only) and ``seeded_parity`` (both) — rather
+than swapped, which is the same fixture-split rule the rest of this sub-stage
+followed.
+
+Test C (``test_coverage_parity_service_equals_sqlite``) is the DIE: its whole
+subject is the differential SQLite-vs-service parity proof. It retires WITH
+the SQLite mirror it compares against, and carries ``local_catalog_backend``
+so its pin is explicit. ``nexus.db.t2.catalog`` and
+``nexus.catalog.catalog`` were already imported inside fixture bodies, so
+this module always COLLECTED after the deletion; only the fixture coupling
+was load-bearing.
 """
 from __future__ import annotations
 
@@ -238,7 +258,12 @@ def cat(java_service):
 
 @pytest.fixture(scope="module")
 def sqlite_db():
-    """Raw SQLite CatalogStore pre-seeded with identical data for parity checks."""
+    """Raw SQLite CatalogStore pre-seeded with identical data for parity checks.
+
+    nexus-i711w Stage 2: requested ONLY by the DIE parity test's chain
+    (``seeded_parity`` -> ``sqlite_cat`` -> here). Retires with
+    ``nexus/db/t2/catalog.py``.
+    """
     from nexus.db.t2.catalog import CatalogStore
     db_fd, db_path = tempfile.mkstemp(suffix=".db", prefix="3cwnx_parity_")
     os.close(db_fd)
@@ -319,10 +344,29 @@ def _seed_sqlite(store) -> None:
 
 
 @pytest.fixture(scope="module")
-def seeded(cat, sqlite_db):
-    """Seed both backends with identical data."""
-    store, _ = sqlite_db
+def seeded(cat):
+    """Seed the SERVICE catalog only (nexus-i711w Stage 2).
+
+    SPLIT from the old form, which seeded the HTTP catalog AND the SQLite
+    ``CatalogStore`` in one fixture. That coupling is what made all four
+    tests depend on the dying substrate even though three of them never look
+    at it: a shared fixture requesting ``sqlite_db`` means every consumer
+    fails at SETUP once ``nexus/db/t2/catalog.py`` is gone. The parity test
+    takes ``seeded_parity`` instead.
+    """
     _seed_http(cat)
+    return True
+
+
+@pytest.fixture(scope="module")
+def seeded_parity(seeded, sqlite_db):
+    """Additionally seed the SQLite mirror, for the DIE parity test only.
+
+    Chains off ``seeded`` so both arms hold IDENTICAL data — the whole point
+    of a differential proof — while keeping the SQLite dependency out of the
+    three tests that do not need it.
+    """
+    store, _ = sqlite_db
     _seed_sqlite(store)
     return True
 
@@ -383,8 +427,17 @@ def test_coverage_owner_prefix_scoping(seeded, cat) -> None:
     assert by_type["paper"]["total"] == 4
 
 
-def test_coverage_parity_service_equals_sqlite(seeded, cat, sqlite_cat) -> None:
+@pytest.mark.usefixtures("local_catalog_backend")
+def test_coverage_parity_service_equals_sqlite(
+    seeded_parity, cat, sqlite_cat,
+) -> None:
     """C) Differential parity: service == real Catalog.coverage_by_content_type().
+
+    nexus-i711w Stage 2: DIE. The assertion IS the SQLite-vs-service
+    comparison, so it retires with the SQLite mirror. ``local_catalog_backend``
+    makes the pin explicit: without it ``sqlite_cat`` builds a ``Catalog``
+    that the service backend would force ``read_only=True`` on once the file
+    exists.
 
     Calls the ACTUAL Catalog.coverage_by_content_type() method (not a proxy
     reimplementation) on an identical seeded SQLite store, then asserts exact
