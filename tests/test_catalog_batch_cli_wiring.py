@@ -93,11 +93,8 @@ class _FallbackWriter(_BatchWriter):
 def _wire(monkeypatch, cat, writer):
     monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
     monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", lambda: writer)
-    # gc backs up before deleting — neutralize the snapshot machinery.
-    monkeypatch.setattr(
-        "nexus.catalog.catalog_backup.snapshot_documents",
-        lambda *a, **kw: None,
-    )
+    # The pre-delete backup snapshot died with nexus.catalog.catalog_backup
+    # (nexus-i711w terminal deletion) — nothing to neutralize anymore.
 
 
 @pytest.fixture()

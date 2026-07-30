@@ -24,11 +24,9 @@ have stopped running the moment the local catalog is deleted.
 That import is gone. The manifest-backfill tests that DO need a catalog seed
 through :class:`tests._catalog_fixture_ops.ActiveCatalog`, i.e. the same
 factories the code under test resolves, so they exercise whichever catalog is
-live. The one genuinely local-only test
-(``TestAutoBootstrapCreatedAtEmpty``, whose subject is ``CatalogDB``'s own
-auto-bootstrap DDL) carries ``local_catalog_backend`` and imports
-``nexus.catalog.catalog_db`` inside its body — it retires with the local
-catalog, not before.
+live. The one genuinely local-only test (``TestAutoBootstrapCreatedAtEmpty``)
+retired with the local catalog in the nexus-i711w terminal deletion — see its
+tombstone below.
 """
 from __future__ import annotations
 
@@ -441,75 +439,11 @@ class TestSIG6ProgressOutput:
 # ── nexus-33xm: created_at='' on auto-bootstrapped collections rows ─────────
 
 
-class TestAutoBootstrapCreatedAtEmpty:
-    """nexus-33xm (replaces SIG-7 / nexus-872w):
-
-    The auto-bootstrap that populates ``collections`` from
-    ``documents.physical_collection`` (catalog_db.py __init__) MUST
-    leave ``created_at`` empty.
-
-    Why: ``_emit_backfilled_collection_events`` (catalog.py) emits
-    a companion ``CollectionCreated`` event with
-    ``payload.created_at = ""`` for each auto-bootstrapped name. The
-    projector handler does ``INSERT OR REPLACE ... COALESCE((SELECT
-    created_at FROM collections WHERE name = ?), payload.created_at)``.
-
-    If the auto-bootstrap stamps ``NOW()``, the COALESCE preserves
-    that synthetic stamp on event apply, but a fresh
-    ``--replay-equality`` replay (which starts from an empty table)
-    takes ``""`` from the event payload, producing a permanent
-    drift between live and projected created_at columns.
-
-    Empty here keeps the two paths bit-equal. The audit-distinction
-    goal that drove SIG-7 (NOW() so audit tools could tell
-    backfilled from event-derived rows) now lives in the synthetic
-    event itself: ``payload.created_at == ""`` is the marker.
-
-    nexus-i711w: PINNED to the local SQLite catalog. Its subject IS
-    ``CatalogDB``'s own auto-bootstrap DDL and the local ``--replay-equality``
-    projector path; there is no service-mode expression of either, so there is
-    nothing to port this to. It retires with ``nexus/catalog/catalog_db.py``.
-    """
-
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_backfilled_collections_have_empty_created_at(self, tmp_path):
-        """Auto-bootstrap must NOT stamp ``created_at = NOW()`` or
-        ``--replay-equality`` will permanently drift on the column.
-        Reverting the empty-string stamp to ``NOW()`` makes this
-        test fail with a non-empty timestamp.
-        """
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db_path = tmp_path / "catalog.db"
-        db = CatalogDB(db_path)
-        db.execute(
-            "INSERT OR IGNORE INTO documents "
-            "(tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "1.1.1", "Test doc", "", 0, "code", "/tmp/test.py",
-                "", "code__test_backfill_33xm", 0, "", "", "{}", 0.0, "", "",
-            ),
-        )
-        db.commit()
-        db.close()
-
-        db2 = CatalogDB(db_path)
-        row = db2._conn.execute(
-            "SELECT created_at FROM collections WHERE name = ?",
-            ("code__test_backfill_33xm",),
-        ).fetchone()
-        db2.close()
-
-        assert row is not None, "collections row was not inserted"
-        assert row[0] == "", (
-            f"auto-bootstrap must leave created_at empty so the "
-            f"synthetic CollectionCreated event with "
-            f"``payload.created_at == ''`` matches under "
-            f"--replay-equality; got {row[0]!r}"
-        )
+# TestAutoBootstrapCreatedAtEmpty RETIRED (nexus-i711w terminal deletion):
+# its subject was ``CatalogDB``'s own auto-bootstrap DDL leaving
+# ``created_at`` empty so the local ``--replay-equality`` projector path
+# stayed bit-equal — machinery with no service-mode expression, deleted with
+# ``nexus/catalog/catalog_db.py`` (its own docstring scheduled exactly this).
 
 
 # ── SIG-4: high-volume orphan error message actionable command ────────────────

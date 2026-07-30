@@ -61,16 +61,14 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     fixture's ``cat`` is what ``_repo_collections`` opens via
     ``nexus.config.catalog_path()``.
     """
-    from nexus.catalog.catalog import Catalog
     cfg = tmp_path / "config"
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     # nexus-aqbrk: return the ACTIVE catalog — the code under test resolves
-    # through the factories, and a local handle hit the RDR-176 read-only guard
-    # on writes. Catalog.init stays for the SQLite arm's factory writer.
-    Catalog.init(cat_dir)
+    # through the factories. (The local Catalog.init that used to run here
+    # died with the local catalog in the terminal nexus-i711w deletion.)
     return ActiveCatalog()
 
 

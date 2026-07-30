@@ -6,20 +6,19 @@ orphan chunks, hub-topic assignments. Section 1 (distance histogram)
 ships telemetry-only in this bead; the live-probe fallback is deferred
 to follow-up bead ``nexus-fx2d``.
 
-CATALOG SUBSTRATE (nexus-i711w Stage 2). This file needs NO import surgery:
-it already imports every dying name inside a function body
-(``_seed_catalog_conn`` -> ``nexus.catalog.catalog_db._SCHEMA_SQL``), so it
-still COLLECTS after the local catalog is deleted. Seven of its eleven tests
+CATALOG SUBSTRATE (nexus-i711w terminal deletion). Seven of the eleven tests
 — the live-distance-probe section and the chash-coverage section — never
 touch a catalog at all and are unaffected.
 
 The remaining FOUR are PORT-BLOCKED on nexus-e9ru2 and are annotated at
 their own sites: ``TestOrphanChunks`` (both) plus the two
 ``TestCollectionAuditCli`` tests that monkeypatch ``_open_catalog_conn``.
-They pass a raw ``sqlite3.Connection`` into ``compute_orphan_chunks``, which
-is service-mode-degraded BY DESIGN (``collection_audit.py``:376-382). They
-are the sole coverage of ``compute_orphan_chunks`` repo-wide, so they stay
-exactly as they are rather than being converted or dropped.
+They pass a raw ``sqlite3.Connection`` into ``compute_orphan_chunks``, whose
+production ``_open_catalog_conn`` seam now returns ``None`` (degraded by
+design) but survives precisely as this fixture's injection point. The
+fixture carries its own two-table DDL (``_ORPHAN_AUDIT_DDL``) since
+``nexus/catalog/catalog_db.py`` is deleted. They are the sole coverage of
+``compute_orphan_chunks`` repo-wide, so they stay rather than being dropped.
 """
 from __future__ import annotations
 
@@ -123,22 +122,50 @@ def _seed_t2(path: Path) -> None:
     db.close()
 
 
-def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
-    """Build a minimal catalog SQLite cache directly — skip the
-    JSONL/git facade that would rebuild from source on first open.
+#: Minimal DDL for the two tables ``compute_orphan_chunks`` anti-joins.
+#: nexus-i711w terminal deletion: this used to import ``_SCHEMA_SQL`` from
+#: ``nexus.catalog.catalog_db``, which is deleted. The production seam these
+#: tests exercise SURVIVES on purpose (``_open_catalog_conn`` stays a
+#: monkeypatchable function precisely for this fixture — see its docstring),
+#: so the fixture carries its own schema for the columns the query reads.
+_ORPHAN_AUDIT_DDL = """
+CREATE TABLE documents (
+    tumbler TEXT PRIMARY KEY,
+    title TEXT,
+    author TEXT,
+    year INTEGER,
+    content_type TEXT,
+    file_path TEXT,
+    corpus TEXT,
+    physical_collection TEXT,
+    chunk_count INTEGER,
+    head_hash TEXT,
+    indexed_at TEXT,
+    metadata TEXT
+);
+CREATE TABLE links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_tumbler TEXT,
+    to_tumbler TEXT,
+    link_type TEXT,
+    created_by TEXT
+);
+"""
 
-    nexus-e9ru2 / nexus-i711w: this is the LOCAL-ONLY seam. Its four callers
-    are the PORT-BLOCKED set named in the module docstring. The
-    ``_SCHEMA_SQL`` import stays function-local so this file collects after
-    ``nexus/catalog/catalog_db.py`` is deleted; the four callers retire (or
-    are rewritten against a service-side orphan query) when e9ru2 lands.
+
+def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
+    """Build a minimal catalog-shaped SQLite DB for the orphan-audit seam.
+
+    nexus-e9ru2 / nexus-i711w: ``compute_orphan_chunks`` still takes a raw
+    ``sqlite3.Connection`` (its only remaining audience is a pre-migration
+    SQLite catalog handed in via the ``_open_catalog_conn`` monkeypatch
+    seam); its four callers here remain its sole repo-wide coverage until
+    e9ru2 provides a service-side orphan query.
     """
     import sqlite3
 
-    from nexus.catalog.catalog_db import _SCHEMA_SQL
-
     conn = sqlite3.connect(str(db_path))
-    conn.executescript(_SCHEMA_SQL)
+    conn.executescript(_ORPHAN_AUDIT_DDL)
     old_ts = (datetime.now(UTC) - timedelta(days=45)).isoformat()
     new_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
     conn.executemany(

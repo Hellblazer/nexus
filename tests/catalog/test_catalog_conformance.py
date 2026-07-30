@@ -176,38 +176,24 @@ def _compute_nonconforming() -> set[str]:
 # ── structural sanity ───────────────────────────────────────────────────────────
 
 
-def test_client_is_not_missing_any_caller_facing_method() -> None:
-    """Every public `Catalog` method exists on `HttpCatalogClient` (audit: 0 missing).
-
-    A method missing entirely is a distinct, harder failure than a signature divergence;
-    pin it so a future deletion is caught here rather than at runtime.
-
-    Local-`Catalog`-anchored (all 88 public methods, wider than the Protocol
-    pair) — retires with the src in the nexus-i711w deletion commit; the
-    surviving missing-method guard is the parametrized conformance family,
-    which KeyErrors on any Protocol method absent from the client.
-    """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-
-    missing = sorted(name for name in _public_methods(Catalog) if name not in _CLIENT_METHODS)
-    assert missing == [], (
-        f"HttpCatalogClient is missing caller-facing Catalog methods: {missing}"
-    )
+# test_client_is_not_missing_any_caller_facing_method RETIRED (nexus-i711w
+# terminal deletion): it was local-`Catalog`-anchored (all 88 public methods,
+# wider than the Protocol pair) and its own docstring scheduled it to retire
+# with the src. The surviving missing-method guard is the parametrized
+# conformance family below, which KeyErrors on any Protocol method absent
+# from the client.
 
 
 def test_no_unguarded_public_classmethods() -> None:
     """Classmethods are excluded from the compared surface (`isfunction` is False).
 
-    Pin the known set so a NEW public classmethod on either class trips here and forces
-    a conscious decision about whether it belongs in the conformance surface, rather than
-    silently dropping out of coverage. `Catalog.init` is the factory; the client has none.
+    Pin the known set so a NEW public classmethod on the client trips here and
+    forces a conscious decision about whether it belongs in the conformance
+    surface, rather than silently dropping out of coverage.
 
-    The `Catalog` half retires with the src (nexus-i711w); the client half is
-    the surviving pin.
+    nexus-i711w terminal deletion: the local-`Catalog` half of this pin
+    (``{"init"}``) retired with the src; the client half is the surviving pin.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-
-    assert _public_classmethods(Catalog) == {"init"}
     assert _public_classmethods(HttpCatalogClient) == set()
 
 

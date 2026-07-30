@@ -238,14 +238,27 @@ class TestDoctorCheckSchema:
         assert "not found" in result.output.lower()
 
     def test_healthy_schema(self, runner: CliRunner, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
         # nexus-4s2o: je0b PK migrations skip via MigrationRetry when
         # the catalog is absent, leaving the stored version unbumped.
-        # Initialize the catalog so apply_pending completes cleanly.
-        Catalog.init(tmp_path / "catalog")
+        # nexus-i711w terminal deletion: ``Catalog.init`` died with the local
+        # catalog; je0b only gates on the frozen migration-source
+        # ``.catalog.db`` FILE plus the two tables its backfill JOIN
+        # references, so seed that stand-in directly (a fully-migrated
+        # legacy box always has a real frozen .catalog.db).
+        cat_db = tmp_path / "catalog" / ".catalog.db"
+        cat_db.parent.mkdir(parents=True)
+        cat_conn = sqlite3.connect(str(cat_db))
+        cat_conn.executescript(
+            "CREATE TABLE documents ("
+            " tumbler TEXT, physical_collection TEXT, file_path TEXT);"
+            "CREATE TABLE collections ("
+            " name TEXT, superseded_by TEXT NOT NULL DEFAULT '');"
+        )
+        cat_conn.commit()
+        cat_conn.close()
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
         apply_pending(conn, _current_version())

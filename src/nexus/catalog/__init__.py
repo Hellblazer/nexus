@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-from nexus.catalog.catalog import Catalog
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.tumbler import (
     DocumentRecord,
@@ -9,8 +12,10 @@ from nexus.catalog.tumbler import (
     Tumbler,
 )
 
+if TYPE_CHECKING:
+    from nexus.catalog.catalog_protocol import CatalogReader
+
 __all__ = [
-    "Catalog",
     "CatalogEntry",
     "CatalogLink",
     "DocumentRecord",
@@ -22,7 +27,7 @@ __all__ = [
 
 
 def resolve_tumbler(
-    cat: Catalog, value: str
+    cat: "CatalogReader", value: str
 ) -> tuple[Tumbler | None, str | None]:
     """Resolve a tumbler string OR title/filename to a ``(Tumbler, None)`` pair.
 

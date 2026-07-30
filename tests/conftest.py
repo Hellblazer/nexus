@@ -1005,11 +1005,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # test_catalog_path.py for the full sweep methodology.
     "test_backfill_hash.py",
     "test_catalog_backfill_collections.py",
+    # Five entries removed (nexus-i711w terminal deletion): test_catalog_
+    # collections_rebuild / concurrent_writer_lock / db / incremental_rebuild
+    # / collections_owner_backfill died with the local catalog. DOWNWARD-only.
     "test_catalog_collection_name.py",
     "test_catalog_collections.py",
-    "test_catalog_collections_rebuild.py",
-    "test_catalog_concurrent_writer_lock.py",
-    "test_catalog_db.py",
     # test_catalog_etl.py entry removed (nexus-i711w Stage 2 sub-stage A):
     # the file died with the SQLite->PG ETL readers. DOWNWARD-only edit.
     "test_catalog_doctor_collections_drift.py",
@@ -1018,9 +1018,10 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # cloud-mode behaviour under test.
     "test_catalog_doctor_name_vs_embed_dim.py",
     "test_upgrade_name_vs_embed_dim_advisory.py",
-    "test_catalog_incremental_rebuild.py",
-    "test_catalog_manifest_backfill.py",
-    "test_catalog_migrate_fallback.py",
+    # test_catalog_manifest_backfill.py entry removed (nexus-i711w terminal
+    # deletion): the file's raw-Catalog harness died with the local catalog.
+    # test_catalog_migrate_fallback.py entry removed (nexus-i711w terminal
+    # deletion, DIE batch-b rm). DOWNWARD-only edit.
     "test_catalog_papers_curator_isolation.py",
     "test_catalog_rename_collection.py",
     "test_catalog_spans_chunk_char.py",
@@ -1029,11 +1030,6 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # nexus-vgq89 correction sweep: test_collection_name_migration.py
     # removed here (same free-win reason as above — pre-existing module
     # cloud_mode mark).
-    # RDR-137 P1.5a: voyage tokens appear in synthetic conformant
-    # collection names used as backfill fixtures (e.g.
-    # ``code__nexus-1-1__voyage-code-3__v1``). Tests exercise pure
-    # SQLite + string parsing; no Voyage call is ever made.
-    "test_collections_owner_backfill.py",
     # RDR-137 P2a (nexus-tts0d.4): same voyage-token-in-fixture pattern
     # — the catalog-backed reader tests register synthetic conformant
     # collection names and read them back; no Voyage call.
@@ -1218,7 +1214,8 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # assertions (real collections ARE voyage-named); these test the catalog
     # public-API methods, not cloud-mode embedder behavior, so cloud_mode is
     # not applicable.
-    "tests/test_catalog_consumer_service_mode.py::TestSQLiteCatalogNewMethods::test_collections_by_owner_filters",
+    # TestSQLiteCatalogNewMethods entry removed (nexus-i711w terminal
+    # deletion): the SQLite parity arm retired. DOWNWARD-only edit.
     "tests/test_catalog_consumer_service_mode.py::TestHttpCatalogClientNewMethods::test_collections_by_owner",
     #
     # RDR-152 nexus-enehl: frecency metadata-update service client test. The

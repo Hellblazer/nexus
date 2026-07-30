@@ -139,19 +139,16 @@ CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 #: nexus-qnp5s: baseline for ``._db`` accesses outside the catalog module.
-#: Seeded at 46 then lowered to 44 after:
-#:   - removing the dead ``else: db = cat._db`` branch in mcp/catalog.py (-1)
-#:   - scoping daemon/ into the allowlist (t2_daemon.py owner-internal) (-1)
-#: Lowered from 44 to 3 by nexus-xnz0o: all 44 commands/ consumer sites migrated
-#: to the public catalog API. Lowered from 3 to 1 by nexus-3cwnx: coverage analytics
-#: migrated to service API (the ``coverage_cmd`` guard removed).
-#: Current unsuppressed count is 0: the two remaining ._db sites in
-#: catalog.py:514+516 (backfill-owner-id, SQLite-only write) both carry
-#: ``# epsilon-allow:`` annotations and are excluded from the scanner's count.
-#: Baseline 1 is the ceiling; a new unsuppressed ._db access anywhere outside
-#: the catalog/ allowlist will push the count to 1 and trip the assertion.
-#: Ratchets down to 0 when backfill-owner-id is ported to the service API.
-CATALOG_DB_ACCESS_BASELINE: int = 1
+#: History: seeded at 46 -> 44 (mcp/catalog dead branch + daemon/ scoping)
+#: -> 3 (nexus-xnz0o: commands/ consumers migrated to the public API)
+#: -> 1 (nexus-3cwnx: coverage analytics on the service API) -> 0
+#: (nexus-i711w terminal deletion: the two epsilon-suppressed
+#: backfill-owner-id ``._db`` writes died with the verb, and the
+#: mcp_infra ``getattr(_gate, "_db", None)`` lint-dodge — the documented
+#: +1 undercount — died with the local reader). ENFORCED at 0: the
+#: catalog handle is an HttpCatalogClient whose ``._db`` property raises;
+#: any new ``._db`` reach outside catalog/ is a hard violation.
+CATALOG_DB_ACCESS_BASELINE: int = 0
 
 
 #: RDR-146 catalog-construction floor. P0.1 seeded this at 49 (the AST
@@ -183,19 +180,16 @@ CLIENT_FOR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 
 #: GH #1374 sibling defect class: consumer code reaching ``Catalog``'s
 #: backend-private ``._dir`` attribute (the on-disk catalog directory).
-#: ``HttpCatalogClient`` (the service-mode catalog handle) has no ``._dir``.
-#: NOT yet enforced as a hard violation -- ``commands/catalog_cmds/
-#: backups.py`` still reaches it for deleted-backups directory bookkeeping
-#: pending its own cutover. Counted baseline, mirrors ``catalog_db_accesses``.
+#: ``HttpCatalogClient`` (the catalog handle in every mode) has no ``._dir``.
 CATALOG_DIR_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/catalog/",
     "src/nexus/daemon/",
 )
 
-#: Seeded at the current unsuppressed count (commands/catalog_cmds/
-#: backups.py:85). Ratchets to 0 when that site routes through the
-#: catalog public API instead of the private ``._dir`` attribute.
-CATALOG_DIR_ACCESS_BASELINE: int = 1
+#: Seeded at 1 (commands/catalog_cmds/backups.py:85); ENFORCED at 0 since
+#: the nexus-i711w terminal deletion — backups.py died with the local
+#: catalog, and no ``._dir`` reach remains outside the allowlist.
+CATALOG_DIR_ACCESS_BASELINE: int = 0
 
 
 #: nexus-9613q.1 (Part 2 of nexus-pyzk7): T2 store handles whose ``.conn`` /

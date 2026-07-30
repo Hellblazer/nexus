@@ -83,7 +83,7 @@ def _ch(seed: str) -> str:
 @pytest.fixture(scope="module")
 def owner(cat):
     """Base owner for document registration (explicit prefix, ETL-style)."""
-    from nexus.catalog.catalog import Tumbler
+    from nexus.catalog.tumbler import Tumbler
     t = cat.register_owner(
         name="i711w1-gap-owner",
         owner_type="curator",
@@ -190,7 +190,7 @@ class TestItem11OwnerNameTypeCoexistence:
 
     # nexus-i711w.1 item 11
     def test_same_name_different_type_coexist(self, cat, coexisting) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         t_repo = coexisting
         assert isinstance(t_repo, Tumbler)

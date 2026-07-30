@@ -4,8 +4,9 @@
 
 The T2 tier is split into seven domain stores, all HTTP clients over the
 engine's PG tables (their SQLite predecessors died across nexus-i711w
-Stage 2). The lazily-built ``catalog`` property still selects the local
-CatalogStore until the terminal i711w deletion:
+Stage 2; the local CatalogStore and the facade's ``catalog`` property died
+with the terminal i711w deletion — the catalog is served by
+``nexus.catalog.http_catalog_client`` / ``nexus.catalog.factory``):
 
 =========================  ==========================  =================================================================
 Attribute                  Class                       Responsibility
@@ -69,22 +70,13 @@ import sqlite3
 
 import structlog
 
-# Cheap import only: ``_sanitize_fts5`` is needed by
-# ``nexus.catalog.catalog_db`` at module import time. Rehomed to
-# ``records`` (pure helpers, no substrate) when memory_store died
-# (nexus-i711w Stage 2 sub-stage A3). Heavy submodule imports are
-# deferred via the module __getattr__ at the bottom of this file.
+# Cheap import only: ``_sanitize_fts5`` was rehomed to ``records``
+# (pure helpers, no substrate) when memory_store died (nexus-i711w
+# Stage 2 sub-stage A3). Re-exported here for historical consumers
+# (tests import it from ``nexus.db.t2``).
 from nexus.db.t2.records import _sanitize_fts5
 
 if TYPE_CHECKING:
-    # Type-only: re-exposed for static type checking. The runtime
-    # bindings come from ``__getattr__`` below, which lazy-loads each
-    # submodule on first attribute access. The CLI cold-start path
-    # (nexus.cli -> nexus.commands.catalog -> nexus.catalog.catalog ->
-    # nexus.catalog.catalog_db -> from nexus.db.t2 import _sanitize_fts5)
-    # therefore stops here without pulling sklearn -> scipy -> numpy
-    # via CatalogTaxonomy.
-    from nexus.db.t2.catalog import CatalogStore
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger()
@@ -216,34 +208,14 @@ def _cold_start_is_current_and_wal(path: Path) -> bool:
         return False
 
 
-# Re-export surface for backward compatibility. Resolution happens
-# lazily through the module-level ``__getattr__`` below; the eager
-# imports were pulling sklearn/scipy/numpy through CatalogTaxonomy on
-# every CLI invocation that touched any nexus.db.t2 symbol.
+# Re-export surface for backward compatibility. The PEP 562
+# ``__getattr__`` lazy resolver that used to live here served only the
+# ``CatalogStore`` re-export; it died with the local catalog
+# (nexus-i711w terminal deletion).
 __all__ = [
-    "CatalogStore",
     "T2Database",
     "_sanitize_fts5",
 ]
-
-
-def __getattr__(name: str) -> Any:  # PEP 562
-    """Lazy resolver for heavy re-exports.
-
-    Map each public name to its owning submodule and import on demand.
-    Only fires the first time a name is accessed (Python caches the
-    attribute on the module after a successful resolve).
-    """
-    _MAP = {
-        "CatalogStore":          "nexus.db.t2.catalog",
-    }
-    if name in _MAP:
-        import importlib  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        mod = importlib.import_module(_MAP[name])
-        value = getattr(mod, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 #: RDR-120 P3b: process-wide default for ``T2Database(run_migrations=...)``
@@ -278,27 +250,18 @@ def _resolve_default_run_migrations() -> bool:
 
 
 class T2Database:
-    """T2 SQLite memory bank with FTS5 full-text search.
+    """T2 memory bank facade.
 
-    Composition over eight domain stores (``memory``, ``plans``,
+    Composition over seven domain stores (``memory``, ``plans``,
     ``taxonomy``, ``telemetry``, ``chash_index``, ``document_aspects``,
-    ``aspect_queue``, ``catalog``). Each store owns its own connection,
-    lock, schema init, and migration guard; the facade forwards legacy
-    public methods to the appropriate store and owns only the
-    cross-domain ``expire()`` composition and the context manager.
+    ``aspect_queue``), all HTTP clients over the engine's PG tables.
+    The facade forwards legacy public methods to the appropriate store
+    and owns only the cross-domain ``expire()`` composition and the
+    context manager.
 
-    The seven domain stores share the single ``nexus.db`` SQLite file
-    passed at construction. The eighth — ``catalog`` — is unique in
-    that it opens a separate ``.catalog.db`` file under
-    ``catalog_path()``. The path split is preserved through P5.A.1 by
-    the Hal-approved thin-shim design; collapsing the files is
-    explicitly out of scope.
-
-    The ``catalog`` store is constructed lazily on first attribute
-    access (RDR-120 P5.A.1) so tests that never touch the catalog do
-    not eagerly open ``.catalog.db`` and contend with separately-
-    constructed ``CatalogDB`` instances during the P5.A.1 to P5.A.2
-    cutover window.
+    The eighth domain store the facade used to carry — the local SQLite
+    ``catalog`` (RDR-120 P5.A.1) — died with the terminal i711w
+    deletion; the catalog is reached via ``nexus.catalog.factory``.
     """
 
     def __init__(
@@ -306,7 +269,6 @@ class T2Database:
         path: Path,
         *,
         run_migrations: bool | None = None,
-        catalog_db_path: Path | None = None,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
@@ -447,15 +409,6 @@ class T2Database:
         from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         self.document_highlights: HttpDocumentHighlightsStore = HttpDocumentHighlightsStore()
 
-        # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
-        # store. Constructed lazily via the ``catalog`` property so
-        # the ``.catalog.db`` file is not opened on every T2Database
-        # construction (tests that never touch the catalog stay
-        # isolated). Caller may pin ``catalog_db_path`` explicitly to
-        # avoid the default resolution through ``nexus.config``.
-        self._catalog_db_path_override: Path | None = catalog_db_path
-        self._catalog: Any = None
-
     @property
     def taxonomy(self) -> "HttpTaxonomyStore":
         """Lazy-construct the taxonomy store on first access.
@@ -497,27 +450,6 @@ class T2Database:
         strictly worse than keeping the public spelling they already use.
         """
         self._taxonomy = store
-
-    @property
-    def catalog(self) -> "CatalogStore":
-        """Lazy-construct the eighth domain store on first access.
-
-        Resolution order for the catalog file path:
-
-        1. Explicit ``catalog_db_path`` argument passed to
-           :meth:`T2Database.__init__`.
-        2. ``nexus.config.catalog_path()/.catalog.db`` (production default).
-        """
-        if self._catalog is None:
-            from nexus.db.t2.catalog import CatalogStore as _CatalogStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-            if self._catalog_db_path_override is not None:
-                db_path = self._catalog_db_path_override
-            else:
-                from nexus.config import catalog_path as _catalog_path  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-                db_path = _catalog_path() / ".catalog.db"
-            self._catalog = _CatalogStore(db_path)
-        return self._catalog
 
     def stored_schema_version(self) -> str:
         """Return the ``_nexus_version`` row's ``cli_version`` value.
@@ -687,17 +619,8 @@ class T2Database:
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so the most recently
-        opened connection is released first. The ``catalog`` store
-        is only closed when it was actually constructed (lazy
-        property — never opened means never to close).
+        opened connection is released first.
         """
-        # RDR-120 P5.A.1: close catalog only if it was materialised.
-        if self._catalog is not None:
-            try:
-                self._catalog.close()
-            except Exception:  # noqa: BLE001  — best-effort; catalog-close silence acceptable during teardown, handle nulled regardless
-                pass
-            self._catalog = None
         # Reverse-construction order: document_highlights was built after
         # aspect_queue (RDR-139 Layer E), so it closes first.
         self.document_highlights.close()

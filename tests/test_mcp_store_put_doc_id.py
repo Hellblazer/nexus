@@ -37,10 +37,11 @@ def local_t3() -> T3Database:
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from nexus.catalog.catalog import Catalog
+    # nexus-i711w: the local Catalog.init that used to run here died with
+    # the local catalog; the store hook registers into the live service
+    # catalog. The env pin keeps any legacy path resolution isolated.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 

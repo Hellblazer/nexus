@@ -33,9 +33,11 @@ def t3():
 
 @pytest.fixture()
 def catalog(tmp_path, monkeypatch):
-    from nexus.catalog.catalog import Catalog
+    # nexus-i711w terminal deletion: seeds through ActiveCatalog (the live
+    # service catalog) — the local Catalog.init arm is gone.
+    from tests._catalog_fixture_ops import ActiveCatalog
     catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
+    cat = ActiveCatalog()
     repo_owner = cat.register_owner("nexus", "repo", repo_hash="aabb1122")
     paper_owner = cat.register_owner("papers", "curator")
     cat.register(repo_owner, "indexer.py", content_type="code",
@@ -309,10 +311,10 @@ class TestTumblerHierarchy:
         assert result == (Tumbler.parse(expected) if expected else None)
 
     def test_resolve_chunk_ghost_element(self, tmp_path):
-        from nexus.catalog.catalog import Catalog
-        catalog_dir = tmp_path / "catalog"
-        catalog_dir.mkdir()
-        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        # nexus-i711w: runs against the live catalog (fresh per-test tenant),
+        # so the deterministic first-owner/first-doc tumblers still hold.
+        from tests._catalog_fixture_ops import ActiveCatalog
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="aabb")
         cat.register(owner, "a.py", content_type="code", physical_collection="code__nexus", chunk_count=5)
         result = cat.resolve_chunk(Tumbler.parse("1.1.1.3"))
@@ -322,10 +324,8 @@ class TestTumblerHierarchy:
         assert result["physical_collection"] == "code__nexus"
 
     def test_resolve_chunk_out_of_range(self, tmp_path):
-        from nexus.catalog.catalog import Catalog
-        catalog_dir = tmp_path / "catalog"
-        catalog_dir.mkdir()
-        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        from tests._catalog_fixture_ops import ActiveCatalog
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="aabb")
         cat.register(owner, "a.py", content_type="code", physical_collection="code__nexus", chunk_count=5)
         assert cat.resolve_chunk(Tumbler.parse("1.1.1.10")) is None
@@ -335,10 +335,8 @@ class TestTumblerHierarchy:
             Tumbler.parse("1.-1.42")
 
     def test_descendants_any_depth(self, tmp_path):
-        from nexus.catalog.catalog import Catalog
-        catalog_dir = tmp_path / "catalog"
-        catalog_dir.mkdir()
-        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        from tests._catalog_fixture_ops import ActiveCatalog
+        cat = ActiveCatalog()
         o1 = cat.register_owner("nexus", "repo", repo_hash="aabb")
         o2 = cat.register_owner("arcaneum", "repo", repo_hash="ccdd")
         cat.register(o1, "a.py", content_type="code", file_path="a.py")

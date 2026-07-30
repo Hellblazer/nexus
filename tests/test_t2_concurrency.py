@@ -540,16 +540,9 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
 
 
 # ── RDR-129 B1 (nexus-qi1zb): serving busy_timeout raised 5000 -> 30000 ──────
-
-
-import pytest as _pytest
-
-
-def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
-    """The shared serving timeout is 30s and equals the bootstrap-migration
-    window (RDR-129 B1 'matching the bootstrap path')."""
-    from nexus.db.t2 import _BOOTSTRAP_BUSY_TIMEOUT_MS
-    from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-
-    assert SERVING_BUSY_TIMEOUT_MS == 30000
-    assert SERVING_BUSY_TIMEOUT_MS == _BOOTSTRAP_BUSY_TIMEOUT_MS
+#
+# test_serving_busy_timeout_constant_matches_bootstrap RETIRED (nexus-i711w
+# terminal deletion): its subject was the SQLite serving-connection tuning
+# constant (``db/t2/_tuning.py``), which was deleted with the local SQLite
+# catalog store — the last consumer of the serving PRAGMA profile. The engine
+# substrate has no client-side busy_timeout to pin.

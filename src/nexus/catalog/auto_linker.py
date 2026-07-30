@@ -11,8 +11,12 @@ from typing import Any
 
 import structlog
 
-from nexus.catalog.catalog import Catalog
+from typing import TYPE_CHECKING
+
 from nexus.catalog.tumbler import Tumbler
+
+if TYPE_CHECKING:
+    from nexus.catalog.catalog_protocol import CatalogReader
 
 _log = structlog.get_logger()
 
@@ -81,7 +85,7 @@ def read_link_contexts(entries: list[dict[str, Any]]) -> list[LinkContext]:
 
 
 def auto_link(
-    cat: Catalog,
+    cat: "CatalogReader",
     source_tumbler: Tumbler,
     contexts: list[LinkContext],
 ) -> AutoLinkResult:

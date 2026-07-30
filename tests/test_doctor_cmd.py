@@ -470,15 +470,9 @@ class TestFixPaths:
 
         entries: list of (owner_type, repo_hash, repo_root, file_path, collection).
         """
-        from nexus.catalog.catalog import Catalog
-
-        # Still init the LOCAL catalog. On the SQLite arm the factory writer
-        # needs it to exist (without it the verb reports "Catalog not
-        # initialized — run: nx catalog setup" and the seeding silently goes
-        # nowhere); on the engine arm it is inert, because the writer resolves
-        # to the service and never opens this directory.
-        Catalog.init(tmp_path / "catalog")
-
+        # nexus-i711w: the local Catalog.init that used to run here died with
+        # the local catalog; the factories are service-only, so seeding goes
+        # straight through the active (service) catalog.
         cat = ActiveCatalog()
         for owner_type, repo_hash, repo_root, file_path, collection in entries:
             owner = cat.register_owner(

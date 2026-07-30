@@ -86,78 +86,10 @@ class TestOwnerRecordRepoRoot:
 
 
 @pytest.mark.usefixtures("local_catalog_backend")
-class TestCatalogDBMigration:
-    """DDL migration: existing DBs get repo_root column added.
-
-    nexus-i711w: DIE. The whole class's subject is ``CatalogDB``'s SQLite
-    schema and its ALTER-on-open migration — there is no service-mode
-    expression of either (the engine's schema is Liquibase-managed and
-    covered by the Java suite). ``nexus.catalog.catalog_db`` is imported
-    inside each body so the FILE still collects after the deletion; the class
-    itself retires with ``nexus/catalog/catalog_db.py``.
-    """
-
-    def test_new_db_has_repo_root_column(self, tmp_path):
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db = CatalogDB(tmp_path / "catalog.db")
-        # Should be able to query repo_root without error
-        db.execute("SELECT repo_root FROM owners LIMIT 0")
-        db.close()
-
-    def test_migration_adds_repo_root_to_existing_db(self, tmp_path):
-        """Simulate an existing DB without repo_root, then open with new CatalogDB."""
-        import sqlite3
-
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db_path = tmp_path / "catalog.db"
-        # Create old-schema DB manually
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("""
-            CREATE TABLE owners (
-                tumbler_prefix TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                owner_type TEXT NOT NULL,
-                repo_hash TEXT,
-                description TEXT
-            )
-        """)
-        conn.execute("INSERT INTO owners VALUES ('1.1', 'old-repo', 'repo', 'hash1', 'desc')")
-        conn.commit()
-        conn.close()
-
-        # Open with new CatalogDB — should migrate
-        db = CatalogDB(db_path)
-        row = db.execute("SELECT repo_root FROM owners WHERE tumbler_prefix = '1.1'").fetchone()
-        assert row[0] == ""  # default empty string
-        db.close()
-
-    def test_rebuild_stores_repo_root(self, tmp_path):
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db = CatalogDB(tmp_path / "catalog.db")
-        owner = OwnerRecord(
-            owner="1.1", name="test-repo", owner_type="repo",
-            repo_hash="abc", description="test", repo_root="/home/user/repo",
-        )
-        db.rebuild(owners={"1.1": owner}, documents={}, links=[])
-        row = db.execute("SELECT repo_root FROM owners WHERE tumbler_prefix = '1.1'").fetchone()
-        assert row[0] == "/home/user/repo"
-        db.close()
-
-    def test_rebuild_stores_empty_repo_root(self, tmp_path):
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db = CatalogDB(tmp_path / "catalog.db")
-        owner = OwnerRecord(
-            owner="1.1", name="test-repo", owner_type="repo",
-            repo_hash="abc", description="test",
-        )
-        db.rebuild(owners={"1.1": owner}, documents={}, links=[])
-        row = db.execute("SELECT repo_root FROM owners WHERE tumbler_prefix = '1.1'").fetchone()
-        assert row[0] == ""
-        db.close()
+# nexus-i711w terminal deletion: TestCatalogDBMigration (4 tests) retired
+# WITH nexus.catalog.catalog_db — the subject was the SQLite schema and its
+# ALTER-on-open migration; the engine schema is Liquibase-managed and
+# covered by the Java suite.
 
 
 # ── resolve_path (nexus-1p4g.2) ──────────────────────────────────────────────
@@ -166,72 +98,73 @@ class TestCatalogDBMigration:
 class TestResolvePath:
     """Catalog.resolve_path() resolution tests.
 
-    ⚠️ FOUR OF THESE SEVEN ARE PORT-BLOCKED ON nexus-5i864 AND STAY PINNED TO
-    THE LOCAL CATALOG. Verified in source: ``HttpCatalogClient.resolve_path``
-    (http_catalog_client.py:1150-1152) is a bare
-    ``Path(entry.file_path) if entry and entry.file_path else None``. It drops
-    BOTH behaviours the local implementation has
-    (``catalog_docs.py``:462+):
-
-      1. the ``owner.repo_root`` recombination that turns a stored RELATIVE
-         ``file_path`` into an absolute on-disk path, and
-      2. the curator guard that returns ``None`` for owners which have no
-         repo root at all.
-
-    On the service arm a relative ``src/test.py`` therefore comes back as the
-    relative ``Path("src/test.py")`` and a curator doc comes back as
-    ``Path("paper.pdf")`` instead of ``None`` — so converting these
-    assertions would mean inverting them. THESE FOUR ARE THE ONLY
-    repo-wide coverage of ``resolve_path``; they must not be lost. They
-    become the regression tests when 5i864 is fixed.
-
-    The two that DO port (unknown tumbler, absolute file_path) agree across
-    substrates and now exercise whichever catalog is live.
+    nexus-i711w terminal deletion: the four locally-PINNED tests (port-
+    blocked on nexus-5i864) lost their harness with the local Catalog.
+    Their CORRECT assertions are preserved below as ``xfail(strict=True,
+    reason="nexus-5i864")`` service-side pins: ``HttpCatalogClient.
+    resolve_path`` (http_catalog_client.py) is a bare
+    ``Path(entry.file_path) if entry and entry.file_path else None`` and
+    drops BOTH the ``owner.repo_root`` recombination and the curator
+    guard, so these fail today — and XPASS loudly (forcing marker
+    removal) the moment 5i864 lands. The registry-legacy variant's
+    structlog-event half was local-only observability and retired with
+    the module; its ``None``-return half is folded into the empty-
+    repo_root pin. The ``RepoRegistry`` source-text lint guard retired
+    with its subject file ``catalog_docs.py``.
     """
 
-    def _make_local_catalog(self, tmp_path: Path) -> Any:
-        """A real LOCAL ``Catalog``, for the nexus-5i864-pinned tests only."""
-        from nexus.catalog.catalog import Catalog
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
-
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_resolve_path_with_repo_root(self, tmp_path: Path) -> None:
-        """PINNED — nexus-5i864 defect (1): the repo_root recombination is
-        absent service-side, so this returns ``Path("src/test.py")`` there.
-        """
-        cat = self._make_local_catalog(tmp_path)
+    @pytest.mark.xfail(
+        strict=True,
+        reason="nexus-5i864: service resolve_path drops repo_root recombination",
+    )
+    def test_resolve_path_with_repo_root(
+        self, active_catalog: Any, tmp_path: Path,
+    ) -> None:
+        """A stored RELATIVE file_path recombines with owner.repo_root."""
         repo_dir = tmp_path / "myrepo"
         repo_dir.mkdir()
-        owner = cat.register_owner(
-            "test-repo", "repo", repo_hash="abc12345", repo_root=str(repo_dir),
+        owner = active_catalog.register_owner(
+            "resolve-path-root", "repo", repo_hash="abc12345",
+            repo_root=str(repo_dir),
         )
-        tumbler = cat.register(
+        tumbler = active_catalog.register(
             owner, "test.py", content_type="code", file_path="src/test.py",
         )
-        result = cat.resolve_path(tumbler)
-        assert result == repo_dir / "src" / "test.py"
+        assert active_catalog.resolve_path(tumbler) == repo_dir / "src" / "test.py"
 
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_resolve_path_curator_returns_none(self, tmp_path: Path) -> None:
-        """PINNED — nexus-5i864 defect (2): the curator guard is absent
-        service-side, so this returns ``Path("paper.pdf")`` there.
-        """
-        cat = self._make_local_catalog(tmp_path)
-        owner = cat.register_owner("papers", "curator")
-        tumbler = cat.register(
+    @pytest.mark.xfail(
+        strict=True,
+        reason="nexus-5i864: service resolve_path drops the curator guard",
+    )
+    def test_resolve_path_curator_returns_none(self, active_catalog: Any) -> None:
+        """Curator owners have no repo root: resolve_path must be None."""
+        owner = active_catalog.register_owner("resolve-path-papers", "curator")
+        tumbler = active_catalog.register(
             owner, "paper.pdf", content_type="paper", file_path="paper.pdf",
         )
-        assert cat.resolve_path(tumbler) is None
+        assert active_catalog.resolve_path(tumbler) is None
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="nexus-5i864: service resolve_path returns a relative Path "
+               "for empty-repo_root owners instead of None",
+    )
+    def test_resolve_path_empty_repo_root_returns_none(
+        self, active_catalog: Any,
+    ) -> None:
+        """RDR-137 Phase 3.6 (OQ-11): legacy owners with empty repo_root
+        resolve to None (no repos.json fallback)."""
+        owner = active_catalog.register_owner(
+            "resolve-path-legacy", "repo", repo_hash="abc12345",
+        )
+        tumbler = active_catalog.register(
+            owner, "test.py", content_type="code", file_path="src/test.py",
+        )
+        assert active_catalog.resolve_path(tumbler) is None
 
     def test_resolve_path_unknown_tumbler(self, active_catalog: Any) -> None:
         """PORTED: an unregistered tumbler resolves to ``None`` on both arms
-        (local returns None from the owner lookup, the service client's
+        (local returned None from the owner lookup, the service client's
         ``resolve`` returns None and short-circuits).
         """
         assert active_catalog.resolve_path(Tumbler.parse("1.99.99")) is None
@@ -254,103 +187,6 @@ class TestResolvePath:
         assert active_catalog.resolve_path(tumbler) == Path(
             "/absolute/path/test.py"
         )
-
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_resolve_path_empty_repo_root_no_registry(self, tmp_path: Path) -> None:
-        """repo_root empty and no registry -> None.
-
-        PINNED — nexus-5i864. The ``None`` here comes from the local
-        repo_root/registry logic that the service client does not have; there
-        it returns ``Path("src/test.py")``. The ``_default_registry_path``
-        patch target is itself in the dying module.
-        """
-        cat = self._make_local_catalog(tmp_path)
-        owner = cat.register_owner("test-repo", "repo", repo_hash="abc12345")
-        tumbler = cat.register(
-            owner, "test.py", content_type="code", file_path="src/test.py",
-        )
-        with patch(
-            "nexus.catalog.catalog._default_registry_path",
-            return_value=tmp_path / "nonexistent" / "repos.json",
-        ):
-            assert cat.resolve_path(tumbler) is None
-
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_resolve_path_empty_repo_root_returns_none_no_registry_consult(
-        self, tmp_path: Path,
-    ) -> None:
-        """RDR-137 Phase 3.6 (nexus-tts0d.11, OQ-11): legacy owners with
-        empty ``repo_root`` no longer fall back to ``repos.json``. The
-        previous RepoRegistry-iteration path is excised; the function
-        now returns ``None`` and emits a DEBUG event so the legacy
-        owner is observable for re-index.
-
-        PINNED — nexus-5i864, and the STRONGEST of the four: it asserts BOTH
-        that ``resolve_path`` returns ``None`` for an empty-repo_root owner
-        AND that the ``catalog_resolve_path_legacy_owner_missing_repo_root``
-        DEBUG event fires. The service client emits no such event and returns
-        a relative Path, so neither assertion has a service-mode form. This
-        is the observability half of 5i864.
-        """
-        import logging
-        import structlog
-        from structlog.testing import capture_logs
-
-        repo_dir = tmp_path / "myrepo"
-        repo_dir.mkdir()
-        repo_hash = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:8]
-
-        # Bump structlog so the DEBUG event fires under capture_logs.
-        structlog.configure(
-            wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
-        )
-        try:
-            cat = self._make_local_catalog(tmp_path)
-            owner = cat.register_owner("test-repo", "repo", repo_hash=repo_hash)
-            tumbler = cat.register(
-                owner, "test.py", content_type="code", file_path="src/test.py",
-            )
-            with capture_logs() as cap:
-                result = cat.resolve_path(tumbler)
-            assert result is None
-            # DEBUG event names the owner and gives a hint.
-            assert any(
-                e.get("event") == "catalog_resolve_path_legacy_owner_missing_repo_root"
-                and e.get("repo_hash") == repo_hash
-                for e in cap
-            )
-        finally:
-            structlog.configure(
-                wrapper_class=structlog.make_filtering_bound_logger(
-                    logging.WARNING,
-                ),
-            )
-
-    def test_resolve_path_no_RepoRegistry_import_in_module(self) -> None:
-        """RDR-137 Phase 3.6 OQ-11 acceptance gate: ``RepoRegistry`` is
-        no longer imported in ``catalog_docs.py`` after this cutover.
-
-        Note: ``_repo_identity`` (a pure helper, not registry-coupled)
-        stays for now — it migrates with the other helpers in
-        ``nexus-tts0d.21`` (relocation to ``nexus.repo_identity``).
-        Phase 5's lint guard fires on ``RepoRegistry`` and
-        ``repos.json`` re-introduction, not on the helpers.
-
-        nexus-i711w: DIE BY CONSTRUCTION, not by substrate. This is a
-        source-text lint guard over ``src/nexus/catalog/catalog_docs.py`` — a
-        file on the deletion list — so it retires with its subject rather
-        than porting. Left exactly as-is: it passes today, and it keeps
-        guarding the re-introduction until the file goes.
-        """
-        from pathlib import Path as _Path
-
-        src = _Path(__file__).resolve().parent.parent / (
-            "src/nexus/catalog/catalog_docs.py"
-        )
-        text = src.read_text()
-        assert "RepoRegistry" not in text
-        assert "_default_registry_path" not in text
-        assert "repos.json" not in text
 
 
 # ── make_relative (nexus-1p4g.3) ─────────────────────────────────────────────

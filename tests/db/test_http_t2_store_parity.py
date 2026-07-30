@@ -448,78 +448,12 @@ def test_http_store_matches_contract_return_shapes(label, http_path):
 
 
 # ---------------------------------------------------------------------------
-# P4-DELETE-MARKER (nexus-i711w): faithfulness guard. This is the ONLY thing in
-# this file that references a SQLite store class. It confirms the frozen contract
-# still matches the live SQLite oracle for as long as the SQLite classes exist.
-#
-# When RDR-158 P4 deletes the SQLite store classes, DELETE this whole block: the
-# `_SQLITE_ORACLES` map and `test_contract_matches_live_sqlite_oracle`. The
-# references are STRING-LITERAL module paths (e.g. "nexus.db.t2.memory_store"),
-# NOT `import` statements — grep for the literal `# P4-DELETE-MARKER` token and
-# for the SQLite module-path strings in `_SQLITE_ORACLES`, not for `import`
-# lines. Leaving this behind after the modules are gone causes nine
-# ModuleNotFoundError at parametrize/collection time, not a quiet skip. The
-# durable tripwire above does NOT depend on this block.
+# The P4-DELETE-MARKER block (``_SQLITE_ORACLES`` +
+# ``test_contract_returns_match_live_sqlite_oracle`` +
+# ``test_contract_matches_live_sqlite_oracle``) was deleted per its own
+# instructions in the nexus-i711w terminal deletion: with the SQLite store
+# classes gone there is no live oracle left to capture from, and the frozen
+# T2_STORE_RETURNS / T2_STORE_CONTRACT tables above are the contract of
+# record. NOTE (by design): this also retired the last live-oracle check for
+# the T1 scratch contract — the frozen table is its contract of record too.
 # ---------------------------------------------------------------------------
-_SQLITE_ORACLES = {
-    # taxonomy: oracle DELETED (nexus-i711w Stage 2 sub-stage C); telemetry,
-    # chash_index, document_highlights and aspect_queue followed in
-    # sub-stage A; memory, plans and document_aspects in sub-stage A3. This
-    # block's own docstring anticipated it — "after RDR-158 P4 there is no
-    # oracle left to capture from". The frozen T2_STORE_RETURNS entries for
-    # all of them STAY: each is now the contract of record rather than a
-    # mirror of a live oracle, which is exactly what it was frozen to
-    # become. Only the (non-SQLite, chromadb-backed) T1 scratch oracle
-    # remains live; the whole block dies with the CatalogStore in the
-    # terminal i711w deletion.
-    "scratch": "nexus.db.t1:T1Database",
-}
-
-
-@pytest.mark.parametrize("label", sorted(_SQLITE_ORACLES),
-                         ids=sorted(_SQLITE_ORACLES))
-def test_contract_returns_match_live_sqlite_oracle(label):
-    """P4-DELETE: the frozen RETURN table reproduces the live oracle exactly.
-
-    Keeps T2_STORE_RETURNS honest while the SQLite twins still exist. After
-    RDR-158 P4 there is no oracle left to capture from, so whatever shapes the
-    Http twins happen to carry would silently become the contract — which is
-    precisely how get_topic_link_pairs would have frozen wrong. Delete with the
-    rest of this block.
-    """
-    sqlite_cls = _load(_SQLITE_ORACLES[label])
-    expected = T2_STORE_RETURNS.get(label, {})
-    drift = []
-    for method, want in sorted(expected.items()):
-        fn = getattr(sqlite_cls, method, None)
-        if fn is None:
-            drift.append(f"  {label}.{method}: in the frozen table, gone from the oracle")
-            continue
-        got = _norm_return(inspect.signature(fn).return_annotation)
-        if got != want:
-            drift.append(f"  {label}.{method}\n      frozen: {want}\n      live  : {got}")
-    assert not drift, (
-        f"{label}: the frozen return table has drifted from the live SQLite "
-        f"oracle — REGENERATE it:\n" + "\n".join(drift)
-    )
-
-
-@pytest.mark.parametrize("label", sorted(_SQLITE_ORACLES),
-                         ids=sorted(_SQLITE_ORACLES))
-def test_contract_matches_live_sqlite_oracle(label):
-    """P4-DELETE: the frozen contract must reproduce the live SQLite oracle's
-    public surface (method names + ordered non-self params) exactly, so the
-    freeze is provably faithful while the SQLite classes still exist."""
-    sqlite_cls = _load(_SQLITE_ORACLES[label])
-    live = {}
-    for name, fn in inspect.getmembers(sqlite_cls, predicate=_is_method_like):
-        if name.startswith("_") or name in _UNIVERSAL_IGNORE:
-            continue
-        live[name] = [
-            p for p in inspect.signature(fn).parameters if p != "self"
-        ]
-    assert live == T2_STORE_CONTRACT[label], (
-        f"{label}: frozen contract drifted from the live SQLite oracle. "
-        f"Regenerate t2_store_contract.py from the live classes (this guard "
-        f"is deleted in RDR-158 P4 once the SQLite classes go)."
-    )

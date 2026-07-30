@@ -180,16 +180,9 @@ def fake_catalog(tmp_path: Path, monkeypatch):
     Sets ``NEXUS_CATALOG_PATH`` so production code paths that call
     ``get_catalog()`` resolve to this on-disk catalog.
     """
-    from nexus.catalog.catalog import Catalog
-
     # nexus-aqbrk: seed through the ACTIVE catalog. mcp_core.traverse resolves
-    # its catalog through the factory, so a local-only seed left the service
-    # graph empty and every assertion read `assert '1.1.2' in []`. Catalog.init
-    # still runs: the SQLite arm's factory writer needs the directory to exist,
-    # and on the engine arm it is inert.
-    cat_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
+    # its catalog through the factory. nexus-i711w terminal deletion: the
+    # local Catalog.init leg died; ActiveCatalog needs no local init.
     cat = ActiveCatalog()
     owner = cat.register_owner("p", "test")
     rdr = cat.register(owner, "RDR", physical_collection="rdr__test")
@@ -269,12 +262,7 @@ def fake_catalog_with_paths(tmp_path: Path, monkeypatch):
     Sets ``NEXUS_CATALOG_PATH`` so production code paths that call
     ``get_catalog()`` resolve to this on-disk catalog.
     """
-    from nexus.catalog.catalog import Catalog
-
     # nexus-aqbrk: seed through the ACTIVE catalog — see fake_catalog above.
-    cat_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
     cat = ActiveCatalog()
     owner = cat.register_owner("p", "test")
     rdr = cat.register(

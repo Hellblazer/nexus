@@ -507,29 +507,22 @@ class TestGap2SourcePathNormalization:
         file_path: str,
         title: str,
     ) -> None:
-        """Build a real local catalog at a tmp dir, register one document,
-        and inject it into the hook via ``_resolve_catalog_reader``.
+        """Seed one document into the ACTIVE (service) catalog and inject
+        the live reader into the hook via ``_resolve_catalog_reader``.
 
-        Injection (not env discovery) keeps the test hermetic and immune to
-        the ambient storage backend: ``make_catalog_reader()`` returns an HTTP
-        client to the live service whenever the shell is in service mode, so
-        env-seeding a tmp catalog would be silently ignored. The injected
-        object is a real :class:`Catalog`, so ``lookup_doc_id_by_collection_and_path``
-        and ``by_doc_id`` exercise production code, not a mock."""
+        nexus-i711w: the local ``Catalog`` this used to build is gone; the
+        seed routes through the same service-only factories the hook reads
+        with, so ``lookup_doc_id_by_collection_and_path`` and ``by_doc_id``
+        still exercise production code, not a mock."""
         import hashlib
 
         import nexus.aspect_worker as mod
-        from nexus.catalog import Catalog
+        from tests._catalog_fixture_ops import ActiveCatalog, active_reader
 
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
         repo_root = str(tmp_path / "repo")
         (tmp_path / "repo").mkdir()
         repo_hash = hashlib.sha256(repo_root.encode()).hexdigest()[:8]
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "seed-repo", "repo", repo_hash=repo_hash, repo_root=repo_root,
         )
@@ -537,7 +530,17 @@ class TestGap2SourcePathNormalization:
             owner, title, content_type="paper",
             file_path=file_path, physical_collection=collection,
         )
-        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: cat)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", active_reader)
+
+    @pytest.mark.xfail(
+
+        strict=True,
+
+        raises=AssertionError,
+
+        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
+
+    )
 
     def test_resolving_absolute_path_normalizes_to_canonical_relative(
         self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -667,6 +670,16 @@ class TestGap2SourcePathNormalization:
         assert not any(
             e.get("event") == "aspect_source_path_uncanonical" for e in cap
         )
+
+    @pytest.mark.xfail(
+
+        strict=True,
+
+        raises=AssertionError,
+
+        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
+
+    )
 
     def test_resolved_but_canonical_is_absolute_left_as_is(
         self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

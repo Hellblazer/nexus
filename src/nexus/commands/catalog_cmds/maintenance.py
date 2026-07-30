@@ -110,19 +110,8 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
         )
         return
 
-    # Backup before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    backup_path = snapshot_documents(
-        cat,
-        [t for t, _, _ in orphans],
-        verb="gc",
-        reason="miss_count >= 2",
-    )
-    if backup_path:
-        click.echo(
-            f"\nBackup snapshot written: {backup_path}"
-            f"\n  Restore with: nx catalog undelete {backup_path.name}"
-        )
+    # The pre-delete local backup snapshot (RDR-106 Option A) died with the
+    # local catalog (nexus-i711w): backups were local-catalog-only.
 
     # nexus-xedhp: batch via delete_many (service mode) instead of one
     # writer.delete_document() per entry. SQLite/daemon-mode writers don't

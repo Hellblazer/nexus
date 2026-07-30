@@ -33,15 +33,11 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def cat(cfg: Path) -> Catalog:
-    from nexus.catalog.catalog import Catalog
-    cat_dir = cfg / "catalog"
+def cat(cfg: Path) -> ActiveCatalog:
     # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
     # through the factories, so a local-only handle left the service
-    # catalog empty (or, for writes, hit the RDR-176 read-only guard).
-    # Catalog.init stays: the SQLite arm's factory writer needs the
-    # directory to exist, and it is inert on the engine arm.
-    Catalog.init(cat_dir)
+    # catalog empty. (The local Catalog.init that used to run here died
+    # with the local catalog in the terminal nexus-i711w deletion.)
     return ActiveCatalog()
 
 

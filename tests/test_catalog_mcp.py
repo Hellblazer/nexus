@@ -48,14 +48,10 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     directly, so under the engine substrate the owner landed in
     ``.catalog.db`` while the MCP tools resolved the SERVICE catalog and saw
     an empty tenant — hence "list index out of range" and "no document with
-    tumbler 1.1.1". NEXUS_CATALOG_PATH is set BEFORE the owner write so the
-    SQLite arm's factories resolve the same directory that was just
-    initialised.
+    tumbler 1.1.1". nexus-i711w terminal deletion: the local ``Catalog.init``
+    arm is gone entirely; ActiveCatalog needs no local init.
     """
-    from nexus.catalog.catalog import Catalog
-    catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
     c = ActiveCatalog()
     c.register_owner("test-repo", "repo", repo_hash="abcd1234")
     return c

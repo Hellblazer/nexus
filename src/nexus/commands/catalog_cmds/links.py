@@ -257,8 +257,7 @@ def link_bulk_delete_cmd(
     """Bulk delete links matching filters.
 
     nexus-9nim: 4.29.1 inverted the default from "delete unless --dry-run"
-    to "report unless --no-dry-run --confirm" + writes a backup snapshot
-    before the actual delete. Recoverable via ``nx catalog undelete``.
+    to "report unless --no-dry-run --confirm".
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -274,9 +273,9 @@ def link_bulk_delete_cmd(
     resolved_from = str(_cat_cmd._resolve_tumbler(cat, from_t)) if from_t else ""
     resolved_to = str(_cat_cmd._resolve_tumbler(cat, to_t)) if to_t else ""
 
-    # First pass: dry-run to enumerate the matching links for the
-    # backup snapshot. The cat.bulk_unlink dry_run path returns the
-    # count; we need the actual rows for the snapshot, so query directly.
+    # Enumerate the matching links so the report path can count them.
+    # (The pre-delete local backup snapshot, RDR-106 Option A, died with
+    # the local catalog — nexus-i711w: backups were local-catalog-only.)
     matching_links = cat.link_query(
         from_t=resolved_from, to_t=resolved_to,
         link_type=link_type, created_by=created_by,
@@ -288,37 +287,6 @@ def link_bulk_delete_cmd(
     if not will_delete:
         click.echo(f"Would remove {count} link(s)")
         return
-
-    # Backup snapshot before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_links  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    backup_path = snapshot_links(
-        cat,
-        [
-            {
-                "from": str(lnk.from_tumbler),
-                "to": str(lnk.to_tumbler),
-                "link_type": lnk.link_type,
-                "from_span": lnk.from_span,
-                "to_span": lnk.to_span,
-                "created_by": lnk.created_by,
-                "created_at": lnk.created_at,
-                "meta": lnk.meta,
-            }
-            for lnk in matching_links
-        ],
-        verb="link-bulk-delete",
-        reason="bulk-unlink filters",
-        args={
-            "from_t": resolved_from, "to_t": resolved_to,
-            "link_type": link_type, "created_by": created_by,
-            "created_at_before": created_at_before,
-        },
-    )
-    if backup_path:
-        click.echo(
-            f"Backup snapshot written: {backup_path}\n"
-            f"  Restore with: nx catalog undelete {backup_path.name}"
-        )
 
     actual = writer.bulk_unlink(
         from_t=resolved_from, to_t=resolved_to,

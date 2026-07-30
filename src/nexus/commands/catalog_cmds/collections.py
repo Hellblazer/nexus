@@ -345,11 +345,11 @@ def rename_collection_cmd(
             f"update failed: {exc}. Recover by running:\n"
             f"  nx catalog backfill-collections --no-dry-run  "
             f"# registers {new!r}\n"
-            f"  python -c \"from nexus.catalog.catalog import Catalog; "
-            f"from nexus.config import catalog_path; "
-            f"p=catalog_path(); "
-            f"Catalog(p, p / '.catalog.db').supersede_collection("
-            f"{old!r}, {new!r})\"",
+            f"then re-run this rename to retry the supersede (idempotent), "
+            f"or supersede via the service API:\n"
+            f"  python -c \"from nexus.catalog.factory import make_catalog_writer; "
+            f"w = make_catalog_writer(); "
+            f"w.supersede_collection({old!r}, {new!r}); w.close()\"",
             err=True,
         )
         raise click.exceptions.Exit(2) from exc

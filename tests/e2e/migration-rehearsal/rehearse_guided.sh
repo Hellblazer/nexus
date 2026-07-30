@@ -152,7 +152,9 @@ fi
 # ensure_storage_supervisor path, so the export must precede it.
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
 
-# Catalog.init (in seed_legacy.py) runs `git init`; give git an identity.
+# Legacy-era catalog code (and, on era legs, the era release's own nx) may run
+# `git init`/commits in the catalog dir; give git an identity. The current
+# seed_legacy.py itself seeds raw SQLite only (Catalog was deleted, i711w).
 git config --global user.email "rehearsal@nexus.local" >/dev/null 2>&1 || true
 git config --global user.name  "nexus rehearsal"       >/dev/null 2>&1 || true
 

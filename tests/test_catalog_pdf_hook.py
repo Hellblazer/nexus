@@ -26,9 +26,9 @@ def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
-    from nexus.catalog.catalog import Catalog
+    # nexus-i711w: the local Catalog.init that used to run here died with
+    # the local catalog; the PDF hook registers into the live service catalog.
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
     return catalog_dir, ActiveCatalog()
 
 

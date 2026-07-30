@@ -684,12 +684,10 @@ def resolve_index_concurrency() -> int:
 
     def _backend_default() -> int:
         from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — deferred to avoid circular import (db.http_vector_client)
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
-        if (
-            is_vector_service_mode()
-            and storage_backend_for("catalog") == StorageBackend.SERVICE
-        ):
+        # nexus-i711w: the catalog conjunct collapsed — the catalog is
+        # service-backed in every mode.
+        if is_vector_service_mode():
             return 2
         return 1
 

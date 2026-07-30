@@ -31,7 +31,7 @@ from nexus.errors import collection_not_found_errors
 from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.db.http_vector_client import HttpVectorClient, _ServiceCollectionStub
     from nexus.db.t3 import T3Database
 
@@ -160,7 +160,7 @@ def _iter_chunks_for_doc(
 
 
 def backfill_manifest_for_collection(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     t3: "T3Database | HttpVectorClient",
     collection_name: str,
     *,

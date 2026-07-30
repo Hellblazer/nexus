@@ -38,11 +38,8 @@ _ALLOWLIST: tuple[tuple[str, str], ...] = (
         "chunk_identity.py",
         "THE canonical width boundary — owns the legacy derivation and its history",
     ),
-    (
-        "catalog/synthesizer.py",
-        "deliberate dual-width cache tolerance: tries full width first, falls back "
-        "to the legacy 32-prefix for pre-rekey rows (read-only)",
-    ),
+    # catalog/synthesizer.py entry removed (nexus-i711w terminal deletion):
+    # the file died with the local catalog. DOWNWARD-only edit.
     # db/t2/chash_index.py entry removed (nexus-i711w Stage 2 sub-stage A):
     # the file died with the SQLite chash index. DOWNWARD-only edit.
     (

@@ -125,11 +125,18 @@ def _stub_t2_cascade(counts: dict[str, int] | None = None):
 
 class TestCatalogRename:
     def _seed(self, tmp_path: Path):
-        from nexus.catalog.catalog import Catalog
+        # nexus-i711w terminal deletion: seeds through ActiveCatalog (live
+        # catalog) — the raw local Catalog arm is gone.
+        from tests._catalog_fixture_ops import ActiveCatalog
 
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        cat = ActiveCatalog()
+        # The engine's rename endpoint 404s on an unregistered source
+        # collection (unlike the deleted local arm, which renamed bare
+        # document strings) — register the rows the way production does.
+        cat.register_collection("knowledge__old", embedding_model="test-model")
+        cat.register_collection("knowledge__stays", embedding_model="test-model")
         owner = cat.register_owner("knowledge-corpus", "corpus")
         tumbler_a = cat.register(
             owner, title="doc-a", content_type="paper", file_path="a.pdf",
@@ -146,66 +153,30 @@ class TestCatalogRename:
         count = cat.rename_collection("knowledge__old", "knowledge__new")
         assert count == 1
 
-        # SQLite cache reflects the rename.
-        rows = cat._db.execute(
-            "SELECT physical_collection FROM documents ORDER BY tumbler",
-        ).fetchall()
-        assert [r[0] for r in rows] == ["knowledge__new", "knowledge__stays"]
+        # The catalog reflects the rename (public reads; the raw local-SQLite
+        # readback died with the local catalog, nexus-i711w).
+        assert [d.title for d in cat.list_by_collection("knowledge__new")] == ["doc-a"]
+        assert cat.list_by_collection("knowledge__old") == []
+        assert [d.title for d in cat.list_by_collection("knowledge__stays")] == ["doc-b"]
 
-    def test_jsonl_appended_so_rebuild_preserves_rename(self, tmp_path: Path) -> None:
-        cat, cat_dir, tumbler_a, tumbler_b = self._seed(tmp_path)
-        cat.rename_collection("knowledge__old", "knowledge__new")
+    # test_jsonl_appended_so_rebuild_preserves_rename retired (nexus-i711w
+    # terminal deletion): documents.jsonl and the rebuild path died with
+    # the local catalog.
 
-        # Last record for tumbler 1.1 in JSONL must have the new collection.
-        records = [
-            json.loads(line)
-            for line in (cat_dir / "documents.jsonl").read_text().splitlines()
-            if line.strip()
-        ]
-        by_tumbler: dict[str, dict] = {}
-        for r in records:
-            by_tumbler[r["tumbler"]] = r
-        assert by_tumbler[str(tumbler_a)]["physical_collection"] == "knowledge__new"
-        assert by_tumbler[str(tumbler_b)]["physical_collection"] == "knowledge__stays"
-
-    def test_no_matches_returns_zero(self, tmp_path: Path) -> None:
+    def test_unknown_collection_raises_not_found(self, tmp_path: Path) -> None:
+        """Service behaviour-of-record (nexus-i711w terminal deletion): the
+        engine 404s on renaming a collection that was never registered —
+        the deleted local arm returned 0. Divergence recorded; whether the
+        client should map 404 -> 0 belongs to the nexus-cecqy conformance
+        family."""
+        import httpx
         cat, *_ = self._seed(tmp_path)
-        assert cat.rename_collection("knowledge__ghost", "knowledge__phantom") == 0
+        with pytest.raises(httpx.HTTPStatusError, match="collection not found"):
+            cat.rename_collection("knowledge__ghost", "knowledge__phantom")
 
-    def test_rename_preserves_source_mtime_across_jsonl_rebuild(
-        self, tmp_path: Path,
-    ) -> None:
-        """Regression: review-flagged Critical (Reviewer B/C1).
-
-        `rename_collection` previously SELECTed 12 columns and appended a
-        JSONL record without `source_mtime`. JSONL is the rebuild source
-        of truth, so rebuild-from-JSONL silently reset mtime to 0.0 for
-        every renamed document, breaking stale-source detection.
-        """
-        from nexus.catalog.catalog import Catalog
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-        owner = cat.register_owner("papers", "corpus")
-        tumbler = cat.register(
-            owner, title="doc", content_type="paper", file_path="a.pdf",
-            physical_collection="knowledge__old", chunk_count=1,
-            source_mtime=1_700_000_000.0,
-        )
-
-        cat.rename_collection("knowledge__old", "knowledge__new")
-
-        # Rebuild from JSONL — the durable source of truth. The mtime
-        # must survive the round-trip.
-        cat_rebuilt = Catalog(cat_dir, cat_dir / ".catalog-rebuilt.db")
-        entry = cat_rebuilt.resolve(tumbler)
-        assert entry is not None
-        assert entry.physical_collection == "knowledge__new"
-        assert entry.source_mtime == 1_700_000_000.0, (
-            f"rename_collection lost source_mtime on JSONL rebuild: "
-            f"got {entry.source_mtime}"
-        )
+    # test_rename_preserves_source_mtime_across_jsonl_rebuild retired
+    # (nexus-i711w terminal deletion): JSONL-rebuild round-tripping was a
+    # property of the deleted local catalog.
 
 
 # ── CLI `nx collection rename` ──────────────────────────────────────────────
@@ -224,36 +195,12 @@ class TestRenameCLI:
         fake.rename_collection = MagicMock()
         return fake
 
-    def test_rename_happy_path(self, tmp_path: Path, env_creds) -> None:
-        """CLI wires the T2 cascade (via t2_index_write), then the T3 rename,
-        and surfaces the cascade's counts in its summary line.
-
-        Ported (nexus-i711w Stage 2 sub-stage A): previously seeded a real
-        SQLite chash row and asserted the row moved; row-level movement is the
-        engine's job now, so this pins the ORCHESTRATION — the cascade is
-        invoked exactly once with (old, new) and its counts reach the output.
-        """
-        from nexus.commands.collection import rename_cmd
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        t2db, t2_runner = _stub_t2_cascade({"chash": 1})
-        fake = self._fake_t3(old_exists=True, new_exists=False)
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.mcp_infra.t2_index_write", side_effect=t2_runner), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            result = runner.invoke(rename_cmd, ["code__old", "code__new"])
-
-        assert result.exit_code == 0, result.output
-        fake.rename_collection.assert_called_once_with("code__old", "code__new")
-
-        # The T2 cascade ran, with the right names, and its counts surfaced.
-        t2db.rename_collection_cascade.assert_called_once_with(
-            old="code__old", new="code__new"
-        )
-        assert "1 chash rows" in result.output
+    # test_rename_happy_path retired (nexus-i711w terminal deletion): it
+    # pinned the client-side fan-out (t2_index_write T2 leg + separate T3
+    # rename + surfaced stub counts), which the unconditional atomic
+    # server-side re-home (rename_collection_cascade on the service
+    # catalog client) replaced. Live coverage:
+    # tests/test_collection_rename_service_mode.py.
 
     def test_rename_rejects_unknown_old(self, tmp_path: Path, env_creds) -> None:
         from nexus.commands.collection import rename_cmd
@@ -286,129 +233,18 @@ class TestRenameCLI:
         assert result.exit_code != 0
         assert "prefix mismatch" in result.output.lower()
 
-    def test_force_prefix_change_bypasses_gate(self, tmp_path: Path, env_creds) -> None:
-        # Ported (nexus-i711w Stage 2 sub-stage A): the "empty T2" seed that
-        # made the cascade succeed trivially became a t2_index_write stub —
-        # the SQLite cascade legs are gone and the Http legs need an engine.
-        from nexus.commands.collection import rename_cmd
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(
-            side_effect=lambda n: n == "code__foo",
-        )
-        fake.rename_collection = MagicMock()
-        _t2db, t2_runner = _stub_t2_cascade()
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.mcp_infra.t2_index_write", side_effect=t2_runner), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            result = runner.invoke(
-                rename_cmd,
-                ["code__foo", "docs__foo", "--force-prefix-change"],
-            )
-        assert result.exit_code == 0, result.output
-        fake.rename_collection.assert_called_once_with("code__foo", "docs__foo")
+    # test_force_prefix_change_bypasses_gate retired (nexus-i711w terminal
+    # deletion): same retired client-side fan-out pins as
+    # test_rename_happy_path above. The prefix/model gates themselves stay
+    # covered by the three reject tests above.
 
 
-# ── Partial-cascade failure mode (review finding + nexus-nhyh / CG-1) ────────
-
-
-class TestRenameCascadeFailureModes:
-    """T2 cascade failures must now exit non-zero (nexus-nhyh / CG-1).
-
-    Old behavior (nexus-1ccq): T3 renamed first, T2 failures were fail-open
-    (warn + exit 0). This left the system in an inconsistent state with no
-    operator-facing signal that action was required.
-
-    New behavior (nexus-nhyh SIG-8 + CG-1):
-    - T2 cascade runs FIRST (T2-first ordering). On failure, T3 rename has
-      NOT yet run, so the system is still fully consistent.
-    - T2 failure raises ClickException (exit non-zero) with an actionable
-      message. Operator must see the failure.
-    - Catalog cascade remains fail-open: it is a derived view, and failures
-      can be repaired by ``nx catalog rebuild``.
-    """
-
-    def test_t2_cascade_failure_exits_nonzero_and_aborts_t3(
-        self, tmp_path: Path, env_creds,
-    ) -> None:
-        """T2 cascade throws → exit non-zero, T3 rename must NOT have fired
-        (T2-first ordering: T3 only runs after T2 succeeds)."""
-        from nexus.commands.collection import rename_cmd
-
-        db_path = tmp_path / "memory.db"
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(
-            side_effect=lambda n: n == "code__old",
-        )
-        fake.rename_collection = MagicMock()
-
-        def _t2_bomb(*a, **kw):
-            raise RuntimeError("simulated T2 outage")
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.db.t2.T2Database", side_effect=_t2_bomb), \
-             patch("nexus.config.default_db_path", return_value=db_path), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            result = runner.invoke(rename_cmd, ["code__old", "code__new"])
-
-        # Must exit non-zero: T2 failure is not fail-open
-        assert result.exit_code != 0, (
-            f"T2 cascade failure must exit non-zero. Got {result.exit_code}. "
-            f"Output: {result.output}"
-        )
-        # T3 must NOT have been called (T2-first ordering: T3 only runs after T2)
-        fake.rename_collection.assert_not_called()
-        # Error message must name the failure and be actionable
-        assert "T2 cascade failed" in result.output or "cascade" in result.output.lower()
-        assert "simulated T2 outage" in result.output
-
-    def test_catalog_cascade_failure_prints_warn_and_continues(
-        self, tmp_path: Path, env_creds,
-    ) -> None:
-        """Catalog cascade throws → T2 + T3 stay renamed, CLI still exits
-        0 with a stderr warn line naming the catalog (fail-open).
-
-        Ported (nexus-i711w Stage 2 sub-stage A): "seed an empty T2 so the
-        cascade succeeds trivially" became a t2_index_write stub — a real
-        cascade cannot succeed here (SQLite legs deleted, Http legs need an
-        engine, and ``db.taxonomy`` raises under this module's =sqlite pin).
-        """
-        from nexus.commands.collection import rename_cmd
-
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(
-            side_effect=lambda n: n == "code__old",
-        )
-        fake.rename_collection = MagicMock()
-        _t2db, t2_runner = _stub_t2_cascade()
-
-        def _catalog_bomb(*a, **kw):
-            raise RuntimeError("simulated catalog lock contention")
-
-        runner = CliRunner()
-        # RDR-146 P1.2: the catalog cascade routes the rename through
-        # make_catalog_writer(); bomb that seam (patching in-process Catalog
-        # would be bypassed by daemon routing).
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.mcp_infra.t2_index_write", side_effect=t2_runner), \
-             patch("nexus.catalog.factory.make_catalog_writer", side_effect=_catalog_bomb), \
-             patch("nexus.catalog.catalog.Catalog", side_effect=_catalog_bomb):
-            result = runner.invoke(rename_cmd, ["code__old", "code__new"])
-
-        assert result.exit_code == 0, result.output
-        # T3 was renamed (T2 succeeded, T3 ran after)
-        fake.rename_collection.assert_called_once_with("code__old", "code__new")
-        assert "catalog cascade failed" in result.output
-        assert "simulated catalog lock contention" in result.output
+# ── Partial-cascade failure modes: RETIRED (nexus-i711w terminal deletion) ──
+# TestRenameCascadeFailureModes pinned the T2-first / T3-last ordering and
+# the fail-open catalog leg of the client-side fan-out. The data plane is
+# now ONE atomic server-side rename_collection_cascade: a failure leaves
+# the collection fully unchanged and RAISES (fail-closed) — the fail-open
+# catalog behaviour these tests asserted no longer exists by design.
 
 
 # ── DocumentAspects.rename_collection (nexus-gp20) ─────────────────────────
@@ -524,46 +360,13 @@ class TestDocumentAspectsRename:
 # ── Aspect cascade wired into rename_collection_data_plane (nexus-gp20) ────
 
 
-class TestAspectCascadeIntegration:
-    """rename_collection_data_plane must run the T2 cascade and surface BOTH
-    aspect-family counts (nexus-gp20).
-
-    Ported (nexus-i711w Stage 2 sub-stage A): the denorm tables live behind
-    the engine now, so row-level movement is store/engine territory (routing
-    pinned by tests/test_t2_rename_cascade_service_mode.py). What this file
-    still owns is the data-plane wiring: the cascade is invoked and its
-    ``aspects`` / ``aspect_queue`` counts are copied through verbatim.
-    """
-
-    def test_both_aspect_counts_surfaced_by_data_plane(
-        self, tmp_path: Path, env_creds,
-    ) -> None:
-        from nexus.commands.collection import rename_collection_data_plane
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        t2db, t2_runner = _stub_t2_cascade({"aspects": 1, "aspect_queue": 1})
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(side_effect=lambda n: n == "code__old")
-        fake.rename_collection = MagicMock()
-
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.mcp_infra.t2_index_write", side_effect=t2_runner), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            counts = rename_collection_data_plane("code__old", "code__new")
-
-        t2db.rename_collection_cascade.assert_called_once_with(
-            old="code__old", new="code__new"
-        )
-        assert counts["aspects"] == 1
-        assert counts["aspect_queue"] == 1
-
-    # test_no_collateral_writes_to_chash stood here. It renamed via the SQLite
-    # ``DocumentAspects`` store and asserted the SQLite ``ChashIndex`` table
-    # (a SEPARATE tmp DB file) was untouched — the chash side of that pin is
-    # the deleted store, and with per-store engine endpoints the isolation is
-    # structural, so the test died with its substrate (nexus-i711w sub-stage A).
+# TestAspectCascadeIntegration retired (nexus-i711w terminal deletion):
+# it asserted the t2_index_write-routed T2 cascade surfaced aspect counts;
+# counts now come from the atomic service cascade
+# (rename_collection_cascade key mapping in
+# nexus.collection_rename.rename_collection_data_plane).
+# (Its sibling tombstone preserved: test_no_collateral_writes_to_chash
+# died earlier with the SQLite stores, nexus-i711w sub-stage A.)
 
 
 # ── Cascade orchestration: every leg invoked, counts aggregated ─────────────
@@ -708,140 +511,22 @@ class TestDocumentAspectsCollisionDefense:
 # UPDATE semantics are the engine's responsibility now.
 
 
-class TestK9CascadeIncludesTelemetry:
-    """K9 end-to-end: rename_collection_data_plane must include the telemetry
-    tables in the cascade and surface their counts.
-
-    Ported (nexus-i711w Stage 2 sub-stage A): the SQLite Telemetry store is
-    deleted, so "the rows moved" is engine territory. The K9 wiring this file
-    still owns is that the data plane copies the cascade's
-    ``search_telemetry`` / ``hook_failures`` counts through to its callers.
-    """
-
-    def test_data_plane_updates_search_telemetry(
-        self, tmp_path: Path, env_creds
-    ) -> None:
-        from nexus.commands.collection import rename_collection_data_plane
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        t2db, t2_runner = _stub_t2_cascade(
-            {"search_telemetry": 1, "hook_failures": 0}
-        )
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(side_effect=lambda n: n == "code__old")
-        fake.rename_collection = MagicMock()
-
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.mcp_infra.t2_index_write", side_effect=t2_runner), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            counts = rename_collection_data_plane("code__old", "code__new")
-
-        t2db.rename_collection_cascade.assert_called_once_with(
-            old="code__old", new="code__new"
-        )
-        assert counts.get("search_telemetry", 0) == 1
-        assert counts.get("hook_failures", 0) == 0
+# TestK9CascadeIncludesTelemetry retired (nexus-i711w terminal deletion):
+# same retired t2_index_write wiring as TestAspectCascadeIntegration; the
+# telemetry counts now flow from the atomic service cascade.
 
 
-# ── SIG-8: T2-first ordering (T3 rename last) ────────────────────────────────
+# ── SIG-8 T2-first ordering: RETIRED (nexus-i711w terminal deletion) ────────
+# TestRenameOrdering pinned "T2 cascade committed before T3 rename". There
+# is no client-side ordering left to pin: the re-home is one atomic
+# server-side transaction and the data plane makes no separate T3 call.
 
 
-class TestRenameOrdering:
-    """SIG-8 (nexus-nhyh): T2 cascade must happen BEFORE T3 rename.
-    Rationale: T2 UPDATEs are reversible; T3 chromadb rename is irrevocable.
-    If T2 succeeds but T3 fails, operator can re-run rename. Reverse is
-    unrecoverable.
-
-    Test: simulate T3 rename failure; assert T2 was already committed
-    (operator can reverse by running T2 cascade back to old name).
-    """
-
-    def test_t2_cascade_committed_before_t3_rename(
-        self, tmp_path: Path, env_creds
-    ) -> None:
-        # Ported (nexus-i711w Stage 2 sub-stage A): previously proved
-        # T2-first by reading the moved SQLite chash row after a T3 bomb;
-        # row movement is engine-side now, so the ordering pin becomes:
-        # the cascade HAS ALREADY RUN when the T3 rename fails.
-        import click
-
-        from nexus.commands.collection import rename_collection_data_plane
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        t2db, t2_runner = _stub_t2_cascade({"chash": 1})
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(side_effect=lambda n: n == "code__old")
-
-        def _t3_rename_bomb(old, new):
-            raise RuntimeError("simulated T3 rename failure")
-
-        fake.rename_collection = _t3_rename_bomb
-
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.mcp_infra.t2_index_write", side_effect=t2_runner), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            with pytest.raises((RuntimeError, click.ClickException)):
-                rename_collection_data_plane("code__old", "code__new")
-
-        # T2-first: the cascade completed even though T3 failed afterwards.
-        t2db.rename_collection_cascade.assert_called_once_with(
-            old="code__old", new="code__new"
-        )
-
-
-# ── CG-1: half-cascade test + non-zero exit ──────────────────────────────────
-
-
-class TestHalfCascadeNonZeroExit:
-    """CG-1 (nexus-nhyh): CLI must exit non-zero when T2 cascade fails,
-    not swallow the error and exit 0.
-
-    The bead finding: broad `except Exception: on_warn(...)` swallows T2
-    failures and returns exit 0 -- operator sees a warning but no indication
-    that action is required.
-
-    Fix: T2 cascade failure re-raises as ClickException (exit non-zero).
-    """
-
-    def test_t2_cascade_failure_exits_nonzero(
-        self, tmp_path: Path, env_creds
-    ) -> None:
-        from nexus.commands.collection import rename_cmd
-        from click.testing import CliRunner
-
-        db_path = tmp_path / "memory.db"
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-
-        fake = MagicMock()
-        fake.collection_exists = MagicMock(
-            side_effect=lambda n: n == "code__old",
-        )
-        fake.rename_collection = MagicMock()
-
-        def _t2_bomb(*a, **kw):
-            raise RuntimeError("simulated T2 cascade failure")
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.db.t2.T2Database", side_effect=_t2_bomb), \
-             patch("nexus.config.default_db_path", return_value=db_path), \
-             patch("nexus.config.catalog_path", return_value=cat_dir):
-            result = runner.invoke(rename_cmd, ["code__old", "code__new"])
-
-        # Must exit non-zero so operator knows cascade failed
-        assert result.exit_code != 0, (
-            f"Expected non-zero exit when T2 cascade fails, got {result.exit_code}. "
-            f"Output: {result.output}"
-        )
-        # Error message must be actionable
-        assert "cascade" in result.output.lower() or "T2" in result.output, (
-            f"Error message must name the failed cascade. Output: {result.output}"
-        )
+# ── CG-1 half-cascade non-zero exit: RETIRED (nexus-i711w terminal
+# deletion) ── TestHalfCascadeNonZeroExit bombed the client-side
+# T2Database cascade; that leg is gone. The fail-closed contract survives
+# in the atomic path: a rename_collection_cascade failure raises
+# ClickException ("service rename failed -- collection ... is unchanged").
 
 
 # ── RDR-162 P2: cross-model reference remap (copy-not-move) ──────────────────

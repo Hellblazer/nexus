@@ -645,11 +645,11 @@ class TestPipelineIndexPdf:
         Without this drop, every PDF indexed via the streaming pipeline
         would continue regressing source_path post-Phase-B.
         """
-        from nexus.catalog.catalog import Catalog
         from nexus.db.t3 import T3Database
 
-        cat_dir = tmp_path / "test-catalog"
-        Catalog.init(cat_dir)
+        # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding
+        # died with the local catalog; the pipeline registers via the
+        # service-only factory into the live per-test tenant.
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
         monkeypatch.setattr(
@@ -698,11 +698,11 @@ class TestPipelineIndexPdf:
         populates ``document_chunks`` from the post-store batch fire.
         Verify chunks lack doc_id and the manifest carries it instead.
         """
-        from nexus.catalog.catalog import Catalog
         from nexus.db.t3 import T3Database
 
-        cat_dir = tmp_path / "test-catalog"
-        Catalog.init(cat_dir)
+        # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding
+        # died with the local catalog; the pipeline registers via the
+        # service-only factory into the live per-test tenant.
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
         monkeypatch.setattr(
@@ -742,7 +742,6 @@ class TestPipelineIndexPdf:
             assert "doc_id" not in m
 
         # Manifest carries the doc-to-chunk binding instead.
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         # nexus-aqbrk: pipeline_index_pdf registers via the factory, so the raw
         # local .catalog.db read was empty on the engine arm.
         documents = active_reader().list_by_collection(

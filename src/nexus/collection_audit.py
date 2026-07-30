@@ -364,26 +364,16 @@ def _open_t2():
 
 
 def _open_catalog_conn() -> sqlite3.Connection | None:
-    """Return a sqlite3 connection to the catalog cache DB.
+    """Return ``None`` — the local catalog cache DB no longer exists.
 
-    Tests monkeypatch this module-level function to point at a seeded
-    fixture; production reaches to ``~/.config/nexus`` by default.
+    nexus-e9ru2 / nexus-i711w: the catalog is service-owned; the audit's
+    catalog legs DEGRADE (orphans=[]) rather than read a local substrate,
+    and the degradation is REPORTED, not silent (the item-17 contract,
+    tests/test_i711w_gap_item17_orphan_audit.py). Tests monkeypatch this
+    module-level function to point at a seeded fixture — that seam is why
+    the function survives the local catalog's deletion.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    if storage_backend_for("catalog") == StorageBackend.SERVICE:
-        # nexus-e9ru2: in service mode the local .catalog.db is a FROZEN
-        # migration source — auditing against it reports stale orphans as
-        # live. Degrade the catalog legs (orphans=[]) instead, the same
-        # service-mode skip this module applies to taxonomy raw access
-        # (nexus-9613q.4). P5 catalog-collapse owns the service-side read.
-        return None
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        return None
-    return sqlite3.connect(str(path / ".catalog.db"))  # epsilon-allow: catalog substrate (.catalog.db); P5 catalog-collapse handles cutover
+    return None
 
 
 # ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────

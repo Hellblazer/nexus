@@ -26,16 +26,13 @@ from tests._catalog_fixture_ops import ActiveCatalog
 
 
 def _make_catalog(tmp_path: Path) -> ActiveCatalog:
-    """Initialise the (autouse-isolated) catalog dir and return a live handle.
+    """Return a live handle over the active (service) catalog.
 
-    ``tmp_path`` is kept in the signature so the 40-odd call sites did not have
-    to change; the actual location comes from ``catalog_path()``, which
-    conftest's autouse ``_isolate_catalog`` already redirects per test.
+    ``tmp_path`` is kept in the signature so the 40-odd call sites did not
+    have to change. nexus-i711w terminal deletion: the local
+    ``Catalog.init`` seeding is gone — ActiveCatalog routes to the live
+    service catalog and needs no init step.
     """
-    from nexus.catalog.catalog import Catalog
-    from nexus.config import catalog_path
-
-    Catalog.init(catalog_path())
     return ActiveCatalog()
 
 
@@ -110,11 +107,11 @@ class TestManifestRow:
     """ManifestRow type is importable and has the expected fields."""
 
     def test_manifestrow_importable(self):
-        from nexus.catalog.catalog_writes import ManifestRow
+        from nexus.catalog.types import ManifestRow
         assert ManifestRow is not None
 
     def test_manifestrow_fields(self):
-        from nexus.catalog.catalog_writes import ManifestRow
+        from nexus.catalog.types import ManifestRow
         row = ManifestRow(
             position=0,
             chash="a" * 64,
@@ -133,7 +130,7 @@ class TestManifestRow:
         assert row.char_end == 100
 
     def test_manifestrow_optional_fields_none(self):
-        from nexus.catalog.catalog_writes import ManifestRow
+        from nexus.catalog.types import ManifestRow
         row = ManifestRow(position=0, chash="b" * 64)
         assert row.chunk_index is None
         assert row.line_start is None
@@ -176,7 +173,7 @@ class TestGetManifest:
 
     def test_get_manifest_returns_manifestrow_objects(self, tmp_path):
         """Return type is list[ManifestRow]."""
-        from nexus.catalog.catalog_writes import ManifestRow
+        from nexus.catalog.types import ManifestRow
 
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")

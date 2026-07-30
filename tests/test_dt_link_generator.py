@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """P1.5 contracts for DEVONthink Layer B link generation (RDR-139).
 
-Pins (real Catalog on tmp SQLite, fake DT client injected):
+Pins (active catalog substrate, fake DT client injected; nexus-i711w
+terminal deletion ported the harness off the local SQLite Catalog —
+the subject ``generate_dt_links`` survives and takes any CatalogReader):
 - 2 of 3 similarity neighbours catalog-known → exactly 2 ``relates`` edges;
   the unindexed neighbour is skipped with no error.
 - re-run is idempotent (no new edges the second time).
@@ -15,14 +17,12 @@ from __future__ import annotations
 import pytest
 
 from nexus.catalog.dt_link_generator import generate_dt_links
+from tests._catalog_fixture_ops import ActiveCatalog
 
 
 @pytest.fixture
-def cat(tmp_path):
-    from nexus.catalog.catalog import Catalog
-    d = tmp_path / "catalog"
-    d.mkdir()
-    return Catalog(d, d / ".catalog.db")
+def cat():
+    return ActiveCatalog()
 
 
 def _uri(uuid: str) -> str:

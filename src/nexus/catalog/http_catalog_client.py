@@ -84,7 +84,7 @@ import structlog
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
-from nexus.catalog.catalog_writes import ManifestRow
+from nexus.catalog.types import ManifestRow
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 

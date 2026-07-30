@@ -28,7 +28,6 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
 
@@ -43,16 +42,15 @@ def _git_identity(monkeypatch):
 
 @pytest.fixture()
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Tmp catalog + tmp T2 + plumbing patches."""
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    db_path = tmp_path / "t2.db"
+    """Live service catalog + tmp T2 path + plumbing patches (nexus-i711w:
+    the local SQLite catalog is gone; seeding routes through the same
+    service-only factories the verbs read with)."""
+    from tests._catalog_fixture_ops import ActiveCatalog  # noqa: PLC0415
 
-    import nexus.config
-    monkeypatch.setattr(nexus.config, "catalog_path", lambda: catalog_dir)
-    import nexus.commands._helpers as h
+    catalog_dir = tmp_path / "catalog"
+    db_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
-    return catalog_dir, db_path, cat
+    return catalog_dir, db_path, ActiveCatalog()
 
 
 def _seed_one(env, *, source_path: str = "docs/papers/p.pdf") -> str:

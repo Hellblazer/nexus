@@ -94,7 +94,6 @@ DDL_CENSUS: dict[str, int] = {
     # document_highlights.py (1), telemetry.py (4) [sub-stage A];
     # memory_store.py (3), plan_library.py (3), document_aspects.py (1)
     # [sub-stage A3]: entries removed — files deleted. DOWNWARD-only edits.
-    "src/nexus/db/t2/catalog.py": 9,
     # wire_reid.py entry removed (RDR-155 P4b P2): file deleted with the
     # migration machinery.
 }
@@ -115,7 +114,6 @@ ALTER_CENSUS: dict[str, int] = {
     "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
     # aspect_extraction_queue.py (2) + chash_index.py (1) entries removed —
     # files deleted (nexus-i711w Stage 2 sub-stage A). DOWNWARD-only edits.
-    "src/nexus/db/t2/catalog.py": 9,              # 8 real + 1 self-referential SQL comment
     # memory_store.py (1) + plan_library.py (1) comment-mirror entries and
     # plans/repair.py (1) removed — files deleted (nexus-i711w Stage 2
     # sub-stage A3). DOWNWARD-only edits.
@@ -131,13 +129,11 @@ EPSILON_CENSUS: dict[str, int] = {
     # aspect_promotion.py entry removed (nexus-70x7y): all six raw-.conn
     # overrides died with the retired promotion verb; the surviving read path
     # delegates to the configured store. DOWNWARD-only edit.
-    "src/nexus/catalog/catalog_owners.py": 1,
-    "src/nexus/collection_audit.py": 3,
+    "src/nexus/collection_audit.py": 2,
     "src/nexus/collection_health.py": 3,
     "src/nexus/commands/_helpers.py": 1,
     "src/nexus/commands/aspects.py": 7,
     "src/nexus/commands/catalog.py": 1,
-    "src/nexus/commands/catalog_cmds/backfill.py": 3,
     "src/nexus/commands/catalog_cmds/report.py": 3,
     "src/nexus/commands/collection.py": 1,
     # commands/daemon.py entry removed (nexus-i711w Stage 2 sub-stage B): its
@@ -180,7 +176,11 @@ EPSILON_CENSUS: dict[str, int] = {
     # migration/* + rungs/t2_schema.py entries removed (RDR-155 P4b P2):
     # files deleted with the migration machinery. DOWNWARD-only edit.
     "src/nexus/operators/aspect_sql.py": 6,
-    "src/nexus/storage_boundary_lint.py": 10,     # defines the token; matches its own docs
+    # storage_boundary_lint.py 10 -> 9 (nexus-i711w terminal deletion): the
+    # catalog-DB baseline docstrings were rewritten when both catalog access
+    # baselines dropped to 0, removing one prose self-mention of the token.
+    # DOWNWARD-only edit.
+    "src/nexus/storage_boundary_lint.py": 9,      # defines the token; matches its own docs
     "src/nexus/taxonomy.py": 1,
 }
 

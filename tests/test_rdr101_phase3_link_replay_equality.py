@@ -52,16 +52,15 @@ CATALOG SUBSTRATE (nexus-i711w Stage 2). Measured disposition: 3 PORT,
     symmetric mutation — is what carries over, now expressed through
     ``links_from`` instead of a raw ``PRAGMA``-driven table snapshot.
 
-All five dying modules are imported INSIDE the bodies that still need them,
-never at module scope, so this file still COLLECTS after the deletion.
+nexus-i711w terminal deletion: the DIE cohort (the 5 replay-equality /
+tombstone-count tests) and its helpers retired WITH the local event log,
+projector, and CatalogDB. The 3 ported link-invariant tests remain.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -81,18 +80,6 @@ def active_catalog() -> ActiveCatalog:
 def _slug() -> str:
     """A per-test discriminator for owner names / paths / collections."""
     return uuid.uuid4().hex[:8]
-
-
-def _local_catalog(tmp_path) -> tuple[Any, Path]:
-    """A real LOCAL SQLite ``Catalog`` rooted in *tmp_path*, plus its dir.
-
-    ONLY for the DIE cohort; callers also carry ``local_catalog_backend``.
-    """
-    from nexus.catalog.catalog import Catalog
-
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    return Catalog(cat_dir, cat_dir / ".catalog.db"), cat_dir
 
 
 def _link_snapshot(cat: Any, tumblers: list[Any]) -> list[tuple]:
@@ -119,131 +106,14 @@ def _link_snapshot(cat: Any, tumblers: list[Any]) -> list[tuple]:
     return sorted(rows)
 
 
-# Mirror the doctor's links-snapshot exclusion (commands/catalog.py:
-# LINKS_EXCLUDE = ["id"]). Keep these in sync — if the doctor's contract
-# ever stops excluding id, this constant must follow.
-_LINKS_EXCLUDE = ("id",)
-
-
-def _snapshot_table(
-    conn: sqlite3.Connection,
-    table: str,
-    *,
-    exclude: tuple[str, ...] = (),
-) -> list[tuple]:
-    """Order-independent snapshot matching the doctor's verb."""
-    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-    cols = [c for c in cols if c not in set(exclude)]
-    if not cols:
-        return []
-    sort_cols = ", ".join(cols)
-    return list(
-        conn.execute(f"SELECT {sort_cols} FROM {table} ORDER BY {sort_cols}")
-    )
-
-
-def _project_events_to(events_iter, db_path: Path) -> int:
-    """Replay ``events_iter`` into a fresh CatalogDB at ``db_path``.
-
-    DIE-cohort helper (nexus-i711w Stage 2) — retires with the projector.
-    """
-    from nexus.catalog.catalog_db import CatalogDB
-    from nexus.catalog.projector import Projector
-
-    proj_db = CatalogDB(db_path)
-    try:
-        return Projector(proj_db).apply_all(events_iter)
-    finally:
-        proj_db.close()
-
-
-def _assert_replay_equal(cat_dir: Path, live_db: Path, projected_path: Path) -> None:
-    """Diff live SQLite vs replayed SQLite; exclude ``links.id``.
-
-    Surfaces a projector failure as an early ``AssertionError`` rather
-    than letting ``_project_events_to``'s ``finally`` close a partial
-    projection that the snapshot diff would silently compare against
-    live state. Counts are sanity-checked: zero events applied for a
-    test that mutated the catalog is a regression.
-
-    DIE-cohort helper (nexus-i711w Stage 2): a live ``.catalog.db`` diffed
-    against a projection rebuilt from ``events.jsonl``; neither artifact has
-    a service-mode counterpart, so the import stays inside the body and the
-    helper retires with its callers.
-    """
-    from nexus.catalog.event_log import EventLog
-
-    applied = _project_events_to(EventLog(cat_dir).replay(), projected_path)
-    assert applied > 0, (
-        "projector applied 0 events — replay-equality cannot be "
-        "established against an empty projection. Either the test "
-        "did not mutate the catalog, or the event log is empty."
-    )
-    with sqlite3.connect(f"file:{live_db}?mode=ro", uri=True) as live:
-        live_links = _snapshot_table(live, "links", exclude=_LINKS_EXCLUDE)
-        live_docs = _snapshot_table(live, "documents")
-        live_owners = _snapshot_table(live, "owners")
-    with sqlite3.connect(str(projected_path)) as proj:
-        proj_links = _snapshot_table(proj, "links", exclude=_LINKS_EXCLUDE)
-        proj_docs = _snapshot_table(proj, "documents")
-        proj_owners = _snapshot_table(proj, "owners")
-    assert live_owners == proj_owners, (
-        f"owners diverged: live={live_owners}, projected={proj_owners}"
-    )
-    assert live_docs == proj_docs, (
-        f"documents diverged: live={live_docs}, projected={proj_docs}"
-    )
-    assert live_links == proj_links, (
-        f"links diverged: live={live_links}, projected={proj_links}"
-    )
-
-
 # ─── A. Long mutation sequence ────────────────────────────────────────────
 
 
 class TestLongLinkMutationSequence:
     """create → merge×3 → unlink → recreate → merge → bulk_unlink → recreate."""
 
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_full_sequence_replays_equal(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        # WITH TEETH (structural): catches a regression where DELETE
-        # events stop landing in SQLite (live keeps the row, replay
-        # drops it) or where the writer fails to emit a LinkCreated
-        # for the recreate-after-unlink path (live recreates, replay
-        # has nothing to recreate).
-        # NOT teeth for INSERT OR IGNORE — the writer's synchronous
-        # ``_projector.apply()`` would make live and replay agree
-        # symmetrically. Coverage for that regression lives in
-        # ``test_link_merge_overwrites_via_insert_or_replace`` (round-3)
-        # and ``TestLinkIdReassignmentSafe`` below.
-        # nexus-i711w Stage 2: DIE — the assertion IS ``_assert_replay_equal``.
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        cat, cat_dir = _local_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose")
-        b = cat.register(owner, "b.md", content_type="prose")
-
-        # Phase 1: create + 3 merges.
-        assert cat.link(a, b, "cites", "agent-1") is True
-        assert cat.link(a, b, "cites", "agent-2") is False
-        assert cat.link(a, b, "cites", "agent-3") is False
-        assert cat.link(a, b, "cites", "agent-4") is False
-
-        # Phase 2: unlink (drops the row), then recreate.
-        assert cat.unlink(a, b, "cites") == 1
-        assert cat.link(a, b, "cites", "agent-5") is True
-        assert cat.link(a, b, "cites", "agent-6") is False
-
-        # Phase 3: bulk_unlink, then recreate one more time.
-        assert cat.bulk_unlink(from_t=str(a), to_t=str(b), link_type="cites") == 1
-        assert cat.link(a, b, "cites", "agent-7") is True
-        cat._db.close()
-
-        _assert_replay_equal(
-            cat_dir, cat_dir / ".catalog.db", tmp_path / "projected.db",
-        )
+    # nexus-i711w terminal deletion: test_full_sequence_replays_equal
+    # retired — its assertion WAS the replay-equality diff.
 
     def test_merge_after_unlink_does_not_carry_old_co_discovered_by(
         self, active_catalog,
@@ -416,192 +286,8 @@ class TestBulkUnlinkRenameInterleaving:
         )
 
 
-# ─── C. id reassignment-on-REPLACE doesn't break replay-equality ──────────
-
-
-class TestLinkIdReassignmentSafe:
-    """The projector's INSERT OR REPLACE deletes-and-re-inserts on the
-    composite-key UNIQUE INDEX, which assigns a new ``id`` integer.
-    The doctor excludes ``id`` from its snapshot
-    (``commands/catalog.py::LINKS_EXCLUDE``); a merge churn must therefore
-    leave the doctor's diff at zero.
-    """
-
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_id_churn_under_merge_is_invisible_to_replay_equality(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        """nexus-i711w Stage 2: DIE. Its subject is the SQLite ``links.id``
-        autoincrement PK and the doctor's ``LINKS_EXCLUDE`` snapshot
-        contract — neither exists service-side."""
-        # WITH TEETH: if anything in the doctor stops excluding id by
-        # name (or excludes by position and a column gets reordered),
-        # this test fails because the live row's id (e.g. 4 after
-        # 3 merges) will not match the replay's id (1, since replay
-        # has only one event landing in a fresh DB).
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        cat, cat_dir = _local_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose")
-        b = cat.register(owner, "b.md", content_type="prose")
-
-        cat.link(a, b, "cites", "agent-1")
-        live_id_1 = cat._db.execute(
-            "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=?",
-            (str(a), str(b)),
-        ).fetchone()[0]
-        cat.link(a, b, "cites", "agent-2")  # merge — REPLACE bumps id
-        cat.link(a, b, "cites", "agent-3")  # merge — REPLACE bumps id
-        live_id_3 = cat._db.execute(
-            "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=?",
-            (str(a), str(b)),
-        ).fetchone()[0]
-        # Sanity: the id MUST have changed across the merge sequence
-        # (else this test is not exercising the invariant it claims to).
-        assert live_id_3 != live_id_1, (
-            "id did not change across merge — projector path may have "
-            "been bypassed; re-check NEXUS_EVENT_SOURCED gate"
-        )
-        cat._db.close()
-
-        _assert_replay_equal(
-            cat_dir, cat_dir / ".catalog.db", tmp_path / "projected.db",
-        )
-
-
-# ─── D. Tombstone shadow-emit gated under event-sourced ───────────────────
-
-
-@pytest.mark.usefixtures("local_catalog_backend")
-class TestLinkTombstoneNoDoubleEmit:
-    """nexus-i711w Stage 2: DIE. Both tests count ``LinkDeleted`` lines in
-    ``events.jsonl`` under the two shadow-emit gates; there is no service-mode
-    observable for either the log or the gates.
-
-    Both ``unlink`` and ``bulk_unlink`` write the LinkDeleted event
-    inline (event-sourced path) AND have a trailing shadow-emit block
-    for the legacy path. Defense-in-depth: TWO gates prevent double-
-    emit under ES — an outer ``not self._event_sourced_enabled`` at
-    the call site, and an inner ``if self._event_sourced_enabled:
-    return`` in ``_emit_shadow_event``. The contract: under any
-    combination of NEXUS_EVENT_SOURCED and NEXUS_EVENT_LOG_SHADOW,
-    exactly one LinkDeleted lands per removed row.
-
-    Coverage scope: removing the OUTER call-site gate alone is caught
-    by the inner ``_emit_shadow_event`` early-return (no duplicate).
-    Removing the INNER gate alone is caught by the outer call-site
-    skip (no duplicate). Removing BOTH simultaneously is what these
-    tests catch — the failure mode is "duplicate LinkDeleted per
-    row," easily observed by counting events. To exercise the gates
-    independently, the inner-gate test would need to monkeypatch
-    ``_emit_shadow_event`` to bypass its own gate; the value of that
-    extra coverage is low (the gates are 4 lines apart in the same
-    file, both removed-together is the realistic regression).
-    """
-
-    def test_unlink_emits_exactly_one_tombstone(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        # WITH TEETH: set BOTH gates so the realistic transition-window
-        # state (operator turning ES on while leaving SHADOW=1) is
-        # exercised. If BOTH defense-in-depth gates are removed, this
-        # assertion fails (count becomes 2). Single-gate removal is
-        # caught by the surviving gate — see class docstring.
-        from nexus.catalog import events as ev
-        from nexus.catalog.event_log import EventLog
-
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
-        cat, cat_dir = _local_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose")
-        b = cat.register(owner, "b.md", content_type="prose")
-        cat.link(a, b, "cites", "agent-1")
-        cat.unlink(a, b, "cites")
-
-        log = EventLog(cat_dir)
-        deletes = [e for e in log.replay() if e.type == ev.TYPE_LINK_DELETED]
-        assert len(deletes) == 1, (
-            f"expected 1 LinkDeleted under ES+SHADOW, found {len(deletes)} "
-            "— outer ``not self._event_sourced_enabled`` gate may have "
-            "been removed"
-        )
-
-    def test_bulk_unlink_emits_one_tombstone_per_row(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        # WITH TEETH: same invariant on bulk_unlink. Under ES+SHADOW
-        # we expect exactly 3 events (one per row). Doubling implies
-        # BOTH defense-in-depth gates were removed simultaneously
-        # (single-gate removal is caught by the surviving gate; see
-        # class docstring).
-        from nexus.catalog import events as ev
-        from nexus.catalog.event_log import EventLog
-
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
-        cat, cat_dir = _local_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(owner, "a.md", content_type="prose")
-        b = cat.register(owner, "b.md", content_type="prose")
-        c = cat.register(owner, "c.md", content_type="prose")
-        d = cat.register(owner, "d.md", content_type="prose")
-        cat.link(a, b, "cites", "agent-1")
-        cat.link(a, c, "cites", "agent-1")
-        cat.link(a, d, "cites", "agent-1")
-
-        n = cat.bulk_unlink(from_t=str(a), link_type="cites")
-        assert n == 3
-
-        log = EventLog(cat_dir)
-        deletes = [e for e in log.replay() if e.type == ev.TYPE_LINK_DELETED]
-        assert len(deletes) == 3, (
-            f"expected 3 LinkDeleted (one per row) under ES+SHADOW, "
-            f"found {len(deletes)}"
-        )
-
-
-# ─── E. Cross-mutation event ordering preserves replay equality ───────────
-
-
-class TestEventOrderingPreservesReplayEquality:
-    """Mixed mutation sequences (link + register + rename + unlink) all
-    appended to one events.jsonl must replay deterministically. The
-    flock serializes mutations on the writer side, so events are
-    appended in a single linearization — replay-equality is the binding
-    contract that a future writer (e.g. transactional batch) preserves
-    that linearization.
-    """
-
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_mixed_event_stream_replays_equal(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ):
-        """nexus-i711w Stage 2: DIE — the assertion IS
-        ``_assert_replay_equal``."""
-        # WITH TEETH: any future change that splits the writer into
-        # parallel paths without preserving append order would diverge
-        # the replay.
-        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
-        cat, cat_dir = _local_catalog(tmp_path)
-        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        a = cat.register(
-            owner, "a.md", content_type="prose", physical_collection="c1",
-        )
-        b = cat.register(
-            owner, "b.md", content_type="prose", physical_collection="c1",
-        )
-        cat.link(a, b, "cites", "agent-1")
-        c = cat.register(
-            owner, "c.md", content_type="prose", physical_collection="c1",
-        )
-        cat.link(b, c, "cites", "agent-2")
-        cat.link(a, b, "cites", "agent-3")  # merge into existing
-        cat.rename_collection("c1", "c2")
-        cat.unlink(a, b, "cites")
-        cat.link(c, a, "cites", "agent-4")
-        cat._db.close()
-
-        _assert_replay_equal(
-            cat_dir, cat_dir / ".catalog.db", tmp_path / "projected.db",
-        )
+# nexus-i711w terminal deletion: TestLinkIdReassignmentSafe (links.id
+# churn vs the doctor LINKS_EXCLUDE snapshot), TestLinkTombstoneNoDoubleEmit
+# (LinkDeleted counts in events.jsonl under the shadow-emit gates), and
+# TestEventOrderingPreservesReplayEquality retired WITH the local event
+# log/projector — none has a service-mode observable.

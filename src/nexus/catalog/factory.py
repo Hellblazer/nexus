@@ -1,46 +1,30 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Typed reader / writer factories for the catalog (RDR-146 P1.2).
+"""Typed reader / writer factories for the catalog (RDR-146 P1.2, service-only
+since nexus-i711w).
 
-The atomic cutover (bead nexus-5p2ci.21) routes EVERY catalog write
-through the T2 daemon (the single owner of the ``.catalog.db`` write
-handle + JSONL append path) and keeps reads local. The read/write split
-is TOOLING-ENFORCED, not convention: ``CATALOG_BANNED_CONSTRUCTORS``
-bans bare ``Catalog(...)`` outside the substrate, so every consumer site
-reaches the catalog through exactly one of:
+The catalog lives in the Java Postgres engine; every reader and writer this
+module hands out is backed by :class:`HttpCatalogClient`. The read/write split
+is TOOLING-ENFORCED, not convention:
 
-  - :func:`make_catalog_reader` -> a read-only local Catalog. Skips the
-    two construction-time WRITES (events.jsonl backfill +
-    ``_ensure_consistent`` rebuild); opens its SQLite handle ``mode=ro``.
-    Reads are WAL read-committed and see the daemon-writer's committed
-    projections (RF-8 Q5). Exposes the full read surface; any write
-    method raises at the SQLite layer.
+  - :func:`make_catalog_reader` -> a read-facing proxy over the shared
+    service client (:class:`_SharedServiceCatalogHandle`).
 
-  - :func:`make_catalog_writer` -> a write-only proxy exposing ONLY the
-    whitelisted write ops (no read methods, so a dataclass-returning read
-    can never accidentally round-trip the wire). Routes to the daemon's
-    hosted Catalog when reachable; falls back to a direct in-process
-    Catalog when the daemon is down (the documented-irreducible
-    availability fallback — with no daemon, this process is the sole
-    writer, so the single-writer invariant still holds).
+  - :func:`make_catalog_writer` -> a write-only proxy
+    (:class:`_ServiceCatalogWriter`) exposing ONLY the whitelisted
+    :data:`CATALOG_WRITE_OPS` (+ service-only batch ops), so a
+    dataclass-returning read can never accidentally round-trip the wire.
 
 Mixed sites (read AND write) hold BOTH a reader and a writer. That is the
 gate-resolved design (re-gate Critical): the two typed factories make the
-read/write distinction visible and enforceable instead of relying on a
-lint that cannot tell a read-only Catalog from a write-capable one.
+read/write distinction visible and enforceable.
 
-There was a THIRD factory, ``make_catalog_admin``, handing back a full
-read+write local Catalog for two deep-maintenance verbs (``dedupe-owners
---apply``, ``undelete``). It is gone (nexus-i711w Stage 2 sub-stage C-store,
-Hal ruling 2026-07-29: unsupported, not reimplemented) and so are both verbs.
-Worth keeping the reason it existed AND the reason it was dangerous, because
-the shape recurs: those verbs mutated through the catalog's low-level event
-log rather than the whitelisted write ops, so they had no service-mode
-expression and the admin opener handed back a direct writer on ``.catalog.db``
-— the FROZEN migration source — while the authoritative catalog lived in
-Postgres. That is the split-brain GH #1419.4 surfaced: at one backup timestamp
-``.catalog.db`` showed 532 docs / 13 links against PG's 592 / 52. It was made
-to refuse loudly (nexus-aoqnb) rather than route; deleting the local catalog
-removes the writer the refusal was guarding against.
+History: through RDR-158 P4 these factories fronted a local SQLite
+``.catalog.db`` (reader: ``mode=ro`` local Catalog; writer: T2-daemon-routed
+with a direct in-process fallback). The daemon died in nexus-i711w sub-stage B
+and the local SQLite catalog itself in the terminal i711w deletion; the
+``make_catalog_admin`` third factory died earlier (Hal ruling 2026-07-29,
+GH #1419.4 split-brain: at one backup timestamp ``.catalog.db`` showed
+532 docs / 13 links against PG's 592 / 52).
 """
 from __future__ import annotations
 
@@ -50,7 +34,6 @@ from typing import Any, Optional
 
 import structlog
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 _log = structlog.get_logger(__name__)
@@ -134,191 +117,42 @@ class _SharedServiceCatalogHandle:
 
 
 def _is_catalog_service_mode() -> bool:
-    """Return True when NX_STORAGE_BACKEND_CATALOG=service (or global NX_STORAGE_BACKEND=service)."""
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    """Return True — the catalog is service-backed in every mode.
 
-    return storage_backend_for("catalog") == StorageBackend.SERVICE
+    Collapsed to a constant by the terminal i711w deletion (the local
+    SQLite catalog no longer exists). Kept as a function because tests
+    and callers patch/probe it by name.
+    """
+    return True
 
 
 def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
-    """Return a read-only catalog, or ``None`` when uninitialised.
+    """Return a read-facing catalog proxy backed by the service.
 
-    In service mode (``NX_STORAGE_BACKEND_CATALOG=service`` or global
-    ``NX_STORAGE_BACKEND=service``) returns an :class:`HttpCatalogClient`
-    that forwards reads to the Java Postgres service.  The client is always
-    considered "initialised" — if the service is unreachable, the first
-    HTTP call will raise.
+    Returns a :class:`_SharedServiceCatalogHandle` forwarding reads to the
+    Java Postgres service. The client is always considered "initialised" —
+    if the service is unreachable, the first HTTP call will raise.
 
-    In SQLite mode (default) returns a read-only local Catalog.  Mirrors the
-    historical ``get_catalog()`` contract (None when the catalog dir is not
-    initialised) so call sites keep their existing None-guards.  The returned
-    Catalog performs no construction-time writes and opens its SQLite handle
-    read-only.
+    The ``Optional`` return annotation is historical (the deleted SQLite
+    leg returned ``None`` when the catalog dir was uninitialised); callers'
+    None-guards are now dead but harmless.
     """
-    if _is_catalog_service_mode():
-        _log.debug("catalog_reader_service_mode")
-        return _SharedServiceCatalogHandle()
-
-    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        return None
-    db_path = path / ".catalog.db"
-    if not db_path.exists():
-        # Cold cache: the JSONL exists (is_initialized) but the SQLite
-        # projection has never been built, so a ``mode=ro`` open would
-        # raise "unable to open database file". Materialise the cache
-        # once via a normal (read-write) construction, then return a
-        # read-only handle over the now-existing file. In the daemon
-        # world this never fires — the daemon builds the cache when it
-        # constructs the hosted Catalog at startup, so ``.catalog.db``
-        # already exists by the time any reader runs. It only fires in
-        # no-daemon contexts (one-shot CLI, tests) where this process is
-        # the sole actor and the one-time build is safe.
-        Catalog(path, db_path)._db.close()
-    return Catalog(path, db_path, read_only=True)
-
-
-class CatalogWriter:
-    """Write-only catalog proxy exposing exactly the whitelisted ops.
-
-    Routing is decided once at construction by an explicit ``hello()``
-    probe (matching ``t2_index_write``): daemon reachable -> route writes
-    over RPC to the hosted Catalog; daemon down -> a direct in-process
-    Catalog. Long-lived: a site constructs one writer and issues many
-    writes through it, so the probe cost is paid once per batch.
-
-    Only :data:`CATALOG_WRITE_OPS` are exposed. Reads are intentionally
-    absent — callers that also read hold a separate
-    :func:`make_catalog_reader` instance.
-    """
-
-    def __init__(
-        self,
-        *,
-        config_dir: Optional[Path] = None,
-        priority: Optional[str] = None,
-    ) -> None:
-        self._config_dir = config_dir
-        self._client: Any = None
-        self._direct: Optional[Catalog] = None
-        self._routed = False
-        # RDR-146 P2 (nexus-5p2ci.12): resolve once at construction (a writer
-        # is long-lived; one resolve per batch). Interactive writers tag every
-        # routed write so the daemon opens its fairness window; batch writers
-        # send no priority field (daemon defaults batch). Resolution honours
-        # NX_WRITE_PRIORITY, then the explicit ``priority`` arg, then isatty.
-        from nexus.catalog.write_priority import resolve_write_priority  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        self._priority = resolve_write_priority(priority)
-        self._connect()
-
-    def _connect(self) -> None:
-        # WAS DAEMON-ROUTED (RDR-128 class). The T2 daemon existed so a single
-        # writer held memory.db's WAL slot; that is a SQLite problem and the
-        # daemon is gone with it (nexus-i711w Stage 2 sub-stage B). This writer
-        # is therefore always direct now.
-        #
-        # The direct Catalog it falls to is ITSELF on the Stage 2 DELETE list
-        # (the rich SQLite catalog, sub-stage C) — this class collapses to
-        # service-only there. Left standing here so sub-stage B is about the
-        # daemon and nothing else.
-        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-        path = catalog_path()
-        self._direct = Catalog(path, path / ".catalog.db")
-        self._routed = False
-
-    @property
-    def routed(self) -> bool:
-        """True when writes route through the daemon; False on direct fallback."""
-        return self._routed
-
-    @property
-    def priority(self) -> str:
-        """Resolved write priority (``"interactive"`` | ``"batch"``)."""
-        return self._priority
-
-    def is_interactive_write_pending(self) -> bool:
-        """RDR-146 P2: True when the daemon reports an interactive catalog
-        write window is open, so a background (batch) producer should yield.
-
-        Routed through the same daemon connection as this writer's writes.
-        Returns False on the direct fallback (no daemon => no cross-process
-        catalog-write contention to mediate; the per-repo advisory lock
-        handles two same-repo indexers) and on any probe transport error
-        (fail-open: never block a write on a probe failure)."""
-        if self._client is None:
-            return False
-        try:
-            return bool(self._client.catalog.is_interactive_write_pending())
-        except Exception:  # noqa: BLE001 — probe must never break a write
-            _log.debug("catalog_interactive_probe_failed", exc_info=True)
-            return False
-
-    def __getattr__(self, name: str) -> Any:
-        # __getattr__ only fires for names not found normally, so the
-        # instance attributes set in __init__ are never shadowed.
-        if name not in CATALOG_WRITE_OPS:
-            raise AttributeError(
-                f"{name!r} is not a catalog write op; make_catalog_writer "
-                f"exposes only the {len(CATALOG_WRITE_OPS)}-op whitelist. "
-                f"For reads use make_catalog_reader()."
-            )
-        if self._client is not None:
-            inner = getattr(self._client.catalog_write, name)
-            if self._priority == "interactive":
-                # Tag every routed write so the daemon opens / refreshes its
-                # fairness window. Batch stays untagged (byte-identical wire).
-                def _routed(*args: Any, **kwargs: Any) -> Any:
-                    return inner(*args, _priority="interactive", **kwargs)
-
-                return _routed
-            return inner
-        return getattr(self._direct, name)
-
-    def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
-        if self._direct is not None:
-            try:
-                self._direct._db.close()
-            except Exception:  # noqa: BLE001 — fallback path; close-on-cleanup errors are non-critical, connection is being discarded
-                pass
-            self._direct = None
-
-    def __enter__(self) -> "CatalogWriter":
-        return self
-
-    def __exit__(self, *exc_info: Any) -> None:
-        self.close()
+    _log.debug("catalog_reader_service_mode")
+    return _SharedServiceCatalogHandle()
 
 
 def make_catalog_writer(
     *, config_dir: Optional[Path] = None, priority: Optional[str] = None,
 ) -> Any:
-    """Return a write-only catalog proxy (daemon-routed or direct fallback).
+    """Return a write-only catalog proxy backed by the service.
 
-    In service mode (``NX_STORAGE_BACKEND_CATALOG=service`` or global
-    ``NX_STORAGE_BACKEND=service``) returns a
-    :class:`_ServiceCatalogWriter` that enforces the same
-    :data:`CATALOG_WRITE_OPS` whitelist but forwards writes to the Java
-    Postgres service via HTTP.  *priority* is ignored in service mode
-    (the service enforces its own fairness).
-
-    In SQLite mode (default) returns a :class:`CatalogWriter` that routes
-    through the T2 daemon or falls back to a direct local Catalog.
-
-    *priority* (RDR-146 P2) sets the interactive-vs-batch fairness intent:
-    ``"interactive"`` tags writes so the daemon prioritises them over a
-    background batch indexer; ``"batch"`` is the yielding background default.
-    ``None`` resolves via ``NX_WRITE_PRIORITY`` env then ``isatty()``.
+    Returns a :class:`_ServiceCatalogWriter` that enforces the
+    :data:`CATALOG_WRITE_OPS` whitelist and forwards writes to the Java
+    Postgres service via HTTP. *priority* is ignored (the service enforces
+    its own fairness); the parameter survives for call-site compatibility.
     """
-    if _is_catalog_service_mode():
-        _log.debug("catalog_writer_service_mode")
-        return _ServiceCatalogWriter(_SharedServiceCatalogHandle())
-    return CatalogWriter(config_dir=config_dir, priority=priority)
+    _log.debug("catalog_writer_service_mode")
+    return _ServiceCatalogWriter(_SharedServiceCatalogHandle())
 
 
 #: nexus-xedhp: extra ops allowed ONLY on the service-mode writer, layered on

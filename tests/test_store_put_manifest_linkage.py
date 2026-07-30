@@ -13,22 +13,14 @@ cause (``nexus.catalog.store_hook.single_chunk_manifest_metadata``).
 """
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
-from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
-from click.testing import CliRunner
 
 from nexus import mcp_infra
-from nexus.catalog.tumbler import Tumbler
-from nexus.db.t3 import T3Database
 from nexus.mcp_infra import (
     get_manifest_identity_drops,
     manifest_write_batch_hook,
     reset_manifest_identity_drops,
 )
-from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -42,67 +34,15 @@ def git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(k, v)
 
 
-@pytest.fixture
-def local_t3() -> T3Database:
-    return T3Database(
-        _client=make_vector_test_client(),
-        _ef_override=DefaultEmbeddingFunction(),
-    )
-
-
-@pytest.fixture
-def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    # nexus-b6enc: pin sqlite/local so the CLI store-put path targets
-    # THIS seeded local catalog even under the NX_TEST_T2_SUBSTRATE=engine
-    # flip (which sets NX_STORAGE_BACKEND=service globally and re-routed
-    # the catalog hooks at the engine tenant — pre-existing engine-run
-    # failure of test_cli_store_put_writes_manifest_linkage).
-    from nexus.catalog.catalog import Catalog
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-    catalog_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
-    return catalog_dir
-
-
-def test_cli_store_put_writes_manifest_linkage(
-    tmp_path: Path,
-    local_t3: T3Database,
-    catalog_env: Path,
-) -> None:
-    from nexus.catalog.catalog import Catalog
-    from nexus.cli import main
-
-    f = tmp_path / "doc.md"
-    f.write_text("body for CLI manifest-linkage regression test")
-
-    with patch("nexus.commands.store._t3", lambda: local_t3):
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "store", "put", str(f),
-            "--collection", "knowledge",
-            "--title", "cli-manifest-linkage",
-        ])
-    assert result.exit_code == 0, result.output
-
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE title = 'cli-manifest-linkage'"
-    ).fetchall()
-    assert rows, "expected a catalog entry for the CLI-stored doc"
-    tumbler = rows[0][0]
-
-    entry = cat.resolve(Tumbler.parse(tumbler))
-    assert entry is not None
-    assert entry.chunk_count >= 1, (
-        "manifest_write_batch_hook must populate chunk_count for CLI "
-        "nx store put; got chunk_count=0 (pre-fix regression)"
-    )
-
-    manifest_rows = cat.get_manifest(tumbler)
-    assert manifest_rows, (
-        "expected document_chunks manifest rows for the CLI-stored doc"
-    )
+# test_cli_store_put_writes_manifest_linkage (and its catalog_env fixture)
+# RETIRED (nexus-i711w terminal deletion): it was sqlite-pinned by design
+# (nexus-b6enc forced NX_STORAGE_BACKEND=sqlite so the CLI store-put path hit
+# a seeded LOCAL catalog and read it back via raw ``cat._db.execute``) — the
+# substrate is deleted. The store-put manifest-linkage contract stays pinned
+# live by tests/test_mcp_store_put_doc_id.py (MCP side, same
+# single_chunk_manifest_metadata root cause) and
+# tests/test_b6enc_store_put_ghost_compensation.py (service-arm store_put
+# catalog compensation, the live P0 pin).
 
 
 # ── nexus-94fxl / GH #1397: identity-drop collector ──────────────────────────

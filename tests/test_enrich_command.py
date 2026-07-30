@@ -432,13 +432,6 @@ def _exact(cat, title: str):
     return cat.resolve(hits[0].tumbler)
 
 
-def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
-    from nexus.catalog.catalog import Catalog
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    return catalog_dir, cat
-
-
 @pytest.fixture(autouse=True)
 def _backfill_catalog_env(monkeypatch):
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
@@ -469,10 +462,9 @@ class TestBackfillCatalog:
         # (enrich.py:41/:73), so a local-only seed left the service catalog
         # empty and the verb reported "Backfilled 0 titles ... 1 titles skipped
         # (no matching catalog row)" — the skip count naming the missing row.
-        # Catalog.init still runs: the SQLite arm's factory writer needs the
-        # directory, and it is inert on the engine arm.
-        catalog_dir, _local_cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        # (The local Catalog.init that used to run here died with the local
+        # catalog in the terminal nexus-i711w deletion; the factories are
+        # service-only.)
         monkeypatch.setattr("nexus.db.make_t3", lambda: local_t3)
         cat = ActiveCatalog()
 

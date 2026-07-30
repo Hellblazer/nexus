@@ -40,10 +40,11 @@ def local_t3() -> T3Database:
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from nexus.catalog.catalog import Catalog
+    # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding is
+    # gone with the local catalog; the store hook registers via the
+    # service-only factory into the live per-test tenant, so no init is needed.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 

@@ -46,14 +46,26 @@ def _clear_module_state() -> None:
 
 class TestSC1VersionTable:
     def test_fresh_install_creates_version_table(self, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
         # RDR-170: the lower-bound-only runner attempts every registered
-        # migration, including the je0b PK steps that require a catalog. Init one
-        # so the run completes and stamps the canonical version cleanly.
-        Catalog.init(tmp_path / "catalog")
+        # migration, including the je0b PK steps that require a catalog.
+        # nexus-i711w terminal deletion: ``Catalog.init`` died with the local
+        # catalog; je0b only gates on the frozen migration-source
+        # ``.catalog.db`` FILE plus the two tables its backfill JOIN
+        # references, so seed that stand-in directly.
+        cat_db = tmp_path / "catalog" / ".catalog.db"
+        cat_db.parent.mkdir(parents=True)
+        cat_conn = sqlite3.connect(str(cat_db))
+        cat_conn.executescript(
+            "CREATE TABLE documents ("
+            " tumbler TEXT, physical_collection TEXT, file_path TEXT);"
+            "CREATE TABLE collections ("
+            " name TEXT, superseded_by TEXT NOT NULL DEFAULT '');"
+        )
+        cat_conn.commit()
+        cat_conn.close()
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
         apply_pending(conn, _current_version())
@@ -158,32 +170,13 @@ class TestSC3UpgradeFlags:
 # ── SC-4: doctor --check-schema ─────────────────────────────────────────────
 
 
-class TestRDR170FrozenBranchReporting:
-    """RDR-170 Approach step 3: ``nx doctor --check-schema`` and ``nx upgrade
-    --dry-run`` must REPORT a registered step whose ``introduced`` exceeds the
-    package version as pending (the dormancy-inverse of nexus-j25po). These
-    guard the RDR-142 reporting-lie class in both CLI surfaces against
-    re-introduction of a package-version upper bound."""
-
-    @staticmethod
-    def _sentinel_registry() -> list:
-        from nexus.db.migrations import Migration
-
-        # introduced (99.0.0) far above the package version → a frozen-branch
-        # "ahead of release" step. A package-version upper bound would exclude it.
-        return [Migration("99.0.0", "rdr170 frozen-branch sentinel", lambda c: None)]
-
-    def _healthy_db(self, tmp_path: Path) -> "Path":
-        from nexus.catalog.catalog import Catalog
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
-
-        Catalog.init(tmp_path / "catalog")  # je0b PK migrations need a catalog
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())  # stored = real registry max
-        conn.close()
-        return db_path
+# TestRDR170FrozenBranchReporting REMOVED (nexus-i711w terminal deletion,
+# batch-D sweep): both of its tests were deleted with the dies-roster at
+# f1ac7d23 (Stage 1b), leaving only the stranded `_sentinel_registry` /
+# `_healthy_db` helpers — the latter carrying a function-local import of the
+# now-deleted local ``Catalog``. Dead code with a dying import; removed with
+# the substrate. The RDR-142 reporting-lie guards live on in
+# tests/test_rdr142_dry_run_resolver.py / tests/test_rdr142_step_resolver.py.
 
 
 # ── SC-5: MCP version divergence warning ────────────────────────────────────

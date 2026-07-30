@@ -28,7 +28,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog import Catalog
 from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from nexus.commands.catalog import catalog
 
@@ -61,8 +60,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """
     from nexus.catalog.factory import make_catalog_writer
 
+    # nexus-i711w terminal deletion: the local Catalog.init seeding is gone —
+    # the service writer needs no local init.
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
 
     import nexus.config
     monkeypatch.setattr(nexus.config, "catalog_path", lambda: catalog_dir)

@@ -41,7 +41,7 @@ import structlog
 from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
@@ -324,7 +324,7 @@ def _content_type_for_collection(collection: str) -> str:
 
 
 def register_dt_linked(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     owner: "Tumbler",
     collection: str,
     matches: list[DTMatch],
@@ -376,7 +376,7 @@ def register_dt_linked(
 
 
 def register_synthetic(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     owner: "Tumbler",
     collection: str,
     groups: list[TitleGroup],
@@ -501,7 +501,7 @@ def dump_csvs(
 
 
 def apply_csv(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     owner: "Tumbler",
     collection: str,
     csv_path: Path,
@@ -581,7 +581,7 @@ def apply_csv(
 
 
 def link_by_title(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     collection: str,
     groups: list[TitleGroup],
 ) -> tuple[int, int, list[TitleGroup]]:
@@ -635,7 +635,7 @@ def link_by_title(
 
 
 def link_by_content_hash(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     t3_db,
     collection: str,
 ) -> tuple[int, int, int]:

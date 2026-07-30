@@ -186,7 +186,7 @@ class TestCatalogIsolatedUnderOverride:
         assert catalog_path() == sandbox_dir / "catalog"
 
     def test_default_registry_path_redirects(self, sandbox_dir: Path):
-        from nexus.catalog.catalog import _default_registry_path
+        from nexus.catalog.types import _default_registry_path
 
         assert _default_registry_path() == sandbox_dir / "repos.json"
 

@@ -21,6 +21,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._catalog_fixture_ops import ActiveCatalog
 
 STATS_PATH = "/v1/vectors/stats"
 COLLECTIONS_PATH = "/v1/vectors/collections"
@@ -32,12 +33,17 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture()
-def catalog(tmp_path):
-    from nexus.catalog.catalog import Catalog
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
+def catalog():
+    """Seed and read through whichever catalog is live (nexus-i711w).
+
+    Was a directly-constructed local ``Catalog`` injected through the
+    ``_get_catalog`` patch seam; that seam and the local class died with the
+    local catalog. The verb now resolves the env-routed service-only
+    factories against the engine's per-test tenant, and the tests seed
+    through the same factories — the identical port shape recorded in
+    tests/test_catalog_rename_collection.py's module docstring.
+    """
+    return ActiveCatalog()
 
 
 def _patch_get(monkeypatch, *, stats_names: set[str], raw_names: set[str]) -> None:
@@ -63,9 +69,7 @@ def test_rename_rejects_tombstoned_old_with_actionable_message(
     _patch_get(monkeypatch, stats_names=set(), raw_names={"knowledge__delos"})
     t3_db = HttpVectorClient()
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), \
-         patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -94,9 +98,7 @@ def test_rename_rejects_tombstoned_new_as_not_free_to_claim(
     t3_db = HttpVectorClient()
     t3_db.rename_collection = MagicMock()  # local-mode leg; must not be reached
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), \
-         patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection", "knowledge__delos", target],

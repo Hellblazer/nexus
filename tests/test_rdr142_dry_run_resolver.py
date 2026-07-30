@@ -230,11 +230,25 @@ class TestForceDryRun:
     def test_force_dry_run_previews_full_remigration(self, runner, tmp_path) -> None:
         """--force --dry-run resets last_seen to 0.0.0 and previews ALL steps as
         eligible (HIGH-2). On a clean realistic DB they are plain (would-succeed)."""
-        from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
-        Catalog.init(tmp_path / "catalog")
+        # nexus-i711w terminal deletion: ``Catalog.init`` died with the local
+        # catalog; je0b only gates on the frozen migration-source
+        # ``.catalog.db`` FILE plus the two tables its backfill JOIN
+        # references, so seed that stand-in directly (same hand-crafted
+        # migration-source shape the other tests in this file already use).
+        cat_db = tmp_path / "catalog" / ".catalog.db"
+        cat_db.parent.mkdir(parents=True)
+        cat_conn = sqlite3.connect(str(cat_db))
+        cat_conn.executescript(
+            "CREATE TABLE documents ("
+            " tumbler TEXT, physical_collection TEXT, file_path TEXT);"
+            "CREATE TABLE collections ("
+            " name TEXT, superseded_by TEXT NOT NULL DEFAULT '');"
+        )
+        cat_conn.commit()
+        cat_conn.close()
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
         conn.execute("PRAGMA journal_mode=WAL")

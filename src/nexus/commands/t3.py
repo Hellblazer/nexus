@@ -400,11 +400,6 @@ def gc_cmd(
       nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # actually GC
       nx t3 gc -c code__nexus --orphan-window 7d --dry-run  # tighter window
     """
-    from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.event_log)
-    from nexus.catalog.events import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.events)
-        ChunkOrphanedPayload,
-        make_event,
-    )
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
 
     window = _parse_orphan_window(orphan_window)
@@ -501,14 +496,6 @@ def gc_cmd(
         )
         return
 
-    # Strict order (RF-101-3): event first, then delete. The event-emit
-    # loop runs per-chunk so the log records each ChunkOrphaned BEFORE
-    # any chunk is deleted; the actual delete is BATCHED into one call
-    # afterward (delete_by_chunk_ids paginates internally at 300). A
-    # crash between event-emit and batch-delete leaves the log
-    # consistent with T3 (events present, all chunks still in T3); the
-    # next gc run idempotently re-emits and retries the batch.
-    #
     # NOTE on the manifest snapshot: ``referenced`` was sampled at the
     # top of this command. A doc registered concurrently between
     # snapshot and execution would not appear in the referenced set,
@@ -516,35 +503,13 @@ def gc_cmd(
     # Operators SHOULD NOT run gc concurrently with active indexing.
     # The window is single-operator-driven and acceptably small in
     # practice.
-    # nexus-h8rf6 live-shakeout finding #4: EventLog is the LOCAL git-backed
-    # catalog's audit trail (needs cat._dir). In service mode the catalog is
-    # an HttpCatalogClient with no local directory — emitting local events
-    # for a server-authoritative delete is neither possible nor meaningful,
-    # so skip emission (logged) rather than crash. The strict order
-    # (event-then-delete) below still holds whenever a local event log exists.
-    cat_dir = getattr(cat, "_dir", None)
-    event_log = EventLog(cat_dir) if cat_dir is not None else None
-    if event_log is None:
-        _log.info(
-            "gc_event_log_skipped",
-            reason="service-backed catalog has no local event log",
-            collection=collection,
-            candidates=len(candidates),
-        )
-    pending_chunk_ids: list[str] = []
-    for chunk_id, chash in candidates:
-        if event_log is not None:
-            event = make_event(
-                ChunkOrphanedPayload(
-                    chunk_id=chunk_id,
-                    reason=(
-                        f"chash {chash} not referenced by any manifest entry "
-                        f"in {collection}"
-                    ),
-                )
-            )
-            event_log.append(event)
-        pending_chunk_ids.append(chunk_id)
+    #
+    # AUDIT-TRAIL WINDOW (nexus-i711w item 20, Hal ruling 2026-07-30):
+    # the local ChunkOrphaned EventLog emission died with the local
+    # git-backed catalog. Until the engine's gc-audit surface ships
+    # (next engine tag), destructive T3 GC has no audit record — an
+    # explicitly accepted window; do not re-litigate here.
+    pending_chunk_ids: list[str] = [chunk_id for chunk_id, _chash in candidates]
 
     deleted_total = 0
     delete_failed = 0
@@ -554,14 +519,13 @@ def gc_cmd(
         delete_failed = len(pending_chunk_ids)
         click.echo(
             f"  batch delete failed ({len(pending_chunk_ids)} chunk(s)): "
-            f"{exc}. Events were emitted; next 'nx t3 gc' run will retry.",
+            f"{exc}. Next 'nx t3 gc' run will retry.",
             err=True,
         )
 
     if delete_failed:
         click.echo(
-            f"\nSummary: emitted {len(pending_chunk_ids)} ChunkOrphaned "
-            f"event(s); batch delete FAILED for {delete_failed} chunk(s)."
+            f"\nSummary: batch delete FAILED for {delete_failed} chunk(s)."
         )
     else:
         click.echo(

@@ -61,15 +61,13 @@ _SRC = Path(nexus.__file__).parent
 #:   dies at RDR-155 P4b.
 #: - indexer.py: the CORRECT service-aware form (catalog_service_mode
 #:   boolean) — the pattern the sweep normalized everything else to.
-_ALLOWED: dict[str, int] = {
-    "catalog/factory.py": 1,
-    "collection_audit.py": 1,  # sqlite-only branch AFTER the service check (e9ru2)
-    "commands/catalog.py": 2,
-    "db/collection_purge.py": 1,
-    "catalog/synthesizer.py": 1,
-    "db/embed_migrate.py": 1,
-    "indexer.py": 3,
-}
+#: EMPTIED by the nexus-i711w terminal deletion: every allowed site died with
+#: the local catalog (factory SQLite leg, collection_audit else-leg, the
+#: init/setup verbs, collection_purge local leg, synthesizer, embed_migrate's
+#: handle, indexer's three gates). Kept as an empty two-sided tombstone pin:
+#: the Catalog class no longer exists, so ANY new ``Catalog.is_initialized``
+#: is a reintroduction and fails this census. Delete the file at Stage 4/5.
+_ALLOWED: dict[str, int] = {}
 
 #: Matches ``Catalog.is_initialized`` including aliased imports
 #: (``_Catalog.is_initialized``); comment-only lines are skipped so prose
@@ -114,11 +112,8 @@ def test_is_initialized_census_is_closed():
 #:   returns earlier at the atomic engine cascade — verified nexus-e9ru2).
 #: - db/embed_migrate.py: Chroma-era tool on frozen sources; dies at P4b.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101).
-_RAW_ALLOWED: dict[str, int] = {
-    "db/collection_purge.py": 1,
-    "db/embed_migrate.py": 1,
-    "catalog/synthesizer.py": 1,
-}
+#: EMPTIED by the nexus-i711w terminal deletion (see _ALLOWED above).
+_RAW_ALLOWED: dict[str, int] = {}
 
 _RAW_PATTERN = re.compile(r"Catalog\(\s*\w+,\s*\w+\s*/\s*\"\.catalog\.db\"")
 

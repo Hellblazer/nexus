@@ -44,9 +44,9 @@ What the ported tests therefore do NOT assert, and where those contracts live:
     the service-arm "supersession recorded" contract is the same item-14
     xfail family.
   - The local client-side fan-out (T2 cascade -> ``t3_db.rename_collection``
-    -> catalog cascade + event emission): pinned by
-    ``test_rename_conformant_new_succeeds_local_fanout`` below (DIE set,
-    retires with the local catalog in the same commit as the src).
+    -> catalog cascade + event emission): RETIRED with the local catalog
+    (nexus-i711w terminal deletion — see the
+    ``test_rename_conformant_new_succeeds_local_fanout`` tombstone below).
 """
 from __future__ import annotations
 
@@ -95,44 +95,17 @@ def active_catalog() -> ActiveCatalog:
     return ActiveCatalog()
 
 
-@pytest.fixture()
-def local_catalog(tmp_path, local_catalog_backend):
-    """A real LOCAL SQLite ``Catalog`` — DIE-set tests only.
-
-    ``local_catalog_backend`` keeps ``storage_backend_for("catalog")`` on
-    SQLITE so the data plane takes the client-side fan-out these tests
-    observe, and so the injected-Catalog patch seam matches the branch
-    taken. Retirement note: fixture and its tests go with the local
-    catalog (nexus-i711w), same commit as the src.
-    """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying import stays fixture-local so the file still collects post-deletion
-
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
+# local_catalog fixture + _seed_local_catalog_doc helper RETIRED (nexus-i711w
+# terminal deletion), together with their two DIE-set tests (tombstones at
+# their original positions below). The local SQLite Catalog they constructed
+# is deleted; the surviving contracts live in the ported tests here plus the
+# tests/db/test_i711w_gap_xfails.py item-14/item-16 families.
 
 
 def _seed_t3_collection(t3_db: T3Database, name: str) -> None:
     """Create a minimal collection in T3."""
     col = t3_db._client.get_or_create_collection(name)
     col.add(ids=["c1"], documents=["seeded chunk"], metadatas=[{"doc_id": "1.1.1"}])
-
-
-def _seed_local_catalog_doc(catalog, *, tumbler: str, collection: str) -> None:
-    """DIE-set companion of the ActiveCatalog ``register`` seeding below."""
-    catalog._db.execute(  # epsilon-allow: fixture seeds a documents row with caller-pinned tumbler; Catalog.register mints its own owner-prefixed tumbler
-        "INSERT INTO documents "
-        "(tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        "metadata, source_mtime, alias_of, source_uri) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            tumbler, f"doc-{tumbler}", "", 0, "text", f"/tmp/{tumbler}.md",
-            "", collection, 1, "", "", "{}", 0.0, "", "",
-        ),
-    )
-    catalog._db.commit()
 
 
 # ── Validation gates fire before side effects ────────────────────────────
@@ -292,66 +265,14 @@ def test_rename_conformant_new_succeeds(t3_db, active_catalog, runner):
     assert entry.physical_collection == "knowledge__1-1__voyage-context-3__v1"
 
 
-def test_rename_conformant_new_succeeds_local_fanout(t3_db, local_catalog, runner):
-    """PINNED (DIE set) — the ORIGINAL end-to-end assertions of the local
-    client-side fan-out: T3 collection moves via ``t3_db.rename_collection``,
-    projection rows updated INCLUDING the old row's superseded tombstone,
-    CollectionSuperseded event appended to the local log, catalog docs
-    re-pointed. Every observable here is the SQLite-era machinery; retires
-    with the local catalog (nexus-i711w), same commit as the src. The
-    service-arm forms of the surviving contracts are the ported test above
-    plus the item-14 strict xfails (nexus-cecqy / nexus-g8z8n).
-    """
-    from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — dying import stays body-local so the file still collects post-deletion
-    from nexus.catalog.events import TYPE_COLLECTION_SUPERSEDED  # noqa: PLC0415 — dying import stays body-local
-
-    local_catalog.register_collection("knowledge__delos")
-    _seed_t3_collection(t3_db, "knowledge__delos")
-    _seed_local_catalog_doc(local_catalog, tumbler="1.1.1", collection="knowledge__delos")
-
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=local_catalog), \
-         patch("nexus.commands.catalog._get_catalog_writer", return_value=local_catalog):
-        result = runner.invoke(
-            main,
-            ["catalog", "rename-collection",
-             "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v1",
-             "--yes"],
-        )
-    assert result.exit_code == 0, result.output
-
-    # T3: new exists, old doesn't
-    assert not t3_db.collection_exists("knowledge__delos")
-    assert t3_db.collection_exists("knowledge__1-1__voyage-context-3__v1")
-
-    # Collections projection: new is registered + not legacy; old is superseded.
-    new_row = local_catalog.get_collection("knowledge__1-1__voyage-context-3__v1")
-    assert new_row is not None
-    assert new_row["legacy_grandfathered"] is False
-    assert new_row["content_type"] == "knowledge"
-    assert new_row["embedding_model"] == "voyage-context-3"
-
-    old_row = local_catalog.get_collection("knowledge__delos")
-    assert old_row is not None
-    assert old_row["superseded_by"] == "knowledge__1-1__voyage-context-3__v1"
-    assert old_row["superseded_at"]
-
-    # CollectionSuperseded event in the log
-    events = [
-        e for e in EventLog(local_catalog._dir).replay()
-        if e.type == TYPE_COLLECTION_SUPERSEDED
-    ]
-    assert len(events) == 1
-    assert events[0].payload.old_coll_id == "knowledge__delos"
-    assert events[0].payload.new_coll_id == "knowledge__1-1__voyage-context-3__v1"
-
-    # Catalog documents re-pointed
-    rows = local_catalog._db.execute(
-        "SELECT physical_collection FROM documents WHERE tumbler = ?",
-        ("1.1.1",),
-    ).fetchone()
-    assert rows[0] == "knowledge__1-1__voyage-context-3__v1"
+# test_rename_conformant_new_succeeds_local_fanout RETIRED (nexus-i711w
+# terminal deletion): the PINNED DIE-set twin of the ported happy path above.
+# Every observable was SQLite-era machinery (local client-side fan-out, local
+# projection rows, CollectionSuperseded in the local event log, raw ``_db``
+# re-point reads) — all deleted with the local catalog, exactly as its
+# docstring scheduled. Surviving contracts: the ported
+# test_rename_conformant_new_succeeds above + the item-14 strict xfails
+# (tests/db/test_i711w_gap_xfails.py, nexus-cecqy / nexus-g8z8n).
 
 
 def test_rename_dry_run_no_writes(t3_db, active_catalog, runner):
@@ -423,34 +344,13 @@ def test_rename_to_self_rejected(t3_db, active_catalog, runner):
     assert "identical" in result.output.lower()
 
 
-def test_rename_allow_legacy_lets_non_conformant_through(t3_db, local_catalog, runner):
-    """``--allow-legacy`` skips the conformance gate; the new collection
-    is registered as legacy_grandfathered=True via the projector regex.
-
-    PORT-BLOCKED on nexus-cecqy (i711w.1 item 16): ``legacy_grandfathered``
-    is DERIVED by the local projector but NEVER derived service-side — the
-    engine binds the literal 0 and the client's bare ``register_collection``
-    defaults the kwarg False, so on the live catalog the closing assertion
-    inverts (the row lands un-flagged). Stays pinned, passing, and becomes
-    the regression test when the derivation lands in
-    HttpCatalogClient.register_collection. Same group-2 disposition as
-    tests/test_catalog_collections.py's cecqy pins.
-    """
-    local_catalog.register_collection("docs__nexus-571b8edd")
-    _seed_t3_collection(t3_db, "docs__nexus-571b8edd")
-
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=local_catalog), \
-         patch("nexus.commands.catalog._get_catalog_writer", return_value=local_catalog):
-        result = runner.invoke(
-            main,
-            ["catalog", "rename-collection",
-             "docs__nexus-571b8edd",
-             "docs__renamed-legacy",
-             "--yes", "--allow-legacy"],
-        )
-    assert result.exit_code == 0, result.output
-    assert t3_db.collection_exists("docs__renamed-legacy")
-    new_row = local_catalog.get_collection("docs__renamed-legacy")
-    assert new_row is not None
-    assert new_row["legacy_grandfathered"] is True
+# test_rename_allow_legacy_lets_non_conformant_through RETIRED (nexus-i711w
+# terminal deletion): it observed the LOCAL projector's
+# ``legacy_grandfathered`` derivation, which was deleted with the local
+# catalog — the "stays pinned, passing" disposition it recorded could only
+# hold while the substrate existed. The service-side derivation gap it
+# documented (bare register_collection never lands legacy_grandfathered=True
+# on the live catalog) remains tracked as nexus-cecqy / i711w.1 item 16, with
+# the landed strict-xfail successor in tests/db/test_i711w_gap_xfails.py
+# (item 16: legacy_grandfathered derivation) — that xfail flips to the live
+# regression test when HttpCatalogClient.register_collection derives it.

@@ -269,7 +269,9 @@ fi
 say "Phase B — seed legacy Chroma + migrate-to-service"
 if nx migrate-to-service --help >/dev/null 2>&1; then  # RDR-155 P4b guard (nexus-8nlj4)
 
-# Catalog.init (in seed_legacy.py) runs `git init`; give git an identity.
+# Legacy-era catalog code (and, on era legs, the era release's own nx) may run
+# `git init`/commits in the catalog dir; give git an identity. The current
+# seed_legacy.py itself seeds raw SQLite only (Catalog was deleted, i711w).
 git config --global user.email "rehearsal@nexus.local" >/dev/null 2>&1 || true
 git config --global user.name  "nexus rehearsal"       >/dev/null 2>&1 || true
 

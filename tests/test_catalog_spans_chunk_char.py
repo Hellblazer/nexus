@@ -57,10 +57,12 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     died on "attempt to write a readonly database". The subject of these tests
     is span resolution through the manifest, not the substrate, so route the
     seeding at the active writer and let the body stand.
+
+    nexus-i711w terminal deletion: the ``Catalog.init`` seeding died with the
+    local catalog; the factories are service-only, so the live per-test tenant
+    needs no init.
     """
-    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return ActiveCatalog()
 

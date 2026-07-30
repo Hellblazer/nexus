@@ -26,6 +26,7 @@ from nexus.commands.catalog_cmds.doctor import (
     doctor_cmd,
 )
 from tests.conftest import make_vector_test_client
+from tests._catalog_fixture_ops import ActiveCatalog
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -348,15 +349,12 @@ class TestT3VsCatalog:
         """T3 collection has chunks AND catalog has docs referencing
         it. No drift in either direction.
         """
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
-        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         cat.register(
             owner, "doc.md", content_type="prose",
             file_path="doc.md", physical_collection="docs__clean",
         )
-        cat._db.close()
 
         _seed(chroma_client, "docs__clean", [
             {"id": "c1", "content": "x"},
@@ -389,9 +387,6 @@ class TestT3VsCatalog:
         """A T3 collection with chunks but zero catalog docs is an
         orphan; report it and FAIL.
         """
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
-
         _seed(chroma_client, "code__orphan", [
             {"id": "c1", "content": "x"},
         ])
@@ -424,16 +419,13 @@ class TestT3VsCatalog:
         from T3 (operator deleted it without going through
         supersede) lands in ``docs_pointing_at_missing_t3``.
         """
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
-        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         cat.register(
             owner, "ghost.md", content_type="prose",
             file_path="ghost.md",
             physical_collection="docs__ghost_t3",
         )
-        cat._db.close()
 
         class _FakeT3:
             _client = chroma_client
@@ -466,13 +458,11 @@ class TestStorePutIntegrity:
 
     @staticmethod
     def _seed_doc(
-        isolated_nexus: Path, title: str, *, chash: str,
+        title: str, *, chash: str,
         chunk_count: int = 0, with_manifest: bool = False,
     ) -> str:
-        from nexus.catalog.catalog import Catalog
-        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
-        owner_t = cat.curator_owner_tumbler_by_name("knowledge")
-        owner = owner_t or cat.register_owner("knowledge", "curator")
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator", repo_hash="")
         t = cat.register(
             owner, title, content_type="knowledge",
             physical_collection="knowledge__seeded",
@@ -485,7 +475,6 @@ class TestStorePutIntegrity:
                 "line_start": None, "line_end": None,
                 "char_start": None, "char_end": None,
             }])
-        cat._db.close()
         return str(t)
 
     class _FakeT3:
@@ -500,11 +489,9 @@ class TestStorePutIntegrity:
     ):
         """A healthy store_put doc (chunk_count==manifest==1, chunk in
         T3) passes — and ``checked`` proves the scan was non-vacuous."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         chash = "a" * 64
         self._seed_doc(
-            isolated_nexus, "healthy-note", chash=chash, with_manifest=True,
+            "healthy-note", chash=chash, with_manifest=True,
         )
         monkeypatch.setattr(
             "nexus.db.make_t3", lambda: self._FakeT3({chash}),
@@ -524,8 +511,6 @@ class TestStorePutIntegrity:
     ):
         """Zero store_put-origin docs: PASS with checked=0 reported
         honestly (no false drift/ghost on a clean install)."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         monkeypatch.setattr("nexus.db.make_t3", lambda: self._FakeT3())
         result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
         assert result.exit_code == 0, result.output
@@ -538,11 +523,9 @@ class TestStorePutIntegrity:
     ):
         """chunk_count=1 with zero manifest rows (the C3 swallow damage
         class / the migration verbatim-import class) FAILS."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         chash = "b" * 64
         self._seed_doc(
-            isolated_nexus, "drifted-note", chash=chash, chunk_count=1,
+            "drifted-note", chash=chash, chunk_count=1,
         )
         monkeypatch.setattr(
             "nexus.db.make_t3", lambda: self._FakeT3({chash}),
@@ -563,11 +546,9 @@ class TestStorePutIntegrity:
         """Row + zero manifest + zero chunks = ghost: FATAL, reported by
         TITLE and TUMBLER so the content can be re-created while it is
         still remembered (nexus-b6enc record section c)."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         chash = "c" * 64
         tumbler = self._seed_doc(
-            isolated_nexus, "ghost-note", chash=chash, chunk_count=0,
+            "ghost-note", chash=chash, chunk_count=0,
         )
         # T3 has NO chunk for this id.
         monkeypatch.setattr("nexus.db.make_t3", lambda: self._FakeT3())
@@ -585,11 +566,9 @@ class TestStorePutIntegrity:
         """chunk_count==0 and zero manifest but the chunk EXISTS in T3
         (the C2 catalog-hook-swallow direction — content recoverable):
         not a ghost; counts agree (0==0) so no drift either."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         chash = "d" * 64
         self._seed_doc(
-            isolated_nexus, "recoverable-note", chash=chash, chunk_count=0,
+            "recoverable-note", chash=chash, chunk_count=0,
         )
         monkeypatch.setattr(
             "nexus.db.make_t3", lambda: self._FakeT3({chash}),
@@ -605,11 +584,9 @@ class TestStorePutIntegrity:
         """make_t3() failing (critic Sig 1): a ghost CANDIDATE must land
         in the non-fatal ``unverifiable`` bucket — never a "content is
         GONE" verdict the check could not verify."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         chash = "f" * 64
         tumbler = self._seed_doc(
-            isolated_nexus, "maybe-ghost", chash=chash, chunk_count=0,
+            "maybe-ghost", chash=chash, chunk_count=0,
         )
         monkeypatch.setattr(
             "nexus.db.make_t3",
@@ -642,11 +619,9 @@ class TestStorePutIntegrity:
         """CRE Imp 2: get_by_id already maps a missing collection to
         ``None``, so a RAISE from the per-doc lookup is transient
         (timeout/auth/network) — unverifiable, never a false GONE."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
         chash = "9" * 64
         tumbler = self._seed_doc(
-            isolated_nexus, "flaky-lookup", chash=chash, chunk_count=0,
+            "flaky-lookup", chash=chash, chunk_count=0,
         )
 
         class _FlakyT3:
@@ -671,9 +646,7 @@ class TestStorePutIntegrity:
     ):
         """Indexer-origin docs (file_path set) are not store_put-origin
         and must not be scanned by this check."""
-        from nexus.catalog.catalog import Catalog
-        Catalog.init(isolated_nexus)
-        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         cat.register(
             owner, "indexed.md", content_type="knowledge",
@@ -682,7 +655,6 @@ class TestStorePutIntegrity:
             chunk_count=5,  # drift-shaped, but out of scope
             meta={"doc_id": "e" * 64},
         )
-        cat._db.close()
         monkeypatch.setattr("nexus.db.make_t3", lambda: self._FakeT3())
         result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
         assert result.exit_code == 0, result.output

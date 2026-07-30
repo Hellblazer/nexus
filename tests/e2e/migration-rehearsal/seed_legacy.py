@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 
 # Build the legacy T2 + catalog stores as raw SQLite, never the service backend
 # — these ARE the migration source a pre-cutover (pre-5.10) nx left on disk.
@@ -58,6 +59,7 @@ import os
 os.environ["NX_STORAGE_BACKEND"] = "sqlite"
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import chromadb
@@ -178,6 +180,239 @@ _BLOCKING_GROUPS: dict[str, tuple[str, ...]] = {
 # target collection (service=0 [MISMATCH] false negative).
 _BGE_MODEL = "bge-base-en-v15-768"
 _VOYAGE_CTX_MODEL = "voyage-context-3"  # knowledge content-type → voyage-context-3
+
+
+# ── Frozen legacy catalog schema (raw-SQLite seeding) ────────────────────────
+# The local Catalog implementation (nexus.catalog.catalog / nexus.db.t2.catalog)
+# was DELETED by the RDR-158/RDR-155 substrate retirement (i711w): the on-disk
+# ``.catalog.db`` is now a frozen MIGRATION SOURCE that the ETL and the
+# rehearsal assertions read via raw sqlite3. This seeder produces that LEGACY
+# artifact, so raw SQLite is the correct tool here (same class as
+# migrations.py's rehomed schemas; tests/e2e is outside the NO-SQLITE DDL
+# census, which scans src/ only).
+#
+# Frozen migration-SOURCE schema, copied VERBATIM from the deleted
+# ``src/nexus/db/t2/catalog.py`` ``_SCHEMA_SQL`` at df0c9c25 (the last
+# pre-deletion commit). Do not evolve it — a legacy artifact's schema is
+# immutable by definition; the upgrade ladder owns forward conversion.
+_LEGACY_CATALOG_SCHEMA_SQL = """\
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS owners (
+    tumbler_prefix TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_type TEXT NOT NULL,
+    repo_hash TEXT,
+    description TEXT,
+    repo_root TEXT DEFAULT '',
+    -- RDR-137 Phase 1.5b (nexus-tts0d.2): per-repo git HEAD identity,
+    -- previously held by ~/.config/nexus/repos.json. The indexer's
+    -- staleness skip compares the running repo's git HEAD against this
+    -- column; A1 verdict rejected documents.source_mtime as equivalent
+    -- because a repo HEAD can advance without any tracked file's mtime
+    -- changing (remote-only merge, ff-only pull of tag-only commits).
+    -- NULL on pre-migration rows AND on owners without a tracked HEAD
+    -- (e.g. ``curator`` owners minted by ``nx index pdf --corpus name``).
+    head_hash TEXT,
+    -- nexus-7vuw: name UNIQUE was a too-strict invariant. A repo and a
+    -- curator are different namespaces, so a repo named "nexus" should
+    -- coexist with a curator named "nexus" (e.g. ``nx index pdf
+    -- --corpus nexus`` after ``nx index repo .``). Pre-fix, the second
+    -- INSERT OR REPLACE silently obliterated the first row via the
+    -- name UNIQUE conflict, leaving owner_for_repo(repo_hash) returning
+    -- None and the indexer falling through to path-derived collection
+    -- naming. Composite UNIQUE keeps name-collision detection where it
+    -- belongs (within an owner_type).
+    UNIQUE(name, owner_type)
+);
+
+-- RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial unique index
+-- on repo_hash so the TOCTOU race in ensure_owner_for_repo (lookup-
+-- then-register) cannot create duplicate owner rows for the same
+-- repository. Excludes empty / NULL repo_hash so curator owners
+-- (which never carry a repo_hash) coexist without conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_repo_hash
+    ON owners(repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != '';
+
+CREATE TABLE IF NOT EXISTS documents (
+    tumbler TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    author TEXT,
+    year INTEGER,
+    content_type TEXT,
+    file_path TEXT,
+    corpus TEXT,
+    physical_collection TEXT,
+    chunk_count INTEGER,
+    head_hash TEXT,
+    indexed_at TEXT,
+    metadata JSON,
+    source_mtime REAL NOT NULL DEFAULT 0,
+    -- nexus-s8yz: permanent tumbler aliasing. When a document is
+    -- consolidated into a canonical owner (dedupe-owners, nexus-tmbh),
+    -- its row is kept and alias_of is set to the canonical tumbler.
+    -- External references (plan templates, prose citations, links
+    -- written by other systems) continue to resolve via alias_of —
+    -- that is the stability promise tumblers were chosen for.
+    -- '' (empty) means "this is the canonical document".
+    alias_of TEXT NOT NULL DEFAULT '',
+    -- RDR-096 P2.1: persistent URI identity. ``''`` (empty) on
+    -- legacy rows; populated for new registers after P2.1 ships.
+    -- Backfill derives URIs from ``file_path + physical_collection``.
+    source_uri TEXT NOT NULL DEFAULT '',
+    -- RDR-101 Phase 1 PR D (nexus-knn3): bibliographic enrichment
+    -- columns from the bib disposition deliverable
+    -- (docs/rdr/post-mortem/rdr-101-bib-disposition.md, Option A).
+    -- The bib_* fields move OFF T3 chunk metadata and live exactly once
+    -- on the Document projection. Phase 1 ships the empty columns;
+    -- Phase 3 wires DocumentEnriched v: 1 events to populate them
+    -- through the projector. The two indexed ID columns are the
+    -- "this title was enriched on backend X" cardinality marker that
+    -- nx enrich bib's skip query will read against (Phase 4); the
+    -- partial indexes (created below) make that query a sub-millisecond
+    -- presence test instead of a 300-row Chroma pagination.
+    bib_year INTEGER NOT NULL DEFAULT 0,
+    bib_authors TEXT NOT NULL DEFAULT '',
+    bib_venue TEXT NOT NULL DEFAULT '',
+    bib_citation_count INTEGER NOT NULL DEFAULT 0,
+    bib_semantic_scholar_id TEXT NOT NULL DEFAULT '',
+    bib_openalex_id TEXT NOT NULL DEFAULT '',
+    bib_doi TEXT NOT NULL DEFAULT '',
+    bib_enriched_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    title, author, corpus, file_path,
+    content=documents, content_rowid=rowid
+);
+
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, title, author, corpus, file_path)
+        VALUES (new.rowid, new.title, new.author, new.corpus, new.file_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, title, author, corpus, file_path)
+        VALUES ('delete', old.rowid, old.title, old.author, old.corpus, old.file_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, title, author, corpus, file_path)
+        VALUES ('delete', old.rowid, old.title, old.author, old.corpus, old.file_path);
+    INSERT INTO documents_fts(rowid, title, author, corpus, file_path)
+        VALUES (new.rowid, new.title, new.author, new.corpus, new.file_path);
+END;
+
+CREATE TABLE IF NOT EXISTS links (
+    id INTEGER PRIMARY KEY,
+    from_tumbler TEXT NOT NULL,
+    to_tumbler TEXT NOT NULL,
+    link_type TEXT NOT NULL,
+    from_span TEXT,
+    to_span TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT,
+    metadata JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_tumbler);
+CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_tumbler);
+CREATE INDEX IF NOT EXISTS idx_links_type ON links(link_type);
+CREATE INDEX IF NOT EXISTS idx_links_created_by ON links(created_by);
+CREATE INDEX IF NOT EXISTS idx_links_from_type ON links(from_tumbler, link_type);
+CREATE INDEX IF NOT EXISTS idx_links_to_type ON links(to_tumbler, link_type);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique
+    ON links(from_tumbler, to_tumbler, link_type);
+
+CREATE INDEX IF NOT EXISTS idx_links_created_by_type
+    ON links(created_by, link_type);
+
+CREATE INDEX IF NOT EXISTS idx_documents_tumbler
+    ON documents(tumbler);
+
+-- RDR-101 Phase 6 (nexus-o6aa.14): first-class Collections projection.
+-- One row per ChromaDB collection name. Materialized from
+-- CollectionCreated events; legacy_grandfathered is projection-derived
+-- from corpus.is_conformant_collection_name (no event-payload extension
+-- required, v: 0 stays stable). Read paths consult this table to
+-- distinguish post-Phase-6 canonical names from grandfathered legacy
+-- names; write paths consult it to short-circuit re-registration.
+CREATE TABLE IF NOT EXISTS collections (
+    name TEXT PRIMARY KEY,
+    content_type TEXT NOT NULL DEFAULT '',
+    owner_id TEXT NOT NULL DEFAULT '',
+    embedding_model TEXT NOT NULL DEFAULT '',
+    model_version TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    -- 1 = name does NOT match is_conformant_collection_name; the row
+    -- exists only because the collection predates RDR-101 Phase 6 or
+    -- was manually registered by the operator. Read paths accept it.
+    legacy_grandfathered INTEGER NOT NULL DEFAULT 0,
+    superseded_by TEXT NOT NULL DEFAULT '',
+    superseded_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_collections_legacy
+    ON collections(legacy_grandfathered);
+CREATE INDEX IF NOT EXISTS idx_collections_owner
+    ON collections(owner_id);
+
+-- nexus-wehp: cross-process consistency-marker table. Stores the
+-- highest canonical-source mtime that was successfully projected into
+-- this SQLite cache. Catalog._ensure_consistent reads it on
+-- construction to skip the DELETE+replay rebuild when the projection
+-- is already up to date, eliminating the 'database is locked'
+-- contention that surfaced when CLI write-side verbs raced an
+-- nx-mcp-held connection in v4.23.0. A fresh SQLite cache has no
+-- row, returns 0.0, and the rebuild fires (the e2e test invariant
+-- 'fresh cache against existing catalog dir sees the data').
+CREATE TABLE IF NOT EXISTS _meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- RDR-103 Phase 2: ``Catalog.collection_for`` resolves a
+-- ``(content_type, owner_id, embedding_model)`` triple to the
+-- highest-versioned conformant collection. Without this index the
+-- lookup is a full scan over the projection.
+CREATE INDEX IF NOT EXISTS idx_collections_tuple
+    ON collections(content_type, owner_id, embedding_model);
+
+-- RDR-101 Phase 1 PR D (nexus-knn3) partial indexes on bib backend IDs
+-- live in the post-migration block in __init__: the legacy-DB upgrade
+-- path has to ALTER TABLE the bib columns into existence before the
+-- partial-index CREATE can reference them.
+
+-- RDR-108 D2 (nexus-mydi): document_chunks manifest. The catalog is
+-- the authoritative source of truth for doc->chunk ordering (the
+-- "tree" layer of the git/IPFS-style blob+tree split). T3 chunks are
+-- content-addressed blobs keyed on chunk_text_hash[:32]; this table
+-- records the ordered (doc_id, position) -> chash references that
+-- compose each Document. The same chash can appear at multiple
+-- (doc_id, position) rows: the manifest preserves position; T3
+-- stores content once. Optional positional columns (line_start /
+-- line_end / char_start / char_end) carry display-friendly span
+-- coordinates so retrieval doesn't have to re-derive them from the
+-- source file. chunk_index is the chunker-assigned ordinal at index
+-- time, retained for reference; position is the canonical ordering
+-- key from this RDR onward.
+CREATE TABLE IF NOT EXISTS document_chunks (
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    PRIMARY KEY (doc_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_chash
+    ON document_chunks(chash);
+"""
 
 
 def _remap_model(source: str, model: str) -> str:
@@ -323,17 +558,49 @@ def _seed_t2_and_catalog(
             )
         conn.commit()
 
-    from nexus.catalog.catalog import Catalog
-
+    # Raw-SQLite seeding of the frozen legacy catalog (see the
+    # _LEGACY_CATALOG_SCHEMA_SQL provenance comment). The deleted
+    # ``Catalog.init`` / ``register_owner`` / ``register_collection`` /
+    # ``register`` / ``write_manifest`` calls are replicated below as the
+    # exact SQLite rows they produced (event-sourced projector SQL at
+    # df0c9c25 — schema triggers keep documents_fts in sync). Only the
+    # ``.catalog.db`` artifact is seeded: the JSONL/git sidecars the old
+    # Catalog also wrote are not consumed by any rehearsal leg or by the
+    # ETL (both read the SQLite file raw), and OMITTING documents.jsonl
+    # is load-bearing for the era-hop leg — a legacy Catalog construction
+    # only fires its DELETE+replay rebuild when documents.jsonl exists.
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True, exist_ok=True)
-    cat = Catalog.init(cat_dir) if not (cat_dir / ".catalog.db").exists() \
-        else Catalog(cat_dir, cat_dir / ".catalog.db")
+    cat_conn = sqlite3.connect(str(cat_dir / ".catalog.db"))
+    cat_conn.executescript(_LEGACY_CATALOG_SCHEMA_SQL)
 
     repo_root = "/tmp/rehearsal-src"
     Path(repo_root).mkdir(parents=True, exist_ok=True)
-    owner = cat.register_owner(
-        "rehearsal", "project", repo_hash="rehearsal01", repo_root=repo_root,
+    # register_owner("rehearsal", "project", repo_hash="rehearsal01",
+    # repo_root=repo_root): mint the next ``1.<n>`` prefix (fresh DB -> 1.1)
+    # unless the (name, owner_type) row already exists — the UNIQUE key the
+    # deleted projector's INSERT OR REPLACE conflicted on.
+    row = cat_conn.execute(
+        "SELECT tumbler_prefix FROM owners WHERE name = ? AND owner_type = ?",
+        ("rehearsal", "project"),
+    ).fetchone()
+    if row:
+        owner_prefix = row[0]
+    else:
+        row = cat_conn.execute(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler_prefix, "
+            "INSTR(tumbler_prefix, '.') + 1) AS INTEGER)), 0) "
+            "FROM owners WHERE tumbler_prefix LIKE '1.%'"
+        ).fetchone()
+        owner_prefix = f"1.{(row[0] or 0) + 1}"
+    cat_conn.execute(
+        "INSERT OR REPLACE INTO owners "
+        "(tumbler_prefix, name, owner_type, repo_hash, description, "
+        "repo_root, head_hash) VALUES (?, ?, ?, ?, ?, ?, "
+        "COALESCE((SELECT head_hash FROM owners "
+        "WHERE name = ? AND owner_type = ?), ''))",
+        (owner_prefix, "rehearsal", "project", "rehearsal01", "",
+         repo_root, "rehearsal", "project"),
     )
 
     # nexus-qeoxf: register EVERY seeded collection in catalog_collections
@@ -347,16 +614,37 @@ def _seed_t2_and_catalog(
     # occur in production. Includes _NOTE: sourceless as a DOCUMENT, but still a
     # registered COLLECTION. Names are conformant 4-segment
     # (<content_type>__<owner>__<model>__v<n>); supply the segments so they
-    # round-trip exactly.
+    # round-trip exactly. legacy_grandfathered is hardwired 0: every seeded
+    # name is conformant 4-segment, which is exactly what the deleted
+    # register_collection's is_conformant_collection_name check computed.
+    coll_ts = datetime.now(UTC).isoformat()
     for coll in collections:
         seg = coll.split("__")
-        cat.register_collection(
-            coll,
-            content_type=seg[0],
-            owner_id=seg[1],
-            embedding_model=seg[2],
-            model_version=seg[3],
+        cat_conn.execute(
+            "INSERT OR REPLACE INTO collections "
+            "(name, content_type, owner_id, embedding_model, model_version, "
+            "display_name, legacy_grandfathered, superseded_by, "
+            "superseded_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, "
+            "COALESCE((SELECT superseded_by FROM collections WHERE name = ?), ''), "
+            "COALESCE((SELECT superseded_at FROM collections WHERE name = ?), ''), "
+            "COALESCE((SELECT created_at FROM collections WHERE name = ?), ?))",
+            (coll, seg[0], seg[1], seg[2], seg[3], coll,
+             coll, coll, coll, coll_ts),
         )
+
+    # Sequential doc tumblers under the owner prefix, exactly as the deleted
+    # ``register`` minted them (fresh owner next_seq=1 -> 1.1.1, 1.1.2, ...).
+    # Resume from the high-water mark so a re-run against an existing DB
+    # never re-mints an occupied tumbler.
+    depth = len(owner_prefix.split("."))
+    row = cat_conn.execute(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler, LENGTH(?) + 2) AS INTEGER)), 0) "
+        "FROM documents WHERE tumbler LIKE ? "
+        "AND (LENGTH(tumbler) - LENGTH(REPLACE(tumbler, '.', ''))) = ?",
+        (owner_prefix, owner_prefix + ".%", depth),
+    ).fetchone()
+    next_doc_num = (row[0] or 0) + 1
 
     docs = 0
     for coll, chashes in collections.items():
@@ -366,19 +654,49 @@ def _seed_t2_and_catalog(
             continue
         fp = f"{repo_root}/{coll}.md"
         Path(fp).write_text("rehearsal legacy doc\n")
-        doc = cat.register(
-            owner, coll, content_type="knowledge", file_path=fp,
-            physical_collection=coll, chunk_count=len(chashes),
+        now = datetime.now(UTC).isoformat()
+        # register(): idempotent by file_path within the owner prefix;
+        # otherwise INSERT the row the deleted projector wrote for a
+        # DocumentRegistered event (source_uri = file://<abspath>, empty
+        # author/corpus/head_hash/alias_of, metadata '{}', bib_* defaults).
+        row = cat_conn.execute(
+            "SELECT tumbler FROM documents WHERE file_path = ? "
+            "AND tumbler LIKE ? "
+            "AND (LENGTH(tumbler) - LENGTH(REPLACE(tumbler, '.', ''))) = ?",
+            (fp, owner_prefix + ".%", depth),
+        ).fetchone()
+        if row:
+            doc = row[0]
+        else:
+            doc = f"{owner_prefix}.{next_doc_num}"
+            next_doc_num += 1
+            cat_conn.execute(
+                "INSERT INTO documents "
+                "(tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, "
+                "indexed_at, metadata, source_mtime, alias_of, source_uri) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (doc, coll, "", 0, "knowledge", fp, "", coll, len(chashes),
+                 "", now, json.dumps({}), 0.0, "", "file://" + fp),
+            )
+        # write_manifest(): DELETE-then-INSERT (idempotent), positions
+        # 0..n-1, chunk_index/span columns NULL, then the nexus-p5qk8
+        # indexed_at refresh a manifest write performed.
+        cat_conn.execute("DELETE FROM document_chunks WHERE doc_id = ?", (doc,))
+        cat_conn.executemany(
+            "INSERT INTO document_chunks "
+            "(doc_id, position, chash, chunk_index, "
+            " line_start, line_end, char_start, char_end) "
+            "VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL)",
+            [(doc, i, c) for i, c in enumerate(chashes)],
         )
-        cat.write_manifest(
-            str(doc),
-            [
-                {"chash": c, "position": i, "line_start": None,
-                 "line_end": None, "char_start": None, "char_end": None}
-                for i, c in enumerate(chashes)
-            ],
+        cat_conn.execute(
+            "UPDATE documents SET indexed_at = ? WHERE tumbler = ?",
+            (datetime.now(UTC).isoformat(), doc),
         )
         docs += 1
+    cat_conn.commit()
+    cat_conn.close()
     return {"t2_notes": 1, "catalog_docs": docs}
 
 

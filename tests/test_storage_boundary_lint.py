@@ -563,7 +563,11 @@ def test_dual_population_baseline_locked():
     # 14 -> 13: sub-stage A3 deleted the `nx plan repair` group's
     # _open_plans_db raw-connect with plans/repair.py and the SQLite
     # PlanLibrary. DOWNWARD-only recount; never bump upward.
-    assert result.epsilon_allow_connects == 13, (
+    # 13 -> 12: the terminal i711w deletion collapsed
+    # collection_audit._open_catalog_conn to `return None`, retiring its
+    # epsilon-allow ro-connect on the local .catalog.db. DOWNWARD-only
+    # recount; never bump upward.
+    assert result.epsilon_allow_connects == 12, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
@@ -699,17 +703,25 @@ def test_catalog_sibling_classes_are_not_matched(tmp_path):
 
 
 def test_catalog_construction_allowlist_includes_catalog_module():
-    """The catalog construction-allowlist holds the substrate (catalog/ db/
-    daemon/) that legitimately constructs ``Catalog``. Widening the allowlist
-    to empty must count strictly MORE sites than the consumer-only baseline,
-    proving substrate sites are being excluded from the cutover surface."""
+    """nexus-i711w terminal-deletion end-state: ZERO ``Catalog(...)``
+    constructions anywhere — allowlisted substrate included.
+
+    Pre-deletion this asserted ``wide > narrow`` (widening the allowlist to
+    empty counted the substrate's own legitimate constructions). With the
+    local ``Catalog`` class deleted there is no legitimate construction
+    site left, so the stronger claim holds and is the tripwire: any
+    reappearance of a ``Catalog(...)`` construction — even under the still-
+    configured substrate allowlist — is a reintroduction of the deleted
+    class. The synthetic-offender tests above keep proving the counter
+    itself still fires."""
     from nexus.storage_boundary_lint import (
         CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES,
     )
 
     wide = _catalog_check(catalog_construction_allowlist_prefixes=())
     narrow = _catalog_check()
-    assert wide.catalog_constructions > narrow.catalog_constructions
+    assert wide.catalog_constructions == 0
+    assert narrow.catalog_constructions == 0
     assert "src/nexus/catalog/" in CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES
 
 

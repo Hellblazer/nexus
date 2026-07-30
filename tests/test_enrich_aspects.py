@@ -25,7 +25,6 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
 from tests._catalog_fixture_ops import ActiveCatalog
 
@@ -119,8 +118,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Create an isolated environment: real tmp catalog + tmp T2 DB.
     Patches catalog_path() and default_db_path() so the CLI reads/writes
     only inside tmp_path. Returns (catalog_dir, db_path, cat)."""
+    # nexus-i711w terminal deletion: the local Catalog.init seeding is gone —
+    # ActiveCatalog routes to the live service catalog, no init step needed.
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
 
     db_path = tmp_path / "enrich_aspects.db"
 
@@ -373,7 +373,6 @@ class TestDryRunSurfacesSourceUri:
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from nexus.aspect_readers import ReadFail
-        from nexus.catalog import Catalog as _Cat  # noqa: F401
 
         _, _, cat = env
         owner = cat.register_owner("rdr", "rdr-curator")

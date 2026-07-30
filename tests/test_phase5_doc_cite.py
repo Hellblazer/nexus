@@ -16,7 +16,6 @@ Exit contract (RDR §Phase 5 Failure Modes):
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -92,17 +91,33 @@ class _FakeChashIndex:
         pass
 
 
+class _SpanResolvingCatalog:
+    """resolve_chash shim honouring the INJECTED t3 + chash_index.
+
+    nexus-i711w terminal deletion: the local ``Catalog.resolve_chash``
+    (a delegating shell over ``catalog_spans.resolve_chash_globally``)
+    died with the local Catalog; the cite command still calls
+    ``cat.resolve_chash(chash, t3, chash_index)`` on whatever
+    ``_phase4_catalog_t3_chash()`` hands back, and the service client
+    ignores the injected collaborators — so these seeded-resolver tests
+    keep the injected shape via the surviving resolution function.
+    """
+
+    def resolve_chash(self, chash, t3=None, chash_index=None, *,
+                      prefer_collection=None):
+        from nexus.catalog.catalog_spans import resolve_chash_globally
+        return resolve_chash_globally(
+            chash, t3, chash_index, prefer_collection=prefer_collection,
+        )
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def cite_env(tmp_path: Path):
-    """Catalog + T3 + fake chash index with one resolvable chunk."""
-    from nexus.catalog.catalog import Catalog
-
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+def cite_env():
+    """Resolver shim + T3 + fake chash index with one resolvable chunk."""
+    cat = _SpanResolvingCatalog()
 
     t3 = make_vector_test_client()
     chash_hex = "c" * 64
@@ -237,15 +252,10 @@ class TestCiteJsonSchema:
 
 
 class TestCiteEmptyIndexShortCircuit:
-    def test_empty_chash_index_exits_2_with_actionable_message(
-        self, tmp_path: Path,
-    ):
-        from nexus.catalog.catalog import Catalog
+    def test_empty_chash_index_exits_2_with_actionable_message(self):
         from nexus.commands.doc import cite_cmd
 
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        cat = _SpanResolvingCatalog()
         # Empty chash index (no rows) — is_empty() True trips the exit-2
         # fresh-install short-circuit.
         chash_index = _FakeChashIndex()

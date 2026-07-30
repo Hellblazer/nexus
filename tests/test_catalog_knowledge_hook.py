@@ -42,10 +42,9 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
     wrote the SERVICE catalog. Every assertion then read an empty local file.
     ``ActiveCatalog`` routes both halves through the same factories the hook
     uses, so the same test body now covers whichever catalog is real.
+    nexus-i711w terminal deletion: the local ``Catalog.init`` seeding is gone.
     """
-    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
     return catalog_dir, ActiveCatalog()
 
 

@@ -12,10 +12,7 @@ Verifies:
 from __future__ import annotations
 
 import json
-import sqlite3
-import tempfile
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -29,118 +26,68 @@ import pytest
 
 
 class TestCatalogCollectionHealthMeta:
-    """SQLite Catalog.collection_health_meta returns exact values."""
+    """collection_health_meta semantics against the ACTIVE catalog.
+
+    nexus-i711w terminal deletion: was the SQLite-arm semantic pin (raw
+    pinned-tumbler INSERTs + local Catalog). The semantics — MAX(indexed_at)
+    aggregation, orphan = zero incoming links, cross-collection isolation —
+    are the engine's to honour now, so the seeds go through register/link
+    and the reads through the live reader. The routing half stays pinned by
+    TestHttpCatalogClientCollectionHealthMeta below.
+    """
 
     @pytest.fixture()
-    def cat(self, tmp_path: Path):
-        """Initialised Catalog with seeded documents and links."""
-        from nexus.catalog.catalog import Catalog
-
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        db_path = cat_dir / ".catalog.db"
-        c = Catalog(cat_dir, db_path)
-        yield c
-
-    def _seed_owner(self, cat, prefix: str, name: str = "owner") -> None:
-        """Seed an owner row directly via cat.register_owner."""
-        cat.register_owner(name=name)
+    def cat(self):
+        from tests._catalog_fixture_ops import ActiveCatalog
+        return ActiveCatalog()
 
     def test_empty_collection_returns_none_last_indexed_zero_orphans(
-        self, cat, tmp_path: Path
+        self, cat
     ) -> None:
         """Collection with no documents: last_indexed=None, orphan_count=0."""
         result = cat.collection_health_meta("nonexistent__collection__v1")
         assert result["last_indexed"] is None
         assert result["orphan_count"] == 0
 
-    def test_last_indexed_is_max_indexed_at(self, cat, tmp_path: Path) -> None:
+    def test_last_indexed_is_max_indexed_at(self, cat) -> None:
         """last_indexed = MAX(indexed_at) for documents in the collection."""
-        # Insert two documents with known indexed_at timestamps directly
-        db = cat._db
-        # Register an owner first
-        db.execute(  # epsilon-allow: test fixture seeds owner row with pinned tumbler_prefix to control doc tumblers
-            "INSERT OR IGNORE INTO owners (tumbler_prefix, name, owner_type) "
-            "VALUES ('1', 'owner1', 'repo')"
-        )
-        db.execute(  # epsilon-allow: test fixture seeds document with known indexed_at to assert MAX aggregation
-            "INSERT INTO documents "
-            "(tumbler, title, physical_collection, indexed_at) "
-            "VALUES ('1.1', 'doc-a', 'test__coll__v1', '2026-01-01T10:00:00')"
-        )
-        db.execute(  # epsilon-allow: test fixture seeds document with known indexed_at to assert MAX aggregation
-            "INSERT INTO documents "
-            "(tumbler, title, physical_collection, indexed_at) "
-            "VALUES ('1.2', 'doc-b', 'test__coll__v1', '2026-06-01T12:00:00')"
-        )
-        db.commit()
+        owner = cat.register_owner("health-owner1", "repo", repo_hash="h1")
+        a = cat.register(owner, "doc-a", physical_collection="test__coll__v1")
+        b = cat.register(owner, "doc-b", physical_collection="test__coll__v1")
+        stamps = {cat.resolve(a).indexed_at, cat.resolve(b).indexed_at}
 
         result = cat.collection_health_meta("test__coll__v1")
-        assert result["last_indexed"] == "2026-06-01T12:00:00"
+        # The aggregate must be the MAX of the per-doc stamps the catalog
+        # itself reports (register stamps indexed_at server-side).
+        assert result["last_indexed"] == max(stamps)
         assert result["orphan_count"] == 2  # no incoming links for either doc
 
-    def test_orphan_count_excludes_linked_docs(self, cat, tmp_path: Path) -> None:
+    def test_orphan_count_excludes_linked_docs(self, cat) -> None:
         """orphan_count = docs with zero incoming links (to_tumbler)."""
-        db = cat._db
-        db.execute(  # epsilon-allow: test fixture seeds owner row with pinned tumbler_prefix to control doc tumblers
-            "INSERT OR IGNORE INTO owners (tumbler_prefix, name, owner_type) "
-            "VALUES ('2', 'owner2', 'repo')"
-        )
-        # 3 docs in the collection
-        for i, t in enumerate(["2.1", "2.2", "2.3"]):
-            db.execute(  # epsilon-allow: test fixture seeds documents to assert orphan_count with known link structure
-                "INSERT INTO documents "
-                "(tumbler, title, physical_collection, indexed_at) "
-                f"VALUES ('{t}', 'doc-{i}', 'linked__coll__v1', '2026-03-01T00:00:00')"
-            )
-        # One link pointing TO 2.2 (makes it a non-orphan)
-        db.execute(  # epsilon-allow: test fixture seeds a link to verify non-orphan docs are excluded from orphan_count
-            "INSERT INTO links (from_tumbler, to_tumbler, link_type, created_by) "
-            "VALUES ('2.1', '2.2', 'cites', 'test')"
-        )
-        db.commit()
+        owner = cat.register_owner("health-owner2", "repo", repo_hash="h2")
+        d1 = cat.register(owner, "doc-0", physical_collection="linked__coll__v1")
+        d2 = cat.register(owner, "doc-1", physical_collection="linked__coll__v1")
+        cat.register(owner, "doc-2", physical_collection="linked__coll__v1")
+        # One link pointing TO d2 (makes it a non-orphan)
+        cat.link(d1, d2, "cites", created_by="test")
 
         result = cat.collection_health_meta("linked__coll__v1")
-        # 2.1 and 2.3 have no incoming links → orphans; 2.2 has one → not orphan
+        # d1 and doc-2 have no incoming links -> orphans; d2 has one.
         assert result["orphan_count"] == 2
 
-    def test_cross_collection_orphan_does_not_bleed(self, cat, tmp_path: Path) -> None:
+    def test_cross_collection_orphan_does_not_bleed(self, cat) -> None:
         """orphan_count must not include docs from other collections."""
-        db = cat._db
-        db.execute(  # epsilon-allow: test fixture seeds owner row with pinned tumbler_prefix to control doc tumblers
-            "INSERT OR IGNORE INTO owners (tumbler_prefix, name, owner_type) "
-            "VALUES ('3', 'owner3', 'repo')"
-        )
-        # doc in target collection
-        db.execute(  # epsilon-allow: test fixture seeds document in target collection to assert cross-collection isolation
-            "INSERT INTO documents "
-            "(tumbler, title, physical_collection, indexed_at) "
-            "VALUES ('3.1', 'doc-target', 'target__coll__v1', '2026-01-01T00:00:00')"
-        )
-        # doc in OTHER collection
-        db.execute(  # epsilon-allow: test fixture seeds document in other collection to verify it is excluded from target query
-            "INSERT INTO documents "
-            "(tumbler, title, physical_collection, indexed_at) "
-            "VALUES ('3.2', 'doc-other', 'other__coll__v1', '2026-01-01T00:00:00')"
-        )
-        db.commit()
+        owner = cat.register_owner("health-owner3", "repo", repo_hash="h3")
+        cat.register(owner, "doc-target", physical_collection="target__coll__v1")
+        cat.register(owner, "doc-other", physical_collection="other__coll__v1")
 
         result = cat.collection_health_meta("target__coll__v1")
-        assert result["orphan_count"] == 1  # only 3.1 (in target__coll__v1)
+        assert result["orphan_count"] == 1  # only the target-collection doc
 
-    def test_returns_exact_types(self, cat, tmp_path: Path) -> None:
+    def test_returns_exact_types(self, cat) -> None:
         """last_indexed is str|None; orphan_count is int."""
-        db = cat._db
-        db.execute(  # epsilon-allow: test fixture seeds owner row with pinned tumbler_prefix to control doc tumblers
-            "INSERT OR IGNORE INTO owners (tumbler_prefix, name, owner_type) "
-            "VALUES ('4', 'owner4', 'repo')"
-        )
-        db.execute(  # epsilon-allow: test fixture seeds document to assert return type of collection_health_meta
-            "INSERT INTO documents "
-            "(tumbler, title, physical_collection, indexed_at) "
-            "VALUES ('4.1', 'typed-doc', 'typed__coll__v1', '2026-04-15T09:30:00')"
-        )
-        db.commit()
+        owner = cat.register_owner("health-owner4", "repo", repo_hash="h4")
+        cat.register(owner, "typed-doc", physical_collection="typed__coll__v1")
 
         result = cat.collection_health_meta("typed__coll__v1")
         assert isinstance(result["last_indexed"], str)
@@ -240,17 +187,14 @@ class TestHttpCatalogClientCollectionHealthMeta:
 class TestCollectionHealthDefaultCatalogStatsFn:
     """_default_catalog_stats_fn calls cat.collection_health_meta (no _db guard)."""
 
-    def test_calls_collection_health_meta_not_db(self, tmp_path: Path) -> None:
-        """_default_catalog_stats_fn must call collection_health_meta(), not _db."""
-        from nexus.catalog.catalog import Catalog
+    def test_calls_collection_health_meta_not_db(self) -> None:
+        """_default_catalog_stats_fn must call collection_health_meta(), not _db.
 
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-
-        # If the implementation still uses hasattr(cat, '_db'), patching
-        # collection_health_meta won't help — but if it's ported, the mock
-        # is what gets called.
+        nexus-i711w terminal deletion: was a real local Catalog with a
+        mocked method; a spec-restricted mock is a STRONGER form of the
+        same pin — any ``_db`` (or other) reach-in raises AttributeError.
+        """
+        cat = MagicMock(spec=["collection_health_meta"])
         cat.collection_health_meta = MagicMock(
             return_value={"last_indexed": "2026-01-01", "orphan_count": 5}
         )

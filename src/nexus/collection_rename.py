@@ -109,100 +109,50 @@ def rename_collection_data_plane(
         "catalog_docs": 0,
     }
 
-    # ── Service mode: ONE atomic server-side re-home (RDR-164 P3) ─────────────
-    # In service mode the entire in-Postgres cascade — T3 pgvector chunks, chash
-    # index, taxonomy topics/assignments/meta/centroids, the aspect family,
+    # ── ONE atomic server-side re-home (RDR-164 P3, unconditional since
+    # nexus-i711w) ────────────────────────────────────────────────────────────
+    # The entire in-Postgres cascade — T3 pgvector chunks, chash index,
+    # taxonomy topics/assignments/meta/centroids, the aspect family,
     # telemetry, AND the catalog documents + registry row — is a single
-    # transactional CatalogRepository.renameCollection on the Java service. Fold
-    # it into one call instead of the SQLite-era fan-out (T2 cascade + separate
-    # T3 Chroma rename + catalog cascade). The atomic txn means a failure leaves
-    # the collection fully unchanged, so it raises (not fail-open) just like the
-    # T2-cascade-failure contract below. No separate t3_db.rename_collection:
-    # the pgvector chunks were re-homed inside the same transaction.
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance (nexus.db.storage_mode)
-
-    if storage_backend_for("catalog") == StorageBackend.SERVICE:
-        client = catalog
-        if client is None or not hasattr(client, "rename_collection_cascade"):
-            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
-            client = make_catalog_reader()
-        if client is None:  # service mode always returns a client; guard for a clear error
-            raise click.ClickException("catalog service client unavailable")
-        try:
-            renamed = client.rename_collection_cascade(old, new)
-        except Exception as exc:
-            raise click.ClickException(
-                f"service rename failed -- collection {old!r} is unchanged "
-                f"(the re-home is atomic). Fix the error and retry:\n  {exc}"
-            ) from exc
-        counts["tax_topics"] = renamed.get("topics", 0)
-        counts["tax_assignments"] = renamed.get("topic_assignments", 0)
-        counts["tax_meta"] = renamed.get("taxonomy_meta", 0)
-        counts["tax_centroids"] = (
-            renamed.get("taxonomy_centroids_384", 0)
-            + renamed.get("taxonomy_centroids_768", 0)
-            + renamed.get("taxonomy_centroids_1024", 0)
-        )
-        counts["chash"] = renamed.get("chash_index", 0)
-        counts["aspects"] = renamed.get("document_aspects", 0)
-        counts["aspect_queue"] = renamed.get("aspect_extraction_queue", 0)
-        counts["highlights"] = renamed.get("document_highlights", 0)
-        counts["relevance_log"] = renamed.get("relevance_log", 0)
-        counts["search_telemetry"] = renamed.get("search_telemetry", 0)
-        counts["hook_failures"] = renamed.get("hook_failures", 0)
-        counts["catalog_docs"] = renamed.get("catalog_documents", 0)
-        return counts
-
-    # ── Local (sqlite/Chroma) mode: client-side fan-out ──────────────────────
-    # ── T2 cascade FIRST (reversible) ────────────────────────────────────────
-    # Failure here raises ClickException -- T3 rename has not yet run so the
-    # system remains fully consistent. Operator can diagnose and retry.
-    # RDR-128 P3 (nexus-sbxbe.3): route the multi-store cascade through the
-    # daemon so this command does not open memory.db directly. The op is on
-    # the daemon's database-pseudo-store allowlist and its dict return
-    # round-trips framed JSON; T2Client's facade passthrough makes the
-    # write_fn body work whether routed or degraded to a direct T2Database.
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-
+    # transactional CatalogRepository.renameCollection on the Java service.
+    # The atomic txn means a failure leaves the collection fully unchanged,
+    # so it raises (not fail-open).
+    #
+    # nexus-i711w: the SQLite-era client-side fan-out (T2 cascade + separate
+    # T3 rename + catalog cascade) that lived here as the else-arm died with
+    # the local catalog. KNOWN KNOCK-ON (bead nexus-i711w comment 20): a
+    # catalog=service + vectors=chroma split-mode rename lost its local leg
+    # with this excision — that mode combination no longer exists post
+    # RDR-155 P4b.
+    client = catalog
+    if client is None or not hasattr(client, "rename_collection_cascade"):
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+        client = make_catalog_reader()
+    if client is None:  # service mode always returns a client; guard for a clear error
+        raise click.ClickException("catalog service client unavailable")
     try:
-        cascade = t2_index_write(
-            lambda t2db: t2db.rename_collection_cascade(old=old, new=new)
-        )
-        counts["tax_topics"] = cascade.get("tax_topics", 0)
-        counts["tax_assignments"] = cascade.get("tax_assignments", 0)
-        counts["tax_meta"] = cascade.get("tax_meta", 0)
-        counts["chash"] = cascade.get("chash", 0)
-        counts["aspects"] = cascade.get("aspects", 0)
-        counts["aspect_queue"] = cascade.get("aspect_queue", 0)
-        counts["highlights"] = cascade.get("highlights", 0)
-        counts["search_telemetry"] = cascade.get("search_telemetry", 0)
-        counts["hook_failures"] = cascade.get("hook_failures", 0)
-        # tax_centroids stays 0 in local mode: the sqlite taxonomy cascade
-        # re-homes centroids internally without a separate per-table count.
-        # Service mode surfaces them from the server response above.
+        renamed = client.rename_collection_cascade(old, new)
     except Exception as exc:
         raise click.ClickException(
-            f"T2 cascade failed before T3 rename -- collection {old!r} is "
-            f"unchanged. Fix the error and retry:\n  {exc}"
+            f"service rename failed -- collection {old!r} is unchanged "
+            f"(the re-home is atomic). Fix the error and retry:\n  {exc}"
         ) from exc
-
-    # ── T3 rename LAST (irrevocable) ─────────────────────────────────────────
-    # T2 is already committed. If T3 fails here the operator can reverse T2
-    # by running the inverse rename (``nx collection rename new old``).
-    t3_db.rename_collection(old, new)
-
-    # ── Catalog cascade (fail-open) ───────────────────────────────────────────
-    try:
-        if catalog is None:
-            # RDR-146 P1.2: rename_collection is a write; route through the
-            # write-only daemon proxy. A caller-supplied ``catalog`` is used
-            # as-is (it is expected to be write-capable).
-            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
-            catalog = make_catalog_writer()
-        counts["catalog_docs"] = catalog.rename_collection(old, new)
-    except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2+T3 succeeded; surfaced via on_warn
-        on_warn(f"warn: T2+T3 rename succeeded but catalog cascade failed: {exc}")
-
+    counts["tax_topics"] = renamed.get("topics", 0)
+    counts["tax_assignments"] = renamed.get("topic_assignments", 0)
+    counts["tax_meta"] = renamed.get("taxonomy_meta", 0)
+    counts["tax_centroids"] = (
+        renamed.get("taxonomy_centroids_384", 0)
+        + renamed.get("taxonomy_centroids_768", 0)
+        + renamed.get("taxonomy_centroids_1024", 0)
+    )
+    counts["chash"] = renamed.get("chash_index", 0)
+    counts["aspects"] = renamed.get("document_aspects", 0)
+    counts["aspect_queue"] = renamed.get("aspect_extraction_queue", 0)
+    counts["highlights"] = renamed.get("document_highlights", 0)
+    counts["relevance_log"] = renamed.get("relevance_log", 0)
+    counts["search_telemetry"] = renamed.get("search_telemetry", 0)
+    counts["hook_failures"] = renamed.get("hook_failures", 0)
+    counts["catalog_docs"] = renamed.get("catalog_documents", 0)
     return counts
 
 
@@ -283,18 +233,12 @@ def remap_collection_references(
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             catalog = make_catalog_writer()
         # nexus-gaou3: this IS the legitimate cross-model repoint (target already
-        # populated by the ETL). In service mode the Java endpoint 409s a rename onto
-        # an existing target UNLESS cross_model=True, so signal it. Only pass the kwarg
-        # in service mode — the local catalog writer's rename_collection has no such
-        # parameter (and local mode has no 409 to bypass).
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance (nexus.db.storage_mode)
-
-        if storage_backend_for("catalog") == StorageBackend.SERVICE:
-            counts["catalog_docs"] = catalog.rename_collection(
-                source, target, cross_model=True
-            )
-        else:
-            counts["catalog_docs"] = catalog.rename_collection(source, target)
+        # populated by the ETL). The Java endpoint 409s a rename onto an existing
+        # target UNLESS cross_model=True, so signal it. Unconditional since
+        # nexus-i711w — the local catalog writer (which lacked the kwarg) is gone.
+        counts["catalog_docs"] = catalog.rename_collection(
+            source, target, cross_model=True
+        )
     except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2 remap; surfaced via on_warn
         # The catalog is a derived view (see docstring): a cascade miss here —
         # e.g. a 404 when the legacy source was never registered as a catalog

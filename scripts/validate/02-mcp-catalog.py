@@ -203,12 +203,10 @@ def run_suite() -> None:
 def main() -> int:
     print(f"[{ts()}] MCP catalog tools live exercise — catalog={os.environ.get('NEXUS_CATALOG_PATH')}")
     try:
-        # Ensure catalog is initialised
-        from pathlib import Path
-        from nexus.catalog.catalog import Catalog
-        cat_path = Path(os.environ["NEXUS_CATALOG_PATH"])
-        if not Catalog.is_initialized(cat_path):
-            Catalog.init(cat_path)
+        # No local catalog init: the SQLite catalog died in 7.0.0
+        # (nexus-i711w) and `nx catalog init` is now a refusal — the manual
+        # validation suite runs against the SERVICE catalog resolved from the
+        # environment (make_catalog_reader), which needs no initialisation.
         run_suite()
     finally:
         print(f"\n[{ts()}] ── mcp-catalog: {_pass} pass, {_fail} fail ──")

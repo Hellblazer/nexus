@@ -319,11 +319,10 @@ def _print_collections_drift_text(report: dict) -> None:
         # would wrap this script.
         click.echo(
             "  Remediate: register a target collection and supersede manually:\n"
-            "    python -c \"from nexus.catalog.catalog import Catalog; "
-            "from nexus.config import catalog_path; "
-            "p=catalog_path(); c=Catalog(p, p / '.catalog.db'); "
-            "c.register_collection('<TARGET>'); "
-            "c.supersede_collection('<OLD>', '<TARGET>')\""
+            "    python -c \"from nexus.catalog.factory import make_catalog_writer; "
+            "w = make_catalog_writer(); "
+            "w.register_collection('<TARGET>'); "
+            "w.supersede_collection('<OLD>', '<TARGET>'); w.close()\""
         )
 
 

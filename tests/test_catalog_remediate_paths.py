@@ -53,12 +53,8 @@ def catalog_env(tmp_path, monkeypatch):
 @pytest.fixture
 def initialized_catalog(catalog_env):
     # nexus-i711w C-store: seed and re-read through the ACTIVE catalog.
-    # Service mode opens the local .catalog.db READ-ONLY (frozen migration
-    # source), so a direct Catalog handle cannot seed; and the verb under
-    # test reads via _get_catalog(), so a local seed would be invisible to
-    # it — the bucket-2 false-negative _catalog_fixture_ops exists to stop.
-    from nexus.catalog.catalog import Catalog
-    Catalog.init(catalog_env)
+    # Terminal deletion: the local Catalog.init seeding is gone —
+    # ActiveCatalog routes to the live service catalog, no init step.
     cat = ActiveCatalog()
     cat.register_owner("test-papers", "curator")
     return cat

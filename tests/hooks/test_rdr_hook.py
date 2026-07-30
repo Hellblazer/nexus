@@ -10,13 +10,10 @@ conformant 4-segment name from the path-derived identity (Phase 5
 tightening; pre-Phase-5 the fallback was the legacy 2-segment shape).
 The test surface pins:
 
-  - The hook helper returns the conformant ``CollectionName.render()``
-    when the catalog is initialized and the repo has a registered owner.
-  - The helper synthesises a conformant 4-segment name when the catalog
-    is absent (operator workstations that have not run
-    ``nx catalog setup``).
-  - The helper synthesises a conformant 4-segment name when the catalog
-    is initialized but the repo has no owner row.
+  - The helper synthesises a conformant 4-segment name when no catalog
+    resolution is available. (nexus-i711w terminal deletion: the
+    local-catalog resolution leg and its two pins retired with the local
+    catalog — see the tombstones below.)
 """
 from __future__ import annotations
 
@@ -49,36 +46,12 @@ def rdr_hook_module():
     return module
 
 
-@pytest.fixture()
-def catalog_with_owner(tmp_path, monkeypatch):
-    """Set up a catalog at tmp_path/catalog with one registered owner."""
-    from nexus.catalog.catalog import Catalog
-
-    cat_dir = tmp_path / "catalog"
-    cat = Catalog.init(cat_dir)
-    cat.register_owner(
-        name="myproject",
-        owner_type="repo",
-        repo_hash="cafef00d",
-        repo_root=str(tmp_path / "myproject"),
-    )
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
-    monkeypatch.setattr(
-        "nexus.repo_identity._repo_identity",
-        lambda r: ("myproject", "cafef00d"),
-    )
-    return cat_dir
-
-
-def test_resolve_rdr_collection_uses_catalog_when_initialized(
-    rdr_hook_module, catalog_with_owner, tmp_path,
-):
-    repo = tmp_path / "myproject"
-    repo.mkdir()
-    name = rdr_hook_module._resolve_rdr_collection(repo)
-    # Owner 1.1 to owner_segment 1-1; canonical model voyage-context-3;
-    # new tuple lands at v1.
-    assert name == "rdr__1-1__voyage-context-3__v1"
+# test_resolve_rdr_collection_uses_catalog_when_initialized (and its
+# catalog_with_owner fixture) RETIRED (nexus-i711w terminal deletion): its
+# subject was the hook's LOCAL-``Catalog.init`` resolution leg, which is dead
+# code now (the hook's ``from nexus.catalog import Catalog`` raises and it
+# always falls through to the indexer's path-derived conformant synthesis —
+# the behaviour pinned by the surviving tests below).
 
 
 def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
@@ -104,28 +77,12 @@ def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
     assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
 
 
-def test_resolve_rdr_collection_synthesises_conformant_when_owner_unregistered(
-    rdr_hook_module, tmp_path, monkeypatch,
-):
-    """Catalog initialized but no owner registered for this repo:
-    helper falls back to the indexer's path-derived conformant
-    synthesis (Phase 5; pre-Phase-5 returned the legacy 2-segment
-    shape).
-    """
-    from nexus.catalog.catalog import Catalog
-
-    cat_dir = tmp_path / "catalog"
-    Catalog.init(cat_dir)
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
-
-    repo = tmp_path / "fresh"
-    repo.mkdir()
-    monkeypatch.setattr(
-        "nexus.repo_identity._repo_identity",
-        lambda r: ("fresh", "deadbeef"),
-    )
-    name = rdr_hook_module._resolve_rdr_collection(repo)
-    assert name == "rdr__fresh-deadbeef__voyage-context-3__v1"
+# test_resolve_rdr_collection_synthesises_conformant_when_owner_unregistered
+# RETIRED (nexus-i711w terminal deletion): its premise — a LOCAL catalog
+# initialized via ``Catalog.init`` with no owner row — died with the local
+# catalog. The surviving fallback contract (helper synthesises the conformant
+# 4-segment name when no catalog resolution is available) is pinned by
+# test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent above.
 
 
 # ── nexus-e2sim: `open` is a pre-accept synonym for `draft` (GH #1409) ──────

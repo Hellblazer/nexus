@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Callable
 import structlog
 
 if TYPE_CHECKING:
-    from nexus.catalog import Catalog
     from nexus.hook_registry import HookRegistry
 
 _log = structlog.get_logger(__name__)
@@ -64,7 +63,7 @@ def _has_credentials() -> bool:
 
 
 def _lookup_existing_doc_id(
-    cat: "Catalog | None", file_path: str, corpus: str,
+    cat: "CatalogReader | None", file_path: str, corpus: str,
 ) -> str:
     """Pre-flight catalog lookup for an already-indexed file (nexus-dcym).
 
@@ -168,28 +167,19 @@ def _register_or_lookup_doc_id(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.catalog)
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.types)
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
         )
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
         # RDR-146 P1.2 strict split: reads via reader, writes via the
         # write-only daemon proxy.
+        # nexus-i711w: the nexus-fq3b local auto-init leg died with the local
+        # catalog — the service owns the catalog in every mode, and
+        # make_catalog_reader always returns a service-backed reader.
         reader = make_catalog_reader()
-        if reader is None:
-            # nexus-fq3b auto-init, SQLite opt-out mode ONLY (reader is None
-            # exactly when that mode has no initialised local catalog):
-            # create it so chunks land with doc_id and the post-Phase-5c
-            # prune finds stale chunks via the doc_id-keyed where filter on
-            # re-index. Idempotent. nexus-e9ru2: in service mode the Java
-            # service owns the catalog — auto-creating a local one here
-            # built a divergent SQLite substrate the service never reads.
-            Catalog.init(catalog_path())
-            reader = make_catalog_reader()
         writer = make_catalog_writer()
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook

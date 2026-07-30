@@ -38,6 +38,7 @@ from structlog.testing import capture_logs
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.storage_mode import StorageBackend
 from nexus.registry import RepoRegistry
+from tests._catalog_fixture_ops import ActiveCatalog
 
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
@@ -63,18 +64,29 @@ def _pin_service(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def catalog(tmp_path: Path) -> Catalog:
-    from nexus.catalog.catalog import Catalog
-    return Catalog.init(tmp_path / "catalog")
+def catalog() -> ActiveCatalog:
+    """Seed and read through whichever catalog is live (nexus-i711w).
+
+    Was ``Catalog.init(tmp_path / "catalog")``, a local handle; the local
+    catalog is deleted. ``_migrate_legacy_collections`` takes ``cat=`` as an
+    injected reader, and :class:`ActiveCatalog` proxies its reads
+    (``collection_for_repo``) to the env-routed service reader against the
+    engine's per-test tenant — the same catalog the code under test resolves.
+    """
+    return ActiveCatalog()
 
 
 @pytest.fixture()
-def repo_with_owner(catalog: Catalog, tmp_path: Path, monkeypatch) -> Path:
+def repo_with_owner(catalog: ActiveCatalog, tmp_path: Path, monkeypatch) -> Path:
     repo = tmp_path / "myproject"
     repo.mkdir()
     catalog.register_owner(
         name="myproject", owner_type="repo", repo_hash="cafef00d",
         repo_root=str(repo),
+        # Explicit prefix so the expected owner segment ("1-1") is
+        # deterministic on the live per-test tenant (the PORT-VERIFY
+        # pattern from tests/test_catalog_rename_collection.py).
+        tumbler_prefix="1.1",
     )
     monkeypatch.setattr(
         "nexus.repo_identity._repo_identity",
@@ -103,7 +115,7 @@ def _patch_get(monkeypatch, *, stats_names: set[str], raw_names: set[str]) -> No
 
 
 def test_tombstoned_legacy_candidate_logs_warning_not_silently_greenfield(
-    repo_with_owner: Path, catalog: Catalog, registry: RepoRegistry, monkeypatch,
+    repo_with_owner: Path, catalog: ActiveCatalog, registry: RepoRegistry, monkeypatch,
 ) -> None:
     from nexus.indexer import _legacy_collection_name, _migrate_legacy_collections
 
@@ -134,7 +146,7 @@ def test_tombstoned_legacy_candidate_logs_warning_not_silently_greenfield(
 
 
 def test_present_legacy_candidate_no_tombstone_warning(
-    repo_with_owner: Path, catalog: Catalog, registry: RepoRegistry, monkeypatch,
+    repo_with_owner: Path, catalog: ActiveCatalog, registry: RepoRegistry, monkeypatch,
 ) -> None:
     """Sanity control: a LIVE legacy candidate proceeds through the
     existing rename path with no tombstone warning at all."""

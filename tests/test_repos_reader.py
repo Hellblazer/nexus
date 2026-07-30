@@ -74,11 +74,9 @@ def cat(tmp_path: Path) -> ActiveCatalog:
 
     The seeding ops used here (``ensure_owner_for_repo``, ``register_collection``)
     are both on ``CATALOG_WRITE_OPS``, so they route on either arm.
+    nexus-i711w terminal deletion: the local ``Catalog.init`` arm is gone —
+    ActiveCatalog needs no init.
     """
-    from nexus.catalog.catalog import Catalog
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir(exist_ok=True)
-    Catalog.init(cat_dir)
     return ActiveCatalog()
 
 

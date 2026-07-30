@@ -48,8 +48,7 @@ def _enable_debug_logging():
 
 
 @pytest.fixture
-def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
-    from nexus.catalog.catalog import Catalog
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     cfg = tmp_path / "config"
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True)
@@ -57,10 +56,8 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
     # through the factories, so a local-only handle left the service
-    # catalog empty (or, for writes, hit the RDR-176 read-only guard).
-    # Catalog.init stays: the SQLite arm's factory writer needs the
-    # directory to exist, and it is inert on the engine arm.
-    Catalog.init(cat_dir)
+    # catalog empty. (The local Catalog.init that used to run here died
+    # with the local catalog in the terminal nexus-i711w deletion.)
     return ActiveCatalog()
 
 

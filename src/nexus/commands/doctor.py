@@ -1021,46 +1021,10 @@ def _run_check_dangling_links(*, strict: bool = False) -> None:
     (an FK with ON DELETE, or delete-time cleanup) is nexus-tk070's
     Hal-gated FK-census decision.
 
-    Service-mode aware via ``storage_backend_for("catalog")`` (the same
-    resolver :func:`nexus.catalog.factory.make_catalog_reader` uses), NOT
-    ``is_local_mode()`` — a migrated LOCAL install also routes catalog
-    reads through the service, and ``is_local_mode()`` would wrongly send
-    it down the sqlite branch (the nexus-cv6jp bug class fixed on the T3
-    legacy-metadata check above).
+    Service-only since nexus-i711w: the sqlite branch died with the local
+    catalog — the catalog is service-backed in every mode.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    if storage_backend_for("catalog") == StorageBackend.SERVICE:
-        _report_dangling_links_service(strict=strict)
-        return
-
-    import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    cat = make_catalog_reader()
-    if cat is None:
-        click.echo("dangling catalog_links check: catalog not initialized.")
-        return
-
-    audit = cat.link_audit()
-    orphaned = audit.get("orphaned", [])
-    count = len(orphaned)
-    if count == 0:
-        click.echo(
-            "dangling catalog_links: 0 found (sqlite backend) — clean."
-        )
-        return
-
-    click.echo(
-        f"dangling catalog_links: {count} link(s) point at a tumbler with "
-        "no document (sqlite backend)."
-    )
-    click.echo(f"\nSample (showing up to {min(count, 20)}):")
-    for row in orphaned[:20]:
-        click.echo(f"  {row['from']} --{row['type']}--> {row['to']}")
-    if strict:
-        _sys.exit(1)
+    _report_dangling_links_service(strict=strict)
 
 
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────

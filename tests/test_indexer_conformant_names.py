@@ -32,20 +32,16 @@ pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
 @pytest.fixture()
-def catalog(tmp_path):
-    """Production-shaped catalog: SQLite at ``<cat_dir>/.catalog.db`` so
-    that ``_repo_collection_or_legacy`` (which constructs a fresh Catalog
-    at the same convention) sees the same backing store as the test.
+def catalog():
+    """Live service catalog via the substrate-agnostic facade (nexus-i711w).
 
-    Also creates the ``.git/`` and ``documents.jsonl`` markers that
-    ``Catalog.is_initialized`` checks so the helper's gate succeeds.
+    The local SQLite catalog is gone; ``_repo_collection_or_legacy`` reads
+    through ``make_catalog_reader`` (service-only), so the test seeds the
+    SAME catalog the helper reads by routing writes through the factories.
     """
-    from nexus.catalog.catalog import Catalog
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    (cat_dir / ".git").mkdir()
-    (cat_dir / "documents.jsonl").touch()
-    return Catalog(catalog_dir=cat_dir, db_path=cat_dir / ".catalog.db")
+    from tests._catalog_fixture_ops import ActiveCatalog
+
+    return ActiveCatalog()
 
 
 @pytest.fixture()
@@ -154,11 +150,8 @@ def test_repo_registry_add_catalog_without_owner_synthesises_conformant(
 def test_repo_collection_or_legacy_uses_catalog_when_initialized(
     repo_with_owner: Path, catalog: Catalog, monkeypatch, tmp_path: Path,
 ) -> None:
-    """The indexer-side helper returns the conformant name when a
-    catalog is initialized at the configured path and the owner exists."""
-    cat_dir = tmp_path / "catalog"
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
-
+    """The indexer-side helper returns the conformant name when the
+    (service) catalog has the owner registered."""
     from nexus.indexer import _repo_collection_or_legacy
 
     name = _repo_collection_or_legacy(repo_with_owner, "code")

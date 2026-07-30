@@ -237,6 +237,29 @@ class CatalogLink:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ManifestRow:
+    """One row from ``document_chunks``, ordered by position.
+
+    Fields mirror the ``document_chunks`` schema (RDR-108 D2):
+    ``(position, chash, chunk_index, line_start, line_end,
+    char_start, char_end)``. Span columns are ``None`` for chunks
+    that were inserted without span metadata.
+
+    Moved verbatim from ``catalog_writes.py`` (nexus-i711w terminal
+    deletion, 2026-07-30): surviving ``http_catalog_client.py`` returns
+    it from ``get_manifest``/``get_manifests``.
+    """
+
+    position: int
+    chash: str
+    chunk_index: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+
+
 def _default_registry_path() -> Path:
     """Return the default path to the repos.json registry.
 

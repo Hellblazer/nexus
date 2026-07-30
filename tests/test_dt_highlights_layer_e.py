@@ -78,16 +78,17 @@ def test_long_body_opening_with_sentinel_phrase_is_kept() -> None:
 
 
 def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
-    """Patch nexus.catalog.catalog.Catalog (lazy-imported inside the helper)."""
+    """Route the dt helpers' factory-resolved catalog to a mock.
+
+    nexus-i711w: the ``nexus.catalog.catalog.Catalog`` patch that used to
+    accompany this died with the local catalog — the helpers reach the
+    catalog exclusively via the (service-only) factory seam now.
+    """
     entry = MagicMock()
     entry.tumbler = tumbler
     entry.physical_collection = collection
     cat = MagicMock()
     cat.by_source_uri.return_value = entry
-    cat._db = MagicMock()
-    CatalogMock = MagicMock(return_value=cat)
-    CatalogMock.is_initialized = staticmethod(lambda p: True)
-    monkeypatch.setattr("nexus.catalog.catalog.Catalog", CatalogMock)
     monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path)
     # RDR-146 P1.2: dt helpers reach the catalog via the factory; route
     # both reader and writer to the same mock.

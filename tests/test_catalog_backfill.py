@@ -43,10 +43,10 @@ def git_identity(monkeypatch):
 
 @pytest.fixture
 def catalog_env(tmp_path, monkeypatch):
-    from nexus.catalog.catalog import Catalog
+    # nexus-i711w terminal deletion: the local Catalog.init seeding is gone —
+    # ActiveCatalog routes to the live service catalog, no init needed.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 
@@ -513,7 +513,9 @@ class TestBackfillRdrsRepoOwner:
         # hash, so the function should pick up the existing repo owner.
         t3, col_name = self._mock_t3_with_rdr(repo_dir, repo_hash)
         with patch(
-            "nexus.catalog.catalog._default_registry_path",
+            # nexus-i711w: _default_registry_path moved to catalog.types
+            # when the local catalog module was deleted.
+            "nexus.catalog.types._default_registry_path",
             return_value=tmp_path / "repos.json",
         ):
             (tmp_path / "repos.json").write_text(json.dumps({
@@ -548,7 +550,9 @@ class TestBackfillRdrsRepoOwner:
         # No matching repo registered — curator fallback is correct.
         t3, col_name = self._mock_t3_with_rdr(tmp_path / "fake", "deadbeef")
         with patch(
-            "nexus.catalog.catalog._default_registry_path",
+            # nexus-i711w: _default_registry_path moved to catalog.types
+            # when the local catalog module was deleted.
+            "nexus.catalog.types._default_registry_path",
             return_value=tmp_path / "repos.json",
         ):
             (tmp_path / "repos.json").write_text(json.dumps({"repos": {}}))
@@ -592,7 +596,9 @@ class TestBackfillRdrsRepoOwner:
         mock.get_or_create_collection.return_value = mock_col
 
         with patch(
-            "nexus.catalog.catalog._default_registry_path",
+            # nexus-i711w: _default_registry_path moved to catalog.types
+            # when the local catalog module was deleted.
+            "nexus.catalog.types._default_registry_path",
             return_value=tmp_path / "repos.json",
         ):
             (tmp_path / "repos.json").write_text(json.dumps({"repos": {}}))

@@ -490,15 +490,12 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     mock_db.get_or_create_collection.side_effect = [mock_col, after_col]
     vr = VerifyResult(status="healthy", doc_count=1, probe_doc_id="x", distance=0.05, metric="l2")
 
-    # Stub Catalog.docs_for_chashes to return the manifest mapping.
-    # Catalog is lazy-imported inside reindex_cmd (`from nexus.catalog
-    # import Catalog`); patch the source module's attribute so the
-    # lazy import resolves to our stub. The autouse
-    # _pin_t2_substrate fixture pins the catalog to SQLite
-    # mode by default, so make_catalog_reader() really returns a local
-    # Catalog here (not HttpCatalogClient).
-    from nexus.catalog.catalog import Catalog
-    fake_cat = MagicMock(spec=Catalog)
+    # Stub docs_for_chashes to return the manifest mapping. nexus-i711w:
+    # the catalog is service-only, so the reader seam yields an
+    # HttpCatalogClient; spec against it so a missing-method bug can't
+    # hide behind an unspec'd stub.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    fake_cat = MagicMock(spec=HttpCatalogClient)
     fake_cat.docs_for_chashes.return_value = {chash: ["ART-PHASE3"]}
 
     # RDR-146 P1.2: reindex reaches the catalog via make_catalog_reader().
@@ -829,15 +826,15 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
 
     import subprocess
     from click.testing import CliRunner
-    from nexus.catalog.catalog import Catalog
     from nexus.commands.index import index_repo_cmd
 
-    # Sandbox config + catalog dirs.
+    # Sandbox config + catalog dirs. (nexus-i711w: the local Catalog.init
+    # that used to run here died with the local catalog; registration goes
+    # through the service-only factories.)
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -893,14 +890,12 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     from unittest.mock import patch
 
     from click.testing import CliRunner
-    from nexus.catalog.catalog import Catalog
     from nexus.commands.index import index_repo_cmd
 
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -916,13 +911,17 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     # repos.json is not created either way.
     assert not (tmp_path / "repos.json").exists()
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    knowledge_rows = cat._db.execute(
-        "SELECT name FROM collections WHERE name LIKE 'knowledge__%'"
-    ).fetchall()
+    # nexus-i711w: read through the ACTIVE catalog (the raw local
+    # .catalog.db SELECT died with the local catalog). list_collections()
+    # is the parity-registered public equivalent.
+    knowledge_rows = [
+        c["name"]
+        for c in active_reader().list_collections()
+        if c["name"].startswith("knowledge__")
+    ]
     assert not knowledge_rows, (
         f"default routing planted a knowledge__ collection; saw: "
-        f"{[r[0] for r in knowledge_rows]}"
+        f"{knowledge_rows}"
     )
 
 

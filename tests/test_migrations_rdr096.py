@@ -12,25 +12,14 @@ The 4.16.0 ``migrate_document_aspects_source_uri`` function:
 * Skips empty ``source_path`` rows (research-2 mitigation, id 1009).
 * Idempotent on re-application.
 
-The catalog ``documents`` table inline migration (in
-``CatalogDB.__init__``):
-
-* Adds ``source_uri TEXT NOT NULL DEFAULT ''`` to existing databases.
-* Idempotent — re-opening a migrated DB is a no-op.
-
 The AspectRecord ``source_uri`` round-trip through the (deleted SQLite)
 DocumentAspects store used to be tested at the bottom of this file; the
 Http store's round-trip lives in ``tests/db/test_http_aspects_stores.py``.
 
-CATALOG SUBSTRATE (nexus-i711w Stage 2). ``nexus.catalog.catalog_db`` is
-already imported INSIDE the two test bodies that use it, never at module scope,
-so this file keeps COLLECTING after the local catalog is deleted. The other 12
-tests are T2 ``document_aspects`` — orthogonal to the catalog — and needed no
-change. ``TestCatalogDocumentsSourceUriMigration`` is the local-only pair and
-carries ``local_catalog_backend``: its subject is ``CatalogDB.__init__``'s
-inline ``ALTER TABLE documents ADD COLUMN source_uri`` self-migration, which
-has no service-mode expression (the engine's column is Liquibase-managed), so
-it retires with ``nexus/catalog/catalog_db.py`` rather than porting.
+CATALOG SUBSTRATE (nexus-i711w terminal deletion). The catalog ``documents``
+inline migration pair (``TestCatalogDocumentsSourceUriMigration``) retired
+with ``nexus/catalog/catalog_db.py`` — see the tombstone below. The remaining
+tests are T2 ``document_aspects`` — orthogonal to the catalog.
 """
 from __future__ import annotations
 
@@ -185,92 +174,12 @@ class TestDocumentAspectsSourceUriMigration:
 # ── catalog documents inline migration ──────────────────────────────────────
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
-class TestCatalogDocumentsSourceUriMigration:
-    """nexus-i711w: PINNED to the local SQLite catalog.
-
-    Both tests drive ``CatalogDB``'s inline ``source_uri`` self-migration on a
-    hand-crafted pre-4.16.0 ``documents`` table. That DDL-on-open behaviour is
-    the local projection's own; the engine's ``source_uri`` column is
-    Liquibase-managed, so there is no service-mode assertion to port to. They
-    retire with ``nexus/catalog/catalog_db.py``.
-    """
-
-    def test_inline_migration_adds_source_uri_to_existing_db(
-        self, tmp_path: Path,
-    ) -> None:
-        """Open a catalog DB at the pre-4.16.0 schema (no source_uri
-        column on documents), then re-open via CatalogDB; the inline
-        migration must add the column without losing data.
-        """
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db = tmp_path / "cat.db"
-
-        # Hand-craft a minimal pre-4.16.0 documents table missing
-        # the source_uri column. Mirrors the columns CatalogDB
-        # creates EXCEPT for source_uri.
-        conn = sqlite3.connect(str(db))
-        conn.executescript("""
-            CREATE TABLE documents (
-                tumbler TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                author TEXT,
-                year INTEGER,
-                content_type TEXT,
-                file_path TEXT,
-                corpus TEXT,
-                physical_collection TEXT,
-                chunk_count INTEGER,
-                head_hash TEXT,
-                indexed_at TEXT,
-                metadata JSON,
-                source_mtime REAL NOT NULL DEFAULT 0,
-                alias_of TEXT NOT NULL DEFAULT ''
-            );
-        """)
-        conn.execute(
-            "INSERT INTO documents "
-            "(tumbler, title, content_type, file_path) "
-            "VALUES ('1.1.1', 't', 'rdr', 'docs/rdr/rdr-090.md')",
-        )
-        conn.commit()
-        conn.close()
-
-        # Re-open via CatalogDB — inline migration runs.
-        cat = CatalogDB(db)
-        cols = {
-            r[1] for r in cat._conn.execute(
-                "PRAGMA table_info(documents)",
-            ).fetchall()
-        }
-        # Pre-existing row must still be there.
-        rows = cat._conn.execute(
-            "SELECT tumbler, source_uri FROM documents",
-        ).fetchall()
-        cat.close()
-
-        assert "source_uri" in cols
-        # Pre-migration row gets the default '' for source_uri.
-        assert rows == [("1.1.1", "")]
-
-    def test_inline_migration_idempotent_on_reopen(self, tmp_path: Path) -> None:
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db = tmp_path / "cat_idem.db"
-        # Fresh open creates the table with source_uri.
-        c1 = CatalogDB(db)
-        c1.close()
-        # Re-open must not raise (the SELECT-then-ALTER inline guard
-        # short-circuits cleanly).
-        c2 = CatalogDB(db)
-        cols = {
-            r[1] for r in c2._conn.execute(
-                "PRAGMA table_info(documents)",
-            ).fetchall()
-        }
-        c2.close()
-        assert "source_uri" in cols
+# TestCatalogDocumentsSourceUriMigration RETIRED (nexus-i711w terminal
+# deletion): both tests drove ``CatalogDB.__init__``'s inline ``ALTER TABLE
+# documents ADD COLUMN source_uri`` self-migration — DDL-on-open behaviour of
+# the deleted local projection (``nexus/catalog/catalog_db.py``). The engine's
+# ``source_uri`` column is Liquibase-managed, so there was no service-mode
+# assertion to port to; the class retired with the file it described.
 
 
 # ── P2.2 null-row DELETE migration ──────────────────────────────────────────

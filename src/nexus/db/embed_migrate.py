@@ -189,16 +189,10 @@ def collection_source_paths(
     sourceless: list[str] = []
     offset = 0
 
+    # nexus-i711w: the best-effort LOCAL Catalog handle died with the local
+    # catalog. The chash->doc_id resolution below degrades to empty (its
+    # documented fallback) pending a service-backed reader here.
     _cat = None
-    try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-        _cp = catalog_path()
-        if Catalog.is_initialized(_cp):
-            _cat = Catalog(_cp, _cp / ".catalog.db")
-    except Exception:  # noqa: BLE001 — catalog is optional here; falls back to None
-        _cat = None
 
     while True:
         batch = col.get(limit=300, offset=offset, include=["metadatas"])

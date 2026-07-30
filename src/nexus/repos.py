@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:  # pragma: no cover — type-hint-only import
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
 
 _log = structlog.get_logger(__name__)
 
@@ -97,7 +97,7 @@ class RepoRecord:
     status: str = "registered"
 
 
-def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
+def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     """Read a repo's collection set from the catalog.
 
     Returns ``None`` when the catalog has no owner registered for
@@ -254,7 +254,7 @@ def from_registry(
 
 
 def read_dual(
-    repo: Path, *, cat: Catalog, registry_path: Path,
+    repo: Path, *, cat: "CatalogReader", registry_path: Path,
 ) -> RepoRecord | None:
     """Dual-read shim: prefer catalog, fall back to registry, log both.
 
@@ -359,7 +359,7 @@ def _diff_fields(a: RepoRecord, b: RepoRecord) -> dict[str, dict[str, str]]:
 
 
 def list_repos_dual(
-    *, cat: Catalog, registry_path: Path,
+    *, cat: "CatalogReader", registry_path: Path,
 ) -> list[str]:
     """Enumerate every known repo path (catalog ∪ registry), sorted.
 

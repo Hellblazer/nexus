@@ -596,29 +596,19 @@ Idempotent; safe on a missing table or empty database. Dry-run by default; `--ap
 
 Document catalog — track indexed documents and the relationships between them.
 
-### nx catalog setup
+### nx catalog setup / init (retired)
 
 ```
-nx catalog setup [--remote URL]
+nx catalog setup      # refuses with guidance
+nx catalog init       # refuses with guidance
 ```
 
-One-command onboarding: creates the catalog, populates from existing T3 collections and repos, generates links. Run once after installing or upgrading. Warns if no git remote is configured (cloud users should add one for durability).
-
-On a new machine with an existing catalog remote: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog.
-
-**Service mode (the default): this command refuses.** The nexus service owns
-the live catalog — `nx catalog search` / `nx catalog links` already work
-against it with nothing to set up, and creating a local catalog here would
-build a divergent store the service never reads (nexus-kmo9h). The command
-applies only to the SQLite opt-out mode (`NX_STORAGE_BACKEND_CATALOG=sqlite`).
-
-### nx catalog init
-
-```
-nx catalog init [--remote URL]
-```
-
-Low-level primitive: initialize the catalog git repository at the config-dir catalog path, without populating it. `nx catalog setup` (init + populate + link) is the normal onboarding path; use `init` only when you want an empty catalog deliberately. Same service-mode caveat as `setup`: a local catalog created here is a divergent store the service never reads.
+**Retired in 7.0.0 (nexus-i711w).** The nexus service owns the catalog in
+every mode and documents are registered automatically at index/store time —
+there is nothing to initialize or set up. Both verbs remain as guided
+refusals so old scripts fail with an explanation instead of a usage error.
+The local SQLite catalog (and the `NX_STORAGE_BACKEND_CATALOG=sqlite`
+opt-out these verbs served) no longer exists.
 
 ### nx catalog search
 
@@ -796,21 +786,16 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot to `.deleted-backups/` (inspectable, but there is no in-product restore verb — see `list-backups` below).
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). **Not reversible in-product**: the pre-delete JSONL backup snapshots died with the local catalog in 7.0.0 (nexus-i711w).
 
-### nx catalog list-backups / vacuum-backups
+### nx catalog list-backups / vacuum-backups (removed)
 
-```
-nx catalog list-backups
-nx catalog vacuum-backups [--older-than-days N] [--no-dry-run]
-```
-
-Lifecycle verbs over the JSONL snapshots that destructive catalog verbs (`delete`, `gc`, `prune-stale`, `link-bulk-delete`) write under `$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` BEFORE deleting (RDR-106).
-
-- `list-backups` shows each snapshot: filename, originating verb, timestamp, row count, reason.
-- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes.
-
-> **No in-product restore.** `nx catalog undelete` was removed in 7.0.0. Restoring re-emitted documents through the local catalog's low-level event log, which has no service-mode equivalent, and the local catalog itself is gone. Snapshots are still written before every destructive verb and are still plain JSONL you can inspect and re-import by hand — but treat the destructive verbs as **not reversible in-product** when deciding whether to run them.
+Removed in 7.0.0 (nexus-i711w) together with the RDR-106 pre-delete JSONL
+snapshot machinery: snapshots were written by the LOCAL catalog, which no
+longer exists. Historical snapshots under
+`$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` remain plain JSONL you can
+inspect by hand. Treat the destructive catalog verbs (`delete`, `gc`,
+`prune-stale`, `link-bulk-delete`) as **not reversible in-product**.
 
 ### nx catalog remediate-paths
 
@@ -834,7 +819,7 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
 ```
 
-Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes a JSONL backup snapshot before deleting (no in-product restore verb — see `list-backups`).
+Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -850,13 +835,11 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
-### nx catalog backfill-owner-id
+### nx catalog backfill-owner-id (removed)
 
-```
-nx catalog backfill-owner-id [--no-dry-run] [--no-from-documents]
-```
-
-One-time RDR-137 P1.5a migration: populate `collections.owner_id` for rows where it is empty. The store's auto-migration already handles conformant four-segment names on every DB open; this verb adds the documents-table fallback that recovers `owner_id` for legacy 2-segment names (e.g. `knowledge__delos`) by inferring the owner from documents physically registered against the collection. Ambiguous rows (documents from multiple owners) are skipped with a warning. Report-only by default. SQLite-only: refuses in service mode; run it locally before switching.
+Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
+through a raw SQLite handle on the local catalog, which no longer exists;
+it already refused in service mode, now the only mode.
 
 ### nx catalog backfill-collections
 

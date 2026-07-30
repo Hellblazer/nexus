@@ -84,14 +84,14 @@ def _collect_health_data() -> dict[str, Any]:
     # live catalog's age.
     cat_db = nexus_config_dir() / "catalog" / ".catalog.db"
     if cat_db.exists():
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        frozen = storage_backend_for("catalog") == StorageBackend.SERVICE
+        # nexus-i711w: the catalog is service-backed in every mode; a
+        # surviving local .catalog.db is always a frozen migration source.
         mtime = cat_db.stat().st_mtime
         age = time.time() - mtime
         data["catalog"] = {
             "exists": True,
             "age_seconds": int(age),
-            "scope": "local-cache-frozen" if frozen else "local",
+            "scope": "local-cache-frozen",
         }
     else:
         data["catalog"] = {"exists": False}

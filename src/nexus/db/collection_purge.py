@@ -143,33 +143,17 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
     # Streaming-pipeline rows (otherwise the next index returns skip/0-chunks).
     _purge_pipeline_db(name, counts)
 
-    # Catalog: document rows pointing at the gone collection + projection row.
-    try:
-        from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
-            cat = Catalog(cat_path, cat_path / ".catalog.db")
-            orphan_tumblers = [
-                row[0]
-                for row in cat._db.execute(
-                    "SELECT tumbler FROM documents WHERE physical_collection = ?",
-                    (name,),
-                ).fetchall()
-            ]
-            for tumbler in orphan_tumblers:
-                try:
-                    if cat.delete_document(tumbler):
-                        counts.catalog_docs_deleted += 1
-                except Exception:  # noqa: BLE001 — per-document purge failure logged at debug, cascade continues
-                    _log.debug(
-                        "purge_cascade_document_failed", tumbler=tumbler, exc_info=True
-                    )
-            if cat.delete_collection_projection(name, reason="collection purge"):
-                counts.catalog_projection_deleted = 1
-    except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and recorded in counts.failures, cascade continues
-        _log.warning("purge_cascade_catalog_failed", collection=name, error=str(exc))
-        counts.failures.append(f"catalog cascade failed: {exc}")
-
+    # Catalog leg: DELETED (nexus-i711w). The local-catalog document/projection
+    # purge that lived here read and wrote the local SQLite catalog, which no
+    # longer exists; the service path above handles catalog rows inside the
+    # engine's atomic cascade (verified nexus-e9ru2). A box still running the
+    # =sqlite catalog opt-out (supported until Stage 3's 7bomn hard-error)
+    # must hear that its catalog rows were NOT cleaned — silence here is the
+    # exact regression class CascadeCounts exists to surface (FAIL LOUD,
+    # terminal-deletion critique Critical, 2026-07-30).
+    counts.failures.append(
+        "catalog rows not purged: the local SQLite catalog was deleted in "
+        "7.0.0 (nexus-i711w); run against the service catalog "
+        "(NX_STORAGE_BACKEND_CATALOG=service) or reconcile engine-side"
+    )
     return counts

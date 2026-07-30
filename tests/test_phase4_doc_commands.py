@@ -53,20 +53,38 @@ class _FakeChashIndex:
         pass
 
 
+class _SpanResolvingCatalog:
+    """resolve_chash shim honouring the INJECTED t3 + chash_index.
+
+    nexus-i711w terminal deletion: the local ``Catalog.resolve_chash``
+    method (a delegating shell over ``catalog_spans.resolve_chash_globally``)
+    died with the local Catalog. The doc commands still call
+    ``cat.resolve_chash(chash, t3, chash_index)`` on whatever
+    ``_phase4_catalog_t3_chash()`` hands back; the service client IGNORES
+    the injected collaborators and asks the engine, so these tests — whose
+    point is the command behaviour over a seeded resolver — keep the
+    injected-collaborator shape via the surviving resolution function.
+    """
+
+    def resolve_chash(self, chash, t3=None, chash_index=None, *,
+                      prefer_collection=None):
+        from nexus.catalog.catalog_spans import resolve_chash_globally
+        return resolve_chash_globally(
+            chash, t3, chash_index, prefer_collection=prefer_collection,
+        )
+
+
 def _seed_catalog_and_t3(tmp_path: Path):
-    """Create a Catalog, T3 EphemeralClient, and fake chash index. Return
-    (cat, t3, chash_index, chash_hex) after seeding one resolvable chunk.
+    """Create a resolver shim, T3 EphemeralClient, and fake chash index.
+    Return (cat, t3, chash_index, chash_hex) after seeding one resolvable
+    chunk.
 
     ``make_vector_test_client()`` is a process-shared singleton — drop
     the phase4-specific collection before recreating so two tests in
     the same process don't leak chunks between ``knowledge__phase4``
     instances.
     """
-    from nexus.catalog.catalog import Catalog
-
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    cat = _SpanResolvingCatalog()
 
     t3 = make_vector_test_client()
     try:

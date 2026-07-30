@@ -7,170 +7,26 @@ link whose ``from_tumbler`` or ``to_tumbler`` resolves to no document
 accumulates silently. Steve Harris's backup held 5 of 52 links pointing at
 tumblers with no document anywhere in the same ``pg_dump``.
 
-Two branches, matching the nexus-ingey / nexus-k0luu false-clean-diagnostics
-pattern already established for the aspect-queue, trim-telemetry, and T3
-legacy-metadata checks (see test_false_clean_diagnostics_service_mode.py):
+Service branch only, matching the nexus-ingey / nexus-k0luu
+false-clean-diagnostics pattern already established for the aspect-queue,
+trim-telemetry, and T3 legacy-metadata checks (see
+test_false_clean_diagnostics_service_mode.py):
 
-  sqlite branch    a REAL ``Catalog`` + real SQLite ``link_audit()`` query
-                   against a genuinely dangling row (``link()`` then
-                   ``delete_document()`` — mirrors
-                   tests/test_catalog_links.py::TestDangling.test_audit_orphaned).
-                   Not mocked: the query result is the query's own answer.
   service branch   ``HttpCatalogClient.orphaned_links()`` over HTTP; an
                    unreachable service must report UNKNOWN and exit 2, never
                    a false-clean zero.
+
+nexus-i711w terminal deletion: TestSqliteBranchDetectsARealDanglingRow (the
+sqlite ``link_audit()`` branch, 5 tests) retired with the local catalog.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 import click
 import httpx
 import pytest
 from click.testing import CliRunner
-
-from nexus.catalog.catalog import Catalog
-
-
-# ── sqlite branch: a genuinely dangling row, not a mocked answer ────────────
-
-
-def _seed_dangling_catalog(tmp_path: Path) -> Catalog:
-    """Real Catalog + real SQLite: link a -> b, then hard-delete b.
-
-    The resulting row is picked up by ``Catalog.link_audit()``'s own
-    ``NOT EXISTS`` SQL (catalog_links.py), not by a stubbed return value.
-    """
-    d = tmp_path / "catalog"
-    d.mkdir()
-    cat = Catalog(d, d / ".catalog.db")
-    owner = cat.register_owner("nexus", "repo", repo_hash="deadbeef")
-    a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
-    b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
-    cat.link(a, b, "cites", created_by="user")
-    cat.delete_document(b)
-    return cat
-
-
-@pytest.fixture()
-def dangling_catalog(tmp_path: Path) -> Catalog:
-    return _seed_dangling_catalog(tmp_path)
-
-
-@pytest.mark.usefixtures("local_catalog_backend")
-class TestSqliteBranchDetectsARealDanglingRow:
-    """The sqlite branch, pinned so the DISPATCHER agrees with the fixture.
-
-    nexus-aqbrk. These inject a real local ``Catalog`` via
-    ``make_catalog_reader``, but ``_run_check_dangling_links`` picks its
-    branch from ``storage_backend_for("catalog")`` — not from the object it
-    is handed. Under the engine substrate that resolver said SERVICE, so the
-    dispatcher called ``_report_dangling_links_service`` and invoked
-    ``orphaned_links()`` on a local Catalog, which only ``HttpCatalogClient``
-    implements:
-
-        AttributeError: 'Catalog' object has no attribute 'orphaned_links'.
-        Did you mean: 'orphaned_docs'?
-
-    NOT A PRODUCTION BUG — worth stating, because the traceback points at
-    production code (doctor.py:982) and reads like one. The dispatch at
-    :1052 is correct on both substrates: SERVICE -> orphaned_links(),
-    SQLITE -> link_audit(), each implemented on the class that gets it. The
-    asymmetry was in this file: the SERVICE class below takes an explicit
-    ``service_mode`` fixture and is therefore substrate-independent, while
-    this class inherited whatever the ambient backend happened to be.
-    Pinning makes both halves declare their branch instead of one declaring
-    and one assuming.
-
-    SERVICE HALF IS OWNED IN THIS FILE: TestServiceBranchRoutesToTheEngine
-    (five cases incl. unreachable -> UNKNOWN/exit-2 and unresolvable
-    endpoint), plus TestWireShapeIsNotTrusted for the response contract.
-    """
-
-    def test_check_reports_the_dangling_link(
-        self, dangling_catalog: Catalog, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.commands import doctor as doctor_mod
-
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda **kw: dangling_catalog,
-        )
-        runner = CliRunner()
-        with runner.isolation() as (out, _err, _):
-            doctor_mod._run_check_dangling_links()
-            printed = out.getvalue().decode()
-
-        assert "1 link(s)" in printed, printed
-        assert "sqlite backend" in printed
-
-    def test_clean_catalog_reports_zero(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.commands import doctor as doctor_mod
-
-        d = tmp_path / "catalog"
-        d.mkdir()
-        cat = Catalog(d, d / ".catalog.db")
-        owner = cat.register_owner("nexus", "repo", repo_hash="deadbeef")
-        a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
-        b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
-        cat.link(a, b, "cites", created_by="user")
-
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda **kw: cat,
-        )
-        runner = CliRunner()
-        with runner.isolation() as (out, _err, _):
-            doctor_mod._run_check_dangling_links()
-            printed = out.getvalue().decode()
-
-        assert "0 found" in printed, printed
-        assert "clean" in printed
-
-    def test_strict_exits_nonzero_on_a_real_dangling_row(
-        self, dangling_catalog: Catalog, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.commands import doctor as doctor_mod
-
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda **kw: dangling_catalog,
-        )
-        with pytest.raises(SystemExit) as exc:
-            doctor_mod._run_check_dangling_links(strict=True)
-        assert exc.value.code == 1
-
-    def test_default_is_warn_only_not_strict(
-        self, dangling_catalog: Catalog, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Without --strict-dangling-links a dangling row must be reported,
-        not turned into a process exit — matches --check-t3-legacy-metadata's
-        default warn-only behavior."""
-        from nexus.commands import doctor as doctor_mod
-
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda **kw: dangling_catalog,
-        )
-        # Must not raise.
-        doctor_mod._run_check_dangling_links(strict=False)
-
-    def test_catalog_not_initialized_does_not_crash(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.commands import doctor as doctor_mod
-
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda **kw: None,
-        )
-        runner = CliRunner()
-        with runner.isolation() as (out, _err, _):
-            doctor_mod._run_check_dangling_links()
-            printed = out.getvalue().decode()
-        assert "not initialized" in printed
-
 
 # ── service branch ───────────────────────────────────────────────────────────
 

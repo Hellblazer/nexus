@@ -24,9 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.config import catalog_path
 from tests._catalog_fixture_ops import ActiveCatalog
-from tests._t2_fixture_ops import require_sqlite_substrate
 
 
 @pytest.fixture()
@@ -34,9 +32,7 @@ def papers_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Fresh Catalog with a papers-curator owner registered. Returns
     (catalog, owner_tumbler).
     """
-    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     # nexus-aqbrk: seed and read through the LIVE catalog. The invariant
     # under test ("no content_type=paper row in knowledge__knowledge") is a
@@ -82,46 +78,10 @@ class TestCatalogPapersCuratorIsolation:
         cat, _ = papers_owner
         assert _scan_for_paper_rows_in_knowledge_knowledge(cat) == []
 
-    def test_invariant_scan_catches_misregistration(self, papers_owner) -> None:
-        """Direct INSERT of a paper into knowledge__knowledge (the
-        2026-05-08 prod state for tumbler 1.653.2) must be detectable
-        by the scan. This is the "doctor check" shape: a maintenance
-        verb can iterate `cat.all_documents()` looking for the same
-        violation and surface it for operator action.
-
-        The test seeds the bad row directly via SQL (epsilon-allow
-        to bypass the catalog API) so it asserts the SCAN finds the
-        class, not that the API rejects it (separate test below).
-        """
-        from nexus.catalog.catalog import Catalog
-        cat, owner = papers_owner
-        # nexus-aqbrk: the ONLY test here that cannot run on the service
-        # catalog. It deliberately bypasses the register API to create a row
-        # the API would reject, which requires a raw INSERT into the local
-        # projection — there is no service-mode path that produces this state
-        # (the engine applies the same validation). The other three tests in
-        # this class register through the public API and run on both.
-        require_sqlite_substrate("seeds an API-rejected row via raw INSERT")
-        local = Catalog(catalog_path(), catalog_path() / ".catalog.db")
-        local._db.execute(  # epsilon-allow: test fixture seeds an invariant-violating row to exercise the read-side scan
-            "INSERT INTO documents "
-            "(tumbler, title, author, year, content_type, file_path, "
-            " corpus, physical_collection, chunk_count, head_hash, "
-            " indexed_at, metadata, source_mtime, alias_of, source_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                f"{owner}.99", "BAD-PaperInKnowledge", "", 2024,
-                "paper", "/papers/bad.pdf", "default",
-                "knowledge__knowledge", 1, "h0",
-                "2026-05-10T00:00:00Z", "{}", 0.0, "",
-                "file:///papers/bad.pdf",
-            ),
-        )
-        local._db.commit()
-
-        violations = _scan_for_paper_rows_in_knowledge_knowledge(cat)
-        assert len(violations) == 1
-        assert violations[0][1] == "BAD-PaperInKnowledge"
+    # test_invariant_scan_catches_misregistration RETIRED with the local
+    # catalog (nexus-i711w terminal deletion): it seeded an API-rejected row
+    # via raw INSERT into the local projection — no service-mode path can
+    # produce that state (the engine applies the same validation).
 
     def test_paper_register_into_curator_collection_is_clean(
         self, papers_owner,

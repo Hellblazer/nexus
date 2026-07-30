@@ -179,42 +179,24 @@ def test_register_or_lookup_fresh_box_no_local_catalog_created(
 # test_register_or_lookup_fresh_box_no_local_catalog_created above, already
 # covers the surviving behaviour and passed on both arms before this.
 #
-# NOTE for nexus-7bomn: test_audit_catalog_conn_is_none_in_service_mode below
-# still sets NX_STORAGE_BACKEND_CATALOG=sqlite explicitly to drive its second
-# branch. That is deliberate today (stating the branch beats inheriting the
-# ambient default) but the selector hard-fails when 7bomn lands, so that half
-# retires with it.
 def test_audit_catalog_conn_is_none_in_service_mode(tmp_path, monkeypatch):
-    """On a MIGRATED box (frozen local .catalog.db present) the audit
-    helper must not hand out a connection to stale data in service mode —
-    same degrade the module already applies to taxonomy raw access
-    (nexus-9613q.4)."""
-    from nexus.catalog import Catalog
+    """The audit helper must not hand out a local catalog connection — the
+    catalog is service-owned; the audit's catalog legs DEGRADE (orphans=[])
+    and the degradation is REPORTED, not silent (the item-17 contract).
 
-    cat_path = tmp_path / "frozen-catalog"
-    Catalog.init(cat_path)
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_path))
-
+    nexus-i711w terminal deletion: ``_open_catalog_conn`` collapsed to an
+    unconditional ``return None`` with the local catalog's deletion, and this
+    test's sqlite half (an initialised local catalog keeps the conn) retired
+    with the substrate it described. The surviving pin: no backend env value
+    can conjure a local catalog connection.
+    """
     from nexus.collection_audit import _open_catalog_conn
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
     assert _open_catalog_conn() is None, (
-        "service mode: the local .catalog.db is a frozen migration source; "
-        "audit legs must degrade (orphans=[]) rather than report stale data"
+        "the local .catalog.db no longer exists; audit legs must degrade "
+        "(orphans=[]) rather than read a local substrate"
     )
-
-    # nexus-aqbrk: SET sqlite explicitly; do NOT delenv. This test drives BOTH
-    # branches in one function, and delenv means "fall back to the ambient
-    # default" — which is SERVICE under the engine substrate, so the sqlite half
-    # was asserting against service mode. State the branch instead of inheriting
-    # it (same lesson as tests/test_doctor_dangling_links.py).
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-    conn = _open_catalog_conn()
-    try:
-        assert conn is not None, "sqlite mode with an initialised catalog keeps the conn"
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def test_markdown_hook_service_down_is_loud_not_silent(

@@ -320,25 +320,18 @@ def test_t1_public_session_id_property(t1):
 
 def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeypatch):
     """catalog_link logs relevance when target collection matches a recent search chunk."""
-    from nexus.catalog import Catalog
     from nexus.mcp.catalog import catalog_link
+    from tests._catalog_fixture_ops import ActiveCatalog
 
-    # The test builds its own LOCAL file catalog; pin the catalog backend to
-    # sqlite so the engine-substrate env (global NX_STORAGE_BACKEND=service,
-    # RDR-155 P4b P0a') doesn't route catalog reads/writes to the engine's
-    # catalog where these tumblers don't exist. T2 relevance logging still
-    # follows the ambient substrate.
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-
-    # Set up a catalog with two documents in the same collection
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
+    # nexus-i711w: the local file catalog this used to build (with the
+    # sqlite backend pin) died with the local catalog; seed the live
+    # service catalog through the same factories catalog_link resolves.
+    cat = ActiveCatalog()
     owner = cat.register_owner("test", "proj")
     doc_a = cat.register(owner, "source", content_type="knowledge",
                          physical_collection="knowledge__ml")
     doc_b = cat.register(owner, "target", content_type="knowledge",
                          physical_collection="knowledge__ml")
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
     t2_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.mcp.catalog._t2_ctx", lambda: T2Database(t2_path))
@@ -368,21 +361,17 @@ def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeyp
 
 def test_catalog_link_no_log_when_collection_mismatch(t1, tmp_path, monkeypatch):
     """catalog_link does NOT log when no trace chunks match the target collection."""
-    from nexus.catalog import Catalog
     from nexus.mcp.catalog import catalog_link
+    from tests._catalog_fixture_ops import ActiveCatalog
 
-    # Local file catalog under test — pin the catalog backend (see the
-    # collection-match test above for the RDR-155 P4b P0a' rationale).
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
+    # Live service catalog (see the collection-match test above for the
+    # nexus-i711w port rationale).
+    cat = ActiveCatalog()
     owner = cat.register_owner("test", "proj")
     doc_a = cat.register(owner, "src", content_type="knowledge",
                          physical_collection="knowledge__ml")
     doc_b = cat.register(owner, "dst", content_type="knowledge",
                          physical_collection="knowledge__ml")
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
     t2_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.mcp.catalog._t2_ctx", lambda: T2Database(t2_path))

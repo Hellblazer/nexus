@@ -1,12 +1,12 @@
 # `nexus.catalog` — AGENTS.md
 
-The catalog is a Xanadu-inspired document registry that tracks *what* is indexed and *how documents relate*. JSONL files are the source of truth; SQLite + FTS5 is the query cache, rebuilt automatically on mtime change.
+The catalog is a Xanadu-inspired document registry that tracks *what* is indexed and *how documents relate*. Since the nexus-i711w terminal deletion the catalog is SERVICE-OWNED in every mode: the authoritative store is the Java engine's Postgres tables, reached through `HttpCatalogClient`. The local SQLite + JSONL catalog (event log, projector, `.catalog.db`) is deleted; a surviving on-disk `~/.config/nexus/catalog/` is a frozen migration source only.
 
 ## Core concepts
 
 - **Tumbler** — hierarchical address (`1.2.5`) identifying a document. Every entry has one. `tumbler.py` provides depth, ancestors, lca, JSONL readers.
 - **Owner** — the top-level tumbler segment. Repos use `owner_type='repo'` with a `repo_hash`; humans use `'curator'`. Repo owners without a hash are rejected (the shadow-registration bug class).
-- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, chroma, https, nx-scratch, x-devonthink-item}`. Bare paths normalize to `file://<abspath>`.
+- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, chroma, https, nx-scratch, x-devonthink-item}`. Bare paths normalize to `file://<abspath>` (`types.py:_normalize_source_uri`).
 - **Link** — typed edge between documents. Built-in types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`, plus custom. Every link carries `created_by` provenance.
 
 ## Three link-creation paths
@@ -26,12 +26,16 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 
 | File | Purpose |
 |---|---|
-| `catalog.py` | `Catalog` class — `register`, `update`, `link`, `link_query`, `graph`, `delete_document`, `link_audit`, `descendants`, `resolve_chunk`. Holds `_KNOWN_URI_SCHEMES` + `_normalize_source_uri` boundary validator. |
-| `catalog_db.py` | SQLite schema, FTS5 tables, UNIQUE link constraint, `descendants()` SQL helper. |
+| `http_catalog_client.py` | `HttpCatalogClient` — the catalog handle in every mode. Full read surface + whitelisted writes over the engine's `/v1/catalog/*` routes. |
+| `catalog_protocol.py` | `CatalogReader` / `CatalogWriter` Protocols + `CATALOG_WRITE_OPS` (the tooling-enforced write whitelist). Annotate consumers with these, never a concrete class. |
+| `factory.py` | `make_catalog_reader()` / `make_catalog_writer()` — the only sanctioned construction path (shared process-lifetime service client, nexus-5en9j). |
+| `types.py` | Substrate-neutral value types: `CatalogEntry`, `CatalogLink`, `ManifestRow`, `make_relative`, `_normalize_source_uri`, `_default_registry_path`. |
 | `tumbler.py` | `Tumbler` dataclass + `parse`, hierarchy helpers, JSONL readers with resilience (truncated rows, bad JSON). |
 | `auto_linker.py` | Storage-boundary auto-linking from T1 scratch link-context. Hook firing site is `mcp/core.py`. |
 | `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared head_hash). |
-| `consolidation.py` | Merges per-paper `knowledge__<paper>` collections into corpus-level `knowledge__<corpus>`. |
+| `catalog_spans.py`, `store_hook.py`, `orphan_backfill.py`, `manifest_backfill.py`, `write_priority.py` | Span resolution, post-store registration hook, backfill tooling, indexer fairness window. |
+
+Deleted in nexus-i711w (RDR-158 P4 terminal deletion): `catalog.py` (the local `Catalog` class), `catalog_db.py`, `event_log.py`, `projector.py`, `events.py`, `catalog_owners.py`, `catalog_sync.py`, `catalog_links.py`, `catalog_docs.py`, `catalog_backup.py`, `catalog_git.py`, `catalog_writes.py` (ManifestRow relocated to `types.py`), `consolidation.py`, `collections_owner_backfill.py`, `synthesizer.py`.
 
 ## Adding a new source-URI scheme
 
@@ -39,25 +43,14 @@ The bar is **register a reader first, then add to the allow-list**. New schemes 
 
 1. Add a `_read_<scheme>_uri()` function to `src/nexus/aspect_readers.py` returning `ReadOk` / `ReadFail`.
 2. Register it in `_READERS` dict.
-3. Add the scheme to `_KNOWN_URI_SCHEMES` in `catalog.py`.
+3. Add the scheme to `_KNOWN_URI_SCHEMES` in `types.py`.
 4. Update the lock test in `tests/test_catalog.py::test_known_uri_schemes_table_is_locked_to_planned_set`.
 5. Update the `--source-uri` CLI help text in `commands/catalog.py`.
 6. Test the round-trip: register → resolve → read.
 
 ## Key invariants
 
-- **`events.jsonl` is canonical; SQLite is a deterministic projection.** Under RDR-101 Phase 3 PR ζ (`NEXUS_EVENT_SOURCED` default ON, nexus-o6aa.9.5) every catalog mutation flows through `Catalog.register / update / link / unlink / set_alias / dedupe`, which emits an event into `events.jsonl` first and then projects to SQLite. The legacy per-class JSONL files (`owners.jsonl`, `documents.jsonl`, `links.jsonl`) are still written for the cutover window but are no longer canonical — the doctor's `--replay-equality` signal is the binding test.
-- **Bootstrap guardrail.** Existing catalogs without an `events.jsonl` (or with one that is materially sparser than the legacy `documents.jsonl`) keep operating in legacy mode via `_event_log_covers_legacy()` in `_ensure_consistent`. The `synthesize-log` and `t3-backfill-doc-id` migration verbs were retired post Phase 5b (nexus-iftc); restore by deleting the catalog directory and re-running `nx catalog setup` to bootstrap from current T3 state. Doctor `--replay-equality --t3-doc-id-coverage --strict-not-in-t3` validates the result.
-- **Opting out.** Set `NEXUS_EVENT_SOURCED=0` (or `false`/`no`/`off`) to fall back to the legacy direct-write path. The runtime gate is still live (`_read_event_sourced_gate` at `catalog.py:61`); the legacy code branches under `if not self._event_sourced_enabled:` remain in-module. Test fixtures that exercise legacy-only behaviour (shadow-emit invariants, doctor `--replay-equality` synthesizer fallback) pin to `0` explicitly.
+- **The engine's Postgres catalog is canonical.** Every mutation flows through the `CATALOG_WRITE_OPS` whitelist on a `make_catalog_writer()` proxy; reads through `make_catalog_reader()`. Direct construction of catalog handles outside `factory.py` is lint-banned (`storage_boundary_lint.py`).
 - **Tumblers are append-only.** Updating an entry preserves the tumbler; deletion creates a tombstone, not a free slot. Reusing a tumbler corrupts the link graph.
 - **Owners with `owner_type='repo'` MUST carry a `repo_hash`.** Enforced in `register_owner`. The empty-hash variant produced 83 orphan owners in the wild before the guard.
-
-## Direct catalog writes outside this module are forbidden (RDR-101 Phase 3 ε)
-
-Under RDR-101 the event log (`events.jsonl`) is canonical and the SQLite catalog is a deterministic projection. From PR ε onward, `tests/test_no_direct_catalog_writes_outside_projector.py` is a lint gate: no production source file outside `src/nexus/catalog/` may issue `INSERT / UPDATE / DELETE / REPLACE / CREATE / DROP / ALTER / TRUNCATE` through `_db.execute`. Reads (SELECT, plus `fetchone`/`fetchall` chains) remain fine.
-
-The lint gate scope is intentionally `src/nexus/catalog/`, not just `projector.py` — `catalog.py`'s legacy direct-write branches are gated behind `if not self._event_sourced_enabled:` and remain in-module. Mutations from anywhere else must travel through public Catalog API (`register`, `update`, `link`, `unlink`, `set_alias`, …), which under `NEXUS_EVENT_SOURCED=1` emits a domain event and projects it.
-
-Test fixtures that need to construct invariant-violating state (forced alias cycles, contaminated source_uri rows, backdated `created_at` for stale-span audits) tag the offending line with `# epsilon-allow: <reason>`. The reason is mandatory; bare markers do not suppress.
-
-Repair operations that previously ran as `cat._db.execute(...)` ad-hoc scripts must land as catalog verbs that travel through the public Catalog API and emit events (e.g. `nx catalog rename-collection`, `nx catalog supersede-collection`, `nx catalog backfill-collections`). The transitional repair verbs (`repair-orphan-chunks`, `prune-deprecated-keys`, `synthesize-log`, `t3-backfill-doc-id`, `migrate`) were retired in nexus-iftc once the irreversibility commitment was complete. The doctor's `--replay-equality` signal is reliable only if the event log is the only write path; PR ζ (nexus-o6aa.9.5) flipped `NEXUS_EVENT_SOURCED=1` to ON by default and depends on this gate plus the dedupe-projector wiring (PR ζ-prereq, nexus-o6aa.9.4).
+- **No `._db` / `._dir` reach-ins.** `HttpCatalogClient._db` raises by design; the boundary-lint baselines (`CATALOG_DB_ACCESS_BASELINE`, `CATALOG_DIR_ACCESS_BASELINE`) are enforced at 0.

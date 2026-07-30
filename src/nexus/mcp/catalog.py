@@ -273,7 +273,7 @@ def catalog_register(
         # canonical repo_root; registry fills in pre-catalog installs.
         fp = file_path
         if fp and _Path(fp).is_absolute():
-            from nexus.catalog.catalog import _default_registry_path  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
+            from nexus.catalog.types import _default_registry_path  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
             from nexus.repos import list_repos_dual  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
 
             reg_path = _default_registry_path()

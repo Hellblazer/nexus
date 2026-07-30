@@ -14,8 +14,6 @@ Conservative: a non-empty unreferenced collection is preserved
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -72,24 +70,16 @@ class TestCollectionGCCli:
         )
 
     @pytest.fixture()
-    def catalog_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> Catalog:
-        from nexus.catalog.catalog import Catalog
-        catalog_dir = tmp_path / "catalog"
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        Catalog.init(catalog_dir)
-        # nexus-i711w C-store: route seeding at the ACTIVE catalog. Service mode
-    # opens the local .catalog.db READ-ONLY (frozen migration source,
-    # RDR-176 P1 Gap 2), so a direct Catalog handle dies on "attempt to
-    # write a readonly database". The subject here is the verb, not the
-    # substrate.
+    def catalog_env(self) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: seeding routes through the ACTIVE
+        # (service) catalog; the local Catalog.init seeding died with
+        # nexus.catalog.catalog and ActiveCatalog needs no local init.
         return ActiveCatalog()
 
     def _seed(
         self,
         t3_db: T3Database,
-        catalog: Catalog,
+        catalog: ActiveCatalog,
         monkeypatch: pytest.MonkeyPatch,
         *,
         zombie_collections: list[str],

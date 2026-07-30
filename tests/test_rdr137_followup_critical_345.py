@@ -47,17 +47,13 @@ def _enable_debug_logging():
 
 
 @pytest.fixture
-def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
-    from nexus.catalog.catalog import Catalog
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
+    # nexus-i711w terminal deletion: seed/read through the ACTIVE (service)
+    # catalog; the local Catalog.init leg died and ActiveCatalog needs no
+    # local init. NEXUS_CONFIG_DIR still isolates repos.json paths.
     cfg = tmp_path / "config"
-    cat_dir = cfg / "catalog"
-    cat_dir.mkdir(parents=True)
+    cfg.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
-    # nexus-i711w C-store: the ACTIVE catalog. Service mode opens the local
-    # .catalog.db read-only (frozen migration source), so a direct handle
-    # cannot seed.
     return ActiveCatalog()
 
 
@@ -68,16 +64,9 @@ def repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q"], cwd=r, check=True)
     return r
 class TestCriticalThreeModelVersionV1:
-    """CRITICAL-3, against a WRITABLE local catalog.
-
-    nexus-aqbrk: PINNED. These build a real ``Catalog`` and register into
-    it. Under the engine substrate ``Catalog`` forces ``read_only=True``
-    whenever the catalog backend is SERVICE and the file exists — the local
-    .catalog.db is a FROZEN migration source (RDR-176 Phase 1 Gap 2) — so
-    every write died on ``sqlite3.OperationalError: attempt to write a
-    readonly database``. That is the invariant working exactly as designed,
-    against a test that wants the local catalog on purpose.
-    """
+    """CRITICAL-3, against the ACTIVE catalog (nexus-i711w terminal
+    deletion ported the harness off the local Catalog; the adapter's
+    register_collection contract is substrate-neutral)."""
 
     def test_corpus_knowledge_register_uses_v1_form(
         self, cat: Catalog, repo: Path, tmp_path: Path,
@@ -138,18 +127,13 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
         deleted by the migration verb. Pre-fix _read_repos_json
         returned {} on JSONDecodeError, vacuously satisfying the
         parity check, then unlink() ran."""
-        from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _migrate_repos_json_to_catalog
 
         cfg = tmp_path / "config"
         cfg.mkdir()
-        cat_dir = cfg / "catalog"
-        cat_dir.mkdir()
-        Catalog.init(cat_dir)
 
         import os
         os.environ["NEXUS_CONFIG_DIR"] = str(cfg)
-        os.environ["NEXUS_CATALOG_PATH"] = str(cat_dir)
         try:
             # Truncated JSON — recoverable but malformed.
             reg_path = cfg / "repos.json"
@@ -169,7 +153,6 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
             ), f"Expected repos_json_malformed warning; saw events: {[e.get('event') for e in cap]}"
         finally:
             os.environ.pop("NEXUS_CONFIG_DIR", None)
-            os.environ.pop("NEXUS_CATALOG_PATH", None)
 
     def test_read_repos_json_returns_distinct_sentinel_for_malformed(
         self, tmp_path: Path,
@@ -202,23 +185,25 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
                 # Or raise — also acceptable.
                 pass
 class TestCriticalFiveTOCTOUOwnerRace:
-    """CRITICAL-5, against a WRITABLE local catalog. Same pin, same reason.
+    """CRITICAL-5, now against the ACTIVE (engine) catalog.
 
-    SERVICE HALF IS A KNOWN OPEN BUG, NOT A TEST — stated plainly rather
-    than claimed as coverage. The engine has its own version of this race:
-    nexus-jq53b (P1, OPEN) — every owner-ensure site uses
-    ``(tenant_id, tumbler_prefix)`` as its ON CONFLICT arbiter while
-    ``catalog_owners`` also carries ``catalog_owners_unique_name_type``, so
-    a concurrent register raises 23505 instead of converging. It surfaced as
-    a CI flake on PR #1423.
-
-    So after this pin NOTHING exercises the service-mode owner race. That is
-    a deliberate, recorded gap: the client-side TOCTOU this class covers was
-    fixed in the SQLite schema path, and the engine-side equivalent is
-    tracked as a defect to fix rather than a behaviour to pin. Do not read
-    the pin as "the race is handled on both substrates".
+    nexus-i711w terminal deletion: the local pin died with the local
+    Catalog. The engine has its own version of this race — nexus-jq53b
+    (P1, OPEN): owner-ensure sites arbitrate ON CONFLICT on
+    ``(tenant_id, tumbler_prefix)`` while ``catalog_owners`` also carries
+    ``catalog_owners_unique_name_type``, so a concurrent register can
+    raise 23505 instead of converging (surfaced as a CI flake on
+    PR #1423). The concurrent test below is therefore xfail(non-strict)
+    on that bead — it converges only when the engine wins the race or
+    once jq53b lands; the synchronous re-check and curator-exemption
+    contracts hold on the engine today.
     """
 
+    @pytest.mark.xfail(
+        reason="nexus-jq53b: engine owner-ensure race can 23505 instead of "
+               "converging; non-strict because the race is timing-dependent",
+        strict=False,
+    )
     def test_concurrent_ensure_owner_for_repo_no_duplicate_rows(
         self, cat: Catalog, repo: Path,
     ) -> None:

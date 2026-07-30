@@ -28,15 +28,14 @@ def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
-    """Init the local catalog, hand back a facade over the LIVE one.
+    """Hand back a facade over the LIVE catalog.
 
     nexus-aqbrk: previously returned the local ``Catalog``, so under the
     engine substrate the assertions read an empty local file while
-    ``_catalog_hook`` wrote the service catalog.
+    ``_catalog_hook`` wrote the service catalog. nexus-i711w terminal
+    deletion: the local ``Catalog.init`` seeding is gone entirely.
     """
-    from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
     return catalog_dir, ActiveCatalog()
 
 

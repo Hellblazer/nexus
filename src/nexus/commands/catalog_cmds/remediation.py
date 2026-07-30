@@ -585,24 +585,8 @@ def prune_stale_cmd(
             click.echo("\n(dry-run — no catalog writes performed.)")
         return
 
-    # Backup snapshot before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    backup_path = snapshot_documents(
-        cat,
-        [str(e.tumbler) for e in stale],
-        verb="prune-stale",
-        reason="absolute path missing OR relative path missing under owner.repo_root",
-        args={
-            "collection": collection, "owner": owner,
-            "source_dir": str(source_dir_opt) if source_dir_opt else "",
-            "rdr_prefix_skip": rdr_prefix_skip,
-        },
-    )
-    if backup_path:
-        click.echo(
-            f"\nBackup snapshot written: {backup_path}"
-            f"\n  Restore with: nx catalog undelete {backup_path.name}"
-        )
+    # The pre-delete local backup snapshot (RDR-106 Option A) died with the
+    # local catalog (nexus-i711w): backups were local-catalog-only.
 
     # nexus-xedhp: batch via delete_many (service mode) instead of one
     # writer.delete_document() per entry. SQLite/daemon-mode writers don't

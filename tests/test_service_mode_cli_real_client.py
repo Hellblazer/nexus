@@ -109,8 +109,6 @@ class TestFixPathsRealClient:
     def test_fix_paths_service_mode_real_client(
         self, tmp_path, runner, real_client, monkeypatch,
     ):
-        from nexus.catalog.catalog import Catalog
-
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         cat_dir = tmp_path / "catalog"
@@ -118,10 +116,9 @@ class TestFixPathsRealClient:
         # via reader.docs_with_absolute_paths(), which doctor.py documents as
         # "uniform across SQLite and service mode", so a local-only seed left the
         # service catalog empty ("No absolute file_path entries found").
-        # NEXUS_CATALOG_PATH is set so the SQLite arm's factory agrees with the
-        # catalog_path() patch below.
+        # nexus-i711w terminal deletion: the ``Catalog.init`` SQLite-arm seeding
+        # died with the local catalog; the factories are service-only.
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-        Catalog.init(cat_dir)
         cat = ActiveCatalog()
         owner = cat.register_owner(
             "test-abc12345", "repo", repo_hash="abc12345", repo_root=str(repo_dir),

@@ -106,7 +106,15 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # only counts entries and never asked whether they still resolved. This is a
 # SHRINK -- the direction the ratchet already sanctions -- and it removes
 # nothing that was excluding anything.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 67
+# 67 -> 62 (nexus-i711w terminal deletion): -5 entries whose files died with
+# the local catalog (test_catalog_collections_rebuild.py,
+# test_catalog_concurrent_writer_lock.py, test_catalog_db.py,
+# test_catalog_incremental_rebuild.py, test_collections_owner_backfill.py).
+# SHRINK, downward-only.
+# 62 -> 61 (nexus-i711w terminal deletion, DIE sweep): one further dying-file
+# entry retired during the retirement batches. SHRINK, downward-only.
+# 61 -> 60: test_catalog_migrate_fallback.py died in the same sweep.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
@@ -154,7 +162,9 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 67
 # grandfathering this ratchet exists to prevent. The two liveness tests added
 # below close that hole permanently; keep them passing rather than lowering
 # these constants to match whatever the sets happen to contain.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 37
+# 37 -> 36 (nexus-i711w terminal deletion): the TestSQLiteCatalogNewMethods
+# nodeid died with the SQLite parity arm. SHRINK, downward-only.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 36
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

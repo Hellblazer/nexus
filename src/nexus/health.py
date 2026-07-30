@@ -20,7 +20,7 @@ import structlog
 from nexus.config import default_db_path
 
 if TYPE_CHECKING:
-    from nexus.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
 
 _log = structlog.get_logger(__name__)
 
@@ -850,7 +850,6 @@ def _check_git_hooks() -> list[HealthResult]:
     from nexus import _git_hooks_meta as _ghm  # noqa: PLC0415 — deferred to avoid circular import
     from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END  # noqa: PLC0415 — deferred to avoid circular import
     _effective_hooks_dir = _ghm.effective_hooks_dir
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -1330,7 +1329,7 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
 # belongs to Postgres, not to a pid count.
 
 
-def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult]:
+def _check_catalog(cat: "CatalogReader | None", cat_path: "Path") -> list[HealthResult]:
     try:
         if cat is not None:
             # nexus-qnp5s: use cat.stats() which works on both SQLite Catalog

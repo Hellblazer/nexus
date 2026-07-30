@@ -13,17 +13,15 @@ Three surfaces are under test:
 Adds a column-exists smoke test so downstream consumers (RDR-087 Phase
 3.4 stale_source_ratio) can assume the schema is present.
 
-CATALOG SUBSTRATE (nexus-i711w Stage 2). Surface 3 — the CRUD round-trip —
-is caller-facing protocol that ``HttpCatalogClient`` implements in full
-(``register`` takes ``source_mtime`` explicitly; ``update`` /
-``by_file_path`` / ``resolve`` / ``by_doc_id`` all exist), so those tests
-seed and read through :class:`tests._catalog_fixture_ops.ActiveCatalog` and
-now exercise whichever catalog is live. Surface 2 (``CatalogDB``'s SQLite
-DDL + ALTER-on-open) is DIE and stays pinned; ``nexus.catalog.catalog_db``
-is imported inside those bodies so the file still COLLECTS after the
-deletion. Surface 1 is substrate-neutral (``nexus.catalog.tumbler``
-dataclasses, not retiring), with one caveat noted at
-``test_jsonl_roundtrip_preserves_mtime``.
+CATALOG SUBSTRATE (nexus-i711w terminal deletion). Surface 3 — the CRUD
+round-trip — is caller-facing protocol that ``HttpCatalogClient`` implements
+in full (``register`` takes ``source_mtime`` explicitly; ``update`` /
+``by_file_path`` / ``resolve`` all exist), so those tests seed and read
+through :class:`tests._catalog_fixture_ops.ActiveCatalog` against the live
+catalog. Surface 2 (``CatalogDB``'s SQLite DDL + ALTER-on-open,
+``TestCatalogDBSchema``) RETIRED with ``nexus/catalog/catalog_db.py``.
+Surface 1 is substrate-neutral (``nexus.catalog.tumbler`` dataclasses, not
+retiring), with one caveat noted at ``test_jsonl_roundtrip_preserves_mtime``.
 """
 from __future__ import annotations
 
@@ -85,71 +83,10 @@ class TestDocumentRecord:
 
 
 # ── Schema ──────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.usefixtures("local_catalog_backend")
-class TestCatalogDBSchema:
-    """nexus-i711w: DIE. The subject is ``CatalogDB``'s SQLite ``documents``
-    DDL and its ALTER-on-open migration; ``PRAGMA table_info`` has no
-    service-mode expression (the engine schema is Liquibase-managed, covered
-    by the Java suite). ``nexus.catalog.catalog_db`` is imported inside each
-    body so the FILE still collects; the class retires with
-    ``nexus/catalog/catalog_db.py``.
-    """
-
-    def test_fresh_install_has_column(self, tmp_path: Path) -> None:
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db = CatalogDB(tmp_path / "cat.db")
-        cols = [r[1] for r in db._conn.execute("PRAGMA table_info(documents)").fetchall()]
-        assert "source_mtime" in cols
-
-    def test_migration_adds_column_to_pre_8luh_db(self, tmp_path: Path) -> None:
-        """ALTER-on-open must patch a pre-migration catalog.db that has
-        every column except source_mtime. Verifies the try/SELECT guard
-        actually runs the ALTER instead of silently skipping it."""
-        import sqlite3
-
-        from nexus.catalog.catalog_db import CatalogDB
-
-        db_path = tmp_path / "cat.db"
-        conn = sqlite3.connect(str(db_path))
-        # Legacy schema — no source_mtime column.
-        conn.execute("""
-            CREATE TABLE documents (
-                tumbler TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                author TEXT,
-                year INTEGER,
-                content_type TEXT,
-                file_path TEXT,
-                corpus TEXT,
-                physical_collection TEXT,
-                chunk_count INTEGER,
-                head_hash TEXT,
-                indexed_at TEXT,
-                metadata JSON
-            )
-        """)
-        conn.execute(
-            "INSERT INTO documents (tumbler, title, author, year, content_type, "
-            "file_path, corpus, physical_collection, chunk_count, head_hash, "
-            "indexed_at, metadata) VALUES ('1.1.1', 'legacy', '', 0, 'paper', "
-            "'legacy.pdf', '', 'knowledge__legacy', 1, '', '', '{}')"
-        )
-        conn.commit()
-        conn.close()
-
-        # Re-open via CatalogDB — migration should kick in.
-        db = CatalogDB(db_path)
-        cols = [r[1] for r in db._conn.execute("PRAGMA table_info(documents)").fetchall()]
-        assert "source_mtime" in cols
-        # Legacy data survives, and pre-existing rows get the default 0.
-        row = db._conn.execute(
-            "SELECT title, source_mtime FROM documents WHERE tumbler = ?",
-            ("1.1.1",),
-        ).fetchone()
-        assert row == ("legacy", 0.0)
+# TestCatalogDBSchema RETIRED (nexus-i711w terminal deletion): its subject
+# was CatalogDB's SQLite documents DDL + ALTER-on-open migration, deleted
+# with nexus/catalog/catalog_db.py. The engine schema is Liquibase-managed
+# and covered by the Java suite.
 
 
 # ── Catalog CRUD ────────────────────────────────────────────────────────────
@@ -175,19 +112,6 @@ class TestCatalogRegisterStoresMtime:
         """
         slug = uuid.uuid4().hex[:8]
         return ActiveCatalog(), f"mtime-{slug}", f"a-{slug}.pdf"
-
-    def _seed_local(self, tmp_path: Path) -> Any:
-        """A real LOCAL ``Catalog``, for the ONE test in this class whose
-        lookup verb means something different on the two substrates
-        (``test_by_doc_id_returns_mtime``). Same return shape as ``_seed``.
-        """
-        from nexus.catalog.catalog import Catalog
-
-        slug = uuid.uuid4().hex[:8]
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-        return cat, f"mtime-{slug}", f"a-{slug}.pdf"
 
     def test_register_without_mtime_defaults_to_zero(self, tmp_path: Path) -> None:
         cat, owner_name, fp = self._seed(tmp_path)
@@ -246,43 +170,17 @@ class TestCatalogRegisterStoresMtime:
         # title, so this is what distinguishes "bumped" from "replaced".
         assert entry.title == "doc"  # other fields preserved
 
-    @pytest.mark.usefixtures("local_catalog_backend")
-    def test_by_doc_id_returns_mtime(self, tmp_path: Path) -> None:
-        """⚠️ PORT-BLOCKED, PINNED. Found by attempting the port and MEASURED,
-        not predicted: with ``ActiveCatalog`` this fails ``assert None is not
-        None``.
-
-        ``by_doc_id`` means two DIFFERENT things on the two substrates:
-
-          - local (``catalog_docs.py``:791-799) —
-            ``WHERE json_extract(metadata,'$.doc_id') = ?``, i.e. the T3
-            doc_id a caller stashed in ``meta``;
-          - service (``http_catalog_client.py``:1075-1076) — a bare
-            ``return self.resolve(doc_id)``, i.e. a TUMBLER lookup.
-
-        So a document registered with ``meta={"doc_id": "doc-abc-42"}`` is
-        findable by that key locally and invisible service-side. Under
-        RDR-108 the tumbler IS the doc identity, so the service reading may
-        well be the intended one — but the two implementations share a name
-        and a signature while answering different questions, and one of them
-        silently returns ``None``. Not resolved here (a src question);
-        recorded so the divergence is not lost with this test.
-
-        The other four tests in this class DID port and run against the live
-        catalog.
-        """
-        cat, owner_name, fp = self._seed_local(tmp_path)
-        doc_id = f"doc-abc-{uuid.uuid4().hex[:8]}"
-        owner = cat.register_owner(owner_name, "corpus")
-        cat.register(
-            owner, title="doc", content_type="paper",
-            file_path=fp, physical_collection="knowledge__x",
-            meta={"doc_id": doc_id},
-            source_mtime=55.5,
-        )
-        entry = cat.by_doc_id(doc_id)
-        assert entry is not None
-        assert entry.source_mtime == 55.5
+    # test_by_doc_id_returns_mtime RETIRED (nexus-i711w terminal deletion):
+    # it pinned the LOCAL reading of ``by_doc_id`` (``WHERE json_extract(
+    # metadata,'$.doc_id') = ?`` — the T3 doc_id stashed in ``meta``), whose
+    # substrate is deleted. RECORD OF DIVERGENCE, so it is not lost with the
+    # test: the surviving service ``by_doc_id`` (http_catalog_client.py) is a
+    # bare ``return self.resolve(doc_id)`` — a TUMBLER lookup. A document
+    # registered with ``meta={"doc_id": ...}`` was findable by that key
+    # locally and is invisible service-side. Under RDR-108 the tumbler IS the
+    # doc identity, so the service reading may well be intended, but the two
+    # implementations shared a name/signature while answering different
+    # questions. Still a src question if a meta-doc_id lookup is ever needed.
 
 
 # ── Indexing-side plumbing smoke test ───────────────────────────────────────

@@ -132,16 +132,11 @@ def unroutable_write_target() -> Any:
     ugly and deliberately named: if nexus-iltyk is resolved by whitelisting
     the op, every caller of this should collapse back to ``ActiveCatalog``.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
-
-    if storage_backend_for("catalog") is not StorageBackend.SQLITE:
-        return active_reader()
-
-    from nexus.catalog.catalog import Catalog
-    from nexus.config import catalog_path
-
-    path = catalog_path()
-    return Catalog(path, path / ".catalog.db")
+    # The SQLite arm died with the local catalog (nexus-i711w terminal
+    # deletion) — the service reader is the only substrate left, so this
+    # helper degenerates to active_reader() until nexus-iltyk whitelists
+    # the op and callers collapse back to ActiveCatalog.
+    return active_reader()
 
 
 class ActiveCatalog:

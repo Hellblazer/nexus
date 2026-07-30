@@ -81,6 +81,13 @@ def test_clean_run_has_no_failures(
     # catalog/pipeline may legitimately be absent in the test env; the T2 step
     # we stubbed must not have failed.
     assert all("taxonomy/chash" not in f for f in counts.failures)
+    # nexus-i711w terminal deletion: the LOCAL path must FAIL LOUD about
+    # catalog rows it can no longer purge (the sqlite catalog is deleted) —
+    # silence here was the exact regression class the critique flagged.
+    assert any("catalog rows not purged" in f for f in counts.failures), (
+        f"local-mode purge must surface the unreachable catalog leg; "
+        f"failures={counts.failures}"
+    )
     assert isinstance(counts, CascadeCounts)
 
 

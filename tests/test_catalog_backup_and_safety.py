@@ -11,18 +11,12 @@ Pins:
   ``--no-dry-run --confirm`` to actually delete.
 - nexus-9nim P2: ``catalog link-bulk-delete`` defaults to dry-run;
   requires ``--no-dry-run --confirm`` to actually delete.
-- RDR-106 Option A: every destructive verb writes a JSONL backup
-  snapshot to ``$catalog_dir/.deleted-backups/`` BEFORE the actual
-  delete.
-
-  Only the SNAPSHOT half is pinned here now, and it is unchanged. The
-  restore half — ``nx catalog undelete``, which re-emitted the documents
-  and their links via event-sourced ``DocumentRegistered`` /
-  ``LinkCreated`` events — was deleted in nexus-i711w Stage 2 sub-stage
-  C-store, together with the local rich Catalog whose low-level event log
-  it wrote through. Snapshots are still taken before every destructive
-  verb and are still managed by ``list-backups`` / ``vacuum-backups``;
-  what is gone is the in-product path back from one.
+- RDR-106 Option A backup-before-delete: FULLY RETIRED (nexus-i711w
+  terminal deletion). The snapshot half followed the undelete half:
+  ``nexus.catalog.catalog_backup`` and the ``list-backups`` /
+  ``vacuum-backups`` verbs died with the local catalog, and destructive
+  verbs no longer write local JSONL snapshots in any mode. The dry-run /
+  --confirm safety rails above are what remains pinned here.
 """
 from __future__ import annotations
 
@@ -44,10 +38,8 @@ from nexus.cli import main
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Initialised catalog with NEXUS_CATALOG_PATH pointed at it."""
-    from nexus.catalog.catalog import Catalog
+    """Catalog dir env pin (nexus-i711w: no local init — service catalog)."""
     cat_dir = tmp_path / "catalog"
-    Catalog.init(cat_dir)
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     return cat_dir
 
@@ -185,10 +177,8 @@ def test_gc_no_dry_run_plus_confirm_actually_deletes(cat: ActiveCatalog, catalog
     )
     assert result.exit_code == 0
     assert cat.resolve(t) is None
-    # Backup snapshot should have been written.
-    backup_dir = catalog_env / ".deleted-backups"
-    assert backup_dir.exists()
-    assert any(backup_dir.glob("catalog-gc-*.jsonl"))
+    # (The pre-delete backup snapshot assertion retired with catalog_backup,
+    # nexus-i711w: destructive verbs no longer write local JSONL snapshots.)
 
 
 # ── nexus-9nim: link-bulk-delete --confirm safety rail ─────────────────────
@@ -241,123 +231,13 @@ def test_link_bulk_delete_confirm_actually_removes(cat: ActiveCatalog, catalog_e
     assert result.exit_code == 0
     assert "Removed 1 link" in result.output
     assert len(cat.links_from(a)) == 0
-    # Backup snapshot.
-    backup_dir = catalog_env / ".deleted-backups"
-    assert any(
-        p for p in backup_dir.glob("catalog-link-bulk-delete-*.jsonl")
-    )
+    # (Backup snapshot assertion retired with catalog_backup, nexus-i711w.)
 
 
-# ── RDR-106 Option A: backup-before-delete ─────────────────────────────────
-
-
-def test_delete_writes_backup_before_deleting(
-    cat: ActiveCatalog,
-    catalog_env: Path,
-) -> None:
-    """``nx catalog delete <tumbler> --yes`` writes a JSONL snapshot
-    BEFORE calling delete_document."""
-    owner = cat.register_owner("o", "repo", repo_hash="h")
-    t = cat.register(
-        owner, "doomed.md", content_type="prose", file_path="doomed.md",
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(
-        main, ["catalog", "delete", str(t), "--yes"],
-    )
-    assert result.exit_code == 0, result.output
-    assert cat.resolve(t) is None
-    backup_dir = catalog_env / ".deleted-backups"
-    backups = list(backup_dir.glob("catalog-delete-*.jsonl"))
-    assert len(backups) == 1, "expected exactly one delete backup"
-    # Backup carries the deleted document.
-    with backups[0].open() as f:
-        lines = [json.loads(l) for l in f if l.strip()]
-    assert lines[0]["kind"] == "header"
-    assert lines[0]["verb"] == "delete"
-    assert any(
-        rec.get("kind") == "document" and rec.get("tumbler") == str(t)
-        for rec in lines
-    )
-
-def test_list_backups_shows_recent_snapshots(cat: ActiveCatalog) -> None:
-    """``nx catalog list-backups`` enumerates JSONL files newest-first."""
-    owner = cat.register_owner("o", "repo", repo_hash="h")
-    t = cat.register(
-        owner, "doomed.md", content_type="prose", file_path="doomed.md",
-    )
-    runner = CliRunner()
-    runner.invoke(main, ["catalog", "delete", str(t), "--yes"])
-    result = runner.invoke(main, ["catalog", "list-backups"])
-    assert result.exit_code == 0, result.output
-    assert "catalog-delete-" in result.output
-    assert "verb=delete" in result.output
-    assert "rows=1" in result.output
-
-
-def test_vacuum_backups_dry_run_default(cat: ActiveCatalog, catalog_env: Path) -> None:
-    """``nx catalog vacuum-backups`` defaults to dry-run."""
-    owner = cat.register_owner("o", "repo", repo_hash="h")
-    t = cat.register(
-        owner, "doomed.md", content_type="prose", file_path="doomed.md",
-    )
-    runner = CliRunner()
-    runner.invoke(main, ["catalog", "delete", str(t), "--yes"])
-
-    # Default dry-run; days = 30 means recent file is kept.
-    result = runner.invoke(main, ["catalog", "vacuum-backups"])
-    assert result.exit_code == 0
-    assert "Would remove 0 backup file" in result.output
-    backup_dir = catalog_env / ".deleted-backups"
-    assert any(backup_dir.glob("*.jsonl"))
-
-
-def test_vacuum_backups_actually_removes_old_files(
-    cat: ActiveCatalog,
-    catalog_env: Path,
-) -> None:
-    """Files older than the retention window are removed when
-    ``--no-dry-run`` is passed."""
-    owner = cat.register_owner("o", "repo", repo_hash="h")
-    t = cat.register(
-        owner, "doomed.md", content_type="prose", file_path="doomed.md",
-    )
-    runner = CliRunner()
-    runner.invoke(main, ["catalog", "delete", str(t), "--yes"])
-
-    backup_dir = catalog_env / ".deleted-backups"
-    backups = list(backup_dir.glob("*.jsonl"))
-    assert len(backups) == 1
-    # Backdate the file beyond retention.
-    old_time = backups[0].stat().st_mtime - (40 * 86400)
-    os.utime(backups[0], (old_time, old_time))
-
-    result = runner.invoke(
-        main, ["catalog", "vacuum-backups", "--no-dry-run"],
-    )
-    assert result.exit_code == 0
-    assert "Removed 1 backup" in result.output
-    assert not any(backup_dir.glob("*.jsonl"))
-
-
-def test_prune_stale_writes_backup_for_truly_stale(
-    cat: ActiveCatalog, tmp_path: Path,
-    catalog_env: Path,
-) -> None:
-    """When prune-stale --no-dry-run --confirm runs, it writes a
-    backup snapshot covering the deleted entries."""
-    owner = cat.register_owner("o", "repo", repo_hash="h")
-    cat.register(
-        owner, "gone.md", content_type="prose",
-        file_path="/definitely/missing/path-9876/gone.md",
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(main, [
-        "catalog", "prune-stale", "--no-dry-run", "--confirm",
-    ])
-    assert result.exit_code == 0
-    assert "deleted 1" in result.output.lower()
-    backup_dir = catalog_env / ".deleted-backups"
-    assert any(backup_dir.glob("catalog-prune-stale-*.jsonl"))
+# ── RDR-106 Option A: backup-before-delete — RETIRED (nexus-i711w) ────────
+# test_delete_writes_backup_before_deleting, test_list_backups_shows_
+# recent_snapshots, test_vacuum_backups_dry_run_default, test_vacuum_
+# backups_actually_removes_old_files, and test_prune_stale_writes_backup_
+# for_truly_stale retired with nexus.catalog.catalog_backup and the
+# list-backups / vacuum-backups verbs: the pre-delete JSONL snapshot
+# machinery was local-catalog-only and died with it.

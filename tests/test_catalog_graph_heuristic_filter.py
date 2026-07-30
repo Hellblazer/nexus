@@ -10,91 +10,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from nexus.catalog.catalog_links import (
-    _HEURISTIC_LINK_TYPES,
-    _filter_link_types,
-)
-from nexus.catalog.tumbler import Tumbler
 from tests._catalog_fixture_ops import ActiveCatalog
 
-
-@pytest.fixture(autouse=True)
-def _git_identity(monkeypatch):
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
-
-
-@pytest.fixture(autouse=True)
-def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Aim ``catalog_path()`` at the dir ``_make_catalog`` initialises
-    (nexus-aqbrk) — ActiveCatalog resolves through the catalog factories, and
-    the SQLite arm of those reads ``catalog_path()``."""
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+# nexus-i711w terminal deletion: TestFilterLinkTypesHelper (4 tests) and
+# TestHeuristicTokenSet retired WITH nexus.catalog.catalog_links — the
+# ``_filter_link_types`` pure helper died with the local BFS; the
+# default-exclude contract itself is server-side now (nexus-ybj1b) and
+# stays pinned end-to-end by TestGraphDefaultExcludesHeuristic below.
 
 
 def _make_catalog(tmp_path: Path) -> ActiveCatalog:
-    """Init the local catalog, hand back a facade over the LIVE one.
+    """Facade over the live (service) catalog; needs no local init.
 
     nexus-aqbrk: link-graph filtering is substrate-independent behaviour, so
-    this file seeds through the same factories the graph reader uses rather
-    than pinning to the local catalog.
+    this file seeds through the same factories the graph reader uses.
     """
-    from nexus.catalog.catalog import Catalog
-    cat_dir = tmp_path / "catalog"
-    Catalog.init(cat_dir)
     return ActiveCatalog()
-
-
-# ── _filter_link_types pure helper ────────────────────────────────────────
-
-
-class TestFilterLinkTypesHelper:
-    def test_explicit_link_types_pass_through(self) -> None:
-        """A caller's explicit list wins; the helper trusts the caller
-        knows whether they want heuristic edges in the result.
-        """
-        result = _filter_link_types(
-            ["cites", "implements-heuristic"], "",
-            include_heuristic=False,
-        )
-        assert result == ["cites", "implements-heuristic"]
-
-    def test_explicit_single_link_type_passes_through(self) -> None:
-        result = _filter_link_types(
-            None, "implements-heuristic",
-            include_heuristic=False,
-        )
-        assert result == ["implements-heuristic"]
-
-    def test_no_filter_default_excludes_heuristic(self) -> None:
-        """nexus-6ppk primary contract: when no explicit filter is
-        given AND ``include_heuristic`` is False, the result is the
-        full known set MINUS heuristic types.
-        """
-        result = _filter_link_types(
-            None, "", include_heuristic=False,
-        )
-        assert result is not None
-        assert "implements-heuristic" not in result
-        # Sanity: meaningful types are present.
-        for must_have in (
-            "cites", "implements", "relates", "supersedes",
-        ):
-            assert must_have in result, f"{must_have!r} missing"
-
-    def test_include_heuristic_true_returns_no_filter(self) -> None:
-        """``include_heuristic=True`` with no explicit types means
-        the caller wants EVERY type including heuristic. Returning
-        None signals the BFS to skip the link-type filter entirely.
-        """
-        result = _filter_link_types(
-            None, "", include_heuristic=True,
-        )
-        assert result is None
 
 
 # ── End-to-end: Catalog.graph default-excludes heuristic ─────────────────
@@ -262,12 +193,3 @@ class TestGraphDefaultExcludesHeuristic:
         }
         assert str(heuristic_a) in node_tumblers_opt
         assert str(heuristic_b) in node_tumblers_opt
-
-
-class TestHeuristicTokenSet:
-    def test_heuristic_set_pinned(self) -> None:
-        """Lock the heuristic-link-type set so adding a new
-        heuristic link type to the catalog forces a deliberate
-        decision about whether it should be default-excluded.
-        """
-        assert _HEURISTIC_LINK_TYPES == frozenset({"implements-heuristic"})

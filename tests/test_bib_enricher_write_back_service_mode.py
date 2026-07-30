@@ -416,66 +416,9 @@ class TestMetaMergeSemanticsDrift:
         assert stored["bib_venue"] == "NeurIPS"
 
 
-class TestBibColumnDualBackendParity:
-    """Standing regression guard for the divergence class recorded as T3
-    insight ``insight-developer-dual-backend-meta-merge-semantics-
-    divergence``: a "drop-in" method identical in name/signature across
-    backends (local ``Catalog`` vs ``HttpCatalogClient``) silently
-    diverging in semantics — the same class ``TestMetaMergeSemanticsDrift``
-    above caught for ``meta=``. nexus-9l2lg's column-level bib_* write
-    (Task 3) is new surface for exactly that risk.
-    """
-
-    def test_local_and_service_backends_produce_identical_bib_columns_after_enrich_apply(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch, reader, writer,
-    ) -> None:
-        from nexus.catalog.catalog import Catalog
-        monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
-        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
-        monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
-        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
-        # No NEXUS_EVENT_SOURCED pin: nexus-6ha8a extended the
-        # event-sourced projector to persist bib_* too, so this parity
-        # check holds under the ambient default (ON, RDR-101 Phase 3
-        # PR ζ) as well as the legacy path.
-
-        # (a) local Catalog — reader and writer are the same object,
-        # mirroring the direct-fallback shape make_catalog_writer() uses
-        # when no T2 daemon is reachable.
-        local_dir = tmp_path / "catalog"
-        local_cat = Catalog(local_dir, local_dir / ".catalog.db")
-        local_owner = local_cat.register_owner("delos", "curator")
-        local_cat.register(
-            local_owner, "Parity Paper", content_type="paper",
-            physical_collection="knowledge__delos", file_path="parity.pdf",
-        )
-
-        # (b) service-mode — fake-server-backed HttpCatalogClient reader
-        # + _ServiceCatalogWriter-wrapped writer (module fixtures).
-        _State.add_document(
-            "1.1.1", title="Parity Paper", physical_collection="knowledge__delos",
-            file_path="parity.pdf",
-        )
-
-        bib_meta = dict(_S2_BIB_META)
-
-        _enrich_apply(
-            local_cat, local_cat, "knowledge__delos", "Parity Paper",
-            ["parity.pdf"], bib_meta, "s2", Tumbler,
-        )
-        _enrich_apply(
-            reader, writer, "knowledge__delos", "Parity Paper",
-            ["parity.pdf"], bib_meta, "s2", Tumbler,
-        )
-
-        local_entry = local_cat.find("Parity Paper")[0]
-        service_entry = reader.find("Parity Paper")[0]
-
-        def _bib_tuple(entry):
-            return (
-                entry.bib_year, entry.bib_authors, entry.bib_venue,
-                entry.bib_citation_count, entry.bib_semantic_scholar_id,
-                entry.bib_openalex_id, entry.bib_doi,
-            )
-
-        assert _bib_tuple(local_entry) == _bib_tuple(service_entry)
+# TestBibColumnDualBackendParity RETIRED (nexus-i711w terminal deletion): its
+# subject was LOCAL-`Catalog`-vs-service bib-column parity after enrich-apply
+# (the dual-backend meta-merge divergence class). The local backend is deleted,
+# so the parity premise has no second arm; the service-side bib-column write
+# contract stays pinned by the fake-server tests above (top-level bib_* column
+# assertions, e.g. the `_enrich_apply` service-mode tests).

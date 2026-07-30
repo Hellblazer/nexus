@@ -611,7 +611,11 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # verb group, taking commands/plan.py's `_open_plans_db` epsilon-allow
     # connect with it (lockstep with test_storage_boundary_lint's copy —
     # same number; derive-don't-paste still stands). DOWNWARD-only recount.
-    assert result.epsilon_allow_connects == 13, (
+    # 13 -> 12: nexus-i711w terminal deletion — collection_audit.py's
+    # `_open_catalog_conn` collapsed to an unconditional `return None`, taking
+    # its `.catalog.db` epsilon-allow connect with it (lockstep with
+    # test_storage_boundary_lint's copy). DOWNWARD-only recount.
+    assert result.epsilon_allow_connects == 12, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

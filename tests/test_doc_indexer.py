@@ -184,9 +184,9 @@ def test_lookup_existing_doc_id_returns_empty_when_catalog_is_none(tmp_path):
 def test_lookup_existing_doc_id_finds_registered_entry(tmp_path):
     """When the catalog already registered *file_path* under *corpus*'s
     owner, the helper returns the tumbler stringified as the doc_id."""
-    from nexus.catalog.catalog import Catalog
-    cat_dir = tmp_path / "cat"
-    cat = Catalog.init(cat_dir)
+    # nexus-i711w: seeds through ActiveCatalog (live catalog) — the local
+    # Catalog.init arm is gone.
+    cat = ActiveCatalog()
     owner = cat.register_owner("mybook", "curator")
     file_path = "/abs/path/paper.pdf"
     doc = cat.register(
@@ -206,17 +206,15 @@ def test_identity_where_prefers_content_hash_post_phase_3(tmp_path, monkeypatch)
     is supplied it becomes the staleness key, otherwise ``source_path``
     is the legacy fallback for pruning sites pending Phase 4.
     """
-    from nexus.catalog.catalog import Catalog
-    cat_dir = tmp_path / "cat"
-    cat = Catalog.init(cat_dir)
+    # nexus-i711w: seeds through ActiveCatalog (live catalog) — the local
+    # Catalog.init arm is gone; no catalog_path repoint needed.
+    cat = ActiveCatalog()
     owner = cat.register_owner("mybook", "curator")
     file_path = "/abs/path/paper.pdf"
     cat.register(
         owner, "Paper", content_type="paper", file_path=file_path,
         corpus="mybook", physical_collection="docs__mybook",
     )
-
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
 
     # With content_hash → content_hash branch (the new staleness key).
     where = _identity_where(file_path, "mybook", content_hash="abcd")
@@ -229,10 +227,8 @@ def test_identity_where_prefers_content_hash_post_phase_3(tmp_path, monkeypatch)
 
 def test_identity_where_falls_back_when_corpus_owner_missing(tmp_path, monkeypatch):
     """No content_hash → source_path fallback."""
-    from nexus.catalog.catalog import Catalog
-    cat_dir = tmp_path / "cat"
-    Catalog.init(cat_dir)
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
+    # nexus-i711w: no local catalog to init; the live catalog simply has no
+    # owner for this corpus, which is the case under test.
     where = _identity_where("/abs/path/x.pdf", "missing-corpus")
     assert where == {"source_path": "/abs/path/x.pdf"}
 
@@ -244,11 +240,9 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     the batch or hang the post-pass. The offending file is marked
     ``failed`` with its path; sibling files complete normally; the whole
     call returns within a wall-clock bound."""
-    from nexus.catalog.catalog import Catalog
     from nexus.db.t3 import T3Database
 
-    cat_dir = tmp_path / "test-catalog"
-    Catalog.init(cat_dir)
+    # nexus-i711w: no local catalog init — the live catalog needs none.
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -308,10 +302,8 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     source_path nor doc_id and the staleness check correctly cannot
     detect "unchanged" — re-index would proceed every time.
     """
-    from nexus.catalog.catalog import Catalog
-
-    cat_dir = tmp_path / "test-catalog"
-    Catalog.init(cat_dir)
+    # nexus-i711w: no local catalog init — pre-flight registration goes to
+    # the live catalog.
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -359,100 +351,10 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     )
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
-def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
-    sample_md, tmp_path, monkeypatch,
-):
-    """nexus-fq3b regression: pre-flight registration must auto-init the
-    catalog when none exists, so chunks land with ``doc_id`` and a
-    subsequent re-index after a content edit prunes the prior chunk set.
-
-    Pre-fix shape: the autouse ``_isolate_catalog`` fixture redirects
-    ``NEXUS_CATALOG_PATH`` to a tmp path that is *not* initialised;
-    ``_register_or_lookup_doc_id`` saw the missing catalog and returned
-    ``""`` silently; chunks were written with neither ``doc_id`` nor
-    (post-Phase-5c) ``source_path``; the prune at the end of the second
-    index iterated ``col.get(where={"source_path": file_path})`` which
-    matched zero chunks; stale chunks accumulated forever.
-
-    Post-fix shape: ``_register_or_lookup_doc_id`` auto-inits the
-    catalog at ``catalog_path()`` on first call, registers the file,
-    and chunks land with ``doc_id``; the re-index after edit finds the
-    same ``doc_id`` and prunes stale chunks via the doc_id-keyed where
-    filter.
-
-    PINNED to the SQLite catalog (nexus-aqbrk), not converted, because
-    the auto-init branch is SQLite-opt-out-mode ONLY BY DESIGN: in
-    service mode ``make_catalog_reader()`` is never ``None``, so the
-    branch never fires and building a local SQLite catalog there would
-    be the nexus-e9ru2 divergent-substrate bug
-    (``doc_indexer.py::_register_or_lookup_doc_id``). Both halves of
-    that seam are owned outright by
-    ``tests/test_e9ru2_catalog_gate_sweep.py``:
-    ``test_register_or_lookup_sqlite_mode_still_auto_inits`` and
-    ``test_register_or_lookup_fresh_box_no_local_catalog_created``.
-    """
-
-    from nexus.catalog.catalog import Catalog
-    from nexus.config import catalog_path
-    from nexus.db.t3 import T3Database
-
-    cat_path = catalog_path()
-    assert not Catalog.is_initialized(cat_path), (
-        "precondition: tmp catalog path should be unitialized before the "
-        "index call. The autouse _isolate_catalog fixture redirects "
-        "NEXUS_CATALOG_PATH but does not initialize the catalog."
-    )
-
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    monkeypatch.setattr(
-        "nexus.config._global_config_path", lambda: Path("/nonexistent"),
-    )
-    client = make_vector_test_client()
-    local_t3 = T3Database(_client=client, local_mode=True)
-
-    # First index: no catalog yet. Auto-init must fire.
-    n1 = index_markdown(sample_md, corpus="autoinit-probe", t3=local_t3)
-    assert n1 > 0, "expected first index to upsert chunks"
-
-    assert Catalog.is_initialized(cat_path), (
-        "post-condition: the catalog must be initialized after the first "
-        "index call. Auto-init in _register_or_lookup_doc_id is the fix "
-        "for nexus-fq3b: without it, chunks land without doc_id and the "
-        "prune fallback (post-Phase-5c) matches zero stale chunks."
-    )
-
-    col = local_t3.get_or_create_collection(
-        f"docs__autoinit-probe__{_local_token()}__v1",
-    )
-    metas_before = col.get(include=["metadatas"])["metadatas"]
-    assert metas_before, "expected chunks after first index"
-    # RDR-108 Phase 3 retired doc_id from chunk metadata. Verify the
-    # catalog manifest covers the chunks instead.
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        (f"docs__autoinit-probe__{_local_token()}__v1",),
-    ).fetchall()
-    assert documents, "auto-init catalog must register the indexed file"
-    for row in documents:
-        assert cat.get_manifest(row[0]), (
-            f"manifest_write_batch_hook must populate document_chunks "
-            f"for doc_id={row[0]!r}"
-        )
-
-    # NOTE (RDR-108 Phase 4): the original nexus-fq3b regression test
-    # asserted that re-indexing an edited file pruned stale chunks via
-    # the doc_id-keyed where filter. Phase 3 retired ``doc_id`` from
-    # chunk metadata in favour of the catalog manifest, but the prune
-    # path at ``doc_indexer.index_doc`` still uses
-    # ``_identity_where(...)`` which falls back to ``source_path`` —
-    # also dropped in RDR-102 D2. Phase 4 (nexus-mmf5 / nexus-dyxe /
-    # nexus-z1mu / nexus-kosc) rewrites the prune path to consult the
-    # manifest. Until then, re-index of an edited file leaves stale
-    # chunks; the auto-init guarantee tested above is the part Phase 3
-    # locks in.
+# test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex
+# retired (nexus-i711w terminal deletion): its subject was the SQLite-
+# opt-out-mode-only catalog auto-init branch of _register_or_lookup_doc_id,
+# which died with the local catalog (service mode never fires it).
 
 
 def test_make_local_embed_fn_returns_consistent_model_name():
@@ -1728,12 +1630,13 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
 
     Forces local-mode ingest by clearing Voyage/Chroma credentials so the
     indexer does not attempt to call the real cloud APIs.
+
+    nexus-i711w: the local Catalog.init is gone — pre-flight registration
+    goes to the live catalog, which needs no init.
     """
-    from nexus.catalog.catalog import Catalog
     from nexus.db.t3 import T3Database
 
     cat_dir = tmp_path / "test-catalog"
-    Catalog.init(cat_dir)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -1743,36 +1646,8 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     return cat_dir, T3Database(_client=client, local_mode=True)
 
 
-def _doc_registered_count(cat_dir: Path, file_path: str) -> int:
-    """Count ``DocumentRegistered`` events in events.jsonl that match
-    *file_path* via either the ``file_path`` payload field or the
-    ``source_uri`` (``file://``-normalized) payload field.
-
-    Returns 0 when events.jsonl is missing or empty.
-    """
-    import json as _json
-    events_path = cat_dir / "events.jsonl"
-    if not events_path.exists():
-        return 0
-    file_uri = f"file://{file_path}"
-    count = 0
-    for raw in events_path.read_text().splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            obj = _json.loads(line)
-        except _json.JSONDecodeError:
-            continue
-        if obj.get("type") != "DocumentRegistered":
-            continue
-        payload = obj.get("payload", {})
-        if (
-            payload.get("file_path") == file_path
-            or payload.get("source_uri") in (file_uri, file_path)
-        ):
-            count += 1
-    return count
+# _doc_registered_count helper retired with the events.jsonl event log
+# (nexus-i711w terminal deletion).
 
 
 def test_index_pdf_does_not_emit_source_path(
@@ -2022,91 +1897,12 @@ def test_curated_title_survives_reindex(tmp_path, monkeypatch):
     assert after[0].title == "Hand-Curated Title"
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
-def test_preflight_registration_idempotent_on_staleness_skip(
-    sample_md, tmp_path, monkeypatch,
-):
-    """RDR-102 D4 #4 / R1: re-indexing an unchanged file must not write
-    a duplicate ``DocumentRegistered`` event to ``events.jsonl``.
-
-    Phase A pre-flight registration calls ``Catalog.register()`` on every
-    index attempt, but the ``by_file_path`` early-return at
-    ``catalog.py:1218-1234`` keeps the event count at exactly one — re-
-    registration of the same ``(owner, file_path)`` pair returns the
-    existing tumbler without writing a new event.
-
-    Also asserts ``nx catalog doctor --replay-equality`` does NOT flag
-    the resulting state as drift. The R1 edge case (a first-time index
-    that staleness skips because content_hash already exists from
-    another path) produces a ``DocumentRegistered`` with no companion
-    ``ChunkIndexed`` events; replay-equality must accept that as valid
-    because the Document row IS reproducible from the event stream.
-
-    PINNED to the SQLite catalog (nexus-aqbrk), not converted, because
-    both of its instruments are local artifacts BY DESIGN: the
-    ``events.jsonl`` event log this counts, and ``nx catalog doctor
-    --replay-equality``, which is one of the local-only verbs named in
-    ``local_catalog_backend``'s own contract — "in service mode the
-    live catalog is owned by the nexus service" (nexus-kmo9h). There is
-    no service-mode event stream for the projector to replay against,
-    so the assertion is unsatisfiable rather than wrong.
-    """
-    import json as _json
-
-    from click.testing import CliRunner
-
-    from nexus.commands.catalog_cmds.doctor import doctor_cmd
-
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
-    sp = str(sample_md.resolve())
-
-    n1 = index_markdown(sample_md, corpus="rdr102-idem", t3=t3)
-    assert n1 > 0, "expected first index_markdown to upsert chunks"
-
-    after_first = _doc_registered_count(cat_dir, sp)
-    # Expected count is 1 OR 2 — Catalog.update() also writes a
-    # DocumentRegistered event (lossless replay model at
-    # catalog.py:1865-1888), so the post-hook's existing-row update
-    # for chunk_count adds a second event. The exact count depends on
-    # whether the post-hook fired (it does for count > 0). Either
-    # value is fine; the load-bearing assertion is the delta-0 check
-    # below — re-indexing an unchanged file must add ZERO events.
-    assert 1 <= after_first <= 2, (
-        f"expected 1 or 2 DocumentRegistered events after first index "
-        f"(pre-flight register + optional post-hook update); got "
-        f"{after_first}. A value > 2 indicates pre-flight or post-hook "
-        f"is double-registering — the by_file_path early-return / the "
-        f"if-existing/update branch is broken."
-    )
-
-    # Drop the process-cached Catalog so the second call re-reads the
-    # owner row written by the first call's _catalog_markdown_hook
-    # rather than reusing a stale in-memory snapshot.
-
-    n2 = index_markdown(sample_md, corpus="rdr102-idem", t3=t3)
-    assert n2 == 0, (
-        f"re-index against unchanged content must be a no-op via the "
-        f"staleness check; got {n2} chunks. If non-zero, the doc_id-keyed "
-        f"identity_where lookup may have failed and the indexer fell "
-        f"back to writing a fresh chunk set."
-    )
-
-    after_second = _doc_registered_count(cat_dir, sp)
-    assert after_second == after_first, (
-        f"re-indexing an unchanged file must add ZERO DocumentRegistered "
-        f"events (event-count delta 0). Got {after_first} after first "
-        f"index, {after_second} after second. Pre-flight "
-        f"Catalog.register() must early-return via by_file_path when the "
-        f"(owner, file_path) pair is already registered, AND the post-hook "
-        f"must skip its update branch when staleness check returned 0 "
-        f"chunks (gate: `if count > 0` at index_markdown line ~1394)."
-    )
-
-    # The replay-equality cross-check that used to run here was removed
-    # with doctor --replay-equality (nexus-i711w Stage 2 sub-stage C-store).
-    # The assertions above are this test's actual subject: pre-flight
-    # registration + the staleness-skip gate. Only the corroborating
-    # projector round-trip is gone.
+# test_preflight_registration_idempotent_on_staleness_skip retired
+# (nexus-i711w terminal deletion): both of its instruments were local
+# artifacts by design — the events.jsonl DocumentRegistered count and
+# `nx catalog doctor --replay-equality` — and died with the local catalog.
+# The register() same-file_path idempotency contract itself is still owed
+# a service-side test (GAP nexus-i711w.1 item 9).
 
 
 @pytest.fixture(autouse=True)

@@ -18,16 +18,13 @@ Tests use a real T3Database backed by chromadb's EphemeralClient +
 DefaultEmbeddingFunction so we exercise the full delete-by-chunk-ids
 machinery without Cloud credentials.
 
-CATALOG SUBSTRATE (nexus-i711w Stage 2). The GC verb reads its alive-set
-through ``make_catalog_reader()``, so the tests seed through the SAME
-factory (``ActiveCatalog``) and let the command resolve the catalog for
+CATALOG SUBSTRATE (nexus-i711w terminal deletion). The GC verb reads its
+alive-set through ``make_catalog_reader()``, so the tests seed through the
+SAME factory (``ActiveCatalog``) and let the command resolve the catalog for
 itself — no ``_make_catalog`` patch, hence no seed-here / read-there split.
-Two tests are the exception and stay PINNED to the local SQLite catalog
-because their subject only exists there; each says so at its own site.
-``nexus.catalog.catalog`` / ``nexus.catalog.event_log`` /
-``nexus.catalog.events`` are therefore imported INSIDE those two bodies and
-the local fixture — never at module scope — so this file still collects once
-the local catalog is deleted.
+The two tests that were PINNED to the local SQLite catalog (the events.jsonl
+audit trail and the uninitialized-catalog abort) RETIRED with it; tombstones
+at their former sites carry the coverage warnings.
 """
 from __future__ import annotations
 
@@ -74,21 +71,10 @@ def active_catalog() -> ActiveCatalog:
     return ActiveCatalog()
 
 
-@pytest.fixture()
-def local_catalog(tmp_path):
-    """A real LOCAL SQLite ``Catalog`` rooted in tmp_path.
-
-    ONLY for the two tests whose subject is local-catalog-specific (the
-    ``events.jsonl`` audit trail, and the ``make_catalog_reader() is None``
-    init gate). Both carry ``local_catalog_backend``; both retire with the
-    local catalog itself, not before.
-    """
-    from nexus.catalog.catalog import Catalog
-
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
+# local_catalog fixture RETIRED with the local catalog (nexus-i711w
+# terminal deletion); its two consumers (the events.jsonl audit-trail test
+# and the uninitialized-catalog abort test) retired with it — see the
+# tombstones at their former sites.
 
 
 def _chunk_orphaned_events(catalog: Any) -> list | None:
@@ -105,13 +91,13 @@ def _chunk_orphaned_events(catalog: Any) -> list | None:
     cat_dir = getattr(catalog, "_dir", None)
     if cat_dir is None:
         return None
-
-    from nexus.catalog.event_log import EVENTS_FILENAME, EventLog
-    from nexus.catalog.events import TYPE_CHUNK_ORPHANED
-
-    if not (cat_dir / EVENTS_FILENAME).exists():
-        return None
-    return [e for e in EventLog(cat_dir).replay() if e.type == TYPE_CHUNK_ORPHANED]
+    # nexus-i711w terminal deletion: nexus.catalog.event_log / .events are
+    # gone, so a catalog handle exposing a ``_dir`` would be a reintroduction
+    # of the local event log — fail loud rather than pretend to read it.
+    raise AssertionError(
+        f"catalog handle unexpectedly exposes _dir={cat_dir!r}; the local "
+        f"event log was deleted with the local catalog (nexus-i711w)"
+    )
 
 
 def _seed_chunk(
@@ -235,39 +221,8 @@ def _register_doc_active(
     return str(tumbler)
 
 
-def _register_doc_local(
-    catalog: Any,
-    *,
-    tumbler: str,
-    collection: str,
-    chashes: list[str] | None = None,
-) -> None:
-    """Seed a document row directly so the catalog manifest references it.
-
-    LOCAL-CATALOG ONLY — the sole remaining caller is the pinned event-log
-    test. Retires with that test and the local catalog (nexus-i711w).
-
-    Bypasses ``Catalog.register`` (which mints its own tumbler off an
-    owner prefix). nexus-e5aw: also writes manifest rows for the given
-    ``chashes`` so ``Catalog.chashes_for_collection`` returns them as
-    referenced (live).
-    """
-    catalog._db.execute(  # epsilon-allow: GC alive_set fixture; Catalog.register would mint its own tumbler instead of pinning to the test value
-        "INSERT INTO documents "
-        "(tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        "metadata, source_mtime, alias_of, source_uri) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            tumbler, f"doc-{tumbler}", "", 0, "text", f"/tmp/{tumbler}.md",
-            "", collection, 1, "", "", "{}", 0.0, "", "",
-        ),
-    )
-    catalog._db.commit()
-    if chashes:
-        catalog.write_manifest(tumbler, [
-            {"chash": c, "position": i} for i, c in enumerate(chashes)
-        ])
+# _register_doc_local RETIRED with the local catalog (nexus-i711w terminal
+# deletion); its sole caller was the pinned event-log test, retired below.
 
 
 def test_gc_dry_run_reports_orphans_no_mutation(
@@ -312,68 +267,11 @@ def test_gc_dry_run_reports_orphans_no_mutation(
         assert events == []
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
-def test_gc_emits_chunk_orphaned_event_before_delete(
-    t3_db, local_catalog, tmp_path, runner,
-):
-    """``--no-dry-run --yes`` emits ChunkOrphaned BEFORE deleting the chunk.
-
-    Strict-order contract from RF-101-3: a crash between event-write and
-    delete leaves the log consistent with T3 (event present, delete
-    pending; next gc retries the delete).
-
-    nexus-i711w: PINNED to the local SQLite catalog, and the ``_make_catalog``
-    patch stays, because ``events.jsonl`` IS the subject. Production already
-    skips emission when the catalog has no local directory
-    (``commands/t3.py``: ``event_log = EventLog(cat_dir) if cat_dir is not
-    None else None``), so there is no service-mode assertion to port this to —
-    only a local event log can hold a ChunkOrphaned record.
-
-    ⚠️ THE STRICT-ORDER CONTRACT IS THEREFORE UNCOVERED ON THE SERVICE ARM,
-    because on that arm it does not exist: the delete happens with no local
-    audit record at all. Do not read this test's green as coverage there.
-    """
-    coll = "knowledge__test_gc_emit"
-    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
-    live_chash = "a" * 64
-    _register_doc_local(
-        local_catalog, tumbler="1.1.1", collection=coll, chashes=[live_chash],
-    )
-    _seed_chunk(
-        t3_db, collection=coll, chunk_id="alive1", content="a",
-        chunk_text_hash=live_chash, indexed_at=long_ago,
-    )
-    _seed_chunk(
-        t3_db, collection=coll, chunk_id="orphan1", content="o",
-        chunk_text_hash="b" * 64, indexed_at=long_ago,
-    )
-    _seed_chunk(
-        t3_db, collection=coll, chunk_id="orphan2", content="o2",
-        chunk_text_hash="c" * 64, indexed_at=long_ago,
-    )
-
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.t3._make_catalog", return_value=local_catalog):
-        result = runner.invoke(
-            main,
-            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
-        )
-
-    assert result.exit_code == 0, result.output
-    assert "deleted 2" in result.output
-
-    # Alive chunk survives
-    surviving = t3_db._client.get_collection(coll).get()["ids"]
-    assert surviving == ["alive1"]
-
-    # ChunkOrphaned events emitted, one per deleted chunk
-    from nexus.catalog.event_log import EventLog
-    from nexus.catalog.events import TYPE_CHUNK_ORPHANED
-
-    log = EventLog(local_catalog._dir)
-    orphan_events = [e for e in log.replay() if e.type == TYPE_CHUNK_ORPHANED]
-    chunk_ids = {e.payload.chunk_id for e in orphan_events}
-    assert chunk_ids == {"orphan1", "orphan2"}
+# test_gc_emits_chunk_orphaned_event_before_delete RETIRED with the local
+# catalog (nexus-i711w terminal deletion): ``events.jsonl`` WAS the subject
+# (RF-101-3 strict order: emit ChunkOrphaned BEFORE delete). ⚠️ THE
+# STRICT-ORDER CONTRACT IS UNCOVERED ON THE SERVICE ARM because on that arm
+# it does not exist — the delete happens with no local audit record at all.
 
 
 def test_gc_orphan_window_excludes_recent(t3_db, tmp_path, runner):
@@ -504,39 +402,13 @@ def test_gc_chunk_with_missing_chunk_text_hash_skipped(
     assert "pre-RDR-053" in result.output
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
-def test_gc_aborts_on_uninitialized_catalog(t3_db, tmp_path, runner, monkeypatch):
-    """nx t3 gc on an uninitialized catalog must raise a clear error,
-    not crash with an opaque traceback or silently produce an empty
-    alive-set (which would treat every chunk as orphan).
-
-    nexus-aqbrk: PINNED to the sqlite catalog because the premise is
-    UNREPRESENTABLE in service mode — the guard is `make_catalog_reader()
-    is None`, and the factory always returns a handle there, so nothing
-    aborts and the command exits 0.
-
-    ⚠️ THIS TEST THEREFORE DOES NOT COVER THE SERVICE ARM, and the hazard
-    its own docstring names is UNGUARDED there: filed as nexus-jqrtp (P1).
-    The alive-set comes from cat.chashes_for_collection(), and an empty
-    return makes every chunk an orphan candidate — reachable on a fresh or
-    mis-scoped tenant without anything being wrong with the client. Three
-    other layers still stand (--dry-run default, --yes required,
-    --orphan-window), so it is not a one-keystroke foot-gun; but the last
-    line of defence for a DESTRUCTIVE command is missing on the substrate
-    that is about to become the only one.
-
-    Do not read this test's green as protection for service mode.
-    """
-    bare_path = tmp_path / "no-such-catalog"
-    monkeypatch.setattr(
-        "nexus.config.catalog_path", lambda: bare_path,
-    )
-    with patch("nexus.db.make_t3", return_value=t3_db):
-        result = runner.invoke(
-            main, ["t3", "gc", "-c", "knowledge__test", "--dry-run"],
-        )
-    assert result.exit_code != 0
-    assert "not initialized" in result.output.lower()
+# test_gc_aborts_on_uninitialized_catalog RETIRED with the local catalog
+# (nexus-i711w terminal deletion): its premise (make_catalog_reader() is
+# None) is UNREPRESENTABLE service-side — the factory always returns a
+# handle. ⚠️ The hazard it guarded remains UNGUARDED on the service arm,
+# filed as nexus-jqrtp (P1): an empty ``chashes_for_collection()`` return
+# (fresh or mis-scoped tenant) makes every chunk an orphan candidate; the
+# remaining defence layers are --dry-run default, --yes, --orphan-window.
 
 
 def test_gc_orphan_window_rejects_zero(runner):

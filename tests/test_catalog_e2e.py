@@ -55,10 +55,10 @@ def _write(repo, rel, content):
 # while the VECTOR half stays on the test seam (``make_vector_test_client``
 # via the ``make_t3`` patch) — only the catalog substrate moves.
 #
-# Tests whose SUBJECT is the local machinery (JSONL rebuild/compact, the
-# local-only ``link_audit(t3=...)`` chash audit) stay pinned through the
-# ``catalog_env`` fixture, which now carries ``local_catalog_backend``, and
-# retire with the local catalog in the same commit as the src.
+# Tests whose SUBJECT was the local machinery (JSONL rebuild/compact, the
+# local-only ``link_audit(t3=...)`` chash audit) retired WITH the local
+# catalog src (nexus-i711w terminal deletion) — see the fixture tombstone
+# below for the recorded GAP-CANDIDATEs.
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -125,53 +125,15 @@ def mock_voyage_client():
         yield mock_client
 
 
-@pytest.fixture
-def catalog_env(tmp_path: Path, monkeypatch, local_catalog_backend) -> Path:
-    """LOCAL catalog dir — the DIE-set carrier (nexus-i711w).
-
-    Requests ``local_catalog_backend`` so every test that still constructs a
-    raw local ``Catalog`` is pinned explicitly rather than incidentally.
-    Retirement: this fixture and its dependents go with the local catalog
-    src, in the same commit — not before.
-    """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying-module import stays out of module scope (nexus-i711w hostage rule)
-
-    catalog_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
-    return catalog_dir
-
-
-@pytest.fixture
-def indexed_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch):
-    """DIE-set sibling of ``indexed_active``: local catalog handle after an
-    index run, for tests whose subject is the local machinery."""
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying-module import stays out of module scope (nexus-i711w hostage rule)
-
-    _do_index(catalog_repo, registry, local_t3, monkeypatch)
-    return Catalog(catalog_env, catalog_env / ".catalog.db"), local_t3
-
-
-@pytest.fixture
-def injected_catalog(indexed_catalog):
-    """Return the indexed catalog. NEXUS_CATALOG_PATH is already set by the
-    ``catalog_env`` fixture (transitively required), so ``get_catalog()``
-    in production code will construct a fresh Catalog at the same path
-    and read the test's data — no explicit injection needed.
-
-    RDR-120 P6 (nexus-qg86h): direct-mode dispatch removed. The MCP
-    ``get_t3()`` singleton now routes through ``make_t3_client()``
-    which needs a running daemon. Tests don't have a daemon, so we
-    pre-seed ``_t3_instance`` with the fixture's local T3 so the
-    singleton skips ``make_t3()`` entirely.
-    """
-    from nexus.mcp_server import _reset_singletons
-    from nexus import mcp_infra
-
-    cat, local_t3 = indexed_catalog
-    _reset_singletons()
-    mcp_infra._t3_instance = local_t3
-    return cat, local_t3
+# nexus-i711w terminal deletion: the DIE-set carrier fixtures
+# (catalog_env / indexed_catalog / injected_catalog) retired WITH
+# nexus.catalog.catalog and their 6 pinned tests (link-audit, JSONL
+# rebuild/compact, chash-span audit roundtrip, compact-leg tumbler
+# permanence). GAP-CANDIDATEs recorded here from the dead tests'
+# docstrings: the link-audit contract survives (the MCP tool ships in
+# service mode) but HttpCatalogClient.link_audit returns {} — nothing
+# pins it or the stale-chash audit on the surviving substrate; needs a
+# service-side implementation + test, not a conversion.
 
 
 @pytest.fixture
@@ -327,21 +289,6 @@ class TestMCP:
         # nexus-8g79.23: we just created exactly one link.
         assert len(catalog_link_query(link_type="relates", created_by="test")) == 1
 
-    def test_link_audit_after_indexing(self, injected_catalog):
-        """DIE (nexus-i711w): pinned local via the ``catalog_env`` chain.
-
-        GAP-CANDIDATE: the link-audit CONTRACT survives (the MCP tool ships
-        in service mode), but ``HttpCatalogClient.link_audit`` returns ``{}``
-        ("not supported in initial service-mode implementation",
-        http_catalog_client.py:1666), so nothing pins it on the surviving
-        substrate. Needs a service-side audit implementation + test, not a
-        conversion of this one. Retires with the local catalog src.
-        """
-        from nexus.mcp_server import catalog_link_audit
-        audit = catalog_link_audit()
-        assert "error" not in audit and audit["total"] == 2
-        assert audit["orphaned_count"] == 0
-
 
 # ── Link generation + lifecycle ──────────────────────────────────────────────
 
@@ -432,29 +379,6 @@ def test_store_put_registers_in_catalog():
 # ── Tumbler permanence ───────────────────────────────────────────────────────
 
 
-def test_tumblers_stable_across_delete_compact_reindex(
-    catalog_repo, registry, local_t3, catalog_env, monkeypatch,
-):
-    """DIE (nexus-i711w): ``compact()`` is JSONL machinery — dropped in
-    service mode (NotImplementedError, catalog-git-DECISION OPTION C). The
-    surviving meaning (delete + reindex never reuses a tumbler) is ported as
-    ``test_tumblers_stable_across_delete_reindex`` below. Retires with the
-    local catalog src.
-    """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying-module import stays out of module scope (nexus-i711w hostage rule)
-
-    _do_index(catalog_repo, registry, local_t3, monkeypatch)
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    original = {r[0] for r in cat._db.execute("SELECT tumbler FROM documents").fetchall()}
-    first_tumbler = sorted(original)[0]
-    cat.delete_document(Tumbler.parse(first_tumbler))
-    cat.compact()
-    _do_index(catalog_repo, registry, local_t3, monkeypatch, force=True)
-    new = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
-           ._db.execute("SELECT tumbler FROM documents").fetchall()}
-    assert first_tumbler not in new and len(new) >= len(original) - 1
-
-
 def test_tumblers_stable_across_delete_reindex(
     catalog_repo, registry, local_t3, monkeypatch,
 ):
@@ -492,49 +416,7 @@ def test_link_with_line_span_resolves_text(tmp_path):
     assert cat.resolve_span_text(doc_a, "2-4") == "line2\nline3\nline4"
 
 
-# ── JSONL rebuild + compact ──────────────────────────────────────────────────
-
-
-class TestJSONLResilience:
-    """DIE (nexus-i711w): the SUBJECT is the local JSONL event log — rebuild
-    into a fresh ``.db`` projection and compaction. Both operations are
-    dropped in service mode by design (Postgres is the sole authority;
-    catalog-git-DECISION OPTION C), so there is no surviving contract to
-    port. Pinned via the ``catalog_env`` chain; retires with the src."""
-
-    def test_fresh_catalog_sees_indexed_data(self, indexed_catalog, catalog_env):
-        from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying-module import stays out of module scope (nexus-i711w hostage rule)
-
-        assert Catalog(catalog_env, catalog_env / ".catalog-fresh.db")._db.execute(
-            "SELECT count(*) FROM documents"
-        ).fetchone()[0] >= len(_CODE_FILES)
-
-    def test_compact_and_rebuild(self, indexed_catalog, catalog_env):
-        from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — dying-module import stays out of module scope (nexus-i711w hostage rule)
-
-        cat, _ = indexed_catalog
-        before = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-        cat.compact()
-        after = Catalog(catalog_env, catalog_env / ".catalog-compact.db")._db.execute(
-            "SELECT count(*) FROM documents"
-        ).fetchone()[0]
-        assert after == before
-
-
 # ── chash span pipeline (RDR-053) ────────────────────────────────────────────
-
-
-def _get_two_docs_and_chunk(cat, local_t3):
-    docs = cat._db.execute(
-        "SELECT tumbler, physical_collection FROM documents LIMIT 2"
-    ).fetchall()
-    # nexus-8g79.23: LIMIT 2 over a non-empty seeded fixture returns 2.
-    assert len(docs) == 2
-    col = local_t3._client.get_collection(docs[0][1])
-    chunk = col.get(limit=1, include=["documents", "metadatas"])
-    assert chunk["ids"]
-    return (Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]), docs[0][1],
-            chunk["metadatas"][0]["chunk_text_hash"], chunk["documents"][0])
 
 
 class TestChashSpan:
@@ -556,41 +438,6 @@ class TestChashSpan:
             assert meta["chunk_text_hash"] != meta["content_hash"]
             # RDR-180 (nexus-jxizy.3): chunk natural ID is the FULL digest.
             assert chunk_id == expected
-
-    def test_audit_and_resolve_roundtrip(self, indexed_catalog):
-        """DIE (nexus-i711w): pinned local via ``indexed_catalog``.
-
-        GAP-CANDIDATE, two-fold: (1) ``link_audit(t3=...)`` chash staleness
-        is unimplemented on the service client (returns {}); (2) the service
-        ``resolve_span`` resolves against the ENGINE's chunk store
-        (GET /resolve_span), which cannot see this harness's local vector
-        seam — the roundtrip needs a coherent service-side E2E, not a
-        conversion. Retires with the local catalog src.
-        """
-        cat, local_t3 = indexed_catalog
-        from_t, to_t, coll, real_hash, real_text = _get_two_docs_and_chunk(cat, local_t3)
-        assert cat.link(from_t, to_t, "quotes", "e2e-test", from_span=f"chash:{real_hash}") is True
-        assert cat.link_audit(t3=local_t3._client)["stale_chash_count"] == 0
-        resolved = cat.resolve_span(f"chash:{real_hash}", coll, local_t3._client)
-        assert resolved is not None
-        assert resolved["chunk_text"] == real_text and resolved["chunk_hash"] == real_hash
-
-    def test_audit_detects_bogus_hash(self, indexed_catalog):
-        """DIE (nexus-i711w): same GAP-CANDIDATE as the roundtrip above —
-        the stale-chash audit contract survives but has no service-side
-        implementation to pin it against. Retires with the local catalog src.
-        """
-        cat, local_t3 = indexed_catalog
-        docs = cat._db.execute("SELECT tumbler FROM documents LIMIT 2").fetchall()
-        # nexus-8g79.23: seeded fixture has ≥2 docs; LIMIT 2 returns 2.
-        assert len(docs) == 2
-        bogus = "f" * 64
-        cat.link(Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]),
-                 "quotes", "e2e-test", from_span=f"chash:{bogus}")
-        audit = cat.link_audit(t3=local_t3._client)
-        # nexus-8g79.23: we created exactly one bogus link above.
-        assert audit["stale_chash_count"] == 1
-        assert f"chash:{bogus}" in [s["span"] for s in audit["stale_chash"]]
 
 
 # ── Tumbler ordering ─────────────────────────────────────────────────────────
