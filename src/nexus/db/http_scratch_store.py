@@ -441,8 +441,9 @@ class HttpScratchStore:
     ) -> "PromotionReport":
         """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport.
 
-        *t2* may be a direct ``T2Database`` or a daemon-backed ``T2Client``
-        (RDR-128 P3) — both expose ``.put()`` and ``.memory``.
+        *t2* is a ``T2Database`` (or any object exposing ``.put()`` and
+        ``.memory`` — the shape the retired daemon-backed ``T2Client``
+        also had, RDR-128 P3; the daemon died in RDR-158 P4).
 
         Overlap detection mirrors :meth:`T1Database.promote`: fetches the entry
         from the T1 service, runs :func:`~nexus.db.t1._find_promote_overlap_candidates`

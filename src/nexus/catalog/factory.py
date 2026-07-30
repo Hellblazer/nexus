@@ -136,7 +136,17 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
     The ``Optional`` return annotation is historical (the deleted SQLite
     leg returned ``None`` when the catalog dir was uninitialised); callers'
     None-guards are now dead but harmless.
+
+    The resolver call is validation only (RDR-158 P3/Stage 5): with the
+    local catalog deleted, no seam resolved ``storage_backend_for("catalog")``
+    any more, so a stranded ``NX_STORAGE_BACKEND_CATALOG=sqlite`` export was
+    silently ignored — the exact silent-ignore the fail-loud directive bans.
+    The factory is where every catalog consumer routes, so it fails here
+    with the stranded-install redirect.
     """
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid import cycle
+
+    storage_backend_for("catalog")
     _log.debug("catalog_reader_service_mode")
     return _SharedServiceCatalogHandle()
 
@@ -150,7 +160,11 @@ def make_catalog_writer(
     :data:`CATALOG_WRITE_OPS` whitelist and forwards writes to the Java
     Postgres service via HTTP. *priority* is ignored (the service enforces
     its own fairness); the parameter survives for call-site compatibility.
+    The resolver call is validation only — see :func:`make_catalog_reader`.
     """
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid import cycle
+
+    storage_backend_for("catalog")
     _log.debug("catalog_writer_service_mode")
     return _ServiceCatalogWriter(_SharedServiceCatalogHandle())
 

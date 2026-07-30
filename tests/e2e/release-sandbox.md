@@ -22,7 +22,7 @@ Recommended for any change that "feels like it might ship differently than it te
 
 Editable installs (`uv sync` / `pip install -e .`) walk the source tree for package data. A wheel install (`uv tool install`) only sees what `pyproject.toml` declared as package data. Files that exist on disk but are not in the wheel manifest disappear silently.
 
-Same hazard for version-gated migrations: `apply_pending` filters by `pyproject.toml`'s version, so a migration written at `4.14.0` is invisible to a tool venv still on `4.13.0`. CI sees the new migration in the source tree and runs it; users with stale local installs do not.
+The same hazard historically applied to version-gated client migrations (`apply_pending` filtered by `pyproject.toml`'s version, so a migration written at `4.14.0` was invisible to a tool venv still on `4.13.0`). The client migration chain is deleted (RDR-158 P4, nexus-i711w) — schema is engine-owned via Liquibase — but the wheel-vs-source-tree gap it illustrated still applies to any version-gated behavior.
 
 `release-sandbox.sh` mirrors a fresh PyPI install and runs the canary checks against that, so deployment gaps surface here instead of in user reports.
 

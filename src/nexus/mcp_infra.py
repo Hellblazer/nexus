@@ -404,24 +404,14 @@ def reset_plan_cache_for_tests() -> None:
 
 
 def get_catalog():
-    """Return a fresh Catalog or None when not initialised.
+    """Return a catalog reader (HttpCatalogClient) or None when unavailable.
 
-    No process-level caching; each call constructs a Catalog at
-    ``catalog_path()``. ``Catalog.__init__`` runs ``_ensure_consistent``
-    so cross-process JSONL refreshes are picked up automatically.
-    Callers that issue many lookups in tight loops should construct
-    once and pass the result down (top-down DI) — see also
-    ``commands/catalog.py:_get_catalog`` for the established pattern.
-
-    Tests that need a specific Catalog instance under test set
-    ``NEXUS_CATALOG_PATH`` (which ``catalog_path()`` reads) so this
-    function constructs at the test's location; the autouse
-    ``_isolate_catalog`` fixture in ``tests/conftest.py`` provides
-    a per-test default.
+    RDR-146 P1.2: get_catalog() is the READ funnel. Writers must use
+    :func:`get_catalog_writer`; the boundary lint bans bare catalog
+    construction in consumer code. Since the local SQLite catalog's
+    deletion (RDR-158 P4, nexus-i711w) the factory is service-only —
+    this returns the shared ``HttpCatalogClient`` against the engine.
     """
-    # RDR-146 P1.2: get_catalog() is the READ funnel — it returns a
-    # read-only local Catalog (or None when uninitialised). Writers must
-    # use get_catalog_writer(); the boundary lint bans bare Catalog(...).
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
     return make_catalog_reader()
 
@@ -429,9 +419,10 @@ def get_catalog():
 def get_catalog_writer():
     """Return a write-only catalog proxy (RDR-146 P1.2).
 
-    Routes the whitelisted write ops through the T2 daemon (the single
-    .catalog.db writer) when reachable, else a direct in-process Catalog.
-    Always returns a CatalogWriter; callers ``.close()`` it when done.
+    Routes the whitelisted write ops (``CATALOG_WRITE_OPS``) to the
+    engine's HTTP catalog via ``_ServiceCatalogWriter`` (the T2-daemon
+    routing this originally described died in RDR-158 P4, nexus-i711w).
+    Always returns a writer proxy; callers ``.close()`` it when done.
 
     RDR-146 P2 (nexus-5p2ci.12): MCP tool invocations are user-initiated and
     latency-sensitive (``store_put`` / ``memory promote`` register through

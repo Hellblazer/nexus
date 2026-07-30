@@ -30,11 +30,9 @@ if TYPE_CHECKING:
     # transformers -> torch at module load. With this import at
     # runtime, every `from nexus.db.<sub> import ...` triggers
     # nexus.db.__init__ which fires the torch import (multi-second).
-    # The CLI hits this path via nexus.cli -> nexus.commands.catalog
-    # -> nexus.catalog.catalog -> nexus.catalog.catalog_db ->
-    # `from nexus.db.t2 import _sanitize_fts5`. Lazy-loading the
-    # T3Database import inside make_t3() removes torch from the cold-
-    # start cost of `nx <subcommand>` invocations.
+    # Any CLI subcommand importing under nexus.db hits this path.
+    # Lazy-loading the T3Database import inside make_t3() removes
+    # torch from the cold-start cost of `nx <subcommand>` invocations.
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.db.t3 import T3Database
 

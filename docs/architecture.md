@@ -409,27 +409,23 @@ The partial-commit failure mode (a batch hook commits an early sub-step then rai
 ## T2 Domain Stores
 
 `src/nexus/db/t2/` is a Python package split into eight domain-specific
-stores. Each store owns its own tables in a shared SQLite file and runs
-against its own `sqlite3.Connection` in WAL mode. Reads in one domain
-are never blocked by writes in another (the Phase 1 global Python
-mutex is gone); concurrent writes across domains still serialize at
-SQLite's single-writer WAL lock. Each serving connection sets
-`busy_timeout=30000` (the shared `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`,
-raised from 5000 in [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B1 after two shakeouts showed 5s was too short to
-absorb sustained cross-store contention) and the daemon dispatch retries on a
-transient `database is locked` ([RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B2), so a contention window becomes a
-wait rather than a dropped write.
+stores. Each store is an HTTP client (`Http*Store`) against the
+engine's Postgres — the SQLite twins that used to own tables in a
+shared `memory.db` were deleted in RDR-158 P4 (nexus-i711w), and the
+engine's Postgres is the single write arbiter. Cross-store contention
+tuning (`busy_timeout`, WAL single-writer serialization, the daemon
+dispatch retry of [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B1/B2) died with that substrate.
 
-| Store             | Class                     | Attribute              | Responsibility                                                             |
-|-------------------|---------------------------|------------------------|----------------------------------------------------------------------------|
-| Memory            | `MemoryStore`             | `db.memory`            | Persistent notes, project context, FTS5 search, access tracking, TTL       |
-| Plans             | `PlanLibrary`             | `db.plans`             | Plan templates, plan search, plan TTL                                      |
-| Taxonomy          | `CatalogTaxonomy`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
-| Telemetry         | `Telemetry`               | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
-| Chash index       | `ChashIndex`              | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
-| Document aspects  | `DocumentAspects`         | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
-| Aspect queue      | `AspectExtractionQueue`   | `db.aspect_queue`      | Durable WAL buffer feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
-| Document highlights | `DocumentHighlights`    | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
+| Store             | Class                       | Attribute              | Responsibility                                                             |
+|-------------------|-----------------------------|------------------------|----------------------------------------------------------------------------|
+| Memory            | `HttpMemoryStore`           | `db.memory`            | Persistent notes, project context, full-text search, access tracking, TTL  |
+| Plans             | `HttpPlanLibrary`           | `db.plans`             | Plan templates, plan search, plan TTL                                      |
+| Taxonomy          | `HttpTaxonomyStore`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
+| Telemetry         | `HttpTelemetryStore`        | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
+| Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
+| Document aspects  | `HttpDocumentAspectsStore`  | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
+| Aspect queue      | `HttpAspectQueue`           | `db.aspect_queue`      | Durable queue feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
+| Document highlights | `HttpDocumentHighlightsStore` | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
 
 `T2Database` is a composing facade: it constructs the eight stores in
 order (memory → plans → taxonomy → telemetry → chash_index →
@@ -438,8 +434,8 @@ methods as thin delegates for backward compatibility, and runs
 cross-domain operations like `expire()` over all of them. The
 chash_index, taxonomy, document_aspects, and aspect_queue domains are
 accessed directly via their attributes -- no facade delegates exist
-for them. The facade holds no database connection of its own; every
-SQL statement runs through a specific domain store.
+for them. The facade holds no connection of its own; every
+operation runs through a specific domain store's HTTP client.
 
 **Preferred call style for new code**:
 
@@ -453,7 +449,13 @@ db.telemetry.log_relevance(query, ...)             # domain method
 Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
 etc. continue to work via facade delegation -- no migration required.
 
-### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2)
+### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
+
+> **This subsection describes the retired SQLite substrate.** The per-store
+> `sqlite3.Connection`s, WAL locks, and `busy_timeout` tuning below were
+> deleted with the SQLite stores (RDR-158 P4, nexus-i711w); concurrency is
+> now arbitered by the engine's Postgres. Kept as design heritage for the
+> domain-split shape the HTTP twins inherited.
 
 Phase 2 replaced a single shared connection with per-store connections:
 

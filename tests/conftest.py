@@ -399,38 +399,6 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-@pytest.fixture
-def local_catalog_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the CATALOG store to SQLite for tests that drive the local catalog.
-
-    Opt in per file with::
-
-        pytestmark = pytest.mark.usefixtures("local_catalog_backend")
-
-    NOT a substrate workaround. A family of catalog verbs is local-only BY
-    DESIGN and says so in its own error text — ``nx catalog synthesize-log``
-    and the doctor replay/consistency verbs "operate on the LOCAL catalog
-    (event log / JSONL / projection); in service mode the live catalog is
-    owned by the nexus service" (nexus-kmo9h). The same seam that makes that
-    true also makes these tests fail under the engine substrate: ``Catalog``
-    forces ``read_only=True`` whenever ``storage_backend_for("catalog")`` is
-    SERVICE and the file exists, because in service mode the local
-    ``.catalog.db`` is a FROZEN MIGRATION SOURCE that must not be mutated
-    (RDR-176 Phase 1 Gap 2, enforced by
-    tests/catalog/test_rdr176_catalog_non_mutation.py). A test that calls
-    ``Catalog.init`` and then registers anything therefore dies on
-    "attempt to write a readonly database" — the invariant working exactly as
-    designed, against a test that wants the local catalog on purpose.
-
-    So this fixture states the intent the test always had, and keeps coverage
-    of a verb family that still works, rather than skipping it.
-
-    Retirement note: these tests go with the local catalog itself, in
-    nexus-i711w — not before, and not silently.
-    """
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-
-
 @pytest.fixture(autouse=True)
 def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
     """Route every test to the session's T2 substrate — the ENGINE.
@@ -490,48 +458,6 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
             "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
         )
     request.getfixturevalue("t2_service_env")
-
-
-@pytest.fixture
-def local_t2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the T2 stores to SQLite for tests that drive the LOCAL T2 database.
-
-    Opt in per file or per class with::
-
-        pytestmark = pytest.mark.usefixtures("local_t2_backend")
-        @pytest.mark.usefixtures("local_t2_backend")
-        class TestSomethingLocal: ...
-
-    The T2 counterpart of :func:`local_catalog_backend`, and NOT a substrate
-    workaround. A family of doctor verbs operates on the LOCAL SQLite artifact
-    by design and says so in its own output — ``doctor --check-schema`` reports
-    "T2 schema is service-backed (Postgres, Liquibase-managed) — local SQLite
-    schema check N/A in service mode" (nexus-p0clh), and ``--trim-telemetry``
-    routes to ``HttpTelemetryStore`` rather than touching the frozen local file
-    (nexus-ingey). Tests that seed a real ``memory.db`` with ``sqlite3.connect``
-    + ``apply_pending`` and then assert on that file are testing the LOCAL arm
-    on purpose; under the engine substrate the verb correctly looks elsewhere,
-    so the assertion becomes unsatisfiable rather than wrong.
-
-    ORDERING: this is deliberately NOT autouse. Non-autouse fixtures resolve
-    AFTER autouse ones, so its ``setenv`` lands later than
-    ``_pin_t2_substrate`` / ``t2_service_env`` on the same
-    monkeypatch and wins — the same contract ``cloud_mode`` relies on. Setting
-    the GLOBAL ``NX_STORAGE_BACKEND`` (not a per-domain override) is
-    intentional: it re-pins every T2 domain at once, including ``telemetry``,
-    which ``t2_service_env`` only ever set globally.
-
-    BEFORE ADDING A CALLER, verify the SERVICE half is owned somewhere and name
-    it. For the two current callers it is:
-      - ``doctor --check-schema``  -> tests/test_doctor_check_schema_service_mode.py
-      - ``doctor --trim-telemetry``-> tests/test_false_clean_diagnostics_service_mode.py
-    A pin without a named service-half owner silently drops coverage the moment
-    nexus-i711w deletes the SQLite stores these tests ride on.
-
-    Retirement note: callers of this fixture go with the local T2 database
-    itself, in nexus-i711w — not before, and not silently.
-    """
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
 
 
 @pytest.fixture(autouse=True)

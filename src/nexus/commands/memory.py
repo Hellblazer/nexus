@@ -229,11 +229,11 @@ def _delete_with_taxonomy_cascade(
     """Memory + taxonomy cascade — replaces the facade-side cascade.
 
     The pre-RDR-120 ``T2Database.delete`` ran (1) ``memory.delete`` and
-    (2) ``taxonomy.purge_assignments_for_doc`` in sequence. T2Client's
-    ``database`` proxy doesn't expose the facade method, so the CLI
-    drives the cascade itself with two store-level RPC calls. In direct
-    mode (tests injecting a T2Database via the handle), the same two
-    calls hit the in-process facade and produce identical state.
+    (2) ``taxonomy.purge_assignments_for_doc`` in sequence. The CLI
+    drives the cascade itself with two store-level calls (a shape
+    inherited from the retired daemon ``T2Client`` era, RDR-158 P4);
+    the same two calls hit the facade's HTTP stores and produce
+    identical state.
     """
     deleted = db.memory.delete(project=project, title=title, id=id)
     if deleted and project and title:

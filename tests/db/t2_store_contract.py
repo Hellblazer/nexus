@@ -29,7 +29,9 @@ snapshot would let Http*-store drift accumulate undetected — keep it current.
 from __future__ import annotations
 
 # Methods present on every store base but not part of the storage contract.
-_UNIVERSAL_IGNORE = {"close", "conn", "bootstrap_schema"}
+# ("bootstrap_schema" was dropped with the deleted client migration chain —
+# RDR-158 P4 Stage 5, nexus-i711w.)
+_UNIVERSAL_IGNORE = {"close", "conn"}
 
 # {store_label: {public_method_name: [ordered non-self parameter names]}}
 T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {

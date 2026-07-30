@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Deprecation shim — taxonomy moved to nexus.db.t2.catalog_taxonomy.
+"""Deprecation shim — taxonomy lives on ``T2Database.taxonomy``
+(the HTTP taxonomy store; the SQLite ``catalog_taxonomy`` twin died in
+RDR-158 P4, nexus-i711w).
 
 Thin compatibility shim so existing import sites (tests, CLI commands)
 continue to work without modification. Each wrapper accepts a

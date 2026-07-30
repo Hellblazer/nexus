@@ -139,10 +139,10 @@ def _safe_json_dict(s: str | None) -> dict:
 
 
 # Rehomed from the deleted SQLite memory_store.py (nexus-i711w Stage 2
-# sub-stage A3): pure text escaping with no substrate. Surviving consumer
-# is the FTS query path in db/t2/catalog.py (CatalogStore, which itself
-# retires with the terminal i711w deletion) via the nexus.db.t2 re-export
-# that nexus.catalog.catalog_db imports at module load.
+# sub-stage A3): pure text escaping with no substrate. Its SQLite
+# consumers (CatalogStore's FTS path, catalog_db) died with the terminal
+# i711w deletion; it survives via the nexus.db.t2 re-export with tests
+# pinning the escaping contract (tests/test_t2.py).
 _FTS5_SPECIAL = set('-:()\'"^~.*+/,;?!#@$%&|\\<>[]{}=')
 
 

@@ -139,24 +139,20 @@ class T2Database:
         # (Gaps 1-3 per the RDR).
         #
         # Lock type: ``threading.RLock`` (reentrant), NOT ``threading.Lock``.
-        # Rationale: T1.2 will guard ``claim_batch`` AND the inner
+        # Rationale: T1.2 guarded ``claim_batch`` AND the inner
         # ``claim_next`` it calls in a loop. A plain Lock would self-deadlock
         # when the outer claim_batch acquire re-enters for each claim_next
         # call. RLock allows the same thread to acquire again without blocking.
-        # An alternative shape (unlocked ``_claim_next_locked`` helper) is
-        # documented in ``AspectExtractionQueue`` but the RLock approach is
-        # chosen for its simplicity.
         #
-        # Lock ordering (forward constraint for T1.2 authors):
+        # Lock ordering (forward constraint):
         #   RENAME_LOCK -> per-store self._lock   (RENAME_LOCK acquired FIRST)
         #   NEVER acquire RENAME_LOCK while already inside a self._lock region.
         #
-        # The daemon runs exactly ONE T2Database instance (verified by
-        # t2_daemon.py's ``_build_dispatch_table`` receiving a single
-        # ``self._t2db``). The lock is instance-held: tests that construct
-        # T2Database directly each get their own lock, isolating them from each
-        # other. Stand-alone AspectExtractionQueue construction (outside
-        # T2Database) falls back to its own RLock via the default parameter.
+        # The lock is instance-held: tests that construct T2Database directly
+        # each get their own lock, isolating them from each other. (The T2
+        # daemon and the SQLite ``AspectExtractionQueue`` this block was
+        # written for died in RDR-158 P4, nexus-i711w; the lock survives for
+        # the in-process cascade-vs-mutator ordering.)
         #
         # The cascade (rename_collection_cascade) bypasses all per-store
         # self._lock regions by design — it uses its own dedicated connection.

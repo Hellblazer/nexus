@@ -85,11 +85,12 @@ class TestOwnerRecordRepoRoot:
         assert rec.repo_root == ""
 
 
-@pytest.mark.usefixtures("local_catalog_backend")
 # nexus-i711w terminal deletion: TestCatalogDBMigration (4 tests) retired
 # WITH nexus.catalog.catalog_db — the subject was the SQLite schema and its
 # ALTER-on-open migration; the engine schema is Liquibase-managed and
-# covered by the Java suite.
+# covered by the Java suite. (Its ``local_catalog_backend`` pin decorator
+# was removed in the Stage 5 sweep — after the class deletion it was
+# accidentally decorating TestResolvePath below.)
 
 
 # ── resolve_path (nexus-1p4g.2) ──────────────────────────────────────────────

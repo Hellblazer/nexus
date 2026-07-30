@@ -393,30 +393,20 @@ class TestDoctorCheckTaxonomy:
 # ── RDR-087 Phase 2.4: nx doctor --trim-telemetry ───────────────────────────
 
 
-@pytest.mark.usefixtures("local_t2_backend")
 class TestDoctorTrimTelemetry:
-    """``doctor --trim-telemetry`` against a REAL local memory.db.
+    """``nx doctor --trim-telemetry [--days N]`` — CLI contract over the
+    engine-side trim.
 
-    PINNED, not converted (nexus-aqbrk). These seed aged rows into a local
-    ``search_telemetry`` and assert the local row count afterwards. In
-    service mode the verb correctly routes to
-    ``HttpTelemetryStore.trim_search_telemetry`` and never opens the frozen
-    local file (nexus-ingey) — so the seeded rows survive and the counts
-    cannot match.
-
-    Note this class contained a VACUOUS PASS before the pin:
-    ``test_empty_table_is_safe`` asserts "Trimmed 0 search_telemetry" and
-    passed under the engine substrate for the wrong reason — the service
-    trimmed its own empty tenant, not the local table the test seeded. The
-    pin makes it test its subject again.
+    Converted from the old local-``memory.db`` pinned form (the SQLite arm
+    died in nexus-i711w Stage 2 sub-stage A): the verb routes to
+    ``HttpTelemetryStore`` and trim row-selection semantics are engine-side,
+    so these tests pin flag wiring + per-table output rendering against a
+    spy store. The ``local_t2_backend`` pin was removed with the fixture in
+    the Stage 5 sweep.
 
     SERVICE HALF IS OWNED: tests/test_false_clean_diagnostics_service_mode.py
     ::test_trim_routes_to_the_service_and_never_opens_sqlite, plus the
     unresolvable-endpoint and mid-call transport-error cases in the same file.
-    """
-
-    """``nx doctor --trim-telemetry [--days N]`` deletes ``search_telemetry``
-    rows older than the retention window. Default 30d; --days validates min=1.
     """
 
     def _spy_and_trim(

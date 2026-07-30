@@ -253,22 +253,19 @@ class CatalogWriter(Protocol):
         ...
 
 
-#: The mutating ops the daemon hosts on behalf of the rich Catalog.
-#: This is a closed whitelist, not a denylist: adding a method to the
-#: rich Catalog does NOT auto-expose it. Every entry must be a method on
-#: :class:`nexus.catalog.catalog.Catalog`; the
-#: ``test_every_write_op_exists_on_rich_catalog`` regression locks that.
+#: The catalog's caller-facing mutating ops. This is a closed whitelist,
+#: not a denylist: adding a write method to the catalog client does NOT
+#: auto-expose it. ``_ServiceCatalogWriter`` (factory.py) enforces the
+#: whitelist at attribute-access time, and
+#: ``tests/catalog/test_catalog_protocol_fidelity.py`` pins
+#: ``CatalogWriter == CATALOG_WRITE_OPS``.
 #:
-#: RDR-146 P1.0 served the first 16 (the hot indexer/MCP write path).
-#: P1.2 (nexus-5p2ci.21) added the last 6 after an AST inventory of all
-#: 49 cutover sites found admin/maintenance writes outside the original
-#: 16 (the ``nx catalog`` surface + ``collection_rename``):
-#:   - rename_collection / bulk_unlink / update_documents_collection_batch
-#:     are per-document mutations that round-trip framed JSON cleanly.
-#:   - sync / pull / compact are git + whole-JSONL maintenance the daemon
-#:     (the single writer) must run; routing them keeps the single-writer
-#:     invariant intact (no direct .catalog.db writer survives the
-#:     cutover).
+#: History: RDR-146 P1.0 served the first 16 (the hot indexer/MCP write
+#: path) through the T2 daemon's write shim; P1.2 (nexus-5p2ci.21) added
+#: the last 6 admin/maintenance ops after an AST inventory of all 49
+#: cutover sites. The daemon and the rich local Catalog both died in
+#: RDR-158 P4 (nexus-i711w); the whitelist survives as the contract for
+#: the HTTP catalog writer.
 CATALOG_WRITE_OPS: tuple[str, ...] = (
     "register_owner",
     "ensure_owner_for_repo",

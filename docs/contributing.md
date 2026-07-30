@@ -94,10 +94,13 @@ See [architecture.md](architecture.md) for the full module map.
 
 ## Adding a T2 Domain Feature
 
-T2 is split into eight domain stores under `src/nexus/db/t2/`:
-`memory_store.py`, `plan_library.py`, `catalog_taxonomy.py`,
-`telemetry.py`, `chash_index.py`, `document_aspects.py`,
-`aspect_extraction_queue.py`, and `document_highlights.py`. See
+T2 is split into domain stores under `src/nexus/db/t2/`, each an HTTP
+client against the engine's Postgres (the SQLite twins were deleted in
+RDR-158 P4, nexus-i711w): `http_memory_store.py`,
+`http_plan_library.py`, `http_taxonomy_store.py`,
+`http_telemetry_store.py`, `http_chash_index.py`,
+`http_document_aspects_store.py`, `http_aspect_queue.py`, and
+`http_document_highlights_store.py`. See
 [architecture.md § T2 Domain Stores](architecture.md#t2-domain-stores)
 for the map (note: `chash_index`, `taxonomy`, `document_aspects`, and
 `aspect_queue` are reached directly via their attributes, not through
@@ -106,8 +109,8 @@ facade delegates).
 **Adding a method to an existing store** (the common case):
 
 1. Add the method to the store's class in its own module — use the
-   store's own connection via its internal methods; do not reach out
-   to the facade.
+   store's own HTTP session / engine routes via its internal methods;
+   do not reach out to the facade.
 2. If the feature needs a new table or column, that is a Liquibase
    changeset in the engine — the client-side migration chain is
    DELETED (RDR-158 P4 Stage 4; there are no per-store SQLite
@@ -131,33 +134,27 @@ facade delegates).
 
 **Adding a whole new domain store** (rare):
 
-1. Create `src/nexus/db/t2/<your_domain>.py` with a store class that
-   takes a `Path` and opens its own `sqlite3.Connection` in WAL mode
-   with `PRAGMA busy_timeout = 30000` (the canonical serving value,
-   `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`, raised from 5000 in
-   RDR-129 B1).
-2. Add a `threading.Lock` on the store and guard every write with it.
-3. Add the store to `T2Database.__init__` in construction order
-   (stores created later may depend on earlier ones — `CatalogTaxonomy`
-   holds a reference to `MemoryStore`, for example).
-4. Make sure `T2Database.close()` tears your store down in reverse
-   construction order.
+1. Schema first: the store's tables are Liquibase changesets in the
+   engine (`service/`), DDL-only per the substrate boundary above.
+   There is no client-side DDL in any mode (NO-SQLITE directive,
+   2026-07-18).
+2. Add the engine routes (Java) and gate them with the engine's own
+   test suite.
+3. Create `src/nexus/db/t2/http_<your_domain>_store.py` following the
+   existing `Http*Store` twins (bearer auth, tenant header,
+   `_refreshable_client` session handling).
+4. Add the store to `T2Database.__init__` in construction order and
+   tear it down in `T2Database.close()`.
 5. If your store registers cross-domain expiry work, add it to
    `T2Database.expire()`.
-6. Add concurrency coverage to `tests/test_t2_concurrency.py`.
 
 **Concurrency rules**:
 
-- Never share a connection across threads outside of that store's own
-  lock — the whole point of Phase 2 is that each store owns its own
-  connection and coordinates with other domains at the SQLite WAL
-  layer, not through a shared Python mutex.
-- Do not add a global T2 lock. If two domains genuinely need to
-  coordinate (rare), prefer a targeted SQLite transaction at a single
-  store and document the constraint in that store's module.
-- Tests that exercise multi-store behaviour should use a temp file
-  path, not `":memory:"`. `:memory:` databases are per-connection, so
-  the four stores would each see their own empty database.
+- Concurrency is arbitered by Postgres in the engine — the client
+  stores are stateless HTTP clients and need no cross-store locking.
+- Do not add a global T2 lock client-side. If two domains genuinely
+  need to coordinate (rare), that coordination belongs in the engine
+  (one transaction, one route), not in Python.
 
 ## Adding an Agent or Skill
 

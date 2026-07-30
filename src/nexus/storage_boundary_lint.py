@@ -5,8 +5,9 @@ AST-scan that catches direct storage opens outside the allowed
 daemon-internal substrate. The lint protects the boundary that
 RDR-120's daemon design enforces: only ``src/nexus/db/`` (and during
 P0-P4, ``src/nexus/catalog/``) may open SQLite clients directly. Every other caller must go through the ``T2Database`` /
-``T3Database`` facades or, post-P3 cutover, through the daemon-
-backed ``T2Client`` / ``T3Client`` wrappers.
+``T3Database`` facades (in the RDR-120 era, additionally through the
+daemon-backed ``T2Client`` / ``T3Client`` wrappers — both deleted in
+RDR-158 P4; the facades now route to the engine over HTTP).
 
 Banlist (configurable via :data:`BANLIST`):
 

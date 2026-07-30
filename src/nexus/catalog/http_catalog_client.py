@@ -273,11 +273,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         contract explicitly; this property was the one place violating it.
         """
         raise AttributeError(
-            "catalog._db is unavailable in service mode "
-            "(NX_STORAGE_BACKEND_CATALOG=service).  "
+            "catalog._db does not exist: the local SQLite catalog was "
+            "deleted (RDR-158 P4, nexus-i711w) and the engine's HTTP "
+            "catalog is the only substrate.  "
             "This command path is not yet ported to the public catalog API — "
-            "tracked in bead nexus-xnz0o.  "
-            "Run with NX_STORAGE_BACKEND_CATALOG unset to use SQLite mode."
+            "tracked in bead nexus-xnz0o."
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────────

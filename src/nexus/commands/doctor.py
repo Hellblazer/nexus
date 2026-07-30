@@ -883,7 +883,8 @@ def _run_check_storage_boundary(
             f"\nRDR-146: catalog constructions ({result.catalog_constructions}) "
             f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}). A new direct "
             f"Catalog(...) site was added in consumer code — route catalog writes "
-            f"through T2Client.catalog instead.",
+            f"through the catalog factory (make_catalog_writer / "
+            f"HttpCatalogClient) instead.",
             err=True,
         )
 

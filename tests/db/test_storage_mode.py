@@ -287,6 +287,27 @@ def test_valid_store_names_covers_t2database_attributes(
         db.close()
 
 
+# ── the catalog factory is a validation point ────────────────────────────────
+
+
+def test_catalog_factory_hard_errors_on_catalog_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-158 Stage 5 (sweeper open question e): with the local catalog
+    deleted, nothing else resolves ``storage_backend_for("catalog")`` — the
+    factory is the seam that keeps a stranded
+    ``NX_STORAGE_BACKEND_CATALOG=sqlite`` export fail-loud instead of
+    silently ignored."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+
+    with pytest.raises(StorageModeFlagError, match="NX_STORAGE_BACKEND_CATALOG"):
+        make_catalog_reader()
+    with pytest.raises(StorageModeFlagError, match="NX_STORAGE_BACKEND_CATALOG"):
+        make_catalog_writer()
+
+
 # ── T2Database construction is a validation point ────────────────────────────
 
 

@@ -32,16 +32,6 @@ from tests._catalog_fixture_ops import ActiveCatalog
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(autouse=True)
-def _pin_local_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin sqlite/local backend: every test here seeds a LOCAL tmp
-    catalog, so under the ``NX_TEST_T2_SUBSTRATE=engine`` flip (global
-    ``NX_STORAGE_BACKEND=service``) the doctor would read the engine
-    tenant's empty catalog instead of the seeded one (nexus-b6enc:
-    fixed the 2 pre-existing engine-substrate failures in this file)."""
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-
-
 @pytest.fixture()
 def isolated_nexus(tmp_path: Path) -> Path:
     return tmp_path / "test-catalog"

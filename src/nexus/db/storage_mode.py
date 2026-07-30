@@ -82,11 +82,13 @@ VALID_STORE_NAMES: frozenset[str] = frozenset(
 
 #: The T2 facade's eagerly-constructed stores — the set
 #: :class:`nexus.db.t2.T2Database` validates at construction time.
-#: Deliberately EXCLUDES ``catalog`` (the ``local_catalog_backend`` test
-#: fixture still pins ``NX_STORAGE_BACKEND_CATALOG=sqlite`` as an inert
-#: marker until the nexus-i711w Stage 5 sweep retires it) and ``t1``
-#: (validated where T1 routing actually happens:
-#: :func:`nexus.db.t1.get_t1_database` and ``nexus.mcp.core``).
+#: Deliberately EXCLUDES ``catalog`` (not a facade store — the catalog
+#: routes through ``nexus.catalog.factory``, and no live seam resolves
+#: ``storage_backend_for("catalog")`` since the local catalog's deletion;
+#: the ``local_catalog_backend`` fixture that once pinned it was removed
+#: in the nexus-i711w Stage 5 sweep) and ``t1`` (validated where T1
+#: routing actually happens: :func:`nexus.db.t1.get_t1_database` and
+#: ``nexus.mcp.core``).
 T2_FACADE_STORES: tuple[str, ...] = (
     "memory",
     "plans",

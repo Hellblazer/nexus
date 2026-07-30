@@ -14,12 +14,11 @@ through the SAME factories the code under test uses. The test then exercises
 whichever catalog is real, which is strictly more coverage than the local-only
 form it replaces.
 
-WHEN NOT TO USE THIS. Verbs that are local-only BY DESIGN — ``nx catalog
-synthesize-log``, the doctor replay/consistency verbs, the local factory's own
-read-only/admin semantics — should use the ``local_catalog_backend`` fixture
-instead. The distinguishing question is whether the code under test routes
-through the factories (use this) or reaches for the local artifacts directly
-(pin instead).
+HISTORY. The local-only verb family this module used to carve out (``nx
+catalog synthesize-log``, the doctor replay/consistency verbs, their
+``local_catalog_backend`` pin) died with the local SQLite catalog in the
+nexus-i711w terminal deletion; the fixture was removed in the Stage 5
+sweep. Everything routes through the factories now.
 """
 from __future__ import annotations
 

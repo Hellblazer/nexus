@@ -15,9 +15,9 @@ This page assumes a 6.x install on the host.
 > (RDR-120: `NX_T2_ADDR`, Unix-socket mounts, `nx daemon t2` transport
 > guidance) is **deleted**, not merely off the happy path — the daemon, its
 > client, its discovery file and those env vars no longer exist
-> (nexus-i711w). `NX_STORAGE_BACKEND=sqlite` still selects local SQLite files
-> as a read path, but there is no daemon behind it. See
-> [Legacy (SQLite backend)](#legacy-sqlite-backend) at the end.
+> (nexus-i711w). `NX_STORAGE_BACKEND=sqlite` is retired too: setting it is a
+> hard error (RDR-158 P3), and the SQLite read path is gone. See
+> [Legacy (SQLite backend)](#legacy-sqlite-backend--retired) at the end.
 
 ## TL;DR
 

@@ -229,10 +229,10 @@ def promote_cmd(entry_id: str, project: str, title: str) -> None:
 
     t1 = _t1()
     try:
-        # RDR-128 P3 (nexus-sbxbe.3): route the T2 write through the daemon.
-        # T1Database.promote calls ``t2.put(...)``; T2Client's facade
-        # passthrough makes that work on the routed client (memory.put RPC)
-        # or the direct-fallback T2Database.
+        # RDR-128 P3 (nexus-sbxbe.3) heritage: this used to route through
+        # the T2 daemon's T2Client. The daemon died in RDR-158 P4;
+        # t2_index_write now yields a service-backed T2Database and
+        # T1Database.promote calls ``t2.put(...)`` on it directly.
         report = t2_index_write(
             lambda t2: t1.promote(entry_id, project=project, title=title, t2=t2)
         )
