@@ -5,6 +5,21 @@ Four sections in one report: distance histogram, top-5 cross-projections,
 orphan chunks, hub-topic assignments. Section 1 (distance histogram)
 ships telemetry-only in this bead; the live-probe fallback is deferred
 to follow-up bead ``nexus-fx2d``.
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). This file needs NO import surgery:
+it already imports every dying name inside a function body
+(``_seed_catalog_conn`` -> ``nexus.catalog.catalog_db._SCHEMA_SQL``), so it
+still COLLECTS after the local catalog is deleted. Seven of its eleven tests
+— the live-distance-probe section and the chash-coverage section — never
+touch a catalog at all and are unaffected.
+
+The remaining FOUR are PORT-BLOCKED on nexus-e9ru2 and are annotated at
+their own sites: ``TestOrphanChunks`` (both) plus the two
+``TestCollectionAuditCli`` tests that monkeypatch ``_open_catalog_conn``.
+They pass a raw ``sqlite3.Connection`` into ``compute_orphan_chunks``, which
+is service-mode-degraded BY DESIGN (``collection_audit.py``:376-382). They
+are the sole coverage of ``compute_orphan_chunks`` repo-wide, so they stay
+exactly as they are rather than being converted or dropped.
 """
 from __future__ import annotations
 
@@ -110,7 +125,14 @@ def _seed_t2(path: Path) -> None:
 
 def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
     """Build a minimal catalog SQLite cache directly — skip the
-    JSONL/git facade that would rebuild from source on first open."""
+    JSONL/git facade that would rebuild from source on first open.
+
+    nexus-e9ru2 / nexus-i711w: this is the LOCAL-ONLY seam. Its four callers
+    are the PORT-BLOCKED set named in the module docstring. The
+    ``_SCHEMA_SQL`` import stays function-local so this file collects after
+    ``nexus/catalog/catalog_db.py`` is deleted; the four callers retire (or
+    are rewritten against a service-side orphan query) when e9ru2 lands.
+    """
     import sqlite3
 
     from nexus.catalog.catalog_db import _SCHEMA_SQL
@@ -147,6 +169,17 @@ def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
 
 
 class TestOrphanChunks:
+    """PORT-BLOCKED on nexus-e9ru2 — DO NOT convert, weaken, or delete.
+
+    ``compute_orphan_chunks`` takes a raw ``sqlite3.Connection`` and runs a
+    local-catalog ``documents``/``links`` anti-join. In service mode the audit
+    is degraded BY DESIGN (``src/nexus/collection_audit.py``:376-382) — there
+    is no service-side orphan query to point these at, so a "port" could only
+    assert that nothing is computed. These two are the ONLY coverage of
+    ``compute_orphan_chunks`` repo-wide and become its regression tests when
+    e9ru2 provides a service-side equivalent.
+    """
+
     def test_flags_old_unlinked_documents(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_orphan_chunks
 
@@ -385,9 +418,21 @@ class TestChashCoverageSection:
 
 
 class TestCollectionAuditCli:
+    """The first two tests here are PORT-BLOCKED on nexus-e9ru2 alongside
+    ``TestOrphanChunks``: both monkeypatch
+    ``nexus.collection_audit._open_catalog_conn`` to hand the verb a raw
+    local-catalog ``sqlite3.Connection`` seeded by ``_seed_catalog_conn``, and
+    both assert the ORPHAN section is present in the report. In service mode
+    that section is degraded by design, so the assertion has no service-mode
+    form yet. The third (``--live``) test needs no catalog and is unaffected.
+    """
+
     def test_default_output_covers_four_sections(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
+        """PORT-BLOCKED — nexus-e9ru2. Asserts the ``orphan`` section renders;
+        see the class docstring.
+        """
         from nexus.cli import main
 
         db_path = tmp_path / "memory.db"
@@ -414,6 +459,9 @@ class TestCollectionAuditCli:
     def test_json_flag_emits_parseable_payload(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
+        """PORT-BLOCKED — nexus-e9ru2. Asserts ``payload["orphans"]``; see the
+        class docstring.
+        """
         import json
         from nexus.cli import main
 
