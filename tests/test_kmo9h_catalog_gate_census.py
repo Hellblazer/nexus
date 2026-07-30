@@ -221,20 +221,16 @@ def test_catalog_writer_helper_no_false_setup_error(service_mode_fresh_box):
         writer.close()
 
 
-def test_document_aspects_identity_probe_routes_service(service_mode_fresh_box):
-    """Pre-fix: _resolve_doc_id opened the LOCAL catalog directly — frozen
-    (stale) reads on migrated boxes, silent skip on fresh ones."""
-    from nexus.db.t2.document_aspects import _resolve_doc_id
-
-    class _Record:
-        collection = "docs__x__bge-base-en-v15-768__v1"
-        source_path = "notes/a.md"
-        source_uri = ""
-
-    assert (
-        _resolve_doc_id(_Record())
-        == "resolved:docs__x__bge-base-en-v15-768__v1:notes/a.md"
-    )
+# test_document_aspects_identity_probe_routes_service DELETED (nexus-i711w
+# Stage 2 sub-stage A3): its subject was ``document_aspects._resolve_doc_id``
+# — the SQLite DocumentAspects.upsert's catalog identity probe, whose kmo9h
+# fix routed it through the factory instead of the frozen local catalog. The
+# store (and the probe) died with the SQLite substrate; the Http store sends
+# ``record.doc_id`` verbatim and the surviving client-side resolution lives
+# in aspect_worker (``lookup_doc_id_by_collection_and_path`` via the
+# factory-routed reader, tests/test_aspect_worker.py). The class-B census
+# above (`test_raw_catalog_construction_census_is_closed`) still tripwires
+# the raw-local-Catalog shape this test existed to prevent.
 
 
 def test_catalog_setup_refuses_divergence_in_service_mode(

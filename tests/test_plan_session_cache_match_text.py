@@ -165,10 +165,12 @@ class TestUpsertEmbedsMatchText:
 
 class TestSynthesizerParityWithPlanLibrary:
     """Smoke-test that the ``session_cache`` delegator produces the
-    same output as the shared ``plan_library`` synthesiser for every
-    row shape. RDR-092 code-review S-2 was resolved by nexus-w98c
-    (``session_cache._synthesize_match_text`` now unpacks the row
-    dict and forwards to ``plan_library._synthesize_match_text``),
+    same output as the shared synthesiser for every row shape.
+    RDR-092 code-review S-2 was resolved by nexus-w98c
+    (``session_cache._synthesize_match_text`` unpacks the row dict
+    and forwards to the shared synthesiser — now
+    ``nexus.plans.match_text._synthesize_match_text``, its home since
+    the SQLite ``plan_library`` module was deleted in nexus-i711w),
     so this test is trivially true as long as the delegation stays
     in place. Kept as a regression guard against an accidental
     re-implementation of the dict-side logic.
@@ -217,7 +219,7 @@ class TestSynthesizerParityWithPlanLibrary:
     def test_session_cache_and_plan_library_synthesisers_agree(
         self, row: dict,
     ) -> None:
-        from nexus.db.t2.plan_library import (
+        from nexus.plans.match_text import (
             _synthesize_match_text as _lib_synth,
         )
         from nexus.plans.session_cache import (

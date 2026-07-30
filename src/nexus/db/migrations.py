@@ -3207,15 +3207,136 @@ CREATE INDEX IF NOT EXISTS idx_search_tel_ts
 """
 
 
+# Rehomed VERBATIM from the deleted SQLite memory_store.py / plan_library.py
+# (nexus-i711w Stage 2 sub-stage A3), for the same reason as
+# _TELEMETRY_SCHEMA_SQL above: the store classes died, but this bootstrap
+# path must keep materialising the source tables until Stage 4 deletes
+# migrations.py wholesale — at which point this text dies with the file.
+_MEMORY_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS memory (
+    id            INTEGER PRIMARY KEY,
+    project       TEXT    NOT NULL,
+    title         TEXT    NOT NULL,
+    session       TEXT,
+    agent         TEXT,
+    content       TEXT    NOT NULL,
+    tags          TEXT,
+    timestamp     TEXT    NOT NULL,
+    ttl           INTEGER,
+    access_count  INTEGER DEFAULT 0 NOT NULL,
+    last_accessed TEXT    DEFAULT ''
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_project_title ON memory(project, title);
+CREATE INDEX        IF NOT EXISTS idx_memory_project       ON memory(project);
+CREATE INDEX        IF NOT EXISTS idx_memory_agent         ON memory(agent);
+CREATE INDEX        IF NOT EXISTS idx_memory_timestamp     ON memory(timestamp);
+CREATE INDEX        IF NOT EXISTS idx_memory_ttl_timestamp ON memory(ttl, timestamp);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    title,
+    content,
+    tags,
+    content='memory',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
+END;
+"""
+
+_PLANS_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS plans (
+    id              INTEGER PRIMARY KEY,
+    project         TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL,
+    plan_json       TEXT NOT NULL,
+    outcome         TEXT DEFAULT 'success',
+    tags            TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    ttl             INTEGER,
+    -- RDR-078 dimensional identity, currying, metrics columns. Present on
+    -- fresh installs; the ``_add_plan_dimensional_identity`` migration
+    -- (4.4.0) covers upgrade-in-place.
+    name            TEXT,
+    verb            TEXT,
+    scope           TEXT,
+    dimensions      TEXT,
+    default_bindings TEXT,
+    parent_dims     TEXT,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    last_used       TEXT,
+    match_count     INTEGER NOT NULL DEFAULT 0,
+    match_conf_sum  REAL NOT NULL DEFAULT 0.0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    -- RDR-091 Phase 2a: scope_tags captures which corpora/collections a
+    -- plan actually touched. Comma-separated, sorted, deduplicated,
+    -- hash-suffix-normalized. DEFAULT '' is load-bearing — Phase 2b
+    -- treats '' as the scope-agnostic marker. Upgrade-in-place via the
+    -- 4.8.0 ``_add_plan_scope_tags`` migration.
+    scope_tags      TEXT NOT NULL DEFAULT '',
+    -- RDR-092 Phase 3: hybrid match_text. Fresh installs get this
+    -- column in the create; existing DBs pick it up via the 4.9.13
+    -- ``_add_plan_match_text_column`` migration (which also rebuilds
+    -- ``plans_fts`` so the FTS lane indexes match_text instead of
+    -- query).
+    match_text      TEXT NOT NULL DEFAULT ''
+);
+
+-- Indexes on the RDR-078 columns (verb/scope/dimensions) live in the
+-- 4.4.0 ``_add_plan_dimensional_identity`` migration, not here. On a
+-- pre-4.4.0 DB the plans table exists without those columns (the
+-- ``CREATE TABLE IF NOT EXISTS`` above is a no-op against an existing
+-- table) and creating the indexes inline crashes with
+-- ``sqlite3.OperationalError: no such column: verb`` before the
+-- migration that would add them has a chance to run. Issue #190.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
+    match_text,
+    tags,
+    project,
+    content=plans,
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
+    INSERT INTO plans_fts(rowid, match_text, tags, project)
+        VALUES (new.id, new.match_text, new.tags, new.project);
+END;
+
+CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
+    INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+        VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+END;
+
+CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
+    INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+        VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+    INSERT INTO plans_fts(rowid, match_text, tags, project)
+        VALUES (new.id, new.match_text, new.tags, new.project);
+END;
+"""
+
+
 def _create_base_tables(conn: sqlite3.Connection) -> None:
     """Execute all domain base-schema SQL via CREATE TABLE IF NOT EXISTS.
 
     Lazy imports avoid circular dependencies between migrations.py and
     domain store modules.
     """
-    from nexus.db.t2.memory_store import _MEMORY_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
-    from nexus.db.t2.plan_library import _PLANS_SCHEMA_SQL  # noqa: PLC0415 — deferred import — migration-step-local, avoids import cost on every load
-
     conn.executescript(_MEMORY_SCHEMA_SQL)
     conn.executescript(_PLANS_SCHEMA_SQL)
     conn.executescript(_TAXONOMY_SCHEMA_SQL)

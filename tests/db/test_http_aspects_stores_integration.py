@@ -318,7 +318,7 @@ def _make_aspect(
     collection: str = "knowledge__inttest",
     confidence: float = 0.85,
 ) -> "AspectRecord":
-    from nexus.db.t2.document_aspects import AspectRecord
+    from nexus.db.t2.records import AspectRecord
     return AspectRecord(
         collection=collection,
         source_path=f"/papers/paper-{suffix}.pdf",
@@ -424,7 +424,7 @@ class TestDocumentAspectsMVV:
         tumbler and the FK is enforced. A non-null doc_id with no matching catalog row
         must cause the service to reject the upsert.
         """
-        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.db.t2.records import AspectRecord
 
         def _aspect(suffix: str, doc_id: str) -> "AspectRecord":
             return AspectRecord(

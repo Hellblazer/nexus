@@ -6,14 +6,14 @@ rename. The CLI wraps it and cascades the new name through every surface
 that stores a collection string:
 
   * The T2 cascade (``T2Database.rename_collection_cascade``) — since
-    nexus-i711w Stage 2 sub-stage A deleted the SQLite T2 stores, every
-    leg (chash index, aspect queue, highlights, taxonomy, telemetry)
-    routes through its Http domain store to the engine. The one surviving
-    SQLite else-arm is ``document_aspects`` (dies in sub-stage A3).
-    Store-level routing coverage lives in
+    nexus-i711w Stage 2 sub-stages A/A3 deleted the SQLite T2 stores,
+    every leg (chash index, document aspects, aspect queue, highlights,
+    taxonomy, telemetry) routes through its Http domain store to the
+    engine. Store-level routing coverage lives in
     ``tests/test_t2_rename_cascade_service_mode.py``; this module covers
     the data-plane ORCHESTRATION — ordering, error contracts, and count
-    surfacing — plus the still-alive ``DocumentAspects`` store itself.
+    surfacing — plus the engine-backed ``document_aspects`` rename
+    semantics (via the suite's hermetic engine substrate).
   * Catalog documents' ``physical_collection`` (JSONL + SQLite cache).
 
 Error contracts: the T2 cascade fails CLOSED (ClickException, exit
@@ -40,12 +40,15 @@ def _pin_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
     branch. Service-mode coverage lives in
     ``test_collection_rename_service_mode.py``.
 
-    Since nexus-i711w Stage 2 sub-stage A the pin no longer selects SQLite T2
-    stores — those are deleted. Under the pin, ``T2Database.taxonomy`` RAISES
-    on access and the chash/queue/highlights/telemetry legs are Http-only, so
-    a REAL cascade run cannot succeed here. Tests of the data-plane
-    orchestration therefore stub ``nexus.mcp_infra.t2_index_write`` (see
-    ``_stub_t2_cascade``) or inject spy stores on the T2Database instance.
+    Since nexus-i711w Stage 2 sub-stages A/A3 the pin no longer selects SQLite
+    T2 stores — those are deleted. Under the pin, ``T2Database.taxonomy``
+    RAISES on access and every cascade leg (chash / aspects / queue /
+    highlights / telemetry) is Http-only, so a REAL cascade run cannot
+    succeed here without the engine. Tests of the data-plane orchestration
+    therefore stub ``nexus.mcp_infra.t2_index_write`` (see
+    ``_stub_t2_cascade``) or inject spy stores on the T2Database instance;
+    the store-level ``document_aspects`` rename tests below run against the
+    suite's hermetic engine substrate directly.
     """
     from nexus.db.storage_mode import StorageBackend
 
@@ -413,83 +416,79 @@ class TestRenameCascadeFailureModes:
 
 class TestDocumentAspectsRename:
     """RDR-108 Phase 1d: ``document_aspects.collection`` is a denorm cache;
-    rename_collection keeps it in sync with the T3 collection rename."""
+    rename_collection keeps it in sync with the T3 collection rename.
+
+    Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite ``DocumentAspects``
+    store is deleted; ``T2Database(path).document_aspects`` is now the
+    engine-backed ``HttpDocumentAspectsStore`` on the suite's hermetic
+    per-test tenant, so the row-level rename semantics run for REAL against
+    Postgres (AspectRepository.renameAspectCollection). Raw-SQL seeds became
+    public ``upsert`` calls; raw COUNTs became ``list_by_collection`` reads.
+    """
+
+    @staticmethod
+    def _record(collection: str, source_path: str, extractor: str = "test_extractor"):
+        from nexus.db.t2.records import AspectRecord
+
+        return AspectRecord(
+            collection=collection,
+            source_path=source_path,
+            problem_formulation=None,
+            proposed_method=None,
+            experimental_datasets=[],
+            experimental_baselines=[],
+            experimental_results=None,
+            extras={},
+            confidence=0.9,
+            extracted_at="2026-05-09T00:00:00Z",
+            model_version="v1",
+            extractor_name=extractor,
+        )
 
     def _seed(self, tmp_path: Path):
-        from nexus.db.t2.document_aspects import DocumentAspects, AspectRecord
+        from nexus.db.t2 import T2Database
 
-        store = DocumentAspects(tmp_path / "aspects.db")
-        # Insert rows directly via SQL to avoid the upsert's schema-detection
-        # gate (pre-migration schema: PK is (collection, source_path)).
-        store.conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, problem_formulation, proposed_method, "
-            " experimental_datasets, experimental_baselines, experimental_results, "
-            " extras, confidence, extracted_at, model_version, extractor_name) "
-            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
-            "        '2026-05-09T00:00:00Z', 'v1', 'test_extractor')",
-            ("code__old", "a.py"),
-        )
-        store.conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, problem_formulation, proposed_method, "
-            " experimental_datasets, experimental_baselines, experimental_results, "
-            " extras, confidence, extracted_at, model_version, extractor_name) "
-            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
-            "        '2026-05-09T00:00:00Z', 'v1', 'test_extractor')",
-            ("code__old", "b.py"),
-        )
-        store.conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, problem_formulation, proposed_method, "
-            " experimental_datasets, experimental_baselines, experimental_results, "
-            " extras, confidence, extracted_at, model_version, extractor_name) "
-            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
-            "        '2026-05-09T00:00:00Z', 'v1', 'test_extractor')",
-            ("code__stays", "c.py"),
-        )
-        store.conn.commit()
+        db = T2Database(tmp_path / "t2.db")
+        store = db.document_aspects
+        store.upsert(self._record("code__old", "a.py"))
+        store.upsert(self._record("code__old", "b.py"))
+        store.upsert(self._record("code__stays", "c.py"))
         return store
+
+    @staticmethod
+    def _count(store, collection: str) -> int:
+        return len(store.list_by_collection(collection))
 
     def test_updates_matching_rows(self, tmp_path: Path) -> None:
         store = self._seed(tmp_path)
         count = store.rename_collection(old="code__old", new="code__new")
         assert count == 2
 
-        old_rows = store.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            ("code__old",),
-        ).fetchone()[0]
-        new_rows = store.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            ("code__new",),
-        ).fetchone()[0]
-        stays_rows = store.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            ("code__stays",),
-        ).fetchone()[0]
-        assert (old_rows, new_rows, stays_rows) == (0, 2, 1)
+        assert (
+            self._count(store, "code__old"),
+            self._count(store, "code__new"),
+            self._count(store, "code__stays"),
+        ) == (0, 2, 1)
 
     def test_source_path_untouched(self, tmp_path: Path) -> None:
         """source_path denorm cache must be byte-identical pre/post rename."""
         store = self._seed(tmp_path)
-        paths_before = set(
-            r[0] for r in store.conn.execute(
-                "SELECT source_path FROM document_aspects ORDER BY source_path"
-            ).fetchall()
-        )
+
+        def _all_paths() -> set[str]:
+            return {
+                r.source_path
+                for coll in ("code__old", "code__new", "code__stays")
+                for r in store.list_by_collection(coll)
+            }
+
+        paths_before = _all_paths()
         store.rename_collection(old="code__old", new="code__new")
-        paths_after = set(
-            r[0] for r in store.conn.execute(
-                "SELECT source_path FROM document_aspects ORDER BY source_path"
-            ).fetchall()
-        )
-        assert paths_before == paths_after
+        assert _all_paths() == paths_before
 
     def test_no_rows_returns_zero(self, tmp_path: Path) -> None:
-        from nexus.db.t2.document_aspects import DocumentAspects
+        from nexus.db.t2 import T2Database
 
-        store = DocumentAspects(tmp_path / "aspects.db")
+        store = T2Database(tmp_path / "t2.db").document_aspects
         assert store.rename_collection(old="docs__ghost", new="docs__phantom") == 0
 
     def test_idempotent_second_rename(self, tmp_path: Path) -> None:
@@ -504,11 +503,9 @@ class TestDocumentAspectsRename:
         """Rows for 'code__stays' must not be touched."""
         store = self._seed(tmp_path)
         store.rename_collection(old="code__old", new="code__new")
-        stays = store.conn.execute(
-            "SELECT collection FROM document_aspects WHERE source_path = ?",
-            ("c.py",),
-        ).fetchone()[0]
-        assert stays == "code__stays"
+        got = store.get("code__stays", "c.py")
+        assert got is not None
+        assert got.collection == "code__stays"
 
 
 # ── AspectExtractionQueue.rename_collection (nexus-gp20) ───────────────────
@@ -591,16 +588,15 @@ class TestCascadeOrchestration:
     aggregates the returned counts (successor to TestCascadeAtomicity's
     happy path).
 
-    The ``document_aspects`` leg is the ONE remaining SQLite else-arm (dies
-    in sub-stage A3), so it runs for REAL against the tmp DB; every other
-    leg is engine-side and is spied here via T2Database instance-attribute
-    assignment (per-store routing coverage:
-    tests/test_t2_rename_cascade_service_mode.py).
+    Since nexus-i711w Stage 2 sub-stage A3 the ``document_aspects`` leg is
+    engine-side like every other leg — the last SQLite else-arm is gone and
+    the cascade is a pure HTTP fan-out — so ALL six legs are spied here via
+    T2Database instance-attribute assignment. Row-level movement is the
+    engine's job (real-engine coverage: TestDocumentAspectsRename above;
+    per-store routing coverage: tests/test_t2_rename_cascade_service_mode.py).
     """
 
     def test_successful_cascade_updates_all_legs(self, tmp_path: Path) -> None:
-        import sqlite3 as _sqlite3
-
         from nexus.db.t2 import T2Database
 
         db_path = tmp_path / "memory.db"
@@ -614,26 +610,13 @@ class TestCascadeOrchestration:
             "search_telemetry": 2, "hook_failures": 0,
         }
         chash_spy = MagicMock(**{"rename_collection.return_value": 1})
+        aspects_spy = MagicMock(**{"rename_collection.return_value": 1})
         queue_spy = MagicMock(**{"rename_collection.return_value": 1})
         highlights_spy = MagicMock(**{"rename_collection.return_value": 1})
 
         with T2Database(db_path) as t2db:
-            # Real row for the surviving SQLite aspects arm — the cascade
-            # still runs raw SQL against document_aspects under the =sqlite
-            # pin (until sub-stage A3 retires the store).
-            t2db.document_aspects.conn.execute(
-                "INSERT INTO document_aspects "
-                "(collection, source_path, problem_formulation, proposed_method, "
-                " experimental_datasets, experimental_baselines, "
-                " experimental_results, extras, confidence, extracted_at, "
-                " model_version, extractor_name) "
-                "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
-                "        '2026-05-09T00:00:00Z', 'v1', 'test')",
-                ("code__old", "a.py"),
-            )
-            t2db.document_aspects.conn.commit()
-
             t2db.chash_index = chash_spy
+            t2db.document_aspects = aspects_spy
             t2db.aspect_queue = queue_spy
             t2db.document_highlights = highlights_spy
             t2db.taxonomy = tax_spy
@@ -642,6 +625,8 @@ class TestCascadeOrchestration:
             counts = t2db.rename_collection_cascade(old="code__old", new="code__new")
 
         chash_spy.rename_collection.assert_called_once_with(
+            old="code__old", new="code__new")
+        aspects_spy.rename_collection.assert_called_once_with(
             old="code__old", new="code__new")
         queue_spy.rename_collection.assert_called_once_with(
             old="code__old", new="code__new")
@@ -663,75 +648,43 @@ class TestCascadeOrchestration:
             "hook_failures": 0,
         }
 
-        # The one real leg actually moved its row.
-        conn = _sqlite3.connect(str(db_path))  # epsilon-allow: test verification read
-        try:
-            da_new = conn.execute(
-                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-                ("code__new",),
-            ).fetchone()[0]
-            da_old = conn.execute(
-                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-                ("code__old",),
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        assert (da_new, da_old) == (1, 0)
-
 
 # ── K4 collision defense: DocumentAspects (queue's version died with the
 #    SQLite store — see the tombstone below) ─────────────────────────────────
 
 
 class TestDocumentAspectsCollisionDefense:
-    """K4 (nexus-nhyh): DocumentAspects.rename_collection must defend against
-    UNIQUE collisions like ChashIndex does, using pre-DELETE of conflicting
-    new-side rows before UPDATE."""
+    """K4 (nexus-nhyh): the document_aspects rename must defend against
+    UNIQUE collisions like the chash leg does, using pre-DELETE of
+    conflicting new-side rows before UPDATE.
 
-    def test_pk_collision_new_side_wins(self, tmp_path: Path) -> None:
+    Ported (nexus-i711w Stage 2 sub-stage A3): the defense is engine-side
+    now (AspectRepository.renameAspectCollection pre-DELETEs new-side rows
+    whose source_path collides with an old-side row), exercised for REAL
+    against Postgres through the engine-backed store.
+    """
+
+    def test_pk_collision_source_side_wins(self, tmp_path: Path) -> None:
         """Pre-existing (new_collection, source_path) row is deleted before
-        UPDATE so UNIQUE constraint is never violated."""
-        from nexus.db.t2.document_aspects import DocumentAspects
+        UPDATE so the UNIQUE (tenant, collection, source_path) natural key
+        is never violated — and the SOURCE row's data survives."""
+        from nexus.db.t2 import T2Database
 
-        store = DocumentAspects(tmp_path / "aspects.db")
-        store.conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, problem_formulation, proposed_method, "
-            " experimental_datasets, experimental_baselines, "
-            " experimental_results, extras, confidence, extracted_at, "
-            " model_version, extractor_name) "
-            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
-            "        '2026-05-09T00:00:00Z', 'v1', 'test')",
-            ("code__old", "a.py"),
-        )
-        # Collision: (new, same source_path) already exists
-        store.conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, problem_formulation, proposed_method, "
-            " experimental_datasets, experimental_baselines, "
-            " experimental_results, extras, confidence, extracted_at, "
-            " model_version, extractor_name) "
-            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
-            "        '2026-05-09T00:00:00Z', 'v1', 'stale')",
-            ("code__new", "a.py"),
-        )
-        store.conn.commit()
+        store = T2Database(tmp_path / "t2.db").document_aspects
+        _rec = TestDocumentAspectsRename._record
+        store.upsert(_rec("code__old", "a.py", extractor="source"))
+        # Collision: (new, same source_path) already exists.
+        store.upsert(_rec("code__new", "a.py", extractor="stale"))
 
-        # Must not raise UNIQUE constraint violation
+        # Must not raise a UNIQUE-violation from the engine.
         count = store.rename_collection(old="code__old", new="code__new")
         assert count == 1
 
-        rows = store.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            ("code__new",),
-        ).fetchone()[0]
-        assert rows == 1
-
-        old_rows = store.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            ("code__old",),
-        ).fetchone()[0]
-        assert old_rows == 0
+        new_rows = store.list_by_collection("code__new")
+        assert len(new_rows) == 1
+        # The source row's data won (nexus-v7mn precedence).
+        assert new_rows[0].extractor_name == "source"
+        assert store.list_by_collection("code__old") == []
 
 
 # TestAspectQueueCollisionDefense stood here (K4, nexus-nhyh). Its one test

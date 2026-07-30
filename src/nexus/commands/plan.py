@@ -8,7 +8,6 @@ Day-2 operations against the plan library:
   - ``nx plan show``    Full plan_json + dimensions + run history
   - ``nx plan delete``  Remove a plan row (with confirmation)
   - ``nx plan reseed``  Re-run the four-tier seed loader
-  - ``nx plan repair``  Re-run the dimensional-identity backfill (RDR-092)
 
 The first four (nexus-la28) close the routine-ops gap that bit the
 RDR-098 abstract-themes smoke run: an inline-planner-grown plan
@@ -20,7 +19,6 @@ lands, ``disable`` slots in next to ``delete``.
 from __future__ import annotations
 
 import json as _json
-import sqlite3
 
 import click
 
@@ -52,218 +50,30 @@ def plan() -> None:
     """Plan library maintenance commands."""
 
 
-@plan.group("repair")
-def repair() -> None:
-    """Consumer-side content-repair verbs for the plan library.
-
-    Under RDR-120 §A8 the substrate's migration chain runs DDL only;
-    legacy backfills that mutated row content moved out of
-    ``apply_pending`` and into these explicit consumer-driven
-    subcommands. Operators run them after `nx upgrade` (or whenever
-    legacy rows surface that need repair). Each subcommand is
-    idempotent.
-
-    See RDR-120 §A8-exempt table for which substrate writes still
-    stay in the migration chain.
-    """
-
-
-def _open_plans_db():
-    """Open memory.db with WAL pragmas. Returns the connection, or
-    None when the database does not exist."""
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    if storage_backend_for("plans") is StorageBackend.SERVICE:
-        # nexus-o02xe / RDR-179 Phase 1: these verbs mutate row content
-        # via raw SQL against the local T2 SQLite. In service mode that
-        # file is the frozen pre-migration snapshot — repairing it is a
-        # silent no-op against the live library (engine-side repairs are
-        # engine work). Refuse loudly instead of writing to the dead file.
-        raise click.ClickException(
-            "plans are served by the storage service; `nx plan repair` "
-            "operates on the local SQLite snapshot only. Set "
-            "NX_STORAGE_BACKEND=sqlite to deliberately repair the local "
-            "file, or repair the live library engine-side."
-        )
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}; nothing to do.")
-        return None
-    # epsilon-allow: nx repair plans — ad-hoc operator-invoked
-    # backfill / migration-helper-style maintenance against the plans
-    # store. Bound to the same SQLite file the daemon serves; the
-    # daemon-RPC equivalent would require exposing every legacy
-    # repair shape, which the RDR-120 §Out of scope moratorium
-    # forbids ("migration helpers beyond apply_pending").
-    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx repair plans operator-invoked maintenance (moratorium on new migration helpers)
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-@repair.command("scope-tags")
-def repair_scope_tags_cmd() -> None:
-    """Backfill empty ``scope_tags`` rows and rewash legacy ``'all'`` sentinels.
-
-    Combines the substantive work of the pre-RDR-120 4.8.0 and 4.8.1
-    migrations into one idempotent pass.
-    """
-    from nexus.plans.repair import repair_scope_tags  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    conn = _open_plans_db()
-    if conn is None:
-        return
-    try:
-        result = repair_scope_tags(conn)
-    finally:
-        conn.close()
-    _emit(result)
-
-
-@repair.command("dimensions")
-def repair_dimensions_cmd() -> None:
-    """Backfill verb / name / dimensions on NULL-dimension plan rows.
-
-    Heuristic verb inference; rows that reached the wh-fallback are
-    tagged ``backfill-low-conf`` for operator review. Re-runs report
-    "0 backfilled" once every row carries dimensions.
-    """
-    from nexus.plans.repair import repair_dimensions  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    conn = _open_plans_db()
-    if conn is None:
-        return
-    try:
-        result = repair_dimensions(conn)
-        # Surface low-confidence rows for operator review.
-        low_conf_rows = conn.execute(
-            "SELECT id, query, verb FROM plans "
-            "WHERE tags LIKE '%backfill-low-conf%' "
-            "ORDER BY id ASC"
-        ).fetchall()
-    finally:
-        conn.close()
-    _emit(result)
-    if low_conf_rows:
-        click.echo(
-            f"\n{len(low_conf_rows)} low-conf row(s) need review "
-            "(tagged backfill-low-conf):"
-        )
-        for row_id, query, verb in low_conf_rows:
-            click.echo(
-                f"  id={row_id} verb={verb or '-'}  "
-                f"query={(query or '').strip()!r}"
-            )
-    else:
-        click.echo("\n0 rows need review.")
-
-
-@repair.command("match-text")
-def repair_match_text_cmd() -> None:
-    """Populate ``plans.match_text`` (and refresh ``plans_fts``) for rows
-    with empty ``match_text``. The schema (column + FTS5 table +
-    triggers) was created by ``apply_pending``; this verb fills in
-    the content the legacy migration used to populate.
-    """
-    from nexus.plans.repair import repair_match_text  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    conn = _open_plans_db()
-    if conn is None:
-        return
-    try:
-        result = repair_match_text(conn)
-    finally:
-        conn.close()
-    _emit(result)
-
-
-@repair.command("retire-legacy")
-def repair_retire_legacy_cmd() -> None:
-    """Delete plan rows whose ``plan_json`` uses the pre-RDR-078
-    ``operation`` shape. Such rows cannot be dispatched by ``plan_run``
-    and only pollute plan-match results.
-    """
-    from nexus.plans.repair import repair_retire_legacy  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    conn = _open_plans_db()
-    if conn is None:
-        return
-    try:
-        result = repair_retire_legacy(conn)
-    finally:
-        conn.close()
-    _emit(result)
-
-
-@repair.command("builtin-bindings")
-def repair_builtin_bindings_cmd() -> None:
-    """Patch ``required_bindings`` / ``optional_bindings`` into builtin
-    plan rows whose stored ``plan_json`` predates the 4.10.1 seed
-    loader fix.
-    """
-    from nexus.plans.repair import repair_builtin_bindings  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    conn = _open_plans_db()
-    if conn is None:
-        return
-    try:
-        result = repair_builtin_bindings(conn)
-    finally:
-        conn.close()
-    _emit(result)
-
-
-@repair.command("all")
-def repair_all_cmd() -> None:
-    """Run every repair pass in dependency order."""
-    from nexus.plans.repair import repair_all  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
-
-    conn = _open_plans_db()
-    if conn is None:
-        return
-    try:
-        results = repair_all(conn)
-    finally:
-        conn.close()
-    for name, result in results.items():
-        click.echo(f"[{name}]")
-        _emit(result, indent="  ")
+# The `nx plan repair` group (6 subcommands) and its SQLite helper
+# `_open_plans_db` were DELETED (nexus-i711w Stage 2 sub-stage A3): every
+# subcommand body took a sqlite3.Connection into the deleted SQLite
+# PlanLibrary's tables ([21098] verb fates: `nx plan repair` D). The live
+# library is engine-served; content repairs are engine-side operations.
 
 
 def _open_plan_library():
-    """Open the plan library through the storage-backend facade.
+    """Open the plan library (HttpPlanLibrary — the only implementation).
 
-    nexus-o02xe / RDR-179 Phase 1: every read/write verb below used to
-    hardcode ``PlanLibrary(path=default_db_path())`` — in service mode
-    that is the frozen pre-migration SQLite snapshot, leaving the CLI
-    dark against the live engine-served library. Route like
-    ``T2Database.plans`` does: service backend -> HttpPlanLibrary,
-    otherwise the local SQLite.
-
-    Returns an opened library, or ``None`` (after echoing) when the
-    local database file does not exist.
+    nexus-o02xe / RDR-179 Phase 1 routed this through the storage-backend
+    facade so service-mode CLIs stopped reading the frozen pre-migration
+    SQLite snapshot. The seam is now COLLAPSED (nexus-i711w Stage 2
+    sub-stage A3): the SQLite PlanLibrary died with the store, so the
+    engine-served library is the only arm left.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.storage_mode)
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.http_plan_library)
 
-    if storage_backend_for("plans") is StorageBackend.SERVICE:
-        from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.http_plan_library)
-
-        try:
-            return HttpPlanLibrary()
-        except Exception as exc:  # noqa: BLE001 — endpoint-resolution failure surfaced as a clean CLI error, not a traceback
-            raise click.ClickException(
-                f"plans service unavailable: {exc}"
-            ) from exc
-
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
-        return None
-    return PlanLibrary(path=db_path)
+    try:
+        return HttpPlanLibrary()
+    except Exception as exc:  # noqa: BLE001 — endpoint-resolution failure surfaced as a clean CLI error, not a traceback
+        raise click.ClickException(
+            f"plans service unavailable: {exc}"
+        ) from exc
 
 
 def _hygiene_scan(library) -> list[dict]:
@@ -346,9 +156,9 @@ def hygiene_cmd(apply_: bool) -> None:
     always-failing plans; --apply DISABLES them (reversible via
     `nx plan enable` — never deletes).
 
-    Works in BOTH modes: unlike `nx plan repair` (local-SQLite-only), this
-    verb routes through the storage facade, so it cleans the live
-    engine-served library on migrated installs (nexus-vtp8h).
+    Routes through HttpPlanLibrary, so it cleans the live engine-served
+    library (nexus-vtp8h). (Its one-time local-SQLite sibling, `nx plan
+    repair`, died with the SQLite store — nexus-i711w sub-stage A3.)
     """
     library = _open_plan_library()
     if library is None:
@@ -366,15 +176,6 @@ def hygiene_cmd(apply_: bool) -> None:
         return
     count = _hygiene_apply(library, findings)
     click.echo(f"Disabled {count} plan(s).")
-
-
-def _emit(result: dict, *, indent: str = "") -> None:
-    """Pretty-print a repair-verb result dict."""
-    if not result:
-        click.echo(f"{indent}(no-op)")
-        return
-    for key, value in result.items():
-        click.echo(f"{indent}{key}: {value}")
 
 
 @plan.command("list")
@@ -700,7 +501,7 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     \b
     With --from-project, stamps scope_tags from the plan's own
     ``project`` column — the same recovery source as the automatic
-    #1069 fallback in ``save_plan`` / ``nx plan repair scope-tags``.
+    #1069 fallback in ``save_plan`` (and the retired ``nx plan repair scope-tags``).
 
     \b
     Examples::
@@ -754,8 +555,7 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     # Derive the echo value from resolved_tags using the same normalization
     # that set_scope_tags applied.  No second connection needed — the
     # normalization is deterministic so this matches what was stored.
-    from nexus.db.t2.plan_library import _normalize_scope_string as _nss  # noqa: PLC0415, N812
-    from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS as _SAS  # noqa: PLC0415, N812
+    from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS as _SAS, _normalize_scope_string as _nss  # noqa: PLC0415, N812
     parts = [
         _nss(p.strip())
         for p in resolved_tags.split(",")
@@ -785,46 +585,18 @@ def reseed_cmd(force: bool) -> None:
     dimensions, so a description tweak on an existing dimension is
     invisible to the idempotent path.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.storage_mode)
-
-    _service = storage_backend_for("plans") is StorageBackend.SERVICE
-    if not _service:
-        # Preserve the pre-o02xe sqlite-mode contract: reseed against a
-        # missing local DB is a no-op, not an implicit bootstrap
-        # (_seed_plan_templates' T2Database would create the file+schema).
-        from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-
-        db_path = default_db_path()
-        if not db_path.exists():
-            click.echo(f"T2 database not found at {db_path}.")
-            return
-
     if force:
-        if _service:
-            # nexus-o02xe: the --force delete is raw SQL against the local
-            # SQLite. In service mode delete the builtin rows individually
-            # (`nx plan list` + `nx plan delete <id>`) — the idempotent
-            # reseed below still runs against the live library.
-            raise click.ClickException(
-                "--force is unavailable in service mode (raw-SQL delete "
-                "against the local snapshot). Delete builtin rows via "
-                "`nx plan delete <id>`, then rerun `nx plan reseed`."
-            )
-
-        lib = _open_plan_library()
-        if lib is None:
-            return
-        try:
-            with lib._lock:
-                cursor = lib.conn.execute(
-                    "DELETE FROM plans "
-                    "WHERE (',' || tags || ',') LIKE '%,builtin-template,%'"
-                )
-                lib.conn.commit()
-                removed = cursor.rowcount
-        finally:
-            lib.close()
-        click.echo(f"--force: removed {removed} builtin row(s).")
+        # The --force purge was raw SQL against the local SQLite plan
+        # library, which died in nexus-i711w Stage 2 sub-stage A3 (its
+        # dead branch had already become an AttributeError trap: lib._lock
+        # / lib.conn on an HttpPlanLibrary — porter-f defect report,
+        # 2026-07-30). The engine-served library keeps the existing
+        # service-mode contract: delete builtin rows individually.
+        raise click.ClickException(
+            "--force is unavailable (the raw-SQL purge died with the local "
+            "SQLite plan library). Delete builtin rows via "
+            "`nx plan delete <id>`, then rerun `nx plan reseed`."
+        )
 
     # _seed_plan_templates writes through T2Database.plans, which is
     # facade-routed (HttpPlanLibrary in service mode) — the seed half of

@@ -18,8 +18,9 @@ The catalog ``documents`` table inline migration (in
 * Adds ``source_uri TEXT NOT NULL DEFAULT ''`` to existing databases.
 * Idempotent — re-opening a migrated DB is a no-op.
 
-AspectRecord + DocumentAspects also widen to round-trip ``source_uri``
-through the store.
+The AspectRecord ``source_uri`` round-trip through the (deleted SQLite)
+DocumentAspects store used to be tested at the bottom of this file; the
+Http store's round-trip lives in ``tests/db/test_http_aspects_stores.py``.
 
 CATALOG SUBSTRATE (nexus-i711w Stage 2). ``nexus.catalog.catalog_db`` is
 already imported INSIDE the two test bodies that use it, never at module scope,
@@ -33,7 +34,6 @@ it retires with ``nexus/catalog/catalog_db.py`` rather than porting.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 
@@ -534,64 +534,9 @@ class TestNullRowDeleteMigration:
 
 
 # ── AspectRecord round-trip through the store ───────────────────────────────
-
-
-class TestAspectRecordSourceUriRoundTrip:
-    def test_upsert_and_get_round_trip_source_uri(self, tmp_path: Path) -> None:
-        from datetime import UTC, datetime
-
-        from nexus.db.t2.document_aspects import AspectRecord, DocumentAspects
-
-        store = DocumentAspects(tmp_path / "rt.db")
-        try:
-            # nexus-17wf: confidence is now floor-gated (>=0.3); pass
-            # an explicit value above the floor so the upsert lands.
-            # The test exercises source_uri round-trip, not confidence
-            # semantics.
-            store.upsert(AspectRecord(
-                collection="knowledge__delos",
-                source_path="/Users/me/aleph-bft.pdf",
-                problem_formulation="problem",
-                proposed_method="method",
-                confidence=0.9,
-                extracted_at=datetime.now(UTC).isoformat(),
-                model_version="claude-haiku-4-5-20251001",
-                extractor_name="scholarly-paper-v1",
-                source_uri="chroma://knowledge__delos//Users/me/aleph-bft.pdf",
-            ))
-            got = store.get("knowledge__delos", "/Users/me/aleph-bft.pdf")
-        finally:
-            store.close()
-
-        assert got is not None
-        assert got.source_uri == "chroma://knowledge__delos//Users/me/aleph-bft.pdf"
-
-    def test_legacy_row_with_null_source_uri_reads_back_as_none(
-        self, tmp_path: Path,
-    ) -> None:
-        """Backward compat: rows that existed before P2.1 and were
-        backfilled to NULL (or never backfilled) read back as
-        ``source_uri=None`` on the AspectRecord.
-        """
-        from nexus.db.t2.document_aspects import DocumentAspects
-
-        store = DocumentAspects(tmp_path / "legacy.db")
-        try:
-            # Bypass upsert to simulate a pre-P2.1 row (source_uri NULL).
-            with store._lock:
-                store.conn.execute(
-                    "INSERT INTO document_aspects "
-                    "(collection, source_path, extracted_at, "
-                    " model_version, extractor_name) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    ("knowledge__legacy", "old-source",
-                     "2026-04-26T00:00:00+00:00",
-                     "claude-haiku-4-5-20251001", "scholarly-paper-v1"),
-                )
-                store.conn.commit()
-            got = store.get("knowledge__legacy", "old-source")
-        finally:
-            store.close()
-
-        assert got is not None
-        assert got.source_uri is None
+#
+# TestAspectRecordSourceUriRoundTrip DELETED (nexus-i711w Stage 2 sub-stage
+# A3): its subject was the SQLite DocumentAspects store's own source_uri
+# round-trip (including the SQLite-only "legacy NULL row" shape). The store
+# is deleted; the surviving store's source_uri round-trip is covered by
+# tests/db/test_http_aspects_stores.py (HttpDocumentAspectsStore).

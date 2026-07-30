@@ -6,9 +6,11 @@
   (``OperationalError: no such column: source_path``) on any DB whose aspect
   PK had migrated to ``doc_id`` (RDR-108 Phase 1c) with ``source_path`` dropped
   (RDR-096 P5.2). Both PK migration and the column drop are deferred until a
-  catalog exists, so a DB can be in either shape — the cascade now resolves the
+  catalog exists, so a DB can be in either shape — the fix resolved the
   dedup column from the live schema (``doc_id`` when present, else
-  ``source_path``), matching the real PRIMARY KEY in each.
+  ``source_path``), matching the real PRIMARY KEY in each. (HISTORICAL:
+  that SQLite cascade + probe died in nexus-i711w sub-stage A3; see the
+  tombstone below.)
 * #1058 — the local tier-1 (bge) embedding function pre-converted fastembed's
   numpy arrays to Python lists; chromadb >= 1.x calls ``.tolist()`` on each
   element itself, so this raised ``'list' object has no attribute 'tolist'``
@@ -16,41 +18,18 @@
 """
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
 
-import os
-
-import pytest
-
-
-# ── #1057a: dedup-column resolution picks the live PRIMARY KEY ───────────────
-
-
-class TestRenameDedupCol:
-    def _table(self, *cols: str) -> sqlite3.Connection:
-        conn = sqlite3.connect(":memory:")
-        conn.execute(f"CREATE TABLE t ({', '.join(c + ' TEXT' for c in cols)})")
-        return conn
-
-    def test_prefers_doc_id_when_present(self) -> None:
-        from nexus.db.t2 import _rename_dedup_col
-
-        conn = self._table("collection", "doc_id", "source_uri")
-        assert _rename_dedup_col(conn, "t") == "doc_id"
-
-    def test_falls_back_to_source_path_when_no_doc_id(self) -> None:
-        from nexus.db.t2 import _rename_dedup_col
-
-        conn = self._table("collection", "source_path", "source_uri")
-        assert _rename_dedup_col(conn, "t") == "source_path"
-
-    def test_raises_when_neither_present(self) -> None:
-        from nexus.db.t2 import _rename_dedup_col
-
-        conn = self._table("collection", "source_uri")
-        with pytest.raises(RuntimeError, match="neither doc_id nor source_path"):
-            _rename_dedup_col(conn, "t")
+# ── #1057a: dedup-column resolution — DELETED ────────────────────────────────
+#
+# TestRenameDedupCol (3 tests) DELETED in nexus-i711w Stage 2 sub-stage A3:
+# its subject was ``_rename_dedup_col``, the live-schema PRIMARY-KEY probe
+# inside the SQLite ``rename_collection_cascade`` (doc_id vs source_path,
+# needed because the PK migration was catalog-deferred so a local DB could be
+# in either shape). The cascade is now a pure HTTP fan-out to the engine
+# stores (no sqlite3 connection, no schema probe — engine schema is
+# Liquibase-managed, always doc_id), and the helper died with it. The
+# surviving cascade contract is pinned by tests/test_rename_lock_t1_1.py and
+# the per-store rename_collection tests in tests/db/test_http_aspects_stores.py.
 
 
 # ── #1058: local tier-1 EF returns numpy arrays, not pre-converted lists ─────

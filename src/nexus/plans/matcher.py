@@ -7,11 +7,10 @@ Two paths, same output shape:
   * **T1 cosine path** — a :class:`PlanCache` queries the
     ``plans__session`` ChromaDB collection, returns ``(plan_id,
     distance)`` pairs. We convert distance → cosine similarity
-    (``1 - distance``), look up the row in :class:`~nexus.db.t2.
-    plan_library.PlanLibrary`, and return :class:`~nexus.plans.match.
+    (``1 - distance``), look up the row in :class:`~nexus.db.t2.http_http_plan_library.HttpPlanLibrary`, and return :class:`~nexus.plans.match.
     Match` objects with ``confidence`` set.
   * **FTS5 fallback** — when no cache is provided or the cache has no
-    hits, fall back to ``PlanLibrary.search_plans`` (keyword match
+    hits, fall back to ``HttpPlanLibrary.search_plans`` (keyword match
     over the stored descriptions). Matches carry ``confidence=None``
     as the sentinel.
 
@@ -23,7 +22,7 @@ rejects below-threshold cosine hits, but FTS5 hits
 
 Side effect: every returned plan increments
 ``plans.match_count`` (and ``match_conf_sum`` when scored) via
-:meth:`PlanLibrary.increment_match_metrics`. SC-12.
+:meth:`HttpPlanLibrary.increment_match_metrics`. SC-12.
 """
 from __future__ import annotations
 
@@ -31,7 +30,14 @@ from typing import Any, Protocol
 
 import structlog
 
-from nexus.db.t2.plan_library import PlanLibrary
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only (PEP 563 lazy): the runtime argument is whatever
+    # the caller passes — production passes HttpPlanLibrary, the only
+    # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
+    # the SQLite PlanLibrary.
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.plans.match import Match
 from nexus.plans.schema import unsatisfiable_typed_binding
 from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS, _normalize_scope_string
@@ -356,7 +362,7 @@ def _superset(plan_dims: dict[str, Any], filter_dims: dict[str, Any]) -> bool:
 def plan_match(
     intent: str,
     *,
-    library: PlanLibrary,
+    library: HttpPlanLibrary,
     cache: PlanCache | None = None,
     dimensions: dict[str, Any] | None = None,
     scope_preference: str = "",

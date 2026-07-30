@@ -18,7 +18,7 @@ import httpx
 import pytest
 
 from nexus.db.t2.records import QueueRow
-from nexus.db.t2.document_aspects import AspectRecord
+from nexus.db.t2.records import AspectRecord
 from nexus.db.t2.records import HighlightRecord
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
 from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore

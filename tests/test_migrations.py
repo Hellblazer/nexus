@@ -6,7 +6,6 @@ They will fail until migrations.py is implemented (nexus-6cn).
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -962,7 +961,10 @@ class TestT2DatabaseIntegration:
     This is SQLite-substrate machinery outright: the transient-connection
     bootstrap and the ``_upgrade_done`` fast path have no service-mode
     counterpart to test, because the Java service owns its own Postgres
-    schema. It retires with the stores themselves in nexus-i711w.
+    schema. The SQLite domain stores are gone (nexus-i711w Stage 2
+    sub-stage A3); ``T2Database.bootstrap_schema`` + ``db/migrations.py``
+    remain the SQLite migration-SOURCE machinery and retire with
+    migrations.py in Stage 4 — this class goes with them.
 
     Pinned rather than skipped so the machinery keeps being tested while it
     still exists — and because the pin also DE-VACUUMS the class's passing
@@ -975,14 +977,13 @@ class TestT2DatabaseIntegration:
     def _clear_module_state(self) -> None:
         """Clear all module-level migration guard sets."""
         from nexus.db import migrations
-        from nexus.db.t2 import memory_store, plan_library
 
         migrations._upgrade_done.clear()
-        memory_store._migrated_paths.clear()
-        plan_library._migrated_paths.clear()
-        # catalog_taxonomy._migrated_paths: the module is deleted (nexus-i711w
-    # Stage 2 sub-stage C). Its per-path migration guard went with it; the
-    # taxonomy base-schema DDL now lives in db/migrations.py.
+        # memory_store._migrated_paths / plan_library._migrated_paths /
+        # catalog_taxonomy._migrated_paths: the SQLite store modules are
+        # deleted (nexus-i711w Stage 2 sub-stages A3/C). Their per-path
+        # migration guards went with them; ``migrations._upgrade_done`` is
+        # the only module-level guard left to clear.
 
     def test_t2database_creates_version_table(self, tmp_path: Path) -> None:
         """T2Database construction should create _nexus_version table."""
@@ -1050,19 +1051,10 @@ class TestT2DatabaseIntegration:
         conn.close()
         db.close()
 
-    def test_standalone_memory_store_works(self, tmp_path: Path) -> None:
-        """MemoryStore constructed outside T2Database still works."""
-        from nexus.db.t2.memory_store import MemoryStore
-
-        db_path = tmp_path / "memory.db"
-        store = MemoryStore(db_path)
-        # Basic operation — verify put doesn't raise
-        store.put("test", "title1", "content", tags="tag1")
-        # Verify row exists via get
-        result = store.get("test", "title1")
-        assert result is not None
-        assert result["content"] == "content"
-        store.close()
+    # test_standalone_memory_store_works DELETED (nexus-i711w Stage 2
+    # sub-stage A3): its subject was the SQLite MemoryStore constructed
+    # outside T2Database — the store is deleted. HttpMemoryStore's
+    # standalone behaviour is covered in tests/db/.
 
     def test_concurrent_t2database_construction(self, tmp_path: Path) -> None:
         """Two threads constructing T2Database on same path — no crash."""
@@ -1909,165 +1901,19 @@ class TestMigrateHookFailuresBatchColumns:
 # ── repair_dimensions (RDR-092 Phase 0d.1) ──────────────────────────
 
 
-def _make_plans_schema(conn: sqlite3.Connection) -> None:
-    """Minimal plans schema with the RDR-078 dimensional columns."""
-    from nexus.db.migrations import _add_plan_dimensional_identity
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL
-        );
-    """)
-    _add_plan_dimensional_identity(conn)
-    conn.commit()
-
-
-def _insert_plan(
-    conn: sqlite3.Connection,
-    *,
-    query: str,
-    tags: str = "",
-    dimensions: str | None = None,
-    verb: str | None = None,
-    name: str | None = None,
-    scope: str | None = None,
-) -> int:
-    cursor = conn.execute(
-        "INSERT INTO plans "
-        "(query, plan_json, outcome, tags, created_at, "
-        "verb, scope, dimensions, name) "
-        "VALUES (?, '{}', 'success', ?, datetime('now'), ?, ?, ?, ?)",
-        (query, tags, verb, scope, dimensions, name),
-    )
-    conn.commit()
-    return cursor.lastrowid
-
-
 class TestBackfillPlanDimensions:
-    """RDR-092 Phase 0d.1: backfill verb/name/dimensions for NULL rows.
+    """RDR-092 Phase 0d.1 plan-dimensions backfill.
 
-    Contract:
-      * Rows with ``dimensions IS NULL`` get verb/name/dimensions filled
-        by a 29-stem verb-from-stem heuristic + wh-fallback on the
-        ``query`` column text.
-      * High-confidence matches tag ``,backfill``; zero-score rows
-        (wh-fallback) tag ``,backfill-low-conf`` so ``nx plan repair``
-        can prioritise them for manual review.
-      * Rows with ``dimensions IS NOT NULL`` are untouched (authored
-        rows, including already-backfilled rows on re-run).
+    The behaviour tests (verb inference, idempotency, authored-row
+    preservation, low-conf flagging, collision resolution) were DELETED
+    in nexus-i711w Stage 2 sub-stage A3: their subject was
+    ``nexus.plans.repair.repair_dimensions``, the ``nx plan repair``
+    consumer verb operating on SQLite plans rows — deleted with the
+    SQLite plan library (the engine's plan rows arrive via the seed
+    loader / save path with dimensions already populated). What
+    survives here is the registry sentinel: the (now no-op) migration
+    step stays registered so the version chain remains monotone.
     """
-
-    def test_backfill_plan_dimensions_infers_verb(self) -> None:
-        """Stem matches select the expected verb for each rule family."""
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-
-        fixtures: list[tuple[str, str, str]] = [
-            # (query, expected verb, row-id label)
-            ("find documents about indexing", "research", "research-find"),
-            ("analyze chunk throughput", "analyze", "analyze-direct"),
-            ("compare two retrieval backends", "analyze", "analyze-compare"),
-            ("review the auth refactor", "review", "review-direct"),
-            ("debug the chroma timeout", "debug", "debug-direct"),
-            ("document the cache protocol", "document", "document-direct"),
-        ]
-        ids = {}
-        for query, _verb, label in fixtures:
-            ids[label] = _insert_plan(conn, query=query)
-
-        repair_dimensions(conn)
-
-        for query, expected_verb, label in fixtures:
-            row = conn.execute(
-                "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
-                (ids[label],),
-            ).fetchone()
-            assert row[0] == expected_verb, (
-                f"{query!r}: expected verb={expected_verb!r}, got {row[0]!r}"
-            )
-            assert row[1], f"{query!r}: name must be populated"
-            assert row[2], f"{query!r}: dimensions JSON must be populated"
-            assert "backfill" in (row[3] or "")
-
-    def test_backfill_plan_dimensions_idempotent(self) -> None:
-        """Re-running the migration is a no-op on already-backfilled rows."""
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        rid = _insert_plan(conn, query="analyze the ranker output")
-
-        repair_dimensions(conn)
-        first = conn.execute(
-            "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
-            (rid,),
-        ).fetchone()
-        assert first[0] == "analyze"
-        assert "backfill" in (first[3] or "")
-
-        # Second run: state must be stable and tags must not duplicate.
-        repair_dimensions(conn)
-        second = conn.execute(
-            "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
-            (rid,),
-        ).fetchone()
-        assert second == first
-        # No double-tagging.
-        assert (second[3] or "").count("backfill") == 1
-
-    def test_backfill_preserves_authored_verbs(self) -> None:
-        """Rows with dimensions IS NOT NULL are untouched."""
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        # Simulate an authored row.
-        rid = _insert_plan(
-            conn,
-            query="analyze lineage",
-            tags="builtin-template,rdr-078,research",
-            verb="research",
-            scope="global",
-            name="default",
-            dimensions='{"scope":"global","verb":"research"}',
-        )
-
-        repair_dimensions(conn)
-
-        row = conn.execute(
-            "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
-            (rid,),
-        ).fetchone()
-        # Not rewritten by the heuristic (query says 'analyze' but
-        # authored verb was 'research'); tags not appended.
-        assert row[0] == "research"
-        assert row[1] == "default"
-        assert row[2] == '{"scope":"global","verb":"research"}'
-        assert "backfill" not in row[3]
-
-    def test_backfill_low_conf_flagging(self) -> None:
-        """Rows that hit only the wh-fallback carry backfill-low-conf."""
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        # A query with no stem match — only the wh-word triggers.
-        rid = _insert_plan(conn, query="what about the graph")
-
-        repair_dimensions(conn)
-
-        row = conn.execute(
-            "SELECT verb, tags FROM plans WHERE id = ?", (rid,),
-        ).fetchone()
-        assert row[0], "verb must be populated even on low-conf"
-        assert "backfill-low-conf" in (row[1] or "")
 
     def test_backfill_registered_in_migrations_list(self) -> None:
         """The migration appears in MIGRATIONS at a >= 4.9.12 version."""
@@ -2085,133 +1931,7 @@ class TestBackfillPlanDimensions:
             f"must be introduced in >= 4.9.12, got {matches[0][0]!r}"
         )
 
-    def test_backfill_collision_resolves_via_row_id_suffix(self) -> None:
-        """RDR-092 code-review C-1: two NULL-dimension rows whose
-        queries collapse to the same kebab name must not crash the
-        migration on the UNIQUE(project, dimensions) partial index.
-        The second row lands with its strategy suffixed by row id
-        so both rows land with distinct, deterministic identities.
-        """
-        from nexus.plans.repair import repair_dimensions
 
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        # Two queries that reduce to the same content tokens after
-        # stop-word stripping.
-        rid1 = _insert_plan(conn, query="find the documents for author")
-        rid2 = _insert_plan(conn, query="find documents by author")
-
-        repair_dimensions(conn)  # must not raise
-
-        rows = conn.execute(
-            "SELECT id, name, dimensions FROM plans ORDER BY id ASC"
-        ).fetchall()
-        assert len(rows) == 2
-        first_name, second_name = rows[0][1], rows[1][1]
-        first_dims, second_dims = rows[0][2], rows[1][2]
-        # Both rows got dimensions populated (no skipped rows).
-        assert first_dims, "first row must carry dimensions"
-        assert second_dims, "collision must not leave dimensions NULL"
-        # The colliding row carries the row_id suffix.
-        assert first_name != second_name
-        assert str(rid2) in second_name, (
-            f"collision row's name must include row_id={rid2}, got {second_name!r}"
-        )
-        # Dimensions JSON differs (unique partial-index satisfied).
-        assert first_dims != second_dims
-
-    def test_backfill_sentinel_name_does_not_collide(self) -> None:
-        """Queries with no alphanumeric tokens fall to the sentinel
-        ``backfilled-plan`` name; multiple such rows must each get a
-        deterministic unique identity via the row-id suffix path
-        (test-validator note: earlier fixture used stop-word-only
-        queries whose raw-token fallback still differed; replace with
-        queries whose ``tokens`` list is actually empty).
-        """
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        # Queries with no regex-matched tokens trigger the
-        # 'backfilled-plan' sentinel in _derive_plan_name_from_query.
-        rid1 = _insert_plan(conn, query="!!!")
-        rid2 = _insert_plan(conn, query="...")
-        rid3 = _insert_plan(conn, query="???")
-
-        repair_dimensions(conn)
-
-        rows = conn.execute(
-            "SELECT id, name, dimensions FROM plans ORDER BY id ASC"
-        ).fetchall()
-        names = [row[1] for row in rows]
-        dims = [row[2] for row in rows]
-        # All three rows land with unique names and unique dimensions.
-        assert len(set(names)) == 3, f"names should all differ, got {names!r}"
-        assert len(set(dims)) == 3, "dimensions JSON must be unique per row"
-        # First row keeps the plain sentinel; 2nd and 3rd carry row_id
-        # suffixes (the in-memory ``claimed`` set catches them because
-        # the 1st row's UPDATE has not been persisted at 2nd row's
-        # pre-check time).
-        assert names[0] == "backfilled-plan"
-        assert str(rid2) in names[1]
-        assert str(rid3) in names[2]
-
-    def test_backfill_within_loop_claimed_set_fires(self) -> None:
-        """Three queries that derive to the same kebab name exercise
-        the in-memory ``claimed`` fallback: the 2nd and 3rd rows both
-        collide, and only the 1st has been persisted when the 2nd's
-        SELECT pre-check runs, so the ``key in claimed`` branch is
-        the one that catches the 3rd.
-        """
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        # All three strip down to 'find-documents-author' after stop-
-        # word filter on the first 5 content tokens.
-        _insert_plan(conn, query="find the documents for author")
-        _insert_plan(conn, query="find documents by author")
-        _insert_plan(conn, query="find documents about author")
-
-        repair_dimensions(conn)
-
-        rows = conn.execute(
-            "SELECT dimensions FROM plans ORDER BY id ASC"
-        ).fetchall()
-        dims = [r[0] for r in rows]
-        assert len(set(dims)) == 3, (
-            f"all three rows must land with distinct dimensions, got {dims!r}"
-        )
-
-    def test_backfill_collision_idempotent_on_rerun(self) -> None:
-        """A second run against a DB that already contains a
-        collision-resolved row must leave the suffixed identity
-        unchanged: the NULL-dimension filter skips it entirely.
-        """
-        from nexus.plans.repair import repair_dimensions
-
-        conn = sqlite3.connect(":memory:")
-        _make_plans_schema(conn)
-        _insert_plan(conn, query="find the documents for author")
-        rid2 = _insert_plan(conn, query="find documents by author")
-
-        repair_dimensions(conn)
-        first = conn.execute(
-            "SELECT name, dimensions, tags FROM plans WHERE id = ?",
-            (rid2,),
-        ).fetchone()
-
-        repair_dimensions(conn)
-        second = conn.execute(
-            "SELECT name, dimensions, tags FROM plans WHERE id = ?",
-            (rid2,),
-        ).fetchone()
-
-        assert first == second, (
-            "collision-resolved row must be stable across reruns"
-        )
-        # Collision row carries the row_id suffix on both runs.
-        assert str(rid2) in first[0]
 # ── _add_plan_match_text_column (RDR-092 Phase 3.1) ─────────────────────────
 
 
@@ -2271,79 +1991,12 @@ class TestAddPlanMatchTextColumn:
             f"plans_fts must index match_text, got: {row[0]!r}"
         )
 
-    def test_backfill_populates_dimensional_rows(self) -> None:
-        """Rows with verb/name/scope get a hybrid match_text; legacy
-        NULL-dimension rows keep the raw query text.
-        """
-        from nexus.db.migrations import _add_plan_match_text_column
-
-        conn = sqlite3.connect(":memory:")
-        self._base_schema(conn)
-
-        conn.execute(
-            "INSERT INTO plans "
-            "(query, plan_json, outcome, tags, created_at, "
-            "verb, scope, name) "
-            "VALUES (?, '{}', 'success', '', datetime('now'), ?, ?, ?)",
-            ("Find documents attributed to a specific author.",
-             "research", "global", "find-by-author"),
-        )
-        conn.execute(
-            "INSERT INTO plans "
-            "(query, plan_json, outcome, tags, created_at) "
-            "VALUES (?, '{}', 'success', '', datetime('now'))",
-            ("legacy plan text",),
-        )
-        conn.commit()
-
-        from nexus.plans.repair import repair_match_text
-
-        _add_plan_match_text_column(conn)
-        # RDR-120 §A8 / nexus-rv7x6: per-row backfill is consumer-side.
-        repair_match_text(conn)
-
-        dimensional = conn.execute(
-            "SELECT match_text FROM plans WHERE name = 'find-by-author'"
-        ).fetchone()
-        assert dimensional is not None
-        assert "research find-by-author scope global" in dimensional[0]
-
-        legacy = conn.execute(
-            "SELECT match_text FROM plans WHERE query = 'legacy plan text'"
-        ).fetchone()
-        assert legacy is not None
-        assert legacy[0] == "legacy plan text"
-
-    def test_backfill_idempotent(self) -> None:
-        """Re-running the migration does not duplicate or corrupt
-        already-synthesised match_text values.
-        """
-        from nexus.db.migrations import _add_plan_match_text_column
-
-        conn = sqlite3.connect(":memory:")
-        self._base_schema(conn)
-        conn.execute(
-            "INSERT INTO plans "
-            "(query, plan_json, outcome, tags, created_at, "
-            "verb, scope, name) "
-            "VALUES (?, '{}', 'success', '', datetime('now'), ?, ?, ?)",
-            ("Analyze lineage across prose and code.",
-             "analyze", "global", "default"),
-        )
-        conn.commit()
-
-        from nexus.plans.repair import repair_match_text
-
-        _add_plan_match_text_column(conn)
-        repair_match_text(conn)
-        first = conn.execute("SELECT match_text FROM plans").fetchone()[0]
-
-        _add_plan_match_text_column(conn)
-        repair_match_text(conn)
-        second = conn.execute("SELECT match_text FROM plans").fetchone()[0]
-
-        assert first == second
-        assert "analyze default scope global" in first
+    # test_backfill_populates_dimensional_rows and test_backfill_idempotent
+    # DELETED (nexus-i711w Stage 2 sub-stage A3): their subject was
+    # ``nexus.plans.repair.repair_match_text`` — the consumer verb that
+    # backfilled per-row match_text on the SQLite plans table. The verb
+    # died with the SQLite plan library; the surviving HttpPlanLibrary
+    # synthesises match_text at save time (see save_plan docstring).
 
     def test_registered_in_migrations_list(self) -> None:
         from nexus.db.migrations import MIGRATIONS
@@ -2364,7 +2017,7 @@ class TestAddPlanMatchTextColumn:
         ALTER TABLE (column add) and the FTS rebuild executescript,
         the column exists but ``plans_fts`` is gone. The migration's
         guard must detect this mid-state on retry and re-run the
-        backfill + FTS rebuild rather than short-circuiting on the
+        FTS rebuild rather than short-circuiting on the
         ``match_text in cols`` check.
         """
         from nexus.db.migrations import _add_plan_match_text_column
@@ -2412,12 +2065,13 @@ class TestAddPlanMatchTextColumn:
         assert row[0] == "", "setup invariant: match_text must be ''"
 
         # Re-run the migration. The has_fts guard detects the mid-state
-        # and falls through to rebuild FTS. Per RDR-120 §A8 the per-row
-        # match_text backfill is the consumer verb's responsibility, so
-        # we drive both legs here to validate end-to-end recovery.
-        from nexus.plans.repair import repair_match_text
+        # and falls through to rebuild FTS. The per-row match_text
+        # backfill used to be validated here too via
+        # ``nexus.plans.repair.repair_match_text``; that consumer verb
+        # was deleted with the SQLite plan library (nexus-i711w Stage 2
+        # sub-stage A3), so this test now pins only the migration's own
+        # contract: FTS recreated, column left at its DEFAULT ''.
         _add_plan_match_text_column(conn)
-        repair_match_text(conn)
 
         fts_row = conn.execute(
             "SELECT name FROM sqlite_master "
@@ -2429,8 +2083,9 @@ class TestAddPlanMatchTextColumn:
         row = conn.execute(
             "SELECT match_text FROM plans"
         ).fetchone()
-        assert "research citation-traversal scope global" in row[0], (
-            f"backfill must synthesize match_text on retry, got {row[0]!r}"
+        assert row[0] == "", (
+            "migration is DDL-only (RDR-120 §A8): match_text stays at "
+            f"DEFAULT '' after the retry, got {row[0]!r}"
         )
 
 
@@ -2438,100 +2093,16 @@ class TestAddPlanMatchTextColumn:
 
 
 class TestRetireLegacyOperationShapePlans:
-    """nexus-4m9b: RDR-092 Phase 0a retired the ``_PLAN_TEMPLATES`` seed
-    array but did not migrate the rows it had previously seeded. Those
-    rows, plus pre-RDR-078 user ad-hoc plans, carry step entries shaped
-    like ``{"operation": "X", "params": {...}}`` that ``plan_run``
-    cannot dispatch. The migration deletes them so modern replacements
-    win during plan-match routing.
+    """nexus-4m9b / RDR-092 Phase 0a legacy-shape retirement.
+
+    The behaviour tests (deletes legacy shape, idempotency, args
+    false-positive guard) were DELETED in nexus-i711w Stage 2 sub-stage
+    A3: their subject was ``nexus.plans.repair.repair_retire_legacy``,
+    the ``nx plan repair`` consumer verb sweeping SQLite plans rows —
+    deleted with the SQLite plan library. What survives is the registry
+    sentinel: the (now no-op) migration step stays registered so the
+    version chain remains monotone.
     """
-
-    def _schema(self, conn: sqlite3.Connection) -> None:
-        conn.executescript("""
-            CREATE TABLE plans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT NOT NULL,
-                plan_json TEXT NOT NULL,
-                outcome TEXT DEFAULT 'success',
-                tags TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-        """)
-        conn.commit()
-
-    def test_deletes_legacy_operation_shape(self) -> None:
-        from nexus.plans.repair import repair_retire_legacy
-
-        conn = sqlite3.connect(":memory:")
-        self._schema(conn)
-        legacy = json.dumps({
-            "steps": [
-                {"step": 1, "operation": "catalog_search", "params": {"author": "x"}},
-            ],
-        })
-        modern = json.dumps({
-            "steps": [{"tool": "search", "args": {"query": "x"}}],
-        })
-        conn.execute(
-            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
-            ("legacy", legacy),
-        )
-        conn.execute(
-            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
-            ("modern", modern),
-        )
-        conn.commit()
-
-        repair_retire_legacy(conn)
-
-        remaining = [r[0] for r in conn.execute(
-            "SELECT query FROM plans ORDER BY id"
-        ).fetchall()]
-        assert remaining == ["modern"]
-
-    def test_idempotent(self) -> None:
-        from nexus.plans.repair import repair_retire_legacy
-
-        conn = sqlite3.connect(":memory:")
-        self._schema(conn)
-        conn.execute(
-            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
-            ("legacy",
-             '{"steps": [{"operation": "search", "params": {}}]}'),
-        )
-        conn.commit()
-
-        repair_retire_legacy(conn)
-        repair_retire_legacy(conn)  # no raise
-
-        count = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
-        assert count == 0
-
-    def test_preserves_rows_that_mention_operation_in_args(self) -> None:
-        """A modern plan whose args payload happens to contain the word
-        ``operation`` (e.g. a ``purpose: reference-operation`` string)
-        must not be retired. The post-parse ``has_tool`` check decides.
-        """
-        from nexus.plans.repair import repair_retire_legacy
-
-        conn = sqlite3.connect(":memory:")
-        self._schema(conn)
-        plan_json = json.dumps({
-            "steps": [{
-                "tool": "traverse",
-                "args": {"purpose": "reference-operation"},
-            }],
-        })
-        conn.execute(
-            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
-            ("false-positive guard", plan_json),
-        )
-        conn.commit()
-
-        repair_retire_legacy(conn)
-
-        count = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
-        assert count == 1
 
     def test_registered_in_migrations_list(self) -> None:
         from nexus.db.migrations import MIGRATIONS
@@ -2552,188 +2123,18 @@ class TestRetireLegacyOperationShapePlans:
 
 
 class TestBackfillBuiltinBindings:
-    """nexus-uyc6: the seed_loader fix merges binding declarations into
-    plan_json at save_plan time, but existing rows short-circuit via
-    ``get_plan_by_dimensions`` on re-seed. This migration patches the
-    declarations into pre-existing builtin rows by matching
-    ``(verb, scope, strategy)`` against the shipping YAMLs.
+    """nexus-uyc6 builtin-bindings backfill.
+
+    The behaviour tests (dimension-matched backfill, idempotency,
+    non-builtin skip) were DELETED in nexus-i711w Stage 2 sub-stage A3:
+    their subject was ``nexus.plans.repair.repair_builtin_bindings``,
+    the ``nx plan repair`` consumer verb patching SQLite builtin plan
+    rows — deleted with the SQLite plan library (the seed loader merges
+    binding declarations into plan_json at save time, covered by
+    tests/test_scoped_plan_loader.py). What survives is the registry
+    sentinel: the (now no-op) migration step stays registered so the
+    version chain remains monotone.
     """
-
-    def _schema(self, conn: sqlite3.Connection) -> None:
-        conn.executescript("""
-            CREATE TABLE plans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT NOT NULL,
-                plan_json TEXT NOT NULL,
-                outcome TEXT DEFAULT 'success',
-                tags TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                project TEXT NOT NULL DEFAULT '',
-                verb TEXT,
-                scope TEXT,
-                dimensions TEXT,
-                name TEXT
-            );
-        """)
-        conn.commit()
-
-    def _write_yaml(self, path, name, verb, scope, strategy,
-                    required, optional):
-        import yaml as _yaml
-        doc = {
-            "name": name,
-            "description": f"{verb} / {strategy} test template",
-            "dimensions": {"verb": verb, "scope": scope, "strategy": strategy},
-            "plan_json": {"steps": [{"tool": "search", "args": {}}]},
-        }
-        if required:
-            doc["required_bindings"] = required
-        if optional:
-            doc["optional_bindings"] = optional
-        path.write_text(_yaml.safe_dump(doc))
-
-    def test_backfills_matching_row_by_dimensions(self, tmp_path, monkeypatch):
-        from nexus.plans.repair import repair_builtin_bindings
-
-        yaml_dir = tmp_path / "conexus" / "plans" / "builtin"
-        yaml_dir.mkdir(parents=True)
-        self._write_yaml(
-            yaml_dir / "analyze.yml",
-            name="default", verb="analyze", scope="global",
-            strategy="default", required=["area", "criterion"],
-            optional=["limit"],
-        )
-
-        # Point the migration's repo-root fallback at our tmp layout.
-        # Migration walks __file__.parents[3]/conexus/plans/builtin; a monkeypatch
-        # of the module-level ``Path`` lookup in the migration is brittle,
-        # so instead pivot on ``importlib.resources`` by setting up a
-        # resource stub. Simpler: mock ``importlib.resources.files`` to
-        # return an object whose ``joinpath`` chain resolves to tmp_path.
-        monkeypatch.chdir(tmp_path)
-
-        class _FakeResource:
-            def __init__(self, root):
-                self._root = root
-            def __truediv__(self, segment):
-                return _FakeResource(self._root / segment)
-            def is_dir(self):
-                return self._root.is_dir()
-            def iterdir(self):
-                return self._root.iterdir()
-
-        def fake_files(_pkg):
-            # Mirror the migration's expected layout: <pkg> / _resources
-            # / plans / builtin. We ship the YAMLs at tmp_path/conexus/plans/
-            # builtin, so route _resources/plans/builtin to tmp_path/conexus/
-            # plans/builtin via the FakeResource chain.
-            root = tmp_path / "conexus"
-            # Eat the leading "_resources" segment by returning a resource
-            # rooted at tmp_path/conexus so the subsequent / "plans" / "builtin"
-            # lands correctly. Requires a small shim: intercept the first
-            # / and redirect.
-            class _RedirectingFakeResource(_FakeResource):
-                def __truediv__(self, segment):
-                    if segment == "_resources":
-                        return _FakeResource(root)
-                    return _FakeResource(self._root / segment)
-            return _RedirectingFakeResource(root)
-
-        class _FakeAsFile:
-            def __init__(self, resource):
-                self._resource = resource
-            def __enter__(self):
-                return self._resource._root
-            def __exit__(self, *a):
-                return False
-
-        monkeypatch.setattr(
-            "importlib.resources.files", fake_files,
-        )
-        monkeypatch.setattr(
-            "importlib.resources.as_file",
-            lambda resource: _FakeAsFile(resource),
-        )
-
-        conn = sqlite3.connect(":memory:")
-        self._schema(conn)
-        conn.execute(
-            "INSERT INTO plans "
-            "(query, plan_json, tags, verb, scope, dimensions, name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "Analysis and synthesis",
-                '{"steps": [{"tool": "search", "args": {}}]}',
-                "builtin-template,rdr-078,analyze",
-                "analyze", "global",
-                '{"scope":"global","strategy":"default","verb":"analyze"}',
-                "default",
-            ),
-        )
-        conn.commit()
-
-        repair_builtin_bindings(conn)
-
-        row = conn.execute(
-            "SELECT plan_json FROM plans WHERE name='default'"
-        ).fetchone()
-        parsed = json.loads(row[0])
-        assert parsed["required_bindings"] == ["area", "criterion"]
-        assert parsed["optional_bindings"] == ["limit"]
-
-    def test_idempotent_when_row_already_has_bindings(self, tmp_path, monkeypatch):
-        from nexus.plans.repair import repair_builtin_bindings
-
-        conn = sqlite3.connect(":memory:")
-        self._schema(conn)
-        already = json.dumps({
-            "steps": [{"tool": "search", "args": {}}],
-            "required_bindings": ["area"],
-        })
-        conn.execute(
-            "INSERT INTO plans "
-            "(query, plan_json, tags, verb, scope, dimensions, name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("x", already, "builtin-template", "analyze", "global",
-             '{"verb":"analyze","scope":"global","strategy":"default"}',
-             "default"),
-        )
-        conn.commit()
-
-        repair_builtin_bindings(conn)
-
-        row = conn.execute(
-            "SELECT plan_json FROM plans WHERE name='default'"
-        ).fetchone()
-        assert row[0] == already
-
-    def test_skips_non_builtin_rows(self, tmp_path, monkeypatch):
-        """User ad-hoc rows (no ``builtin`` in tags) must not be touched
-        even if a dimension match exists in the shipping YAMLs.
-        """
-        from nexus.plans.repair import repair_builtin_bindings
-
-        conn = sqlite3.connect(":memory:")
-        self._schema(conn)
-        conn.execute(
-            "INSERT INTO plans "
-            "(query, plan_json, tags, verb, scope, dimensions, name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("ad-hoc", '{"steps": []}', "ad-hoc,grown",
-             "analyze", "global",
-             '{"verb":"analyze","scope":"global","strategy":"default"}',
-             "default"),
-        )
-        conn.commit()
-
-        # Even with missing YAMLs the migration should no-op cleanly
-        # on non-builtin rows. Call it without fixture YAMLs.
-        repair_builtin_bindings(conn)
-
-        row = conn.execute(
-            "SELECT plan_json FROM plans WHERE name='default'"
-        ).fetchone()
-        assert row[0] == '{"steps": []}'
 
     def test_registered_in_migrations_list(self):
         from nexus.db.migrations import MIGRATIONS

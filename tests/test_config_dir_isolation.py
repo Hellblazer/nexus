@@ -27,22 +27,20 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(sandbox))
 
     # Reload modules that resolve their path constants at import time so
-    # the new env var takes effect within the test scope. Also reload
-    # nexus.db.t2.memory_store because it imports
-    # ``read_claude_session_id`` from nexus.session by name — a bare
-    # reload of nexus.session would leave memory_store pointing at the
-    # old function object and break the identity-check assertion in
-    # tests/test_memory.py.
+    # the new env var takes effect within the test scope.
+    # nexus.db.t2.memory_store used to be reloaded here too (it imported
+    # ``read_claude_session_id`` from nexus.session by name); the SQLite
+    # store was deleted in nexus-i711w Stage 2 sub-stage A3, and
+    # HttpMemoryStore resolves the session file at call time, so no
+    # store reload is needed anymore.
     import nexus.session
     import nexus.context
     import nexus.checkpoint
     import nexus.commands.search_cmd
-    import nexus.db.t2.memory_store
     importlib.reload(nexus.session)
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
     importlib.reload(nexus.commands.search_cmd)
-    importlib.reload(nexus.db.t2.memory_store)
 
     yield sandbox
 
@@ -53,7 +51,6 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
     importlib.reload(nexus.commands.search_cmd)
-    importlib.reload(nexus.db.t2.memory_store)
 
 
 class TestCanonicalHelper:

@@ -12,11 +12,9 @@ Tests covering:
 """
 from __future__ import annotations
 
-import os
-import sqlite3
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -156,21 +154,21 @@ class TestCascadeHoldsLock:
             db.close()
 
     def test_rename_lock_released_on_cascade_error(self, tmp_path: Path) -> None:
-        """RENAME_LOCK is released even when rename_collection_cascade raises."""
+        """RENAME_LOCK is released even when rename_collection_cascade raises.
+
+        nexus-i711w sub-stage A3: the cascade is a pure HTTP fan-out (no
+        sqlite3 connection to bomb), so the error is injected at a store's
+        ``rename_collection`` leg instead — same subject: the lock's
+        with-block must release on a mid-cascade raise.
+        """
         from nexus.db.t2 import T2Database
         db = T2Database(tmp_path / "t2.db")
 
-        class _BombConn:
-            """Fake connection that raises on BEGIN."""
-            def execute(self, sql: str, *args: object) -> object:
-                if sql.strip().upper() == "BEGIN":
-                    raise RuntimeError("injected failure")
-                return MagicMock()
-            def rollback(self) -> None: pass
-            def close(self) -> None: pass
+        def _bomb(*, old: str, new: str) -> int:
+            raise RuntimeError("injected failure")
 
         try:
-            with patch("sqlite3.connect", return_value=_BombConn()):
+            with patch.object(db.chash_index, "rename_collection", _bomb):
                 with pytest.raises(RuntimeError, match="injected failure"):
                     db.rename_collection_cascade(old="code__old", new="code__new")
 

@@ -114,7 +114,7 @@ _SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # Grandfathered prose-message events as of nexus-whh61.3 (AST count over src/).
 # Ratchet DOWN as sites are fixed; never UP (a new prose event must fail CI).
-SNAKE_CASE_EVENT_BASELINE = 78  # 80 -> 78: RDR-188 .9/.19 deleted both prose-style client-rerank log sites
+SNAKE_CASE_EVENT_BASELINE = 77  # 80 -> 78: RDR-188 .9/.19 deleted both prose-style client-rerank log sites; 78 -> 77: nexus-i711w Stage 2 sub-stage A3 deleted the SQLite T2 stores (a prose-style site went with the deleted src) — LOWERED per this file's own ratchet rule, never bumped up
 
 
 def _event_is_snake_case(event: str) -> bool:

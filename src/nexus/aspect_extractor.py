@@ -89,7 +89,7 @@ import structlog
 
 from nexus import pdeathsig as _pdeathsig
 from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
-from nexus.db.t2.document_aspects import AspectRecord
+from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 
 # Re-exported for ergonomic ``from nexus.aspect_extractor import

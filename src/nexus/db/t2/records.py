@@ -136,3 +136,31 @@ def _safe_json_dict(s: str | None) -> dict:
     except (ValueError, TypeError):
         return {}
     return v if isinstance(v, dict) else {}
+
+
+# Rehomed from the deleted SQLite memory_store.py (nexus-i711w Stage 2
+# sub-stage A3): pure text escaping with no substrate. Surviving consumer
+# is the FTS query path in db/t2/catalog.py (CatalogStore, which itself
+# retires with the terminal i711w deletion) via the nexus.db.t2 re-export
+# that nexus.catalog.catalog_db imports at module load.
+_FTS5_SPECIAL = set('-:()\'"^~.*+/,;?!#@$%&|\\<>[]{}=')
+
+
+def _sanitize_fts5(query: str) -> str:
+    """Escape a user-supplied query for FTS5 MATCH.
+
+    Splits on whitespace and wraps any token that contains FTS5 special
+    characters in double quotes, with internal double-quotes escaped as '""'.
+    Plain tokens (letters and digits only) are passed through unchanged so
+    that FTS5 AND-of-terms semantics and boolean operators (AND, OR, NOT)
+    still work for well-formed queries.
+    """
+    tokens = query.split()
+    parts: list[str] = []
+    for token in tokens:
+        if any(ch in _FTS5_SPECIAL for ch in token):
+            escaped = token.replace('"', '""')
+            parts.append(f'"{escaped}"')
+        else:
+            parts.append(token)
+    return " ".join(parts)

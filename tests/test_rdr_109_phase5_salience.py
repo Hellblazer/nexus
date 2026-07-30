@@ -1,46 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-109 Phase 5: salience module + DocumentAspects.salient_sentences
-I/O + search_engine boost integration.
+"""RDR-109 Phase 5: salience module + search_engine boost integration.
 
 Tests cover the deterministic surfaces (the salience module wraps the
-Phase 4 prototype; the DocumentAspects column adds three narrow
-methods; the search-engine wiring is feature-flagged so default-off
-behavior is the regression bar).
+Phase 4 prototype; the search-engine wiring is feature-flagged so
+default-off behavior is the regression bar).
+
+The DocumentAspects.salient_sentences I/O tests that used to live here
+targeted the SQLite ``DocumentAspects`` store, deleted in nexus-i711w
+Stage 2 sub-stage A3. The accessor contract
+(set/get_salient_sentences) now lives on ``HttpDocumentAspectsStore``
+and is covered in ``tests/db/test_http_aspects_stores.py``.
 """
 from __future__ import annotations
 
-import json
-import os
-import sqlite3
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
-
-from nexus.db.t2.document_aspects import AspectRecord, DocumentAspects
-
-
-def _seed_engine_catalog_docs(*tumblers: str) -> None:
-    """Seed catalog_documents rows for the aspects doc_id FK.
-
-    The engine enforces fk_doc_aspects_catalog_doc: a non-null
-    document_aspects.doc_id must match a catalog_documents(tenant_id,
-    tumbler) row or the upsert 409s. Seed through the client's
-    fidelity-import surface (HttpCatalogClient POST /import/document —
-    RDR-155 P4b P0a': store surfaces, not psql). This used to no-op on the
-    SQLite substrate, whose schema never carried the FK; that substrate is
-    gone (nexus-i711w), so the seed is unconditional.
-    """
-    from nexus.catalog.http_catalog_client import HttpCatalogClient
-
-    client = HttpCatalogClient()
-    try:
-        client._post("/import/document", {
-            "rows": [{"tumbler": t, "title": f"seed-{t}"} for t in tumblers],
-        })
-    finally:
-        client.close()
 from nexus.salience import (
     extract_salient_sentences,
     split_sentences,
@@ -100,124 +74,44 @@ def test_extract_salient_returns_top_n() -> None:
 
 
 # ── DocumentAspects.salient_sentences I/O ────────────────────────────
-
-
-@pytest.fixture
-def aspects_db(tmp_path: Path, monkeypatch):
-    """Run T2 migrations against a fresh tmp DB so document_aspects has
-    the post-migration schema (doc_id PK + salient_sentences column).
-    Pre-initialises the catalog at the path the autouse
-    ``_isolate_catalog`` fixture configured so je0b runs.
-    """
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
-    # ``_isolate_catalog`` (tests/conftest.py) sets NEXUS_CATALOG_PATH
-    # to ``tmp_path / "test-catalog"``; init the catalog there so the
-    # je0b migration sees the expected file.
-    from nexus.catalog.catalog import Catalog
-    # je0b's _catalog_db_path_from_conn infers
-    # <memory_db_parent>/catalog/.catalog.db regardless of
-    # NEXUS_CATALOG_PATH; init there so the migration runs.
-    Catalog.init(tmp_path / "catalog")
-    # Engine substrate: the doc_ids the tests upsert must exist in
-    # catalog_documents or the aspects FK rejects the write.
-    _seed_engine_catalog_docs("1.1.42", "2.2.42")
-    from nexus.db.t2 import T2Database
-    db = T2Database(tmp_path / "memory.db")
-    try:
-        yield db.document_aspects
-    finally:
-        db.close()
-
-
-def test_set_salient_sentences_round_trip(aspects_db) -> None:
-    """Write + read via the legacy-keyed API; verify the JSON round-trips
-    through the new ``salient_sentences`` column regardless of whether
-    je0b's doc_id PK switch has run."""
-    record = AspectRecord(
-        collection="knowledge__test",
-        source_path="doc.md",
-        problem_formulation="p",
-        proposed_method="m",
-        extracted_at="2026-05-11T00:00:00Z",
-        model_version="v1",
-        extractor_name="scholarly-paper-v1",
-        confidence=0.9,
-        doc_id="1.1.42",
-        source_uri="file:///tmp/doc.md",
-    )
-    aspects_db.upsert(record)
-    # je0b ran (catalog is initialised in the fixture) so doc_id PK is
-    # active and we can use the doc_id-keyed setter directly.
-    ok = aspects_db.set_salient_sentences(
-        "1.1.42", ["alpha beta", "gamma delta"],
-    )
-    assert ok is True
-    assert aspects_db.get_salient_sentences("1.1.42") == [
-        "alpha beta", "gamma delta",
-    ]
-
-
-def test_get_salient_sentences_returns_empty_when_missing(aspects_db) -> None:
-    assert aspects_db.get_salient_sentences("never-existed") == []
-
-
-def test_set_salient_sentences_empty_doc_id_returns_false(aspects_db) -> None:
-    assert aspects_db.set_salient_sentences("", ["x"]) is False
-
-
-def test_set_salient_sentences_targets_no_row_returns_false(aspects_db) -> None:
-    assert aspects_db.set_salient_sentences("missing-id", ["x"]) is False
-
-
-def test_get_salient_sentences_handles_null_column(aspects_db) -> None:
-    record = AspectRecord(
-        collection="docs__test",
-        source_path="x.md",
-        problem_formulation=None,
-        proposed_method=None,
-        extracted_at="2026-05-11T00:00:00Z",
-        model_version="v1",
-        extractor_name="rdr-frontmatter-v1",
-        confidence=0.9,
-        doc_id="2.2.42",
-        source_uri="file:///tmp/x.md",
-    )
-    aspects_db.upsert(record)
-    # salient_sentences was not set; expect [].
-    assert aspects_db.get_salient_sentences("2.2.42") == []
-
-
-def test_get_salient_sentences_handles_garbage_json(tmp_path: Path) -> None:
-    """If a future writer corrupts the JSON, get returns [] not a raise."""
-    db = sqlite3.connect(str(tmp_path / "memory.db"))
-    db.executescript(
-        """
-        CREATE TABLE document_aspects (
-            doc_id TEXT PRIMARY KEY,
-            collection TEXT NOT NULL,
-            source_path TEXT,
-            extracted_at TEXT NOT NULL,
-            model_version TEXT NOT NULL,
-            extractor_name TEXT NOT NULL,
-            salient_sentences TEXT
-        );
-        INSERT INTO document_aspects(
-            doc_id, collection, source_path, extracted_at,
-            model_version, extractor_name, salient_sentences
-        )
-        VALUES ('x', 'k__t', 's', '2026-05-11', 'v1', 'e1', '{not-json}');
-        """
-    )
-    db.commit()
-    db.close()
-    da = DocumentAspects(tmp_path / "memory.db")
-    try:
-        assert da.get_salient_sentences("x") == []
-    finally:
-        da.close()
+#
+# TOMBSTONE (nexus-i711w Stage 2 A3): the ``aspects_db`` fixture and the
+# six set/get_salient_sentences store-accessor tests (round-trip,
+# missing doc, empty doc_id, no-row, NULL column, garbage JSON) were
+# deleted with their subject — the SQLite ``DocumentAspects`` store
+# (src/nexus/db/t2/document_aspects.py). The accessor contract now
+# lives on ``HttpDocumentAspectsStore`` and is pinned in
+# tests/db/test_http_aspects_stores.py (set_salient_sentences,
+# set_salient_sentences_by_key, get_salient_sentences, and the
+# 404-returns-empty arm that subsumes the old missing-row case).
+# Corrupt-JSON-in-storage is an engine-side concern on the HTTP
+# substrate; there is no client-side column to corrupt.
 
 
 # ── search_engine._apply_salience_boost ──────────────────────────────
+
+_ASPECTS_SEAM = (
+    "nexus.db.t2.http_document_aspects_store.HttpDocumentAspectsStore"
+)
+
+
+class _FakeAspectsStore:
+    """Stateful stand-in for HttpDocumentAspectsStore — the ONLY aspects
+    store after nexus-i711w Stage 2 A3. ``_apply_salience_boost`` imports
+    the class function-locally, so patching the module attribute is the
+    seam."""
+
+    def __init__(self, sentences: dict[str, list[str]] | None = None) -> None:
+        self.sentences = sentences or {}
+        self.requested: list[str] = []
+        self.closed = 0
+
+    def get_salient_sentences(self, doc_id: str) -> list[str]:
+        self.requested.append(doc_id)
+        return self.sentences.get(doc_id, [])
+
+    def close(self) -> None:
+        self.closed += 1
 
 
 def _make_result(rid: str, collection: str, doc_id: str, score: float) -> SearchResult:
@@ -231,40 +125,16 @@ def _make_result(rid: str, collection: str, doc_id: str, score: float) -> Search
     )
 
 
-def test_salience_boost_reorders_by_token_overlap(tmp_path: Path, monkeypatch) -> None:
+def test_salience_boost_reorders_by_token_overlap(monkeypatch) -> None:
     """Two results, one with strong salient overlap with the query —
-    boost moves it to the top."""
-    monkeypatch.setattr(
-        "nexus.config.nexus_config_dir", lambda: tmp_path,
-    )
-    from nexus.catalog.catalog import Catalog
-    # je0b's _catalog_db_path_from_conn infers
-    # <memory_db_parent>/catalog/.catalog.db regardless of
-    # NEXUS_CATALOG_PATH; init there so the migration runs.
-    Catalog.init(tmp_path / "catalog")
-    _seed_engine_catalog_docs("A", "B")
-    from nexus.db.t2 import T2Database
-    db = T2Database(tmp_path / "memory.db")
-    da = db.document_aspects
-    da.upsert(AspectRecord(
-        collection="knowledge__rag",
-        source_path="a.md",
-        problem_formulation=None, proposed_method=None,
-        extracted_at="2026-05-11T00:00:00Z",
-        model_version="v1", extractor_name="t", confidence=0.9,
-        doc_id="A", source_uri="file:///a",
-    ))
-    da.upsert(AspectRecord(
-        collection="knowledge__rag",
-        source_path="b.md",
-        problem_formulation=None, proposed_method=None,
-        extracted_at="2026-05-11T00:00:00Z",
-        model_version="v1", extractor_name="t", confidence=0.9,
-        doc_id="B", source_uri="file:///b",
-    ))
-    da.set_salient_sentences("A", ["irrelevant words"])
-    da.set_salient_sentences("B", ["hybrid retrieval cross-encoder reranking"])
-    db.close()
+    boost moves it to the top. Ported off the deleted SQLite store
+    (nexus-i711w A3): salient sentences now come from
+    HttpDocumentAspectsStore, faked at the function-local import seam."""
+    fake = _FakeAspectsStore({
+        "A": ["irrelevant words"],
+        "B": ["hybrid retrieval cross-encoder reranking"],
+    })
+    monkeypatch.setattr(_ASPECTS_SEAM, lambda: fake)
 
     from nexus.search_engine import _apply_salience_boost
     results = [
@@ -276,15 +146,20 @@ def test_salience_boost_reorders_by_token_overlap(tmp_path: Path, monkeypatch) -
     )
     assert [r.id for r in out] == ["b", "a"]
     assert out[0].hybrid_score > 0.45  # boosted
+    assert fake.closed == 1
 
 
-def test_salience_boost_ignores_code_collections(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "nexus.config.nexus_config_dir", lambda: tmp_path,
-    )
-    # code__ results pass through unchanged even if doc_id matches a
-    # row with salient_sentences (Phase 4b: code is opt-in via flag,
-    # boost gated to knowledge__/docs__ only).
+def test_salience_boost_ignores_code_collections(monkeypatch) -> None:
+    """code__ results pass through unchanged even if doc_id matches a
+    row with salient_sentences (Phase 4b: code is opt-in via flag,
+    boost gated to knowledge__/docs__ only). The fake would hand back
+    boost-bait if consulted; it must never be."""
+    fake = _FakeAspectsStore({
+        "X": ["anything at all"],
+        "Y": ["anything at all"],
+    })
+    monkeypatch.setattr(_ASPECTS_SEAM, lambda: fake)
+
     from nexus.search_engine import _apply_salience_boost
     results = [
         _make_result("c1", "code__foo", "X", score=0.70),
@@ -293,26 +168,22 @@ def test_salience_boost_ignores_code_collections(tmp_path: Path, monkeypatch) ->
     out = _apply_salience_boost(results, query="anything", weight=0.5)
     assert [r.id for r in out] == ["c1", "c2"]
     assert out[0].hybrid_score == pytest.approx(0.70)
+    assert fake.requested == []  # aspects store never consulted
 
 
-def test_salience_boost_no_op_when_db_missing(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "nexus.config.nexus_config_dir", lambda: tmp_path / "absent",
-    )
-    from nexus.search_engine import _apply_salience_boost
-    results = [_make_result("r", "knowledge__x", "doc-1", score=0.50)]
-    out = _apply_salience_boost(results, query="q", weight=0.5)
-    assert out == results
+# TOMBSTONE (nexus-i711w Stage 2 A3): test_salience_boost_no_op_when_db_missing
+# deleted. Its premise — a missing local ``memory.db`` file makes
+# ``_apply_salience_boost`` early-return — DIED with the SQLite arm.
+# The HTTP path has no local-file existence check to no-op on.
 
 
-def test_salience_boost_no_op_when_no_doc_id(tmp_path: Path, monkeypatch) -> None:
-    """Result without doc_id metadata passes through unchanged."""
-    monkeypatch.setattr(
-        "nexus.config.nexus_config_dir", lambda: tmp_path,
-    )
-    from nexus.db.t2 import T2Database
-    db = T2Database(tmp_path / "memory.db")
-    db.close()
+def test_salience_boost_no_op_when_no_doc_id(monkeypatch) -> None:
+    """Result without doc_id metadata passes through unchanged and the
+    aspects store is never queried for it (ported to the http seam,
+    nexus-i711w A3)."""
+    fake = _FakeAspectsStore({"any": ["boost bait"]})
+    monkeypatch.setattr(_ASPECTS_SEAM, lambda: fake)
+
     from nexus.search_engine import _apply_salience_boost
     r = SearchResult(
         id="r", content="", distance=0.5, collection="knowledge__x",
@@ -320,16 +191,19 @@ def test_salience_boost_no_op_when_no_doc_id(tmp_path: Path, monkeypatch) -> Non
     )
     out = _apply_salience_boost([r], query="q", weight=0.5)
     assert out == [r]
+    assert fake.requested == []
+    assert fake.closed == 1  # store is constructed for knowledge__ results and must be closed
 
 
-def test_salience_boost_routes_via_http_store_in_service_mode(monkeypatch) -> None:
-    """nexus-g8r2h fold (sweep [21089] item 8): on a service-backed box the
-    boost must read salient_sentences through HttpDocumentAspectsStore —
-    the old direct DocumentAspects(memory.db) read served STALE frozen
-    pre-migration rows. Also pins that the store's close() is called (it
-    closes the httpx pool — load-bearing, reviewer Low)."""
-    from nexus.db.storage_mode import StorageBackend
-
+def test_salience_boost_routes_via_http_store(monkeypatch) -> None:
+    """nexus-g8r2h fold (sweep [21089] item 8): the boost must read
+    salient_sentences through HttpDocumentAspectsStore — the old direct
+    DocumentAspects(memory.db) read served STALE frozen pre-migration
+    rows. The routing seam is now COLLAPSED (nexus-i711w A3): the http
+    store is constructed unconditionally, no storage_backend_for call
+    remains, so no service-mode pin is needed. Also pins that the
+    store's close() is called (it closes the httpx pool — load-bearing,
+    reviewer Low)."""
     calls: dict = {"salient": [], "closed": 0}
 
     class _FakeHttpAspects:
@@ -340,14 +214,7 @@ def test_salience_boost_routes_via_http_store_in_service_mode(monkeypatch) -> No
         def close(self) -> None:
             calls["closed"] += 1
 
-    monkeypatch.setattr(
-        "nexus.db.storage_mode.storage_backend_for",
-        lambda store: StorageBackend.SERVICE,
-    )
-    monkeypatch.setattr(
-        "nexus.db.t2.http_document_aspects_store.HttpDocumentAspectsStore",
-        lambda: _FakeHttpAspects(),
-    )
+    monkeypatch.setattr(_ASPECTS_SEAM, lambda: _FakeHttpAspects())
 
     from nexus.search_engine import _apply_salience_boost
     results = [

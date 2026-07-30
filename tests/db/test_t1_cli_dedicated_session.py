@@ -48,6 +48,10 @@ _ALWAYS_401: set[str] = set()  # session_ids that always 401 on t1 ops (persiste
 _MINT_CALLS: list[str] = []  # session_ids passed to /v1/sessions/start, in call order
 _MINT_FAILS: bool = False  # nexus-c8yvj finding 2: simulate a broken NX_SERVICE_TOKEN (mint 403s)
 _MINT_TTL_SECONDS: float = 3600  # nexus-ngcpo: overridable per-test so refresh-cadence tests don't wait real TTLs
+# nexus-i711w sub-stage A3: session_end_flush's T2 leg is HttpMemoryStore
+# (the SQLite MemoryStore died), so the fake grew the minimal T2 memory
+# contract too. Rows land here so the flush tests can assert arrival.
+_T2_MEMORY: list[dict[str, Any]] = []
 
 
 def _reset_fake_service_state() -> None:
@@ -55,6 +59,7 @@ def _reset_fake_service_state() -> None:
     _VALID_TOKENS.clear()
     _ALWAYS_401.clear()
     _MINT_CALLS.clear()
+    _T2_MEMORY.clear()
     global _MINT_FAILS, _MINT_TTL_SECONDS
     _MINT_FAILS = False
     _MINT_TTL_SECONDS = 3600
@@ -129,6 +134,28 @@ class _FakeHandler(BaseHTTPRequestHandler):
                 self._send(401, {"error": "unauthorized"})
                 return
             self._handle_t1(path, body)
+            return
+
+        # Minimal T2 memory contract (nexus-i711w sub-stage A3): the
+        # SessionEnd flush's T2 leg is HttpMemoryStore + T2Database.expire(),
+        # so the flush tests need these three endpoints to exist here.
+        if path == "/v1/memory/put":
+            if not self._check_bearer():
+                return
+            _T2_MEMORY.append(dict(body))
+            self._send(200, {"id": len(_T2_MEMORY)})
+            return
+
+        if path == "/v1/memory/expire":
+            if not self._check_bearer():
+                return
+            self._send(200, {"deleted_ids": []})
+            return
+
+        if path == "/v1/telemetry/relevance/expire":
+            if not self._check_bearer():
+                return
+            self._send(200, {"deleted": 0})
             return
 
         self._send(404, {"error": "not found"})
@@ -696,17 +723,21 @@ class TestSessionEndFlushViaLease:
     def test_flagged_entry_is_flushed_via_published_lease(
         self, fake_service, config_dir, monkeypatch, tmp_path
     ) -> None:
+        import nexus.mcp_infra as mcp_infra
+
         from nexus.db.http_scratch_store import HttpScratchStore
         from nexus.db.t1 import publish_t1_session_lease
         from nexus.hooks import session_end_flush
 
-        # T1 only: keep T2 (memory.db / telemetry / expire) on its normal
-        # test-suite SQLite default -- the fake service in this file only
-        # implements the T1 + session-mint contract, not T2's. The global
-        # override from `fake_service` is per-store-overridable; T1 wins on
-        # the per-store var, T2 falls back to the (conftest-default) global.
-        monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        # nexus-i711w sub-stage A3: the old "T2 on its SQLite default" split
+        # (NX_STORAGE_BACKEND=sqlite + NX_STORAGE_BACKEND_T1=service) died
+        # with the SQLite MemoryStore — the flush's T2 leg is HttpMemoryStore
+        # unconditionally, and the fake now implements the minimal T2 memory
+        # contract (/v1/memory/put, /v1/memory/expire) so the flush lands
+        # here. Reset the process-lifetime service-T2 singleton so THIS
+        # test's T2Database binds to THIS test's fake endpoint (monkeypatch
+        # restores the prior instance on teardown).
+        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
 
         live_session_id = "live-mcp-session-flush"
         live_token = _mint_live_session_token(fake_service, live_session_id)
@@ -737,6 +768,12 @@ class TestSessionEndFlushViaLease:
         assert "Flushed 1" in output, (
             f"expected the flagged entry to be flushed via the published lease, got: {output!r}"
         )
+        # And the entry actually LANDED on the (fake) T2 memory store —
+        # the engine-substrate equivalent of the old SQLite readback.
+        assert len(_T2_MEMORY) == 1
+        assert _T2_MEMORY[0]["project"] == "c8yvj_test_project"
+        assert _T2_MEMORY[0]["title"] == "c8yvj_test_title"
+        assert _T2_MEMORY[0]["content"] == "flagged content that must reach T2"
 
     def test_flush_still_reports_zero_without_a_lease_or_env(
         self, fake_service, config_dir, monkeypatch
@@ -745,10 +782,13 @@ class TestSessionEndFlushViaLease:
         original pre-rn3wo.1 'nothing to flush' case), the hook still
         reports 0 without raising -- this asserts the fix is additive, not
         a change to the no-session baseline."""
+        import nexus.mcp_infra as mcp_infra
+
         from nexus.hooks import session_end_flush
 
-        monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        # Same substrate note as above (nexus-i711w sub-stage A3): T2 leg is
+        # HttpMemoryStore against the fake; reset the service-T2 singleton.
+        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)

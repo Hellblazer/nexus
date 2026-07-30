@@ -119,9 +119,9 @@ class _SpyTelemetry(_SpyStore):
 # NX_STORAGE_BACKEND_<STORE> knobs no longer select anything for them. The
 # surviving routing contract — every leg goes through its store's
 # rename_collection with (old=, new=) and the counts surface — is pinned by
-# TestCascadeAllStoresServiceMode below; the still-conditional
-# document_aspects SQLite arm is pinned by TestCascadeOrchestration in
-# tests/test_collection_rename.py until sub-stage A3 retires it.
+# TestCascadeAllStoresServiceMode below and by TestCascadeOrchestration in
+# tests/test_collection_rename.py. (Sub-stage A3 retired the last SQLite
+# arm — document_aspects — so the cascade is a pure HTTP fan-out.)
 # ---------------------------------------------------------------------------
 
 

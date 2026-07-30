@@ -83,19 +83,23 @@ def test_builtin_templates_no_dimension_collisions() -> None:
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
     reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
 )
-def test_builtin_templates_load_into_library(tmp_path: Path) -> None:
-    """All builtin templates must load into a fresh PlanLibrary with no errors.
+def test_builtin_templates_load_into_library() -> None:
+    """All builtin templates must load into a fresh plan library with no errors.
 
     Verifies the full seed-loader path including idempotency (a second
     run must produce zero inserts and zero errors).
+
+    Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite PlanLibrary is
+    deleted; HttpPlanLibrary on the suite's hermetic engine substrate
+    (per-test tenant => fresh library) is the only plan library. The
+    ``_add_plan_dimensional_identity`` migration call went with it — the
+    RDR-078 dimensional-identity schema ships in the engine's Liquibase
+    changelog (plans-001-baseline.xml).
     """
-    from nexus.db.migrations import _add_plan_dimensional_identity
-    from nexus.db.t2.plan_library import PlanLibrary
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
     from nexus.plans.seed_loader import load_seed_directory
 
-    lib = PlanLibrary(tmp_path / "plans.db")
-    _add_plan_dimensional_identity(lib.conn)
-    lib.conn.commit()
+    lib = HttpPlanLibrary()
 
     result = load_seed_directory(_BUILTIN_DIR, library=lib)
 

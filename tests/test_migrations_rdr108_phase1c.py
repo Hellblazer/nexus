@@ -717,67 +717,19 @@ class TestAspectQueuePKMigration:
 # against raw sqlite3 connections (migration SOURCE, not the store).
 
 
-# ── DocumentAspects post-migration accessor API ───────────────────────────────
-
-
-class TestDocumentAspectsPostMigrationAPI:
-    """After migration, get_by_doc_id works; existing API still usable."""
-
-    @pytest.fixture()
-    def migrated_aspects_path(self, tmp_path: Path) -> Path:
-        from nexus.db.migrations import migrate_document_aspects_pk_to_doc_id
-        from nexus.db.t2.document_aspects import AspectRecord
-
-        mem_db = tmp_path / "memory.db"
-        cat_db = tmp_path / ".catalog.db"
-        conn = _make_memory_db(mem_db)
-        cat_conn = _make_catalog_db(cat_db)
-        _insert_catalog_doc(
-            cat_conn,
-            tumbler="nexus-asp01",
-            file_path="/papers/asp.pdf",
-            physical_collection="knowledge__delos",
-        )
-        cat_conn.commit()
-        cat_conn.close()
-
-        _insert_aspect(conn, collection="knowledge__delos", source_path="/papers/asp.pdf")
-        migrate_document_aspects_pk_to_doc_id(conn, catalog_db_path=cat_db)
-        conn.close()
-        return mem_db
-
-    def test_get_by_doc_id(self, migrated_aspects_path: Path) -> None:
-        from nexus.db.t2.document_aspects import DocumentAspects
-
-        store = DocumentAspects(migrated_aspects_path)
-        record = store.get_by_doc_id("nexus-asp01")
-        assert record is not None
-        assert record.collection == "knowledge__delos"
-        store.close()
-
-    def test_upsert_by_doc_id(self, migrated_aspects_path: Path) -> None:
-        from nexus.db.t2.document_aspects import AspectRecord, DocumentAspects
-
-        store = DocumentAspects(migrated_aspects_path)
-        record = AspectRecord(
-            collection="knowledge__delos",
-            source_path="/papers/new.pdf",
-            doc_id="nexus-new01",
-            problem_formulation="Test",
-            proposed_method="Test method",
-            # nexus-17wf: confidence floor-gated (>=0.3); pass an
-            # explicit value so the upsert lands. Test exercises
-            # doc_id PK round-trip, not confidence semantics.
-            confidence=0.9,
-            extracted_at="2026-05-09T00:00:00+00:00",
-            model_version="claude-haiku-4-5-20251001",
-            extractor_name="scholarly-paper-v1",
-        )
-        store.upsert(record)
-        fetched = store.get_by_doc_id("nexus-new01")
-        assert fetched is not None
-        assert fetched.problem_formulation == "Test"
-        store.close()
+# ── DocumentAspects post-migration accessor API — DELETED ─────────────────────
+#
+# TestDocumentAspectsPostMigrationAPI (2 tests: get_by_doc_id after the PK
+# migration, upsert round-trip keyed by doc_id) DELETED in nexus-i711w
+# Stage 2 sub-stage A3: its subject was the SQLite DocumentAspects store's
+# post-PK-migration accessor API, and that store died this same commit
+# (following the queue in A2 — see the twin tombstone above). The surviving
+# store's equivalent contract is pinned in
+# tests/db/test_http_aspects_stores.py::TestHttpDocumentAspectsStore
+# (test_get_by_doc_id_returns_record, test_upsert_written) plus the
+# engine-side AspectRepository tests. The PK migration function itself stays
+# covered by the classes above, which run against raw sqlite3 connections
+# (migration SOURCE, not the store).
 
 
 # ── MIGRATIONS list registration ──────────────────────────────────────────────

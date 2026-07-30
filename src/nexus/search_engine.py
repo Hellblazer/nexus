@@ -1096,8 +1096,6 @@ def _apply_salience_boost(
     Results without ``doc_id`` or whose document has no salient
     sentences fall through unchanged.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
-    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — circular-dep avoidance (nexus.db.t2.document_aspects)
     from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
     targeted = [
@@ -1107,21 +1105,13 @@ def _apply_salience_boost(
     if not targeted:
         return results
 
-    # nexus-g8r2h fold (sweep [21089] item 8): route via the storage facade —
-    # the old direct DocumentAspects(memory.db) read served STALE frozen
-    # pre-migration salient_sentences on migrated boxes (and no boost at all
-    # for post-migration docs).
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance
+    # nexus-g8r2h fold (sweep [21089] item 8) routed this via the storage
+    # facade; the seam is now COLLAPSED (nexus-i711w Stage 2 sub-stage A3):
+    # HttpDocumentAspectsStore is the only aspects store — the SQLite arm's
+    # stale-frozen-read hazard died with it.
+    from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — circular-dep avoidance
 
-    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — circular-dep avoidance
-
-        aspects = HttpDocumentAspectsStore()
-    else:
-        db_path = nexus_config_dir() / "memory.db"
-        if not db_path.exists():
-            return results
-        aspects = DocumentAspects(db_path)
+    aspects = HttpDocumentAspectsStore()
     try:
         cache: dict[str, list[str]] = {}
         for r in targeted:

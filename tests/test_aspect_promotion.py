@@ -15,7 +15,6 @@ behaviour is asserted ABSENT rather than left as a hole.
 """
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -50,15 +49,14 @@ def _make_record(*, source_path: str = "/p1.pdf", extras: dict | None = None) ->
 def db_with_papers(tmp_path: Path) -> Path:
     """T2 DB with three papers carrying ``extras.venue`` / ``extras.year``."""
     db_path = tmp_path / "promotion.db"
-    # nexus-aqbrk: build the SQLite schema explicitly. T2Database(path) does
-    # NOT create it under the engine substrate — bootstrap_schema early-returns
-    # so apply_pending cannot re-stamp _nexus_version on what RDR-176 Gap 2
-    # treats as a frozen migration source — so _seed_legacy_history's raw
-    # sqlite3 INSERT died on "no such table: aspect_promotion_log".
-    #
-    # CONVERT, not pin: the subject (list_promotions) is documented as working
-    # on BOTH substrates; only the LEGACY-HISTORY seed is inherently SQLite,
-    # because it reproduces what a pre-retirement install left behind.
+    # nexus-aqbrk: build the local SQLite schema explicitly — T2Database(path)
+    # does NOT create it under the engine substrate (bootstrap_schema
+    # early-returns so apply_pending cannot re-stamp _nexus_version on what
+    # RDR-176 Gap 2 treats as a frozen migration source). Kept so the CLI
+    # tests that open this path see a well-formed migration-source file.
+    # (The legacy-history seed itself no longer touches this file — since
+    # sub-stage A3 it goes through the promotion ETL import; see
+    # _seed_legacy_history.)
     bootstrap_migration_source(db_path)
     with T2Database(db_path) as db:
         db.document_aspects.upsert(_make_record(
@@ -70,28 +68,47 @@ def db_with_papers(tmp_path: Path) -> Path:
     return db_path
 
 
-def _seed_legacy_history(db_path: Path, rows: list[tuple]) -> None:
-    """Insert rows into the log as a pre-retirement install would have.
+def _seed_legacy_history(db_path: Path, rows: list[dict]) -> None:
+    """Plant rows in the log as a pre-retirement install's history.
 
-    The table itself is created by the sanctioned T2 migration registry
-    (``migrations.migrate_aspect_promotion_log_table``), not by product code
-    at call time — so an opened T2 always has it, empty.
+    Ported (nexus-i711w Stage 2 sub-stage A3): the raw sqlite3 INSERT died
+    with the SQLite ``aspect_promotion_log`` read path. Post-migration, the
+    history of an install that promoted while the mechanic was live reaches
+    the engine via the promotion ETL import — so the seed IS that path:
+    ``HttpDocumentAspectsStore.import_promotion_batch`` (the RDR-176 P3
+    bulk import, ``POST /v1/aspects/promotion/import``).
     """
-    conn = sqlite3.connect(db_path)
-    try:
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='aspect_promotion_log'"
-        ).fetchone(), "T2 migrations should have created aspect_promotion_log"
-        conn.executemany(
-            "INSERT INTO aspect_promotion_log "
-            "(field_name, sql_type, column_added, rows_backfilled, "
-            " rows_pruned, pruned, promoted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    with T2Database(db_path) as db:
+        imported = db.document_aspects.import_promotion_batch(rows)
+    assert imported == len(rows), (
+        f"promotion ETL seed: expected {len(rows)} rows imported, got {imported}"
+    )
+
+
+def _history_row(
+    field_name: str,
+    sql_type: str,
+    column_added: bool,
+    rows_backfilled: int,
+    rows_pruned: int,
+    pruned: bool,
+    promoted_at: str,
+) -> dict:
+    """One pre-retirement promotion event in the ETL import's dict shape.
+
+    ``column_added`` / ``pruned`` must be real booleans — the engine's
+    importer applies ``Boolean.TRUE.equals`` (the SQLite tuples' 1/0 ints
+    would silently import as False).
+    """
+    return {
+        "field_name": field_name,
+        "sql_type": sql_type,
+        "column_added": column_added,
+        "rows_backfilled": rows_backfilled,
+        "rows_pruned": rows_pruned,
+        "pruned": pruned,
+        "promoted_at": promoted_at,
+    }
 
 
 # ── The retired verb ────────────────────────────────────────────────────────
@@ -146,57 +163,32 @@ class TestHistoryReadPath:
         with T2Database(db_with_papers) as db:
             assert list_promotions(db) == []
 
-    def test_absent_table_reads_empty_and_is_not_created(
-        self, tmp_path: Path,
-    ) -> None:
-        """On a store opened WITHOUT the migration registry the table does
-        not exist. Reading history must return [] and must not bootstrap it —
-        lazy client-side ``CREATE TABLE`` is what the retired mechanic did and
-        what the NO-SQLITE directive forbids.
-        """
-        from nexus.db.t2.document_aspects import DocumentAspects
+    # test_absent_table_reads_empty_and_is_not_created stood here
+    # (nexus-i711w Stage 2 sub-stage A3). It pinned the SQLite store's OWN
+    # refusal to lazily bootstrap ``aspect_promotion_log`` — asserted via
+    # sqlite_master on a bare ``DocumentAspects(path)``. The store is
+    # deleted, so the subject (a client-side SQLite table that could be
+    # bootstrapped at read time) is gone; the no-client-DDL half survives
+    # as TestPromotionVerbRetired::test_module_runs_no_ddl, and the PG
+    # table is Liquibase-owned from birth (aspects-001-baseline.xml), so
+    # "absent table" is not a reachable state on the only substrate left.
 
-        bare = tmp_path / "bare.db"
-        store = DocumentAspects(bare)
-        try:
-            assert store.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='aspect_promotion_log'"
-            ).fetchone() is None, "fixture precondition: table must be absent"
-
-            assert store.list_promotions() == []
-
-            assert store.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='aspect_promotion_log'"
-            ).fetchone() is None, (
-                "reading history must not bootstrap a client-side SQLite table"
-            )
-        finally:
-            store.close()
-
-    # nexus-aqbrk: PINNED. This test SEEDS LEGACY HISTORY — rows as a
-    # pre-retirement install would have left them — via raw sqlite3 INSERT
-    # into aspect_promotion_log. That seed is inherently a SQLite artifact:
-    # there is no service-mode way to plant "what the old install left
-    # behind", and reading it back requires the same substrate.
-    #
-    # Only the three _seed_legacy_history tests are pinned; the other nine
-    # exercise list_promotions on freshly-promoted data and pass on BOTH arms.
-    #
-    # SERVICE HALF IS OWNED: HttpDocumentAspectsStore.list_promotions is
-    # implemented (nexus-70x7y, closed) and covered by
-    # tests/db/t2_store_contract.py plus tests/test_aspect_consumer_service_mode.py.
-    @pytest.mark.usefixtures("local_t2_backend")
+    # Ported (nexus-i711w Stage 2 sub-stage A3, superseding the nexus-aqbrk
+    # pin): the pin's rationale — "no service-mode way to plant what the old
+    # install left behind" — stopped being true when the promotion ETL
+    # import landed (RDR-176 P3, /v1/aspects/promotion/import): that IS the
+    # channel a pre-retirement install's history arrives by after migration.
+    # _seed_legacy_history now seeds through it, so the local_t2_backend pin
+    # (whose SQLite read path is deleted) is gone.
     def test_reads_pre_retirement_rows_oldest_first(
         self, db_with_papers: Path,
     ) -> None:
         """An install that promoted while the mechanic was live keeps its
         history. Successor to TestAuditLog::test_multiple_promotions_logged."""
         _seed_legacy_history(db_with_papers, [
-            ("venue", "TEXT", 1, 3, 0, 0, "2026-01-01T00:00:00+00:00"),
-            ("year", "INTEGER", 1, 2, 0, 0, "2026-02-01T00:00:00+00:00"),
-            ("venue", "TEXT", 0, 0, 3, 1, "2026-03-01T00:00:00+00:00"),
+            _history_row("venue", "TEXT", True, 3, 0, False, "2026-01-01T00:00:00+00:00"),
+            _history_row("year", "INTEGER", True, 2, 0, False, "2026-02-01T00:00:00+00:00"),
+            _history_row("venue", "TEXT", False, 0, 3, True, "2026-03-01T00:00:00+00:00"),
         ])
         with T2Database(db_with_papers) as db:
             entries = list_promotions(db)
@@ -257,13 +249,12 @@ class TestCLI:
             combined = (result.output or "") + (result.stderr or "")
             assert "no such option" in combined.lower(), combined
 
-    @pytest.mark.usefixtures("local_t2_backend")
     def test_history_flag_renders_entries(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _seed_legacy_history(db_with_papers, [
-            ("venue", "TEXT", 1, 3, 0, 0, "2026-01-01T00:00:00+00:00"),
-            ("year", "INTEGER", 1, 2, 0, 0, "2026-02-01T00:00:00+00:00"),
+            _history_row("venue", "TEXT", True, 3, 0, False, "2026-01-01T00:00:00+00:00"),
+            _history_row("year", "INTEGER", True, 2, 0, False, "2026-02-01T00:00:00+00:00"),
         ])
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
@@ -276,14 +267,13 @@ class TestCLI:
         assert "year" in result.output
         assert "INTEGER" in result.output
 
-    @pytest.mark.usefixtures("local_t2_backend")
     def test_history_accepts_the_legacy_dummy_argument(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """FIELD_NAME became optional; the old ``--history <dummy>`` form that
         operators (and scripts) already type must keep working."""
         _seed_legacy_history(db_with_papers, [
-            ("venue", "TEXT", 1, 3, 0, 0, "2026-01-01T00:00:00+00:00"),
+            _history_row("venue", "TEXT", True, 3, 0, False, "2026-01-01T00:00:00+00:00"),
         ])
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 

@@ -813,24 +813,45 @@ class TestCheckPlanLibrary:
         assert "global" in result.output.lower()
 
     def test_check_plan_library_passes_on_healthy_seed(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
+        self, runner: CliRunner, tmp_path: Path,
     ) -> None:
-        """Seeding the YAML builtins and re-running the check exits 0."""
+        """A healthy local census (>= the builtin floor, all dimensional)
+        exits 0.
+
+        nexus-i711w sub-stage A3: this used to seed through
+        ``_seed_plan_templates()``, but that loader writes through
+        ``T2Database(...).plans`` — now unconditionally the engine-backed
+        ``HttpPlanLibrary`` — so its rows can no longer land in the local
+        SQLite file this census reads. Seed the healthy shape with raw SQL
+        against the migration-source file instead, exactly as the two
+        unhealthy-shape siblings above do. The subject (census math on the
+        local file) is unchanged; the loader's own behaviour is pinned in
+        tests/test_scoped_plan_loader.py.
+        """
+        import json as _json
         import sqlite3
 
+        from nexus.commands.doctor import _MIN_GLOBAL_BUILTIN_COUNT
         from nexus.db.migrations import apply_pending
         from nexus.commands.upgrade import _current_version
 
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
         apply_pending(conn, _current_version())
+        for i in range(_MIN_GLOBAL_BUILTIN_COUNT):
+            dims = _json.dumps(
+                {"verb": "research", "scope": "global", "strategy": f"s{i}"}
+            )
+            conn.execute(
+                "INSERT INTO plans "
+                "(project, query, plan_json, outcome, tags, created_at, "
+                " dimensions) "
+                "VALUES ('', ?, '{\"steps\": []}', 'success', "
+                " 'builtin-template', datetime('now'), ?)",
+                (f"builtin seed {i}", dims),
+            )
+        conn.commit()
         conn.close()
-
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
 
         with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])

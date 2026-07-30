@@ -23,14 +23,20 @@ import pytest
 
 @pytest.fixture()
 def library(tmp_path: Path):
-    """Fresh PlanLibrary with the RDR-078 schema applied."""
-    from nexus.db.migrations import _add_plan_dimensional_identity
-    from nexus.db.t2.plan_library import PlanLibrary
+    """Engine-backed ``HttpPlanLibrary`` on a fresh per-test tenant.
 
-    lib = PlanLibrary(tmp_path / "plans.db")
-    _add_plan_dimensional_identity(lib.conn)
-    lib.conn.commit()
-    return lib
+    Substrate (nexus-i711w Stage 2 sub-stage A3): the SQLite ``PlanLibrary``
+    is deleted; ``T2Database(path).plans`` constructs ``HttpPlanLibrary``
+    unconditionally, bound here to the hermetic engine via the autouse
+    ``_pin_t2_substrate`` fixture. The RDR-078 dimensional-identity schema
+    ships in the engine's Liquibase changelog, so no local migration step
+    is needed. The keyword-fallback path (the tests' "FTS5" naming) now
+    exercises the engine's Postgres FTS through the same ``search_plans``
+    call the matcher makes in production.
+    """
+    from nexus.db.t2 import T2Database
+
+    return T2Database(tmp_path / "m.db").plans
 
 
 def _seed(library, *, query: str, dimensions: dict | None = None,
@@ -851,9 +857,10 @@ class TestRdr092Canaries:
         # Rationale: Postgres FTS (ts_rank + STORED tsvector) and SQLite FTS5
         # (rank BM25) may return different orderings for equally-ranked matches.
         # Formal parity (top-K set equality + Spearman >= 0.90) is verified
-        # against the integration fixture in tests/db/test_http_plan_library_integration.py
-        # once the plans Postgres service is running (requires NX_STORAGE_BACKEND_PLANS=SERVICE
-        # + a populated plans table). This test validates SQLite-only FTS5 order locally.
+        # against the integration fixture in tests/db/test_http_plan_library_integration.py.
+        # Post-i711w A3 this test runs against the engine's Postgres FTS
+        # directly (the SQLite FTS5 leg is deleted), so the set-membership
+        # relaxation is exactly what keeps it stable here.
         result_ids = [m.plan_id for m in matches]
         assert research_id in result_ids, (
             f"research plan must appear in result set; "

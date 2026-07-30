@@ -560,7 +560,10 @@ def test_dual_population_baseline_locked():
     # 15 -> 14: nexus-i711w Stage 2 sub-stage B deleted the `nx daemon t2`
     # verb group from commands/daemon.py, taking its single epsilon-allow
     # raw-connect with it. DOWNWARD-only recount; never bump upward.
-    assert result.epsilon_allow_connects == 14, (
+    # 14 -> 13: sub-stage A3 deleted the `nx plan repair` group's
+    # _open_plans_db raw-connect with plans/repair.py and the SQLite
+    # PlanLibrary. DOWNWARD-only recount; never bump upward.
+    assert result.epsilon_allow_connects == 13, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

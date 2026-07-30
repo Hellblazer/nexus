@@ -274,7 +274,7 @@ def test_plan_exists_isolated_per_query(plan_db: T2Database) -> None:
 
 def test_normalize_scope_string_strips_hash_suffix() -> None:
     """_normalize_scope_string strips an 8-char hex suffix like '-2ad2825c'."""
-    from nexus.db.t2.plan_library import _normalize_scope_string
+    from nexus.plans.scope import _normalize_scope_string
 
     assert _normalize_scope_string("rdr__arcaneum-2ad2825c") == "rdr__arcaneum"
     assert _normalize_scope_string("knowledge__delos-deadbeef") == "knowledge__delos"
@@ -282,7 +282,7 @@ def test_normalize_scope_string_strips_hash_suffix() -> None:
 
 def test_normalize_scope_string_strips_trailing_glob() -> None:
     """_normalize_scope_string strips ``*`` and ``-*`` glob suffixes."""
-    from nexus.db.t2.plan_library import _normalize_scope_string
+    from nexus.plans.scope import _normalize_scope_string
 
     assert _normalize_scope_string("rdr__arcaneum-*") == "rdr__arcaneum"
     assert _normalize_scope_string("rdr__arcaneum*") == "rdr__arcaneum"
@@ -290,7 +290,7 @@ def test_normalize_scope_string_strips_trailing_glob() -> None:
 
 def test_normalize_scope_string_preserves_bare_family() -> None:
     """_normalize_scope_string leaves a bare family prefix alone."""
-    from nexus.db.t2.plan_library import _normalize_scope_string
+    from nexus.plans.scope import _normalize_scope_string
 
     assert _normalize_scope_string("rdr__") == "rdr__"
     assert _normalize_scope_string("code__nexus") == "code__nexus"
@@ -298,7 +298,7 @@ def test_normalize_scope_string_preserves_bare_family() -> None:
 
 def test_normalize_scope_string_preserves_tumbler_form() -> None:
     """_normalize_scope_string passes tumbler addresses through untouched."""
-    from nexus.db.t2.plan_library import _normalize_scope_string
+    from nexus.plans.scope import _normalize_scope_string
 
     assert _normalize_scope_string("1.16") == "1.16"
     assert _normalize_scope_string("2.5.3") == "2.5.3"
@@ -306,7 +306,7 @@ def test_normalize_scope_string_preserves_tumbler_form() -> None:
 
 def test_normalize_scope_string_empty_passthrough() -> None:
     """_normalize_scope_string('') returns ''."""
-    from nexus.db.t2.plan_library import _normalize_scope_string
+    from nexus.plans.scope import _normalize_scope_string
 
     assert _normalize_scope_string("") == ""
 
@@ -326,7 +326,7 @@ def test_normalize_scope_string_strips_uppercase_hex_suffix() -> None:
 def test_normalize_scope_string_does_not_strip_short_or_nonhex() -> None:
     """Only 8-char lowercase hex suffixes are stripped; other trailing
     segments survive (collection-name hash convention is strict)."""
-    from nexus.db.t2.plan_library import _normalize_scope_string
+    from nexus.plans.scope import _normalize_scope_string
 
     # 7 hex chars — not stripped.
     assert _normalize_scope_string("rdr__x-1234567") == "rdr__x-1234567"
@@ -338,7 +338,7 @@ def test_normalize_scope_string_does_not_strip_short_or_nonhex() -> None:
 
 def test_infer_scope_tags_single_step_corpus() -> None:
     """_infer_scope_tags pulls ``corpus`` out of a single retrieval step."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}'
     assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
@@ -346,7 +346,7 @@ def test_infer_scope_tags_single_step_corpus() -> None:
 
 def test_infer_scope_tags_skips_var_placeholders() -> None:
     """_infer_scope_tags skips ``$var`` bindings (not yet resolved)."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":[{"tool":"search","args":{"corpus":"$corpus"}},'
@@ -357,7 +357,7 @@ def test_infer_scope_tags_skips_var_placeholders() -> None:
 
 def test_infer_scope_tags_union_across_steps() -> None:
     """_infer_scope_tags unions corpus/collection across all retrieval steps."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":['
@@ -371,7 +371,7 @@ def test_infer_scope_tags_union_across_steps() -> None:
 
 def test_infer_scope_tags_collection_arg() -> None:
     """_infer_scope_tags reads a ``collection`` arg as well as ``corpus``."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":[{"tool":"search","args":{"collection":"rdr__arcaneum"}}]}'
@@ -381,7 +381,7 @@ def test_infer_scope_tags_collection_arg() -> None:
 
 def test_infer_scope_tags_hash_suffix_normalized() -> None:
     """Inferred tags are normalized at save time."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum-2ad2825c"}}]}'
@@ -391,7 +391,7 @@ def test_infer_scope_tags_hash_suffix_normalized() -> None:
 
 def test_infer_scope_tags_traverse_only_agnostic() -> None:
     """A plan that only traverses is scope-agnostic — empty tags."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":[{"tool":"traverse","args":{"start":"$doc_id","depth":2}}]}'
@@ -401,21 +401,21 @@ def test_infer_scope_tags_traverse_only_agnostic() -> None:
 
 def test_infer_scope_tags_empty_steps() -> None:
     """An empty steps list yields an empty scope string."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     assert _infer_scope_tags('{"steps":[]}') == ""
 
 
 def test_infer_scope_tags_malformed_json_safe() -> None:
     """_infer_scope_tags returns empty string when plan_json is not JSON."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     assert _infer_scope_tags("not valid json{{{") == ""
 
 
 def test_infer_scope_tags_dedup_and_sort() -> None:
     """Same corpus cited multiple times appears once, sorted."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":['
@@ -494,56 +494,14 @@ def test_save_plan_scope_tags_column_default_empty(plan_db: T2Database) -> None:
     assert row[0] == ""
 
 
-def test_migration_idempotent_on_populated_table(tmp_path: Path) -> None:
-    """RDR-120 §A8: the migration adds the column; the backfill body
-    runs via ``nx plan repair scope-tags`` (``repair_scope_tags``).
-    Both layers are idempotent.
-    """
-    import sqlite3
-
-    from nexus.db.migrations import _add_plan_scope_tags
-    from nexus.plans.repair import repair_scope_tags
-
-    db_path = tmp_path / "mig.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            ttl INTEGER
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO plans (query, plan_json, created_at) "
-        "VALUES (?, ?, ?)",
-        (
-            "q",
-            '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
-            "2025-01-01T00:00:00Z",
-        ),
-    )
-    conn.commit()
-
-    # Substrate (migration): DDL only, adds the column.
-    _add_plan_scope_tags(conn)
-    repair_scope_tags(conn)
-    first = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
-    assert first[0] == "rdr__arcaneum"
-
-    # Re-running both is a no-op (idempotent).
-    _add_plan_scope_tags(conn)
-    repair_scope_tags(conn)
-    second = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
-    assert second[0] == "rdr__arcaneum"
-
-    conn.close()
+# test_migration_idempotent_on_populated_table was DELETED (nexus-i711w
+# Stage 2 sub-stage A3): its subject was the ``repair_scope_tags`` backfill
+# (``nexus.plans.repair``), which died with the SQLite PlanLibrary — content
+# repairs on the retired local snapshot have no engine-side counterpart. The
+# surviving DDL half (``_add_plan_scope_tags`` adds the column, idempotently,
+# including on a table that already has it) stays pinned by
+# test_migration_adds_column_to_empty_plans_table and
+# test_save_plan_explicit_scope_tags_survive_backfill below.
 
 
 def test_migration_no_op_on_missing_plans_table(tmp_path: Path) -> None:
@@ -597,7 +555,7 @@ def test_infer_scope_tags_skips_all_sentinel() -> None:
     plans using ``corpus: all`` were filtered out of any scoped
     ``nx_answer`` call, inverting RDR-091's entire purpose.
     """
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     assert _infer_scope_tags(
         '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
@@ -607,7 +565,7 @@ def test_infer_scope_tags_skips_all_sentinel() -> None:
 def test_infer_scope_tags_mixes_all_with_specific_drops_all() -> None:
     """Multi-step plans that mix ``corpus: all`` with a specific corpus keep
     only the specific tag; ``all`` never contributes."""
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     plan_json = (
         '{"steps":['
@@ -669,92 +627,15 @@ def test_save_plan_explicit_scope_tags_survive_backfill(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_rewash_migration_fixes_all_sentinel_rows(tmp_path: Path) -> None:
-    """The 4.8.1 rewash migration corrects rows stuck at 'all' from the
-    pre-fix backfill."""
-    import sqlite3
-
-    from nexus.plans.repair import repair_scope_tags
-
-    db_path = tmp_path / "rewash.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            scope_tags TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
-    # Simulate pre-fix state: three rows with stale 'all'-contaminated
-    # scope_tags alongside one already-clean row.
-    conn.executemany(
-        "INSERT INTO plans (query, plan_json, created_at, scope_tags) "
-        "VALUES (?, ?, ?, ?)",
-        [
-            # Plain 'all' → should become '' after rewash.
-            ("q1", '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
-             "2025-01-01T00:00:00Z", "all"),
-            # Mixed 'all,specific' → should become 'rdr__arcaneum'.
-            ("q2", '{"steps":['
-                   '{"tool":"search","args":{"corpus":"all"}},'
-                   '{"tool":"search","args":{"corpus":"rdr__arcaneum"}}'
-                   ']}',
-             "2025-01-01T00:00:00Z", "all,rdr__arcaneum"),
-            # Clean row — should be untouched.
-            ("q3", '{"steps":[{"tool":"search","args":{"corpus":"rdr__delos"}}]}',
-             "2025-01-01T00:00:00Z", "rdr__delos"),
-        ],
-    )
-    conn.commit()
-
-    repair_scope_tags(conn)
-
-    q1 = conn.execute("SELECT scope_tags FROM plans WHERE query='q1'").fetchone()
-    q2 = conn.execute("SELECT scope_tags FROM plans WHERE query='q2'").fetchone()
-    q3 = conn.execute("SELECT scope_tags FROM plans WHERE query='q3'").fetchone()
-    assert q1[0] == "", "plain 'all' must rewash to agnostic"
-    assert q2[0] == "rdr__arcaneum", "mixed 'all,specific' must drop 'all'"
-    assert q3[0] == "rdr__delos", "clean row must be untouched"
-
-    # Idempotent: running again finds nothing to rewash.
-    repair_scope_tags(conn)
-    q1 = conn.execute("SELECT scope_tags FROM plans WHERE query='q1'").fetchone()
-    assert q1[0] == ""
-    conn.close()
-
-
-def test_rewash_migration_no_op_when_no_all_rows(tmp_path: Path) -> None:
-    """Rewash migration is a safe no-op when no row contains 'all'."""
-    import sqlite3
-
-    from nexus.plans.repair import repair_scope_tags
-
-    db_path = tmp_path / "clean.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            scope_tags TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
-    conn.commit()
-    repair_scope_tags(conn)  # must not crash
-    conn.close()
+# test_rewash_migration_fixes_all_sentinel_rows and
+# test_rewash_migration_no_op_when_no_all_rows were DELETED (nexus-i711w
+# Stage 2 sub-stage A3): their subject was ``repair_scope_tags``'s rewash of
+# 'all'-contaminated LEGACY rows in the retired SQLite snapshot — the repair
+# verb and its module (``nexus.plans.repair``) are gone. The live contract
+# ("the 'all' sentinel never reaches storage") survives in
+# ``nexus.plans.scope.normalize_scope_tags`` and is pinned on the engine
+# substrate by the two save_plan tests immediately below plus
+# test_set_scope_tags_drops_all_sentinel.
 
 
 def test_save_plan_explicit_scope_tags_filters_all_sentinel(plan_db: T2Database) -> None:
@@ -783,60 +664,13 @@ def test_save_plan_explicit_scope_tags_drops_all_mixed_with_specific(
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
-def test_rewash_migration_fixes_trailing_all_variant(tmp_path: Path) -> None:
-    """Rewash handles 'rdr__arcaneum,all' (trailing-all variant) — the LIKE
-    '%,all' branch (RDR-091 code-review finding I-7)."""
-    import sqlite3
-
-    from nexus.plans.repair import repair_scope_tags
-
-    db_path = tmp_path / "trailing_all.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            scope_tags TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
-    # Lexicographic sort puts 'all' first, so trailing-'all' cannot arise
-    # from inference. But manual/external writes can produce it; the
-    # rewash query must still handle it.
-    conn.execute(
-        "INSERT INTO plans (query, plan_json, created_at, scope_tags) "
-        "VALUES (?, ?, ?, ?)",
-        (
-            "q",
-            '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}},'
-            '{"tool":"search","args":{"corpus":"all"}}]}',
-            "2025-01-01T00:00:00Z",
-            "rdr__arcaneum,all",
-        ),
-    )
-    conn.commit()
-    repair_scope_tags(conn)
-    row = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
-    assert row[0] == "rdr__arcaneum"
-    conn.close()
-
-
-def test_rewash_migration_no_op_without_plans_table(tmp_path: Path) -> None:
-    """Rewash migration is a safe no-op on a DB without a plans table."""
-    import sqlite3
-
-    from nexus.plans.repair import repair_scope_tags
-
-    db_path = tmp_path / "empty.db"
-    conn = sqlite3.connect(str(db_path))
-    repair_scope_tags(conn)  # must not crash
-    conn.close()
+# test_rewash_migration_fixes_trailing_all_variant and
+# test_rewash_migration_no_op_without_plans_table were DELETED (nexus-i711w
+# Stage 2 sub-stage A3) with ``nexus.plans.repair`` — both probed
+# ``repair_scope_tags``'s SQL over the retired SQLite snapshot (the LIKE
+# '%,all' branch and the missing-table guard). The trailing-'all' input shape
+# is handled substrate-independently by ``normalize_scope_tags`` (order-blind
+# split/drop/sort), pinned via set_scope_tags/save_plan tests in this file.
 
 
 # ── RDR-092 Phase 3.2: match_text wiring into save_plan + search_plans ──────

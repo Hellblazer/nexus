@@ -10,8 +10,6 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
-import os
-
 import pytest
 from click.testing import CliRunner
 
@@ -26,14 +24,13 @@ def runner() -> CliRunner:
 @pytest.fixture(autouse=True)
 def _clear_module_state() -> None:
     from nexus.db import migrations
-    from nexus.db.t2 import memory_store, plan_library
 
     migrations._upgrade_done.clear()
-    memory_store._migrated_paths.clear()
-    plan_library._migrated_paths.clear()
-    # catalog_taxonomy._migrated_paths: the module is deleted (nexus-i711w
-    # Stage 2 sub-stage C). Its per-path migration guard went with it; the
-    # taxonomy base-schema DDL now lives in db/migrations.py.
+    # memory_store._migrated_paths / plan_library._migrated_paths /
+    # catalog_taxonomy._migrated_paths: the SQLite store modules are deleted
+    # (nexus-i711w Stage 2 sub-stages A3/C). Their per-path migration guards
+    # went with them; migrations.py's own _upgrade_done is the only
+    # module-level guard left to clear.
 
 
 # NO _no_real_daemon_nudge fixture: it patched out `_cycle_daemon_to_current`
@@ -203,27 +200,37 @@ class TestSC5McpVersionCheck:
             check_version_compatibility()
 
 
-# ── SC-6: Domain stores delegate to module-level functions ──────────────────
+# ── SC-6: Domain stores usable post-upgrade ──────────────────────────────────
 
 
 class TestSC6Delegation:
-    def test_memory_store_delegates(self, tmp_path: Path) -> None:
-        from nexus.db.t2.memory_store import MemoryStore
+    """RDR-076 SC-6 originally asserted the SQLite MemoryStore / PlanLibrary
+    delegated schema work to migrations.py's module-level functions. Those
+    stores are deleted (nexus-i711w Stage 2 sub-stage A3); the surviving
+    MEANING of SC-6 is that the T2 facade's domain stores are usable
+    end-to-end after construction — now against the engine substrate via
+    the Http* stores T2Database builds unconditionally."""
 
-        db_path = tmp_path / "memory.db"
-        store = MemoryStore(db_path)
-        store.put("test", "title1", "content")
-        result = store.get("test", "title1")
-        assert result is not None
-        store.close()
+    def test_memory_store_round_trip(self, tmp_path: Path) -> None:
+        from nexus.db.t2 import T2Database
 
-    def test_plan_library_delegates(self, tmp_path: Path) -> None:
-        from nexus.db.t2.plan_library import PlanLibrary
+        db = T2Database(tmp_path / "memory.db")
+        try:
+            db.memory.put("test", "title1", "content")
+            result = db.memory.get("test", "title1")
+            assert result is not None
+        finally:
+            db.close()
 
-        db_path = tmp_path / "memory.db"
-        lib = PlanLibrary(db_path)
-        lib.save_plan("test query", '{"plan": "test"}')
-        lib.close()
+    def test_plan_library_round_trip(self, tmp_path: Path) -> None:
+        from nexus.db.t2 import T2Database
+
+        db = T2Database(tmp_path / "memory.db")
+        try:
+            row_id = db.plans.save_plan("test query", '{"plan": "test"}')
+            assert isinstance(row_id, int) and row_id > 0
+        finally:
+            db.close()
 
 
 # ── SC-7: Single-line migration addition ────────────────────────────────────

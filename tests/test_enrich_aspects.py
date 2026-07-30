@@ -1001,7 +1001,7 @@ class TestDay2Ops:
         """
         from nexus.aspect_readers import uri_for
         from nexus.db.t2 import T2Database
-        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.db.t2.records import AspectRecord
 
         _, db_path, _ = env
         with T2Database(db_path) as db:
@@ -1043,7 +1043,7 @@ class TestDay2Ops:
         """
         from datetime import UTC, datetime
         from nexus.db.t2 import T2Database
-        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.db.t2.records import AspectRecord
 
         _, db_path, _ = env
         with T2Database(db_path) as db:

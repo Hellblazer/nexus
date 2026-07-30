@@ -462,17 +462,16 @@ def test_http_store_matches_contract_return_shapes(label, http_path):
 # durable tripwire above does NOT depend on this block.
 # ---------------------------------------------------------------------------
 _SQLITE_ORACLES = {
-    "memory": "nexus.db.t2.memory_store:MemoryStore",
-    "plans": "nexus.db.t2.plan_library:PlanLibrary",
-    "document_aspects": "nexus.db.t2.document_aspects:DocumentAspects",
     # taxonomy: oracle DELETED (nexus-i711w Stage 2 sub-stage C); telemetry,
-    # chash_index, document_highlights and aspect_queue followed with their
-    # stores in sub-stage A. This block's own docstring anticipated it —
-    # "after RDR-158 P4 there is no oracle left to capture from". The frozen
-    # T2_STORE_RETURNS entries for all of them STAY: each is now the contract
-    # of record rather than a mirror of a live oracle, which is exactly what
-    # it was frozen to become. memory / plans / document_aspects go in
-    # sub-stage A3, and the whole block dies with them.
+    # chash_index, document_highlights and aspect_queue followed in
+    # sub-stage A; memory, plans and document_aspects in sub-stage A3. This
+    # block's own docstring anticipated it — "after RDR-158 P4 there is no
+    # oracle left to capture from". The frozen T2_STORE_RETURNS entries for
+    # all of them STAY: each is now the contract of record rather than a
+    # mirror of a live oracle, which is exactly what it was frozen to
+    # become. Only the (non-SQLite, chromadb-backed) T1 scratch oracle
+    # remains live; the whole block dies with the CatalogStore in the
+    # terminal i711w deletion.
     "scratch": "nexus.db.t1:T1Database",
 }
 

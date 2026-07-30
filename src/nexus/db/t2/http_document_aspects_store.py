@@ -277,9 +277,15 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         extractor_name: str,
         max_version: str,
     ) -> list[AspectRecord]:
-        """Return rows whose extractor_name matches and model_version < max_version."""
+        """Return rows whose extractor_name matches and model_version < max_version.
+
+        Wire param is ``extractor_name`` (AspectHandler.java:244). The client
+        sent ``extractor`` from inception — every real-engine call 400'd —
+        and the fake-server wire tests pinned the client's own wrong shape;
+        found by the nexus-i711w A3 port running against the real engine.
+        """
         rows: list[dict] = self._get("/list_by_extractor_version", {
-            "extractor": extractor_name,
+            "extractor_name": extractor_name,
             "max_version": max_version,
         })
         return [_body_to_record(r) for r in rows]

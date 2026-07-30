@@ -84,14 +84,17 @@ DDL_CENSUS: dict[str, int] = {
     # Same shape as the taxonomy move above: the SOURCE schema outlives the
     # store class because the bootstrap path must materialise it until
     # Stage 4 deletes migrations.py wholesale. Repo total DOWN, nothing new.
-    "src/nexus/db/migrations.py": 32,             # the sanctioned-until-retired T2 registry
+    # 32 -> 37 (nexus-i711w Stage 2 sub-stage A3): _MEMORY_SCHEMA_SQL +
+    # _PLANS_SCHEMA_SQL moved here VERBATIM from the deleted memory_store.py
+    # (3) / plan_library.py (3) — one of the six was an already-censused
+    # comment mirror, net +5. Same shape as the telemetry and taxonomy moves
+    # above; dies with this file in Stage 4. Repo total DOWN, nothing new.
+    "src/nexus/db/migrations.py": 37,             # the sanctioned-until-retired T2 registry
     # aspect_extraction_queue.py (3), chash_index.py (2),
-    # document_highlights.py (1), telemetry.py (4): entries removed —
-    # files deleted (nexus-i711w Stage 2 sub-stage A). DOWNWARD-only edits.
+    # document_highlights.py (1), telemetry.py (4) [sub-stage A];
+    # memory_store.py (3), plan_library.py (3), document_aspects.py (1)
+    # [sub-stage A3]: entries removed — files deleted. DOWNWARD-only edits.
     "src/nexus/db/t2/catalog.py": 9,
-    "src/nexus/db/t2/document_aspects.py": 1,
-    "src/nexus/db/t2/memory_store.py": 3,
-    "src/nexus/db/t2/plan_library.py": 3,
     # wire_reid.py entry removed (RDR-155 P4b P2): file deleted with the
     # migration machinery.
 }
@@ -113,10 +116,10 @@ ALTER_CENSUS: dict[str, int] = {
     # aspect_extraction_queue.py (2) + chash_index.py (1) entries removed —
     # files deleted (nexus-i711w Stage 2 sub-stage A). DOWNWARD-only edits.
     "src/nexus/db/t2/catalog.py": 9,              # 8 real + 1 self-referential SQL comment
-    "src/nexus/db/t2/memory_store.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
-    "src/nexus/db/t2/plan_library.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
+    # memory_store.py (1) + plan_library.py (1) comment-mirror entries and
+    # plans/repair.py (1) removed — files deleted (nexus-i711w Stage 2
+    # sub-stage A3). DOWNWARD-only edits.
     "src/nexus/health.py": 1,                     # PG/Liquibase RLS syntax in a comment (health.py:1673) — not SQLite debt
-    "src/nexus/plans/repair.py": 1,               # docstring mention only; module runs NO DDL — not own debt
     "src/nexus/upgrade_ladder/rungs/chash_rekey.py": 1,  # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text — not SQLite debt
 }
 
@@ -148,7 +151,8 @@ EPSILON_CENSUS: dict[str, int] = {
     # index.py 3 -> 2 (RDR-155 P4b P0a): the --dry-run epsilon-allow
     # retired with the InMemoryVectorClient cutover.
     "src/nexus/commands/index.py": 2,
-    "src/nexus/commands/plan.py": 2,
+    # commands/plan.py (2) entries removed — the `nx plan repair` group and
+    # its _open_plans_db helper died (nexus-i711w Stage 2 sub-stage A3).
     "src/nexus/commands/rdr.py": 1,
     "src/nexus/commands/search_cmd.py": 1,
     # storage_cmd.py entry removed (RDR-187/nexus-piwya.10): the retired

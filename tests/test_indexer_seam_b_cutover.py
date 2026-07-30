@@ -607,7 +607,11 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # 15 -> 14: nexus-i711w Stage 2 sub-stage B deleted the `nx daemon t2`
     # verb group from commands/daemon.py, taking its single epsilon-allow
     # raw-connect with it. DOWNWARD-only recount; never bump upward.
-    assert result.epsilon_allow_connects == 14, (
+    # 14 -> 13: nexus-i711w Stage 2 sub-stage A3 deleted the `nx plan repair`
+    # verb group, taking commands/plan.py's `_open_plans_db` epsilon-allow
+    # connect with it (lockstep with test_storage_boundary_lint's copy —
+    # same number; derive-don't-paste still stands). DOWNWARD-only recount.
+    assert result.epsilon_allow_connects == 13, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

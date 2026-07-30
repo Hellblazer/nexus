@@ -31,13 +31,13 @@ from structlog.testing import capture_logs
 
 @pytest.fixture()
 def library(tmp_path: Path):
-    from nexus.db.migrations import _add_plan_dimensional_identity
-    from nexus.db.t2.plan_library import PlanLibrary
+    """Engine-backed ``HttpPlanLibrary`` on a fresh per-test tenant
+    (nexus-i711w A3: the SQLite ``PlanLibrary`` is deleted; the autouse
+    ``_pin_t2_substrate`` fixture supplies the hermetic engine and the
+    dimensional-identity schema ships in the engine's Liquibase changelog)."""
+    from nexus.db.t2 import T2Database
 
-    lib = PlanLibrary(tmp_path / "plans.db")
-    _add_plan_dimensional_identity(lib.conn)
-    lib.conn.commit()
-    return lib
+    return T2Database(tmp_path / "m.db").plans
 
 
 def _seed_with_bindings(

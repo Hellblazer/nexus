@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from nexus.db.t2.document_aspects import AspectRecord
+from nexus.db.t2.records import AspectRecord
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
 
 # ── Rotatable-bearer fake aspects service ───────────────────────────────────

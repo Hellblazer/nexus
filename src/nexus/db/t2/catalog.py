@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 import structlog
 
 from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-from nexus.db.t2.memory_store import _sanitize_fts5
+from nexus.db.t2.records import _sanitize_fts5
 
 if TYPE_CHECKING:  # pragma: no cover — import for type hints only
     from nexus.catalog.tumbler import (

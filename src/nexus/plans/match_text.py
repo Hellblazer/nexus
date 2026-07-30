@@ -7,7 +7,8 @@ module the SQLite retirement deletes. The function's own docstring already
 called itself "the single source of truth for match-text synthesis"; this gives
 it a home that matches the claim, and one that is not tied to a substrate.
 
-``plan_library`` re-exports it for the callers that still import it there.
+(The SQLite ``plan_library`` re-exported it until that module was deleted in
+nexus-i711w Stage 2 sub-stage A3; every surviving caller imports from here.)
 """
 from __future__ import annotations
 

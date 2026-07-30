@@ -260,34 +260,13 @@ def test_valid_store_names_covers_t2database_attributes(
 
 
 # ── seam: memory branch is live, default behavior unchanged ──────────────────
-
-
-def test_t2database_sqlite_seam_constructs_memory_store(
-    tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """SQLite seam: T2Database construction succeeds and db.memory is the
-    concrete MemoryStore.  Confirms the seam is live and routes correctly.
-    Pins sqlite explicitly (the default is SERVICE since nexus-fjwxh).
-    """
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-    from pathlib import Path
-
-    import nexus.db.t2 as t2_mod
-
-    orig = t2_mod._DEFAULT_RUN_MIGRATIONS
-    t2_mod._DEFAULT_RUN_MIGRATIONS = True
-    try:
-        from nexus.db.t2 import T2Database
-        from nexus.db.t2.memory_store import MemoryStore
-
-        db = T2Database(Path(tmp_path) / "seam_sqlite.db")  # type: ignore[arg-type]
-        try:
-            assert isinstance(db.memory, MemoryStore)
-        finally:
-            db.close()
-    finally:
-        t2_mod._DEFAULT_RUN_MIGRATIONS = orig
+#
+# test_t2database_sqlite_seam_constructs_memory_store DELETED (nexus-i711w
+# Stage 2 sub-stage A3): its subject was the sqlite ARM of the backend seam —
+# "NX_STORAGE_BACKEND=sqlite -> db.memory is the concrete MemoryStore". The
+# SQLite MemoryStore died with the store deletions and T2Database now
+# constructs the Http twins UNCONDITIONALLY, so the seam has one reachable
+# arm; the surviving routing contract is exactly the sibling below.
 
 
 def test_t2database_service_backend_uses_http_memory_store(

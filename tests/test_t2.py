@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database, _sanitize_fts5
-from nexus.db.t2.plan_library import PlanLibrary
 from tests._t2_fixture_ops import (
     backdate_memory,
     memory_row,
@@ -682,105 +681,12 @@ def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     assert db.get_relevance_log() == []
 
 
-@_skip_on_gha_flake
-def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) -> None:
-    """Two T2Database instances on the same path do not re-run migrations sequentially."""
-    _require_sqlite_substrate()
-    from nexus.db.t2 import plan_library
-
-    # Clear any prior migration state for this path. Each store owns its
-    # own guard after Phase 2 (RDR-063 Open Question 3 resolution), so we
-    # target plan_library's set — PlanLibrary._migrate_plans_if_needed is
-    # the monkeypatched function below. The guard keys on the resolved
-    # path, so discard the resolved form (important on macOS where /var
-    # and /private/var resolve differently).
-    path = tmp_path / "sequential.db"
-    with plan_library._migrated_lock:
-        plan_library._migrated_paths.discard(str(path.resolve()))
-
-    call_count = {"n": 0}
-    # _migrate_plans_if_needed lives on PlanLibrary. Each T2Database
-    # constructor instantiates PlanLibrary(path), which in turn runs
-    # _init_schema → _migrate_plans_if_needed under plan_library's own
-    # _migrated_lock. The per-domain guard short-circuits the second
-    # construction exactly as the Phase 1 facade-level guard did.
-    original = PlanLibrary._migrate_plans_if_needed
-
-    def counting(self):
-        call_count["n"] += 1
-        return original(self)
-
-    monkeypatch.setattr(PlanLibrary, "_migrate_plans_if_needed", counting)
-
-    db1 = T2Database(path)
-    assert call_count["n"] == 1
-    # Second instance on the same path: migration must NOT run again
-    db2 = T2Database(path)
-    assert call_count["n"] == 1, (
-        "Migration ran a second time — the per-domain _migrated_paths guard failed"
-    )
-
-
-@_skip_on_gha_flake
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="os.symlink requires admin/developer mode on Windows",
-)
-def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None:
-    """Two paths resolving to the same file share a guard key via symlink.
-
-    Python's ``Path`` collapses ``.`` segments at construction, so a naive
-    ``base / "." / "file.db"`` produces the same string as ``base / "file.db"``
-    and doesn't exercise normalization. This test uses a real symlink so the
-    two string paths genuinely differ — only ``resolve()`` can reconcile them.
-    """
-    _require_sqlite_substrate()
-    import os
-
-    from nexus.db.t2 import plan_library
-
-    base = tmp_path / "real"
-    base.mkdir()
-    canonical = base / "norm.db"
-
-    # Create a symlinked alias pointing at the same parent directory
-    link_parent = tmp_path / "via_symlink"
-    os.symlink(base, link_parent)
-    via_symlink = link_parent / "norm.db"
-
-    # Sanity: the two path strings genuinely differ
-    assert str(canonical) != str(via_symlink)
-    # But resolve() converges them
-    assert canonical.resolve() == via_symlink.resolve()
-
-    with plan_library._migrated_lock:
-        plan_library._migrated_paths.discard(str(canonical.resolve()))
-
-    call_count = {"n": 0}
-    # See test_migration_guard_sequential_construction for the rationale —
-    # _migrate_plans_if_needed is on PlanLibrary and guarded by
-    # plan_library._migrated_paths (per-domain guard, Phase 2).
-    original = PlanLibrary._migrate_plans_if_needed
-
-    def counting(self):
-        call_count["n"] += 1
-        return original(self)
-
-    monkeypatch.setattr(PlanLibrary, "_migrate_plans_if_needed", counting)
-
-    # First construction via canonical path
-    T2Database(canonical)
-    assert call_count["n"] == 1
-
-    # Second construction via symlinked path that resolves to the same file.
-    # Without path.resolve() in __init__, the guard would see a different key
-    # and re-run migrations.
-    T2Database(via_symlink)
-    assert call_count["n"] == 1, (
-        "Migration ran again for a symlinked path resolving to the same "
-        "file — path normalization in _init_schema failed"
-    )
-
+# test_migration_guard_sequential_construction and
+# test_migration_guard_path_normalization DELETED (nexus-i711w Stage 2
+# sub-stage A3): their subject was the SQLite PlanLibrary's per-domain
+# migration guard (_migrate_plans_if_needed / _migrated_paths), which died
+# with the store. The facade constructs HttpPlanLibrary unconditionally and
+# runs no per-store SQLite migrations.
 
 @_skip_on_gha_flake
 def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None:

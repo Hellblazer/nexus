@@ -631,13 +631,16 @@ class TestPlanLibraryMetrics:
     """
 
     def _fresh_library(self):
-        """Return a PlanLibrary over an on-disk temp db + seed one plan."""
-        import tempfile
-        from pathlib import Path
-        from nexus.db.t2.plan_library import PlanLibrary
+        """Return a fresh plan library + seed one plan.
 
-        tmp = Path(tempfile.mkdtemp()) / "library.db"
-        lib = PlanLibrary(tmp)
+        Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite PlanLibrary is
+        deleted; HttpPlanLibrary on the suite's hermetic engine substrate
+        (autouse ``_pin_t2_substrate``, per-test tenant) is the only plan
+        library — the fresh tenant makes it a fresh library.
+        """
+        from nexus.db.t2.http_plan_library import HttpPlanLibrary
+
+        lib = HttpPlanLibrary()
         plan_id = lib.save_plan(
             query="anchor probe",
             plan_json=json.dumps({"steps": []}),

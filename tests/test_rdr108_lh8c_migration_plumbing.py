@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
-import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -905,68 +904,13 @@ class TestK2DrainCLI:
 
 
 # ── S-3: _has_doc_id_pk double-checked lock ───────────────────────────────────
-
-
-class TestS3LockPattern:
-    """S-3: _has_doc_id_pk must check hasattr INSIDE the lock (TOCTOU fix)."""
-
-    def test_hasattr_inside_lock_in_source(self) -> None:
-        """hasattr() check must appear AFTER 'with self._lock:' in _has_doc_id_pk."""
-        from nexus.db.t2.document_aspects import DocumentAspects
-        src = inspect.getsource(DocumentAspects._has_doc_id_pk)
-        lines = src.split("\n")
-        lock_idx = next(
-            (i for i, ln in enumerate(lines) if "with self._lock" in ln), None
-        )
-        hasattr_idx = next(
-            (i for i, ln in enumerate(lines) if "hasattr" in ln), None
-        )
-        assert lock_idx is not None, "_has_doc_id_pk must have 'with self._lock:'"
-        assert hasattr_idx is not None, "_has_doc_id_pk must use hasattr()"
-        assert hasattr_idx > lock_idx, (
-            f"hasattr() (line {hasattr_idx}) must come after 'with self._lock:' "
-            f"(line {lock_idx}) to prevent TOCTOU race."
-        )
-
-    def test_concurrent_calls_consistent_result(self, tmp_path: Path) -> None:
-        """10 concurrent calls to _has_doc_id_pk must all return the same value."""
-        from nexus.db.t2.document_aspects import DocumentAspects
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS document_aspects (
-                doc_id TEXT PRIMARY KEY,
-                collection TEXT NOT NULL DEFAULT '',
-                source_path TEXT NOT NULL DEFAULT '',
-                extracted_at TEXT NOT NULL DEFAULT '',
-                model_version TEXT NOT NULL DEFAULT '',
-                extractor_name TEXT NOT NULL DEFAULT '',
-                source_uri TEXT
-            );
-        """)
-        conn.commit()
-        conn.close()
-
-        aspects = DocumentAspects(db_path)
-        results: list[bool] = []
-        errors: list[Exception] = []
-
-        def check() -> None:
-            try:
-                results.append(aspects._has_doc_id_pk())
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=check) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5.0)
-
-        assert not errors, f"Concurrent _has_doc_id_pk raised: {errors}"
-        assert len(results) == 10
-        assert len(set(results)) == 1, "All threads must agree on schema version"
+#
+# TestS3LockPattern DELETED (nexus-i711w Stage 2 sub-stage A3): its subject
+# was the S-3 TOCTOU double-checked lock inside the SQLite DocumentAspects
+# store's ``_has_doc_id_pk`` schema probe. The store — probe, lock, and the
+# dual-schema window the probe existed for — is deleted; the surviving
+# HttpDocumentAspectsStore has no client-side schema probe (the engine's
+# schema is Liquibase-managed).
 
 
 # ── O-5: INSERT OR IGNORE in collections backfill ────────────────────────────
