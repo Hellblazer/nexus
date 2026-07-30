@@ -12,6 +12,25 @@ import time
 
 from nexus.config import default_db_path
 
+
+def _parse_version(ver: str) -> tuple[int, ...]:
+    """Parse a dotted version string into a comparable 3-component tuple.
+
+    Normalises to exactly 3 components so ``(3, 7)`` doesn't compare
+    less than ``(3, 7, 0)``.  Falls back to ``(0, 0, 0)`` for
+    pre-release tags or malformed input.
+
+    REHOMED from ``nexus.db.migrations`` in RDR-158 P4 Stage 4
+    (nexus-i711w): the migration registry is deleted; this module's
+    plugin↔CLI drift check is the surviving consumer.
+    """
+    try:
+        parts = tuple(int(x) for x in ver.split(".")[:3])
+        return parts + (0,) * (3 - len(parts))
+    except ValueError:
+        return (0, 0, 0)
+
+
 # ── T2 daemon-unreachable rate-limiter (GH #1048) ────────────────────────────
 # Emit the daemon-unreachable warning at most once per _WARN_RATE_LIMIT_SECS
 # rather than once per write. Under load (nx dt index, bulk indexing) the
@@ -1069,7 +1088,6 @@ def check_version_compatibility() -> None:
     log = structlog.get_logger()
     try:
         from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — stdlib importlib.metadata deferred to function scope
-        from nexus.db.migrations import _parse_version  # noqa: PLC0415 — deferred to avoid circular import (db.migrations)
 
         cli_ver = _pkg_version("conexus")
 

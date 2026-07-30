@@ -73,45 +73,9 @@ def _make_multi_step_match() -> Match:
     )
 
 
-# ── T2 migration ──────────────────────────────────────────────────────────────
-
-
-class TestNxAnswerRunsMigration:
-
-    def test_creates_table(self):
-        from nexus.db.migrations import migrate_nx_answer_runs
-
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-
-        cursor = conn.execute("PRAGMA table_info(nx_answer_runs)")
-        columns = {row[1] for row in cursor.fetchall()}
-        expected = {
-            "id", "question", "plan_id", "matched_confidence",
-            "step_count", "final_text", "cost_usd", "duration_ms",
-            "created_at",
-        }
-        assert expected <= columns
-
-    def test_idempotent(self):
-        from nexus.db.migrations import migrate_nx_answer_runs
-
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-        migrate_nx_answer_runs(conn)  # must not raise
-
-    def test_in_migrations_list(self):
-        from nexus.db.migrations import MIGRATIONS
-
-        versions = [(m.introduced, m.name) for m in MIGRATIONS]
-        assert any(
-            v == "4.5.0" and "nx_answer_runs" in n
-            for v, n in versions
-        ), f"4.5.0 nx_answer_runs migration not in MIGRATIONS: {versions}"
-
-
-# ── Plan-match gate ───────────────────────────────────────────────────────────
-
+# ── T2 migration tests DELETED (RDR-158 P4 Stage 4, nexus-i711w): the
+# migrate_nx_answer_runs chain died with nexus/db/migrations.py; the
+# nx_answer_runs table is engine-owned (Liquibase). ─────────────────────────
 
 class TestPlanMatchGate:
 

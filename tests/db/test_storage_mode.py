@@ -257,40 +257,34 @@ def test_valid_store_names_covers_t2database_attributes(
     """
     from pathlib import Path
 
-    import nexus.db.t2 as t2_mod
+    from nexus.db.t2 import T2Database
 
-    # Temporarily enable auto-migrate so construction works without a running daemon.
-    orig = t2_mod._DEFAULT_RUN_MIGRATIONS
-    t2_mod._DEFAULT_RUN_MIGRATIONS = True
+    # RDR-158 P4 Stage 4 (nexus-i711w): the auto-migrate plumbing is deleted;
+    # construction never migrates, so no default-flip is needed here.
+    db = T2Database(Path(tmp_path) / "drift_guard.db")  # type: ignore[arg-type]
     try:
-        from nexus.db.t2 import T2Database
+        # Collect eagerly-constructed public store attributes: lower-case,
+        # not starting with '_', not ALL_CAPS (RENAME_LOCK), not a method/property.
+        import inspect
 
-        db = T2Database(Path(tmp_path) / "drift_guard.db")  # type: ignore[arg-type]
-        try:
-            # Collect eagerly-constructed public store attributes: lower-case,
-            # not starting with '_', not ALL_CAPS (RENAME_LOCK), not a method/property.
-            import inspect
-
-            store_attrs = {
-                name
-                for name, val in vars(db).items()
-                if (
-                    not name.startswith("_")
-                    and name != name.upper()  # exclude ALL_CAPS like RENAME_LOCK
-                    and not inspect.ismethod(val)
-                    and not inspect.isfunction(val)
-                )
-            }
-            # Every eager store attribute must be in VALID_STORE_NAMES.
-            missing = store_attrs - VALID_STORE_NAMES
-            assert not missing, (
-                f"T2Database has domain-store attribute(s) not in VALID_STORE_NAMES: "
-                f"{sorted(missing)}.  Add them to nexus.db.storage_mode.VALID_STORE_NAMES."
+        store_attrs = {
+            name
+            for name, val in vars(db).items()
+            if (
+                not name.startswith("_")
+                and name != name.upper()  # exclude ALL_CAPS like RENAME_LOCK
+                and not inspect.ismethod(val)
+                and not inspect.isfunction(val)
             )
-        finally:
-            db.close()
+        }
+        # Every eager store attribute must be in VALID_STORE_NAMES.
+        missing = store_attrs - VALID_STORE_NAMES
+        assert not missing, (
+            f"T2Database has domain-store attribute(s) not in VALID_STORE_NAMES: "
+            f"{sorted(missing)}.  Add them to nexus.db.storage_mode.VALID_STORE_NAMES."
+        )
     finally:
-        t2_mod._DEFAULT_RUN_MIGRATIONS = orig
+        db.close()
 
 
 # ── T2Database construction is a validation point ────────────────────────────
@@ -339,11 +333,8 @@ def test_t2database_service_backend_uses_http_memory_store(
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token-for-seam")
     from pathlib import Path
 
-    import nexus.db.t2 as t2_mod
     from nexus.db.t2.http_memory_store import HttpMemoryStore
 
-    orig = t2_mod._DEFAULT_RUN_MIGRATIONS
-    t2_mod._DEFAULT_RUN_MIGRATIONS = True
     db = None
     try:
         from nexus.db.t2 import T2Database
@@ -353,7 +344,6 @@ def test_t2database_service_backend_uses_http_memory_store(
             f"Expected HttpMemoryStore, got {type(db.memory).__name__}"
         )
     finally:
-        t2_mod._DEFAULT_RUN_MIGRATIONS = orig
         if db is not None:
             try:
                 db.memory.close()

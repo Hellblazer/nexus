@@ -50,10 +50,10 @@ def db_with_papers(tmp_path: Path) -> Path:
     """T2 DB with three papers carrying ``extras.venue`` / ``extras.year``."""
     db_path = tmp_path / "promotion.db"
     # nexus-aqbrk: build the local SQLite schema explicitly — T2Database(path)
-    # does NOT create it under the engine substrate (bootstrap_schema
-    # early-returns so apply_pending cannot re-stamp _nexus_version on what
-    # RDR-176 Gap 2 treats as a frozen migration source). Kept so the CLI
-    # tests that open this path see a well-formed migration-source file.
+    # never creates it (the bootstrap machinery died with db/migrations.py in
+    # RDR-158 P4 Stage 4; the fixture executescripts a frozen DDL snapshot).
+    # Kept so the CLI tests that open this path see a well-formed
+    # migration-source file.
     # (The legacy-history seed itself no longer touches this file — since
     # sub-stage A3 it goes through the promotion ETL import; see
     # _seed_legacy_history.)

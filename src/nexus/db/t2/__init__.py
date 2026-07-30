@@ -51,9 +51,9 @@ Concurrency model (RDR-063 Phase 2):
 * ``taxonomy.discover_topics`` holds only ``taxonomy._lock`` for
   INSERTs — never acquires ``memory._lock``.
 
-Schema migrations are per-domain and idempotent: each store runs its
-own migration guard the first time it sees a given database path, so
-independent stores can initialize concurrently.
+Schema is engine-owned (Liquibase) since RDR-158 P4 Stage 4
+(nexus-i711w): the client-side SQLite migration chain is deleted, and the
+local ``.db`` files are a frozen migration source (RDR-176 Gap 2).
 
 See ``docs/architecture.md`` § T2 Domain Stores for the full picture
 and ``docs/contributing.md`` § Adding a T2 Domain Feature for how to
@@ -82,132 +82,6 @@ if TYPE_CHECKING:
 _log = structlog.get_logger()
 
 
-# RDR-128 P0a (RF-3): the daemon's startup migration must tolerate another
-# process holding memory.db's single WAL writer lock (typically ``nx index
-# repo``). ``busy_timeout`` governs how long each statement waits for the
-# lock before raising ``database is locked``; the old 5s was tight enough
-# that a concurrent indexer could trip a migration step and crash the
-# freshly-spawned daemon. 30s matches the intra-host contention window
-# already used by aspect_extraction_queue (nexus-v4m7y) and costs nothing
-# on a quiet database.
-_BOOTSTRAP_BUSY_TIMEOUT_MS: int = 30000
-
-# Bounded Python-level retry around ``apply_pending``, layered on top of the
-# busy_timeout. Mirrors aspect_extraction_queue.reclaim_stale: three attempts
-# with two inter-attempt sleeps. ``apply_pending`` is idempotent (per-migration
-# existence guards) and only records the path as done on success, so a retry
-# after a mid-run ``database is locked`` safely re-runs from bootstrap_version.
-# Worst case if every attempt blocks the full busy_timeout: 30 + 0.5 + 30 +
-# 1.0 + 30 = ~91.5s, after which the final attempt re-raises so a genuinely
-# stuck lock still surfaces rather than hanging the daemon forever.
-_BOOTSTRAP_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.5, 1.0)
-
-
-def _apply_pending_with_lock_retry(
-    conn: sqlite3.Connection, current_version: str
-) -> None:
-    """Run the startup migration (``PRAGMA journal_mode=WAL`` + ``apply_pending``)
-    with a bounded retry on ``database is locked`` / ``database is busy``.
-
-    ``journal_mode=WAL`` is inside the retry because it is itself a write
-    that takes the writer lock when the file is not already in WAL mode —
-    leaving it outside would let a held lock crash the daemon before
-    ``apply_pending`` ever runs (code-review finding, RDR-128 P0a). Only
-    writer-slot contention is retried; any other ``OperationalError``
-    (schema corruption, FK violation, ...) propagates on the first attempt.
-    The final attempt re-raises so the failure is never silently swallowed.
-    """
-    import time  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-    from nexus.db.migrations import apply_pending  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-    sleeps_between = _BOOTSTRAP_RETRY_SLEEPS_BETWEEN
-    max_attempts = len(sleeps_between) + 1
-    for attempt in range(1, max_attempts + 1):
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            apply_pending(conn, current_version)
-            if attempt > 1:
-                _log.info(
-                    "t2_bootstrap_migration_recovered",
-                    attempt=attempt,
-                )
-            return
-        except sqlite3.OperationalError as exc:
-            msg = str(exc).lower()
-            if "locked" not in msg and "busy" not in msg:
-                raise
-            # Clear any partial transaction left by the failed step so the
-            # retry re-runs from a clean connection state.
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            if attempt == max_attempts:
-                raise
-            sleep_seconds = sleeps_between[attempt - 1]
-            _log.warning(
-                "t2_bootstrap_migration_lock_retry",
-                attempt=attempt,
-                next_sleep_seconds=sleep_seconds,
-                exc=str(exc),
-            )
-            time.sleep(sleep_seconds)
-
-
-def _cold_start_is_current_and_wal(path: Path) -> bool:
-    """Return True iff *path* is already at ``current_version`` AND already in
-    WAL journal mode, using only lock-free reads (RDR-140 P1.2 Gap 4, A3).
-
-    Both probes succeed under a held EXCLUSIVE writer lock, so this never
-    contends with a concurrent writer. Any read error, a missing/``0.0.0``
-    version row, a non-WAL journal, or a ``"0.0.0"`` current version (the
-    importlib fallback) returns False so the caller takes the full
-    flock+migration path — a genuine pending migration must always run.
-    """
-    # A non-existent path is a fresh DB: there is nothing to fast-path, and we
-    # must NOT create the file here (this probe is read-only by contract — a
-    # plain ``sqlite3.connect`` would materialise a 0-byte DB). Fall through to
-    # the full bootstrap, which creates and migrates it. We use a plain
-    # read-write connection rather than ``mode=ro`` because read-only mode
-    # cannot create the ``-shm`` file a WAL DB needs when no other connection
-    # is open (the exact cold-start steady state we optimise), which would
-    # defeat the fast path. Reads on a plain connection are lock-free (A3),
-    # mirroring ``stored_schema_version``.
-    if not path.exists():
-        return False
-    try:
-        # RDR-170: compare against the canonical (registry-aware) schema version
-        # — the value apply_pending stamps — NOT the raw package version. On a
-        # frozen/ahead branch the daemon stamps the registry max (e.g. 5.10.7)
-        # while the package is 5.10.6; reading _pkg_version here would make the
-        # row compare unequal and break the fast path on every cold start.
-        from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-        current_version = expected_t2_schema_version()
-        if current_version == "0.0.0":
-            return False
-
-        conn = sqlite3.connect(str(path), check_same_thread=False)
-        try:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
-                ).fetchone()
-            except sqlite3.OperationalError:
-                return False  # _nexus_version absent — uninitialised DB.
-            if not row or row[0] != current_version:
-                return False
-            mode = conn.execute("PRAGMA journal_mode").fetchone()
-            if not mode or str(mode[0]).lower() != "wal":
-                return False
-            return True
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return False
-
-
 # Re-export surface for backward compatibility. The PEP 562
 # ``__getattr__`` lazy resolver that used to live here served only the
 # ``CatalogStore`` re-export; it died with the local catalog
@@ -216,34 +90,6 @@ __all__ = [
     "T2Database",
     "_sanitize_fts5",
 ]
-
-
-#: RDR-120 P3b: process-wide default for ``T2Database(run_migrations=...)``
-#: when the caller leaves the parameter unspecified. Production code keeps
-#: this False (daemon owns migrations). The test conftest flips it to True
-#: so existing direct-open fixtures keep migrating their fresh tmp DBs.
-_DEFAULT_RUN_MIGRATIONS: bool = False
-
-#: Env-var override for :data:`_DEFAULT_RUN_MIGRATIONS`. Set to ``"1"`` to
-#: opt every direct-open ``T2Database`` construction into running
-#: ``apply_pending`` even when the in-process module global is False.
-#: Used by the test conftest to propagate auto-migrate semantics into
-#: subprocess children (``subprocess.run`` / ``claude -p`` dispatches /
-#: MCP children) which inherit ``os.environ`` but not Python module state.
-_RUN_MIGRATIONS_ENV: str = "NX_T2_AUTO_MIGRATE"
-
-
-def _resolve_default_run_migrations() -> bool:
-    """Read the effective default from the env var first, the module
-    global second. The env-var path is what propagates into spawned
-    subprocesses (RDR-120 P3b review item 1).
-    """
-    import os as _os  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-    raw = _os.environ.get(_RUN_MIGRATIONS_ENV, "").strip()
-    if raw:
-        return raw not in ("0", "false", "False", "no", "")
-    return _DEFAULT_RUN_MIGRATIONS
 
 
 # ── Database facade ───────────────────────────────────────────────────────────
@@ -274,22 +120,16 @@ class T2Database:
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
         self._path: Path = path
 
-        # RDR-120 P3b: migration ownership transferred to the T2 daemon.
-        # ``T2Database.__init__`` no longer auto-runs ``apply_pending``.
-        # Callers that need to materialise the schema (daemon startup,
-        # ``nx upgrade``, conftest bootstrap) must either pass
-        # ``run_migrations=True`` here or call
-        # :meth:`T2Database.bootstrap_schema` explicitly. The default is
-        # the module-level :data:`_DEFAULT_RUN_MIGRATIONS` (False in
-        # production; conftest flips it to True so the test suite stays
-        # green without touching 300+ direct-open call sites).
-        effective = (
-            _resolve_default_run_migrations()
-            if run_migrations is None
-            else run_migrations
-        )
-        if effective:
-            T2Database.bootstrap_schema(path)
+        # ``run_migrations`` is RETAINED-AND-IGNORED for signature stability
+        # (RDR-158 P4 Stage 4, nexus-i711w): the machinery it used to gate —
+        # ``bootstrap_schema`` / ``apply_pending`` / the ``NX_T2_AUTO_MIGRATE``
+        # conftest default — is deleted with ``nexus/db/migrations.py``. The
+        # engine owns its (Postgres) schema via Liquibase in every mode, and
+        # the local ``.db`` is a frozen migration source that must never be
+        # re-stamped (RDR-176 Gap 2). Callers passing ``run_migrations=True``
+        # get exactly the same non-mutating construction as everyone else —
+        # pinned by tests/db/test_rdr176_non_mutation.py.
+        del run_migrations
 
         # ── RDR-138 T1.1 (nexus-tgzvt): process-wide rename coordination lock ──
         #
@@ -461,127 +301,10 @@ class T2Database:
             "client_schema_version": client_schema_version or "",
         }
 
-    @staticmethod
-    def bootstrap_schema(path: Path, store: str = "memory") -> None:
-        """Run ``apply_pending`` against *path*.
-
-        RDR-120 P3b: lifted out of ``__init__`` so the T2 daemon is the
-        sole substrate-owner that runs migrations in steady state.
-        ``nx upgrade`` and the test conftest also call this directly.
-
-        Idempotent: subsequent calls against the same resolved path
-        short-circuit via the ``_upgrade_done`` set in
-        :mod:`nexus.db.migrations`.
-
-        RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local
-        ``.db`` is a migration SOURCE only and must stay byte-for-content
-        immutable so a downgrade is just "reinstall the prior CLI". Running
-        ``apply_pending`` here would re-stamp ``_nexus_version`` forward and
-        break the rollback guarantee, so skip entirely when *store* is
-        service-backed. *store* defaults to ``"memory"`` (the sole production
-        caller bootstraps ``memory.db``); a per-store caller passes its own name
-        so the routing decision matches the DB it is actually bootstrapping
-        rather than a global proxy. The Java service owns its own (Postgres)
-        schema; nothing on the SQLite side needs migrating. Enforced by
-        ``tests/db/test_rdr176_non_mutation.py``.
-        """
-        from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep bootstrap_schema import-cheap on the steady-state path
-            StorageBackend,
-            storage_backend_for,
-        )
-
-        if storage_backend_for(store) == StorageBackend.SERVICE:
-            return
-
-        from nexus.db.migrations import (  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            _upgrade_done,
-            _upgrade_lock,
-            t2_migration_flock,
-        )
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path_key = str(path.resolve())
-        except OSError:
-            path_key = str(path)
-
-        # Fast path: already migrated in this process. Cheap check under the
-        # in-process lock only — no cross-process flock needed.
-        with _upgrade_lock:
-            if path_key in _upgrade_done:
-                return
-
-        # RDR-140 P1.2 (nexus-2p52a) Gap 4: cold-start (cross-process) fast
-        # path. When a fresh process meets a DB that is already at
-        # current_version AND already in WAL, the existing flock-wait +
-        # connection-open + no-op apply_pending below is pure overhead that
-        # still takes SQLite's writer lock (PRAGMA journal_mode=WAL is a write
-        # when the file is not WAL, and bootstrap_version writes the version
-        # table). A3 (T2 rdr/140-research-A3, verified) proved both probes are
-        # lock-free: SELECT value FROM _nexus_version (mirrors
-        # ``stored_schema_version``) and PRAGMA journal_mode read succeed even
-        # under a held EXCLUSIVE writer lock. Short-circuit ONLY when BOTH
-        # conditions hold; anything else (missing/0.0.0 row, non-WAL journal,
-        # or any read error) falls through to the unchanged flock+migration
-        # path so a genuine pending migration always runs (no silent fallback
-        # for correctness, mem:feedback_no_silent_fallbacks_for_correctness).
-        if _cold_start_is_current_and_wal(path):
-            with _upgrade_lock:
-                # Double-check (mirrors the full-migration path below): another
-                # thread may have finished a migration for this path while we
-                # ran the lock-free probe.
-                if path_key in _upgrade_done:
-                    return
-                _upgrade_done.add(path_key)
-            return
-
-        # RDR-128 P2: acquire the cross-process migration flock BEFORE the
-        # in-process ``_upgrade_lock`` so the lock order matches ``nx upgrade``
-        # (flock -> _upgrade_lock, via apply_pending). Consistent ordering
-        # means the daemon-startup and upgrade migration paths cannot deadlock
-        # even if ever run concurrently in one process (code-review finding).
-        # The flock also serializes the two paths cross-process, replacing the
-        # old WAL free-for-all.
-        with t2_migration_flock(path.parent):
-            with _upgrade_lock:
-                # Double-check: another thread may have completed the migration
-                # while we blocked on the flock.
-                if path_key in _upgrade_done:
-                    return
-                # RDR-170: stamp the canonical (registry-aware) schema version
-                # — max(package, registry_max) — so a frozen/ahead branch records
-                # the highest migration that actually ran (5.10.7), not the frozen
-                # package version (5.10.6) which would leave it reported pending.
-                from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-                current_version = expected_t2_schema_version()
-
-                import sys as _sys  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-                if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():
-                    print(  # noqa: T201 — interactive-only (isatty-gated) migration banner to stderr
-                        f"Migrating database {path.name!r} to schema "
-                        f"version {current_version} ...",
-                        file=_sys.stderr,
-                    )
-
-                conn = sqlite3.connect(str(path), check_same_thread=False)
-                try:
-                    # RDR-128 P0a (RF-3): tolerate a concurrent writer (e.g.
-                    # `nx index repo`) holding the WAL writer lock — wait it
-                    # out via a 30s busy_timeout plus a bounded retry, rather
-                    # than crashing on `database is locked`. busy_timeout is a
-                    # connection-local pragma that never blocks; journal_mode
-                    # =WAL + apply_pending run inside the retry helper since
-                    # both can take the writer lock.
-                    conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
-                    _apply_pending_with_lock_retry(conn, current_version)
-                finally:
-                    conn.close()
-                # Mirror the T2Database-form path_key into _upgrade_done so
-                # a second construction with the same Path argument
-                # short-circuits without re-opening the connection
-                # (nexus-avwe — CI path-resolution edge cases).
-                _upgrade_done.add(path_key)
+    # NO bootstrap_schema: deleted in RDR-158 P4 Stage 4 (nexus-i711w) with
+    # ``nexus/db/migrations.py``. The engine owns schema via Liquibase; the
+    # local ``.db`` is a frozen migration source that must never be migrated
+    # or re-stamped (RDR-176 Gap 2, tests/db/test_rdr176_non_mutation.py).
 
     def __enter__(self) -> "T2Database":
         return self

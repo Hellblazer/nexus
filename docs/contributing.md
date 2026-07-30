@@ -108,18 +108,18 @@ facade delegates).
 1. Add the method to the store's class in its own module — use the
    store's own connection via its internal methods; do not reach out
    to the facade.
-2. If the feature needs a new table or column, add a per-store
-   migration that runs the first time that store opens a database
-   path (the existing stores show the pattern — a module-level
-   `_migrated_paths: set[str]` guard + `_migrated_lock`, checked
-   in `__init__`).
-   - **Substrate boundary (RDR-120 §A8):** the migration body must
-     ship DDL only. Any work beyond DDL (per-row backfills, sweeps,
-     content seeding) belongs in a consumer verb under the matching
-     `nx <area>` command group, not in `migrations.py`. The narrow
-     set of exceptions lives in RDR-120 §Research Findings ("§A8-
-     exempt substrate-owned writes"); if your migration is not on
-     that list, it ships DDL-only and the data work moves to a
+2. If the feature needs a new table or column, that is a Liquibase
+   changeset in the engine — the client-side migration chain is
+   DELETED (RDR-158 P4 Stage 4; there are no per-store SQLite
+   migrations in any mode).
+   - **Substrate boundary (RDR-120 §A8, restated for the engine
+     era):** the changeset ships DDL only. Any work beyond DDL
+     (per-row backfills, sweeps, content seeding) belongs in a
+     consumer verb under the matching `nx <area>` command group or
+     an upgrade-ladder rung. The narrow set of exceptions lives in
+     RDR-120 §Research Findings ("§A8-exempt substrate-owned
+     writes"); if your change is not on that list, it ships
+     DDL-only and the data work moves to a
      consumer verb.
 3. If external callers should be able to use the method via the
    `T2Database` facade for backward compatibility, add a one-line
@@ -298,7 +298,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    ./tests/e2e/release-sandbox.sh smoke
    ```
    Required for any change touching `pyproject.toml`, `uv.lock`,
-   `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`,
+   `src/nexus/mcp/**`, `conexus/**`,
    `.claude-plugin/**`, or `src/nexus/commands/{doctor,upgrade}.py` — which
    a release always does (the version bumps alone qualify). The reinstall it
    drives is genuinely isolated and runs cleanly with live Claude Code
@@ -362,7 +362,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `docs/configuration.md` | new config keys or tuning parameters |
 | `docs/storage-tiers.md` | new storage capabilities |
 | `README.md` | high-level feature descriptions |
-| `src/nexus/db/migrations.py` | verify `PRE_REGISTRY_VERSION` matches previous release; new T2 migrations in `MIGRATIONS` list; new T3 steps in `T3_UPGRADES` |
+| `src/nexus/upgrade_ladder/` | new DATA-convergence axes land as rungs registered in `registry.py` (the client-side T2 migration chain is deleted — RDR-158 P4 Stage 4; schema is Liquibase in the engine) |
 
 ### Pre-push release checklist
 

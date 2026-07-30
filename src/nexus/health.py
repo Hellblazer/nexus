@@ -1205,9 +1205,11 @@ _INTEGRITY_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.25, 0.5)
 def _is_lock_error(exc: BaseException) -> bool:
     """True when *exc* is transient writer-slot contention, not corruption.
 
-    Mirrors the discriminator in ``nexus.db.t2._apply_pending_with_lock_retry``:
-    ``database is locked`` / ``database is busy`` (including the
-    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked").
+    Mirrors the discriminator the retired T2 bootstrap-migration retry used
+    (``database is locked`` / ``database is busy``, including the
+    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked");
+    the retry died with ``db/migrations.py`` (RDR-158 P4 Stage 4,
+    nexus-i711w) but the lock-vs-corruption distinction is still the point.
     """
     msg = str(exc).lower()
     return "locked" in msg or "busy" in msg
@@ -2735,7 +2737,7 @@ def _check_catalog_legacy_file(*, config_dir: Path | None = None) -> list[Health
 
     legacy = config_dir / "catalog" / ".catalog.db"
     if legacy.is_file():
-        from nexus.db.migrations import (  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db import (  # noqa: PLC0415 — deferred to avoid circular import
             read_legacy_catalog_counts,
         )
 

@@ -21,11 +21,8 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-@pytest.fixture(autouse=True)
-def _clear_upgrade_done() -> None:
-    from nexus.db import migrations
-
-    migrations._upgrade_done.clear()
+# NO _clear_upgrade_done fixture: the ``_upgrade_done`` fast-path set died
+# with ``nexus/db/migrations.py`` (RDR-158 P4 Stage 4, nexus-i711w).
 
 
 # ── hooks.json tests ────────────────────────────────────────────────────────
@@ -222,13 +219,12 @@ class TestDoctorCheckTaxonomy:
     """
 
     def _setup_db(self, tmp_path: Path) -> Path:
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
+        # RDR-158 P4 Stage 4 (nexus-i711w): frozen-DDL seed replaces the
+        # deleted apply_pending chain — same well-formed local schema.
+        from tests._t2_fixture_ops import bootstrap_migration_source
 
         db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
+        bootstrap_migration_source(db_path)
         return db_path
 
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
@@ -468,13 +464,12 @@ class TestDoctorTrimTelemetry:
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:
         """Trim on an empty table is a no-op (zero deletions reported)."""
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
+        # RDR-158 P4 Stage 4 (nexus-i711w): frozen-DDL seed replaces the
+        # deleted apply_pending chain.
+        from tests._t2_fixture_ops import bootstrap_migration_source
 
         db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
+        bootstrap_migration_source(db_path)
 
         with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--trim-telemetry"])

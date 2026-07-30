@@ -89,7 +89,11 @@ DDL_CENSUS: dict[str, int] = {
     # (3) / plan_library.py (3) — one of the six was an already-censused
     # comment mirror, net +5. Same shape as the telemetry and taxonomy moves
     # above; dies with this file in Stage 4. Repo total DOWN, nothing new.
-    "src/nexus/db/migrations.py": 37,             # the sanctioned-until-retired T2 registry
+    # 37 -> 0 — RDR-158 P4 Stage 4 (nexus-i711w): db/migrations.py entry
+    # removed — the file (the last inline-DDL site in src/) is DELETED.
+    # The census is now EMPTY: src/ carries ZERO inline SQLite CREATE
+    # TABLE statements, and the grown-side delta trips on the first new
+    # one. DOWNWARD-only edit.
     # aspect_extraction_queue.py (3), chash_index.py (2),
     # document_highlights.py (1), telemetry.py (4) [sub-stage A];
     # memory_store.py (3), plan_library.py (3), document_aspects.py (1)
@@ -111,7 +115,8 @@ ALTER_CENSUS: dict[str, int] = {
     "src/nexus/aspect_promotion.py": 2,
     "src/nexus/commands/enrich.py": 1,            # nexus-70x7y: comment saying the runtime statement is GONE — not own debt
     "src/nexus/db/admin_sql.py": 2,                # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex + docstring — not SQLite debt
-    "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
+    # db/migrations.py (36) entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
+    # the file is DELETED. DOWNWARD-only edit.
     # aspect_extraction_queue.py (2) + chash_index.py (1) entries removed —
     # files deleted (nexus-i711w Stage 2 sub-stage A). DOWNWARD-only edits.
     # memory_store.py (1) + plan_library.py (1) comment-mirror entries and
@@ -137,8 +142,11 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/collection_health.py": 1,
     "src/nexus/commands/_helpers.py": 1,
     # aspects.py 7 -> 3 (nexus-7bomn Stage 3): gc / gc-fixtures raw sweeps
-    # became unconditional guided refusals.
-    "src/nexus/commands/aspects.py": 3,
+    # became unconditional guided refusals. 3 -> 1 (RDR-158 P4 Stage 4,
+    # nexus-i711w, critique Critical): backfill-source-uri and
+    # gc-pre-rdr096 carried the last unguarded raw writes into the frozen
+    # migration source; both are refusals now.
+    "src/nexus/commands/aspects.py": 1,
     "src/nexus/commands/catalog.py": 1,
     "src/nexus/commands/catalog_cmds/report.py": 3,
     "src/nexus/commands/collection.py": 1,
@@ -169,7 +177,10 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/taxonomy_cmd.py": 3,
     # tier_status.py entry removed (nexus-7bomn Stage 3): the local
     # tier_writes reader died with the opt-out.
-    "src/nexus/commands/upgrade.py": 3,
+    # commands/upgrade.py (3) entry removed — RDR-158 P4 Stage 4
+    # (nexus-i711w): all three overrides sat in _run_upgrade's local-SQLite
+    # leg (the chicken-and-egg bootstrap connect + the T3-step T2Database),
+    # deleted with db/migrations.py. DOWNWARD-only edit.
     # console/routes/health.py entry removed (nexus-7bomn Stage 3): the
     # console aspect-queue sqlite reader died with the opt-out.
     "src/nexus/context.py": 1,
@@ -266,12 +277,22 @@ def test_census_is_nonvacuous() -> None:
     ever reads zero sites while the census is non-empty, the scan itself
     broke (path drift, encoding) and the `grown` half above would go
     vacuously green."""
-    assert _count_matches(_DDL_RE)
+    # RDR-158 P4 Stage 4 (nexus-i711w): the DDL census reached EMPTY —
+    # db/migrations.py, the last inline-DDL file in src/, is deleted. The
+    # meaningful non-vacuity assertion flips direction: the live scan must
+    # ALSO be empty (any new CREATE TABLE in src/ trips the grown-side
+    # delta above AND this line). The old ">= 15 debt floor" has no debt
+    # left to see. The RDR-186 .18 census-to-empty bead formalizes the
+    # remaining ledgers.
+    assert not _count_matches(_DDL_RE)
+    assert not DDL_CENSUS
     assert _count_matches(_ALTER_RE)
     assert _count_matches(_EPSILON_RE)
-    assert sum(DDL_CENSUS.values()) >= 15
-    # Loose sanity floor like its siblings (critic 2026-07-18): legitimate
-    # D6 shrink-side retirements must not trip it — it only proves the
-    # scanner still sees a substantial census.
-    assert sum(ALTER_CENSUS.values()) >= 20
+    # Loose sanity floors like before (critic 2026-07-18): legitimate
+    # D6 shrink-side retirements must not trip them — they only prove the
+    # scanner still sees a substantial census. ALTER floor lowered 20 -> 5
+    # in RDR-158 P4 Stage 4 (nexus-i711w): migrations.py's 36 died with the
+    # file; the 7 surviving entries are PG/Liquibase prose, not SQLite debt.
+    # DOWNWARD-only move.
+    assert sum(ALTER_CENSUS.values()) >= 5
     assert sum(EPSILON_CENSUS.values()) >= 40

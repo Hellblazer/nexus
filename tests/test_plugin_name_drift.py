@@ -128,3 +128,48 @@ def test_check_version_compatibility_silent_when_name_matches(monkeypatch, tmp_p
     out, err = capsys.readouterr()
     captured = out + err
     assert "plugin_name_mismatch" not in captured
+
+
+# ── _parse_version (mcp_infra.py) ────────────────────────────────────────────
+# PORTED from tests/test_migrations.py::TestParseVersion in RDR-158 P4 Stage 4
+# (nexus-i711w): the helper was REHOMED from the deleted nexus.db.migrations
+# into nexus.mcp_infra, whose plugin↔CLI drift check is its surviving consumer.
+
+
+class TestParseVersion:
+    def test_normal_version(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("4.1.2") == (4, 1, 2)
+
+    def test_zero_version(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("0.0.0") == (0, 0, 0)
+
+    def test_prerelease_fallback(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("1.0.0rc1") == (0, 0, 0)
+
+    def test_empty_string_fallback(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("") == (0, 0, 0)
+
+    def test_two_part_version_normalized(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("3.7") == (3, 7, 0)
+
+    def test_single_part_version_normalized(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("5") == (5, 0, 0)
+
+    def test_ordering(self) -> None:
+        from nexus.mcp_infra import _parse_version
+
+        assert _parse_version("1.10.0") > _parse_version("1.9.0")
+        assert _parse_version("2.0.0") > _parse_version("1.99.99")
+        assert _parse_version("4.1.2") == _parse_version("4.1.2")

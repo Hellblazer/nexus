@@ -574,7 +574,15 @@ def test_dual_population_baseline_locked():
     # local legs, and _t2_diagnostic_connect's writable-WAL arm (its
     # read-only frozen-source arm survives and is counted). DOWNWARD-only
     # recount; never bump upward.
-    assert result.epsilon_allow_connects == 5, (
+    # 5 -> 4: RDR-158 P4 Stage 4 (nexus-i711w) deleted _run_upgrade's
+    # chicken-and-egg bootstrap connect (commands/upgrade.py) with the
+    # local-SQLite migration leg and db/migrations.py. DOWNWARD-only
+    # recount; never bump upward.
+    # 4 -> 2: RDR-158 P4 Stage 4 (nexus-i711w, critique Critical) — the
+    # backfill-source-uri and gc-pre-rdr096 repair verbs carried the last
+    # unguarded raw-connect writes into the frozen migration source; both
+    # are unconditional guided refusals now. DOWNWARD-only recount.
+    assert result.epsilon_allow_connects == 2, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
@@ -628,7 +636,12 @@ def test_dual_population_baseline_locked():
     # mcp_infra.t2_index_write's SQLite arm, and the session-end launcher's
     # pre-fork reader; commands/_helpers.t2_handle keeps its (annotated)
     # service-routing construction.
-    assert result.t2database_constructions == 26, (
+    #
+    # RDR-158 P4 Stage 4 (nexus-i711w): 26 -> 25. DOWNWARD. _run_upgrade's
+    # T3-step T2Database construction (commands/upgrade.py, the RDR-128 P3
+    # documented-irreducible bootstrap open) died with the local-SQLite
+    # migration leg and db/migrations.py.
+    assert result.t2database_constructions == 25, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 

@@ -1,182 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""E2E tests for the complete upgrade mechanism (RDR-076, Phase 6).
+"""E2E tests for the upgrade mechanism (RDR-076, Phase 6) — surviving SCs.
 
-Validates all 9 success criteria end-to-end.
+RDR-158 P4 Stage 4 (nexus-i711w): SC-1/2/3/7/9 (version table, version-gated
+execution, the local dry-run/--force flags, the Migration registry shape, and
+existing-install bootstrapping) were subjects of the DELETED
+``nexus/db/migrations.py`` chain and its ``nx upgrade`` local leg — they die
+with the machinery. What survives here:
+
+  SC-5  MCP version divergence warning never crashes on a missing DB
+  SC-6  T2 facade domain stores usable end-to-end (engine substrate)
+  SC-8  hooks.json SessionStart ordering + PreToolUse timeout bounds
 """
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-from click.testing import CliRunner
-
-from nexus.cli import main
-
-
-@pytest.fixture()
-def runner() -> CliRunner:
-    return CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def _clear_module_state() -> None:
-    from nexus.db import migrations
-
-    migrations._upgrade_done.clear()
-    # memory_store._migrated_paths / plan_library._migrated_paths /
-    # catalog_taxonomy._migrated_paths: the SQLite store modules are deleted
-    # (nexus-i711w Stage 2 sub-stages A3/C). Their per-path migration guards
-    # went with them; migrations.py's own _upgrade_done is the only
-    # module-level guard left to clear.
-
-
-# NO _no_real_daemon_nudge fixture: it patched out `_cycle_daemon_to_current`
-# and `_quiesce_daemon` so these migration-logic tests could not shell out to
-# `nx daemon t2 ensure-running` and leak a detached daemon (nexus-scoo5). Both
-# functions retired with the T2 daemon (nexus-i711w Stage 2 sub-stage B), so
-# there is no spawn left to suppress. The conftest `_reap_spawned_daemons`
-# backstop stays in place regardless.
-
-
-# ── SC-1: _nexus_version table ──────────────────────────────────────────────
-
-
-class TestSC1VersionTable:
-    def test_fresh_install_creates_version_table(self, tmp_path: Path) -> None:
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
-
-        # RDR-170: the lower-bound-only runner attempts every registered
-        # migration, including the je0b PK steps that require a catalog.
-        # nexus-i711w terminal deletion: ``Catalog.init`` died with the local
-        # catalog; je0b only gates on the frozen migration-source
-        # ``.catalog.db`` FILE plus the two tables its backfill JOIN
-        # references, so seed that stand-in directly.
-        cat_db = tmp_path / "catalog" / ".catalog.db"
-        cat_db.parent.mkdir(parents=True)
-        cat_conn = sqlite3.connect(str(cat_db))
-        cat_conn.executescript(
-            "CREATE TABLE documents ("
-            " tumbler TEXT, physical_collection TEXT, file_path TEXT);"
-            "CREATE TABLE collections ("
-            " name TEXT, superseded_by TEXT NOT NULL DEFAULT '');"
-        )
-        cat_conn.commit()
-        cat_conn.close()
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        assert row is not None
-        assert row[0] == _current_version()
-        conn.close()
-
-
-# ── SC-2: Version-gated migration execution ─────────────────────────────────
-
-
-class TestSC2VersionGating:
-    def test_migrations_have_version_tags(self) -> None:
-        from nexus.db.migrations import MIGRATIONS, _parse_version
-
-        for m in MIGRATIONS:
-            ver = _parse_version(m.introduced)
-            assert ver > (0, 0, 0), f"Migration {m.name!r} has invalid version"
-
-    def test_only_newer_migrations_run(self, monkeypatch) -> None:
-        """RDR-170: gating is by the LOWER bound only — a migration runs iff
-        ``introduced > last_seen``. ``current_version`` no longer caps the upper
-        end (that upper bound was the nexus-j25po dormancy bug). A second pass at
-        the same version runs nothing new. Uses a clean monkeypatched registry
-        for determinism (no catalog-absent defer noise)."""
-        from nexus.db import migrations
-        from nexus.db.migrations import Migration, apply_pending
-
-        ran: list[str] = []
-        monkeypatch.setattr(
-            migrations,
-            "MIGRATIONS",
-            [
-                Migration("1.10.0", "a", lambda c: ran.append("a")),
-                Migration("2.8.0", "b", lambda c: ran.append("b")),
-                Migration("3.7.0", "c", lambda c: ran.append("c")),
-            ],
-        )
-        migrations._upgrade_done.clear()
-
-        conn = sqlite3.connect(":memory:")
-        apply_pending(conn, "3.7.0")  # current >= all introduced
-        assert ran == ["a", "b", "c"]
-
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        assert row[0] == "3.7.0"
-
-        # Second pass at the same version: nothing new (all <= last_seen).
-        migrations._upgrade_done.clear()
-        ran.clear()
-        apply_pending(conn, "3.7.0")
-        assert ran == []
-
-
-# ── SC-3: nx upgrade command flags ──────────────────────────────────────────
-
-
-class TestSC3UpgradeFlags:
-    def test_dry_run(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "memory.db"
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=db_path),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        ):
-            result = runner.invoke(main, ["upgrade", "--dry-run"])
-        assert result.exit_code == 0
-
-    def test_force(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "memory.db"
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=db_path),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        ):
-            runner.invoke(main, ["upgrade"])
-
-            from nexus.db import migrations
-
-            migrations._upgrade_done.clear()
-
-            result = runner.invoke(main, ["upgrade", "--force"])
-        assert result.exit_code == 0
-
-    def test_auto_always_exits_zero(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "memory.db"
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=db_path),
-            patch(
-                "nexus.commands.upgrade.apply_pending",
-                side_effect=RuntimeError("boom"),
-            ),
-        ):
-            result = runner.invoke(main, ["upgrade", "--auto"])
-        assert result.exit_code == 0
-
-
-# ── SC-4: doctor --check-schema ─────────────────────────────────────────────
-
-
-# TestRDR170FrozenBranchReporting REMOVED (nexus-i711w terminal deletion,
-# batch-D sweep): both of its tests were deleted with the dies-roster at
-# f1ac7d23 (Stage 1b), leaving only the stranded `_sentinel_registry` /
-# `_healthy_db` helpers — the latter carrying a function-local import of the
-# now-deleted local ``Catalog``. Dead code with a dying import; removed with
-# the substrate. The RDR-142 reporting-lie guards live on in
-# tests/test_rdr142_dry_run_resolver.py / tests/test_rdr142_step_resolver.py.
 
 
 # ── SC-5: MCP version divergence warning ────────────────────────────────────
@@ -226,20 +65,6 @@ class TestSC6Delegation:
             db.close()
 
 
-# ── SC-7: Single-line migration addition ────────────────────────────────────
-
-
-class TestSC7RegistryPattern:
-    def test_all_migrations_have_required_fields(self) -> None:
-        from nexus.db.migrations import MIGRATIONS
-
-        for m in MIGRATIONS:
-            assert hasattr(m, "introduced")
-            assert hasattr(m, "name")
-            assert hasattr(m, "fn")
-            assert callable(m.fn)
-
-
 # ── SC-8: hooks.json SessionStart ───────────────────────────────────────────
 
 
@@ -287,58 +112,3 @@ class TestSC8HooksJson:
                     f"A long ceiling masks real stalls — keep it tight "
                     f"(<=10 s)."
                 )
-
-
-# ── SC-9: Existing install bootstrapping ────────────────────────────────────
-
-
-class TestSC9Bootstrap:
-    def test_existing_install_seeds_pre_registry(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import PRE_REGISTRY_VERSION, apply_pending
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        # Simulate existing install with all tables
-        conn.executescript(
-            """\
-            CREATE TABLE memory (
-                id INTEGER PRIMARY KEY, project TEXT NOT NULL, title TEXT NOT NULL,
-                session TEXT, agent TEXT, content TEXT NOT NULL, tags TEXT,
-                timestamp TEXT NOT NULL, ttl INTEGER,
-                access_count INTEGER DEFAULT 0 NOT NULL, last_accessed TEXT DEFAULT ''
-            );
-            CREATE VIRTUAL TABLE memory_fts USING fts5(
-                title, content, tags, content='memory', content_rowid='id'
-            );
-            """
-        )
-        conn.execute(
-            "INSERT INTO memory (project, title, content, tags, timestamp) "
-            "VALUES ('test', 'note1', 'content', '', '2026-01-01')"
-        )
-        conn.commit()
-
-        apply_pending(conn, PRE_REGISTRY_VERSION)
-
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        assert row[0] == PRE_REGISTRY_VERSION
-        conn.close()
-
-    def test_fresh_install_seeds_zero(self) -> None:
-        from nexus.db.migrations import apply_pending
-
-        conn = sqlite3.connect(":memory:")
-        apply_pending(conn, "4.1.2")
-
-        # All base tables created
-        tables = {
-            r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        assert "memory" in tables
-        assert "plans" in tables
-        assert "topics" in tables

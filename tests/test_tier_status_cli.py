@@ -217,11 +217,26 @@ def _seed_local_t2(db_path: Path, rows: list[tuple]) -> None:
     must NOT read the local table — so the row has to exist locally and
     ONLY locally, or the assertion proves nothing.
     """
-    from nexus.db.migrations import migrate_tier_writes
-
     conn = sqlite3.connect(str(db_path))
     try:
-        migrate_tier_writes(conn)
+        # RDR-158 P4 Stage 4 (nexus-i711w): frozen DDL snapshot of what
+        # migrate_tier_writes produced — the chain died with
+        # nexus/db/migrations.py.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS tier_writes (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT    NOT NULL,
+                ts           TEXT    NOT NULL,
+                tool         TEXT    NOT NULL,
+                tier         TEXT    NOT NULL,
+                agent        TEXT,
+                project      TEXT,
+                target_title TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tier_writes_session ON tier_writes(session_id);
+            CREATE INDEX IF NOT EXISTS idx_tier_writes_ts      ON tier_writes(ts);
+            CREATE INDEX IF NOT EXISTS idx_tier_writes_tool    ON tier_writes(tool);
+        """)
         ts = datetime.now(timezone.utc).isoformat()
         for sid, tool, tier, agent, project, title in rows:
             conn.execute(

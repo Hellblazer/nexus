@@ -2241,26 +2241,22 @@ preview before anything charges; silent when nothing bills).
 ```
 nx upgrade                        # Converge: preconditions, then every pending rung
 nx upgrade --dry-run              # Report what is pending, read-only — changes nothing
-nx upgrade --force                # Reset the T2 version gate and re-run all migrations
 nx upgrade --auto                 # Quiet mode for hook invocation (exit 0 always)
 nx upgrade --yes                  # Unattended: pre-approve the billed re-embed (=NX_ASSUME_YES=1)
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--dry-run` | Report pending T2 migrations and pending ladder rungs without executing (creates base tables if absent). Each rung's read-only `detect()` — the completion store is never opened |
-| `--force` | Reset the T2 version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
-| `--auto` | Quiet mode for the SessionStart hook. T3 upgrade steps and the engine install are skipped (hook timeout budget); exit 0 always |
+| `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`; the completion store is never opened. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 
 **Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 
-**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin — T2 migrations apply silently on every session start. Long rungs and T3 upgrade steps run only via explicit `nx upgrade`.
+**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin — pending ladder rungs and preconditions converge silently on every session start. Long rungs run only via explicit `nx upgrade`.
 
-**How the T2 rung works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
-
-**Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`. A new data axis becomes a ladder rung in `src/nexus/upgrade_ladder/rungs/`, registered in `registry.py` — not a new verb.
+**Local T2 migrations are RETIRED** (RDR-158 P4 Stage 4, nexus-i711w): the client-side migration chain (`src/nexus/db/migrations.py`, `MIGRATIONS`, `T3UpgradeStep`) is deleted. Schema is engine-owned via Liquibase in every mode; the local `.db` files are a frozen migration source that `nx upgrade` never touches. New schema changes go through Liquibase changesets in the engine; a new DATA axis becomes a ladder rung in `src/nexus/upgrade_ladder/rungs/`, registered in `registry.py` — not a new verb.
 
 ### Internal upgrade primitives
 

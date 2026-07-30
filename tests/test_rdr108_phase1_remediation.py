@@ -1,27 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-872w: RDR-108 Phase 1 remediation T-E — defensive coding + operator UX.
 
-Tests cover:
+Tests cover (survivors):
   K10  - bare except in manifest_backfill swallows non-NotFound errors
   S-2  - BackfillResult.docs_skipped_no_t3 declared but never incremented
-  OBS-2 - no "migrating database..." UX during T2Database init
   SIG-6 - backfill-manifest progress output + SIGINT safety
-  SIG-7 - created_at='' on backfilled collections rows
-  SIG-4 - high-volume orphan error message lacks actionable command template
-  OBS-1 - no telemetry on migration runs
-  OBS-4 - _HIGH_VOLUME_ORPHAN_THRESHOLD is a magic number (env override)
 
-CATALOG SUBSTRATE (nexus-i711w Stage 2). Most of this file's subject is
-``nexus/db/migrations.py`` — LIVE guided-upgrade code that
-``commands/upgrade.py`` imports (``apply_pending`` / ``MIGRATIONS`` /
-``bootstrap_version``) and that reads the legacy ``.catalog.db`` through raw
-parameterized ATTACH, never through the ``CatalogDB`` class. Those tests touch
-no catalog object at all. They were nevertheless held hostage by a single
-module-level ``from nexus.catalog.catalog import Catalog``: one dying import at
-module scope kills COLLECTION for the whole file, so every test in it would
-have stopped running the moment the local catalog is deleted.
+OBS-2 / SIG-4 / OBS-1 / OBS-4 DELETED in RDR-158 P4 Stage 4 (nexus-i711w):
+their subject was the ``nexus/db/migrations.py`` machinery (the T2Database
+migration banner, ``_check_high_volume_orphans``, apply_pending telemetry),
+which is deleted with the migration chain.
 
-That import is gone. The manifest-backfill tests that DO need a catalog seed
+The manifest-backfill tests that DO need a catalog seed
 through :class:`tests._catalog_fixture_ops.ActiveCatalog`, i.e. the same
 factories the code under test resolves, so they exercise whichever catalog is
 live. The one genuinely local-only test (``TestAutoBootstrapCreatedAtEmpty``)
@@ -31,7 +21,6 @@ tombstone below.
 from __future__ import annotations
 
 import os
-import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
@@ -271,54 +260,10 @@ class TestS2DocsSkippedNoT3:
         assert "skip" in result.output.lower() or "no_t3" in result.output.lower()
 
 
-# ── OBS-2: no migration UX during T2Database init ────────────────────────────
-
-
-class TestOBS2MigrationUX:
-    """OBS-2: T2Database.__init__ must emit a migration-start message on
-    stderr when apply_pending runs, so users don't see a silent hang."""
-
-
-    def test_migration_quiet_under_non_tty_stderr(self, tmp_path, capsys, monkeypatch):
-        """OBS-2 message is suppressed when stderr is not a tty (CI, pipes,
-        click.testing.CliRunner mixing stderr into result.output)."""
-        from nexus.db.t2 import T2Database
-        import sys
-
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
-
-        db_path = tmp_path / "obs2_quiet.db"
-        db = T2Database(db_path)
-        db.close()
-
-        captured = capsys.readouterr()
-        assert "migrat" not in captured.err.lower(), (
-            f"Expected NO 'migrat' under non-tty stderr but got: {captured.err!r}"
-        )
-
-    def test_no_output_on_already_migrated_db(self, tmp_path, capsys, monkeypatch):
-        """Second T2Database construction (fast-path via _upgrade_done) must
-        not re-emit the migration message even when stderr is a tty."""
-        from nexus.db.t2 import T2Database
-        import sys
-
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
-
-        db_path = tmp_path / "obs2_second.db"
-
-        # First construction: migrations run, message emitted.
-        db = T2Database(db_path)
-        db.close()
-        capsys.readouterr()  # drain first-run output
-
-        # Second construction: fast path — _upgrade_done hit, no print.
-        db2 = T2Database(db_path)
-        db2.close()
-
-        captured = capsys.readouterr()
-        assert "migrat" not in captured.err.lower(), (
-            f"Unexpected migration message on second construction: {captured.err!r}"
-        )
+# ── OBS-2 / SIG-4 / OBS-1 / OBS-4 DELETED (RDR-158 P4 Stage 4, nexus-i711w) ──
+# Their subjects — the T2Database-init migration banner, the
+# _check_high_volume_orphans message/threshold, and apply_pending's
+# migration telemetry — died with nexus/db/migrations.py.
 
 
 # ── SIG-6: progress output ────────────────────────────────────────────────────
@@ -446,231 +391,3 @@ class TestSIG6ProgressOutput:
 # ``nexus/catalog/catalog_db.py`` (its own docstring scheduled exactly this).
 
 
-# ── SIG-4: high-volume orphan error message actionable command ────────────────
-
-
-class TestSIG4ActionableErrorMessage:
-    """SIG-4: _check_high_volume_orphans must include the
-    `nx catalog rename-collection <legacy> <new>` template in the error message."""
-
-    def _make_aspects_db_with_orphans(
-        self, tmp_path: Path, collection: str, count: int
-    ) -> sqlite3.Connection:
-        """Create an in-memory aspects DB with orphan rows for testing."""
-        conn = sqlite3.connect(str(tmp_path / "memory.db"))
-        conn.executescript("""
-            CREATE TABLE document_aspects (
-                collection  TEXT NOT NULL,
-                source_path TEXT NOT NULL,
-                doc_id      TEXT NOT NULL DEFAULT '',
-                extracted_at TEXT NOT NULL DEFAULT '',
-                model_version TEXT NOT NULL DEFAULT '',
-                extractor_name TEXT NOT NULL DEFAULT ''
-            );
-        """)
-        for i in range(count):
-            conn.execute(
-                "INSERT INTO document_aspects (collection, source_path, doc_id) "
-                "VALUES (?, ?, '')",
-                (collection, f"/path/to/file_{i}.py"),
-            )
-        conn.commit()
-        return conn
-
-    def test_error_message_contains_rename_collection_template(self, tmp_path):
-        """MigrationError raised by _check_high_volume_orphans must include
-        the `nx catalog rename-collection` command template."""
-        from nexus.db.migrations import _check_high_volume_orphans, MigrationError
-
-        orphan_collection = "code__legacy_orphan"
-        conn = self._make_aspects_db_with_orphans(tmp_path, orphan_collection, 15)
-
-        with pytest.raises(MigrationError) as exc_info:
-            _check_high_volume_orphans(conn, table="document_aspects")
-
-        msg = str(exc_info.value)
-        assert "nx catalog rename-collection" in msg, (
-            f"Error message must include 'nx catalog rename-collection' template, got: {msg!r}"
-        )
-        assert orphan_collection in msg, (
-            f"Error message must name the orphan collection {orphan_collection!r}, got: {msg!r}"
-        )
-
-    def test_error_message_contains_each_orphan_collection(self, tmp_path):
-        """All orphan collection names appear in the error."""
-        from nexus.db.migrations import _check_high_volume_orphans, MigrationError
-
-        conn = sqlite3.connect(str(tmp_path / "m2.db"))
-        conn.executescript("""
-            CREATE TABLE document_aspects (
-                collection TEXT NOT NULL, source_path TEXT NOT NULL,
-                doc_id TEXT NOT NULL DEFAULT ''
-            );
-        """)
-        for coll in ("code__alpha", "code__beta"):
-            for i in range(15):
-                conn.execute(
-                    "INSERT INTO document_aspects VALUES (?, ?, '')",
-                    (coll, f"/f{i}.py"),
-                )
-        conn.commit()
-
-        with pytest.raises(MigrationError) as exc_info:
-            _check_high_volume_orphans(conn, table="document_aspects")
-
-        msg = str(exc_info.value)
-        assert "code__alpha" in msg
-        assert "code__beta" in msg
-        assert "nx catalog rename-collection" in msg
-
-
-# ── OBS-1: migration telemetry ────────────────────────────────────────────────
-
-
-class TestOBS1MigrationTelemetry:
-    """OBS-1: apply_pending must emit structured log events with duration_ms
-    at migration start and completion."""
-
-    def test_migration_log_events_emitted(self, tmp_path, monkeypatch):
-        """apply_pending calls _log.info with migration_start and migration_done events."""
-        from nexus.db import migrations as _migrations
-        from nexus.db.migrations import _parse_version, _upgrade_done, apply_pending
-
-        # RDR-170: apply_pending is lower-bound-only, so a "4.29.1" target no
-        # longer caps the run — it would attempt the catalog-absent je0b defer
-        # steps (4.30.0), set any_skipped, and return BEFORE migration_done.
-        # Slice the registry to introduced <= 4.29.1 (the old upper-bound scope).
-        monkeypatch.setattr(
-            _migrations,
-            "MIGRATIONS",
-            [m for m in _migrations.MIGRATIONS if _parse_version(m.introduced) <= _parse_version("4.29.1")],
-        )
-
-        path = tmp_path / "t2_obs1.db"
-        path_key = str(path.resolve())
-        _upgrade_done.discard(path_key)
-
-        conn = sqlite3.connect(str(path))
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        log_calls: list[tuple[str, dict]] = []
-
-        original_info = _migrations._log.info
-
-        def _capturing_info(event: str, **kw: object) -> None:
-            log_calls.append((event, dict(kw)))
-            return original_info(event, **kw)
-
-        with patch.object(_migrations._log, "info", side_effect=_capturing_info):
-            apply_pending(conn, "4.29.1")
-
-        conn.close()
-
-        events = [ev for ev, _ in log_calls]
-        assert "migration_start" in events, (
-            f"Expected 'migration_start' log call, got: {events}"
-        )
-        assert "migration_done" in events, (
-            f"Expected 'migration_done' log call, got: {events}"
-        )
-
-    def test_migration_done_has_duration_ms(self, tmp_path, monkeypatch):
-        """migration_done log call includes duration_ms field."""
-        from nexus.db import migrations as _migrations
-        from nexus.db.migrations import _parse_version, _upgrade_done, apply_pending
-
-        # RDR-170: slice to introduced <= 4.29.1 so the catalog-absent je0b
-        # defer steps (4.30.0) don't set any_skipped and suppress migration_done.
-        monkeypatch.setattr(
-            _migrations,
-            "MIGRATIONS",
-            [m for m in _migrations.MIGRATIONS if _parse_version(m.introduced) <= _parse_version("4.29.1")],
-        )
-
-        path = tmp_path / "t2_obs1_dur.db"
-        path_key = str(path.resolve())
-        _upgrade_done.discard(path_key)
-
-        conn = sqlite3.connect(str(path))
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        log_calls: list[tuple[str, dict]] = []
-
-        original_info = _migrations._log.info
-
-        def _capturing_info(event: str, **kw: object) -> None:
-            log_calls.append((event, dict(kw)))
-            return original_info(event, **kw)
-
-        with patch.object(_migrations._log, "info", side_effect=_capturing_info):
-            apply_pending(conn, "4.29.1")
-
-        conn.close()
-
-        done_calls = [(ev, kw) for ev, kw in log_calls if ev == "migration_done"]
-        assert done_calls, f"No migration_done log call. Got: {[ev for ev, _ in log_calls]}"
-        for _, kw in done_calls:
-            assert "duration_ms" in kw, (
-                f"migration_done missing duration_ms, got fields: {list(kw.keys())}"
-            )
-
-
-# ── OBS-4: _HIGH_VOLUME_ORPHAN_THRESHOLD env override ────────────────────────
-
-
-class TestOBS4ThresholdEnvOverride:
-    """OBS-4: _HIGH_VOLUME_ORPHAN_THRESHOLD must be overridable via
-    NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD env var."""
-
-    def _make_db_with_orphans(
-        self, tmp_path: Path, collection: str, count: int
-    ) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(tmp_path / f"thresh_{uuid.uuid4().hex}.db"))
-        conn.executescript("""
-            CREATE TABLE document_aspects (
-                collection TEXT NOT NULL, source_path TEXT NOT NULL,
-                doc_id TEXT NOT NULL DEFAULT ''
-            );
-        """)
-        for i in range(count):
-            conn.execute(
-                "INSERT INTO document_aspects VALUES (?, ?, '')",
-                (collection, f"/f{i}.py"),
-            )
-        conn.commit()
-        return conn
-
-    def test_env_override_lowers_threshold(self, tmp_path):
-        """Setting NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=5 triggers the error
-        at 6 orphan rows instead of the default 10."""
-        from nexus.db.migrations import _check_high_volume_orphans, MigrationError
-
-        # 6 rows: default threshold=10 would pass, env threshold=5 must fail
-        conn = self._make_db_with_orphans(tmp_path, "code__test_env_thresh", 6)
-
-        with patch.dict(os.environ, {"NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD": "5"}):
-            with pytest.raises(MigrationError):
-                _check_high_volume_orphans(conn, table="document_aspects")
-
-    def test_env_override_raises_threshold(self, tmp_path):
-        """Setting NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=20 allows 15 orphan rows
-        through without error."""
-        from nexus.db.migrations import _check_high_volume_orphans
-
-        conn = self._make_db_with_orphans(tmp_path, "code__test_raise_thresh", 15)
-
-        with patch.dict(os.environ, {"NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD": "20"}):
-            # Should NOT raise
-            _check_high_volume_orphans(conn, table="document_aspects")
-
-    def test_default_threshold_still_10_without_env(self, tmp_path):
-        """Without env var, default threshold is 10: 11 rows raises, 10 does not."""
-        from nexus.db.migrations import _check_high_volume_orphans, MigrationError
-
-        conn_pass = self._make_db_with_orphans(tmp_path, "code__pass_10", 10)
-        # Exactly 10 rows: HAVING n > 10 means 10 does NOT trigger
-        _check_high_volume_orphans(conn_pass, table="document_aspects")  # no raise
-
-        conn_fail = self._make_db_with_orphans(tmp_path, "code__fail_11", 11)
-        with pytest.raises(MigrationError):
-            _check_high_volume_orphans(conn_fail, table="document_aspects")

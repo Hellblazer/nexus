@@ -42,10 +42,9 @@ _ALLOWLIST: tuple[tuple[str, str], ...] = (
     # the file died with the local catalog. DOWNWARD-only edit.
     # db/t2/chash_index.py entry removed (nexus-i711w Stage 2 sub-stage A):
     # the file died with the SQLite chash index. DOWNWARD-only edit.
-    (
-        "db/migrations.py",
-        "SQLite-era migration-source debt (RDR-186): frozen legacy schema history",
-    ),
+    # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
+    # the file is DELETED with its frozen legacy schema history.
+    # DOWNWARD-only edit.
 )
 
 _COMMENT_RE = re.compile(r"#[^\n]*")

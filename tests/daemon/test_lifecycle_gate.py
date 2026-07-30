@@ -113,7 +113,8 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     "_locking.py",                       # the general advisory-lock primitive
     "daemon/service_registry.py",        # the ONLY election flock (_elect)
     "daemon/storage_service_daemon.py",  # storage-daemon spawn lock
-    "db/migrations.py",                  # migration serialization lock
+    # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
+    # the migration serialization flock died with the file. DOWNWARD-only.
     "commands/daemon.py",                # daemon CLI single-instance lock
     # verify-fill watermark file lock (nexus-te885.10, review c0e4493e f4):
     # serializes read-modify-write of migration/verify_fill_watermarks.json

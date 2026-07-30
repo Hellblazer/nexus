@@ -228,7 +228,8 @@ def test_the_fixed_sites_stay_fixed() -> None:
         "src/nexus/catalog/orphan_backfill.py",
         "src/nexus/mcp/catalog.py",
         "src/nexus/commands/catalog_cmds/orphan_backfill.py",
-        "src/nexus/db/migrations.py",
+        # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
+        # the file is DELETED (a deleted file trivially holds zero).
         "src/nexus/db/t3_reidentify.py",
         "src/nexus/db/embed_migrate.py",
     ):

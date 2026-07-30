@@ -7,50 +7,25 @@ RDR-076 (nexus-jda).
 from __future__ import annotations
 
 import contextlib
-import sqlite3
 
 import click
 import structlog
 
-from nexus.db.migrations import (
-    MIGRATIONS,
-    T3_UPGRADES,
-    _parse_version,
-    _upgrade_done,
-    apply_pending,
-    bootstrap_version,
-    t2_migration_flock,
-)
-
 _log = structlog.get_logger()
 
 
-def _db_path() -> "Path":  # noqa: F821 — lazy import
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    return default_db_path()
-
-
-def _current_version() -> str:
-    # RDR-170: the upgrade target is the canonical (registry-aware) schema
-    # version — max(package, registry_max) — NOT the raw package version. If
-    # this returned the frozen package version (5.10.6) while the registry
-    # carries an ahead-of-release step (5.10.7), apply_pending would RUN that
-    # step but stamp 5.10.6, leaving it perpetually "pending" to doctor and the
-    # next upgrade. expected_t2_schema_version() keeps the stamp == what ran.
-    from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — branch-local; avoids import cost on cold CLI start
-
-    return expected_t2_schema_version()
-
-
 @click.command("upgrade")
-@click.option("--dry-run", is_flag=True, help="List pending migrations without executing (creates base tables if absent).")
-@click.option("--force", is_flag=True, help="Reset version gate and re-run all migrations.")
-@click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (T2 only, exit 0 always).")
+@click.option("--dry-run", is_flag=True, help="Report pending upgrade-ladder rungs (read-only detect() walk) without executing.")
+# --force REMOVED (RDR-158 P4 Stage 4, review Significant): it reset the
+# local-SQLite version gate so apply_pending re-ran every migration — the
+# machinery is deleted, the flag read nothing, and dead-but-documented
+# flags actively mislead. 7.0.0 is a major; scripts passing --force now get
+# Click's no-such-option error, which is the honest outcome.
+@click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (exit 0 always).")
 @click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
 @click.option("--yes", "assume_yes", is_flag=True, help="Assume yes to the billed re-embed consent prompt (equivalent to NX_ASSUME_YES=1). Nothing else prompts.")
 def upgrade(
-    dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool
+    dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool
 ) -> None:
     """Run pending database migrations and upgrade steps.
 
@@ -68,7 +43,7 @@ def upgrade(
     # serving connections to free; the migration flock that serialized the
     # MIGRATOR processes is untouched and still does its half.
     try:
-        _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
+        _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3)
         # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
         # STATELESS preconditions before the ladder walks — re-derived from
         # on-disk state each invocation (sidecar/lease/metadata), never
@@ -185,63 +160,6 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
                 click.echo(f"Precondition [{report.name}] pending: {report.detail}")
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
         _log.warning("upgrade_preconditions_failed", error=str(exc))
-
-
-#: Namespace prefix for T3-step completion records in the ladder ledger
-#: (RDR-186 .15). Position derivation ignores these by construction.
-_T3_STEP_PREFIX: str = "t3-step:"
-
-
-def _t3_step_key(introduced: str, name: str) -> str:
-    return f"{_T3_STEP_PREFIX}{introduced}:{name}"
-
-
-def _t3_completion_holder():
-    """The T3-step completion ledger — the SAME surface the ladder uses
-    (RDR-186 .15 subsumption): a DeferredLadderLedger (engine-backed,
-    first-use construction) fronted by the in-process holder. Patchable
-    seam for tests."""
-    from nexus.upgrade_ladder.holder import InProcessCompletionHolder  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
-    from nexus.upgrade_ladder.http_store import DeferredLadderLedger  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
-
-    return InProcessCompletionHolder(DeferredLadderLedger())
-
-
-def _carry_t3_step_rows(conn, holder, current: str) -> None:
-    """One-time carry of pre-.15 ``_nexus_t3_steps`` rows into the ledger,
-    then DROP the table (the retirement) — the DROP GATED on confirmed
-    durability (critic-146xx-15): the table is deleted ONLY when nothing is
-    left owed in the holder after a flush, i.e. every carried fact reached
-    the engine. Engine down → the table stays for the next invocation's
-    idempotent re-carry (records upsert), and a warning says so.
-
-    Precedent honesty (the critic's factual catch): this is the FIRST bead
-    in the epic to delete a local artifact at all — .6 DEMOTES chash_remap.db
-    to a quarantined read-only source (never deletes), and .14 LEAVES
-    aspect_promotion_log in place for the RDR-158 window. Deletion is
-    appropriate here because the records are re-derivable bookkeeping
-    (RF-186-2 class) — but only once durably carried, hence the gate."""
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='_nexus_t3_steps'"
-    ).fetchone()
-    if row is None:
-        return
-    rows = conn.execute("SELECT introduced, name FROM _nexus_t3_steps").fetchall()
-    for introduced, name in rows:
-        holder.record_verified(
-            _t3_step_key(introduced, name), package_version=current, detail=name
-        )
-    if holder.flush() == 0:
-        conn.execute("DROP TABLE _nexus_t3_steps")
-        conn.commit()
-        _log.info("t3_steps_table_carried_and_dropped", carried=len(rows))
-    else:
-        _log.warning(
-            "t3_steps_table_carry_deferred",
-            carried=len(rows),
-            note="engine unreachable — the local table stays for the next "
-            "invocation's idempotent re-carry; nothing was dropped",
-        )
 
 
 def _run_ladder(
@@ -461,311 +379,39 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
         _cycle_storage_service_to_current()  # Java storage service + Postgres (P5.1)
 
 
-def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
-    from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
+def _run_upgrade(*, dry_run: bool, auto_mode: bool, skip_t3: bool = False) -> None:
+    """The T2 schema stage of ``nx upgrade`` — a service-mode no-op.
 
-    # RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local SQLite
-    # T2 (and legacy Chroma T3) are a frozen migration SOURCE — the Java service
-    # owns its own Postgres schema. Opening the ``.db`` read-write here (PRAGMA
-    # journal_mode=WAL is a header write; bootstrap_version/apply_pending stamp
-    # ``_nexus_version``) would mutate the source and break the downgrade
-    # guarantee. There is no local schema to migrate, so no-op.
-    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep CLI startup cheap
-        StorageBackend,
-        storage_backend_for,
-    )
+    RDR-158 P4 Stage 4 (nexus-i711w): the local-SQLite migration leg that
+    used to live below the service-mode return (bootstrap_version /
+    apply_pending / the RDR-142 dry-run step resolver / the T3-step
+    ladder-ledger carry against a local ``memory.db``) is DELETED with
+    ``nexus/db/migrations.py`` — the engine owns its schema via Liquibase in
+    every mode, and the local ``.db`` files are a frozen migration source
+    (RDR-176 Gap 2) this command must never touch. On this version the local
+    migration story is the two-hop redirect: install the last
+    migration-capable 6.x release, migrate there, upgrade back.
 
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        if not auto_mode:
-            click.echo(
-                "Service mode: the local SQLite/Chroma tiers are an immutable "
-                "migration source — no local schema migration to run."
-            )
-        return
+    The resolver call is retained on purpose: a stranded shell's
+    ``NX_STORAGE_BACKEND=sqlite`` export must fail LOUD with the
+    stranded-install redirect (``StorageModeFlagError`` rendered by the CLI
+    boundary as exit 2), never be silently ignored — pinned by
+    ``TestUpgradeRetiredSqliteOptOut``.
 
-    db_path = _db_path()
-    current = _current_version()
-    current_t = _parse_version(current)
+    ``dry_run`` / ``skip_t3`` are accepted for call-site stability and
+    unused here — the surviving pending-work reporting is the ladder's
+    read-only ``detect()`` walk in :func:`_run_ladder`.
+    """
+    del dry_run, skip_t3  # signature stability; the local leg is gone
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred import — keep CLI startup cheap
 
-    if current_t == (0, 0, 0) and dry_run:
+    storage_backend_for("memory")
+
+    if not auto_mode:
         click.echo(
-            "Cannot determine pending migrations — CLI version is "
-            "unresolvable (pre-release or dev install). Run 'nx upgrade' directly."
+            "Service mode: the local SQLite/Chroma tiers are an immutable "
+            "migration source — no local schema migration to run."
         )
-        return
-
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    # epsilon-allow: nx upgrade is the chicken-and-egg substrate
-    # bootstrap path — schema migration cannot route through the
-    # daemon when the daemon's startup requires the schema to be
-    # migrated. Operator coordinates by stopping the daemon, running
-    # nx upgrade, restarting the daemon.
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)  # epsilon-allow: nx upgrade chicken-and-egg substrate bootstrap (cannot route through daemon)
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA journal_mode=WAL")
-
-    try:
-        # CLI review: in --dry-run we must never write. ``bootstrap_version``
-        # creates base tables and seeds ``_nexus_version`` when absent,
-        # which is a legitimate write. Peek at the version row directly
-        # when dry-run is set and treat a missing row as the pre-bootstrap
-        # seed value (``PRE_REGISTRY_VERSION`` for an existing schema,
-        # ``0.0.0`` for a fresh DB).
-        if dry_run:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
-                ).fetchone()
-                last_seen = row[0] if row else "0.0.0"
-            except sqlite3.OperationalError:
-                # _nexus_version doesn't exist yet; fresh install.
-                last_seen = "0.0.0"
-        else:
-            # Read last-seen version (bootstrap_version handles base tables,
-            # version table creation, and existing-vs-fresh detection).
-            last_seen = bootstrap_version(conn)
-        last_seen_t = _parse_version(last_seen)
-
-        if force:
-            last_seen = "0.0.0"
-            last_seen_t = (0, 0, 0)
-
-        # Compute pending T3 steps (skip in auto mode or when --skip-t3)
-        pending_t3 = []
-        if not auto_mode and not skip_t3:
-            pending_t3 = [
-                s
-                for s in T3_UPGRADES
-                if _parse_version(s.introduced) > last_seen_t
-            ]
-
-        if dry_run:
-            # RDR-142 P2.1: report T2 pending work from the read-only
-            # step-resolver, NOT a bare version-range filter. The resolver runs
-            # each eligible step's precondition (no DDL / no writes) and reports
-            # would-succeed / would-defer (MigrationRetry) / would-gate
-            # (MigrationError) WITH remediation — so --dry-run can no longer say
-            # "no pending" while a deferred/gated step would block the next start
-            # (the RDR-142 reporting-lie). This subsumes and replaces the GH-1061
-            # E2 `_check_deferred_migrations` stopgap (deleted), covering all 7
-            # defer/gate sites including the undrained-queue and drop_source_path
-            # conditions the stopgap missed.
-            from nexus.db.migrations import (  # noqa: PLC0415 — branch-local; avoids import cost on the non-dry-run path
-                StepOutcome,
-                resolve_blocking_steps,
-            )
-
-            steps = resolve_blocking_steps(conn, current, last_seen=last_seen)
-            if not steps and not pending_t3:
-                click.echo(f"Up to date (v{current}). No pending migrations.")
-                return
-
-            # Two classes, framed accurately (RDR-142 P2.1 review):
-            #  - eligible: introduced > last_seen — WILL run on the next upgrade /
-            #    daemon start. A gate here genuinely blocks that run.
-            #  - supplementary: the version gate has already passed, so
-            #    apply_pending will NOT re-run it. A non-succeed verdict here is an
-            #    incomplete TABLE STATE with RUNTIME impact (code expects the new
-            #    schema), not a next-start crash — labelled distinctly so an
-            #    operator isn't told the daemon will crash when it won't.
-            eligible = [s for s in steps if s.eligible]
-            supplementary = [s for s in steps if not s.eligible]
-
-            def _emit(s) -> None:
-                if s.outcome == StepOutcome.WOULD_GATE and s.informational:
-                    tag = "[needs attention — apply_pending will attempt to resolve automatically]"
-                elif s.outcome == StepOutcome.WOULD_GATE:
-                    tag = "[BLOCKED — would gate on next start]" if s.eligible \
-                        else "[TABLE STATE INCOMPLETE — runtime queries will fail; apply_pending will NOT re-run (version gate passed)]"
-                elif s.outcome == StepOutcome.WOULD_DEFER:
-                    tag = "[deferred — retried on next start]" if s.eligible \
-                        else "[deferred — catalog absent; apply_pending will NOT re-run at this version]"
-                else:
-                    tag = ""
-                click.echo(f"  T2: [{s.introduced}] {s.name}  {tag}".rstrip())
-                if s.detail:
-                    click.echo(f"    Reason:      {s.detail}")
-                if s.remediation:
-                    click.echo(f"    Remediation: {s.remediation}")
-
-            if eligible or pending_t3:
-                click.echo(
-                    f"Dry-run: pending migrations (last seen: v{last_seen}, current: v{current}):"
-                )
-                for s in eligible:
-                    _emit(s)
-                for s in pending_t3:
-                    click.echo(f"  T3: [{s.introduced}] {s.name} (heavy — skip with --skip-t3)")
-
-            if supplementary:
-                click.echo(
-                    "Table-state checks (version gate already passed; apply_pending will "
-                    "not re-run these — they indicate incomplete migration state with runtime impact):"
-                )
-                for s in supplementary:
-                    _emit(s)
-            return
-
-        # Eligible T2 steps for the post-apply report (lower-bound only, mirroring
-        # apply_pending). Computed BEFORE apply_pending stamps the version.
-        pending_t2 = [
-            m for m in MIGRATIONS if _parse_version(m.introduced) > last_seen_t
-        ]
-
-        # Execute T2 migrations
-        if force:
-            # Reset version gate — apply_pending will re-run from 0.0.0
-            conn.execute(
-                "INSERT OR REPLACE INTO _nexus_version (key, value) VALUES ('cli_version', '0.0.0')"
-            )
-            conn.commit()
-
-        # Clear fast path so apply_pending runs
-        path_key = str(Path(db_path).resolve())
-        _upgrade_done.discard(path_key)
-
-        # RDR-128 P2: serialize against the daemon's startup migration via
-        # the cross-process flock (the daemon was quiesced above, but a
-        # session-start hook could respawn it mid-upgrade; the flock makes
-        # that respawn's migration WAIT rather than race the WAL).
-        with t2_migration_flock(db_path.parent):
-            apply_pending(conn, current)
-
-        if not auto_mode:
-            if pending_t2:
-                click.echo(f"Applied {len(pending_t2)} T2 migration(s).")
-                for m in pending_t2:
-                    click.echo(f"  [{m.introduced}] {m.name}")
-            else:
-                click.echo(f"Up to date (v{current}).")
-
-        # T3 steps (skipped in auto mode — require ChromaDB, may exceed hook timeout)
-        #
-        # Completion tracking (RDR-186 .15): each step's done-fact is a
-        # namespaced record in the LADDER's own CompletionLedger
-        # (``t3-step:<introduced>:<name>`` in PG ladder_completions via the
-        # engine) — the inline ``_nexus_t3_steps`` table is RETIRED. The
-        # namespace can never collide with real rung names, and
-        # ``derive_ladder_position`` ignores it by construction (position
-        # only consults the canonical rung ORDER — pinned by
-        # test_rows_outside_the_order_are_ignored). A record that misses the
-        # engine stays owed in the holder and is retried by the flush below;
-        # a record lost with the process costs one redundant re-run of an
-        # idempotent step (the same RF-186-2 class as rung records). The
-        # retry-on-failure contract, stated PRECISELY (critic-146xx-15 found
-        # the old "retried next nx upgrade" claim was never true across
-        # invocations — pending_t3's version gate closes once apply_pending
-        # stamps, before AND after .15; filed as its own bug): a FAILED step
-        # records nothing, the run exits non-zero, and the retry VEHICLE is
-        # --force (which reopens the gate; the ledger's done-tracking then
-        # skips succeeded steps and retries failed ones — test-pinned).
-        # (Precision, reviewer
-        # 146xx-15: the loss cost is bounded by the number of SEPARATE
-        # upgrade invocations that see the backend down before one flush
-        # succeeds — each such invocation can lose its own in-process
-        # records — not literally one re-run ever. Correctness-preserving
-        # either way; wasteful only while the engine stays down.)
-        if not auto_mode and pending_t3:
-            from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-            from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-            from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-            # The whole block (carry, done-check, steps) shares one holder
-            # whose flush+close runs in the OUTER finally — including the
-            # nothing-to-apply branch (critic-146xx-15: the earlier shape
-            # flushed/closed only inside the apply branch, leaking the
-            # carry's connection on the steady-state path).
-            t3_holder = _t3_completion_holder()
-            try:
-                _carry_t3_step_rows(conn, t3_holder, current)
-                done_keys = {
-                    key for key in t3_holder.verified_rungs() if key.startswith(_T3_STEP_PREFIX)
-                }
-                unapplied = [
-                    s for s in pending_t3 if _t3_step_key(s.introduced, s.name) not in done_keys
-                ]
-            except BaseException:
-                t3_holder.close()
-                raise
-            if not unapplied:
-                click.echo("All T3 upgrade steps already applied.")
-                t3_holder.flush()
-                t3_holder.close()
-            else:
-                t2_db: T2Database | None = None
-                applied = 0
-                any_failed = False
-                try:
-                    # RDR-128 P3 (nexus-sbxbe.3): the T3 steps mutate T2
-                    # (taxonomy) data and write _nexus_t3_steps. Hold the
-                    # same cross-process migration flock that guards
-                    # apply_pending above (it was released by the time we
-                    # get here) so a session-start-respawned daemon's
-                    # startup migration WAITS rather than racing these
-                    # writes on the single WAL writer lock.
-                    with t2_migration_flock(db_path.parent):
-                        t3_db = make_t3()
-                        t2_db = T2Database(default_db_path())  # epsilon-allow: nx upgrade is the bootstrap chicken-and-egg (it migrates the schema the daemon serves, so it cannot route through the daemon); daemon quiesced during upgrade, the migration flock serializes a respawned daemon's startup migration cross-process. NOTE: shares the process with the apply_pending migration conn (pre-existing, single-threaded sequential writes, tracked by nexus-izpcb) (RDR-128 P3 documented-irreducible)
-                        for step in unapplied:
-                            click.echo(f"  T3: [{step.introduced}] {step.name}")
-                            try:
-                                step.fn(t3_db, t2_db.taxonomy)
-                            except Exception as step_exc:  # noqa: BLE001 — per-step T3 upgrade failure logged + flagged, remaining steps continue
-                                any_failed = True
-                                _log.warning(
-                                    "t3_upgrade_step_failed",
-                                    introduced=step.introduced,
-                                    name=step.name,
-                                    error=str(step_exc),
-                                    exc_info=True,
-                                )
-                                click.echo(
-                                    f"    FAILED: {step_exc} — will retry on next `nx upgrade`",
-                                    err=True,
-                                )
-                                continue
-                            t3_holder.record_verified(
-                                _t3_step_key(step.introduced, step.name),
-                                package_version=current,
-                                detail=step.name,
-                            )
-                            applied += 1
-                finally:
-                    t3_holder.flush()
-                    t3_holder.close()
-                    if t2_db is not None:
-                        t2_db.close()
-                if applied:
-                    click.echo(f"Applied {applied}/{len(unapplied)} T3 upgrade step(s).")
-                if any_failed:
-                    # Non-zero exit so CI / orchestrators see the failure.
-                    raise click.exceptions.Exit(1)
-
-        # nexus-b03o: post-migration advisory — pre-4.32 local-mode
-        # installs wrote 384d MiniLM vectors into collections named for
-        # voyage-* (1024d). The forward fix shipped in 4.32.0 (RDR-109
-        # Phase 2); existing mislabeled collections persist until the
-        # operator runs `nx collection rename`. Surface a one-liner so
-        # they know to look. Advisory only — does not fail the upgrade.
-        if not auto_mode and not skip_t3:
-            _emit_name_vs_embed_dim_advisory()
-
-        # RDR-137 Phase 5.2 (nexus-tts0d.19): one-shot migration of
-        # ~/.config/nexus/repos.json into the catalog. Idempotent: no-op
-        # when the file is already absent. Safety: refuses to delete on
-        # any catalog-vs-registry disagreement (per OQ-7 lock).
-        if not auto_mode:
-            _migrate_repos_json_to_catalog(dry_run=dry_run)
-
-        # Refresh nexus-managed git hooks across every registered repo so a
-        # stanza change (e.g. a new pgrep guard) lands everywhere in one
-        # upgrade instead of a per-repo `nx hooks update`. Best-effort,
-        # non-auto, non-dry-run; only touches already-managed hooks.
-        if not auto_mode and not dry_run:
-            _refresh_all_git_hooks()
-
-    finally:
-        conn.close()
 
 
 def _refresh_all_git_hooks() -> None:

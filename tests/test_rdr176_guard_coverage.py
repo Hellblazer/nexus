@@ -58,10 +58,12 @@ def test_service_mode_run_upgrade_does_not_mutate_db(
 
     db_path = _seed_legacy_db(tmp_path)
     digest_before = _content_digest(db_path)
-    monkeypatch.setattr(upgrade, "_db_path", lambda: db_path)
+    # RDR-158 P4 Stage 4 (nexus-i711w): no `_db_path` monkeypatch — the
+    # collapsed _run_upgrade resolves no local path at all; the digest
+    # assertion below proves it touched nothing.
 
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-    upgrade._run_upgrade(dry_run=False, force=False, auto_mode=False)
+    upgrade._run_upgrade(dry_run=False, auto_mode=False)
 
     assert _content_digest(db_path) == digest_before
 

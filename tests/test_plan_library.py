@@ -468,48 +468,10 @@ def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None
     assert row["scope_tags"] == ""
 
 
-def test_migration_no_op_on_missing_plans_table(tmp_path: Path) -> None:
-    """The migration is a safe no-op on a DB that has no plans table."""
-    import sqlite3
-
-    from nexus.db.migrations import _add_plan_scope_tags
-
-    db_path = tmp_path / "empty.db"
-    conn = sqlite3.connect(str(db_path))
-    # Do not create plans table; migration must not crash.
-    _add_plan_scope_tags(conn)
-    conn.close()
-
-
-def test_migration_adds_column_to_empty_plans_table(tmp_path: Path) -> None:
-    """Migration adds scope_tags column to an empty plans table."""
-    import sqlite3
-
-    from nexus.db.migrations import _add_plan_scope_tags
-
-    db_path = tmp_path / "emptyplans.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-    conn.commit()
-    _add_plan_scope_tags(conn)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
-    assert "scope_tags" in cols
-    conn.close()
-
-
-# ── RDR-091 critic follow-up (nexus-dfok) ────────────────────────────────
+# test_migration_no_op_on_missing_plans_table and
+# test_migration_adds_column_to_empty_plans_table DELETED (RDR-158 P4
+# Stage 4, nexus-i711w): their subject was the 4.8.0 _add_plan_scope_tags
+# migration itself, which died with nexus/db/migrations.py.
 
 
 def test_infer_scope_tags_skips_all_sentinel() -> None:
@@ -540,55 +502,11 @@ def test_infer_scope_tags_mixes_all_with_specific_drops_all() -> None:
     assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
 
 
-def test_save_plan_explicit_scope_tags_survive_backfill(tmp_path: Path) -> None:
-    """Rows with explicit scope_tags must NOT be overwritten by the 4.8.0
-    backfill on subsequent process starts.
-
-    Regression guard for the nexus-dfok bug: the original backfill ran
-    an unconditional UPDATE, so plans authored with
-    ``save_plan(scope_tags='rdr__arcaneum')`` whose plan_json used
-    ``$var`` corpus bindings were reverted to agnostic on every restart.
-    """
-    import sqlite3
-
-    from nexus.db.migrations import _add_plan_scope_tags
-
-    db_path = tmp_path / "preserve.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE plans (
-            id INTEGER PRIMARY KEY,
-            project TEXT NOT NULL DEFAULT '',
-            query TEXT NOT NULL,
-            plan_json TEXT NOT NULL,
-            outcome TEXT DEFAULT 'success',
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            scope_tags TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
-    # An explicit-tagged plan whose plan_json uses $var bindings —
-    # inference would return '' if re-run, overwriting the explicit value.
-    conn.execute(
-        "INSERT INTO plans (query, plan_json, created_at, scope_tags) "
-        "VALUES (?, ?, ?, ?)",
-        (
-            "q",
-            '{"steps":[{"tool":"search","args":{"corpus":"$corpus"}}]}',
-            "2025-01-01T00:00:00Z",
-            "rdr__arcaneum",
-        ),
-    )
-    conn.commit()
-
-    _add_plan_scope_tags(conn)
-    row = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
-    assert row[0] == "rdr__arcaneum", (
-        "explicit scope_tags value must survive the idempotent backfill"
-    )
-    conn.close()
+# test_save_plan_explicit_scope_tags_survive_backfill DELETED (RDR-158 P4
+# Stage 4, nexus-i711w): its subject was the 4.8.0 _add_plan_scope_tags
+# backfill's preserve-explicit-rows behaviour (nexus-dfok), which died with
+# nexus/db/migrations.py. The live explicit-tags round-trip survives in
+# test_save_plan_explicit_scope_tags_round_trip above.
 
 
 # test_rewash_migration_fixes_all_sentinel_rows and

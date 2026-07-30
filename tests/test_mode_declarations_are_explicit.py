@@ -114,7 +114,11 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # 62 -> 61 (nexus-i711w terminal deletion, DIE sweep): one further dying-file
 # entry retired during the retirement batches. SHRINK, downward-only.
 # 61 -> 60: test_catalog_migrate_fallback.py died in the same sweep.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 60
+# 60 -> 58 (RDR-158 P4 Stage 4, nexus-i711w): -2 entries whose files died
+# with db/migrations.py and _run_upgrade's local leg
+# (test_migrations_rdr108_phase1c.py,
+# test_upgrade_name_vs_embed_dim_advisory.py). SHRINK, downward-only.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).

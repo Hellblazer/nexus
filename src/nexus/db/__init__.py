@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 from nexus.config import get_credential
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     # Type-only import. T3Database transitively pulls voyageai ->
     # transformers -> torch at module load. With this import at
     # runtime, every `from nexus.db.<sub> import ...` triggers
@@ -87,5 +89,55 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
         _client=_client,
         _ef_override=_ef_override,
     )
+
+
+def read_legacy_catalog_counts(path: "Path") -> tuple[int | str, int | str]:
+    """Count document / link rows in a FROZEN legacy catalog SQLite file.
+
+    Read-only probe of a pre-PG migration SOURCE, for the ``nx doctor`` row
+    that labels ``<config_dir>/catalog/.catalog.db`` as a frozen snapshot
+    rather than a live mirror. The authoritative catalog is Postgres; these
+    counts exist only so the row can say how much is in the snapshot.
+
+    REHOMED from ``nexus.db.migrations`` in RDR-158 P4 Stage 4
+    (nexus-i711w) — the migration registry is deleted; this doctor probe is
+    the surviving consumer. It stays in the ``db/`` substrate for the same
+    reason the original docstring gave: the storage-boundary lint counts raw
+    ``sqlite3.connect`` sites outside ``db/`` and its epsilon-allow baseline
+    is a DOWNWARD-only ratchet, so a caller-side connect would have to bump
+    a count that is never permitted to rise.
+
+    Returns ``("unknown", "unknown")`` for anything unreadable — a legacy
+    file that cannot be opened must still be NAMED by the doctor row, never
+    suppressed.
+
+    Args:
+        path: Path to the legacy ``.catalog.db``.
+
+    Returns:
+        ``(documents, links)`` — row counts, or ``"unknown"`` per table when
+        the table is absent or the file cannot be read.
+    """
+    import sqlite3  # noqa: PLC0415 — read-only legacy-source probe; keep module import cheap
+
+    docs: int | str = "unknown"
+    links: int | str = "unknown"
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            for tbl, key in (("documents", "docs"), ("links", "links")):
+                try:
+                    n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
+                except sqlite3.Error:
+                    continue
+                if key == "docs":
+                    docs = n
+                else:
+                    links = n
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — an unreadable legacy file must still be NAMED
+        pass
+    return docs, links
 
 

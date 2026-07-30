@@ -148,7 +148,7 @@ The lock file MUST be committed. CI also checks this.
 
 ### 6. Run sandbox smoke (~2 min)
 
-Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
+Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
 
 ```bash
 ./tests/e2e/release-sandbox.sh smoke

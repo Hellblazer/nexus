@@ -22,7 +22,6 @@ from click.testing import CliRunner
 
 import pytest
 
-import nexus.db.migrations as migrations
 import nexus.upgrade_ladder.preconditions as pre_mod
 from nexus.cli import main
 from nexus.commands.upgrade import _converge_preconditions, upgrade
@@ -289,10 +288,7 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
     """P3 validator gap 1: nothing verified upgrade() actually FORWARDS the
     click flags — a hardcoded skip_t3=False at the call site passed every
     test. Drive the CLI and unpack the call kwargs."""
-    migrations._upgrade_done.clear()
     with (
-        patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-        patch("nexus.commands.upgrade.T3_UPGRADES", []),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
         patch("nexus.commands.upgrade._converge_preconditions") as stage,
     ):
@@ -301,7 +297,6 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
         assert stage.call_args.kwargs == {"auto_mode": False, "skip_t3": True}
 
         stage.reset_mock()
-        migrations._upgrade_done.clear()
         result = CliRunner().invoke(main, ["upgrade", "--auto"])
         assert result.exit_code == 0, result.output
         assert stage.call_args.kwargs == {"auto_mode": True, "skip_t3": False}

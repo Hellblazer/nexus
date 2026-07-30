@@ -620,7 +620,15 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # session-end pre-fork summary, tier-status local reader, three doctor
     # local legs, _t2_diagnostic_connect's writable-WAL arm); lockstep with
     # test_storage_boundary_lint's copy. DOWNWARD-only recount.
-    assert result.epsilon_allow_connects == 5, (
+    # 5 -> 4: RDR-158 P4 Stage 4 (nexus-i711w) deleted _run_upgrade's
+    # chicken-and-egg bootstrap connect (commands/upgrade.py) with the
+    # local-SQLite migration leg and db/migrations.py; lockstep with
+    # test_storage_boundary_lint's copy. DOWNWARD-only recount.
+    # 4 -> 2: RDR-158 P4 Stage 4 (nexus-i711w, critique Critical) — the
+    # backfill-source-uri and gc-pre-rdr096 repair verbs carried the last
+    # unguarded raw-connect writes into the frozen migration source; both
+    # are unconditional guided refusals now. DOWNWARD-only recount.
+    assert result.epsilon_allow_connects == 2, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-
@@ -637,7 +645,10 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # constructions with their =sqlite arms (aspect_sql x3, merge_candidates,
     # collection_audit, mcp_infra sqlite arm, session-end pre-fork reader);
     # lockstep with test_storage_boundary_lint's copy. DOWNWARD-only.
-    assert result.t2database_constructions == 26, (
+    # 26 -> 25: RDR-158 P4 Stage 4 (nexus-i711w) — _run_upgrade's T3-step
+    # T2Database construction died with the local migration leg; lockstep
+    # with test_storage_boundary_lint's copy. DOWNWARD-only.
+    assert result.t2database_constructions == 25, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

@@ -28,6 +28,40 @@ def chroma_client() -> Any:
 # ── Hook mechanism ───────────────────────────────────────────────────────────
 
 
+
+_HOOK_FAILURES_DDL = """\
+CREATE TABLE IF NOT EXISTS hook_failures (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id      TEXT NOT NULL DEFAULT '',
+    collection  TEXT NOT NULL DEFAULT '',
+    hook_name   TEXT NOT NULL,
+    error       TEXT NOT NULL DEFAULT '',
+    occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    batch_doc_ids TEXT,
+    is_batch INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_hook_failures_occurred_at ON hook_failures(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_hook_failures_collection  ON hook_failures(collection);
+"""
+
+
+def _seed_hook_failures_schema(db_path) -> None:
+    """Materialise the legacy hook_failures schema at *db_path*.
+
+    RDR-158 P4 Stage 4 (nexus-i711w): frozen DDL snapshot of what
+    ``migrate_hook_failures`` + ``migrate_hook_failures_batch_columns``
+    produced — the migration functions died with ``nexus/db/migrations.py``.
+    """
+    import sqlite3  # noqa: PLC0415 — test-fixture helper
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_HOOK_FAILURES_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_fire_single_calls_registered(
     tmp_path: Path, chroma_client: Any,
 ) -> None:
@@ -163,18 +197,10 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
     dies with the raw handle at the RDR-155 P4b flip (dies-roster).
     """
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-    import sqlite3
 
     db_path = tmp_path / "batch_hook_failures.db"
     T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.close()
+    _seed_hook_failures_schema(db_path)
     monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
 
     second_calls: list = []
@@ -226,18 +252,10 @@ def test_fire_batch_partial_commit_failure_mode(
     branch dies with the raw handle at the RDR-155 P4b flip (dies-roster).
     """
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-    import sqlite3
 
     db_path = tmp_path / "partial_commit.db"
     T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.close()
+    _seed_hook_failures_schema(db_path)
     monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
 
     sub_step_log: list[str] = []
@@ -281,20 +299,13 @@ def test_record_batch_hook_failure_transient_store_error_is_swallowed(
     """
     import nexus.hook_registry as hr
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
     from nexus.hook_registry import _record_batch_hook_failure
     from contextlib import contextmanager
     import sqlite3
 
     db_path = tmp_path / "lock_propagate.db"
     T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.close()
+    _seed_hook_failures_schema(db_path)
 
     hr._hook_failure_drop_warned.discard(("batch", "probe"))
 

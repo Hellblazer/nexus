@@ -580,25 +580,21 @@ is locked` daemon incidents):
   next idempotent pass; the per-repo advisory lock keeps its orthogonal
   two-same-repo job.
 
-**Migration Registry** ([RDR-076](rdr/rdr-076-idempotent-upgrade-mechanism.md)): All T2 schema migrations are centralised in
-`src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
-`Migration(introduced, name, fn)` entries. `apply_pending(conn, current_version)`
-runs migrations between the last-seen version (stored in `_nexus_version` table)
-and the current CLI version. Each migration function is idempotent via
-`PRAGMA table_info()` or `sqlite_master` guards.
-
-`T2Database.__init__()` opens a transient connection, calls `apply_pending()`,
-closes it, then constructs the eight domain stores. The `_upgrade_done` set
-(guarded by `_upgrade_lock`) provides a process-level fast path — subsequent
-constructions skip all DB access. Domain stores retain their own
-`_migrated_paths` guards for standalone construction outside `T2Database`.
-
-**T3 Upgrade Steps**: `T3UpgradeStep(introduced, name, fn)` entries in the
-`T3_UPGRADES` list handle T3 vector-store operations (backfills, re-indexing)
-that require a T3 client. These run via `nx upgrade` (not `--auto` mode).
+**Migration Registry — DELETED** ([RDR-076](rdr/rdr-076-idempotent-upgrade-mechanism.md) → RDR-158 P4 Stage 4, nexus-i711w):
+the client-side T2 migration chain (`src/nexus/db/migrations.py`: the
+`MIGRATIONS` / `T3_UPGRADES` registries, `apply_pending`,
+`T2Database.bootstrap_schema`, the migration flock) is deleted. Schema is
+engine-owned via Liquibase in every mode; the local `.db` files are a FROZEN
+migration source ([RDR-176](rdr/rdr-176-survivable-managed-migration-readiness.md) Gap 2)
+that nothing migrates or re-stamps. `T2Database.__init__()` constructs the
+domain stores (all HTTP clients) and runs no schema work; its
+`run_migrations` parameter is retained-and-ignored for signature stability.
+Installs still carrying pre-PG local data use the pinned last
+migration-capable 6.x release (the two-hop redirect).
 
 **Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook,
-applying T2 migrations silently. T3 steps are skipped in auto mode.
+converging pending ladder rungs and preconditions silently (there are no
+local T2 migrations — RDR-158 P4 Stage 4).
 
 **In-memory SQLite**: Tests that want an ephemeral database should use
 a temp file path, not `":memory:"` -- `:memory:` databases are

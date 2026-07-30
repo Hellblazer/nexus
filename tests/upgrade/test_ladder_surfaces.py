@@ -16,15 +16,10 @@ from dataclasses import dataclass, field
 import click
 import pytest
 
-from unittest.mock import patch
-
 from click.testing import CliRunner
 
 
-import nexus.db.migrations as migrations
 import nexus.upgrade_ladder.registry as ladder_registry
-from nexus.cli import main
-from nexus.db.migrations import Migration, MigrationRetry
 from nexus.health import _check_pending_rungs, run_health_checks
 import nexus.commands.upgrade as upgrade_mod
 from nexus.commands.upgrade import _run_ladder, upgrade
@@ -406,67 +401,13 @@ def test_deferred_walk_notices_but_exits_cleanly(
     assert ledger.verified_rungs() == frozenset()
 
 
-# nexus-aqbrk: T2 PIN + ENGINE SKIP — this test spans TWO subsystems and only
-# one of them is pinnable.
-#
-# The T2 pin is right and necessary: `nx upgrade` early-returns in service mode
-# (upgrade.py:548), so without it the migration step never ran at all
-# ("deferring step executed 0 times"). With it, the step runs exactly once and
-# defers via MigrationRetry — that half now passes.
-#
-# The REMAINING half is not pinnable. The test also asserts the user-facing
-# "deferred" line, which comes from the LADDER report (RungOutcome.DEFERRED,
-# upgrade.py:337) — and the ladder's ledger is UNCONDITIONALLY engine-backed:
-# upgrade.py:210 returns InProcessCompletionHolder(DeferredLadderLedger()) with
-# no backend switch, resolving the engine endpoint on first use (RDR-186 .15).
-# So on the engine arm the ladder talks to the real test engine and its rung
-# state differs; NX_STORAGE_BACKEND cannot reach it.
-#
-# Skipped rather than left red or force-fitted: porting the ladder's
-# engine-backed rung semantics is its own piece of work, not a disposition.
-# Carved out as residue on nexus-aqbrk.
-@pytest.mark.skip(
-    reason="nexus-aqbrk residue: asserts a LADDER RungOutcome.DEFERRED, and the "
-           "ladder ledger is unconditionally engine-backed (upgrade.py:210, "
-           "RDR-186 .15) so no storage-backend pin reaches it. Needs its own "
-           "port of the ladder's engine-backed rung semantics. Unconditional "
-           "since nexus-i711w Stage 1b deleted the SQLite substrate this "
-           "used to skip against.",
-)
-@pytest.mark.usefixtures("local_t2_backend")
-def test_upgrade_invocation_executes_each_migration_step_exactly_once(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """P1 critique Critical: nx upgrade runs _run_upgrade (legacy leg) then
-    the ladder walk in one invocation — in the DEFERRED case the rung must
-    REPORT the prior attempt, never re-execute apply_pending (which re-ran
-    every eligible step's body, incl. a 30s drain attempt, twice — also on
-    the SessionStart --auto hot path). Pinned end to end through the CLI."""
-    migrations._upgrade_done.clear()
-    calls = {"n": 0}
-
-    def _counting_defer(conn: object) -> None:
-        calls["n"] += 1
-        raise MigrationRetry("precondition blocked — retried next open")
-
-    monkeypatch.setattr(
-        migrations,
-        "MIGRATIONS",
-        [Migration(introduced="99.0.0", name="counting-defer", fn=_counting_defer)],
-    )
-    db = tmp_path / "memory.db"
-    with (
-        patch("nexus.commands.upgrade._db_path", return_value=db),
-        patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
-    ):
-        result = CliRunner().invoke(main, ["upgrade"])
-    assert result.exit_code == 0, result.output  # deferral is NOT a failure
-    assert calls["n"] == 1, (
-        f"deferring step executed {calls['n']} times in one nx upgrade "
-        "invocation — the ladder must report, not re-run"
-    )
-    assert "deferred" in result.output.lower()
+# test_upgrade_invocation_executes_each_migration_step_exactly_once DELETED
+# (RDR-158 P4 Stage 4, nexus-i711w): it was already an unconditional skip
+# (nexus-aqbrk residue), and its subject — apply_pending re-execution across
+# the legacy leg + ladder walk in one invocation — died with the migration
+# machinery. The surviving property (the ladder reports a DEFERRED rung
+# rather than re-running it) is pinned by
+# test_deferred_walk_notices_but_exits_cleanly above.
 
 
 def test_upgrade_command_is_wired_to_the_ladder() -> None:

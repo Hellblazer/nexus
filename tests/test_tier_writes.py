@@ -3,7 +3,6 @@
 """Phase 1A tier-discipline telemetry (nexus-kren).
 
 Covers:
-- Migration creates ``tier_writes`` table + indexes, idempotent.
 - ``_record_tier_write`` inserts rows correctly.
 - ``_record_tier_write`` swallows exceptions (telemetry must NEVER
   break the hot path).
@@ -12,68 +11,14 @@ Covers:
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
 
 
-# ── Migration ────────────────────────────────────────────────────────────────
-
-
-class TestMigration:
-    def test_creates_table_with_expected_columns(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_tier_writes
-
-        conn = sqlite3.connect(str(tmp_path / "t.db"))
-        try:
-            migrate_tier_writes(conn)
-            cols = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(tier_writes)")
-            }
-        finally:
-            conn.close()
-        expected = {
-            "id", "session_id", "ts", "tool", "tier",
-            "agent", "project", "target_title",
-        }
-        assert expected.issubset(cols), f"missing columns: {expected - cols}"
-
-    def test_creates_three_indexes(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_tier_writes
-
-        conn = sqlite3.connect(str(tmp_path / "t.db"))
-        try:
-            migrate_tier_writes(conn)
-            indexes = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type='index' AND tbl_name='tier_writes'"
-                )
-            }
-        finally:
-            conn.close()
-        assert "idx_tier_writes_session" in indexes
-        assert "idx_tier_writes_ts" in indexes
-        assert "idx_tier_writes_tool" in indexes
-
-    def test_idempotent(self, tmp_path: Path) -> None:
-        """Second call must be a clean no-op (no exception, no double-create)."""
-        from nexus.db.migrations import migrate_tier_writes
-
-        conn = sqlite3.connect(str(tmp_path / "t.db"))
-        try:
-            migrate_tier_writes(conn)
-            migrate_tier_writes(conn)  # must not raise
-            count = conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE type='table' AND name='tier_writes'"
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        assert count == 1
+# ── Migration tests DELETED (RDR-158 P4 Stage 4, nexus-i711w): the
+# migrate_tier_writes chain died with nexus/db/migrations.py; the
+# tier_writes table is engine-owned (Liquibase). ─────────────────────────────
 
 
 # ── Recorder helper ──────────────────────────────────────────────────────────

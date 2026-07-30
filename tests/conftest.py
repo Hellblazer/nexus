@@ -11,24 +11,11 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
 
-def _enable_t2_test_auto_migrate() -> None:
-    """RDR-120 P3b: T2Database.__init__ no longer auto-runs migrations
-    in production (the daemon owns ``apply_pending``). The test suite
-    has hundreds of direct-open call sites that rely on a freshly-
-    migrated schema, so we opt the in-process default ON and also
-    set the ``NX_T2_AUTO_MIGRATE`` env var so subprocesses
-    (``subprocess.run`` / ``claude -p`` / MCP children) that inherit
-    ``os.environ`` but not Python module state get the same default.
-    Production code paths (CLI, MCP servers) keep the
-    daemon-owns-migration semantic; only the test process tree sees
-    the flipped default.
-    """
-    import os
-
-    from nexus.db import t2 as _t2
-
-    _t2._DEFAULT_RUN_MIGRATIONS = True
-    os.environ.setdefault(_t2._RUN_MIGRATIONS_ENV, "1")
+# NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
+# (``_DEFAULT_RUN_MIGRATIONS`` / ``NX_T2_AUTO_MIGRATE``) died with
+# ``nexus/db/migrations.py`` in RDR-158 P4 Stage 4 (nexus-i711w).
+# ``T2Database(run_migrations=...)`` is retained-and-ignored for signature
+# stability; construction never migrates anything in any mode.
 
 
 def _disable_aspect_worker_autostart() -> None:
@@ -52,7 +39,6 @@ def _disable_aspect_worker_autostart() -> None:
     os.environ.setdefault("NX_ASPECT_WORKER_AUTOSTART", "0")
 
 
-_enable_t2_test_auto_migrate()
 _disable_aspect_worker_autostart()
 
 # RDR-155 P4b P0a': import at collection start so the engine substrate
@@ -1017,7 +1003,9 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # synthetic collection names being asserted against, not as
     # cloud-mode behaviour under test.
     "test_catalog_doctor_name_vs_embed_dim.py",
-    "test_upgrade_name_vs_embed_dim_advisory.py",
+    # test_upgrade_name_vs_embed_dim_advisory.py entry removed (RDR-158 P4
+    # Stage 4, nexus-i711w): the file died with _run_upgrade's local leg.
+    # DOWNWARD-only edit.
     # test_catalog_manifest_backfill.py entry removed (nexus-i711w terminal
     # deletion): the file's raw-Catalog harness died with the local catalog.
     # test_catalog_migrate_fallback.py entry removed (nexus-i711w terminal
@@ -1081,7 +1069,8 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # sub-stage A): the file died with the SQLite store. DOWNWARD-only edit.
     "test_dt_highlights_layer_e.py",
     "test_dt_capture_cmd.py",
-    "test_migrations_rdr108_phase1c.py",
+    # test_migrations_rdr108_phase1c.py entry removed (RDR-158 P4 Stage 4,
+    # nexus-i711w): the file died with db/migrations.py. DOWNWARD-only edit.
     "test_plan_run.py",
     # nexus-vgq89 correction sweep: test_rdr_hook.py (tests/hooks/) and
     # test_registry.py removed here (same free-win reason — pre-existing

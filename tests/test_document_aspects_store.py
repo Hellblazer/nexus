@@ -23,7 +23,6 @@ twin is ``tests/db/test_http_aspects_stores_integration.py``.
 """
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -383,39 +382,5 @@ class TestFacadeWiring:
             assert got is not None
 
 
-# ── Migration sanity ─────────────────────────────────────────────────────────
-
-
-class TestMigration:
-    """The migration entry idempotently creates the table and is
-    no-op when the table already exists (CREATE IF NOT EXISTS pattern).
-
-    Still exercises the SQLite MIGRATION SOURCE (``nexus.db.migrations``)
-    — retained per the NO-SQLite directive's carve-out: SQLite stays a
-    migration source until RDR-155 P4b deletes the tooling.
-    """
-
-    def test_migration_creates_table(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_document_aspects_table
-
-        db_path = tmp_path / "post_migrate.db"
-        raw = sqlite3.connect(str(db_path))
-        migrate_document_aspects_table(raw)
-
-        tables = {
-            r[0] for r in raw.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        raw.close()
-        assert "document_aspects" in tables
-
-    def test_migration_idempotent(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_document_aspects_table
-
-        db_path = tmp_path / "idempotent.db"
-        raw = sqlite3.connect(str(db_path))
-        migrate_document_aspects_table(raw)
-        # Second call must be a no-op.
-        migrate_document_aspects_table(raw)
-        raw.close()
+# ── Migration sanity DELETED (RDR-158 P4 Stage 4, nexus-i711w): the
+# migrate_document_aspects_table entry died with nexus/db/migrations.py. ─────

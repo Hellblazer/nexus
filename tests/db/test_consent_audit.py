@@ -13,61 +13,12 @@ Covers:
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
-# ── Migration ────────────────────────────────────────────────────────────────
-
-
-class TestMigration:
-    def test_creates_table_with_expected_columns(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_claude_assisted_remediation_consents
-
-        conn = sqlite3.connect(str(tmp_path / "t.db"))
-        try:
-            migrate_claude_assisted_remediation_consents(conn)
-            cols = {
-                row[1]
-                for row in conn.execute(
-                    "PRAGMA table_info(claude_assisted_remediation_consents)"
-                )
-            }
-        finally:
-            conn.close()
-        assert {"id", "scope", "ts", "granted"}.issubset(cols)
-
-    def test_creates_scope_index(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_claude_assisted_remediation_consents
-
-        conn = sqlite3.connect(str(tmp_path / "t.db"))
-        try:
-            migrate_claude_assisted_remediation_consents(conn)
-            indexes = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type='index' AND tbl_name='claude_assisted_remediation_consents'"
-                )
-            }
-        finally:
-            conn.close()
-        assert "idx_consents_scope" in indexes
-
-    def test_idempotent(self, tmp_path: Path) -> None:
-        """Second call must be a clean no-op (no exception, no double-create)."""
-        from nexus.db.migrations import migrate_claude_assisted_remediation_consents
-
-        conn = sqlite3.connect(str(tmp_path / "t.db"))
-        try:
-            migrate_claude_assisted_remediation_consents(conn)
-            migrate_claude_assisted_remediation_consents(conn)  # must not raise
-            count = conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE type='table' AND name='claude_assisted_remediation_consents'"
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        assert count == 1
+# ── Migration tests DELETED (RDR-158 P4 Stage 4, nexus-i711w): the
+# migrate_claude_assisted_remediation_consents chain died with
+# nexus/db/migrations.py; the consents table is engine-owned (Liquibase,
+# nexus-ng2sy). ──────────────────────────────────────────────────────────────
 
 
 # ── record_consent ───────────────────────────────────────────────────────────
