@@ -61,8 +61,16 @@ mechanize, it matters enough to ship.
   `recognized=0` stays structurally pinned.
 - `conexus/commands/continuation.md` — nexus-mk3tw: documents that
   `expectations_undeclared`'s exit code is now load-bearing (exit 1 + BLINDSPOT).
+  ALSO nexus-qc4p1: documents the widened recogniser (agent_type key, N-of-type
+  matching).
 - `conexus/skills/orchestration/SKILL.md` — nexus-mk3tw: same, for the
-  orchestration skill's census step.
+  orchestration skill's census step. ALSO nexus-qc4p1: the dispatch convention
+  now says the EXPECT row is MECHANIZED and must not be hand-written. This one
+  is order-sensitive: until the release ships, the hook is inert while the skill
+  says not to hand-write, so declarations lapse for that window. Accepted
+  deliberately — the alternative is telling agents to hand-write rows keyed on a
+  name that provably cannot pair, which is what produced 25 unrecognised
+  dispatches. Both halves go live in the same release.
 - `conexus/skills/orchestration/SKILL.md` — context-economy routing: adds a
   second routing axis (shape, not only task type) carrying the distill-early
   heuristic and the bulk-read-to-subagent rule. Until this ships, routing
