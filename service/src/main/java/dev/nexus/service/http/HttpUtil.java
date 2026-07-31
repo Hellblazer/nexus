@@ -143,6 +143,25 @@ public final class HttpUtil {
             send(exchange, 503, "{\"error\":\"database connection pool exhausted, retry\"}");
             return true;
         }
+        // nexus-0ehwe arbiter class: a DELIBERATE refusal to give one identity to two
+        // addresses. Mapped ahead of the generic class-23 branch because it is raised by
+        // the repository BEFORE the statement runs, so it carries no SQLSTATE — but it
+        // is the same 409 story with a diagnosable body (which key, what already holds
+        // it, what was refused) instead of a bare "integrity constraint violation".
+        var conflict = identityConflict(e);
+        if (conflict != null) {
+            log.warn("event={}_identity_conflict {} constraint={} identity={} existing={} attempted={}",
+                event, context, conflict.constraint(), conflict.identity(),
+                conflict.existingAddress(), conflict.attemptedAddress());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(conflict.getMessage())
+                + ",\"constraint\":" + jsonString(conflict.constraint())
+                + ",\"identity\":" + jsonString(conflict.identity())
+                + ",\"existing\":" + jsonString(conflict.existingAddress())
+                + ",\"attempted\":" + jsonString(conflict.attemptedAddress())
+                + "}");
+            return true;
+        }
         String sqlState = sqlState23(e);
         if (sqlState != null) {
             // nexus-7e057: class-23 integrity violations are caller errors (bad FK id
@@ -170,22 +189,25 @@ public final class HttpUtil {
      * The violated constraint's name, walking the cause chain, or null
      * (nexus-0ehwe item 6).
      *
-     * <p>PostgreSQL reports it in {@code ServerErrorMessage}; the JDBC driver
-     * exposes it on {@link org.postgresql.util.PSQLException}. Reflection keeps
-     * this file free of a hard driver import for one optional field — a null
-     * simply omits the key rather than degrading the 409.
+     * <p>Delegates to {@link dev.nexus.service.db.SqlConstraints#violated}. The
+     * extraction moved to the {@code db} package when the repository layer also had to
+     * branch on WHICH unique key fired (nexus-0ehwe arbiter class) — one implementation,
+     * so a driver-shape change cannot fix the 409 body and leave the repository's
+     * converge-vs-refuse decision reading a stale copy.
      */
     static String constraintName(Throwable e) {
-        for (Throwable t = e; t != null; t = t.getCause()) {
-            try {
-                var m = t.getClass().getMethod("getServerErrorMessage");
-                Object sem = m.invoke(t);
-                if (sem != null) {
-                    Object name = sem.getClass().getMethod("getConstraint").invoke(sem);
-                    if (name instanceof String str && !str.isBlank()) return str;
-                }
-            } catch (ReflectiveOperationException | RuntimeException ignored) {
-                // not a PSQLException, or the driver shape changed — fall through
+        return dev.nexus.service.db.SqlConstraints.violated(e);
+    }
+
+    /**
+     * The {@link dev.nexus.service.db.CatalogIdentityConflictException} in {@code t}'s
+     * cause chain, or null. Depth-bounded like the sibling walks — the repository throws
+     * it inside {@code TenantScope.withTenant}, which wraps on the way out.
+     */
+    static dev.nexus.service.db.CatalogIdentityConflictException identityConflict(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.CatalogIdentityConflictException ce) {
+                return ce;
             }
         }
         return null;

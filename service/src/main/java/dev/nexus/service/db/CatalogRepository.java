@@ -252,6 +252,149 @@ public final class CatalogRepository {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // UNIQUE-KEY COMPLETENESS (nexus-0ehwe / pbawi / jq53b / z3ssg)
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // An INSERT ... ON CONFLICT takes exactly ONE conflict target — naming two in one
+    // statement is a PostgreSQL *syntax* error, verified against PG 17. So on a table
+    // with more than one CALLER-determined unique key, every key the arbiter does not
+    // name is an unhandled 23505 path. Both catalog tables in this class are in that
+    // position, and each separates one ADDRESS key from one or more IDENTITY keys:
+    //
+    //   catalog_owners     address (tenant_id, tumbler_prefix)             = catalog_owners_pk
+    //                      identity (tenant_id, name, owner_type)          = catalog_owners_unique_name_type
+    //                      alias    (tenant_id, repo_hash) partial         = idx_catalog_owners_repo_hash
+    //   catalog_documents  address (tenant_id, tumbler)                    = catalog_documents_pk
+    //                      identity (tenant_id, source_uri) live-only      = ux_catalog_documents_live_source_uri
+    //
+    // The arbiter keeps naming the ADDRESS (or, at the register sites, the identity).
+    // The keys it does NOT name are handled HERE, by resolving them BEFORE the write —
+    // the same prevent-rather-than-catch stance claimNextSeq takes for the tumbler PK —
+    // with UniqueRaceRetry as the belt for the residual READ COMMITTED race.
+    //
+    // NOTE: catalog_links also carries two unique keys, but its PK is (tenant_id, id)
+    // with id BIGSERIAL and no insert site supplies it, so that key cannot collide.
+    // Server-generated keys are exempt; caller-determined ones are not. That, not
+    // "the arbiter matches the only unique key", is why catalog_links is clean.
+
+    /** Address key of {@code catalog_owners} (catalog-001-baseline.xml:46). */
+    static final String OWNERS_PK = "catalog_owners_pk";
+    /** Identity key of {@code catalog_owners} (catalog-001-baseline.xml:47). */
+    static final String OWNERS_NAME_TYPE = "catalog_owners_unique_name_type";
+    /** Alias key of {@code catalog_owners}, partial (catalog-001-baseline.xml:51). */
+    static final String OWNERS_REPO_HASH = "idx_catalog_owners_repo_hash";
+    /** Address key of {@code catalog_documents} (catalog-001-baseline.xml:96). */
+    static final String DOCUMENTS_PK = "catalog_documents_pk";
+    /** Identity key of {@code catalog_documents}, partial (catalog-016:153). */
+    static final String DOCUMENTS_LIVE_SOURCE_URI = "ux_catalog_documents_live_source_uri";
+
+    /** The {@code catalog_owners} keys no owner-site arbiter names. */
+    static final String[] OWNER_NON_ARBITRATED = {OWNERS_NAME_TYPE, OWNERS_REPO_HASH};
+    /** The {@code catalog_documents} keys the address-arbitrated sites do not name. */
+    static final String[] DOCUMENT_NON_ARBITRATED = {DOCUMENTS_LIVE_SOURCE_URI};
+
+    /**
+     * The owner address that already holds this identity, or {@code null}.
+     *
+     * <p>Resolution order is {@code (name, owner_type)} then {@code repo_hash}, and the
+     * two must AGREE: if the identity key and the alias key point at different owners,
+     * there is no single "the existing owner" and proceeding would pick one arbitrarily.
+     * That disagreement is itself refused.
+     *
+     * <p>{@code repo_hash} is only consulted when non-blank, mirroring the partial
+     * index's own predicate ({@code repo_hash IS NOT NULL AND repo_hash != ''}) — a
+     * blank hash is not an identity and must not alias every other blank-hash owner
+     * onto one row.
+     */
+    private static String resolveOwnerAddress(DSLContext ctx, String tenant,
+                                              String name, String ownerType, String repoHash) {
+        String byIdentity = null;
+        if (name != null && !name.isBlank() && ownerType != null && !ownerType.isBlank()) {
+            byIdentity = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX).from(CATALOG_OWNERS)
+                            .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                   .and(CATALOG_OWNERS.NAME.eq(name))
+                                   .and(CATALOG_OWNERS.OWNER_TYPE.eq(ownerType)))
+                            .limit(1)
+                            .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
+        }
+        String byRepoHash = null;
+        if (repoHash != null && !repoHash.isBlank()) {
+            byRepoHash = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX).from(CATALOG_OWNERS)
+                            .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                   .and(CATALOG_OWNERS.REPO_HASH.eq(repoHash)))
+                            .limit(1)
+                            .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
+        }
+        if (byIdentity != null && byRepoHash != null && !byIdentity.equals(byRepoHash)) {
+            throw new CatalogIdentityConflictException(
+                OWNERS_REPO_HASH, "repo_hash=" + repoHash, byRepoHash, byIdentity);
+        }
+        return byIdentity != null ? byIdentity : byRepoHash;
+    }
+
+    /**
+     * Refuse a write that would give one owner identity to two addresses.
+     *
+     * <p>Called with the address the caller ASKED for. A resolution to that same address
+     * is the ordinary idempotent case and returns quietly; a resolution to a DIFFERENT
+     * address is the rename/merge hazard and is refused by name.
+     */
+    private static void guardOwnerIdentity(DSLContext ctx, String tenant, String attemptedPrefix,
+                                           String name, String ownerType, String repoHash) {
+        String existing = resolveOwnerAddress(ctx, tenant, name, ownerType, repoHash);
+        if (existing != null && !existing.equals(attemptedPrefix)) {
+            boolean viaRepoHash = repoHash != null && !repoHash.isBlank()
+                && ctx.fetchExists(ctx.selectOne().from(CATALOG_OWNERS)
+                    .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_OWNERS.REPO_HASH.eq(repoHash))
+                           .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(existing))));
+            throw new CatalogIdentityConflictException(
+                viaRepoHash ? OWNERS_REPO_HASH : OWNERS_NAME_TYPE,
+                viaRepoHash ? "repo_hash=" + repoHash
+                            : "owner name=" + name + " owner_type=" + ownerType,
+                existing, attemptedPrefix);
+        }
+    }
+
+    /**
+     * The tumbler of the LIVE document that already holds {@code sourceUri}, or
+     * {@code null}.
+     *
+     * <p>Scoped to live rows and non-empty URIs to match the partial index's predicate
+     * exactly ({@code deleted_at IS NULL AND source_uri <> ''}). A tombstoned row does
+     * NOT hold its source_uri — re-registering it is legal and must not be refused.
+     */
+    private static String liveTumblerForSourceUri(DSLContext ctx, String tenant, String sourceUri) {
+        if (sourceUri == null || sourceUri.isEmpty()) return null;
+        return ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                  .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                         .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(sourceUri))
+                         .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                  .limit(1)
+                  .fetchOne(CATALOG_DOCUMENTS.TUMBLER);
+    }
+
+    /**
+     * Refuse an address-arbitrated document write that would move a live
+     * {@code source_uri} onto a second row.
+     *
+     * <p>Guards BOTH arms of the upsert, which is the half nexus-z3ssg named and the
+     * half that is easy to miss: a fresh INSERT at a new tumbler carrying an
+     * already-live source_uri violates the index, AND an insert whose PK conflict is
+     * cleanly HANDLED then violates it again from the DO UPDATE arm, because that arm
+     * sets {@code source_uri} from the excluded row. Both were reproduced against PG 17
+     * before this guard was written.
+     */
+    private static void guardDocumentIdentity(DSLContext ctx, String tenant,
+                                              String attemptedTumbler, String sourceUri) {
+        String existing = liveTumblerForSourceUri(ctx, tenant, sourceUri);
+        if (existing != null && !existing.equals(attemptedTumbler)) {
+            throw new CatalogIdentityConflictException(
+                DOCUMENTS_LIVE_SOURCE_URI, "source_uri=" + sourceUri, existing, attemptedTumbler);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // OWNERS
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -265,6 +408,7 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
+        UniqueRaceRetry.run("upsertOwner", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
             // nexus-0cy4b: tumbler_prefix is NOT NULL. The SQLite catalog
             // (Catalog.register_owner) assigns the owner prefix server-side; the
@@ -272,15 +416,20 @@ public final class CatalogRepository {
             // the existing owner's prefix for this repo (idempotent), else
             // allocate 1.{MAX+1}. An explicit prefix (ETL/import) is honoured.
             String prefix = s(o, "tumbler_prefix");
+            String name = s(o, "name");
+            String ownerType = s(o, "owner_type");
+            String repoHash = s(o, "repo_hash");
+
+            // nexus-jq53b, Hal decision (a) 2026-07-28: (tenant, name, owner_type) IS
+            // an identity key, so register_owner is idempotent BY it. Resolve it BEFORE
+            // allocating, not after — the pre-fix order allocated a fresh prefix first,
+            // which made the ON CONFLICT (tenant_id, tumbler_prefix) arbiter miss the
+            // existing row and let catalog_owners_unique_name_type fire as a raw 23505.
+            // That is reachable with no concurrency at all: registering the same
+            // name+type twice was enough (the nexus-aqbrk sequential repro).
+            String existing = resolveOwnerAddress(ctx, tenant, name, ownerType, repoHash);
             if (prefix == null || prefix.isBlank()) {
-                String repoHash = s(o, "repo_hash");
-                if (repoHash != null && !repoHash.isBlank()) {
-                    prefix = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX)
-                                .from(CATALOG_OWNERS)
-                                .where(CATALOG_OWNERS.REPO_HASH.eq(repoHash))
-                                .limit(1)
-                                .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
-                }
+                prefix = existing;
                 if (prefix == null || prefix.isBlank()) {
                     // Next owner number: MAX(int after the first dot) + 1 over
                     // '1.%' owners. RLS scopes this to the tenant.
@@ -295,6 +444,11 @@ public final class CatalogRepository {
                         .fetchOne(0, Integer.class);
                     prefix = "1." + ((maxNum == null ? 0 : maxNum) + 1);
                 }
+            } else {
+                // An EXPLICIT prefix is an address. Honour it — but not by silently
+                // stealing an identity that already belongs to a different owner, and
+                // not by routing a rename through this path (Hal's jq53b constraint 1).
+                guardOwnerIdentity(ctx, tenant, prefix, name, ownerType, repoHash);
             }
             ctx.insertInto(CATALOG_OWNERS,
                     CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
@@ -313,7 +467,7 @@ public final class CatalogRepository {
                .set(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD)
                .execute();
             return null;
-        });
+        }));
     }
 
     /** Return all owners for tenant as list of maps. */
@@ -383,7 +537,15 @@ public final class CatalogRepository {
      */
     public void upsertDocument(String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
+        UniqueRaceRetry.run("upsertDocument", DOCUMENT_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
+            // nexus-0ehwe arbiter class / nexus-z3ssg shape. This statement arbitrates
+            // the ADDRESS key (tenant_id, tumbler) and sets source_uri from the excluded
+            // row, so it can violate ux_catalog_documents_live_source_uri on BOTH arms:
+            // a fresh INSERT at a new tumbler carrying an already-live source_uri, and an
+            // insert whose PK conflict is cleanly HANDLED and whose DO UPDATE arm then
+            // moves that source_uri onto a second live row. Both reproduce on PG 17.
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -428,7 +590,7 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.DELETED_AT, (java.time.OffsetDateTime) null)
                .execute();
             return null;
-        });
+        }));
     }
 
     /**
@@ -479,22 +641,58 @@ public final class CatalogRepository {
         return root != null ? root : "";
     }
 
+    /**
+     * Ensure the owner row at {@code ownerPrefix} exists, and return its
+     * {@code repo_root} (nexus-0ehwe arbiter class).
+     *
+     * <p>Replaces a blind {@code INSERT ... ON CONFLICT (tenant_id, tumbler_prefix) DO
+     * NOTHING} at both register sites. That insert named only the ADDRESS key, so it was
+     * exposed to both of {@code catalog_owners}' other unique keys: an owner whose
+     * {@code (name, owner_type)} already lives at a different prefix raised a raw 23505
+     * that no arm caught (nexus-jq53b), and it is a documented TOCTOU guard that fires
+     * under exactly the concurrency the register path sees (nexus-z3ssg).
+     *
+     * <p>Costs no extra round trip. The SELECT that decides whether the row exists is
+     * the SAME one both callers already made for {@code repo_root} via
+     * {@link #ownerRepoRoot}; {@code repo_root} is {@code NOT NULL DEFAULT ''}, so a
+     * {@code null} here unambiguously means "no row at this address" rather than "row
+     * with an empty root".
+     */
+    private static String ensureOwnerRow(DSLContext ctx, String tenant, String ownerPrefix,
+                                         String ownerName, String ownerType) {
+        String repoRoot = ctx.select(CATALOG_OWNERS.REPO_ROOT).from(CATALOG_OWNERS)
+                             .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                    .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+                             .fetchOne(CATALOG_OWNERS.REPO_ROOT);
+        if (repoRoot != null) return repoRoot;
+
+        // Creating the row: its identity must not already belong to another address.
+        guardOwnerIdentity(ctx, tenant, ownerPrefix, ownerName, ownerType, null);
+        ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX,
+                       CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT,
+                       CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
+           .values(tenant, ownerPrefix, ownerName, ownerType, null, null, "", null, 0L)
+           .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
+           .doNothing()
+           .execute();
+        return "";
+    }
+
     public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
-        return tenantScope.withTenant(tenant, ctx -> {
-            // Ensure owner row exists (idempotent upsert with minimal fields)
-            ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
-                           CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
-               .values(tenant, ownerPrefix,
-                       s(fields, "owner_name", ownerPrefix),
-                       s(fields, "owner_type", "repo"),
-                       null, null, "", null, 0L)
-               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
-               .doNothing()
-               .execute();
+        return UniqueRaceRetry.run("registerDocument", OWNER_NON_ARBITRATED, () ->
+        tenantScope.withTenant(tenant, ctx -> {
+            // Ensure owner row exists. Resolve-first (nexus-0ehwe arbiter class): the
+            // blind DO-NOTHING upsert this replaces named only the address key and was
+            // exposed to catalog_owners' other two. Same round-trip count — this SELECT
+            // is the repo_root lookup that used to happen a few lines below.
+            String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
+                s(fields, "owner_name", ownerPrefix),
+                s(fields, "owner_type", "repo"));
 
             // Idempotency check BEFORE claiming a sequence number — avoids permanent seq gaps
             // on re-registration of existing documents.
@@ -504,7 +702,7 @@ public final class CatalogRepository {
             String srcUri = deriveSourceUri(
                 s(fields, "source_uri", ""),
                 s(fields, "file_path", ""),
-                ownerRepoRoot(ctx, tenant, ownerPrefix));
+                repoRoot);
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
                                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
@@ -606,7 +804,7 @@ public final class CatalogRepository {
                 return winner.value1();
             }
             return tumbler;
-        });
+        }));
     }
 
     /**
@@ -637,22 +835,18 @@ public final class CatalogRepository {
         if (docs == null || docs.isEmpty()) {
             return java.util.List.of();
         }
-        return tenantScope.withTenant(tenant, ctx -> {
+        return UniqueRaceRetry.run("registerDocumentMany", OWNER_NON_ARBITRATED, () ->
+        tenantScope.withTenant(tenant, ctx -> {
             // nexus-oub13: per-step wall timing — the live duoak.11 re-gate
             // measured ~38s/page client-side with no way to tell which step
             // (or whether the server at all) was the sink. One structured
             // line per page; negligible overhead at page granularity.
             long tStart = System.nanoTime();
-            // Ensure owner row exists (idempotent upsert, minimal fields) — once.
-            ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
-                           CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
-               .values(tenant, ownerPrefix,
-                       s(docs.get(0), "owner_name", ownerPrefix),
-                       s(docs.get(0), "owner_type", "repo"),
-                       null, null, "", null, 0L)
-               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
-               .doNothing()
-               .execute();
+            // Ensure owner row exists — once. Resolve-first, same as the single-doc
+            // path (nexus-0ehwe arbiter class); this is also the repo_root lookup.
+            String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
+                s(docs.get(0), "owner_name", ownerPrefix),
+                s(docs.get(0), "owner_type", "repo"));
             long tOwner = System.nanoTime();
 
             // Batch idempotency: fetch existing LIVE docs for every source_uri and
@@ -661,7 +855,6 @@ public final class CatalogRepository {
             // the owner's repo_root) when the caller sent none — see
             // deriveSourceUri. The derived value is used for lookup, insert,
             // and race patching alike.
-            String repoRoot = ownerRepoRoot(ctx, tenant, ownerPrefix);
             String[] uriOf = new String[docs.size()];
             java.util.List<String> srcUris = new java.util.ArrayList<>();
             java.util.List<String> filePaths = new java.util.ArrayList<>();
@@ -859,7 +1052,7 @@ public final class CatalogRepository {
                 (tEnd - tStart) / 1_000_000);
 
             return java.util.Arrays.asList(out);
-        });
+        }));
     }
 
     /** Fetch a document by tumbler. Returns null if not found. */
@@ -3692,6 +3885,10 @@ public final class CatalogRepository {
                         CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
                         CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ);
                 for (var o : batch) {
+                    // Same identity guard as doImportOwner (nexus-0ehwe arbiter class) —
+                    // the batch form is not exempt from the keys its arbiter omits.
+                    guardOwnerIdentity(ctx, tenant, s(o, "tumbler_prefix"),
+                                       s(o, "name"), s(o, "owner_type"), s(o, "repo_hash"));
                     insert = insert.values(tenant,
                             s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
                             s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
@@ -3716,6 +3913,14 @@ public final class CatalogRepository {
     private static final int MAX_BATCH_PARAMS = 30_000;
 
     private void doImportOwner(DSLContext ctx, String tenant, Map<String, Object> o) {
+        // nexus-0ehwe arbiter class. The ETL replays an authoritative snapshot at an
+        // EXPLICIT address, so the address wins — but the snapshot may still carry an
+        // identity that now lives at a different prefix (SQLite permitted two owners to
+        // share name+owner_type; PG's catalog_owners_unique_name_type forbids it, the
+        // substrate disagreement nexus-aqbrk recorded). Converging would MERGE two
+        // distinct owners, so this refuses by name instead of raising a raw 23505.
+        guardOwnerIdentity(ctx, tenant, s(o, "tumbler_prefix"),
+                           s(o, "name"), s(o, "owner_type"), s(o, "repo_hash"));
         ctx.insertInto(CATALOG_OWNERS,
                 CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
                 CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
@@ -3768,6 +3973,8 @@ public final class CatalogRepository {
                         CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT);
                 for (var d : batch) {
                     String metaJson = jsonOrNull(d.get("metadata"));
+                    // Same identity guard as doImportDocument (nexus-0ehwe arbiter class).
+                    guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                             nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
@@ -3813,6 +4020,9 @@ public final class CatalogRepository {
     private void doImportDocument(DSLContext ctx, String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
         {
+            // nexus-0ehwe arbiter class: address-arbitrated, and the DO UPDATE arm sets
+            // source_uri — so both arms are exposed to ux_catalog_documents_live_source_uri.
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
