@@ -237,6 +237,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         _token: str | None = None,
     ) -> None:
         super().__init__(base_url=base_url, tenant=tenant, _token=_token)
+        #: nexus-5i864: per-instance owner cache for resolve_path (see
+        #: ``_owner_for_resolve_path``). Maps owner tumbler_prefix ->
+        #: owner dict. HITS ONLY — misses are never cached, because this
+        #: client is a process-lifetime singleton and a pinned miss would
+        #: silently zero the auto-linker for any owner registered later
+        #: by another process.
+        self._resolve_path_owner_cache: dict[str, dict] = {}
         _log.debug("http_catalog_client.init", base_url=self._base_url, tenant=tenant)
 
     def close(self) -> None:
@@ -349,6 +356,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if repo_root:      payload["repo_root"] = str(repo_root)
         if head_hash:      payload["head_hash"] = head_hash
         result = self._post("/owners/upsert", payload)
+        # nexus-5i864: an owner upsert can change owner_type/repo_root —
+        # drop the resolve_path owner cache so later resolutions re-read.
+        # AFTER the POST: a raising upsert changed nothing to invalidate.
+        self._resolve_path_owner_cache.clear()
         # If server echoes tumbler_prefix in response (future enhancement), use it
         if isinstance(result, dict) and result.get("tumbler_prefix"):
             return Tumbler.parse(result["tumbler_prefix"])
@@ -407,6 +418,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if tumbler_prefix: payload["tumbler_prefix"] = tumbler_prefix
         if head_hash:      payload["head_hash"] = head_hash
         result = self._post("/owners/upsert", payload)
+        # nexus-5i864: see register_owner — invalidate after a successful upsert.
+        self._resolve_path_owner_cache.clear()
         if isinstance(result, dict) and result.get("tumbler_prefix"):
             return Tumbler.parse(result["tumbler_prefix"])
         if tumbler_prefix:
@@ -1149,8 +1162,86 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return Tumbler.parse(str(tumbler))
 
     def resolve_path(self, tumbler: Tumbler | str) -> Path | None:
-        entry = self.resolve(tumbler)
-        return Path(entry.file_path) if entry and entry.file_path else None
+        """Return the absolute filesystem path for a document, or ``None``.
+
+        nexus-5i864: ports the deleted local ``Catalog.resolve_path``
+        resolution order (catalog_docs.py, RDR-137 P3.6 form) into the
+        service client. The pre-fix client returned the STORED
+        ``file_path`` verbatim — for the relative paths the catalog hook
+        always writes, that re-anchored on the caller's CWD (the
+        nexus-3e4s class) and silently zeroed / mis-fed the auto-linker.
+
+        Resolution order:
+          1. resolve(tumbler); no entry or empty file_path -> None
+          2. owner lookup by ``tumbler.owner_address()`` (cached per
+             client instance — the link generator calls this in loops)
+          3. owner missing or ``owner_type == "curator"`` -> None
+             (curator-owned PDFs / standalone docs are not resolvable)
+          4. absolute ``file_path`` -> returned as-is
+          5. non-empty ``owner.repo_root`` -> ``repo_root / file_path``
+          6. else DEBUG ``catalog_resolve_path_legacy_owner_missing_repo_root``
+             and None (legacy owner healed by re-running ``nx index repo``)
+        """
+        tum = tumbler if isinstance(tumbler, Tumbler) else Tumbler.parse(tumbler)
+        entry = self.resolve(tum)
+        if not entry or not entry.file_path:
+            return None
+
+        owner_prefix = str(tum.owner_address())
+        owner = self._owner_for_resolve_path(owner_prefix)
+        if owner is None:
+            return None
+        if owner.get("owner_type") == "curator":
+            return None
+
+        fp = Path(entry.file_path)
+        if fp.is_absolute():
+            return fp
+
+        repo_root = owner.get("repo_root") or ""
+        if repo_root:
+            return Path(repo_root) / entry.file_path
+
+        _log.debug(
+            "catalog_resolve_path_legacy_owner_missing_repo_root",
+            tumbler=str(tum),
+            owner_prefix=owner_prefix,
+            repo_hash=owner.get("repo_hash", ""),
+            file_path=entry.file_path,
+            hint="re-run 'nx index repo' on the source repo to backfill repo_root",
+        )
+        return None
+
+    def _owner_for_resolve_path(self, owner_prefix: str) -> dict | None:
+        """Cached owner lookup for :meth:`resolve_path` (nexus-5i864).
+
+        ``resolve_path`` is driven in loops by the link generator
+        (link_generator.py) where consecutive tumblers overwhelmingly
+        share an owner; caching per client instance turns N owner
+        round-trips into one per distinct owner.
+
+        POSITIVE RESULTS ONLY — a miss is never cached. This client is a
+        PROCESS-LIFETIME SINGLETON (catalog/factory.py
+        ``_get_shared_service_catalog_client``, nexus-53x7s), so caching
+        a ``None`` would pin "this owner does not exist" for the life of
+        the process: an owner registered afterwards by ANOTHER process
+        (a separate ``nx index repo`` run, a daemon) would never be
+        observed here, and ``resolve_path`` would keep returning None —
+        silently zeroing the auto-linker for that repo indefinitely.
+        That is the very failure shape nexus-5i864 exists to remove, so
+        the miss path re-queries every call. A found owner is safe to
+        cache: ``owner_type`` / ``repo_root`` change only on
+        re-registration, which clears this cache (:meth:`register_owner`,
+        :meth:`ensure_owner_for_repo`).
+        """
+        cache = self._resolve_path_owner_cache
+        cached = cache.get(owner_prefix)
+        if cached is not None:
+            return cached
+        owner = self.get_owner_by_prefix(owner_prefix)
+        if owner is not None:
+            cache[owner_prefix] = owner
+        return owner
 
     def resolve_span(
         self,
@@ -2014,8 +2105,53 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return out
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Referenced-chash alive-set for a collection, count-reconciled.
+
+        nexus-ir6eh: this list is the indexer GC's alive-set — chunks
+        absent from it are classified orphan and DELETED, so a
+        PARTIALLY-truncated list silently destroys live data (a fully
+        missing list is guarded downstream by the indexer's
+        ``manifest_empty_skipping_gc``). The engine emits ``count``
+        alongside ``chashes`` since v0.1.55 (CatalogHandler.
+        handleManifestChashes; the release floor guarantees it), so the
+        client reconciles ``len(chashes) == count`` BEFORE returning and
+        fails loud on any deviation — a missing ``count`` field means a
+        field-stripping hop interposed (the nexus-znwc2 class) and is
+        itself a contract violation, never treated as optional.
+        """
         result = self._get("/manifest/chashes", collection=physical_collection)
-        return set(result.get("chashes", [])) if result else set()
+        result = result if isinstance(result, dict) else {}
+        chashes = result.get("chashes") or []
+        if "count" not in result:
+            _log.error(
+                "manifest_chashes_count_missing",
+                collection=physical_collection,
+                received=len(chashes),
+                response_keys=sorted(result),
+            )
+            raise RuntimeError(
+                f"manifest/chashes response for {physical_collection!r} "
+                "carried no `count` field — the engine emits it "
+                "unconditionally (floor >= v0.1.55), so something "
+                "interposed on the read path; refusing to hand GC an "
+                "unverifiable alive-set "
+                f"(response keys: {sorted(result)})"
+            )
+        count = int(result["count"])
+        if len(chashes) != count:
+            _log.error(
+                "manifest_chashes_count_mismatch",
+                collection=physical_collection,
+                received=len(chashes),
+                count=count,
+            )
+            raise RuntimeError(
+                f"manifest/chashes truncated for {physical_collection!r}: "
+                f"list carries {len(chashes)} chashes but count says "
+                f"{count} — orphan classification off this list would "
+                "delete live chunks; refusing"
+            )
+        return set(chashes)
 
     def purge_manifest_for_doc(self, doc_id: str) -> None:
         self._post("/manifest/purge", {"doc_id": doc_id})

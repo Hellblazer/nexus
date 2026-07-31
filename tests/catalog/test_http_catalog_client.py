@@ -19,12 +19,14 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.tumbler import Tumbler
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 # Wave review (the h8rf6.3 -> 49523e16 lesson): fixture chashes must be
@@ -230,7 +232,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/manifest/get":
             self._send_json({"rows": [{"position": 0, "chash": CHASH_A}], "count": 1})
         elif op == "/manifest/chashes":
-            self._send_json({"chashes": [CHASH_A, CHASH_B]})
+            # nexus-ir6eh: the real CatalogHandler emits count alongside
+            # chashes (truncation defence, v0.1.55+); the client reconciles
+            # len(chashes) == count and fails loud on deviation.
+            self._send_json({"chashes": [CHASH_A, CHASH_B], "count": 2})
         elif op == "/manifest/orphans":
             params = self._query_params()
             dim = int(params.get("dim", "0"))
@@ -1756,3 +1761,106 @@ class TestByFilePathExactMatchGuard:
     def test_empty_owner_returns_none(self, fake_server: str) -> None:
         c = self._client_returning(fake_server, [])
         assert c.by_file_path("1.12", "any/path.pdf") is None
+
+
+# ── nexus-5i864: resolve_path owner cache ────────────────────────────────────
+
+
+class TestResolvePathOwnerCache:
+    """The owner lookup ``resolve_path`` added is CACHED — and the cache's
+    two contracts both carry correctness weight, so both are pinned here.
+
+    HITS are cached because the link generator drives ``resolve_path`` in
+    loops over tumblers that overwhelmingly share one owner. MISSES are
+    NOT, because ``HttpCatalogClient`` is a process-lifetime singleton
+    (catalog/factory.py, nexus-53x7s): a pinned miss would mean an owner
+    registered later by another process is never observed, and
+    ``resolve_path`` would keep answering None — silently zeroing the
+    auto-linker for that repo for the life of the process, which is the
+    exact failure shape nexus-5i864 exists to remove.
+    """
+
+    def _client(self, monkeypatch: pytest.MonkeyPatch, owners: dict):
+        from types import SimpleNamespace
+
+        c = object.__new__(HttpCatalogClient)
+        c._resolve_path_owner_cache = {}
+        calls: list[str] = []
+
+        def _fake_owner(prefix: str):
+            calls.append(prefix)
+            return owners.get(prefix)
+
+        monkeypatch.setattr(
+            c, "get_owner_by_prefix", _fake_owner, raising=False,
+        )
+        monkeypatch.setattr(
+            c, "resolve",
+            lambda t, **kw: SimpleNamespace(file_path="src/a.py", tumbler=t),
+            raising=False,
+        )
+        return c, calls
+
+    def test_hit_is_cached_across_calls_sharing_an_owner(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        owners = {"1.1": {"owner_type": "repo", "repo_root": "/repo"}}
+        c, calls = self._client(monkeypatch, owners)
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/repo/src/a.py")
+        assert c.resolve_path(Tumbler.parse("1.1.2")) == Path("/repo/src/a.py")
+
+        assert calls == ["1.1"], (
+            f"owner lookup should happen once for a shared owner; got {calls}"
+        )
+
+    def test_miss_is_never_cached_so_a_later_registration_is_observed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The correctness half: an owner that appears AFTER a miss (another
+        process registering it) must be picked up, not pinned to None."""
+        owners: dict = {}
+        c, calls = self._client(monkeypatch, owners)
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) is None
+        assert calls == ["1.1"]
+
+        # Another process registers the owner; this client never saw the write.
+        owners["1.1"] = {"owner_type": "repo", "repo_root": "/repo"}
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/repo/src/a.py"), (
+            "a cached miss pinned the owner as absent — the auto-linker would "
+            "stay silently zeroed for this repo for the life of the process"
+        )
+        assert calls == ["1.1", "1.1"], "the miss path must re-query, not serve a cached None"
+
+    def test_owner_upsert_invalidates_a_cached_hit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        owners = {"1.1": {"owner_type": "repo", "repo_root": "/old"}}
+        c, calls = self._client(monkeypatch, owners)
+        # The upsert echoes the assigned prefix, so register_owner returns
+        # without its /owners/by_name fallback read.
+        monkeypatch.setattr(
+            c, "_post", lambda *a, **kw: {"tumbler_prefix": "1.1"}, raising=False,
+        )
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/old/src/a.py")
+
+        owners["1.1"] = {"owner_type": "repo", "repo_root": "/new"}
+        c.register_owner("repo-name", "repo", repo_root="/new")
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/new/src/a.py"), (
+            "register_owner must drop the cache so a changed repo_root is seen"
+        )
+
+    def test_curator_owner_is_cached_but_still_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A curator hit is a legitimate cache entry; the guard still fires."""
+        owners = {"1.1": {"owner_type": "curator", "repo_root": ""}}
+        c, calls = self._client(monkeypatch, owners)
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) is None
+        assert c.resolve_path(Tumbler.parse("1.1.2")) is None
+        assert calls == ["1.1"]

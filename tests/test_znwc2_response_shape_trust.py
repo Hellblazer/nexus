@@ -104,6 +104,58 @@ class TestManifestOrphansCountRequired:
         assert result["count"] == 3
 
 
+# ── 3. manifest/chashes: count reconciled before orphan classification ───────
+
+
+class TestManifestChashesCountReconciled:
+    """nexus-ir6eh client half: the manifest chashes list is the GC's
+    alive-set — chunks absent from it are classified orphan and DELETED.
+    A partially-truncated list therefore destroys live data silently.
+    The engine emits ``count`` since v0.1.55 (floor (0,1,58) >= that), so
+    the client reconciles ``len(chashes) == count`` and a missing count
+    field is itself a contract violation (fail loud, never optional)."""
+
+    def _client_with(self, monkeypatch: pytest.MonkeyPatch, response: Any):
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(
+            c, "_get", lambda path, **params: response, raising=False,
+        )
+        return c
+
+    def test_missing_count_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Floor >= (0,1,55): the engine emits count unconditionally, so a
+        response without it means a field-stripping hop — refuse rather
+        than hand GC an unverifiable alive-set."""
+        c = self._client_with(monkeypatch, {"chashes": ["a" * 64]})
+        with pytest.raises(RuntimeError, match="count"):
+            c.chashes_for_collection("code__x__stub-code-1024__v1")
+
+    def test_truncated_list_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(
+            monkeypatch, {"chashes": ["a" * 64, "b" * 64], "count": 3},
+        )
+        with pytest.raises(RuntimeError, match="chashes"):
+            c.chashes_for_collection("code__x__stub-code-1024__v1")
+
+    def test_intact_response_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(
+            monkeypatch, {"chashes": ["a" * 64, "b" * 64], "count": 2},
+        )
+        assert c.chashes_for_collection("code__x__stub-code-1024__v1") == {
+            "a" * 64, "b" * 64,
+        }
+
+    def test_empty_intact_response_passes(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """count=0 with an empty list is a legitimate empty manifest — the
+        indexer's manifest_empty_skipping_gc guard handles it downstream."""
+        c = self._client_with(monkeypatch, {"chashes": [], "count": 0})
+        assert c.chashes_for_collection("code__x__stub-code-1024__v1") == set()
+
+
 # ── 4. merge sort: missing distance sorts LAST, never first ──────────────────
 
 

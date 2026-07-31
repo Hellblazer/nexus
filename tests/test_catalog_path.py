@@ -13,9 +13,9 @@ that still need them. What remains pinned to the local catalog:
 
   - ``TestCatalogDBMigration`` — DIE. Its subject IS ``CatalogDB``'s
     ALTER-on-open DDL, a SQLite-only observable.
-  - ``TestResolvePath``, four of seven — PORT-BLOCKED on nexus-5i864 (see
-    the class docstring). Two of the seven DO port and now run against
-    whichever catalog is live.
+  - ``TestResolvePath`` — fully ported. The three strict-xfail pins that
+    were PORT-BLOCKED on nexus-5i864 went live when the service client
+    gained the local resolution order (see the class docstring).
   - ``test_resolve_path_no_RepoRegistry_import_in_module`` — DIE by
     construction: it greps ``src/nexus/catalog/catalog_docs.py``, a file on
     the deletion list, so it retires with its subject.
@@ -99,25 +99,19 @@ class TestOwnerRecordRepoRoot:
 class TestResolvePath:
     """Catalog.resolve_path() resolution tests.
 
-    nexus-i711w terminal deletion: the four locally-PINNED tests (port-
-    blocked on nexus-5i864) lost their harness with the local Catalog.
-    Their CORRECT assertions are preserved below as ``xfail(strict=True,
-    reason="nexus-5i864")`` service-side pins: ``HttpCatalogClient.
-    resolve_path`` (http_catalog_client.py) is a bare
-    ``Path(entry.file_path) if entry and entry.file_path else None`` and
-    drops BOTH the ``owner.repo_root`` recombination and the curator
-    guard, so these fail today — and XPASS loudly (forcing marker
-    removal) the moment 5i864 lands. The registry-legacy variant's
-    structlog-event half was local-only observability and retired with
-    the module; its ``None``-return half is folded into the empty-
-    repo_root pin. The ``RepoRegistry`` source-text lint guard retired
-    with its subject file ``catalog_docs.py``.
+    nexus-5i864 LANDED: ``HttpCatalogClient.resolve_path`` now carries the
+    full local resolution order (resolve -> owner lookup -> curator guard ->
+    absolute passthrough -> ``owner.repo_root`` recombination -> DEBUG +
+    None for legacy empty-repo_root owners), so the three strict-xfail pins
+    this class carried through the nexus-i711w port are live tests again,
+    running against the service client. History: the local Catalog harness
+    died in the i711w terminal deletion; the registry-legacy variant's
+    structlog-event half was local-only observability and retired with the
+    module (its ``None``-return half is folded into the empty-repo_root
+    test); the ``RepoRegistry`` source-text lint guard retired with its
+    subject file ``catalog_docs.py``.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="nexus-5i864: service resolve_path drops repo_root recombination",
-    )
     def test_resolve_path_with_repo_root(
         self, active_catalog: Any, tmp_path: Path,
     ) -> None:
@@ -133,10 +127,6 @@ class TestResolvePath:
         )
         assert active_catalog.resolve_path(tumbler) == repo_dir / "src" / "test.py"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="nexus-5i864: service resolve_path drops the curator guard",
-    )
     def test_resolve_path_curator_returns_none(self, active_catalog: Any) -> None:
         """Curator owners have no repo root: resolve_path must be None."""
         owner = active_catalog.register_owner("resolve-path-papers", "curator")
@@ -145,11 +135,6 @@ class TestResolvePath:
         )
         assert active_catalog.resolve_path(tumbler) is None
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="nexus-5i864: service resolve_path returns a relative Path "
-               "for empty-repo_root owners instead of None",
-    )
     def test_resolve_path_empty_repo_root_returns_none(
         self, active_catalog: Any,
     ) -> None:

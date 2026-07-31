@@ -2586,7 +2586,27 @@ def _prune_deleted_files(
         (rdr_collection,) if rdr_collection else ()
     )
     for collection_name in _collections:
-        referenced = catalog.chashes_for_collection(collection_name)
+        # nexus-ir6eh: the alive-set read is count-reconciled client-side
+        # (HttpCatalogClient.chashes_for_collection raises on a truncated
+        # or count-stripped response). GC must never classify orphans off
+        # an unverifiable list — a truncated list reads live chunks as
+        # orphans and deletes real data — so a failed read skips THIS
+        # collection with a structured error (never a silent continue,
+        # never a sweep-wide abort; same per-collection isolation as the
+        # nexus-ou4tb degraded-read guard below).
+        try:
+            referenced = catalog.chashes_for_collection(collection_name)
+        except Exception:  # noqa: BLE001 — one collection's failed alive-set read must not end the sweep
+            # .error, not the .warning its sibling skip-guards below use:
+            # those absorb transient READ failures, whereas this fires on a
+            # count-reconciliation breach — a contract violation by the
+            # engine or an interposing hop, which is never routine.
+            _log.error(
+                "gc_manifest_read_failed_skipping_collection",
+                collection=collection_name,
+                exc_info=True,
+            )
+            continue
         try:
             col = db.get_collection(collection_name)
         except collection_not_found_errors():

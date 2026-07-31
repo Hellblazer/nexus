@@ -62,11 +62,41 @@ class _State:
 
     documents: dict[str, dict[str, Any]] = {}
     links: list[dict[str, Any]] = []
+    #: nexus-5i864: owners keyed by tumbler_prefix. ``resolve_path`` now
+    #: performs the owner lookup + curator guard the local catalog always
+    #: did, so the fake must serve ``/owners/show`` or every resolution
+    #: returns None and the generators silently emit zero links.
+    owners: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def reset(cls) -> None:
         cls.documents = {}
         cls.links = []
+        # Default repo owner for the "1.1" prefix every fixture tumbler
+        # sits under. ``repo_root`` is empty because every document in
+        # this module carries an ABSOLUTE file_path, which resolve_path
+        # returns before consulting repo_root; a test needing the
+        # relative-path recombination must call set_owner() with one.
+        cls.owners = {
+            "1.1": {
+                "tumbler_prefix": "1.1",
+                "owner_type": "repo",
+                "name": "fake-repo",
+                "repo_root": "",
+                "repo_hash": "",
+                "head_hash": "",
+            },
+        }
+
+    @classmethod
+    def set_owner(cls, tumbler_prefix: str, **fields: Any) -> None:
+        """Override/insert an owner row (e.g. a curator, or a repo_root)."""
+        base = dict(cls.owners.get(tumbler_prefix) or {})
+        base.setdefault("tumbler_prefix", tumbler_prefix)
+        base.setdefault("owner_type", "repo")
+        base.setdefault("repo_root", "")
+        base.update(fields)
+        cls.owners[tumbler_prefix] = base
 
     @classmethod
     def add_document(cls, tumbler: str, **fields: Any) -> str:
@@ -163,6 +193,17 @@ class FakeLinkGenHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self._send_json(doc)
+        elif op == "/owners/show":
+            # nexus-5i864: mirrors CatalogHandler's owner show — 404 for an
+            # unknown prefix, and a flat dict carrying tumbler_prefix (the
+            # key HttpCatalogClient.get_owner_by_prefix requires before it
+            # will treat the response as a hit).
+            owner = _State.owners.get(params.get("tumbler_prefix", ""))
+            if owner is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self._send_json(owner)
         elif op == "/link_query":
             matches = _State.links_matching(
                 params.get("from_tumbler", ""),

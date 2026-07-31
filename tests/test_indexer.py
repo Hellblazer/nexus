@@ -736,6 +736,54 @@ def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
     )
 
 
+def test_prune_deleted_files_manifest_read_failure_skips_collection(tmp_path):
+    """nexus-ir6eh: a ``chashes_for_collection`` read that fails its count
+    reconciliation (truncated list / stripped count field) raises — GC must
+    NOT classify orphans off an unverifiable alive-set for THAT collection
+    (a truncated list reads live chunks as orphans and deletes real data),
+    must log a structured error (never silent), and must still sweep the
+    OTHER collections (per-collection isolation, the nexus-ou4tb pattern).
+    """
+    from structlog.testing import capture_logs
+    from nexus.indexer import _prune_deleted_files
+
+    live_chash = "a" * 64
+    orphan_chash = "b" * 64
+    db, cols = _gc_db({
+        "code__repo": [("code-live", live_chash), ("code-orphan", orphan_chash)],
+        "docs__repo": [("docs-live", live_chash), ("docs-orphan", orphan_chash)],
+    })
+
+    def _chashes(name):
+        if name == "code__repo":
+            raise RuntimeError(
+                "manifest/chashes truncated for 'code__repo': "
+                "list carries 1 chashes but count says 2"
+            )
+        return {live_chash}
+
+    catalog = MagicMock()
+    catalog.chashes_for_collection.side_effect = _chashes
+
+    with capture_logs() as cap:
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    # The unreconcilable collection is untouched — nothing deleted, nothing
+    # quarantined off a truncated alive-set.
+    assert _deleted_ids(cols["code__repo"]) == []
+    assert list(cols["code__repo"]._rows) == ["code-live", "code-orphan"]
+    # The sweep CONTINUED: docs__repo's orphan was still classified.
+    assert "docs-orphan" not in cols["docs__repo"]._rows
+    assert "docs-live" in cols["docs__repo"]._rows
+    # Structured error surfaced (skip-with-error, never silent continue).
+    err_logs = [
+        r for r in cap
+        if r.get("event") == "gc_manifest_read_failed_skipping_collection"
+    ]
+    assert err_logs, f"missing structured error event; got {cap}"
+    assert err_logs[0]["collection"] == "code__repo"
+
+
 def test_prune_deleted_files_chunk_without_chunk_text_hash_skipped(tmp_path):
     """A T3 chunk that lacks ``chunk_text_hash`` metadata cannot be
     proved live by the manifest, BUT silently sweeping such chunks

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.link_generator import (
@@ -23,16 +21,6 @@ class TestRdrFilepathLinks:
         # nexus-i711w terminal deletion: the raw local Catalog this helper
         # built is gone; ActiveCatalog routes to the live catalog, no init.
         return ActiveCatalog()
-
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
 
     def test_filepath_linker_with_relative_paths(self, tmp_path: Path) -> None:
         """RDR with relative file_path resolves via resolve_path and generates links."""
@@ -89,16 +77,6 @@ class TestRdrFilepathLinks:
         count = generate_rdr_filepath_links(cat)
         assert count == 0
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
-
     def test_filepath_linker_idempotent(self, tmp_path: Path) -> None:
         """Running the linker twice produces no duplicate links."""
         repo = tmp_path / "myrepo"
@@ -148,16 +126,6 @@ class TestIncrementalRdrFilepathLinking:
         count = generate_rdr_filepath_links(cat, new_tumblers=[])
         assert count == 0
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
-
     def test_full_scan_when_new_tumblers_is_none(self, tmp_path: Path) -> None:
         """new_tumblers=None uses existing full-scan behavior."""
         repo = tmp_path / "myrepo"
@@ -169,16 +137,6 @@ class TestIncrementalRdrFilepathLinking:
         cat.register(owner, "catalog.py", content_type="code", file_path="src/catalog.py")
         count = generate_rdr_filepath_links(cat, new_tumblers=None)
         assert count == 1
-
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
 
     def test_incremental_only_scans_new_rdrs(self, tmp_path: Path) -> None:
         """With new_tumblers, only listed RDR tumblers are scanned."""
@@ -256,16 +214,6 @@ class TestProseFilepathLinks:
         # built is gone; ActiveCatalog routes to the live catalog, no init.
         return ActiveCatalog()
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
-
     def test_prose_doc_in_docs_dir_links_to_code(self, tmp_path: Path) -> None:
         repo = tmp_path / "myrepo"
         repo.mkdir()
@@ -302,16 +250,6 @@ class TestProseFilepathLinks:
         assert len(links) == 1
         assert str(links[0].to_tumbler) == str(code_tumbler)
         assert links[0].link_type == "implements"
-
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
 
     def test_prose_doc_in_non_source_root_dir_links(self, tmp_path: Path) -> None:
         """nexus-sob9 widening contract: a docs/ -> conexus/ reference (no
@@ -371,16 +309,6 @@ class TestProseFilepathLinks:
         count = generate_prose_filepath_links(cat)
         assert count == 0
         assert len(cat.links_from(prose_tumbler)) == 0
-
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
-
-    )
 
     def test_incremental_only_scans_new_prose(self, tmp_path: Path) -> None:
         """When ``new_tumblers`` lists only the new prose entry, only
