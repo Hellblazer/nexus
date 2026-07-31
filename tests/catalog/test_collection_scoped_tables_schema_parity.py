@@ -36,8 +36,19 @@ Two placement facts, both verified rather than assumed:
    ``<column name=...>`` attribute, so an attribute-scanning parser reports it absent.
 
    So this asks POSTGRES, via the engine substrate — which boots a real PG and lets
-   the engine apply every changelog. ``information_schema`` is ground truth: it cannot
-   drift from the schema, because it *is* the schema.
+   the engine apply every changelog. What columns EXIST is then ground truth: it
+   cannot drift from the schema, because it *is* the schema.
+
+SCOPE — WHAT "PARITY" MEANS HERE, AND WHAT IT DOES NOT
+-------------------------------------------------------
+The *existence* of columns is ground truth; WHICH of them count as collection
+references is still decided by a name pattern (``LIKE '%collection%'``). So this
+gate closes the case that actually bit us — a table added with a conventionally
+named collection column and never registered — and does NOT close the case of a
+collection reference that is named unconventionally or buried in JSONB. The
+residual is enumerated on ``_COLLECTION_COLUMN_PREDICATE``; read it before relying
+on a green run here as proof that rename re-homes everything, because it is not
+that proof.
 
 Non-vacuity is asserted explicitly in each direction; see ``test_parser_is_not_vacuous``.
 """
@@ -69,12 +80,25 @@ _CATALOG_REPOSITORY = (
 #:
 #: An enumerated vocabulary standing in for a universal is the failure shape behind
 #: every attempt in this arc (liveness for emptiness, identity for provenance, five
-#: tables for seventeen). A gate against that class must not be built on one. Ask the
-#: schema what exists; do not tell it what to look for.
+#: tables for seventeen). A pattern is strictly weaker evidence than an enumeration
+#: is, but it is still NAME-BASED, and honesty about that matters more than the
+#: rhetorical win of calling this "asking the schema".
 #:
-#: The cost is that unrelated ``%collection%`` columns surface here and must be
-#: documented in ``_DOCUMENTED_EXCLUSIONS``. That is the correct direction to fail:
-#: a spurious entry is loud and cheap, a missed column is silent and corrupting.
+#: WHAT THIS GATE STILL CANNOT SEE — the residual, stated so nobody reads the
+#: assertions as broader than they are:
+#:   * a scalar column holding a collection name WITHOUT "collection" in its name
+#:     (``corpus``, ``store``, ``owner_scope``, a bare ``name`` on a child table);
+#:   * a collection name nested inside JSONB, which is not a column at all — this
+#:     is not theoretical, it is ``migration_jobs`` below;
+#:   * a collection referenced indirectly, via an id that resolves to a name.
+#: The first class is the dangerous one, because it looks exactly like the columns
+#: this gate DOES catch. Closing it needs a value-shaped check (does any column hold
+#: a string matching a live collection name?) rather than a name-shaped one, which is
+#: a bigger and slower piece of work — not attempted here, and not pretended away.
+#:
+#: The cost of the pattern is that unrelated ``%collection%`` columns surface here and
+#: must be documented in ``_DOCUMENTED_EXCLUSIONS``. That is the correct direction to
+#: fail: a spurious entry is loud and cheap, a missed column is silent and corrupting.
 _COLLECTION_COLUMN_PREDICATE = "c.column_name LIKE '%collection%'"
 
 #: The list is deliberately smaller than the schema in exactly these places, and each
