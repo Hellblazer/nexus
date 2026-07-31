@@ -4615,27 +4615,27 @@ def traverse(
         if hasattr(n, "physical_collection") and n.physical_collection
     })
 
-    # Resolve chunk IDs from T3 for nodes that have a file_path.
+    # Resolve chunk IDs from each node's CATALOG MANIFEST.
+    #
+    # nexus-bm8dd: this used to ask T3 for `ids_for_source(collection,
+    # file_path)`. Chunk metadata has carried no source_path since RDR-102 D2
+    # removed it from the schema, so that where-filter matched nothing and every
+    # traverse returned ids=[] — silently, because the per-node except swallowed
+    # it and an empty list is a legitimate answer. The manifest is the addressing
+    # RDR-108 replaced it with: documents.tumbler -> document_chunks.chash, one
+    # batched round-trip for every node instead of one T3 query per node.
     chunk_ids: list[str] = []
-    candidates = [
-        (getattr(n, "file_path", "") or "", getattr(n, "physical_collection", "") or "")
-        for n in nodes
-        if (getattr(n, "file_path", "") or "") and (getattr(n, "physical_collection", "") or "")
-    ]
-    if candidates:
+    if tumblers:
         try:
-            t3 = _get_t3()
             seen_ids: set[str] = set()
-            for fp, pc in candidates:
-                try:
-                    for cid in t3.ids_for_source(pc, fp):
-                        if cid not in seen_ids:
-                            seen_ids.add(cid)
-                            chunk_ids.append(cid)
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    pass  # degrade gracefully per node
+            for rows in catalog.get_manifests(tumblers).values():
+                for row in rows:
+                    chash = getattr(row, "chash", "") or ""
+                    if chash and chash not in seen_ids:
+                        seen_ids.add(chash)
+                        chunk_ids.append(chash)
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass  # T3 unavailable — ids stays empty
+            pass  # catalog manifest unavailable — ids stays empty
 
     return {"tumblers": tumblers, "ids": chunk_ids, "collections": collections}
 

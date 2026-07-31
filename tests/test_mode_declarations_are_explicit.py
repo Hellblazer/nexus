@@ -168,7 +168,10 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # these constants to match whatever the sets happen to contain.
 # 37 -> 36 (nexus-i711w terminal deletion): the TestSQLiteCatalogNewMethods
 # nodeid died with the SQLite parity arm. SHRINK, downward-only.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 36
+# nexus-bm8dd (2026-07-31): 36 -> 35. TestUpdateSourcePath was deleted with the
+# retired source_path-keyed methods, so its exclusion pointed at nothing. Removing
+# a dead slot is not a new grant.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 35
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

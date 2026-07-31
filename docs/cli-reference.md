@@ -819,7 +819,7 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
 ```
 
-Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
+Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -965,13 +965,18 @@ Owner resolution: `--owner` overrides; otherwise the owner is looked up from the
 
 T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
 
-### nx t3 prune-stale
+### nx t3 prune-stale — RETIRED in 7.0.0
+
+Exits with an error explaining what to run instead. It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
+
+Use the catalog-native pipeline, which does strictly more:
 
 ```
-nx t3 prune-stale [-c COLLECTION] [--no-dry-run --confirm]
+nx catalog prune-stale [-c COLLECTION] --no-dry-run --confirm   # drop stale documents
+nx t3 gc [-c COLLECTION] --no-dry-run --yes                     # collect their chunks
 ```
 
-Sweep T3 chunks whose `source_path` is missing from disk. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete.
+Prune first, GC second. Deleting chunks while their document still references them leaves the dangling manifest `nx doctor` flags (nexus-5xn3k).
 
 ### nx t3 gc
 

@@ -95,7 +95,7 @@ def test_store_expire_service_mode_real_client(runner, real_client, monkeypatch)
     assert deletes == [{"collection": _KNOWLEDGE, "ids": ["dead"]}]
 
 
-# ── nx doctor --fix-paths (update_source_path, nexus-h8rf6.6) ────────────────
+# ── nx doctor --fix-paths (catalog-only since nexus-bm8dd) ──────────────────
 
 
 class TestFixPathsRealClient:
@@ -106,18 +106,24 @@ class TestFixPathsRealClient:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
-    def test_fix_paths_service_mode_real_client(
+    def test_fix_paths_service_mode_repairs_the_catalog_without_touching_t3(
         self, tmp_path, runner, real_client, monkeypatch,
     ):
+        """nexus-bm8dd. This test used to prove fix-paths rewrote chunk
+        metadata, and it did so by having its own fake_post RETURN chunks
+        carrying ``source_path`` — a key RDR-102 D2 removed from the schema, so
+        the real server can never return it. It asserted "2 T3 chunks updated"
+        against numbers it had manufactured.
+
+        The repair is, and now only claims to be, the catalog row. The
+        vector transport must not be touched at all.
+        """
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         cat_dir = tmp_path / "catalog"
         # nexus-aqbrk: seed through the ACTIVE catalog — doctor --fix-paths reads
-        # via reader.docs_with_absolute_paths(), which doctor.py documents as
-        # "uniform across SQLite and service mode", so a local-only seed left the
+        # via reader.docs_with_absolute_paths(), so a local-only seed left the
         # service catalog empty ("No absolute file_path entries found").
-        # nexus-i711w terminal deletion: the ``Catalog.init`` SQLite-arm seeding
-        # died with the local catalog; the factories are service-only.
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
         cat = ActiveCatalog()
         owner = cat.register_owner(
@@ -129,23 +135,10 @@ class TestFixPathsRealClient:
             file_path=abs_path, physical_collection=_CODE,
         )
 
-        posted = []
-
         def fake_post(path, body, **kw):
-            posted.append((path, body))
-            if path == "/v1/vectors/get":
-                if body["offset"] > 0:
-                    return {"ids": [], "metadatas": []}
-                return {
-                    "ids": ["c1", "c2"],
-                    "metadatas": [
-                        {"source_path": abs_path, "title": "foo"},
-                        {"source_path": abs_path},
-                    ],
-                }
-            if path == "/v1/vectors/update-metadata":
-                return {}
-            raise AssertionError(f"unexpected path {path}")
+            raise AssertionError(
+                f"fix-paths must not call the vector service; got {path}"
+            )
 
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         with (
@@ -155,12 +148,11 @@ class TestFixPathsRealClient:
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0, result.output
         assert "Fixed 1" in result.output
-        assert "2 T3 chunks updated" in result.output
-        updates = [b for p, b in posted if p == "/v1/vectors/update-metadata"]
-        assert updates and updates[0]["ids"] == ["c1", "c2"]
-        assert all(
-            m["source_path"] == "src/foo.py" for m in updates[0]["metadatas"]
-        )
+        # NON-VACUITY: the repair really landed on the catalog row.
+        entry = ActiveCatalog().resolve(str(cat.list_by_collection(_CODE)[0].tumbler))
+        assert entry is not None and entry.file_path == "src/foo.py"
+        # And no chunk-level claim is made.
+        assert "chunks updated" not in result.output
 
 
 # ── nx t3 gc (list_chunks_with_metadata + delete_by_chunk_ids, h8rf6.7) ──────
@@ -213,39 +205,20 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
     assert deletes == [{"collection": _KNOWLEDGE, "ids": ["orphan1"]}]
 
 
-# ── nx t3 prune-stale (list_unique_source_paths, nexus-h8rf6.7) ──────────────
+# ── nx t3 prune-stale (RETIRED, nexus-bm8dd) ─────────────────────────────────
 
 
-def test_t3_prune_stale_service_mode_real_client(
-    tmp_path, runner, real_client, monkeypatch,
-):
-    """Stale-path sweep through the real client: one live file, one ghost;
-    the ghost's chunks are deleted via delete_by_source."""
-    real_file = tmp_path / "real.md"
-    real_file.write_text("hello")
-    ghost = tmp_path / "ghost.md"  # never created
+def test_t3_prune_stale_service_mode_refuses(tmp_path, runner, real_client, monkeypatch):
+    """nexus-bm8dd. The predecessor of this test drove a "real client" sweep
+    whose own fake_post returned chunk metadata containing ``source_path`` —
+    a key RDR-102 D2 removed, so the real server could never return it — and
+    then asserted "deleted 2 chunk(s)". It passed while the verb deleted
+    nothing on every real corpus.
 
+    The verb is retired. It must refuse, and must not reach the transport.
+    """
     def fake_post(path, body, **kw):
-        if path == "/v1/vectors/get":
-            if body.get("where"):
-                # delete_by_source's id resolution for the ghost path
-                assert body["where"] == {"source_path": str(ghost)}
-                if body["offset"] > 0:
-                    return {"ids": [], "metadatas": []}
-                return {"ids": ["g1", "g2"]}
-            if body["offset"] > 0:
-                return {"ids": [], "metadatas": []}
-            return {
-                "ids": ["r1", "g1", "g2"],
-                "metadatas": [
-                    {"source_path": str(real_file)},
-                    {"source_path": str(ghost)},
-                    {"source_path": str(ghost)},
-                ],
-            }
-        if path == "/v1/vectors/store-delete":
-            return {"deleted": len(body["ids"])}
-        raise AssertionError(f"unexpected path {path}")
+        raise AssertionError(f"retired verb must not call the service; got {path}")
 
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
     with patch("nexus.db.make_t3", return_value=real_client):
@@ -253,9 +226,11 @@ def test_t3_prune_stale_service_mode_real_client(
             main,
             ["t3", "prune-stale", "-c", _KNOWLEDGE, "--no-dry-run", "--confirm"],
         )
-    assert result.exit_code == 0, result.output
-    assert "deleted 2 chunk(s)" in result.output
-    assert str(real_file) not in result.output
+    assert result.exit_code != 0, result.output
+    assert "RETIRED" in result.output
+    assert "nx catalog prune-stale" in result.output
+    # It must not read as a completed sweep.
+    assert "chunk(s)" not in result.output
 
 
 # ── doctor model-drift probe (collection_metadata, nexus-h8rf6.8) ────────────

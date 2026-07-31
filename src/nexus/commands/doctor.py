@@ -1415,12 +1415,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         # Post-nexus-nzyrh owner.repo_root is always populated for
         # freshly-registered owners; legacy owners with empty
         # repo_root surface via the WARN below for re-index targeting.
-        t3_db = None
-        if not dry_run:
-            t3_db = make_t3()
-
+        # nexus-bm8dd: no T3 handle here any more. fix-paths repairs a
+        # document's path, which lives entirely on the catalog row; the T3
+        # source_path it also tried to rewrite has not existed since RDR-102 D2.
         fixed = 0
-        chunks_updated = 0
         for tumbler_str, file_path, physical_collection in rows:
             tumbler = Tumbler.parse(tumbler_str)
             owner_prefix = str(tumbler.owner_address())
@@ -1452,14 +1450,16 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             if dry_run:
                 click.echo(f"  [dry-run] {tumbler_str}: {file_path} -> {new_rel}")
             else:
-                # Update T3 source_path
-                n = 0
-                if physical_collection:
-                    n = t3_db.update_source_path(physical_collection, file_path, new_rel)
-                chunks_updated += n
-                # Update catalog entry
+                # nexus-bm8dd: the T3 leg is GONE. This used to call
+                # t3_db.update_source_path(...) first and report its count as
+                # "(n chunks)". Chunk metadata has carried no source_path since
+                # RDR-102 D2 removed it from the schema, so that call rewrote
+                # nothing and n was always 0 — the message told the operator a
+                # repair had a chunk-level component it never had. A document's
+                # path lives on its CATALOG row, and the line below is the whole
+                # fix.
                 writer.update(tumbler, file_path=new_rel)
-                click.echo(f"  fixed: {tumbler_str}: {file_path} -> {new_rel} ({n} chunks)")
+                click.echo(f"  fixed: {tumbler_str}: {file_path} -> {new_rel}")
 
             fixed += 1
 
@@ -1470,7 +1470,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         if dry_run:
             click.echo(f"\n{fixed} entries would be fixed. Use --fix-paths without --dry-run to apply.")
         else:
-            click.echo(f"\nFixed {fixed} entries ({chunks_updated} T3 chunks updated).")
+            click.echo(f"\nFixed {fixed} entries.")
         return
 
     # ── Health check path — delegates to nexus.health ─────────────────────────

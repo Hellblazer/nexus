@@ -520,8 +520,13 @@ class TestFixPaths:
             ("repo", "abc12345", str(repo_dir),
              str(repo_dir / "src" / "foo.py"), "code__test"),
         ])
+        # nexus-bm8dd: fix-paths no longer touches T3 at all. It used to call
+        # update_source_path first and report the count as "(n chunks)"; chunk
+        # metadata has carried no source_path since RDR-102 D2, so that call
+        # rewrote nothing and n was always 0. This test asserted it was CALLED —
+        # a pin on the call, never on its effect, which is how the dead leg
+        # survived. The repair is entirely the catalog row.
         mock_t3 = MagicMock(spec=HttpVectorClient)
-        mock_t3.update_source_path.return_value = 5
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
             patch("nexus.db.make_t3", return_value=mock_t3),
@@ -530,7 +535,10 @@ class TestFixPaths:
         assert result.exit_code == 0
         assert "Fixed 1" in result.output
         assert only_document().file_path == "src/foo.py"
-        mock_t3.update_source_path.assert_called_once()
+        # The path repair landed WITHOUT any T3 call — and the output must not
+        # advertise a chunk-level component the command does not have.
+        mock_t3.update_source_path.assert_not_called()
+        assert "chunks updated" not in result.output
 
     def test_fix_paths_skips_curator(self, tmp_path, runner):
         cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
@@ -553,6 +561,9 @@ class TestFixPaths:
             f"seed did not land; the skip assertion below would be vacuous "
             f"(got {seeded.file_path!r})"
         )
+        # nexus-bm8dd: T3 is not touched on ANY fix-paths path now, so this
+        # assertion no longer distinguishes "skipped the curator" by itself —
+        # the seed check above is what carries it.
         mock_t3.update_source_path.assert_not_called()
 
     def test_fix_paths_idempotent(self, tmp_path, runner):

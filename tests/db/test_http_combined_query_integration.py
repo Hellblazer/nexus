@@ -777,3 +777,22 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
         "REPEAT /import/chunk call — the import seam's ON CONFLICT DO "
         f"UPDATE branch broke the collection stamp. Rows: {rows2!r}"
     )
+
+
+# ── nexus-bm8dd PROBE (temporary) ────────────────────────────────────────────
+
+def test_bm8dd_probe_ids_for_source(cat_client, vec_client):
+    import hashlib
+    src = "/probe/bm8dd/doc.md"
+    text = "bm8dd probe chunk body alpha beta gamma"
+    chash = hashlib.sha256(text.encode()).hexdigest()
+    vec_client.upsert_chunks(
+        _COLLECTION, [chash], [text],
+        metadatas=[{"source_path": src, "kind": "bm8dd-probe"}],
+    )
+    got = vec_client.ids_for_source(_COLLECTION, src)
+    print(f"\n[bm8dd-probe] ids_for_source -> {got!r} (expected [{chash!r}])")
+    deleted = vec_client.delete_by_source(_COLLECTION, src)
+    print(f"[bm8dd-probe] delete_by_source -> {deleted!r}")
+    assert got == [chash]
+    assert deleted == 1

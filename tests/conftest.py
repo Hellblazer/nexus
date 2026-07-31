@@ -1101,7 +1101,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/catalog/test_docs_for_chashes_live_content.py::TestBuildStalenessCacheLiveContent::test_nonzero_docs_after_index_like_write",
     "tests/test_http_vector_client_parity.py::TestExpire::test_expire_deletes_only_expired_knowledge_rows",
     "tests/test_http_vector_client_parity.py::TestExpire::test_expire_no_knowledge_collections_returns_zero",
-    "tests/test_http_vector_client_parity.py::TestUpdateSourcePath::test_rewrites_matching_rows_and_returns_count",
     "tests/test_http_vector_client_parity.py::TestCollectionMetadata::test_returns_t3_parity_keys",
     #
     # nexus-gc2ze + nexus-c9xr2/u37lw wave (2026-07-04): all

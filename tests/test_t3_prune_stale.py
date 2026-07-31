@@ -6,18 +6,26 @@ RDR-090 P1.4. Tests use a real T3Database backed by chromadb's
 EphemeralClient + DefaultEmbeddingFunction so we exercise the full
 delete-by-source machinery without Cloud credentials.
 
+nexus-bm8dd (2026-07-31): the VERB is RETIRED. It swept chunks by their
+``source_path`` metadata, and RDR-102 D2 hard-removed that key from the chunk
+schema — ``make_chunk_metadata`` raises ``TypeError`` if a caller passes it — so
+the sweep matched nothing on any collection the product actually writes and
+reported a clean "0 stale" regardless. The five CLI tests that pinned its
+reporting and deletion behaviour are replaced by pins on the retirement itself.
+
+The three ``list_unique_source_paths`` tests below survive and still pass, but
+read them for what they are: they exercise ``T3Database`` (the legacy Chroma
+class, which ``make_t3()`` has not returned since nexus-i711w) against chunks
+whose ``source_path`` this file writes BY HAND via ``col.add``. They prove the
+Chroma method does what it says; they are not evidence that any chunk in a real
+collection carries the key. They go with the Chroma leg in the 7.0.0 wave.
+
 Contracts pinned here:
 
-  - ``list_unique_source_paths`` deduplicates across multi-chunk
-    same-source documents and skips empty/missing source_path values.
-  - ``--dry-run`` (default) reports stale paths and chunk counts but
-    does not delete anything.
-  - ``--no-dry-run --confirm`` actually deletes; the two-flag dance
-    is required.
-  - ``--no-dry-run`` alone is treated as report-only (defensive).
-  - ``--collection`` scopes to one collection.
-  - Live source_paths (file present on disk) are never flagged.
-  - Empty source_path (MCP-put chunks) never flagged.
+  - ``nx t3 prune-stale`` exits non-zero, names the bead, and names the
+    replacement pipeline instead of running a sweep that cannot work.
+  - ``list_unique_source_paths`` (T3Database/Chroma only) deduplicates across
+    multi-chunk same-source documents and skips empty/missing values.
 """
 from __future__ import annotations
 
@@ -107,108 +115,56 @@ def test_list_unique_source_paths_missing_collection(t3_db):
 # ── nx t3 prune-stale CLI (integration via patched make_t3) ───────────────
 
 
-def test_prune_stale_dry_run_reports_stale_only(t3_db, tmp_path, runner):
-    """Default dry-run reports stale source_paths + chunk counts; live
-    paths and empty source_path chunks are not flagged.
+
+# ── the verb itself (nexus-bm8dd: retired) ────────────────────────────────
+
+
+def test_prune_stale_exits_nonzero_instead_of_sweeping(t3_db, tmp_path, runner):
+    """The old verb's worst property was that it SUCCEEDED. It printed
+    "Summary: would delete 0 chunk(s)" on a corpus with deleted files, which an
+    operator reads as "checked, nothing stale" rather than "could not check".
+
+    Seed a chunk whose source file does not exist — the exact input the sweep
+    was for — and assert the verb refuses rather than reporting a clean result.
     """
-    coll = "knowledge__test_dryrun"
-    real = tmp_path / "real.md"
-    real.write_text("hello")
-    stale = tmp_path / "ghost.md"  # never created
-    _seed_chunk(t3_db, collection=coll, chunk_id="r1", content="x", source_path=str(real))
-    _seed_chunk(t3_db, collection=coll, chunk_id="s1", content="y", source_path=str(stale))
-    _seed_chunk(t3_db, collection=coll, chunk_id="s2", content="z", source_path=str(stale))
-
-    with patch("nexus.db.make_t3", return_value=t3_db):
-        result = runner.invoke(
-            main, ["t3", "prune-stale", "-c", coll],
-        )
-    assert result.exit_code == 0, result.output
-    assert str(stale) in result.output
-    assert "2 chunk(s)" in result.output
-    assert str(real) not in result.output
-    assert "would delete" in result.output  # default report-only
-
-    # Live chunk + stale chunks all still present (dry-run)
-    col = t3_db._client.get_collection(coll)
-    assert col.count() == 3
-
-
-def test_prune_stale_no_confirm_treated_as_report_only(t3_db, tmp_path, runner):
-    """``--no-dry-run`` without ``--confirm`` is the safer middle path:
-    print the would-delete report, but do not modify T3.
-    """
-    coll = "knowledge__test_no_confirm"
-    stale = tmp_path / "ghost.md"
-    _seed_chunk(t3_db, collection=coll, chunk_id="s1", content="x", source_path=str(stale))
-
-    with patch("nexus.db.make_t3", return_value=t3_db):
-        result = runner.invoke(
-            main, ["t3", "prune-stale", "-c", coll, "--no-dry-run"],
-        )
-    assert result.exit_code == 0
-    assert "Add --confirm" in result.output
-    assert "would delete" in result.output
-    assert t3_db._client.get_collection(coll).count() == 1
-
-
-def test_prune_stale_no_dry_run_with_confirm_actually_deletes(
-    t3_db, tmp_path, runner,
-):
-    """``--no-dry-run --confirm`` removes the stale chunks; live ones survive."""
-    coll = "knowledge__test_delete"
-    real = tmp_path / "real.md"
-    real.write_text("hi")
-    stale = tmp_path / "ghost.md"
-    _seed_chunk(t3_db, collection=coll, chunk_id="r1", content="x", source_path=str(real))
-    _seed_chunk(t3_db, collection=coll, chunk_id="s1", content="y", source_path=str(stale))
-    _seed_chunk(t3_db, collection=coll, chunk_id="s2", content="z", source_path=str(stale))
-
-    with patch("nexus.db.make_t3", return_value=t3_db):
-        result = runner.invoke(
-            main,
-            ["t3", "prune-stale", "-c", coll, "--no-dry-run", "--confirm"],
-        )
-    assert result.exit_code == 0, result.output
-    assert "deleted 2 chunk(s)" in result.output
-
-    col = t3_db._client.get_collection(coll)
-    assert col.count() == 1
-    surviving = col.get()
-    assert surviving["ids"] == ["r1"]
-
-
-def test_prune_stale_no_stale_paths_emits_clean_summary(
-    t3_db, tmp_path, runner,
-):
-    """When every source_path is live, the summary reads 0/0 cleanly."""
-    coll = "knowledge__test_clean"
-    real = tmp_path / "doc.md"
-    real.write_text("hi")
-    _seed_chunk(t3_db, collection=coll, chunk_id="c1", content="x", source_path=str(real))
-
-    with patch("nexus.db.make_t3", return_value=t3_db):
-        result = runner.invoke(main, ["t3", "prune-stale", "-c", coll])
-    assert result.exit_code == 0
-    assert "0 chunk(s)" in result.output
-    assert "0 stale path(s)" in result.output
-
-
-def test_prune_stale_no_collections_message(t3_db, runner):
-    """Empty Chroma → friendly 'no collections' message.
-
-    chromadb.EphemeralClient is a process-singleton-ish, so other
-    tests' collections may still be present. We delete all collections
-    at the start so this test exercises the truly-empty path.
-    """
-    for raw in list(t3_db._client.list_collections()):
-        name = raw if isinstance(raw, str) else getattr(raw, "name", str(raw))
-        try:
-            t3_db._client.delete_collection(name)
-        except Exception:
-            pass
+    missing = tmp_path / "gone.md"
+    assert not missing.exists()  # non-vacuity: this IS the stale case
+    _seed_chunk(
+        t3_db, collection="docs__bm8dd", chunk_id="c1",
+        content="body of a document whose file was deleted",
+        source_path=str(missing),
+    )
 
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(main, ["t3", "prune-stale"])
-    assert result.exit_code == 0
-    assert "No collections" in result.output
+
+    assert result.exit_code != 0, result.output
+    # It must NOT look like a completed sweep.
+    assert "Summary:" not in result.output
+    assert "0 chunk(s)" not in result.output
+
+
+def test_prune_stale_message_names_the_cause_and_the_replacement(t3_db, runner):
+    """A retired verb that does not say what to run instead just moves the
+    operator's problem. Pin both halves of the message."""
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(main, ["t3", "prune-stale"])
+
+    assert "nexus-bm8dd" in result.output
+    assert "source_path" in result.output, "must name WHY it cannot work"
+    assert "nx catalog prune-stale" in result.output
+    assert "nx t3 gc" in result.output
+
+
+def test_prune_stale_refuses_under_every_flag_combination(t3_db, runner):
+    """Including the destructive one. --no-dry-run --confirm previously deleted;
+    it must not now silently succeed as a no-op."""
+    for argv in (
+        ["t3", "prune-stale", "--no-dry-run"],
+        ["t3", "prune-stale", "--no-dry-run", "--confirm"],
+        ["t3", "prune-stale", "-c", "docs__bm8dd", "--no-dry-run", "--confirm"],
+    ):
+        with patch("nexus.db.make_t3", return_value=t3_db):
+            result = runner.invoke(main, argv)
+        assert result.exit_code != 0, f"{argv} -> {result.output}"
+        assert "RETIRED" in result.output

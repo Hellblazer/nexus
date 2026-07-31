@@ -730,115 +730,72 @@ class TestGetEmbeddingsParam:
         assert calls[0]["collection"] == "knowledge__nexus__minilm-l6-v2-384__v1"
 
 
-# ── Behavior: delete_by_source / ids_for_source (nexus-vhyua) ────────────────
+# ── Behavior: the source_path-keyed methods are RETIRED (nexus-bm8dd) ────────
+#
+# TestDeleteBySource / TestUpdateSourcePath used to live here, pinning the wire
+# behaviour of ids_for_source, delete_by_source and update_source_path: their
+# pagination, their 404 handling, their mid-pagination re-raise. Every one of
+# those pins passed, and the methods were dead the whole time.
+#
+# They asserted what the CLIENT SENT. RDR-102 D2 had hard-removed source_path
+# from the chunk schema, so what came BACK was always empty, and each method
+# dutifully returned its no-rows value — [] / 0 / [] / 0 — which is
+# indistinguishable from "there was nothing to do". `nx t3 prune-stale`
+# reported "0 stale" on every corpus, `nx doctor fix-paths` reported "0 T3
+# chunks updated" as if that were a result, and the documented "delete this
+# document's chunks and re-index" recovery deleted nothing.
+#
+# The methods now raise. These pins replace the wire-shape ones, and they are
+# deliberately about the RAISE, not the message: a test that asserts a method
+# still paginates correctly is exactly what let this run for months.
 
 
-class TestDeleteBySource:
-    """nexus-vhyua: delete_by_source was a NotImplementedError stub, making
-    ``nx t3 prune-stale`` silently no-op in service mode. It is now built from
-    the existing /v1/vectors/get (where-filter) + /v1/vectors/store-delete
-    endpoints. Param name ``collection_name`` matches T3Database (nexus-7zuzz).
+class TestSourcePathMethodsRetired:
+    """nexus-bm8dd: the four source_path-keyed methods must FAIL LOUD.
+
+    Returning the empty/zero value was the defect — it let callers, and their
+    tests, read "cannot look" as "looked, found nothing".
     """
 
-    def test_ids_for_source_paginates_and_collects(self, monkeypatch):
-        # Two pages (300 then 2) -> single flat id list; second short page ends it.
-        pages = [
-            {"ids": [f"id{i}" for i in range(300)]},
-            {"ids": ["id300", "id301"]},
-        ]
-        calls = []
+    @staticmethod
+    def _client(monkeypatch) -> HttpVectorClient:
+        # No transport needed: the guard is the first statement in each method,
+        # so nothing may reach the wire. If a future edit moves the raise below
+        # a _post, these tests fail on the network instead of passing — which is
+        # the correct signal.
+        return HttpVectorClient()
 
-        def fake_post(path, body, **kw):
-            # Index by call order, not a hard-coded page size (robust if the
-            # quota constant changes).
-            page = pages[len(calls)]
-            calls.append((path, body))
-            return page
+    def test_ids_for_source_raises(self, monkeypatch):
+        c = self._client(monkeypatch)
+        with pytest.raises(NotImplementedError) as e:
+            c.ids_for_source("code__x__minilm-l6-v2-384__v1", "/src/foo.py")
+        assert "source_path" in str(e.value)
+        assert "nexus-bm8dd" in str(e.value)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client = HttpVectorClient()
-        ids = client.ids_for_source(
-            collection_name="code__nexus__minilm-l6-v2-384__v1",
-            source_path="/src/foo.py",
-        )
-        assert len(ids) == 302
-        # where-filter is by source_path; param key is collection_name's value.
-        assert calls[0][1]["where"] == {"source_path": "/src/foo.py"}
-        assert all(c[0] == "/v1/vectors/get" for c in calls)
+    def test_delete_by_source_raises(self, monkeypatch):
+        c = self._client(monkeypatch)
+        with pytest.raises(NotImplementedError):
+            c.delete_by_source("code__x__minilm-l6-v2-384__v1", "/src/foo.py")
 
-    def test_ids_for_source_404_first_page_returns_empty(self, monkeypatch):
-        # Collection-not-found (404 on page 0) is the ONLY swallowed case.
-        from nexus.db.http_vector_client import VectorServiceError
+    def test_update_source_path_raises(self, monkeypatch):
+        c = self._client(monkeypatch)
+        with pytest.raises(NotImplementedError):
+            c.update_source_path("code__x__minilm-l6-v2-384__v1", "/old.py", "/new.py")
 
-        def fake_post(path, body, **kw):
-            raise VectorServiceError("not found", code=404)
+    def test_list_unique_source_paths_raises(self, monkeypatch):
+        c = self._client(monkeypatch)
+        with pytest.raises(NotImplementedError):
+            c.list_unique_source_paths("code__x__minilm-l6-v2-384__v1")
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client = HttpVectorClient()
-        assert client.ids_for_source("missing-col", "/src/foo.py") == []
-
-    def test_ids_for_source_mid_pagination_error_reraises(self, monkeypatch):
-        # A 500 on page 2 (after ids collected) must NOT be masked as "no chunks"
-        # — else delete_by_source would under-delete and report success.
-        from nexus.db.http_vector_client import VectorServiceError
-
-        def fake_post(path, body, **kw):
-            if body["offset"] == 0:
-                return {"ids": [f"id{i}" for i in range(300)]}
-            raise VectorServiceError("server error", code=500)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client = HttpVectorClient()
-        with pytest.raises(VectorServiceError):
-            client.ids_for_source("code__nexus__minilm-l6-v2-384__v1", "/src/foo.py")
-
-    def test_delete_by_source_deletes_resolved_ids(self, monkeypatch):
-        posted = []
-
-        def fake_post(path, body, **kw):
-            posted.append((path, body))
-            if path == "/v1/vectors/get":
-                # one short page of 3 ids
-                return {"ids": ["a", "b", "c"]}
-            return {"deleted": len(body["ids"])}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client = HttpVectorClient()
-        n = client.delete_by_source(
-            collection_name="code__nexus__minilm-l6-v2-384__v1",
-            source_path="/src/foo.py",
-        )
-        assert n == 3
-        delete_calls = [b for p, b in posted if p == "/v1/vectors/store-delete"]
-        assert delete_calls and delete_calls[0]["ids"] == ["a", "b", "c"]
-
-    def test_delete_by_source_no_ids_is_noop(self, monkeypatch):
-        posted = []
-
-        def fake_post(path, body, **kw):
-            posted.append(path)
-            return {"ids": []}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client = HttpVectorClient()
-        n = client.delete_by_source(
-            collection_name="c", source_path="/none",
-        )
-        assert n == 0
-        assert "/v1/vectors/store-delete" not in posted  # no delete attempted
-
-    def test_delete_by_source_collection_name_kwarg_no_typeerror(self, monkeypatch):
-        # Param-name parity guard (nexus-7zuzz): collection_name must be accepted.
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda *a, **kw: {"ids": []},
-        )
-        client = HttpVectorClient()
-        # Must NOT raise TypeError (wrong param) or NotImplementedError (old stub).
-        assert client.delete_by_source(
-            collection_name="code__nexus__minilm-l6-v2-384__v1",
-            source_path="/src/foo.py",
-        ) == 0
+    def test_the_message_names_the_replacement_addressing(self, monkeypatch):
+        """An operator or a future caller hitting this needs to be told what
+        replaced it, not merely that it is gone."""
+        c = self._client(monkeypatch)
+        with pytest.raises(NotImplementedError) as e:
+            c.list_unique_source_paths("c")
+        msg = str(e.value)
+        assert "manifest" in msg
+        assert "list_by_collection" in msg
 
 
 class TestExpire:
@@ -951,90 +908,16 @@ class TestExpire:
             HttpVectorClient().expire()
 
 
-class TestUpdateSourcePath:
-    """nexus-h8rf6.6: update_source_path was missing entirely — `nx doctor
-    fix-paths` (non-dry-run) crashed with AttributeError on the first row in
-    service mode (doctor.py calls it per-row with no guard). Built from the
-    where-filter get (ids_for_source shape) + update_chunks, per the bead.
-    """
-
-    def test_rewrites_matching_rows_and_returns_count(self, monkeypatch):
-        posted = []
-
-        def fake_post(path, body, **kw):
-            posted.append((path, body))
-            if path == "/v1/vectors/get":
-                if body["offset"] > 0:
-                    return {"ids": [], "metadatas": []}
-                return {
-                    "ids": ["a", "b"],
-                    "metadatas": [
-                        {"source_path": "/old.py", "title": "keep-me"},
-                        {"source_path": "/old.py"},
-                    ],
-                }
-            return {}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        n = HttpVectorClient().update_source_path(
-            collection_name="code__nexus-1-1__voyage-code-3__v1",
-            old_path="/old.py",
-            new_path="/new.py",
-        )
-        assert n == 2
-        gets = [b for p, b in posted if p == "/v1/vectors/get"]
-        assert gets[0]["where"] == {"source_path": "/old.py"}
-        updates = [b for p, b in posted if p == "/v1/vectors/update-metadata"]
-        assert updates and updates[0]["ids"] == ["a", "b"]
-        # other metadata keys survive; only source_path is rewritten
-        assert updates[0]["metadatas"][0] == {
-            "source_path": "/new.py", "title": "keep-me",
-        }
-        assert updates[0]["metadatas"][1] == {"source_path": "/new.py"}
-
-    def test_no_matches_returns_zero_without_update(self, monkeypatch):
-        posted = []
-
-        def fake_post(path, body, **kw):
-            posted.append(path)
-            return {"ids": [], "metadatas": []}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        n = HttpVectorClient().update_source_path("c", "/old.py", "/new.py")
-        assert n == 0
-        assert "/v1/vectors/update-metadata" not in posted
-
-    def test_missing_collection_returns_zero(self, monkeypatch):
-        # T3Database parity: _ChromaNotFoundError -> 0. Service: 404 -> 0.
-        from nexus.db.http_vector_client import VectorServiceError
-
-        def fake_post(path, body, **kw):
-            raise VectorServiceError("not found", code=404)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        assert HttpVectorClient().update_source_path("gone", "/o", "/n") == 0
-
-    def test_mid_pagination_error_reraises(self, monkeypatch):
-        from nexus.db.http_vector_client import VectorServiceError
-
-        def fake_post(path, body, **kw):
-            if body["offset"] == 0:
-                return {
-                    "ids": [f"id{i}" for i in range(300)],
-                    "metadatas": [{"source_path": "/old.py"}] * 300,
-                }
-            raise VectorServiceError("server error", code=500)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        with pytest.raises(VectorServiceError):
-            HttpVectorClient().update_source_path("c", "/old.py", "/new.py")
-
-
 class TestT3GcPrimitives:
     """nexus-h8rf6.7: delete_by_chunk_ids / list_unique_source_paths /
     list_chunks_with_metadata were missing — `nx t3 gc` and `nx t3
     prune-stale` degrade to silent no-ops in service mode (call sites are
     try/except-wrapped, so no traceback, just zero effect).
+
+    The two ``list_unique_source_paths`` cases MOVED to
+    TestSourcePathMethodsRetired (nexus-bm8dd): the method addresses a chunk
+    metadata key RDR-102 D2 removed, so it now raises. `nx t3 gc` never used
+    it — that was `nx t3 prune-stale`, which is retired.
     """
 
     def test_delete_by_chunk_ids_deletes_and_counts(self, monkeypatch):
@@ -1069,33 +952,6 @@ class TestT3GcPrimitives:
 
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         assert HttpVectorClient().delete_by_chunk_ids("gone", ["a"]) == 0
-
-    def test_list_unique_source_paths_dedupes_sorts_skips_empty(self, monkeypatch):
-        def fake_post(path, body, **kw):
-            if body["offset"] > 0:
-                return {"ids": [], "metadatas": []}
-            return {
-                "ids": ["1", "2", "3", "4"],
-                "metadatas": [
-                    {"source_path": "/b.py"},
-                    {"source_path": "/a.py"},
-                    {"source_path": "/b.py"},   # duplicate
-                    {"title": "mcp-note"},       # no source_path -> skipped
-                ],
-            }
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        paths = HttpVectorClient().list_unique_source_paths("c")
-        assert paths == ["/a.py", "/b.py"]
-
-    def test_list_unique_source_paths_missing_collection_empty(self, monkeypatch):
-        from nexus.db.http_vector_client import VectorServiceError
-
-        def fake_post(path, body, **kw):
-            raise VectorServiceError("not found", code=404)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        assert HttpVectorClient().list_unique_source_paths("gone") == []
 
     def test_list_chunks_with_metadata_yields_field_subset(self, monkeypatch):
         def fake_post(path, body, **kw):

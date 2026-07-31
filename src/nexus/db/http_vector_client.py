@@ -816,6 +816,33 @@ class _ServiceCollectionStub:
 # ── HttpVectorClient ─────────────────────────────────────────────────────────
 
 
+
+#: nexus-bm8dd: the four methods below address ``source_path`` in CHUNK metadata.
+#: RDR-102 D2 HARD-REMOVED that key from the chunk schema — it is not in
+#: ``metadata_schema.ALLOWED_TOP_LEVEL`` and ``make_chunk_metadata()`` raises
+#: ``TypeError`` if a caller passes it. So no chunk this codebase writes has
+#: carried a ``source_path`` since that change, every one of these where-filters
+#: matches nothing, and each returned its "no rows" value: ``[]``, ``0``, ``[]``,
+#: ``0``. Indistinguishable from "nothing to do".
+#:
+#: The damage is not the wasted call, it is the FALSE ALL-CLEAR:
+#: ``nx t3 prune-stale`` reported "0 stale" on every corpus, and the documented
+#: "delete this document's chunks and re-index" recovery silently deleted
+#: nothing. They now raise (no-silent-fallbacks directive).
+#:
+#: The replacement addressing is the catalog: a document's chunks are its
+#: manifest rows (``documents.tumbler -> document_chunks.doc_id ->
+#: document_chunks.chash``), and its path is ``resolve_path(tumbler)``. Use
+#: ``HttpCatalogClient.list_by_collection`` + ``get_manifests``.
+_SOURCE_PATH_RETIRED = (
+    "chunk metadata has carried no source_path since RDR-102 D2 removed it from "
+    "the schema, so this method can only ever match zero chunks (nexus-bm8dd). "
+    "Address a document's chunks through the catalog manifest instead: "
+    "HttpCatalogClient.list_by_collection() -> get_manifests() -> chashes, with "
+    "resolve_path(tumbler) for the on-disk path."
+)
+
+
 class HttpVectorClient:
     """Drop-in subset of ``T3Database`` that routes to the Java service.
 
@@ -1797,84 +1824,31 @@ class HttpVectorClient:
         raise NotImplementedError("delete_collection not implemented in HttpVectorClient")
 
     def ids_for_source(self, collection_name: str, source_path: str) -> list[str]:
-        """Return all chunk IDs for a given source path. Does not fetch content.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        Mirrors ``T3Database.ids_for_source``: paginates the service's
-        ``/v1/vectors/get`` where-filter endpoint at the 300-record quota and
-        returns an empty list when the collection does not exist (the service
-        returns no ids). Param name ``collection_name`` matches the oracle
-        (nexus-7zuzz).
+        Raises ``NotImplementedError``. See :data:`_SOURCE_PATH_RETIRED`: this
+        used to page ``/v1/vectors/get`` with ``where={"source_path": ...}``,
+        which has matched nothing since RDR-102 D2 removed the key from the
+        chunk schema — and returned ``[]``, which reads as "this source has no
+        chunks".
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        ids: list[str] = []
-        offset = 0
-        while True:
-            try:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": collection_name,
-                        "where": {"source_path": source_path},
-                        "include": [],
-                        "limit": page_limit,
-                        "offset": offset,
-                    },
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                # Match T3Database, which suppresses ONLY collection-not-found
-                # (404) and returns []. A 5xx / 422 / transport failure — or ANY
-                # error mid-pagination after ids were already collected — must
-                # NOT be masked as "no chunks": delete_by_source would then
-                # under-delete and report success, silently orphaning the
-                # unread chunks (review: over-broad catch). Re-raise so the
-                # prune-stale call site's except-clause reports SKIP loudly.
-                if exc.code == 404 and offset == 0:
-                    return []
-                raise
-            page = result.get("ids", []) or []
-            ids.extend(page)
-            if len(page) < page_limit:
-                break
-            offset += len(page)  # match T3Database oracle (not += page_limit)
-        return ids
+        raise NotImplementedError(
+            f"ids_for_source({collection_name!r}, {source_path!r}): {_SOURCE_PATH_RETIRED}"
+        )
 
     def delete_by_source(self, collection_name: str, source_path: str) -> int:
-        """Delete all chunks for a given source path; return the count deleted.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        nexus-vhyua: previously a NotImplementedError stub, which made
-        ``nx t3 prune-stale --no-dry-run`` print 'delete failed' per path and
-        silently do nothing in service mode (the post-P4a default). Now built
-        from existing primitives — ``ids_for_source`` (``/v1/vectors/get``
-        where-filter) + ``/v1/vectors/store-delete`` — so no new Java endpoint
-        is required. Param name ``collection_name`` matches
-        ``T3Database.delete_by_source`` (nexus-7zuzz).
-
-        Count semantics differ slightly from the oracle by design: T3Database
-        returns ``len(ids)`` (ids it asked to delete); this returns the sum of
-        the service's CONFIRMED ``deleted`` counts. They match unless a
-        concurrent delete already removed some — in which case the prune-stale
-        caller's ``deleted != len(ids)`` WARN correctly fires.
+        Raises ``NotImplementedError``. It returned ``0``, so the documented
+        "delete this document's chunks and re-index" recovery deleted nothing
+        and said so in a way indistinguishable from "there was nothing to
+        delete". Delete by chash instead: take the document's manifest rows from
+        ``HttpCatalogClient.get_manifests`` and pass them to
+        :meth:`delete_by_ids`.
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        ids = self.ids_for_source(collection_name, source_path)
-        if not ids:
-            return 0
-        # Batch at the 300-record write quota — a source with many chunks would
-        # otherwise exceed MAX_RECORDS_PER_WRITE in a single store-delete.
-        batch = QUOTAS.MAX_RECORDS_PER_WRITE
-        deleted = 0
-        for i in range(0, len(ids), batch):
-            result = _post(
-                "/v1/vectors/store-delete",
-                {"collection": collection_name, "ids": ids[i:i + batch]},
-                tenant=self._tenant,
-            )
-            deleted += int(result.get("deleted", 0))
-        return deleted
+        raise NotImplementedError(
+            f"delete_by_source({collection_name!r}, {source_path!r}): {_SOURCE_PATH_RETIRED}"
+        )
 
     def find_ids_by_title(self, collection: str, title: str) -> list[str]:
         """Return all chunk IDs whose title metadata exactly matches *title*.
@@ -1982,57 +1956,18 @@ class HttpVectorClient:
     def update_source_path(
         self, collection_name: str, old_path: str, new_path: str
     ) -> int:
-        """Rewrite source_path metadata for all chunks matching *old_path*.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        nexus-h8rf6.6: was missing entirely — ``nx doctor fix-paths``
-        (non-dry-run) crashed with ``AttributeError`` on the first row in
-        service mode (doctor.py calls it per-row with no guard). Built from
-        the where-filter get (:meth:`ids_for_source` shape) +
-        :meth:`update_chunks`; T3Database parity (returns count updated,
-        missing collection -> 0, idempotent). Matching rows are accumulated
-        across all pages BEFORE updating — updating mid-pagination would
-        shrink the where-match set and shift offsets.
+        Raises ``NotImplementedError``. There is nothing in a chunk to rewrite:
+        a document's path lives on its CATALOG row, which ``nx doctor
+        fix-paths`` already updates via ``writer.update(tumbler, file_path=...)``
+        on the line after it called this. The ``n`` chunks it reported repaired
+        was always 0.
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        ids: list[str] = []
-        metadatas: list[dict] = []
-        offset = 0
-        while True:
-            try:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": collection_name,
-                        "where": {"source_path": old_path},
-                        "include": ["metadatas"],
-                        "limit": page_limit,
-                        "offset": offset,
-                    },
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                # 404 on the first page = no such collection (T3 parity: 0).
-                # Mid-pagination failures must NOT be swallowed — the caller
-                # would under-update and report success.
-                if exc.code == 404 and offset == 0:
-                    return 0
-                raise
-            page_ids = result.get("ids", []) or []
-            page_metas = result.get("metadatas", []) or []
-            for doc_id, meta in zip(page_ids, page_metas):
-                ids.append(doc_id)
-                updated = dict(meta) if isinstance(meta, dict) else {}
-                updated["source_path"] = new_path
-                metadatas.append(updated)
-            offset += len(page_ids)
-            if len(page_ids) < page_limit:
-                break
-        if not ids:
-            return 0
-        self.update_chunks(collection_name, ids, metadatas)
-        return len(ids)
+        raise NotImplementedError(
+            f"update_source_path({collection_name!r}, {old_path!r} -> {new_path!r}): "
+            f"{_SOURCE_PATH_RETIRED}"
+        )
 
     def delete_by_chunk_ids(
         self, collection_name: str, chunk_ids: list[str],
@@ -2073,49 +2008,18 @@ class HttpVectorClient:
         return deleted
 
     def list_unique_source_paths(self, collection_name: str) -> list[str]:
-        """Return every distinct ``source_path`` value in *collection_name*.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        nexus-h8rf6.7: was missing — ``nx t3 prune-stale``'s staleness sweep
-        silently skipped every collection in service mode. Pages the plain
-        (no ``where``) ``/v1/vectors/get`` listing and dedupes locally, same
-        as T3Database. Empty/missing source_path values are skipped (MCP-put
-        chunks have no on-disk source by design). Missing collection -> [].
+        Raises ``NotImplementedError``. This one caused the worst of the
+        silences: it fed ``nx t3 prune-stale``'s sweep, and an empty list ended
+        the loop before it began, so the verb printed a clean "0 stale" on every
+        corpus regardless of how many indexed files had been deleted from disk.
+        The catalog answers this: ``HttpCatalogClient.list_by_collection`` gives
+        the documents, ``resolve_path(tumbler)`` gives each one's path.
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        seen: set[str] = set()
-        offset = 0
-        while True:
-            try:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": collection_name,
-                        "include": ["metadatas"],
-                        "limit": page_limit,
-                        "offset": offset,
-                    },
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                if exc.code == 404 and offset == 0:
-                    return []
-                raise
-            page_ids = result.get("ids", []) or []
-            page_metas = result.get("metadatas", []) or []
-            if not page_ids:
-                break
-            for meta in page_metas:
-                if not isinstance(meta, dict):
-                    continue
-                src = meta.get("source_path") or ""
-                if src:
-                    seen.add(src)
-            offset += len(page_ids)
-            if len(page_ids) < page_limit:
-                break
-        return sorted(seen)
+        raise NotImplementedError(
+            f"list_unique_source_paths({collection_name!r}): {_SOURCE_PATH_RETIRED}"
+        )
 
     def list_chunks_with_metadata(
         self,
