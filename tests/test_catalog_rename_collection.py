@@ -354,3 +354,80 @@ def test_rename_to_self_rejected(t3_db, active_catalog, runner):
 # the landed strict-xfail successor in tests/db/test_i711w_gap_xfails.py
 # (item 16: legacy_grandfathered derivation) — that xfail flips to the live
 # regression test when HttpCatalogClient.register_collection derives it.
+
+
+# ── nexus-cecqy: the rename must not claim a supersede that did not happen ────
+
+
+def test_rename_does_not_claim_supersede_when_no_row_was_marked(monkeypatch, tmp_path):
+    """Service-mode rename DELETEs the old registry row (renameCollectionTxn —
+    it must DELETE, because the fk-002/fk-003 collection FKs are ON UPDATE NO
+    ACTION), so the follow-up supersede UPDATE matches ZERO rows.
+
+    The CLI announced "Emitted CollectionSuperseded(...)" regardless. That was a
+    claim about something that did not happen: the old name ends up ABSENT
+    rather than marked-superseded, the rename's history is unrecorded in
+    superseded_by/superseded_at, and the operator is told the opposite.
+    """
+    from unittest.mock import MagicMock
+
+    from click.testing import CliRunner
+
+    from nexus.commands import catalog as _cat_cmd
+    from nexus.cli import main
+
+    from nexus.db.collection_state import CollectionState
+
+    writer = MagicMock()
+    writer.supersede_collection.return_value = 0   # the row was already deleted
+    writer.rename_collection_cascade.return_value = {"catalog_documents": 3}
+    writer.rename_collection.return_value = 3
+
+    reader = MagicMock()
+    reader.get_collection.return_value = {"name": "code__old__stub-code-1024__v1"}
+
+    monkeypatch.setattr(_cat_cmd, "_get_catalog_writer", lambda *a, **k: writer, raising=False)
+    monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda *a, **k: reader, raising=False)
+    monkeypatch.setattr(
+        "nexus.commands.catalog_cmds.collections.make_t3",
+        lambda *a, **k: MagicMock(), raising=False,
+    )
+    # old exists in T3, new does not — the only state the rename proceeds from.
+    def _state(_t3, name):
+        return (CollectionState.ABSENT
+                if name.endswith("new__stub-code-1024__v1")
+                else CollectionState.PRESENT)
+
+    # Patch every module that bound its OWN reference at import time — a
+    # module-level `from ... import probe_collection_state` does not see a
+    # patch applied to the source module.
+    for target in (
+        "nexus.db.collection_state.probe_collection_state",
+        "nexus.commands.catalog_cmds.collections.probe_collection_state",
+        "nexus.collection_rename.probe_collection_state",
+    ):
+        monkeypatch.setattr(target, _state, raising=False)
+    monkeypatch.setattr(
+        "nexus.collection_rename.rename_collection_everywhere",
+        lambda *a, **k: {"t3": 3}, raising=False,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["catalog", "rename-collection",
+         "code__old__stub-code-1024__v1", "code__new__stub-code-1024__v1", "--yes"],
+    )
+
+    # NON-VACUITY FIRST: the command must actually have REACHED the announce
+    # site. Asserting only the absence of a string passes trivially when the
+    # CLI bailed earlier — which is exactly what a first cut of this test did.
+    assert result.exit_code == 0, f"rename did not run: {result.output}"
+    assert "Renamed:" in result.output, (
+        f"the rename never reached its summary, so the assertion below would "
+        f"pass vacuously. Output: {result.output}"
+    )
+
+    assert "Emitted CollectionSuperseded" not in result.output, (
+        "the CLI announced a supersede that affected zero rows — the exact "
+        "false claim nexus-cecqy is about"
+    )

@@ -1982,14 +1982,30 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *,
         reason: str = "",
         superseded_at: str | None = None,
-    ) -> None:
+    ) -> int:
+        """Mark *old_name* superseded by *new_name*; return rows actually updated.
+
+        nexus-cecqy: returns the engine's rowcount instead of None. ZERO is the
+        meaningful case — it means the old registry row no longer exists, which
+        is exactly what a service-mode rename leaves behind.
+        """
         # Wire keys: name (old_name), superseded_by (new_name); reason is informational.
         payload: dict = {"name": old_name, "superseded_by": new_name}
         if reason:
             payload["reason"] = reason
         if superseded_at:
             payload["superseded_at"] = superseded_at
-        self._post("/collections/supersede", payload)
+        # nexus-cecqy: the engine returns {"updated": N} and this used to
+        # DISCARD it, which is what let `nx catalog rename-collection` announce
+        # "Emitted CollectionSuperseded(...)" after an UPDATE that touched ZERO
+        # rows. Service-mode rename implements itself as INSERT-new -> re-home
+        # -> DELETE-old (renameCollectionTxn; it must DELETE because the
+        # fk-002/fk-003 collection FKs are ON UPDATE NO ACTION), so by the time
+        # supersede runs the old row is already gone and `WHERE name = old`
+        # matches nothing. Surfacing the count lets the caller tell "marked
+        # superseded" from "there was nothing left to mark".
+        result = self._post("/collections/supersede", payload)
+        return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
     def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.

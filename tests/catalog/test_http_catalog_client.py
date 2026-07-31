@@ -1150,12 +1150,22 @@ class TestHttpCatalogClientRoundTrip:
         colls = client.list_collections()
         assert len(colls) == 1
 
-    def test_supersede_collection(self, client: HttpCatalogClient) -> None:
-        # Canonical Catalog.supersede_collection() takes positional old_name, new_name.
-        # Migrated from old client-specific sig (new_name was keyword-only superseded_by).
-        # Returns None (canonical), not int.
-        result = client.supersede_collection("old__coll", "new__coll")
-        assert result is None
+    def test_supersede_collection_returns_the_rowcount(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """nexus-cecqy: the engine returns {"updated": N} and the client used to
+        DISCARD it, asserting only `result is None` — wire shape, not behaviour.
+
+        That discard is what let `nx catalog rename-collection` announce
+        "Emitted CollectionSuperseded(...)" after an UPDATE that touched ZERO
+        rows: service-mode rename DELETEs the old registry row, so the
+        follow-up `WHERE name = old` matches nothing. ZERO is the meaningful
+        value, and it was the one being thrown away.
+
+        (The fake has been returning {"updated": 5} the whole time — the count
+        was available and unused.)
+        """
+        assert client.supersede_collection("old__coll", "new__coll") == 5
 
     def test_rename_collection(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)

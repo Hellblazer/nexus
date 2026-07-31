@@ -337,8 +337,19 @@ def rename_collection_cmd(
                 model_version=segments["model_version"],
             )
         else:
-            writer.register_collection(new)
-        writer.supersede_collection(old, new, reason="rename-collection")
+            # nexus-cecqy: --allow-legacy documents that a non-conformant name
+            # "still gets a row in the projection but is flagged
+            # legacy_grandfathered=True". The LOCAL catalog DERIVED that flag by
+            # regex; the engine infers nothing (upsertCollection binds the
+            # caller's value, defaulting 0) and this call passed no kwarg — so
+            # in service mode the row was never flagged and the documented
+            # behaviour was simply absent. Derive it here, at the one call site
+            # that knows the name is non-conformant.
+            from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to match the sibling call site above
+            writer.register_collection(
+                new, legacy_grandfathered=not is_conformant_collection_name(new),
+            )
+        superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:
         click.echo(
             f"WARN: T3 was renamed {old!r} -> {new!r} but the projection "
@@ -367,7 +378,21 @@ def rename_collection_cmd(
         parts.append(f"{counts['catalog_docs']} catalog docs")
     suffix = f" ({'; '.join(parts)})" if parts else ""
     click.echo(f"Renamed: {old} -> {new}{suffix}")
-    click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
+    # nexus-cecqy: only claim the supersede when it actually marked a row.
+    # Service-mode rename DELETEs the old registry row (renameCollectionTxn),
+    # so the follow-up UPDATE matches nothing and the old name ends up ABSENT
+    # rather than marked-superseded. Announcing it regardless was a claim about
+    # something that did not happen, and it made the rename unauditable while
+    # reading as though the history had been recorded.
+    if superseded_rows:
+        click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
+    else:
+        click.echo(
+            f"NOTE: {old} was removed from the collection registry by the "
+            f"rename, so there was no row left to mark superseded. The rename "
+            f"itself succeeded; its history is not recorded in "
+            f"superseded_by/superseded_at (nexus-cecqy)."
+        )
 
 
 @click.command("collection-gc")
