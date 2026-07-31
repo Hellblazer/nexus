@@ -40,6 +40,13 @@ Fixture strategy: same Docker pgvector/pgvector:pg17 pattern as
 (``nexus_cq_tripwire_pg17``) so the two gates never collide on a shared
 Docker container when run concurrently.
 
+RUN THIS FILE IN ITS OWN PYTEST PROCESS (nexus-z6y58). Running the four
+Docker-backed integration gates together in ONE process errors at setup with
+``PSQLException: The connection attempt failed`` (measured: 7 passed / 4 errors,
+all in the write-seam gate); each file alone is green. The own-container-name
+reasoning above covers concurrent separate PROCESSES, not four container
+boot/teardown cycles inside one.
+
 Prerequisites (identical to the write-seam gate):
   - ``service/target/nexus-service-1.0-SNAPSHOT.jar`` built and fresh.
   - Docker available and ``pgvector/pgvector:pg17`` pullable.
@@ -362,6 +369,7 @@ def vec_client(local_service: tuple[str, str], monkeypatch: pytest.MonkeyPatch):
     """HttpVectorClient singleton re-resolved against the live local_service."""
     from nexus.db.http_vector_client import (
         get_http_vector_client,
+        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
 
@@ -373,6 +381,11 @@ def vec_client(local_service: tuple[str, str], monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
+    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
+    # (release.properties is blank in source; stamped only at native-build time
+    # from a tag), so the cloud version probe fail-closes on it. Engine identity
+    # is known by construction here — there is no skew to catch.
+    mark_version_probe_satisfied_for_tests()
 
     return get_http_vector_client()
 

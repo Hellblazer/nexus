@@ -343,6 +343,7 @@ def test_over_300_record_upsert_round_trip(
     """
     from nexus.db.http_vector_client import (
         get_http_vector_client,
+        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
 
@@ -354,6 +355,11 @@ def test_over_300_record_upsert_round_trip(
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
+    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
+    # (release.properties is blank in source; stamped only at native-build time
+    # from a tag), so the cloud version probe fail-closes on it. Engine identity
+    # is known by construction here — there is no skew to catch.
+    mark_version_probe_satisfied_for_tests()
 
     client = get_http_vector_client()
     n = 350  # > 300 = MAX_RECORDS_PER_WRITE
@@ -388,6 +394,7 @@ def test_duplicate_chash_dedup_collapse(
     """
     from nexus.db.http_vector_client import (
         get_http_vector_client,
+        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
 
@@ -399,6 +406,11 @@ def test_duplicate_chash_dedup_collapse(
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
+    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
+    # (release.properties is blank in source; stamped only at native-build time
+    # from a tag), so the cloud version probe fail-closes on it. Engine identity
+    # is known by construction here — there is no skew to catch.
+    mark_version_probe_satisfied_for_tests()
 
     client = get_http_vector_client()
 
@@ -435,6 +447,7 @@ def test_on_conflict_idempotency(
     """
     from nexus.db.http_vector_client import (
         get_http_vector_client,
+        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
 
@@ -446,6 +459,11 @@ def test_on_conflict_idempotency(
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
+    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
+    # (release.properties is blank in source; stamped only at native-build time
+    # from a tag), so the cloud version probe fail-closes on it. Engine identity
+    # is known by construction here — there is no skew to catch.
+    mark_version_probe_satisfied_for_tests()
 
     client = get_http_vector_client()
     coll = "knowledge__seam-gate-conflict__bge-base-en-v15-768__v1"
@@ -512,6 +530,7 @@ def test_nul_bytes_sanitized_server_side(
     """
     from nexus.db.http_vector_client import (
         get_http_vector_client,
+        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
 
@@ -523,6 +542,11 @@ def test_nul_bytes_sanitized_server_side(
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
+    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
+    # (release.properties is blank in source; stamped only at native-build time
+    # from a tag), so the cloud version probe fail-closes on it. Engine identity
+    # is known by construction here — there is no skew to catch.
+    mark_version_probe_satisfied_for_tests()
 
     client = get_http_vector_client()
     coll = "knowledge__seam-gate-nul__bge-base-en-v15-768__v1"
