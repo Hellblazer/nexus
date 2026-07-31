@@ -194,6 +194,13 @@ def _boot() -> dict:
         "bearer": _BEARER,
         "pgdata": pgdata,
         "pg_bin": bin_dir,
+        # PG coordinates, so a test can query the substrate's schema DIRECTLY rather
+        # than through the engine's HTTP surface. Added for nexus-20890, whose gate
+        # asks information_schema what tables carry a denormalized collection column
+        # — a question the API cannot answer and a changelog parser can only guess at.
+        "pg_port": pg_port,
+        "pg_user": pg_user,
+        "pg_dbname": _DBNAME,
         "svc": svc,
     }
     atexit.register(_teardown)
