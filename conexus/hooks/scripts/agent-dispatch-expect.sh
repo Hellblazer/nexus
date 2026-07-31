@@ -66,7 +66,15 @@ source "$HERE/expectations.sh" 2>/dev/null || exit 0
 # turns out to be sync is noise, silently dropping a real one is the exact
 # Gap-1 failure this file exists to catch. Every dispatch observed in the
 # wild passed the field explicitly, so this default is unexercised there.
-IFS=$'\t' read -r SESSION_ID TOOL_NAME SUBAGENT_TYPE DISPATCH_MODE DISPATCH_ID <<<"$(
+# Delimiter is US (0x1f), NOT tab. `IFS=$'\t' read` COLLAPSES empty fields,
+# because tab is IFS *whitespace*: a payload with an empty session_id (or an
+# absent subagent_type) shifts every later field one position left, and the
+# hook then writes a row whose "name" is whatever landed there — e.g. the
+# literal string "background". A non-whitespace IFS preserves empty fields
+# positionally. Found by mutating the fail-open guard and watching the test
+# stay green for the wrong reason; the same `IFS=$'\t' read` shape is used by
+# subagent-start-stamp.sh, where it is currently benign only by luck.
+IFS=$'\x1f' read -r SESSION_ID TOOL_NAME SUBAGENT_TYPE DISPATCH_MODE DISPATCH_ID <<<"$(
     printf '%s' "$PAYLOAD" | python3 -c '
 import json, sys
 try:
@@ -88,7 +96,8 @@ fields = [
     "background" if bg else "sync",
     str(d.get("tool_use_id") or ""),
 ]
-print("\t".join(f.replace("\t", " ").replace("\n", " ") for f in fields))
+scrub = str.maketrans({"\x1f": " ", "\t": " ", "\n": " ", "\r": " "})
+print("\x1f".join(f.translate(scrub) for f in fields))
 ' 2>/dev/null
 )"
 
