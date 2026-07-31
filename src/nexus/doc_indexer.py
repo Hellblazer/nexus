@@ -118,6 +118,105 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
     return {"source_path": file_path}
 
 
+def _doc_id_for_path(file_path: Path) -> str:
+    """Best-effort READ-ONLY document identity for a source path, or "".
+
+    nexus-5xn3k AC2, prose path. The PDF gate has a doc_id in scope already
+    (``_register_or_lookup_doc_id`` runs before it); ``_index_document`` does
+    not. Resolving one must NOT register: this sits on the staleness path,
+    which by definition runs for documents that may be untouched, and minting
+    catalog rows as a side effect of *deciding whether to skip* would be a
+    far worse bug than the one being fixed.
+
+    ``by_source_uri`` is the read-only lookup — no owner resolution, no
+    create. The catalog auto-derives ``file://<abspath>`` when a document is
+    registered without an explicit URI (catalog register, RDR-096 P3.1), so
+    that is the key tried here.
+
+    Returns "" when the document cannot be identified, which
+    ``_manifest_is_fully_present`` treats as "no evidence of damage" — the
+    pre-fix behaviour. A miss is therefore SAFE, never a spurious re-embed.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return ""
+        entry = cat.by_source_uri(f"file://{file_path.resolve()}")
+        return str(entry.tumbler) if entry is not None else ""
+    except Exception as exc:  # noqa: BLE001 — fail-open: identity is best-effort here
+        _log.debug("index_doc_identity_lookup_failed", path=str(file_path), error=str(exc))
+        return ""
+
+
+def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:
+    """True iff EVERY chash the document's manifest names still exists in T3.
+
+    nexus-5xn3k AC2. The staleness gates ask ``col.get(where={"content_hash":
+    h}, limit=1)`` — "does ANY chunk with this content hash exist?" — which is
+    satisfied by a SINGLE survivor. An index that dies mid-write commits an
+    arbitrary SUBSET of the document's chunks, so from then on every re-index
+    finds one of them and returns 0: the document is permanently "up to date"
+    while most of its content is missing, and every attempt reports success.
+
+    (The bead attributed this to the gate trusting the catalog's chunk_count.
+    It does not: neither gate consults the catalog at all. The mechanism is
+    limit=1. Corollary worth keeping: PARTIAL deletion is worse than none —
+    removing 206 of 207 chunks leaves the document broken AND still skipped.)
+
+    The manifest is the authoritative expected set (RDR-108), so this compares
+    it against what T3 actually holds. Existence only — ``include=[]`` fetches
+    no documents, metadata or embeddings — and paged to the 300-id quota
+    (chroma_quotas.MAX_QUERY_RESULTS), so it is a cheap check, not a hydrate.
+
+    FAIL-OPEN, deliberately: an unreadable catalog or T3 returns True, i.e.
+    "no evidence of damage", preserving the pre-fix behaviour. This runs on the
+    hot path of every re-index, and a transient read failure must not force a
+    full re-embed of an intact document. The DAMAGE it detects is durable and
+    will be caught on the next pass; a false positive here is expensive.
+    An EMPTY manifest also returns True: that is the GH #1397 ghost class,
+    which `nx catalog reconcile` owns, and this gate must not silently take it.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        if not doc_id:
+            # Identity unresolvable (prose path, unregistered doc) — no
+            # expected set to compare against, so no evidence of damage.
+            return True
+        cat = make_catalog_reader()
+        if cat is None:
+            return True
+        rows = cat.get_manifest(str(doc_id))
+        expected = {r.get("chash", "") for r in rows if r.get("chash")}
+        if not expected:
+            return True
+        ordered = sorted(expected)
+        present: set[str] = set()
+        page = 300  # chroma_quotas.MAX_QUERY_RESULTS
+        for i in range(0, len(ordered), page):
+            got = _vector_with_retry(
+                col.get, ids=ordered[i:i + page], include=[],
+            )
+            present.update(got.get("ids", []) or [])
+        missing = expected - present
+        if missing:
+            _log.warning(
+                "index_manifest_incomplete_reindexing",
+                doc_id=str(doc_id),
+                expected=len(expected),
+                missing=len(missing),
+                detail="manifest names chunks absent from T3 — a prior index "
+                       "died mid-write; re-indexing instead of skipping",
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 — fail-open: a read failure must not force a re-embed
+        _log.debug("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
+        return True
+
+
 def _register_or_lookup_doc_id(
     file_path: Path,
     corpus: str,
@@ -772,7 +871,15 @@ def _index_document(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        if stored_hash == content_hash and stored_model == target_model:
+        # nexus-5xn3k AC2: the match above is satisfied by ONE surviving chunk
+        # (limit=1), so a mid-write failure leaves the document permanently
+        # "fresh". Verify the manifest is whole before skipping. Identity is
+        # resolved READ-ONLY and only on the skip path; a miss fails open.
+        if (
+            stored_hash == content_hash
+            and stored_model == target_model
+            and _manifest_is_fully_present(col, _doc_id_for_path(file_path))
+        ):
             return 0
 
     now_iso = datetime.now(UTC).isoformat()
@@ -1395,7 +1502,15 @@ def index_pdf(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        if stored_hash == content_hash and stored_model == target_model:
+        # nexus-5xn3k AC2: the hash/model match above is satisfied by ONE
+        # surviving chunk (limit=1), so a mid-write failure leaves the document
+        # permanently "fresh". Verify the manifest is actually whole before
+        # taking the skip.
+        if (
+            stored_hash == content_hash
+            and stored_model == target_model
+            and _manifest_is_fully_present(col, doc_id)
+        ):
             if return_metadata:
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
             return 0
