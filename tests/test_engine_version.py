@@ -129,7 +129,38 @@ class TestRequiredEngineVersion:
         # sides — apply_topic_boost is Python-client-only and absent from
         # the engine, so it cannot run on the /v1/vectors/* path STEP-6
         # measures (nexus-j46lz).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 58)
+        # ->(0,1,59) for the 7.0.0 catalog defect set: mqd6t's tombstone
+        # filters across every manifest-rooted read (chashesForCollection,
+        # docsForChashes, getManifest, getManifestMany, resolveChash's doc_id
+        # attribution, two PgVectorRepository siblings) + the non-resurrection
+        # rule; e4gel's chunk_count re-derivation, GUARDED so an incidental
+        # update cannot zero a positive count against an EMPTY manifest (that
+        # disagreement is the GH #1371 damage signature reconcile classifies
+        # on); s4e1n's co_discovered_by link-merge fold; tz1cx's real
+        # metadata.doc_id route; ekaxn's alias hop; jqvzk's gc_audit surface.
+        # 9ssih was deliberately HELD OUT — its 400 would have broken every
+        # already-installed client, nothing client-side caught it, and its
+        # client half had to ship first.
+        # SCHEMA: two new changesets, catalog-018-1/-2 (207 -> 209), creating
+        # nexus.gc_audit. A NEW table: no existing table rewritten, no executed
+        # changeset mutated — conexus called it the safest deploy shape they
+        # have taken; rollback is a plain image revert.
+        # Gates: engine suite 1517/0; deployed (digest sha256:ba7a0a18...,
+        # cosign KMS + spdxjson verified, on-host verify PASS at redeploy);
+        # STEP-6 parity BYTE-IDENTICAL to the v0.1.58 baseline (113/104,
+        # p50_jaccard 1.0, zero per-query regressions); recall 12/12 local ==
+        # cloud, zero vacuous legs; corpus drift NONE (the check built after
+        # the v0.1.58 mis-attribution, live for the first time). Relay [21293].
+        # AND: nexus-bwulw's CLOUD CLIENT-PATH GATE, written as EXPECTED RED,
+        # now PASSES all four legs from a cloud-mode box against the live edge.
+        # conexus's STEP-6 probes the engine DIRECTLY and structurally cannot
+        # see the client path — it was green throughout the period three client
+        # features were dead on arrival for cloud boxes.
+        # HONEST LIMIT, as reported: their run's exit code was swallowed by a
+        # shell redirect, so the PASS is the script's sentinel line, not a
+        # captured 0. Equivalent by the script's own definition; not claimed as
+        # a verified numeric code.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 59)
 
 
 class TestParseEngineVersion:

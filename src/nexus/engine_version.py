@@ -210,7 +210,46 @@ from __future__ import annotations
 #: attribution was floated across the bus and WITHDRAWN by both sides:
 #: apply_topic_boost is Python-client-only and absent from the engine, so it
 #: cannot execute on the /v1/vectors/* path STEP-6 measures. See nexus-j46lz.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 58)
+#: ── v0.1.59 (2026-07-31) — the 7.0.0 catalog defect set ──────────────────────
+#: Carries nexus-mqd6t (tombstone filters across every manifest-rooted read:
+#: chashesForCollection, docsForChashes, getManifest, getManifestMany,
+#: resolveChash's doc_id attribution, two PgVectorRepository siblings — plus the
+#: non-resurrection rule), nexus-e4gel (chunk_count re-derivation, guarded so an
+#: incidental update cannot zero a positive count against an EMPTY manifest —
+#: that disagreement is the GH #1371 damage signature reconcile classifies on),
+#: nexus-s4e1n (the co_discovered_by link-merge fold), nexus-tz1cx (a real
+#: metadata.doc_id lookup route), nexus-ekaxn (alias following on /show and
+#: updateDocument) and nexus-jqvzk (the gc_audit surface).
+#: nexus-9ssih was deliberately HELD OUT: its 400 would have broken every
+#: already-installed client, since nothing client-side caught it. Its client
+#: half shipped first (bc175f29-adjacent, a62649ef) and the engine half rides
+#: the NEXT tag.
+#: SCHEMA: exactly TWO new changesets, catalog-018-1/-2 (orders 517/518),
+#: creating nexus.gc_audit + indexes + RLS. 207 -> 209. A NEW table, so no
+#: existing table rewritten (no stale-planner-stats exposure) and no executed
+#: changeset mutated (no Liquibase checksum risk) — conexus called it the safest
+#: deploy shape they have taken; rollback to 0.1.58 is a plain image revert.
+#: Gates: engine suite 1517/0; deployed to api.conexus-nexus.com (digest
+#: sha256:ba7a0a18..., cosign KMS + spdxjson attestation verified, on-host
+#: cosign verify PASS at redeploy); STEP-6 parity BYTE-IDENTICAL to the v0.1.58
+#: baseline (113 evaluated / 104 passed / p50_jaccard 1.0, zero per-query
+#: regressions), recall AC-3 12/12 local == cloud with zero vacuous legs,
+#: latency margins the widest recorded, corpus drift NONE (41 collections,
+#: drifted=false — the check built after the v0.1.58 mis-attribution, running
+#: live for the first time). Relay [21293].
+#: AND THE ONE THAT MATTERS MOST: nexus-bwulw's CLOUD CLIENT-PATH GATE, written
+#: as EXPECTED RED, now PASSES all four legs from a real cloud-mode box against
+#: the live public edge — /version fields come through (voyage threshold gating
+#: ON, dimension-orphan tooling live), /health honors the ez5.1 contract for
+#: bearers, the embedding_mode probe resolves, the read path round-trips.
+#: conexus's own STEP-6 probes the engine DIRECTLY and structurally cannot see
+#: the client path; it was green throughout the period those three features were
+#: dead on arrival for cloud boxes.
+#: HONEST LIMIT on that evidence, as reported: their run's exit code was
+#: swallowed by a shell redirect, so the PASS is the script's literal sentinel
+#: line rather than a captured 0. The script defines them as equivalent; the
+#: numeric code was not verified and is not being claimed.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 59)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

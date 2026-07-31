@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 import json
+import os
 import re
 import subprocess
 import sys
@@ -553,6 +554,34 @@ class PDFExtractor:
             opts.generate_page_images = False
             opts.generate_picture_images = False
             opts.do_formula_enrichment = enriched
+            # Use PRE-DOWNLOADED models when a local artifacts directory is
+            # named, instead of letting docling fetch from HuggingFace at
+            # convert() time (docling loads layout/TableFormer/CodeFormula
+            # LAZILY, so the fetch happens mid-extraction).
+            #
+            # CI sets this to our own hosted mirror (release asset
+            # ci-assets-docling-v1) — runners keep no layer cache, so every
+            # build otherwise re-fetched ~1.1GB anonymously from HuggingFace and
+            # flaked on it: CAS data-processing errors, connection resets, 429s.
+            # It is the same reason the bge-768 ONNX is self-hosted as
+            # ci-assets-bge-768-v1. An offline or air-gapped install can point
+            # this at any directory produced by
+            # ``docling-tools models download -o <dir> layout tableformer code_formula``.
+            #
+            # Unset (the default) keeps docling's own resolution, so nothing
+            # changes for an ordinary local install.
+            artifacts = os.environ.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
+            if artifacts:
+                artifacts_dir = Path(artifacts)
+                if not artifacts_dir.is_dir():
+                    raise ValueError(
+                        f"NEXUS_DOCLING_ARTIFACTS_PATH is set to {artifacts!r} but that "
+                        "is not a directory. Point it at a docling artifacts dir "
+                        "(docling-tools models download -o <dir> layout tableformer "
+                        "code_formula), or unset it to let docling resolve its own "
+                        "models."
+                    )
+                opts.artifacts_path = artifacts_dir
             converter = DocumentConverter(
                 format_options={"pdf": PdfFormatOption(pipeline_options=opts)}
             )
