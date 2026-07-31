@@ -12,6 +12,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1469,6 +1470,13 @@ def _fake_t2_ctx(tmp_path):
     return _ctx
 
 
+
+#: structlog's ConsoleRenderer emits ANSI colour when FORCE_COLOR is set, which
+#: interleaves escape codes inside `key=value` pairs. Log-content assertions
+#: strip it so they measure the log's CONTENT in every environment.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 class TestNxAnswerEndToEnd:
     """nx_answer() orchestration wiring with fully mocked sub-calls.
 
@@ -1973,7 +1981,13 @@ class TestSubagentTimeoutFloor:
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         await nx_plan_audit(plan_json='{"steps": []}', timeout=180.0)
         out = capsys.readouterr()
-        emitted = out.out + out.err
+        # Strip ANSI: structlog's ConsoleRenderer colorizes whenever FORCE_COLOR
+        # is set in the environment (independent of isatty, so capsys does not
+        # disable it), which splits `tool=nx_plan_audit` into
+        # `\x1b[36mtool\x1b[0m=\x1b[35mnx_plan_audit\x1b[0m` and breaks every
+        # plain substring assertion below. CI has no FORCE_COLOR, so this pin
+        # was green there and red in any developer terminal that sets it.
+        emitted = _ANSI_RE.sub("", out.out + out.err)
         assert "subagent_timeout_clamped" in emitted, (
             "expected a structured warning when caller timeout is below floor"
         )

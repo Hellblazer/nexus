@@ -889,6 +889,14 @@ Validation gates fire BEFORE any side effect:
 
 Default is report-only; both `--no-dry-run` AND `--yes` are required to actually rename.
 
+The old name survives the rename as a **superseded tombstone**: its projection row
+stays, carrying `superseded_by` = the new name and a `superseded_at` timestamp, so a
+rename remains auditable after the fact. It holds no chunks or documents (everything
+re-homes onto the new name) and `superseded_by` keeps it out of collection-for-tuple
+resolution, so it can never be picked as a write target. Renaming *back* onto a
+tombstoned name revives it. Before 7.0.0 the row was deleted instead, which silently
+discarded the rename's history (nexus-cecqy).
+
 ### nx catalog migrate-fallback
 
 ```

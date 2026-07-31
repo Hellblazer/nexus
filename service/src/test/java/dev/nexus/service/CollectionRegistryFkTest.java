@@ -1078,10 +1078,12 @@ class CollectionRegistryFkTest {
             assertThat(counts.get("chunks_384"))
                 .as("the chunks-present case re-homes the chunk row").isEqualTo(1);
             assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
-            assertThat(counts.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
+            assertThat(counts.get("catalog_collections_superseded"))
+                .as("registry X retired as a superseded tombstone (nexus-cecqy)").isEqualTo(1);
         }
 
-        // Verify the move at the SQL layer: chunk + registry under NEW, nothing under OLD.
+        // Verify the move at the SQL layer: chunk + registry under NEW, and under OLD a
+        // superseded tombstone with no chunks (nexus-cecqy — step 3 retires, not deletes).
         try (Connection su = pg.createConnection("")) {
             ResultSet rs;
             rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='"
@@ -1093,9 +1095,10 @@ class CollectionRegistryFkTest {
             rs.next();
             assertThat(rs.getInt(1)).as("chunk re-homed under new name").isEqualTo(1);
             rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='"
-                + tenant + "' AND name='" + oldName + "'");
+                + tenant + "' AND name='" + oldName + "' AND superseded_by='" + newName + "'"
+                + " AND superseded_at IS NOT NULL");
             rs.next();
-            assertThat(rs.getInt(1)).as("old registry row gone").isZero();
+            assertThat(rs.getInt(1)).as("old registry row retired as a tombstone").isEqualTo(1);
             rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='"
                 + tenant + "' AND name='" + newName + "'");
             rs.next();

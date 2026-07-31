@@ -350,10 +350,13 @@ def test_rename_to_self_rejected(t3_db, active_catalog, runner):
 # catalog — the "stays pinned, passing" disposition it recorded could only
 # hold while the substrate existed. The service-side derivation gap it
 # documented (bare register_collection never lands legacy_grandfathered=True
-# on the live catalog) remains tracked as nexus-cecqy / i711w.1 item 16, with
-# the landed strict-xfail successor in tests/db/test_i711w_gap_xfails.py
-# (item 16: legacy_grandfathered derivation) — that xfail flips to the live
-# regression test when HttpCatalogClient.register_collection derives it.
+# on the live catalog) was FIXED under nexus-cecqy: HttpCatalogClient
+# .register_collection now derives the flag when the caller passes none. Its
+# successor pins are live, not xfail — tests/db/test_i711w_gap_xfails.py item 16
+# against a real engine, and the three
+# test_*_derives_legacy_*/test_explicit_kwarg_overrides_the_derivation cases in
+# tests/catalog/test_http_catalog_client.py on the wire payload (those run on
+# every push; the item-16 pin is integration-gated).
 
 
 # ── nexus-cecqy: the rename must not claim a supersede that did not happen ────

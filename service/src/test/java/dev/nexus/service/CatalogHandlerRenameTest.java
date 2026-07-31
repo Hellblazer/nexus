@@ -29,6 +29,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * exercises the HTTP glue the repo test cannot: the {@code old_name/new_name} canonical
  * keys, the {@code old/new} compat alias, the 400 missing-key guard, the 405 method guard,
  * and the {@code {"renamed": {...}}} response shape.
+ *
+ * <p>Also covers its PAIRED verb {@code POST /collections/supersede} — the two are one
+ * operation from the CLI's point of view ({@code nx catalog rename-collection} calls
+ * rename and then supersede), the guards live in the same handler, and they share this
+ * fixture exactly. See {@link dev.nexus.service.http.CatalogHandler
+ * #handleCollectionSupersede}: nexus-g8z8n's four guards and nexus-cecqy's
+ * tombstone/idempotence contract.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CatalogHandlerRenameTest {
@@ -112,8 +119,8 @@ class CatalogHandlerRenameTest {
         Map<String, Object> renamed = (Map<String, Object>) body.get("renamed");
         assertThat(((Number) renamed.get("catalog_collections_inserted")).intValue())
             .as("registry Y inserted via HTTP").isEqualTo(1);
-        assertThat(((Number) renamed.get("catalog_collections_deleted")).intValue())
-            .as("registry X deleted via HTTP").isEqualTo(1);
+        assertThat(((Number) renamed.get("catalog_collections_superseded")).intValue())
+            .as("registry X retired as a tombstone via HTTP (nexus-cecqy)").isEqualTo(1);
     }
 
     @Test
@@ -193,6 +200,147 @@ class CatalogHandlerRenameTest {
             .as("the doc under the source repoints to the target").isEqualTo(1);
         assertThat(renamed).as("no full re-home in the cross-model branch")
             .doesNotContainKey("catalog_collections_inserted");
+    }
+
+    // ── POST /collections/supersede — the guards (nexus-g8z8n, nexus-cecqy) ─────
+    // The route had NONE of these: every refusal below replied 200 {"updated":0},
+    // and HttpCatalogClient discarded the count, so all four were silent.
+
+    private void seedCollections(String... names) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            for (String n : names) {
+                su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                    + "VALUES ('" + TENANT + "', '" + n + "') ON CONFLICT DO NOTHING");
+            }
+        }
+    }
+
+    private Map<String, Object> collectionRow(String name) throws Exception {
+        var resp = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort()
+                + "/v1/catalog/collections/get?name=" + name))
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("X-Nexus-Tenant", TENANT)
+            .GET().build();
+        var r = http.send(resp, HttpResponse.BodyHandlers.ofString());
+        return r.statusCode() == 200 ? mapper.readValue(r.body(), MAP_T) : null;
+    }
+
+    @Test
+    void post_supersede_stampsSupersededAtWithoutCallerSuppliedValue() throws Exception {
+        // nexus-g8z8n guard 4: superseded_at was bound ONLY from the request body and no
+        // caller ever sent one, so every supersession landed undatable.
+        seedCollections("hsup__t-old", "hsup__t-new");
+        assertThat(collectionRow("hsup__t-old").get("superseded_at"))
+            .as("guard: starts un-stamped").isIn(null, "");
+
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__t-old\",\"superseded_by\":\"hsup__t-new\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = collectionRow("hsup__t-old");
+        assertThat(row.get("superseded_by")).isEqualTo("hsup__t-new");
+        assertThat((String) row.get("superseded_at"))
+            .as("the supersession must be datable without the caller supplying an instant")
+            .isNotBlank();
+    }
+
+    @Test
+    void post_supersede_toItself_returns400() throws Exception {
+        // A self-referential supersession retires a live collection with nothing to
+        // redirect to: collectionForTuple skips any row with superseded_by set, so the
+        // name becomes permanently unresolvable while still existing.
+        seedCollections("hsup__g0-self");
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g0-self\",\"superseded_by\":\"hsup__g0-self\"}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("cannot supersede itself");
+        assertThat((String) collectionRow("hsup__g0-self").get("superseded_by"))
+            .as("a refused self-supersede must write nothing").isEmpty();
+    }
+
+    @Test
+    void post_supersede_unknownOldName_returns404() throws Exception {
+        // nexus-g8z8n guard 1: a typo on an explicit action must fail loud.
+        seedCollections("hsup__g1-new");
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__never-registered\",\"superseded_by\":\"hsup__g1-new\"}");
+        assertThat(resp.statusCode()).isEqualTo(404);
+        assertThat(resp.body()).contains("collection not found");
+    }
+
+    @Test
+    void post_supersede_unregisteredNewName_returns404AndWritesNothing() throws Exception {
+        // nexus-g8z8n guard 3: an unvalidated superseded_by leaves a pointer that
+        // resolves to nothing and no join can follow.
+        seedCollections("hsup__g3-old");
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g3-old\",\"superseded_by\":\"hsup__g3-nosuch\"}");
+        assertThat(resp.statusCode()).isEqualTo(404);
+        assertThat(resp.body()).contains("unregistered collection");
+        assertThat((String) collectionRow("hsup__g3-old").get("superseded_by"))
+            .as("a refused supersede must write nothing").isEmpty();
+    }
+
+    @Test
+    void post_supersede_alreadySupersededToDifferentTarget_returns409() throws Exception {
+        // nexus-g8z8n guard 2: a second supersession rewrote the chain unaudited.
+        seedCollections("hsup__g2-old", "hsup__g2-new1", "hsup__g2-new2");
+        assertThat(post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g2-old\",\"superseded_by\":\"hsup__g2-new1\"}").statusCode()).isEqualTo(200);
+
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g2-old\",\"superseded_by\":\"hsup__g2-new2\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("already superseded by");
+        assertThat(collectionRow("hsup__g2-old").get("superseded_by"))
+            .as("the ORIGINAL pointer survives a refused re-supersede").isEqualTo("hsup__g2-new1");
+    }
+
+    @Test
+    void post_supersede_sameTargetIsIdempotentAndDoesNotRestamp() throws Exception {
+        // nexus-cecqy: the carve-out guard 2 must leave open. The canonical rename now
+        // tombstones X -> Y itself and its caller then issues supersede(X, Y); that has
+        // to succeed. Idempotent means the recorded instant holds still, too — otherwise
+        // every retry relabels when the supersession happened.
+        seedCollections("hsup__idem-old", "hsup__idem-new");
+        var first = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__idem-old\",\"superseded_by\":\"hsup__idem-new\"}");
+        assertThat(first.statusCode()).isEqualTo(200);
+        String stamp = (String) collectionRow("hsup__idem-old").get("superseded_at");
+        assertThat(stamp).as("guard: the first supersede stamped an instant").isNotBlank();
+
+        var again = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__idem-old\",\"superseded_by\":\"hsup__idem-new\"}");
+        assertThat(again.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(again.body(), MAP_T).get("updated"))
+            .as("a re-assertion still reports a marked row — the CLI gates its "
+                + "CollectionSuperseded message on this count")
+            .isEqualTo(1);
+        assertThat((String) collectionRow("hsup__idem-old").get("superseded_at"))
+            .as("a repeat must not move the recorded supersession instant").isEqualTo(stamp);
+    }
+
+    @Test
+    void post_supersede_afterRename_marksTheTombstoneTheRenameLeft() throws Exception {
+        // nexus-cecqy end to end over HTTP: rename retires X, the paired supersede call
+        // re-asserts it, and X survives as a datable record of where it went. Before the
+        // fix X was DELETEd and this second call updated ZERO rows while the CLI
+        // announced "Emitted CollectionSuperseded".
+        seedCollections("hsup__ren-old");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hsup__ren-old\",\"new_name\":\"hsup__ren-new\"}").statusCode()).isEqualTo(200);
+
+        var row = collectionRow("hsup__ren-old");
+        assertThat(row).as("the rename must leave the old name as a tombstone").isNotNull();
+        assertThat(row.get("superseded_by")).isEqualTo("hsup__ren-new");
+
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__ren-old\",\"superseded_by\":\"hsup__ren-new\"}");
+        assertThat(resp.statusCode()).as("the paired supersede must not 409 on the "
+            + "tombstone the rename itself wrote").isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), MAP_T).get("updated")).isEqualTo(1);
     }
 
     @Test

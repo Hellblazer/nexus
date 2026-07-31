@@ -2636,6 +2636,17 @@ public final class CatalogRepository {
                .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
                .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+               // nexus-cecqy: an explicit registration REVIVES a tombstone. Since a rename
+               // now retires the old name instead of deleting it, re-creating a collection
+               // under that name would otherwise land on a row still marked superseded —
+               // and superseded rows are excluded from collectionForTuple, so the live
+               // collection would be unreachable as a write target while `nx catalog
+               // doctor --collections-drift` stayed quiet (it deliberately permits a
+               // superseded row to be absent from T3). /collections/upsert is the caller
+               // asserting "this collection exists and is current"; a caller that wants it
+               // retired says so via /collections/supersede.
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
                .execute();
             return null;
         });
@@ -2744,7 +2755,23 @@ public final class CatalogRepository {
 
     /**
      * Supersede a collection.
-     * nz() for superseded_at: '' is invalid in the timestamptz column after catalog-002-1-temporal-typing.
+     *
+     * <p>nz() for superseded_at: '' is invalid in the timestamptz column after
+     * catalog-002-1-temporal-typing.
+     *
+     * <p><b>nexus-g8z8n guard 4 — the supersession is self-timestamping.</b> This used
+     * to bind superseded_at ONLY from the request body, and no caller ever sent one, so
+     * every supersession landed with superseded_at NULL: recorded but undatable, hence
+     * unauditable. A blank/absent value now stamps {@code now()} server-side (the DB
+     * clock, not the client's), matching the retired local implementation which stamped
+     * {@code datetime.now(UTC)}. An explicit value still wins — backfills and migrations
+     * must be able to assert a historical instant.
+     *
+     * <p>The three PRECONDITION guards (old registered; not already superseded to a
+     * DIFFERENT target; new registered) live in {@code CatalogHandler
+     * .handleCollectionSupersede}, alongside the identical handler-side guards its
+     * sibling verb {@code handleCollectionRename} already carries (nexus-hz785 404,
+     * nexus-gaou3 409). This method stays a pure UPDATE.
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
         return tenantScope.withTenant(tenant, ctx ->
@@ -2752,7 +2779,10 @@ public final class CatalogRepository {
             // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
             ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
-               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, tsOrNull(supersededAt))
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                    supersededAt == null || supersededAt.isBlank()
+                        ? DSL.currentOffsetDateTime()
+                        : DSL.val(tsOrNull(supersededAt)))
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                    .and(CATALOG_COLLECTIONS.NAME.eq(name)))
                .execute()
@@ -2795,7 +2825,11 @@ public final class CatalogRepository {
      * <ol>
      *   <li>INSERTs a new registry row Y, copying X's metadata;</li>
      *   <li>UPDATEs every child denorm collection X-&gt;Y (Y now exists, FK satisfied);</li>
-     *   <li>DELETEs the old registry row X (no child references X now, RESTRICT satisfied).</li>
+     *   <li>RETIRES the old registry row X as a superseded tombstone —
+     *       {@code superseded_by = Y}, {@code superseded_at = now()} (nexus-cecqy; this
+     *       step DELETEd X until 2026-07-31, which destroyed the rename's audit trail
+     *       and made the CLI's follow-up supersede a zero-row no-op it nonetheless
+     *       announced).</li>
      * </ol>
      * Telemetry tables (search_telemetry, hook_failures) have no FK but ARE re-homed — a
      * rename is not a delete, audit rows follow the new name.
@@ -2808,11 +2842,17 @@ public final class CatalogRepository {
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName);
-        // Post-commit (nexus-h8rf6 wave review): the canonical branch DELETEs the
-        // old registry row — evict it so a later same-named collection re-registers.
-        // The cross-model COPY branch leaves both registry rows untouched (no key
-        // in counts), so nothing is evicted there.
-        if (counts.containsKey("catalog_collections_deleted")) {
+        // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
+        // registry row — evict it so a later same-named collection re-registers. The
+        // cross-model COPY branch leaves both registry rows untouched (no key in
+        // counts), so nothing is evicted there.
+        //
+        // nexus-cecqy: the key is catalog_collections_superseded since the retire stopped
+        // being a DELETE. The eviction is still right — the row survives, so the skipped
+        // INSERT ... ON CONFLICT DO NOTHING would be a no-op either way, but a caller
+        // re-registering the old name must reach upsertCollection rather than be short-
+        // circuited by a stale KNOWN entry.
+        if (counts.containsKey("catalog_collections_superseded")) {
             CollectionRegistry.evict(tenant, oldName);
             CollectionRegistry.markKnown(tenant, newName);
         }
@@ -2822,10 +2862,18 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
-            boolean targetExists = ctx.fetchExists(
-                ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
+            // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
+            // as a superseded tombstone instead of deleting it, a round-trip rename
+            // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is
+            // a retired name, not an occupied one: routing it to the RDR-162 COPY branch
+            // would repoint documents only and strand the chunks, so it must take the
+            // canonical branch, where step 1's upsert REVIVES it.
+            boolean liveTargetExists = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.NAME.eq(newName)
+                       .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
 
-            if (targetExists) {
+            if (liveTargetExists) {
                 // RDR-162 cross-model COPY branch: repoint catalog_documents; leave
                 // both registry rows (renaming the source would collide on the name PK).
                 counts.put("catalog_documents",
@@ -2845,6 +2893,12 @@ public final class CatalogRepository {
             }
 
             // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
+            //    UPSERT, not a bare INSERT (nexus-cecqy): the one conflict that can reach
+            //    here is Y's own tombstone from an earlier rename Y->..., since a LIVE Y
+            //    took the COPY branch above. Renaming back onto a retired name REVIVES it
+            //    — superseded_by/at cleared, metadata refreshed from X — which is exactly
+            //    what the round trip means. A bare INSERT would collide on the
+            //    (tenant_id, name) PK and abort the whole re-home.
             counts.put("catalog_collections_inserted",
                 ctx.insertInto(CATALOG_COLLECTIONS,
                         CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
@@ -2861,6 +2915,19 @@ public final class CatalogRepository {
                             CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
                             CATALOG_COLLECTIONS.CREATED_AT)
                         .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)))
+                    .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                    .doUpdate()
+                    .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
+                    .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+                    .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+                    .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+                    .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+                    .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+                    // Revive: clear the tombstone markers rather than copying X's (which
+                    // are '' / NULL anyway — the CLI refuses to rename an already-
+                    // superseded row, so X is live). Explicit beats incidental here.
+                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+                    .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
                     .execute());
 
             // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
@@ -2895,9 +2962,34 @@ public final class CatalogRepository {
             counts.put("search_telemetry", ctx.update(SEARCH_TELEMETRY).set(SEARCH_TELEMETRY.COLLECTION, newName).where(SEARCH_TELEMETRY.COLLECTION.eq(oldName)).execute());
             counts.put("hook_failures",     ctx.update(HOOK_FAILURES).set(HOOK_FAILURES.COLLECTION, newName).where(HOOK_FAILURES.COLLECTION.eq(oldName)).execute());
 
-            // 3. Delete the old registry row X (RESTRICT children are now re-homed onto Y).
-            counts.put("catalog_collections_deleted",
-                ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)).execute());
+            // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
+            //
+            // This used to DELETE X. The delete was never required — by this point every
+            // RESTRICT child has been re-homed onto Y, so X is childless and free to
+            // either go or stay — and it destroyed the rename's own audit trail: the CLI
+            // called supersede_collection(X, Y) immediately afterwards, that UPDATE
+            // matched ZERO rows, and the operator was told "Emitted
+            // CollectionSuperseded(X -> Y)" about something that had not happened. X
+            // ended ABSENT rather than marked-superseded and the rename became
+            // unrecoverable history.
+            //
+            // Keeping X ALIVE-but-unmarked was the other candidate and is worse: X and Y
+            // share the (content_type, owner_id, embedding_model) tuple (step 1 copies
+            // the metadata), and collectionForTuple resolves that tuple with
+            // `superseded_by = '' ORDER BY name DESC LIMIT 1`. An unmarked X wins that
+            // race whenever it sorts ABOVE Y — e.g. renaming to fix a typo,
+            // code__zold__... -> code__anew__... — handing every subsequent write the
+            // now-empty old name. The tombstone carries superseded_by != '', so it is
+            // filtered out of tuple resolution by construction.
+            //
+            // Renaming back INTO a tombstoned name is already refused: the handler 409s
+            // on collectionExists(newName), which sees tombstones (nexus-gaou3).
+            counts.put("catalog_collections_superseded",
+                ctx.update(CATALOG_COLLECTIONS)
+                   .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
+                   .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, DSL.currentOffsetDateTime())
+                   .where(CATALOG_COLLECTIONS.NAME.eq(oldName))
+                   .execute());
             return counts;
         });
     }
@@ -3982,6 +4074,13 @@ public final class CatalogRepository {
     private static Integer i(Map<String, Object> m, String k) {
         Object v = m.get(k);
         if (v instanceof Number n) return n.intValue();
+        // nexus-cecqy: JSON booleans coerce to 0/1. Our integer columns that model flags
+        // (catalog_collections.legacy_grandfathered) are sent by Python clients as real
+        // JSON booleans, and this returned null for them — so the caller's value was
+        // silently replaced by the ni(..., 0) default and the flag could NEVER be set
+        // through /collections/upsert, by any caller, explicit or derived. That is why
+        // the client-side derivation alone did not move the stored value.
+        if (v instanceof Boolean b) return b ? 1 : 0;
         return null;
     }
 

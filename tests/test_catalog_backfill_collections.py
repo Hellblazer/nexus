@@ -92,21 +92,10 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
     ]
 
 
-@pytest.mark.xfail(
-
-
-    strict=True,
-
-
-    raises=AssertionError,
-
-
-    reason="nexus-cecqy item-16 family: service-side legacy_grandfathered derivation absent (i711w.1 item-16 xfail twin exists). Flips with cecqy.",
-
-
-)
-
-
+# nexus-cecqy item-16 family: xfail REMOVED — the derivation now lives in
+# HttpCatalogClient.register_collection, which is what this backfill loop's
+# bare non-conformant branch calls. Its engine-backed twin is item 16 in
+# tests/db/test_i711w_gap_xfails.py.
 def test_backfill_marks_legacy_via_projector(catalog, runner):
     """Non-conformant names land with legacy_grandfathered=True;
     conformant names land False.

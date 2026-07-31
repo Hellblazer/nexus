@@ -153,6 +153,22 @@ _REGISTER_MANY_PAGE = 1000
 _UPDATE_MANY_PAGE = 1000
 
 
+def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
+    """Best-effort human text from an engine error response.
+
+    Engine handlers reply ``{"error": "<message>"}``; fall back to the raw body
+    (then the status line) so a refusal never surfaces as an empty reason.
+    """
+    with contextlib.suppress(Exception):
+        body = exc.response.json()
+        if isinstance(body, dict) and body.get("error"):
+            return str(body["error"])
+    with contextlib.suppress(Exception):
+        if text := exc.response.text.strip():
+            return text
+    return f"HTTP {exc.response.status_code}"
+
+
 def _coerce_legacy_grandfathered(d: dict) -> dict:
     """Coerce a collection row's ``legacy_grandfathered`` to ``bool`` (nexus-u26b4).
 
@@ -1862,8 +1878,38 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         embedding_model: str = "",
         model_version: str = "v1",
         display_name: str = "",
-        legacy_grandfathered: bool = False,
+        legacy_grandfathered: bool | None = None,
     ) -> None:
+        """Register (upsert) a collection row.
+
+        ``legacy_grandfathered`` DEFAULTS TO DERIVED, not to False (nexus-cecqy,
+        scope-corrected 2026-07-29). The retired local catalog derived the flag
+        by regex; the engine infers nothing (``upsertCollection`` binds the
+        caller's value verbatim) and this client used to default the kwarg
+        ``False`` — so every *bare* ``register_collection(name)`` call site left
+        non-conformant names UN-flagged. Those bare calls are BY CONSTRUCTION
+        the non-conformant branch of an ``if is_conformant_collection_name(...)``
+        fork, which is exactly where the flag has to be True:
+
+            src/nexus/indexer.py:784                         (post-rename registration)
+            src/nexus/commands/catalog_cmds/collections.py:138 (backfill loop)
+            src/nexus/commands/catalog_cmds/collections.py:349 (rename --allow-legacy)
+
+        The defect was invisible on the conformant branch because a conformant
+        name wants False and the old default WAS False — correct by accident,
+        which is what made this read as an ``--allow-legacy``-only bug when it
+        reached the ordinary ``nx index`` and backfill paths too.
+
+        Deriving here rather than at the call sites puts the inference on the
+        same side of the boundary as the implementation it replaced, and covers
+        callers that do not yet exist. Pass the kwarg explicitly to force it.
+        """
+        from nexus.corpus import (  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+            is_conformant_collection_name,
+        )
+
+        if legacy_grandfathered is None:
+            legacy_grandfathered = not is_conformant_collection_name(name)
         self._post("/collections/upsert", {
             "name": name,
             "content_type": content_type,
@@ -1985,9 +2031,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     ) -> int:
         """Mark *old_name* superseded by *new_name*; return rows actually updated.
 
-        nexus-cecqy: returns the engine's rowcount instead of None. ZERO is the
-        meaningful case — it means the old registry row no longer exists, which
-        is exactly what a service-mode rename leaves behind.
+        Raises ``ValueError`` when the engine refuses on a precondition
+        (nexus-g8z8n): *old_name* unregistered, *new_name* unregistered (which
+        would leave a dangling ``superseded_by`` pointer), or *old_name* already
+        superseded to a DIFFERENT target. Re-asserting the SAME target is
+        idempotent and returns 1 without moving the recorded instant.
+
+        nexus-cecqy: returns the engine's rowcount instead of None. Zero used to
+        be the routine outcome — the rename DELETEd the old row out from under
+        this call — and discarding it is what let the CLI announce a supersede
+        that had not happened. The rename now retires the row as a tombstone
+        instead, so zero is once again the exceptional case.
         """
         # Wire keys: name (old_name), superseded_by (new_name); reason is informational.
         payload: dict = {"name": old_name, "superseded_by": new_name}
@@ -1995,16 +2049,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             payload["reason"] = reason
         if superseded_at:
             payload["superseded_at"] = superseded_at
-        # nexus-cecqy: the engine returns {"updated": N} and this used to
-        # DISCARD it, which is what let `nx catalog rename-collection` announce
-        # "Emitted CollectionSuperseded(...)" after an UPDATE that touched ZERO
-        # rows. Service-mode rename implements itself as INSERT-new -> re-home
-        # -> DELETE-old (renameCollectionTxn; it must DELETE because the
-        # fk-002/fk-003 collection FKs are ON UPDATE NO ACTION), so by the time
-        # supersede runs the old row is already gone and `WHERE name = old`
-        # matches nothing. Surfacing the count lets the caller tell "marked
-        # superseded" from "there was nothing left to mark".
-        result = self._post("/collections/supersede", payload)
+        try:
+            result = self._post("/collections/supersede", payload)
+        except httpx.HTTPStatusError as exc:
+            # 404 = guard 1 or 3 (an endpoint names nothing), 409 = guard 2 (a
+            # second supersession would rewrite the chain). Every one of these
+            # used to be a 200 {"updated": 0} the client threw away, so a typo on
+            # an explicit action silently did nothing — the exact shape the
+            # no-silent-fallbacks directive exists to prevent.
+            if exc.response is not None and exc.response.status_code in (404, 409):
+                raise ValueError(
+                    f"supersede_collection({old_name!r} -> {new_name!r}) refused: "
+                    f"{_engine_error_detail(exc)}"
+                ) from exc
+            raise
         return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
     def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:

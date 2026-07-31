@@ -1015,6 +1015,56 @@ public final class CatalogHandler implements HttpHandler {
         if (name == null || supersededBy == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"name and superseded_by required\"}"); return;
         }
+        // nexus-g8z8n: the three preconditions the retired local implementation enforced
+        // and this route had none of. A bare UPDATE replies 200 {"updated":0} for every
+        // one of them, and the client discarded the count — so all three were SILENT.
+        // Guarded here rather than in the repo to match the sibling verb
+        // handleCollectionRename, which already carries its 404 (nexus-hz785) and 409
+        // (nexus-gaou3) the same way.
+        //
+        // Guard 0 — a collection cannot supersede itself. The result would be a row
+        // pointing at its own name: permanently excluded from collectionForTuple (which
+        // skips anything with superseded_by set) with nothing to redirect to. Its sibling
+        // handleCollectionRename refuses the identical old==new case for the same reason.
+        if (name.equals(supersededBy)) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "a collection cannot supersede itself: " + name) + "}"); return;
+        }
+        // Guard 1 — old_name must be registered. Superseding a name that does not exist
+        // is a typo on an explicit destructive-ish action; it must fail loud, not no-op.
+        Map<String, Object> oldRow = repo.getCollection(tenant, name);
+        if (oldRow == null) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        }
+        // Guard 3 — superseded_by must name a registered collection, or the pointer
+        // dangles and nothing can follow it.
+        if (!repo.collectionExists(tenant, supersededBy)) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "superseded_by names an unregistered collection: " + supersededBy) + "}"); return;
+        }
+        // Guard 2 — refuse to CHAIN a second supersession. Re-asserting the SAME target
+        // is idempotent, not a chain: the canonical rename now tombstones X -> Y itself
+        // (nexus-cecqy) and its caller then issues supersede(X, Y), which must succeed.
+        // A DIFFERENT target would rewrite the supersession chain unaudited.
+        Object current = oldRow.get("superseded_by");
+        String currentBy = current instanceof String s ? s : "";
+        if (!currentBy.isEmpty()) {
+            if (!currentBy.equals(supersededBy)) {
+                HttpUtil.send(exchange, 409,
+                    "{\"error\":" + MAPPER.writeValueAsString(
+                        "collection " + name + " is already superseded by " + currentBy
+                        + "; refusing to chain a second supersede to " + supersededBy) + "}"); return;
+            }
+            // Same target: the desired state already holds. Reply as though one row was
+            // marked (the caller's contract is "is it superseded to Y", and its CLI gates
+            // its CollectionSuperseded message on a non-zero count) but do NOT re-run the
+            // UPDATE — re-stamping superseded_at would move the supersession's recorded
+            // instant every time the operation is retried.
+            HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
+        }
         int updated = repo.supersedeCollection(tenant, name, supersededBy, supersededAt != null ? supersededAt : "");
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }

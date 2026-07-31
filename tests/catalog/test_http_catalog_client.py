@@ -503,9 +503,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             if FakeCatalogHandler.rename_conflicts and body.get("cross_model") is not True:
                 self._send_json({"error": "target collection already exists"}, code=409)
             else:
+                # nexus-cecqy: the canonical branch RETIRES the old registry row
+                # as a superseded tombstone; it stopped DELETEing it, so the key
+                # is catalog_collections_superseded.
                 self._send_json({"renamed": {"catalog_documents": 3,
                                              "catalog_collections_inserted": 1,
-                                             "catalog_collections_deleted": 1}})
+                                             "catalog_collections_superseded": 1}})
         elif op == "/import/owner":
             self._send_json({"imported": 1})
         elif op == "/import/document":
@@ -1166,6 +1169,118 @@ class TestHttpCatalogClientRoundTrip:
         was available and unused.)
         """
         assert client.supersede_collection("old__coll", "new__coll") == 5
+
+    @pytest.mark.parametrize(
+        ("status", "detail"),
+        [
+            (404, "collection not found: old__coll"),
+            (404, "superseded_by names an unregistered collection: new__coll"),
+            (409, "collection old__coll is already superseded by other__coll"),
+        ],
+    )
+    def test_supersede_refusal_raises_value_error_carrying_the_reason(
+        self, client: HttpCatalogClient, status: int, detail: str,
+    ) -> None:
+        """nexus-g8z8n: the engine's three precondition refusals must surface as
+        ValueError, not as a silent zero or a bare HTTPStatusError.
+
+        The reason has to travel with it — an operator who typoed a collection
+        name needs to be told WHICH endpoint did not resolve, and the engine
+        already says so in the response body.
+        """
+        request = httpx.Request("POST", "http://engine/collections/supersede")
+        response = httpx.Response(status, json={"error": detail}, request=request)
+
+        def _fake_post(path: str, body: dict) -> dict:
+            raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+        client._post = _fake_post  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError) as excinfo:
+            client.supersede_collection("old__coll", "new__coll")
+        # Non-vacuity: the message must name the operands AND carry the engine's
+        # own explanation, not just the status code.
+        assert "old__coll" in str(excinfo.value)
+        assert detail in str(excinfo.value)
+
+    def test_supersede_other_http_errors_are_not_swallowed_as_value_error(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """Only the two precondition statuses map. A 500 is an engine fault, not
+        a caller mistake, and must keep raising what it raises — otherwise an
+        outage reads to every caller as 'you passed a bad name'."""
+        request = httpx.Request("POST", "http://engine/collections/supersede")
+        response = httpx.Response(500, json={"error": "boom"}, request=request)
+
+        def _fake_post(path: str, body: dict) -> dict:
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        client._post = _fake_post  # type: ignore[method-assign]
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.supersede_collection("old__coll", "new__coll")
+
+    # ── nexus-cecqy: legacy_grandfathered is DERIVED, not defaulted False ────
+
+    def _upsert_body(self, client: HttpCatalogClient, *a: object, **kw: object) -> dict:
+        """Call register_collection and return the body it POSTed."""
+        sent: dict = {}
+
+        def _fake_post(path: str, body: dict) -> dict:
+            assert path == "/collections/upsert", path
+            sent.update(body)
+            return {}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        client.register_collection(*a, **kw)  # type: ignore[arg-type]
+        return sent
+
+    def test_bare_register_derives_legacy_true_for_nonconformant_name(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """The BARE ``register_collection(name)`` shape — by construction the
+        non-conformant branch of every call site's conformance fork — must send
+        ``legacy_grandfathered=True``. It used to send the kwarg's False
+        default, so non-conformant names landed un-flagged in service mode.
+
+        The engine infers nothing (``upsertCollection`` binds the caller's
+        value), so whatever this sends IS the stored flag.
+        """
+        from nexus.corpus import is_conformant_collection_name
+
+        name = "docs__cecqy-legacy"
+        # Non-vacuity: the fix is only observable on a non-conformant name.
+        assert not is_conformant_collection_name(name)
+
+        assert self._upsert_body(client, name)["legacy_grandfathered"] is True
+
+    def test_bare_register_derives_legacy_false_for_conformant_name(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """The other half of the derivation. Pins against a 'fix' that blanket-
+        flags every bare registration True — the conformant case was correct by
+        accident at the old False default, which is what hid the defect."""
+        from nexus.corpus import is_conformant_collection_name
+
+        name = "docs__cecqy-conf__stub-docs-1024__v1"
+        assert is_conformant_collection_name(name)
+
+        assert self._upsert_body(client, name)["legacy_grandfathered"] is False
+
+    def test_explicit_kwarg_overrides_the_derivation(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """Deriving must not take the override away: a caller that must force
+        the flag still can, in BOTH directions."""
+        forced_on = self._upsert_body(
+            client, "docs__cecqy-conf__stub-docs-1024__v1", legacy_grandfathered=True,
+        )
+        assert forced_on["legacy_grandfathered"] is True
+
+        forced_off = self._upsert_body(
+            client, "docs__cecqy-legacy", legacy_grandfathered=False,
+        )
+        assert forced_off["legacy_grandfathered"] is False
 
     def test_rename_collection(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)

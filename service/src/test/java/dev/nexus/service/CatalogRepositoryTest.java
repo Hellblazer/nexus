@@ -1108,6 +1108,43 @@ class CatalogRepositoryTest {
         assertThat(coll.get("superseded_by")).isEqualTo("code__nexus__voyage-code-3__v1");
     }
 
+    @Test @Order(62)
+    void collection_upsert_revivesASupersededRow() {
+        // nexus-cecqy: a rename now RETIRES the old name as a tombstone instead of
+        // deleting it, so re-creating a collection under that name lands on a row that
+        // is still marked superseded. Superseded rows are excluded from
+        // collectionForTuple, so without this the revived collection would be
+        // unreachable as a write target — and silently so, since
+        // `nx catalog doctor --collections-drift` deliberately permits a superseded row
+        // to have no T3 collection. /collections/upsert is the caller asserting the
+        // collection is current.
+        String name = "code__revive__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "revive", "embedding_model", "voyage-code-3"));
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
+            .isEqualTo(1);
+        // NON-VACUITY: the row really is tombstoned before the re-registration.
+        assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
+            .as("guard: the row must be superseded before the revive is meaningful")
+            .isEqualTo("code__revive__voyage-code-3__v2");
+
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "revive", "embedding_model", "voyage-code-3"));
+
+        var revived = repo.getCollection(TENANT_A, name);
+        assertThat(revived.get("superseded_by")).as("tombstone pointer cleared").isEqualTo("");
+        // collRow renders every null column as "" (nne), and a non-null timestamptz would
+        // render as an ISO instant — so "" here means the column is genuinely NULL.
+        assertThat(revived.get("superseded_at")).as("tombstone timestamp cleared").isEqualTo("");
+        // And it is once again resolvable as the live collection for its tuple.
+        var forTuple = repo.collectionForTuple(TENANT_A, "code", "revive", "voyage-code-3");
+        assertThat(forTuple).as("a revived collection must be reachable as a write target")
+            .isNotNull();
+        assertThat(forTuple.get("name")).isEqualTo(name);
+    }
+
     @Test @Order(63)
     void importCollection_overwritesStubRow() {
         // A stub row (all three discriminator columns empty) must be fully upgraded
@@ -1186,7 +1223,8 @@ class CatalogRepositoryTest {
         var counts = repo.renameCollection(TENANT_A, "knowledge__old__v1", "knowledge__new__v1");
         assertThat(counts.get("catalog_documents")).as("1 document re-homed").isEqualTo(1);
         assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
-        assertThat(counts.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
+        assertThat(counts.get("catalog_collections_superseded"))
+            .as("registry X retired as a superseded tombstone (nexus-cecqy)").isEqualTo(1);
         var doc = repo.getDocument(TENANT_A, "rn.1");
         assertThat(doc.get("physical_collection")).isEqualTo("knowledge__new__v1");
     }

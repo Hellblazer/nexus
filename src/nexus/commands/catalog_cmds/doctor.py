@@ -317,6 +317,10 @@ def _print_collections_drift_text(report: dict) -> None:
         # T3 collection to exist). Direct supersede is the correct
         # recovery; a future 'nx catalog supersede-collection' verb
         # would wrap this script.
+        #
+        # The ORDER is load-bearing (nexus-g8z8n): supersede now refuses a
+        # superseded_by that names an unregistered collection, so the target
+        # must be registered first. Do not reorder these two calls.
         click.echo(
             "  Remediate: register a target collection and supersede manually:\n"
             "    python -c \"from nexus.catalog.factory import make_catalog_writer; "

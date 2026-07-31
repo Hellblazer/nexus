@@ -128,7 +128,8 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("relevance_log")).as("relevance_log (re-homed, no FK)").isEqualTo(2);
         assertThat(c.get("search_telemetry")).as("search_telemetry (re-homed, no FK)").isEqualTo(2);
         assertThat(c.get("hook_failures")).as("hook_failures (re-homed, no FK)").isEqualTo(1);
-        assertThat(c.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
+        assertThat(c.get("catalog_collections_superseded"))
+            .as("registry X retired as a superseded tombstone (nexus-cecqy)").isEqualTo(1);
     }
 
     @Test @Order(20)
@@ -148,8 +149,13 @@ class CatalogRenameCollectionTest {
                 + "' AND source_collection='" + OLD + "'")).as("assignment orphans").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
                 + "' AND physical_collection='" + OLD + "'")).as("catalog_documents orphans").isZero();
+            // nexus-cecqy: OLD is RETIRED, not deleted — a superseded tombstone that
+            // records where the collection went. It carries no children (every table
+            // above is asserted empty under OLD) and superseded_by != '' keeps it out of
+            // collectionForTuple's live-tuple resolution.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + OLD + "'")).as("old registry row gone").isZero();
+                + "' AND name='" + OLD + "' AND superseded_by='" + NEW + "' AND superseded_at IS NOT NULL"))
+                .as("old registry row retired as a tombstone").isEqualTo(1);
             // Present under NEW.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
                 + "' AND name='" + NEW + "'")).as("new registry row present").isEqualTo(1);
@@ -193,14 +199,22 @@ class CatalogRenameCollectionTest {
     void renameCollection_roundTrip_newBackToOld() throws Exception {
         // Y -> X: tenant A currently lives under NEW; rename it back and confirm the inverse.
         Map<String, Integer> c = repo.renameCollection(TENANT_A, NEW, OLD);
-        assertThat(c.get("catalog_collections_inserted")).as("registry X re-inserted").isEqualTo(1);
+        // nexus-cecqy: X is a TOMBSTONE at this point (the Order(10) rename retired it),
+        // so step 1 upserts onto it — the count is still 1, but via DO UPDATE. The revive
+        // is the whole point: renaming back onto a retired name brings it to life.
+        assertThat(c.get("catalog_collections_inserted")).as("registry X revived").isEqualTo(1);
         assertThat(c.get("chunks_384")).as("chunks_384 back").isEqualTo(2);
-        assertThat(c.get("catalog_collections_deleted")).as("registry Y deleted").isEqualTo(1);
+        assertThat(c.get("catalog_collections_superseded")).as("registry Y retired").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + NEW + "'")).as("NEW gone after round-trip").isZero();
+                + "' AND name='" + NEW + "' AND superseded_by='" + OLD + "'"))
+                .as("NEW retired after round-trip").isEqualTo(1);
+            // OLD must be REVIVED, not still carrying its own tombstone markers from the
+            // forward rename — otherwise the restored collection is invisible to
+            // collectionForTuple and the round trip only looks complete.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + OLD + "'")).as("OLD restored").isEqualTo(1);
+                + "' AND name='" + OLD + "' AND superseded_by='' AND superseded_at IS NULL"))
+                .as("OLD restored and revived").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + OLD + "'")).as("chunks restored under OLD").isEqualTo(2);
             // Back-direction must restore the derived tables too (not just chunks/registry).

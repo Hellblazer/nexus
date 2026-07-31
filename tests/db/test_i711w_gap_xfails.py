@@ -1,33 +1,43 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Service-side contract tests for importer-sweep GAP items 13-17 (nexus-i711w.1).
 
-Each test in this module states the CORRECT contract the service catalog owes
-and is marked ``xfail(strict=True)`` against the FILED DEFECT bead that keeps
-it failing today. The strict marker is the forcing function:
+Each test in this module states the CORRECT contract the service catalog owes.
+They were written as ``xfail(strict=True)`` pins against their FILED DEFECT
+beads; ALL of those defects are now fixed and every marker has been removed, so
+these are live regression tests. They remain the sole repo-wide pins on their
+contracts (the local-catalog tests that used to pin them died with the
+nexus-i711w SQLite deletion).
 
-  - while the defect stands, the test xfails and the suite stays green;
-  - if the behaviour drifts further, the test's guard asserts fail loudly;
-  - when the fix lands, the test XPASSes and FAILS the suite — at that point
-    REMOVE THE xfail MARKER, do NOT delete the test. These are the sole
-    repo-wide pins on their contracts (the local-catalog tests that used to
-    pin them die with the nexus-i711w SQLite deletion).
+If a future defect of this shape is filed, the same protocol applies: mark it
+``xfail(strict=True)`` naming the bead, and REMOVE THE MARKER when the fix
+lands — never delete the test.
+
+⚠ These pins run ONLY under ``-m integration``, which CI does not run. Items 13
+and 15 sat XPASS-red for a full session after their fixes landed because nobody
+re-ran this file (nexus-5opzu tracks making that visible).
 
 Items and their beads:
 
   13  T3-GC tombstone safety, method-level
       (both engine reads) AND verb-level
-      (`nx t3 gc` consuming the leaking read) -> nexus-mqd6t
+      (`nx t3 gc` consuming the leaking read) -> nexus-mqd6t (CLOSED; xfails
+                                                  removed 2026-07-31)
   14  supersede_collection semantics + guards  -> nexus-cecqy, nexus-g8z8n
                                                   (all four g8z8n guards:
                                                   1 unknown old_name, 2
                                                   already-superseded, 3
                                                   dangling new_name, 4
-                                                  superseded_at NULL)
+                                                  superseded_at NULL) — FIXED,
+                                                  xfails removed, these five are
+                                                  now the live regression pins
   15  resolve_path repo_root recombination
-      + curator guard                          -> nexus-5i864
+      + curator guard                          -> nexus-5i864 (CLOSED; xfails
+                                                  removed 2026-07-31)
   16  legacy_grandfathered derivation on the
       bare register_collection path            -> nexus-cecqy (scope-corrected
-                                                  comment, 2026-07-29)
+                                                  comment, 2026-07-29) — FIXED,
+                                                  xfail removed, the test is now
+                                                  the live regression pin
   17  orphan-chunks audit degradation is
       REPORTED, never silent                   -> nexus-e9ru2 (CLOSED; the pin
                                                   is fully hermetic, so it
@@ -113,19 +123,6 @@ class TestT3GcTombstoneSafety:
         return self._OWNER_PREFIX
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 1)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-mqd6t BUG 1: CatalogRepository.chashesForCollection "
-            "(~:1916) joins catalog_documents but has no `deleted_at IS "
-            "NULL` predicate, so a tombstoned document's chunks stay in the "
-            "returned chash set — the T3 GC alive-set (commands/t3.py:431), "
-            "so `nx t3 gc` treats deleted docs' vectors as referenced and "
-            "never collects them. STRICT: the engine fix makes this XPASS "
-            "and forces the marker out."
-        ),
-    )
     def test_chashes_for_collection_excludes_tombstoned_doc(self, cat) -> None:
         owner = self._owner(cat)
         coll = "code__i711w-gc1__voyage-code-3__v1"
@@ -147,22 +144,10 @@ class TestT3GcTombstoneSafety:
         assert cat.delete_document(t) is True
 
         # CORRECT CONTRACT: a deleted document contributes nothing to the
-        # T3 GC alive-set. (Service today: chash still present.)
+        # T3 GC alive-set.
         assert h not in cat.chashes_for_collection(coll)
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 2)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-mqd6t BUG 2: CatalogRepository.docsForChashes (~:1931) "
-            "does not join catalog_documents AT ALL, so there is nothing to "
-            "filter — a search hit is attributed to a document the user "
-            "deleted (search_engine.py:104 maps result chunks back to docs). "
-            "USER-VISIBLE, the worse of the two. STRICT: the engine fix "
-            "makes this XPASS and forces the marker out."
-        ),
-    )
     def test_docs_for_chashes_excludes_tombstoned_doc(self, cat) -> None:
         owner = self._owner(cat)
         coll = "code__i711w-gc2__voyage-code-3__v1"
@@ -189,19 +174,6 @@ class TestT3GcTombstoneSafety:
         assert str(t) not in after.get(h, [])
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (VERB level)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-mqd6t (verb level): `nx t3 gc` consumes "
-            "chashes_for_collection as its alive-set (commands/t3.py:431), "
-            "so BUG 1's missing `deleted_at IS NULL` predicate makes the "
-            "verb treat a tombstoned document's chunks as still referenced "
-            "and never collect them — the operator-visible consequence of "
-            "the leaking read the two method-level tests above pin. STRICT: "
-            "the engine fix makes this XPASS and forces the marker out."
-        ),
-    )
     def test_t3_gc_verb_collects_tombstoned_docs_chunks(
         self, cat, service, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -332,21 +304,6 @@ class TestSupersedeCollectionSemantics:
     """
 
     # nexus-i711w.1 item 14 -> nexus-cecqy
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-cecqy: service-mode rename DELETEs the old "
-            "catalog_collections row (CatalogRepository.renameCollectionTxn "
-            "step 3, key catalog_collections_deleted — forced by the "
-            "fk-002/fk-003 ON UPDATE NO ACTION FKs), so the follow-up "
-            "supersede_collection UPDATE matches 0 rows and the old name "
-            "ends ABSENT instead of marked-superseded — while the CLI still "
-            "echoes 'Emitted CollectionSuperseded'. Correct contract: the "
-            "old row survives with superseded_by + non-NULL superseded_at, "
-            "visible via get_collection AND list_collections."
-        ),
-    )
     def test_supersede_after_rename_marks_old_row(self, cat) -> None:
         old = "code__i711w-sup__voyage-code-3__v1"
         new = "code__i711w-sup__voyage-code-3__v2"
@@ -370,7 +327,8 @@ class TestSupersedeCollectionSemantics:
         old_row = cat.get_collection(old)
         assert old_row is not None, (
             "old collection row must SURVIVE a rename+supersede as the "
-            "superseded tombstone (service today: rename deleted it)"
+            "superseded tombstone (it was DELETEd by the rename until "
+            "nexus-cecqy)"
         )
         assert old_row["superseded_by"] == new
         assert old_row.get("superseded_at"), "superseded_at must be non-NULL"
@@ -380,20 +338,6 @@ class TestSupersedeCollectionSemantics:
         assert by_name[old]["superseded_by"] == new
 
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 4)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-g8z8n guard 4: CatalogRepository.supersedeCollection (:2292-2303) "
-            "binds superseded_at ONLY from the request body and "
-            "HttpCatalogClient.supersede_collection (:1794-1808) never sends "
-            "one, so superseded_at stays NULL — the supersession is "
-            "untimestamped and unauditable. Correct contract: a supersede "
-            "records a non-NULL superseded_at without the caller having to "
-            "supply it (parity with local _WriteOps.supersede_collection, "
-            "which stamps datetime.now(UTC))."
-        ),
-    )
     def test_supersede_records_timestamp_without_caller_supplied_at(
         self, cat
     ) -> None:
@@ -416,25 +360,13 @@ class TestSupersedeCollectionSemantics:
 
         row = cat.get_collection(old)
         assert row is not None
-        # Passes today (the UPDATE does set superseded_by on a surviving row):
+        # Always held (the UPDATE does set superseded_by on a surviving row):
         assert row["superseded_by"] == new
-        # Fails today — the actual g8z8n defect:
+        # The actual g8z8n guard-4 defect: the engine now stamps now() when the
+        # caller supplies no superseded_at, so the supersession is datable.
         assert row.get("superseded_at"), "superseded_at must be non-NULL"
 
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 1)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-g8z8n guard 1: superseding an UNREGISTERED old_name "
-            "silently no-ops — the bare UPDATE matches 0 rows and the "
-            "handler replies 200 {'updated':0}; HttpCatalogClient discards "
-            "the rowcount so nothing raises. Local parity contract "
-            "(_WriteOps.supersede_collection): unknown old_name raises "
-            "ValueError (the typo-on-explicit-action path must fail loud, "
-            "per the no-silent-fallbacks directive)."
-        ),
-    )
     def test_supersede_unknown_old_name_raises(self, cat) -> None:
         new = "code__i711w-supguard__voyage-code-3__v2"
         cat.register_collection(
@@ -446,10 +378,8 @@ class TestSupersedeCollectionSemantics:
         missing = "code__i711w-nosuch__voyage-code-3__v1"
         assert cat.get_collection(missing) is None  # guard: truly unregistered
 
-        # try/except-then-assert (not pytest.raises) so today's silent no-op
-        # fails via AssertionError, matching the marker's `raises=`. An
-        # unexpected exception TYPE from a future fix propagates and fails
-        # the strict marker loudly instead of being absorbed.
+        # try/except-then-assert (not pytest.raises): an unexpected exception
+        # TYPE propagates and fails loudly rather than being absorbed as a pass.
         raised = False
         try:
             cat.supersede_collection(missing, new)
@@ -461,21 +391,6 @@ class TestSupersedeCollectionSemantics:
         )
 
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 2)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-g8z8n guard 2: superseding an ALREADY-superseded old row "
-            "silently OVERWRITES superseded_by — the bare UPDATE (`WHERE "
-            "tenant_id=? AND name=?`, CatalogRepository.java:2292-2303) has "
-            "no `superseded_by IS NULL` predicate and the handler replies "
-            "200, so a second supersede rewrites the supersession chain "
-            "unaudited. Local parity contract (_WriteOps.supersede_collection "
-            "catalog_writes.py:270+, nexus-qpet.2): an already-superseded "
-            "old_name raises ValueError — 'refusing to chain a second "
-            "supersede event' — and the original pointer survives."
-        ),
-    )
     def test_supersede_already_superseded_old_row_conflicts(self, cat) -> None:
         old = "code__i711w-resup__voyage-code-3__v1"
         new1 = "code__i711w-resup__voyage-code-3__v2"
@@ -512,21 +427,44 @@ class TestSupersedeCollectionSemantics:
         # And the ORIGINAL pointer must survive the refused re-supersede.
         assert cat.get_collection(old)["superseded_by"] == new1
 
+    # nexus-cecqy: the carve-out guard 2 has to leave open, pinned explicitly.
+    def test_resupersede_to_the_same_target_is_idempotent(self, cat) -> None:
+        """Re-asserting the SAME supersession is not "chaining a second
+        supersede event" — it is the ordinary state of affairs after a rename,
+        which now tombstones old -> new itself and whose caller then issues
+        supersede(old, new). Guard 2 must not turn that into a hard failure.
+
+        Idempotent means genuinely idempotent: the recorded instant must NOT
+        move, or every retry would relabel when the supersession happened.
+        """
+        old = "code__i711w-idem__voyage-code-3__v1"
+        new = "code__i711w-idem__voyage-code-3__v2"
+        for name, ver in ((old, "v1"), (new, "v2")):
+            cat.register_collection(
+                name,
+                content_type="code",
+                owner_id="i711w-idem",
+                embedding_model="voyage-code-3",
+                model_version=ver,
+            )
+
+        assert cat.supersede_collection(old, new) == 1
+        first = cat.get_collection(old)
+        assert first["superseded_by"] == new
+        stamp = first["superseded_at"]
+        # NON-VACUITY: there IS a recorded instant to hold still.
+        assert stamp, "guard: the first supersede must have stamped superseded_at"
+
+        # Re-assert: must not raise, must report a marked row, must not re-stamp.
+        assert cat.supersede_collection(old, new) == 1
+        again = cat.get_collection(old)
+        assert again["superseded_by"] == new
+        assert again["superseded_at"] == stamp, (
+            "a repeated supersede to the same target must not move the "
+            "recorded supersession instant"
+        )
+
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 3)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-g8z8n guard 3: superseding TO an UNREGISTERED new_name "
-            "writes a DANGLING superseded_by pointer — neither "
-            "HttpCatalogClient.supersede_collection (:1794-1808) nor the "
-            "handler nor the bare UPDATE validates that superseded_by names "
-            "a registered collection, so the pointer resolves to nothing and "
-            "no foreign-key-style join can follow it. Local parity contract "
-            "(_WriteOps.supersede_collection): unregistered new_name raises "
-            "ValueError before anything is written."
-        ),
-    )
     def test_supersede_unregistered_new_name_raises(self, cat) -> None:
         old = "code__i711w-dangl__voyage-code-3__v1"
         cat.register_collection(
@@ -578,19 +516,6 @@ class TestResolvePathServiceParity:
     """
 
     # nexus-i711w.1 item 15 -> nexus-5i864 (defect 1: repo_root recombination)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-5i864 defect 1: HttpCatalogClient.resolve_path "
-            "(:1150-1152) drops the owner.repo_root recombination, so a "
-            "stored RELATIVE file_path comes back as a relative Path and the "
-            "caller anchors it on CWD — the nexus-3e4s CWD-anchoring class "
-            "(~6,500 contaminated rows last time), with no write-path guard "
-            "behind it service-side. Correct contract (catalog_docs.py "
-            "resolution order step 5): Path(owner.repo_root) / file_path."
-        ),
-    )
     def test_relative_file_path_anchors_on_owner_repo_root(self, cat) -> None:
         repo_root = "/i711w/anchored-repo"
         cat.register_owner(
@@ -611,18 +536,6 @@ class TestResolvePathServiceParity:
         assert resolved == Path(repo_root) / "src" / "anchored.py"
 
     # nexus-i711w.1 item 15 -> nexus-5i864 (defect 2: curator guard)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-5i864 defect 2: the curator guard is dropped. "
-            "Curator-owned documents (PDFs, standalone docs) must resolve to "
-            "None (catalog_docs.py resolution order steps 3-4 — the curator "
-            "check precedes even the absolute-path return) but come back as "
-            "a bare Path, so the auto-linker will read_text() a PDF and scan "
-            "the mojibake for file paths."
-        ),
-    )
     def test_curator_owner_resolves_none(self, cat) -> None:
         cat.register_owner(
             name="i711w-papers",
@@ -642,18 +555,6 @@ class TestResolvePathServiceParity:
         assert cat.resolve_path(t) is None
 
     # nexus-i711w.1 item 15 -> nexus-5i864 (defect 1, legacy-owner leg)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-5i864: a repo owner with EMPTY repo_root (pre-RDR-137 "
-            "legacy row awaiting its re-index heal) must resolve a relative "
-            "file_path to None (catalog_docs.py step 6, with the "
-            "catalog_resolve_path_legacy_owner_missing_repo_root DEBUG "
-            "breadcrumb); the service client returns the relative Path "
-            "instead, which the caller then mis-anchors on CWD."
-        ),
-    )
     def test_empty_repo_root_owner_resolves_none(self, cat) -> None:
         cat.register_owner(
             name="i711w-legacy-repo",
@@ -682,24 +583,11 @@ class TestLegacyGrandfatheredDerivation:
     """
 
     # nexus-i711w.1 item 16 -> nexus-cecqy (legacy_grandfathered half,
-    # scope-corrected comment 2026-07-29)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-cecqy (legacy_grandfathered half): local "
-            "Catalog.register_collection DERIVES legacy_grandfathered = not "
-            "is_conformant_collection_name(name) (catalog/catalog.py:1501); "
-            "the engine does NO inference (CatalogRepository.java:2171 binds "
-            "the literal 0) and HttpCatalogClient.register_collection "
-            "defaults the kwarg False (:1681), so every bare-else call site "
-            "(indexer.py:791, catalog_cmds/collections.py:138 and :340 — BY "
-            "CONSTRUCTION the non-conformant branch) lands non-conformant "
-            "names UN-flagged in service mode. Recommended fix per the bead: "
-            "derive inside HttpCatalogClient.register_collection when the "
-            "caller did not pass the flag explicitly."
-        ),
-    )
+    # scope-corrected comment 2026-07-29). XFAIL REMOVED — the fix landed:
+    # HttpCatalogClient.register_collection now defaults the kwarg to None and
+    # DERIVES `not is_conformant_collection_name(name)`, covering all three
+    # bare-else call sites (indexer.py:784, catalog_cmds/collections.py:138
+    # and :349) at one boundary instead of patching them one at a time.
     def test_bare_register_nonconformant_name_flagged_legacy(self, cat) -> None:
         from nexus.corpus import is_conformant_collection_name
 

@@ -59,7 +59,9 @@ _SERVER_COUNTS = {
     "relevance_log": 2,
     "search_telemetry": 2,
     "hook_failures": 1,
-    "catalog_collections_deleted": 1,
+    # nexus-cecqy: the rename retires the old registry row as a superseded
+    # tombstone rather than deleting it.
+    "catalog_collections_superseded": 1,
 }
 
 

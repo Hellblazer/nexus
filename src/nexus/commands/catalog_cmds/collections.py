@@ -339,16 +339,12 @@ def rename_collection_cmd(
         else:
             # nexus-cecqy: --allow-legacy documents that a non-conformant name
             # "still gets a row in the projection but is flagged
-            # legacy_grandfathered=True". The LOCAL catalog DERIVED that flag by
-            # regex; the engine infers nothing (upsertCollection binds the
-            # caller's value, defaulting 0) and this call passed no kwarg — so
-            # in service mode the row was never flagged and the documented
-            # behaviour was simply absent. Derive it here, at the one call site
-            # that knows the name is non-conformant.
-            from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to match the sibling call site above
-            writer.register_collection(
-                new, legacy_grandfathered=not is_conformant_collection_name(new),
-            )
+            # legacy_grandfathered=True". That flag is now DERIVED inside
+            # HttpCatalogClient.register_collection, so this bare call flags the
+            # row correctly. Deriving it *here* instead was the too-narrow fix:
+            # two sibling bare-else sites (indexer.py:784, :138 below) have the
+            # same shape and would have stayed defective.
+            writer.register_collection(new)
         superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:
         click.echo(
@@ -379,19 +375,21 @@ def rename_collection_cmd(
     suffix = f" ({'; '.join(parts)})" if parts else ""
     click.echo(f"Renamed: {old} -> {new}{suffix}")
     # nexus-cecqy: only claim the supersede when it actually marked a row.
-    # Service-mode rename DELETEs the old registry row (renameCollectionTxn),
-    # so the follow-up UPDATE matches nothing and the old name ends up ABSENT
-    # rather than marked-superseded. Announcing it regardless was a claim about
-    # something that did not happen, and it made the rename unauditable while
-    # reading as though the history had been recorded.
+    # Against a CURRENT engine this always fires: renameCollectionTxn retires the
+    # old row as a superseded tombstone, and the follow-up supersede re-asserts
+    # the same target idempotently. The zero branch survives for the version-skew
+    # window — an engine still on the pre-2026-07-31 build DELETEs the old row, so
+    # the UPDATE matches nothing. Announcing the event regardless was a claim
+    # about something that had not happened.
     if superseded_rows:
         click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
     else:
         click.echo(
-            f"NOTE: {old} was removed from the collection registry by the "
-            f"rename, so there was no row left to mark superseded. The rename "
-            f"itself succeeded; its history is not recorded in "
-            f"superseded_by/superseded_at (nexus-cecqy)."
+            f"NOTE: no registry row was left to mark superseded, so this "
+            f"rename's history is not recorded in superseded_by/superseded_at. "
+            f"The rename itself succeeded. This means the engine still deletes "
+            f"the old row on rename — upgrade it to record rename history "
+            f"(nexus-cecqy)."
         )
 
 
