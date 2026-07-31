@@ -200,20 +200,27 @@ def test_probe_timeout_respects_the_lease_ttl_invariant() -> None:
     restart for a vanished endpoint, which is the same outage wearing a
     different hat.
 
-    So the honest statement is: 4.0s is the largest value the current design
-    permits, and it is NOT large enough to outlast a saturated HikariCP pool
-    (connectionTimeout 30s). The tri-state fix stands on its own; closing the
-    remaining gap needs the probe off the heartbeat thread or a dependency-free
-    engine liveness endpoint. Both are tracked.
+    That reasoning held while /health was the restart authority. nexus-hubc0
+    CLOSED the gap the last paragraph of this docstring used to describe as
+    tracked-but-open: the dependency-free ``/livez`` endpoint now holds the
+    restart decision, so /health no longer has to outlast a saturated pool to
+    avoid being mistaken for death — and its budget came back DOWN (4.0 -> 2.0)
+    as a result, which is what restored the TTL margin.
+
+    The budget is still capped, and the cap now spans BOTH probes, because a
+    beat whose /health goes silent consults /livez before deciding anything.
     """
     import nexus.daemon.storage_service_daemon as ssd
     from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
 
-    worst_tick = ssd._HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+    worst_tick = ssd._HEALTH_TIMEOUT + ssd._LIVEZ_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
     assert ttl_for_tier("storage_service") >= 3 * worst_tick, (
-        "probe timeout raised past what the lease TTL can absorb — the "
+        "probe budget raised past what the lease TTL can absorb — the "
         "supervisor would lose its own lease while probing"
     )
-    # Still meaningfully wider than the 2s/3-beat window that cycled Steve's
-    # service: 4 beats of total silence at ~5s per tick.
-    assert ssd._HEALTH_TIMEOUT * ssd._MAX_UNHEALTHY_HEARTBEATS >= 16.0
+    # The DETECTION window is unchanged in wall-clock terms: still ~4 beats of
+    # total silence before an exit-for-restart, still far wider than the 2s /
+    # 3-beat window that cycled Steve's service. What changed is WHAT has to be
+    # silent — both endpoints, not just the pool-bound one — so a busy service
+    # no longer spends this window on its way to a needless kill.
+    assert ssd._MAX_UNHEALTHY_HEARTBEATS * worst_tick >= 16.0

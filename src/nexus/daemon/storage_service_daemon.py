@@ -31,11 +31,16 @@ logic lives in the shared primitive, not here. This module:
    200, (c) Postgres TCP-reachable. Delegates to ``supervisor.heartbeat_tick()``.
    When PG dies independently (service still alive), the run loop calls
    ``_ensure_pg_running()`` directly — a PG restart without a full service respawn.
-   When the service is alive but ``/health`` returns non-200 for
-   ``_MAX_UNHEALTHY_HEARTBEATS`` consecutive beats (stuck process: connection-pool
-   exhaustion, internal deadlock), ``heartbeat_once()`` returns ``(False, pg_ok)``
-   so the run loop exits non-zero — treating a stuck process identically to a
-   process death and letting the OS watchdog restart the whole supervisor.
+   When the service is alive but BOTH ``/health`` and the dependency-free
+   ``/livez`` go silent for ``_MAX_UNHEALTHY_HEARTBEATS`` consecutive beats
+   (a genuine wedge: internal deadlock, GC spiral), ``heartbeat_once()`` returns
+   ``(False, pg_ok)`` so the run loop exits non-zero — treating a stuck process
+   identically to a process death and letting the OS watchdog restart the whole
+   supervisor. TWO ENDPOINTS, TWO JOBS (nexus-hubc0): ``/health`` takes a pool
+   connection and drives LEASE STAMPING (readiness); ``/livez`` touches nothing
+   and holds the RESTART authority, so connection-pool exhaustion — which is
+   precisely what ``/health`` cannot distinguish from death — no longer reads
+   as a wedge.
 6. ``mark_shutting_down()`` BEFORE ``os.killpg`` (RDR-151 P1.3 ordering).
 7. RDR-175: OS init (launchd/systemd, RDR-174) is the single process watchdog.
    On service death OR the stuck-process threshold, the supervisor EXITS non-zero
@@ -147,14 +152,24 @@ _GRACEFUL_STOP_TIMEOUT: float = 5.0
 #: whether to KILL the service must not be tighter than the resource it
 #: contends for.
 #:
-#: CEILING (test_ttl_exceeds_worst_case_heartbeat_tick): the probe BLOCKS the
-#: heartbeat thread, so the tick can take _HEALTH_TIMEOUT + heartbeat interval
-#: and the lease TTL must be >= 3x that. With TTL 15s that caps this at 4.0s.
-#: Raising it further requires either a larger TTL (which widens the
-#: post-restart stale-endpoint window, nexus-om64x) or moving the probe OFF
-#: the heartbeat thread — see the follow-up bead. 4.0s is the largest value
-#: the current invariant allows, not the value the problem wants.
-_HEALTH_TIMEOUT: float = 4.0
+#: nexus-hubc0: LOWERED 4.0 -> 2.0, which is a tightening made SAFE by moving
+#: the restart decision off this endpoint. /health's 4.0s existed solely so a
+#: contended pool could not masquerade as a wedge; now that ``/livez`` owns the
+#: restart decision, a /health timeout means only "not ready this beat" — it
+#: costs a lease stamp, never a kill. Readiness does not need to outlast the
+#: pool's 30s connectionTimeout, so the budget goes back down and buys the TTL
+#: margin the invariant had lost (see _LIVEZ_TIMEOUT).
+_HEALTH_TIMEOUT: float = 2.0
+
+#: Timeout for the ``GET /livez`` liveness probe (nexus-hubc0).
+#:
+#: ``/livez`` is engine-side implemented with NO pool access, no SELECT, no I/O
+#: beyond the socket (LivezHandler.java, shipped in engine-service-v0.1.55), so
+#: it cannot be slowed by a saturated HikariCP pool or an unhappy Postgres. A
+#: process that cannot answer a socket-only route within a second is not busy,
+#: it is wedged — which is exactly the discrimination the restart decision
+#: needs and which /health, by construction, can never provide.
+_LIVEZ_TIMEOUT: float = 1.0
 
 #: The storage-service lease TTL is a SUBSTRATE parameter — it lives in the shared
 #: primitive (``service_registry.TIER_TTLS["storage_service"]``, resolved via
@@ -176,8 +191,9 @@ _HEALTH_TIMEOUT: float = 4.0
 #: nexus-7f7gb: was 3, which with the old 2s probe gave a ~3s grace window —
 #: an ordinary indexing burst crossed it and cycled the service mid-batch,
 #: severing in-flight clients (which then retried, adding load: the loop was
-#: self-amplifying). Only UNKNOWN beats (no answer AT ALL) advance this
-#: counter now; a 503 means the service ANSWERED and is not a wedge. 4 beats
+#: self-amplifying). Only beats with no answer from EITHER endpoint advance
+#: this counter: a 503 means /health ANSWERED, and (nexus-hubc0) a silent
+#: /health whose /livez still answers is a contended pool, not a wedge. 4 beats
 #: x ~5s tick = ~20s of total silence before the supervisor exits for
 #: an OS restart — long enough that saturation cannot masquerade as death,
 #: short enough that a real deadlock is still caught. RDR-175 retired the in-process respawn mechanism; this
@@ -717,6 +733,38 @@ class StorageServiceSupervisor:
         except Exception:  # noqa: BLE001 — no answer: timeout, refused, anything
             return HealthProbe.UNKNOWN
 
+    def _probe_service_liveness(self, port: int | None = None) -> bool:
+        """Return True iff ``GET /livez`` answered at all (nexus-hubc0).
+
+        THE RESTART AUTHORITY. ``/livez`` is dependency-free engine-side, so an
+        answer — of ANY status — proves the process is alive and its HTTP loop
+        is responsive, and silence is the only evidence of a wedge that a
+        saturated pool cannot fake. That is the whole distinction ``/health``
+        could not draw: /health takes a pool connection whose own
+        connectionTimeout is 30s, so under an indexing burst "the pool is busy"
+        and "the process is dead" look identical from the outside.
+
+        Any status answers TRUE deliberately — this probe asks "is anyone home",
+        not "are you ready". Readiness is :meth:`_probe_service_health`'s job,
+        and conflating them is the bug this separates.
+        """
+        _port = port if port is not None else self._service_port
+        if _port <= 0:
+            return False
+        url = f"http://{_SERVICE_HOST}:{_port}/livez"
+        try:
+            import urllib.error  # noqa: PLC0415 — deferred import — branch-local
+            import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=_LIVEZ_TIMEOUT):
+                return True
+        except urllib.error.HTTPError:
+            # An HTTP status IS an answer: the socket was accepted, the request
+            # routed, a response written. Alive.
+            return True
+        except Exception:  # noqa: BLE001 — no answer: timeout, refused, anything
+            return False
+
     def _service_healthy(self, port: int | None = None) -> bool:
         """Back-compat boolean: True iff /health answered 200.
 
@@ -1041,10 +1089,27 @@ class StorageServiceSupervisor:
             return True, pg_ok
 
         if not service_ok:
+            # nexus-hubc0: /health went SILENT. That alone is not evidence of a
+            # wedge — it is also exactly what a saturated pool looks like, since
+            # /health takes a HikariCP connection (30s connectionTimeout). Ask
+            # the dependency-free endpoint before touching the restart counter.
+            if self._probe_service_liveness():
+                self._consecutive_unhealthy_heartbeats = 0
+                _log.warning(
+                    "storage_service_saturated",
+                    pg_ok=pg_ok,
+                    port=self._service_port,
+                    msg="/health silent but /livez answered — the process is "
+                        "alive and its pool is contended; NOT a restart reason. "
+                        "Lease not re-stamped, so discoverers age it out.",
+                )
+                return True, pg_ok
+
             self._consecutive_unhealthy_heartbeats += 1
             _log.warning(
                 "storage_service_unhealthy",
                 service_ok=service_ok,
+                livez_answered=False,
                 pg_ok=pg_ok,
                 port=self._service_port,
                 pg_port=self._pg_port,
