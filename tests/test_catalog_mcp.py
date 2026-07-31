@@ -385,14 +385,17 @@ def test_link_audit(cat, monkeypatch) -> None:
     _setup_two_docs(cat)
     catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
     result = catalog_link_audit()
-    # nexus-wnlit: HttpCatalogClient.link_audit is a stub returning {},
-    # so the tool reports success-shaped emptiness — indistinguishable
-    # from "audited, found nothing". Asserted at the broken value so the
-    # fix fails loudly here.
-    assert result == {}, (
-        f"nexus-wnlit looks FIXED (link_audit returned {result!r}, not "
-        f"the broken empty dict) — restore the unconditional assertion"
+    # nexus-wnlit / nexus-ai41v FIXED 2026-07-31: link_audit is no longer a
+    # stub returning {}. It was asserted AT the broken value so the fix would
+    # fail loudly here — it did, and this is the promised restoration of the
+    # unconditional assertion. An empty dict is the shape that matters: the
+    # tool reported success-shaped emptiness, indistinguishable from "audited,
+    # found nothing".
+    assert result["total"] == 1, (
+        f"one link was created above; audit reported {result!r}"
     )
+    assert result["by_type"]["cites"] == 1
+    assert result["orphaned_count"] == len(result["orphaned"])
 
 
 @pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])

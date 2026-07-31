@@ -441,6 +441,7 @@ def gc_cmd(
         click.echo(f"Failed to list chunks for {collection}: {exc}")
         raise click.exceptions.Exit(1)
 
+
     for chunk_id, meta in chunks:
         chash = meta.get("chunk_text_hash") or ""  # RDR-180: full digest — the truncation was the quarantine-class bug
         if not chash:

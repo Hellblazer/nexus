@@ -122,7 +122,13 @@ def test_expire_returns_zero_on_fresh_db(db: T2Database) -> None:
     ("stale.md",     1,    2,  0, 1, True),
     ("fresh.md",     30,   0,  0, 0, False),
     ("permanent.md", None, 1000, 0, 0, False),
-    ("zero.md",      0,    0, 60, 1, True),
+    # nexus-cg13x: ttl=0 through put() is PERMANENT, not expire-immediately.
+    # The store's expire() still treats a STORED 0 as expire-immediately
+    # (WHERE ttl IS NOT NULL, effective_ttl = 0), but put() — MCP and the
+    # engine's POST /v1/memory/put alike — now coerces ttl <= 0 to NULL, so a
+    # 0 can no longer REACH the column through this path. This row previously
+    # asserted the footgun that destroyed nexus/deployed-engine-version.
+    ("zero.md",      0,    0, 60, 0, False),
     ("recent.md",    30,  29,  0, 0, False),
 ])
 def test_expire_scenarios(

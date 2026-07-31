@@ -603,3 +603,65 @@ class TestGetEmbeddingsRequestOrder:
         col.add(ids=["only"], documents=["text"], metadatas=[{"k": "v"}])
         result = t3.get_embeddings("knowledge__ordertest2", ["only", "absent"])
         assert result.shape[0] == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "nexus-jqrtp: the empty-alive-set guard is STILL unreachable in service "
+        "mode. _make_catalog()'s init gate tests `cat is None`, a SQLite-only "
+        "condition, so the catastrophe it guards (empty alive-set -> every chunk "
+        "an orphan -> --no-dry-run --yes deletes the collection) is unguarded on "
+        "every shipping configuration. A first attempt at guarding the CONDITION "
+        "(chunks present, manifest referencing none) was REVERTED 2026-07-31: it "
+        "also refuses the LEGITIMATE fully-orphaned collection, which six gc "
+        "tests construct on purpose, and separating the two needs a "
+        "per-collection document count the client has no read for "
+        "(all_documents takes no physical_collection filter). The real fix is "
+        "that read, or an explicit opt-out that changes a DESTRUCTIVE verb's "
+        "default — Hal's call, not a rushed patch. This pin holds the gap open."
+    ),
+)
+def test_gc_refuses_when_manifest_references_nothing_but_chunks_exist(
+    runner: CliRunner, t3_db
+) -> None:
+    """nexus-jqrtp: the empty-alive-set guard, finally reachable.
+
+    _make_catalog()'s init gate was written to stop exactly this catastrophe —
+    an empty alive-set makes EVERY chunk an orphan, which with --no-dry-run
+    --yes deletes the whole collection. But it tested ``cat is None``, a
+    condition only a SQLite opt-out install could produce; in service mode the
+    factory always returns a handle, so the guard could never fire and the
+    hazard was unguarded on every shipping configuration.
+
+    The guard now tests the CONDITION: chunks present, manifest referencing
+    none of them. That disagreement is damage (a dropped manifest-write hook),
+    not an empty collection, and GC must refuse and name the repair.
+    """
+    from unittest.mock import MagicMock
+
+    coll = "code__jqrtp-guard__stub-code-1024__v1"
+    long_ago = "2020-01-01T00:00:00Z"
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="c1", content="x",
+        chunk_text_hash="a" * 64, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="c2", content="y",
+        chunk_text_hash="b" * 64, indexed_at=long_ago,
+    )
+
+    # A catalog whose manifest knows nothing about this collection.
+    empty_cat = MagicMock()
+    empty_cat.chashes_for_collection.return_value = set()
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=empty_cat):
+        result = runner.invoke(main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"])
+
+    assert result.exit_code == 1, result.output
+    assert "REFUSING" in result.output
+    assert "nx catalog reconcile" in result.output
+    # THE POINT: nothing was deleted despite --no-dry-run --yes.
+    assert t3_db._client.get_collection(coll).count() == 2

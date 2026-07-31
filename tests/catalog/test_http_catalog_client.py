@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -1873,3 +1874,75 @@ class TestResolvePathOwnerCache:
         assert c.resolve_path(Tumbler.parse("1.1.1")) is None
         assert c.resolve_path(Tumbler.parse("1.1.2")) is None
         assert calls == ["1.1"]
+
+
+# ── nexus-ai41v / nexus-9ssih: link audit + dangling-endpoint translation ─────
+
+
+class TestLinkAuditIsNoLongerAStub:
+    """nexus-ai41v: link_audit used to `return {}`.
+
+    Service mode is now EVERY mode and the verb ships on two surfaces, so an
+    empty dict was not graceful degradation — `--json` printed `{}`, which
+    reads as a CLEAN audit. Everything it reports is computed from reads the
+    engine already serves, so no engine change was needed.
+    """
+
+    def test_audit_reports_real_totals_not_an_empty_dict(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        audit = client.link_audit()
+        assert audit != {}, "an empty audit reads as CLEAN — the false-clean shape"
+        for key in (
+            "total", "by_type", "by_creator",
+            "duplicate_count", "duplicates", "orphaned_count", "orphaned",
+        ):
+            assert key in audit, f"CLI/MCP consumers read {key!r}; it must be present"
+        assert audit["total"] >= 1
+        assert audit["by_type"].get("cites", 0) >= 1
+
+    def test_audit_counts_orphans_from_the_engine_route(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        audit = client.link_audit()
+        assert audit["orphaned_count"] == len(audit["orphaned"])
+
+
+class TestDanglingEndpointBecomesValueError:
+    """nexus-9ssih CLIENT HALF, landed AHEAD of its engine half.
+
+    auto_linker counts skipped_missing_endpoint inside `except ValueError`, so
+    the engine's future 400 must arrive as ValueError or every install takes an
+    uncaught httpx.HTTPStatusError on its next index pass.
+    """
+
+    def _client_raising(self, monkeypatch: pytest.MonkeyPatch, status: int, body: dict):
+        c = object.__new__(HttpCatalogClient)
+
+        def _boom(path, payload):
+            request = httpx.Request("POST", "http://svc/v1/catalog/link")
+            response = httpx.Response(status, json=body, request=request)
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        monkeypatch.setattr(c, "_post", _boom, raising=False)
+        return c
+
+    def test_dangling_endpoint_code_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_raising(
+            monkeypatch, 400,
+            {"error": "dangling link endpoint", "code": "dangling_endpoint",
+             "missing": ["to_tumbler"]},
+        )
+        with pytest.raises(ValueError, match="dangling link endpoint"):
+            c.link("1.1.1", "1.9.9", "cites", "auto-linker")
+
+    def test_other_400s_are_not_swallowed_into_value_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Discriminate on `code`, never on the bare status — a malformed-body
+        400 must keep raising exactly what it raises today."""
+        c = self._client_raising(monkeypatch, 400, {"error": "malformed body"})
+        with pytest.raises(httpx.HTTPStatusError):
+            c.link("1.1.1", "1.1.2", "cites", "someone")

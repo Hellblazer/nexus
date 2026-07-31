@@ -184,6 +184,51 @@ class MemoryHandlerTest {
         assertThat(body.get("content")).isEqualTo("content A");
     }
 
+    // ── nexus-cg13x: ttl <= 0 is coerced to NULL (permanent) ─────────────────
+
+    @Test
+    void put_ttlZeroIsCoercedToPermanentNull() throws Exception {
+        // ttl=0 does NOT mean permanent: expire() filters WHERE ttl IS NOT NULL
+        // and computes effective_ttl = ttl * (1 + log(access_count + 1)), so a
+        // stored 0 is deleted by the very next sweep. This destroyed
+        // nexus/deployed-engine-version repeatedly — each write returning 200
+        // with a row id, each immediate read-back passing, the row gone once a
+        // sweep ran. MCP always coerced; direct POSTers inherited the footgun.
+        var putResp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"ttl0-proj\",\"title\":\"perm\",\"content\":\"keep me\",\"ttl\":0}");
+        assertThat(putResp.statusCode()).isEqualTo(200);
+
+        var resp = get("/v1/memory/get?project=ttl0-proj&title=perm", TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("ttl"))
+            .as("ttl=0 must be stored as NULL (permanent), not as 0 (expire immediately)")
+            .isNull();
+    }
+
+    @Test
+    void put_negativeTtlIsAlsoCoerced() throws Exception {
+        var putResp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"ttlneg-proj\",\"title\":\"perm\",\"content\":\"x\",\"ttl\":-5}");
+        assertThat(putResp.statusCode()).isEqualTo(200);
+
+        var body = mapper.readValue(
+            get("/v1/memory/get?project=ttlneg-proj&title=perm", TENANT).body(), MAP_T);
+        assertThat(body.get("ttl")).isNull();
+    }
+
+    @Test
+    void put_positiveTtlIsPreservedExactly() throws Exception {
+        // NON-VACUITY: the coercion must not swallow real TTLs.
+        var putResp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"ttlpos-proj\",\"title\":\"expiring\",\"content\":\"x\",\"ttl\":30}");
+        assertThat(putResp.statusCode()).isEqualTo(200);
+
+        var body = mapper.readValue(
+            get("/v1/memory/get?project=ttlpos-proj&title=expiring", TENANT).body(), MAP_T);
+        assertThat(((Number) body.get("ttl")).intValue()).isEqualTo(30);
+    }
+
     // ── Test 3: GET by id ─────────────────────────────────────────────────────
 
     @Test

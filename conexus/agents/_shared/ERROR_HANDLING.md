@@ -68,7 +68,16 @@ This file documents common error handling patterns for agents.
 
 **TTL format errors**:
 - Valid ttl parameter values for memory_put: integer days (e.g., `ttl=30`)
-- Use `ttl=0` for permanent entries
+- Permanent is a NULL ttl — omit the parameter, or pass `ttl=0` and let the API coerce it
+- **Do not carry "0 means permanent" outside `memory_put`.** In the store itself, `0` means
+  EXPIRE IMMEDIATELY: `expire()` selects `WHERE ttl IS NOT NULL` and computes
+  `effective_ttl = ttl * (1 + log(access_count + 1))`, so a stored `0` is swept on the next
+  pass. Only NULL is excluded by that filter. `memory_put` (MCP and the engine's
+  `POST /v1/memory/put`) coerces `ttl <= 0` to NULL for you — the ETL import endpoints
+  deliberately do NOT, because they carry source values verbatim. A raw write that stores a
+  literal `0` is a self-deleting row (nexus-cg13x: this destroyed
+  `nexus/deployed-engine-version` repeatedly, each write returning 200 with a row id and each
+  immediate read-back passing, the row gone once a sweep ran).
 
 ### T3 Store Errors
 

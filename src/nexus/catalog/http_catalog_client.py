@@ -74,6 +74,7 @@ new scope, not a mechanical mixin swap.
 """
 from __future__ import annotations
 
+import contextlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -1448,6 +1449,46 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # LINKS
     # ══════════════════════════════════════════════════════════════════════════
 
+    def _post_link(self, payload: dict) -> bool:
+        """POST /link, translating a dangling-endpoint refusal into ValueError.
+
+        nexus-9ssih, CLIENT HALF — deliberately landed AHEAD of its engine half.
+        The engine will reject a link whose endpoint does not resolve to a live
+        document with ``400 {"code": "dangling_endpoint", ...}``. The canonical
+        local ``link_if_absent`` raised ``ValueError`` for exactly that case,
+        and ``auto_linker.auto_link`` counts ``skipped_missing_endpoint`` inside
+        an ``except ValueError``. Without this translation the refusal would
+        surface as ``httpx.HTTPStatusError``, which nothing on the client
+        catches — every install would take an uncaught exception on its next
+        index pass, since a stale link-context reference occurs on every one.
+
+        FORWARD-COMPATIBLE BY CONSTRUCTION, which is why it can ship first:
+        against an engine that never emits that code this branch is unreachable,
+        and ``allow_dangling`` on the payload is ignored by an engine that does
+        not read it. So this is safe on today's engine and correct on the next.
+
+        Discriminates on ``code``, never on the bare 400: a malformed-body 400
+        must keep raising what it raises today.
+        """
+        try:
+            result = self._post("/link", payload)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                code = ""
+                with contextlib.suppress(Exception):
+                    body = exc.response.json()
+                    if isinstance(body, dict):
+                        code = str(body.get("code", ""))
+                if code == "dangling_endpoint":
+                    raise ValueError(
+                        f"dangling link endpoint: {payload.get('from_tumbler')} -> "
+                        f"{payload.get('to_tumbler')} ({payload.get('link_type')}) — "
+                        "an endpoint does not resolve to a live catalog document. "
+                        "Pass allow_dangling=True to write the edge anyway."
+                    ) from exc
+            raise
+        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
+
     def link(
         self,
         from_t: Tumbler | str,
@@ -1471,8 +1512,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if meta:
             payload["metadata"] = dict(meta)
-        result = self._post("/link", payload)
-        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
+        return self._post_link(payload)
 
     def link_if_absent(
         self,
@@ -1514,8 +1554,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if meta:
             payload["metadata"] = dict(meta)
-        result = self._post("/link", payload)
-        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
+        return self._post_link(payload)
 
     def unlink(
         self,
@@ -1755,7 +1794,60 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return self._traverse(payload)
 
     def link_audit(self, *, t3: Any = None) -> dict:
-        return {}  # not supported in initial service-mode implementation
+        """Audit the link graph: totals, per-type/creator breakdown, orphans, dupes.
+
+        nexus-ai41v: this used to ``return {}`` — "not supported in initial
+        service-mode implementation". Service mode is now EVERY mode, and the
+        verb ships on two surfaces (``nx catalog link-audit`` and the MCP
+        ``catalog_link_audit`` tool), so an empty dict was not a graceful
+        degradation: ``--json`` printed ``{}``, which reads as a CLEAN audit.
+        That is the silent-false-clean shape this project has been burned by
+        before (nexus-ou4tb folded unreadable collections in as "no ghosts").
+
+        Everything here is computed from reads the engine already serves — the
+        paginated ``/link_query`` with no filters, and ``/links/orphaned``
+        (nexus-ysrwi) — so no engine change is required.
+
+        ``t3`` is accepted and ignored: the local implementation used it for a
+        stale-chash cross-check against T3, which this substrate answers from
+        the manifest instead. It stays in the signature for call-site parity.
+        """
+        by_type: dict[str, int] = defaultdict(int)
+        by_creator: dict[str, int] = defaultdict(int)
+        seen: dict[tuple[str, str, str], int] = defaultdict(int)
+        total = 0
+
+        page = 200
+        offset = 0
+        while True:
+            batch = self.link_query(limit=page, offset=offset)
+            if not batch:
+                break
+            for lk in batch:
+                total += 1
+                by_type[lk.link_type] += 1
+                by_creator[lk.created_by or ""] += 1
+                seen[(str(lk.from_tumbler), str(lk.to_tumbler), lk.link_type)] += 1
+            if len(batch) < page:
+                break
+            offset += page
+
+        duplicates = {k: n for k, n in seen.items() if n > 1}
+        result = self._get("/links/orphaned")
+        orphaned = (result.get("links", []) if result else [])
+
+        return {
+            "total": total,
+            "by_type": dict(by_type),
+            "by_creator": dict(by_creator),
+            "duplicate_count": len(duplicates),
+            "duplicates": [
+                {"from_tumbler": f, "to_tumbler": t, "link_type": lt, "count": n}
+                for (f, t, lt), n in sorted(duplicates.items())
+            ],
+            "orphaned_count": len(orphaned),
+            "orphaned": orphaned,
+        }
 
     # ══════════════════════════════════════════════════════════════════════════
     # COLLECTIONS
