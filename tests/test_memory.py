@@ -143,50 +143,52 @@ def test_memory_list_by_project(db: T2Database) -> None:
     assert {e["title"] for e in db.list_entries(project="proj_a")} == {"x.md", "y.md"}
 
 
-# ── FTS5 safety ──────────────────────────────────────────────────────────────
+# ── query grammar: plain text, and the empty-tsquery gap ─────────────────────
 
 
-def _assert_malformed_query_rejected(
-    db: T2Database, method: str, args: tuple,
+def test_stopword_only_query_is_indistinguishable_from_no_match(
+    db: T2Database,
 ) -> None:
-    """Assert the substrate's CURRENT handling of a malformed FTS5 query.
+    """A query of only stopwords returns [] even when the corpus CONTAINS it.
 
-    SQLite rejects it loudly (``ValueError: Invalid search query 'AND':
-    fts5: syntax error near "AND"``, raised by ``_sanitize_fts5``). The
-    service silently returns zero rows — nexus-senub. Both are pinned so
-    neither can drift unnoticed, and so the service arm's assertion FAILS
-    the moment nexus-senub is fixed.
+    nexus-senub, re-scoped 2026-07-31. The bead was filed as "malformed query
+    silently returns 0 rows where SQLite raised". That mechanism died with
+    SQLite: FTS5 treated AND/NOT as OPERATORS (bare = syntax error), while the
+    engine uses PostgreSQL plainto_tsquery, whose whole purpose is accepting
+    arbitrary text WITHOUT a syntax error. There is no malformed-query class.
+
+    But re-measuring found a REAL and narrower silent false negative in the
+    same place. plainto_tsquery strips English stopwords, so a query made
+    ENTIRELY of them reduces to an EMPTY tsquery, which matches nothing — not
+    "nothing relevant", but nothing, unconditionally. This test proves it is
+    unconditional by seeding a row that literally contains the word and
+    showing it still does not match.
+
+    The caller cannot tell that from a genuine empty store, which is the
+    no-silent-fallbacks class: a human concludes the entry is absent, and an
+    agent treats it as evidence of absence and re-derives from scratch.
+
+    ASSERTED AT THE BROKEN VALUE so fixing nexus-senub fails here loudly. The
+    fix is to detect an empty effective tsquery and SAY so ("no searchable
+    terms — 'and' is a stopword") rather than returning []. When that lands,
+    replace the assertion below with the raise/report the fix introduces.
     """
-    call = getattr(db, method)
+    db.put(project="proj_rdr", title="operators.md", content="clause and clause")
 
-
-    result = call(*args)
-    assert result == [], (
-        f"{method}{args!r} returned {len(result)} rows on the service arm. "
-        f"If nexus-senub is FIXED, this assertion is now wrong: delete this "
-        f"branch and restore the unconditional pytest.raises(ValueError, "
-        f"match='Invalid search query') above. If it returned MATCHES, that "
-        f"is a third behaviour and neither the SQLite contract nor the "
-        f"recorded gap — investigate before touching this test."
+    assert db.search("and") == [], (
+        "nexus-senub looks FIXED: 'and' now matches a row that contains it, or "
+        "the call reported the empty-tsquery condition. Replace this "
+        "broken-value assertion with the real contract."
     )
 
-
-@pytest.mark.parametrize("method,args", [
-    ("search", ("AND",)),
-    ("search_glob", ("NOT", "*_rdr")),
-])
-def test_malformed_fts5_query_raises_valueerror(db: T2Database, method: str, args: tuple) -> None:
-    """A malformed FTS5 query must be REPORTED, not answered with silence.
-
-    nexus-senub (P1, open): the service arm does not validate the query and
-    returns an empty result set instead — a false 'no matches' for a syntax
-    error, indistinguishable by the caller from a genuinely empty store. The
-    gap is asserted AT ITS BROKEN VALUE rather than xfailed, so fixing
-    nexus-senub fails this test loudly and points at the strict assertion to
-    restore.
-    """
-    db.put(project="proj_rdr", title="doc.md", content="some content")
-    _assert_malformed_query_rejected(db, method, args)
+    # NON-VACUITY: the search path itself works — a non-stopword term in the
+    # same row matches. So the [] above is the stopword reduction, not a
+    # broken fixture or a dead search.
+    hits = db.search("clause")
+    assert {row["title"] for row in hits} == {"operators.md"}, (
+        "the control term must match, or this test proves nothing about "
+        "stopwords"
+    )
 
 
 # ── T2 session delegation ───────────────────────────────────────────────────
