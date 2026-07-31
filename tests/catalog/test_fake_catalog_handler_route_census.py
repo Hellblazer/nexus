@@ -228,6 +228,18 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "shared-surface parity gate by construction; the engine route "
         "retires with RDR-187 .11"
     ),
+    "/gc_audit/record": (
+        "nexus-jqvzk, engine surface shipped AHEAD of its client half: the "
+        "engine owns the destructive-T3-op audit record, and `nx t3 gc` does "
+        "not yet emit through it. REMOVE THIS ENTRY when the gc verb starts "
+        "writing — an exclusion outliving its reason is the stale-allowlist "
+        "class this repo has been bitten by (see the mode-lint orphans, "
+        "nexus-th15h)"
+    ),
+    "/gc_audit/list": (
+        "nexus-jqvzk, the read half of the same not-yet-consumed audit "
+        "surface. Same removal condition as /gc_audit/record"
+    ),
 }
 
 #: Fake routes with NO CatalogHandler.java counterpart — either they belong

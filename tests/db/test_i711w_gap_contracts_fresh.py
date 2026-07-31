@@ -409,25 +409,9 @@ class TestItem21LinkMergeCoDiscoveredBy:
         assert first is True
         assert second is False
 
-    # nexus-i711w.1 item 21 — PRODUCT DIVERGENCE (engine vs canonical contract)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "engine DIVERGES from the canonical co_discovered_by merge: "
-            "CatalogRepository.upsertLink's ON CONFLICT DO UPDATE sets "
-            "created_by = EXCLUDED.created_by and metadata = EXCLUDED.metadata "
-            "(CatalogRepository.java:1404-1409, EX_LNK_CRTBY/EX_LNK_META at "
-            "lines 177-178) — the second writer OVERWRITES the original "
-            "creator and wipes the merged metadata instead of preserving "
-            "created_by and folding the new creator into "
-            "meta['co_discovered_by'] as the canonical local merge does "
-            "(catalog_links.py:224-268; MCP contract mcp/catalog.py:373). "
-            "No co_discovered_by handling exists anywhere in service/src. "
-            "When the engine implements the fold this strict xfail flips to "
-            "XPASS and forces removal of the marker."
-        ),
-    )
+    # nexus-i711w.1 item 21 — the canonical fold, now implemented engine-side
+    # (nexus-s4e1n): upsertLink preserves created_by and folds the second
+    # creator into meta['co_discovered_by'] instead of overwriting both.
     def test_co_discovered_by_folds_second_creator(self, cat, merged_edge) -> None:
         c, d, _first, _second = merged_edge
         edges = [

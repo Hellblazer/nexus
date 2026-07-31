@@ -1317,15 +1317,6 @@ def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="nexus-mqd6t: the engine's chashesForCollection misses the "
-    "tombstone filter — a deleted doc's chunks stay in the T3 GC alive-set. "
-    "CONFIRMED LIVE by this port against the real engine (2026-07-30), the "
-    "second independent confirmation after the i711w.1 item-13 xfails. "
-    "Flips with mqd6t's engine fix.",
-)
 def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     """RDR-108 Phase 4 / nexus-dyxe integration test: exercise the full
     catalog -> T3 round trip with the ACTIVE catalog (whichever backend the

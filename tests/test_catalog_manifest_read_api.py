@@ -436,18 +436,6 @@ class TestChashesForCollection:
         result = cat.chashes_for_collection("code__test")
         assert result == set()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "nexus-mqd6t: CatalogRepository.chashesForCollection joins "
-            "catalog_documents but has no `deleted_at IS NULL` predicate, so a "
-            "tombstoned document's chunks stay in the returned set. Passed on "
-            "SQLite only because SQLite HARD-deletes — a substrate accident, "
-            "not a behavioural guarantee. Feeds the T3 GC alive-set "
-            "(commands/t3.py:431), so deleted documents' vectors leak. STRICT: "
-            "the engine fix must make this XPASS and force the marker out."
-        ),
-    )
     def test_chashes_for_collection_skips_deleted_documents(self, tmp_path):
         """ON DELETE CASCADE removes manifest rows when the document is
         deleted, so ``chashes_for_collection`` returns an empty set after

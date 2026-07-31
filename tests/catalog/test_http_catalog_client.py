@@ -342,6 +342,15 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"owners": [
                 {"tumbler_prefix": "1.1", "name": "myrepo", "owner_type": "curator"},
             ]})
+        elif op == "/by_doc_id":
+            # nexus-tz1cx: the engine's metadata.doc_id lookup. Same response
+            # shape as /show (a document object) or 404 on miss — the client
+            # half reads it with the same _to_entry path.
+            if not self._query_params().get("doc_id", ""):
+                self.send_response(404)
+                self.end_headers()
+                return
+            self._send_json(_entry_dict())
         elif op == "/owners/show":
             params = self._query_params()
             prefix = params.get("tumbler_prefix")

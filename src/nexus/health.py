@@ -1523,6 +1523,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
+    "nexus.gc_audit",
     "nexus.hook_failures",
     "nexus.ladder_completions",
     "nexus.memory",

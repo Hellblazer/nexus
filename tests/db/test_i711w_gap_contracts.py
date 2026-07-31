@@ -146,21 +146,6 @@ def owner(cat) -> str:
 
 
 class TestUpdateContracts:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-i711w.1 item 1: engine diverges — updateDocument sets ONLY "
-            "the caller-provided columns (buildUpdateDocumentQuery, "
-            "service/.../db/CatalogRepository.java:971-1017; no chunk_count "
-            "re-derivation anywhere on the /update path), and "
-            "appendManifestChunks does NOT fold documents.chunk_count "
-            "(CatalogRepository.java:1852-1874 — contrast writeManifestRows, "
-            "which folds count = rows.size() at :1731-1736, nexus-b6enc F5). "
-            "So manifest rows appended without touching chunk_count stay "
-            "unreflected until an explicit /manifest/resync."
-        ),
-    )
     def test_update_re_derives_chunk_count_from_manifest_when_omitted(
         self, cat, owner,
     ) -> None:
@@ -178,11 +163,20 @@ class TestUpdateContracts:
             owner, "re-derive doc", content_type="prose",
             file_path=f"{slug}/doc.md", chunk_count=0,
         )
-        # Simulate the post-store manifest write landing 5 chunk rows but NOT
-        # touching documents.chunk_count (the pre-zq79 bug shape). append (not
-        # write_manifest) is load-bearing: the engine's REPLACE path folds the
-        # count, the append path does not — same asymmetry as the spec's.
         cat.append_manifest_chunks(str(tumbler), _manifest_rows(5, f"rederive-{slug}"))
+        # DE-CONFOUNDING (2026-07-30). The original shape — append 5 rows, then
+        # assert 5 after a head_hash-only update — stopped proving anything the
+        # moment nexus-e4gel ALSO made append_manifest_chunks fold the count:
+        # the count was already 5 before update() ran, so the update-path
+        # re-derivation this test is named for could be removed entirely and it
+        # would still pass. (Its old comment asserted the append path does NOT
+        # fold; that is no longer true.) Forcing an explicit, DISAGREEING count
+        # first means only the update path can restore it.
+        cat.update(tumbler, chunk_count=99)
+        assert cat.resolve(tumbler).chunk_count == 99, (
+            "precondition: an explicit chunk_count must win, leaving the row "
+            "disagreeing with its 5-row manifest"
+        )
         # Update with head_hash only — no chunk_count in fields.
         cat.update(tumbler, head_hash="updated")
 
@@ -385,23 +379,6 @@ class TestCollectionMoveBibPreservation:
 
 
 class TestDeleteDocumentContracts:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-i711w.1 item 8: engine diverges — deleteDocument is a SOFT "
-            "tombstone by design (RDR-156 P1.2: SET deleted_at = NOW(), "
-            "service/.../db/CatalogRepository.java:1035-1042) so the fk-001 "
-            "CASCADE chains (manifest, aspects, highlights, queue) "
-            "deliberately do NOT fire (tripwire comment :1027-1034, "
-            "nexus-7n553), and getManifest has no tombstone filter "
-            "(CatalogRepository.java:1877-1895) — the manifest rows of a "
-            "deleted document remain readable until a HARD purge "
-            "(purge_trash), where the FK cascade purges them. The spec's "
-            "delete-purges-manifest contract holds only at hard-delete time "
-            "on the service substrate."
-        ),
-    )
     def test_delete_cascades_to_document_chunks(self, cat, owner) -> None:
         """delete_document must cascade-purge the document_chunks manifest.
 
@@ -427,8 +404,13 @@ class TestDeleteDocumentContracts:
         assert cat.resolve(tumbler) is None
         manifest_after = cat.get_manifest(str(tumbler))
         assert manifest_after == [], (
-            "delete_document must cascade-purge document_chunks; pre-fix "
-            f"this left {len(manifest_after)} orphan rows."
+            "a deleted document's manifest must read EMPTY; pre-fix "
+            f"this left {len(manifest_after)} readable rows. NOTE the engine "
+            "satisfies this by TOMBSTONE-FILTERING the read (nexus-mqd6t), "
+            "not by physically purging: the rows survive on disk so "
+            "document_restore can bring the document back whole (RDR-156 "
+            "P1.2). The observable contract — deleted means unreadable — is "
+            "identical; the storage mechanism is not."
         )
 
 

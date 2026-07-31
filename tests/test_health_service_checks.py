@@ -802,6 +802,7 @@ _ALL_TENANT_TABLES = [
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
+    "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
     "nexus.hook_failures",
     "nexus.ladder_completions",
     "nexus.memory",
