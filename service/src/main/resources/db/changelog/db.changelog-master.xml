@@ -312,6 +312,12 @@
          relay, T2 [21164]). MUST follow both of them. -->
     <include file="db/changelog/analyze-002-fts-rewritten-tables.xml"/>
 
+    <!-- nexus-jqvzk (i711w.1 item 20): engine-side audit record for
+         destructive T3 operations. Standalone table with no FK into the
+         catalog (an audit row must outlive whatever it recorded), so it only
+         needs to precede the runAlways grants below. -->
+    <include file="db/changelog/catalog-018-gc-audit.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001

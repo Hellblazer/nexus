@@ -117,6 +117,8 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Documents ─────────────────────────────────────────────────
                 case "/register"              -> handleRegister(exchange, tenant, method);
                 case "/show"                  -> handleShow(exchange, tenant, method);
+                // nexus-tz1cx: metadata.doc_id lookup — NOT a tumbler resolve.
+                case "/by_doc_id"             -> handleByDocId(exchange, tenant, method);
                 case "/list"                  -> handleList(exchange, tenant, method);
                 case "/search"                -> handleSearch(exchange, tenant, method);
                 case "/update"                -> handleUpdate(exchange, tenant, method);
@@ -204,6 +206,10 @@ public final class CatalogHandler implements HttpHandler {
                 case "/doc/register_many"     -> handleRegisterMany(exchange, tenant, method);
 
                 // ── Migration count verification (RDR-159 P-1a) ───────────────
+                // ── GC audit (nexus-jqvzk) ────────────────────────────────────
+                case "/gc_audit/record"       -> handleGcAuditRecord(exchange, tenant, method);
+                case "/gc_audit/list"         -> handleGcAuditList(exchange, tenant, method);
+
                 case "/verify/relation-counts" -> handleRelationCounts(exchange, tenant, method);
 
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
@@ -248,7 +254,32 @@ public final class CatalogHandler implements HttpHandler {
         if (tumbler == null || tumbler.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"tumbler query param required\"}"); return;
         }
-        var doc = repo.getDocument(tenant, tumbler);
+        // nexus-ekaxn: follow_alias defaults FALSE — byte-identical to the
+        // pre-fix response for any client that does not send the param.
+        boolean followAlias = boolParam(exchange, "follow_alias", false);
+        var doc = repo.getDocument(tenant, tumbler, followAlias);
+        if (doc == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(doc));
+    }
+
+    /**
+     * GET /v1/catalog/by_doc_id?doc_id=X — resolve a document by the T3
+     * {@code doc_id} carried in its metadata (nexus-tz1cx).
+     *
+     * <p>A DIFFERENT question from {@code /show}, which is a tumbler lookup.
+     * The client's {@code by_doc_id} had no route to ask this one and fell back
+     * to {@code /show}, answering null for every input the method exists to
+     * find. Response is the same document shape as {@code /show}; 404 on miss.
+     */
+    private void handleByDocId(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String docId = queryParam(exchange, "doc_id");
+        if (docId == null || docId.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"doc_id query param required\"}"); return;
+        }
+        var doc = repo.documentByMetaDocId(tenant, docId);
         if (doc == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return;
         }
@@ -459,7 +490,20 @@ public final class CatalogHandler implements HttpHandler {
     private void handleLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        boolean created = repo.upsertLink(tenant, body);
+        boolean created;
+        try {
+            created = repo.upsertLink(tenant, body);
+        } catch (CatalogRepository.DanglingEndpointException e) {
+            // nexus-9ssih: a MACHINE-READABLE 400 — the auto-linker counts
+            // skipped_missing_endpoint off `code`, and must not confuse this
+            // with the generic malformed-body 400 the outer ladder produces.
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("error", e.getMessage());
+            payload.put("code", "dangling_endpoint");
+            payload.put("missing", e.missing());
+            HttpUtil.send(exchange, 400, MAPPER.writeValueAsString(payload));
+            return;
+        }
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"created\":" + created + "}");
     }
 
@@ -1451,6 +1495,38 @@ public final class CatalogHandler implements HttpHandler {
         }
     }
 
+    /**
+     * POST /v1/catalog/gc_audit/record — append ONE destructive-T3-op audit row
+     * (nexus-jqvzk).
+     *
+     * <p>Body: {@code {operation, collection?, actor?, dry_run?, chashes?[],
+     * details?{}}}. Response: {@code {"id": <bigint>}}. A missing/blank
+     * {@code operation} is a 400 (the outer IllegalArgumentException ladder).
+     */
+    private void handleGcAuditRecord(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        long id = repo.recordGcAudit(tenant, body);
+        HttpUtil.send(exchange, 200, "{\"id\":" + id + "}");
+    }
+
+    /**
+     * GET /v1/catalog/gc_audit/list?collection=&amp;operation=&amp;limit=&amp;offset=
+     * — the audit trail, newest first (nexus-jqvzk).
+     *
+     * <p>Response: {@code {"entries": [{id, operation, collection, actor,
+     * dry_run, chash_count, chashes, details, created_at}, ...]}}.
+     */
+    private void handleGcAuditList(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var entries = repo.listGcAudit(tenant,
+            queryParam(exchange, "collection"),
+            queryParam(exchange, "operation"),
+            intParam(exchange, "limit", 100),
+            intParam(exchange, "offset", 0));
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("entries", entries)));
+    }
+
     private String queryParam(HttpExchange exchange, String key) {
         String query = exchange.getRequestURI().getRawQuery();
         if (query == null) return null;
@@ -1467,6 +1543,17 @@ public final class CatalogHandler implements HttpHandler {
         String v = queryParam(exchange, key);
         if (v == null || v.isBlank()) return def;
         try { return Integer.parseInt(v); } catch (NumberFormatException e) { return def; }
+    }
+
+    /**
+     * Boolean query param. Absent/blank yields *def*, which every caller sets
+     * to the PRE-EXISTING behaviour so an older client that sends no param is
+     * unaffected (nexus-ekaxn: {@code follow_alias}).
+     */
+    private boolean boolParam(HttpExchange exchange, String key, boolean def) {
+        String v = queryParam(exchange, key);
+        if (v == null || v.isBlank()) return def;
+        return "1".equals(v) || "true".equalsIgnoreCase(v) || "yes".equalsIgnoreCase(v);
     }
 
     /**

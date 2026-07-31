@@ -2364,8 +2364,13 @@ public final class PgVectorRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // 1. The document must be visible under RLS. A foreign tenant's tumbler is
             //    indistinguishable from an unknown one (no existence leak).
+            // nexus-mqd6t (audit sibling): + deleted_at IS NULL. A tombstoned
+            // document must not serve its chunk TEXT either — this read is the
+            // document-content surface, and without the predicate a deleted
+            // document stayed fully readable here while /show returned 404.
             Integer doc = ctx.select(DSL.one()).from(CATALOG_DOCUMENTS)
-                             .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                             .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)
+                                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                              .fetchOne(0, Integer.class);
             if (doc == null) {
                 throw new IllegalStateException(
@@ -2831,8 +2836,12 @@ public final class PgVectorRepository {
                 ctx.select(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH), CATALOG_DOCUMENTS.SOURCE_URI)
                    .from(CATALOG_DOCUMENT_CHUNKS)
                    .join(CATALOG_DOCUMENTS)
+                   // nexus-mqd6t (audit sibling): the twin of docsForChashes —
+                   // this maps a search-hit chash back to its document's
+                   // source_uri, so a tombstoned document must not be named.
                    .on(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)
-                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)))
+                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                        .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).in(batch)))
                    .fetch());

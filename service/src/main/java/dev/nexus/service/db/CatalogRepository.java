@@ -18,6 +18,7 @@ import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
 import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
@@ -174,8 +175,50 @@ public final class CatalogRepository {
 
     private static final Field<String>  EX_LNK_FSPAN  = DSL.field("EXCLUDED.from_span",   String.class);
     private static final Field<String>  EX_LNK_TSPAN  = DSL.field("EXCLUDED.to_span",     String.class);
-    private static final Field<String>  EX_LNK_CRTBY  = DSL.field("EXCLUDED.created_by",  String.class);
     private static final Field<String>  EX_LNK_META   = DSL.field("EXCLUDED.metadata",    String.class);
+
+    /**
+     * nexus-s4e1n — the canonical link-merge metadata fold, in SQL.
+     *
+     * <p>Ports the local {@code catalog_links.py} merge (recovered from the
+     * pre-deletion tree) verbatim:
+     * <pre>
+     *   existing_meta = json.loads(row.metadata) if row.metadata else {}
+     *   existing_meta.update(meta)                     # incoming wins per key
+     *   co = existing_meta.get("co_discovered_by", [])
+     *   if created_by != row.created_by and created_by not in co:
+     *       co.append(created_by)
+     *   existing_meta["co_discovered_by"] = co
+     * </pre>
+     * The pre-fix {@code metadata = EXCLUDED.metadata} was a data-loss bug in
+     * both directions: it dropped every previously merged key, and it wrote
+     * SQL NULL whenever the second caller carried no metadata of its own.
+     * {@code src/nexus/mcp/catalog.py} advertises this fold ("Duplicate links
+     * are merged with co_discovered_by tracking") for service mode too.
+     *
+     * <p>{@code jsonb_build_object()} / {@code jsonb_build_array()} rather than
+     * the literals {@code '{}'::jsonb} / {@code '[]'::jsonb}: jOOQ plain-SQL
+     * templates treat braces as placeholder syntax, and the builder functions
+     * produce the identical empty values without them.
+     *
+     * <p>The {@code jsonb_typeof(...) = 'array'} guard keeps a caller who
+     * stored a non-array under that key from crashing the whole upsert — the
+     * bad value is replaced rather than concatenated into.
+     */
+    private static final String LNK_META_BASE =
+        "(coalesce(catalog_links.metadata, jsonb_build_object()) "
+        + "|| coalesce(EXCLUDED.metadata, jsonb_build_object()))";
+    private static final String LNK_META_CO_EXISTING =
+        "(case when jsonb_typeof(" + LNK_META_BASE + " -> 'co_discovered_by') = 'array' "
+        + "then " + LNK_META_BASE + " -> 'co_discovered_by' else jsonb_build_array() end)";
+    private static final Field<String> LNK_META_FOLD = DSL.field(
+        LNK_META_BASE + " || jsonb_build_object('co_discovered_by', "
+        + "case when EXCLUDED.created_by is not null and EXCLUDED.created_by <> '' "
+        + "      and EXCLUDED.created_by is distinct from catalog_links.created_by "
+        + "      and not (" + LNK_META_CO_EXISTING + " @> to_jsonb(EXCLUDED.created_by)) "
+        + "then " + LNK_META_CO_EXISTING + " || jsonb_build_array(EXCLUDED.created_by) "
+        + "else " + LNK_META_CO_EXISTING + " end)",
+        String.class);
 
     private static final Field<String>  EX_COL_CTYPE  = DSL.field("EXCLUDED.content_type", String.class);
     private static final Field<String>  EX_COL_OWNER  = DSL.field("EXCLUDED.owner_id",    String.class);
@@ -322,7 +365,18 @@ public final class CatalogRepository {
     // DOCUMENTS
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Upsert a document. ON CONFLICT (tenant_id, tumbler) update all mutable fields. */
+    /**
+     * Upsert a document. ON CONFLICT (tenant_id, tumbler) update all mutable fields.
+     *
+     * <p>nexus-mqd6t (Hal ruling, tombstone NON-RESURRECTION): this is the ONE
+     * sanctioned way a tombstoned row comes back. {@link #updateDocument}
+     * refuses tombstoned targets outright ({@code deleted_at IS NULL} in its
+     * WHERE), so an incidental field write can never resurrect a deleted
+     * document; an EXPLICIT register of the same tumbler clears the tombstone
+     * here. Before this, a register addressed at a tombstoned tumbler updated
+     * every column and left {@code deleted_at} set — the row was written and
+     * then stayed invisible to every reader, silently.
+     */
     public void upsertDocument(String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
         tenantScope.withTenant(tenant, ctx -> {
@@ -366,6 +420,8 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
                .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
+               // nexus-mqd6t: explicit un-tombstone (see the javadoc above).
+               .set(CATALOG_DOCUMENTS.DELETED_AT, (java.time.OffsetDateTime) null)
                .execute();
             return null;
         });
@@ -798,13 +854,78 @@ public final class CatalogRepository {
 
     /** Fetch a document by tumbler. Returns null if not found. */
     public Map<String, Object> getDocument(String tenant, String tumbler) {
+        return getDocument(tenant, tumbler, false);
+    }
+
+    /**
+     * Maximum {@code alias_of} hops before {@link #resolveAliasTarget} gives up
+     * (nexus-ekaxn; matches the local {@code resolve_alias(max_hops=16)} the
+     * service client declared and never implemented).
+     */
+    private static final int MAX_ALIAS_HOPS = 16;
+
+    /**
+     * Fetch a document by tumbler, optionally following the {@code alias_of}
+     * chain to its canonical target (nexus-ekaxn).
+     *
+     * <p>{@code followAlias=false} is the DEFAULT and is byte-for-byte the
+     * pre-fix behaviour, so a client that sends no {@code follow_alias} param
+     * sees exactly what it saw before.
+     *
+     * @param followAlias when true, hop {@code alias_of} up to
+     *                    {@value #MAX_ALIAS_HOPS} times, stopping early on a
+     *                    cycle or a pointer that resolves to nothing.
+     */
+    public Map<String, Object> getDocument(String tenant, String tumbler, boolean followAlias) {
         return tenantScope.withTenant(tenant, ctx -> {
+            String target = followAlias ? resolveAliasTarget(ctx, tenant, tumbler) : tumbler;
             var r = ctx.select(documentFields())
                        .from(CATALOG_DOCUMENTS)
-                       .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                       .where(CATALOG_DOCUMENTS.TUMBLER.eq(target).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                        .fetchOne();
             return r != null ? docRowFromRecord(r.intoMap()) : null;
         });
+    }
+
+    /**
+     * Walk {@code alias_of} from *tumbler* to the canonical document tumbler
+     * (nexus-ekaxn). Bounded at {@value #MAX_ALIAS_HOPS} hops and cycle-safe
+     * (a visited set, so A→B→A terminates on the row it started from rather
+     * than spinning).
+     *
+     * <p>Fail-SOFT by construction, and deliberately so: a pointer that names a
+     * missing or tombstoned row resolves to the LAST live row on the chain, not
+     * to null. Returning null would turn "this alias is stale" into "this
+     * document does not exist" for every caller — a strictly worse answer than
+     * the alias row itself, which is what the pre-fix behaviour already gave.
+     *
+     * @return the canonical tumbler, or *tumbler* itself when it is not an alias
+     */
+    private static String resolveAliasTarget(DSLContext ctx, String tenant, String tumbler) {
+        String current = tumbler;
+        Set<String> seen = new LinkedHashSet<>();
+        seen.add(current);
+        for (int hop = 0; hop < MAX_ALIAS_HOPS; hop++) {
+            String next = ctx.select(CATALOG_DOCUMENTS.ALIAS_OF)
+                             .from(CATALOG_DOCUMENTS)
+                             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(current))
+                                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                             .fetchOne(CATALOG_DOCUMENTS.ALIAS_OF);
+            if (next == null || next.isBlank() || !seen.add(next)) return current;
+            // A pointer at a row that is gone (or tombstoned) stops the walk on
+            // the last row that actually exists.
+            boolean liveTarget = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(next))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+            if (!liveTarget) return current;
+            current = next;
+        }
+        log.warn("event=alias_chain_hop_limit tenant={} start={} stopped_at={} max_hops={}",
+            tenant, tumbler, current, MAX_ALIAS_HOPS);
+        return current;
     }
 
     /**
@@ -971,6 +1092,18 @@ public final class CatalogRepository {
     private Query buildUpdateDocumentQuery(
         DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields
     ) {
+        // nexus-ekaxn (3): an update addressed to an ALIAS must land on the
+        // CANONICAL target, not on the alias row. Only the engine can fix this
+        // half — the client cannot make `WHERE tumbler = ?` mean anything else.
+        //
+        // CARVE-OUT: a write that SETS alias_of is a write about the pointer
+        // itself, so it must NOT hop. Without this carve-out, re-pointing an
+        // existing alias would rewrite its current canonical target's alias_of
+        // instead — turning a pointer edit into silent corruption of the row it
+        // points at.
+        String target = fields.containsKey("alias_of")
+            ? tumbler
+            : resolveAliasTarget(ctx, tenant, tumbler);
         for (String key : fields.keySet()) {
             // deleted_at keeps its documented silent-strip contract (callers must use
             // trash/restore); every OTHER unknown key is a caller error — fail loud.
@@ -1010,10 +1143,31 @@ public final class CatalogRepository {
             more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
         }
         if (more == null) return null;
+        // nexus-e4gel / nexus-zq79 F4: when the caller does NOT name chunk_count,
+        // re-derive it from the manifest — the manifest IS the count's source of
+        // truth (nexus-b6enc F5, already enforced by writeManifestRows /
+        // purgeManifest). Without this an /update that follows a manifest change
+        // pins a stale count until someone calls /manifest/resync by hand. An
+        // EXPLICIT chunk_count still wins (the orphan-backfill paths depend on
+        // asserting a count the manifest does not yet carry).
+        if (!fields.containsKey("chunk_count")) {
+            more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, target));
+        }
         // AND deleted_at IS NULL: refuse to update tombstoned documents
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+    }
+
+    /**
+     * Correlated {@code SELECT count(*)} over a document's manifest rows, used
+     * as a SET expression so the fold happens inside the same statement (no
+     * read-then-write race with a concurrent manifest writer).
+     */
+    private static Field<Integer> manifestRowCount(DSLContext ctx, String tenant, String tumbler) {
+        return DSL.field(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                                   .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))));
     }
 
     /**
@@ -1368,6 +1522,42 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * Look up a document by the T3 {@code doc_id} carried in its metadata
+     * (nexus-tz1cx).
+     *
+     * <p>THE QUESTION THIS ANSWERS DID NOT EXIST SERVER-SIDE. The local
+     * catalog's {@code by_doc_id} ran
+     * {@code SELECT ... WHERE json_extract(metadata,'$.doc_id') = ?}; the
+     * service client had no such predicate to call, so it fell back to a
+     * TUMBLER resolve — a different question entirely, which returned null for
+     * exactly the inputs the method exists to find. Six live callers
+     * (store_hook's idempotency check and its store_delete ghost compensation
+     * among them) read that null as "no such document" and silently skipped
+     * their work.
+     *
+     * <p>Tombstone-filtered and tenant-scoped like every sibling read. When
+     * more than one live document carries the same {@code doc_id} — possible,
+     * since nothing constrains it — the lowest tumbler wins, deterministically,
+     * rather than an arbitrary row.
+     *
+     * @return the document row (same shape as {@link #getDocument}) or null
+     */
+    public Map<String, Object> documentByMetaDocId(String tenant, String docId) {
+        if (docId == null || docId.isBlank()) return null;
+        return tenantScope.withTenant(tenant, ctx -> {
+            var r = ctx.select(documentFields())
+                       .from(CATALOG_DOCUMENTS)
+                       .where(DSL.field("catalog_documents.metadata ->> 'doc_id'", String.class).eq(docId)
+                              .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                              .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                       .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                       .limit(1)
+                       .fetchOne();
+            return r != null ? docRowFromRecord(r.intoMap()) : null;
+        });
+    }
+
     /** Look up tumbler by (physical_collection, file_path). Returns null if not found. */
     public String lookupDocByCollectionAndPath(String tenant, String collection, String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -1392,7 +1582,12 @@ public final class CatalogRepository {
      */
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
+        boolean allowDangling = Boolean.TRUE.equals(lnk.get("allow_dangling"))
+            || "true".equalsIgnoreCase(String.valueOf(lnk.get("allow_dangling")));
         return tenantScope.withTenant(tenant, ctx -> {
+            if (!allowDangling) {
+                requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
+            }
             var rec = ctx.insertInto(CATALOG_LINKS,
                     CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                     CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
@@ -1405,8 +1600,10 @@ public final class CatalogRepository {
                .doUpdate()
                .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
                .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
-               .set(CATALOG_LINKS.CREATED_BY, EX_LNK_CRTBY)
-               .set(F_LNK_META,  EX_LNK_META)
+               // nexus-s4e1n: created_by is DELIBERATELY NOT SET on the merge
+               // path. A second creator of the same edge does not take over the
+               // attribution — it is folded into meta['co_discovered_by'] below.
+               .set(F_LNK_META,  LNK_META_FOLD)
                // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
                // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
                // recognized table returns the table's OWN record shape with the extra
@@ -1418,6 +1615,65 @@ public final class CatalogRepository {
                .fetchOne();
             return rec != null && Boolean.TRUE.equals(rec.value1());
         });
+    }
+
+    /**
+     * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
+     *
+     * <p>Extends {@link IllegalArgumentException} so the handler's existing
+     * ladder already maps it to 400; {@link #missing()} lets the wire response
+     * name which side dangles, which is what the client needs to distinguish
+     * this from any other 400 (the auto-linker counts
+     * {@code skipped_missing_endpoint} off exactly this signal — the local
+     * {@code link_if_absent} raised {@code ValueError} for it, and the service
+     * path silently wrote the dangling edge instead).
+     */
+    public static final class DanglingEndpointException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+        private final transient List<String> missing;
+
+        DanglingEndpointException(List<String> missing, String message) {
+            super(message);
+            this.missing = List.copyOf(missing);
+        }
+
+        /** Which endpoint fields dangle: {@code from_tumbler}, {@code to_tumbler}, or both. */
+        public List<String> missing() {
+            return missing;
+        }
+    }
+
+    /**
+     * Reject a link whose {@code from}/{@code to} does not resolve to a LIVE
+     * (non-tombstoned) document in this tenant (nexus-9ssih).
+     *
+     * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
+     * path — and NOT to the {@code import*} family, which legitimately writes
+     * edges for documents whose live state the ETL leg does not control (same
+     * carve-out {@code physicalCollectionOf} already documents for the manifest
+     * write path). Callers that genuinely want an unvalidated edge pass
+     * {@code allow_dangling: true}, the parity of the local {@code link}'s own
+     * {@code allow_dangling} flag.
+     */
+    private static void requireLiveEndpoints(DSLContext ctx, String tenant, String fromT, String toT) {
+        List<String> missing = new ArrayList<>(2);
+        if (!liveDocument(ctx, tenant, fromT)) missing.add("from_tumbler");
+        if (!liveDocument(ctx, tenant, toT))   missing.add("to_tumbler");
+        if (missing.isEmpty()) return;
+        throw new DanglingEndpointException(missing,
+            "dangling link endpoint: " + String.join(", ", missing)
+            + " does not resolve to a live catalog document"
+            + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
+            + " Pass allow_dangling=true to write the edge anyway.");
+    }
+
+    private static boolean liveDocument(DSLContext ctx, String tenant, String tumbler) {
+        if (tumbler == null || tumbler.isBlank()) return false;
+        return ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */
@@ -1869,16 +2125,55 @@ public final class CatalogRepository {
                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                    .execute();
             }
+            // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
+            // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
+            // path folded and the APPEND path did not, so an append-grown
+            // manifest carried a stale count until someone ran /manifest/resync.
+            // count(*) rather than += rows.size(): appends upsert BY POSITION,
+            // so an append that overwrites existing positions adds no rows.
+            if (!rows.isEmpty()) {
+                ctx.update(CATALOG_DOCUMENTS)
+                   .set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, docId))
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)))
+                   .execute();
+            }
             return null;
         });
     }
 
-    /** Get manifest rows for docId, ordered by position. */
+    /**
+     * nexus-mqd6t: the manifest reads below are READS, so a tombstoned parent
+     * document must be invisible through them — the same rule nexus-23wlw
+     * applied to the {@code catalog_documents} reads. {@code catalog_document_chunks}
+     * carries no {@code deleted_at} of its own (the soft delete is on the parent
+     * and the fk-001 CASCADE deliberately does not fire, RDR-156 P1.2), so the
+     * filter has to be an EXISTS against a live parent rather than a column
+     * predicate. Without it a soft-deleted document's manifest stayed publicly
+     * readable via {@code /manifest/get} while {@code /show} returned 404.
+     *
+     * <p>Deliberately an EXISTS and not a JOIN: {@code catalog_document_chunks}
+     * has no FK-guaranteed 1:1 to {@code catalog_documents} (import legs write
+     * manifest rows for documents they do not own), so a JOIN could both drop
+     * rows and — with a duplicated tumbler — multiply them. EXISTS filters
+     * without touching cardinality.
+     */
+    private static Condition liveParentDoc(DSLContext ctx, String tenant) {
+        return DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+    }
+
+    /** Get manifest rows for docId, ordered by position. Tombstoned docs read empty (nexus-mqd6t). */
     public List<Map<String, Object>> getManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
-               .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+               .from(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant)))
+               .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
                .fetch().map(r -> {
                    Map<String, Object> m = new LinkedHashMap<>();
                    m.put("doc_id",      r.value1());
@@ -1912,14 +2207,23 @@ public final class CatalogRepository {
         });
     }
 
-    /** Get chashes for a physical_collection via manifest join. */
+    /**
+     * Get chashes for a physical_collection via manifest join.
+     *
+     * <p>nexus-mqd6t BUG 1: this is the T3 GC ALIVE-SET (commands/t3.py). It
+     * joined {@code catalog_documents} but filtered only on
+     * {@code physical_collection}, so a tombstoned document's chunks stayed in
+     * the returned set and {@code nx t3 gc} treated their vectors as still
+     * referenced — a permanent, silent under-collection.
+     */
     public Set<String> chashesForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.selectDistinct(CHK_CHASH_HEX)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
                                            .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
-                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
+                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
+                                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                           .fetch();
             Set<String> result = new LinkedHashSet<>();
             for (var r : rows) result.add(r.value1());
@@ -1927,12 +2231,20 @@ public final class CatalogRepository {
         });
     }
 
-    /** Get document tumblers that contain any of the given chashes. */
+    /**
+     * Get document tumblers that contain any of the given chashes.
+     *
+     * <p>nexus-mqd6t BUG 2 (the user-visible one): this backs search-hit
+     * attribution (search_engine.py maps result chunks back to documents). It
+     * did not reference {@code catalog_documents} at all, so a hit could be
+     * attributed to a document the user had deleted.
+     */
     public List<String> docsForChashes(String tenant, List<String> chashes) {
         if (chashes.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
-               .where(CHK_CHASH_HEX.in(chashes)).fetch().map(r -> r.value1())
+               .where(CHK_CHASH_HEX.in(chashes).and(liveParentDoc(ctx, tenant)))
+               .fetch().map(r -> r.value1())
         );
     }
 
@@ -1952,7 +2264,10 @@ public final class CatalogRepository {
             var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                                   CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                           .from(CATALOG_DOCUMENT_CHUNKS)
-                          .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds))
+                          // nexus-mqd6t: batch twin of getManifest's tombstone filter.
+                          // Load-bearing beyond parity — HttpCatalogClient.docs_for_chashes
+                          // reconstructs its chash -> doc_id map from THIS read.
+                          .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds).and(liveParentDoc(ctx, tenant)))
                           .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                           .fetch();
             Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
@@ -3571,6 +3886,140 @@ public final class CatalogRepository {
         if (v == null) return null;
         if (v instanceof String sv) return sv.isBlank() ? null : sv;
         try { return MAPPER.writeValueAsString(v); } catch (Exception e) { return null; }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GC AUDIT  (nexus-jqvzk — engine-side record for destructive T3 ops)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** Hard cap on chashes persisted per audit row; the count is always exact. */
+    public static final int GC_AUDIT_MAX_CHASHES = 5000;
+
+    /**
+     * Record ONE destructive (or dry-run) T3 operation (nexus-jqvzk).
+     *
+     * <p>Append-only: an audit row is never updated or deleted by this service.
+     * The row is written on the CALLER's say-so — the engine does not perform
+     * the T3 deletion itself (the gc verb does), so this records what the
+     * caller reports, and the caller writes it in the same breath as the
+     * delete. That is the honest boundary: it is an audit trail, not a
+     * two-phase commit.
+     *
+     * <p>{@code chashes} is TRUNCATED at {@value #GC_AUDIT_MAX_CHASHES} entries
+     * so one enormous collection-wide sweep cannot write an unbounded row;
+     * {@code chash_count} always carries the FULL count, and
+     * {@code details.chashes_truncated} records that the list is partial —
+     * never a silently short list.
+     *
+     * @param audit {@code {operation, collection, actor, dry_run, chashes[], details{}}}
+     * @return the new audit row's id
+     */
+    public long recordGcAudit(String tenant, Map<String, Object> audit) {
+        String operation = s(audit, "operation", "");
+        if (operation.isBlank()) {
+            throw new IllegalArgumentException("gc_audit: 'operation' is required");
+        }
+        List<String> chashes = new ArrayList<>();
+        if (audit.get("chashes") instanceof List<?> raw) {
+            for (Object o : raw) {
+                if (o != null) chashes.add(o.toString());
+            }
+        }
+        int fullCount = chashes.size();
+        boolean truncated = fullCount > GC_AUDIT_MAX_CHASHES;
+        List<String> stored = truncated ? chashes.subList(0, GC_AUDIT_MAX_CHASHES) : chashes;
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (audit.get("details") instanceof Map<?, ?> d) {
+            for (var e : d.entrySet()) details.put(String.valueOf(e.getKey()), e.getValue());
+        }
+        if (truncated) {
+            details.put("chashes_truncated", true);
+            details.put("chashes_stored", GC_AUDIT_MAX_CHASHES);
+        }
+
+        boolean dryRun = Boolean.TRUE.equals(audit.get("dry_run"))
+            || "true".equalsIgnoreCase(String.valueOf(audit.get("dry_run")));
+
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.insertInto(GC_AUDIT)
+               .set(GC_AUDIT.TENANT_ID,   tenant)
+               .set(GC_AUDIT.OPERATION,   operation)
+               .set(GC_AUDIT.COLLECTION,  s(audit, "collection", ""))
+               .set(GC_AUDIT.ACTOR,       s(audit, "actor", ""))
+               .set(GC_AUDIT.DRY_RUN,     dryRun)
+               .set(GC_AUDIT.CHASH_COUNT, fullCount)
+               .set(gcAuditChashes(),     jsonbVal(jsonOrNull(stored)))
+               .set(gcAuditDetails(),     jsonbVal(details.isEmpty() ? null : jsonOrNull(details)))
+               .returningResult(GC_AUDIT.ID)
+               .fetchOne()
+               .value1());
+    }
+
+    /**
+     * Read the audit trail, newest first (nexus-jqvzk).
+     *
+     * @param collection optional exact {@code physical_collection} filter
+     * @param operation  optional exact operation filter
+     */
+    public List<Map<String, Object>> listGcAudit(String tenant, String collection,
+                                                  String operation, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition cond = GC_AUDIT.TENANT_ID.eq(tenant);
+            if (collection != null && !collection.isBlank()) cond = cond.and(GC_AUDIT.COLLECTION.eq(collection));
+            if (operation != null && !operation.isBlank())   cond = cond.and(GC_AUDIT.OPERATION.eq(operation));
+            return ctx.select(GC_AUDIT.ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.ACTOR,
+                              GC_AUDIT.DRY_RUN, GC_AUDIT.CHASH_COUNT, gcAuditChashes(), gcAuditDetails(),
+                              GC_AUDIT.CREATED_AT)
+                      .from(GC_AUDIT)
+                      .where(cond)
+                      .orderBy(GC_AUDIT.ID.desc())
+                      .limit(limit <= 0 ? 100 : limit)
+                      .offset(Math.max(offset, 0))
+                      .fetch()
+                      .map(r -> {
+                          Map<String, Object> m = new LinkedHashMap<>();
+                          m.put("id",          r.value1());
+                          m.put("operation",   r.value2());
+                          m.put("collection",  r.value3());
+                          m.put("actor",       r.value4());
+                          m.put("dry_run",     r.value5());
+                          m.put("chash_count", r.value6());
+                          m.put("chashes",     parseJsonList(r.value7()));
+                          m.put("details",     parseJsonMap(r.value8()));
+                          m.put("created_at",  r.value9() != null ? r.value9().toString() : null);
+                          return m;
+                      });
+        });
+    }
+
+    /** jsonb columns read as String so the same MAPPER round-trip as F_DOC_META applies. */
+    private static Field<String> gcAuditChashes() {
+        return DSL.field(DSL.name("gc_audit", "chashes"), String.class);
+    }
+
+    private static Field<String> gcAuditDetails() {
+        return DSL.field(DSL.name("gc_audit", "details"), String.class);
+    }
+
+    private static List<Object> parseJsonList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return MAPPER.readValue(json, new TypeReference<List<Object>>() {});
+        } catch (Exception e) {
+            log.warn("event=gc_audit_chashes_unparseable error={}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static Map<String, Object> parseJsonMap(String json) {
+        if (json == null || json.isBlank()) return Map.of();
+        try {
+            return MAPPER.readValue(json, MAP_TYPE);
+        } catch (Exception e) {
+            log.warn("event=gc_audit_details_unparseable error={}", e.getMessage());
+            return Map.of();
+        }
     }
 
     /**
