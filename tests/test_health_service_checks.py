@@ -1370,3 +1370,68 @@ class TestChashProbeViewFallback:
             "a DiagnosticSqlViolation must reach the outer handler without a "
             "single psql invocation - never a silent legacy retry"
         )
+
+
+# ── nexus-5xn3k AC5: dangling manifest chashes ───────────────────────────────
+
+
+class TestCheckDanglingManifests:
+    """A POPULATED manifest whose chashes no longer resolve in T3.
+
+    A partial index commits chunks and a manifest without a transaction
+    spanning them, so an interrupted run leaves a catalog row that LOOKS
+    healthy: a chunk_count, a manifest full of chashes, and nothing behind
+    them. `nx catalog reconcile` covers the adjacent shape (chunk_count>0 with
+    an EMPTY manifest, GH #1397) but not this one, so it was undetectable.
+    """
+
+    def _t3(self, per_collection: dict[str, list[str]]):
+        class _T3:
+            def list_collections(self):
+                return [type("C", (), {"name": n})() for n in per_collection]
+
+            def list_chunks_with_metadata(self, name, *, fields=()):
+                for i, ch in enumerate(per_collection.get(name, [])):
+                    yield f"{name}-{i}", {"chunk_text_hash": ch}
+        return _T3()
+
+    def _cat(self, referenced: dict[str, set[str]]):
+        class _Cat:
+            def chashes_for_collection(self, name):
+                return referenced.get(name, set())
+        return _Cat()
+
+    def _run(self, monkeypatch, referenced, present):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(referenced), raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3", lambda *a, **k: self._t3(present), raising=False,
+        )
+        return h._check_dangling_manifests()[0]
+
+    def test_dangling_chash_is_reported(self, monkeypatch) -> None:
+        live, dead = "a" * 64, "b" * 64
+        r = self._run(monkeypatch, {"code__x": {live, dead}}, {"code__x": [live]})
+        assert r.ok is False and r.warn is True
+        assert "code__x" in r.detail
+        assert "1 of 2" in r.detail, r.detail
+        assert any("reconcile" in f for f in r.fix_suggestions)
+
+    def test_fully_resolvable_manifest_is_clean(self, monkeypatch) -> None:
+        live = "a" * 64
+        r = self._run(monkeypatch, {"code__x": {live}}, {"code__x": [live]})
+        assert r.ok is True
+        assert "none" in r.detail
+
+    def test_nothing_to_compare_is_not_reported_as_clean(self, monkeypatch) -> None:
+        """NON-VACUITY: zero collections actually compared must read as SKIPPED,
+        never as a clean bill of health. A check whose silent-pass mode is
+        'found nothing to check' is the failure mode this whole class is about.
+        """
+        r = self._run(monkeypatch, {}, {})
+        assert r.ok is True
+        assert "skipped" in r.detail, r.detail
+        assert "none (" not in r.detail

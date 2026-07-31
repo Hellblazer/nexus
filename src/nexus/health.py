@@ -2902,6 +2902,101 @@ def _check_dimension_orphans() -> list[HealthResult]:
     )]
 
 
+def _check_dangling_manifests() -> list[HealthResult]:
+    """Name documents whose manifest references chashes that no longer exist
+    in T3 (nexus-5xn3k AC5).
+
+    THE UNDETECTABLE CLASS. A partial index commits chunks and a manifest
+    without a transaction spanning them, so an interrupted run can leave a
+    catalog row that LOOKS healthy: ``nx catalog show`` reports a chunk_count,
+    the manifest lists chashes, and every one of them hydrates to nothing.
+    Nothing in the product reports it. ``nx catalog reconcile`` covers the
+    adjacent shape — ``chunk_count > 0`` with an EMPTY manifest (GH #1397) —
+    but NOT a POPULATED manifest full of dead chashes, which is the state a
+    failed index actually leaves behind.
+
+    This is the exact INVERSE of the ``nx t3 gc`` orphan scan, and reuses the
+    same two reads so doctor and gc can never disagree about what is real:
+
+        gc:     present_in_T3 - referenced_by_manifest  -> orphan chunks
+        doctor: referenced_by_manifest - present_in_T3  -> dangling manifest
+
+    Reports per collection rather than per document: the alive-set read is
+    collection-scoped, and naming the collection plus a count is enough to act
+    on. Degrades to a skip — a doctor check must never crash the command it
+    is diagnosing, and never guess.
+    """
+    label = "dangling manifest chashes"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+        t3 = make_t3()
+        collections = [c.name for c in t3.list_collections()]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_dangling_manifest_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
+
+    dangling: list[tuple[str, int, int]] = []  # (collection, n_dangling, n_referenced)
+    checked = 0
+    for name in collections:
+        try:
+            referenced = cat.chashes_for_collection(name)
+            if not referenced:
+                continue
+            present = {
+                meta.get("chunk_text_hash", "")
+                for _cid, meta in t3.list_chunks_with_metadata(
+                    name, fields=("chunk_text_hash",),
+                )
+            }
+            checked += 1
+            missing = {c for c in referenced if c and c not in present}
+            if missing:
+                dangling.append((name, len(missing), len(referenced)))
+        except Exception as exc:  # noqa: BLE001 — one unreadable collection must not end the sweep
+            _log.debug(
+                "doctor_dangling_manifest_collection_skipped",
+                collection=name, error=str(exc),
+            )
+            continue
+
+    if checked == 0:
+        # NON-VACUITY: zero collections actually compared is not a clean bill
+        # of health, and must not render as one.
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (no collection had a readable manifest to compare)",
+        )]
+    if not dangling:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none ({checked} collection(s) checked)",
+        )]
+
+    names = "; ".join(
+        f"{name} ({n_missing} of {n_ref} manifest chash(es) missing from T3)"
+        for name, n_missing, n_ref in dangling
+    )
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(dangling)} collection(s) reference chunks that do not exist: "
+            f"{names}. A document in this state reports a chunk_count and "
+            "returns nothing; re-indexing may silently no-op (nexus-5xn3k)."
+        ),
+        fix_suggestions=[
+            "nx catalog reconcile          (rebuild manifests from T3)",
+            "nx index <path> --force       (discard the staleness decision and re-index)",
+        ],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -2929,6 +3024,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # point at `nx collection prune`. Applies in both modes; degrades
     # internally.
     results.extend(_check_dimension_orphans())
+    # nexus-5xn3k AC5: a POPULATED manifest whose chashes no longer
+    # resolve in T3 — the class `nx catalog reconcile` does not cover
+    # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
+    results.extend(_check_dangling_manifests())
 
     results.extend(_check_tools())
     results.extend(_check_git_hooks())
