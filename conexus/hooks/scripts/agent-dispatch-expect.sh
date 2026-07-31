@@ -122,7 +122,15 @@ _expect_if_absent() {
     expectations_expect "$SESSION_ID" "$SUBAGENT_TYPE" "$DISPATCH_MODE" "$DISPATCH_ID" >/dev/null 2>&1
 }
 
+# A lockdir left behind by a killed hook would otherwise cost EVERY later
+# dispatch in the session the full 1s budget, forever. This hook runs before
+# every Agent dispatch, so that tax is worth one stat: reap a lockdir older
+# than a minute (orders of magnitude beyond the ~ms critical section) and
+# retry. Failure to reap is ignored — the loop below still proceeds.
 LOCKDIR="${FILE}.expect.lock"
+if [[ -d "$LOCKDIR" ]] && [[ -z "$(find "$LOCKDIR" -maxdepth 0 -mmin -1 2>/dev/null)" ]]; then
+    rmdir "$LOCKDIR" 2>/dev/null
+fi
 _held=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if mkdir "$LOCKDIR" 2>/dev/null; then

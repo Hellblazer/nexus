@@ -317,7 +317,13 @@ expectations_undeclared() {
                 named[$3] = (index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2)
             }
         }
-        $2 == "EXPECT" { e[$3] = 1; credit[$3]++ }
+        # Dedupe by dispatch_id: the writing hook takes a bounded lock, so a
+        # double registration that outlasts the budget can append the SAME
+        # dispatch twice. A duplicate EXPECT row is not the harmless nuisance
+        # a duplicate START row is — it inflates the credit pool and MASKS an
+        # undeclared start. The reader can settle it unambiguously, so it does.
+        $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
+        $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1; e[$3] = 1; credit[$3]++ }
         END {
             undeclared = 0
             for (i = 1; i <= n; i++) {
@@ -411,10 +417,17 @@ expectations_census() {
         # declaration "no-start"). NOTE term[] reads auto-vivify keys;
         # printing iterates order[] only, so stray keys are inert.
         seen[$0]++ { next }                     # 3h0u6 exact-duplicate rows
+        # Dedupe by dispatch_id BEFORE the ROWS tally, so a re-registered
+        # dispatch does not inflate `expect=N` either — same placement as the
+        # exact-duplicate filter above. See the identical guard in
+        # expectations_undeclared for why a duplicate EXPECT row is worse
+        # than a duplicate START row.
+        $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
         { rows[$2]++ }
         # expectrows[] is the immutable per-type total; credit[] is the
         # copy the AGENT walk consumes for N-of-type matching.
-        $2 == "EXPECT"  { expect[$3] = 1; expectrows[$3]++; credit[$3]++ }
+        $2 == "EXPECT"  { if ($5 != "") dseen[$5] = 1
+                          expect[$3] = 1; expectrows[$3]++; credit[$3]++ }
         # Recognition (and therefore listing) is decided in END: an EXPECT
         # row for a START row s agent_type may appear anywhere in the file.
         $2 == "START" {

@@ -3,8 +3,14 @@
 # mechanism and asserts the pin that claims to cover it goes RED. A green test
 # that has not been falsified is not evidence.
 #
-# Throwaway: everything is committed, so each mutation is reverted with
-# `git checkout --`. Run from the repo root.
+# ⛔ COMMIT FIRST. Each mutation is reverted with `git checkout --`, which
+# restores the COMMITTED version — so running this against a dirty tree
+# silently DELETES your uncommitted work. That happened on the first run of
+# the review-round fixes: two edits vanished mid-harness and only the
+# post-restore baseline going red revealed it. The baseline check at the end
+# is not decoration; if it is RED, the harness ate something.
+#
+# Run from the repo root.
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
@@ -176,6 +182,31 @@ p.write_text(s)
 PY
 run "M9 undeclared drift" expect-red "$T::TestPluginWiring::test_declared_in_pending_release_ledger"
 restore conexus/PENDING_RELEASE.md
+
+echo
+echo "== M10: reader-side dispatch_id dedup removed (review finding 1) =="
+python3 - <<'PY'
+import pathlib
+for f in ("tests/e2e/lib/expectations.sh", "conexus/hooks/scripts/expectations.sh"):
+    p = pathlib.Path(f)
+    s = p.read_text().replace(
+        '$2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }', "")
+    p.write_text(s)
+PY
+run "M10 no dedup by dispatch id" expect-red "$T::TestIdempotence::test_duplicate_rows_do_not_inflate_the_credit_pool"
+restore "$LIB" "$PLUGIN_LIB"
+
+echo
+echo "== M11: stale-lockdir reaping removed (review finding 3) =="
+python3 - <<'PY'
+import pathlib, re
+p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
+s = p.read_text()
+s = re.sub(r'if \[\[ -d "\$LOCKDIR" \]\].*?\nfi\n', "", s, flags=re.S, count=1)
+p.write_text(s)
+PY
+run "M11 no stale-lock reaping" expect-red "$T::TestIdempotence::test_stale_lockdir_is_reaped"
+restore "$HOOK"
 
 echo
 echo "== restored: post-mutation baseline =="
