@@ -1,0 +1,100 @@
+name: Scheduled-gate watchdog (daily)
+
+# nexus-x7xjj. A failing PR check is impossible to miss. A failing SCHEDULED
+# run produces no check, no annotation and no notification — it is a red entry
+# on a page nobody opens. Three gates rotted for three days on exactly that
+# (guided-upgrade-mvv from 2026-07-24, era-hop-mvv from 2026-07-25,
+# local-service-gate-nightly on main from 2026-07-25) and were found only
+# because an unrelated push happened to match two path filters and fired two
+# weekly workflows off-schedule.
+#
+# This sweeps every workflow declaring an on.schedule trigger and keeps ONE
+# issue in sync with the result: opened when something is wrong, edited while
+# it stays wrong, closed when it clears. One issue, not one per run — a
+# watchdog that spams gets muted, and a muted watchdog is the thing it was
+# built to replace.
+#
+# THREE failure modes, not one (see scripts/scheduled_workflow_watchdog.py):
+# `failing` (latest run red), `never-ran` (schedule declared but never fired —
+# GitHub disables schedules on inactive repos and accepts an invalid cron
+# silently), and `stale` (last run green but far older than the cadence, which
+# reads as healthy forever).
+#
+# CI-cost discipline: a few API calls on ubuntu-latest, once a day. No
+# checkout of history, no build, no matrix.
+
+on:
+  schedule:
+    - cron: "23 9 * * *"   # 09:23 UTC daily — off the release and nightly-gate hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: scheduled-failure-watch
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    name: Sweep scheduled workflows for silent failures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Sweep
+        id: sweep
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set +e
+          uv run --with pyyaml python scripts/scheduled_workflow_watchdog.py > body.md 2> sweep.err
+          rc=$?
+          set -e
+          cat sweep.err
+          cat body.md
+          # rc 2 is a usage/config error (missing token or repo) — that is a
+          # BROKEN WATCHDOG, and must not be mistaken for either state.
+          if [ "$rc" = "2" ]; then
+            echo "watchdog could not run — treating as failure, not as all-clear" >&2
+            exit 1
+          fi
+          echo "findings=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDINGS: ${{ steps.sweep.outputs.findings }}
+        run: |
+          set -euo pipefail
+          TITLE="Scheduled workflows are failing silently"
+          existing="$(gh issue list --state open --search "$TITLE in:title" \
+                        --json number,title \
+                        --jq ".[] | select(.title == \"$TITLE\") | .number" | head -1)"
+
+          if [ "$FINDINGS" = "1" ]; then
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --body-file body.md
+              echo "updated issue #$existing"
+            else
+              gh issue create --title "$TITLE" --body-file body.md --label bug
+              echo "opened a new issue"
+            fi
+          else
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" \
+                --comment "All scheduled workflows are green and firing on cadence."
+              echo "closed issue #$existing"
+            else
+              echo "clean; no issue to manage"
+            fi
+          fi
