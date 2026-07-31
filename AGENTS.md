@@ -87,6 +87,13 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
+- **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h). Two consecutive sessions concluded the ledger was unavailable and skipped the declaration on that basis — it was available both times.
+  ```bash
+  source tests/e2e/lib/expectations.sh                    # in this checkout
+  source ~/.claude/plugins/marketplaces/*/conexus/hooks/scripts/expectations.sh   # anywhere else
+  expectations_expect "$SESSION_ID" <unique-name> background   # BEFORE the Agent dispatch
+  ```
+  The two copies are kept byte-identical by `tests/hooks/test_subagent_stop_hook.py`; edit `tests/e2e/lib/expectations.sh` and copy it over, never the reverse. Auto-writing the row from a PreToolUse hook — so no agent has to remember any of this — is `nexus-qc4p1`.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
 ## Workflows

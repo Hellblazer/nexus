@@ -156,6 +156,68 @@ def test_prune_stale_message_names_the_cause_and_the_replacement(t3_db, runner):
     assert "nx t3 gc" in result.output
 
 
+def test_prune_stale_message_advertises_only_flags_that_exist(t3_db, runner):
+    """The remediation text is the whole value of a retired verb, and it shipped
+    (1232585d) advertising ``nx catalog prune-stale [-c COLLECTION]`` when that
+    command declares only ``--collection``. Copy-pasting it yields
+    "Error: No such option: -c" — the identical failure mode the same commit was
+    fixing one line below for ``nx t3 gc``.
+
+    Resolve each advertised option against the real Click command rather than
+    string-matching, so this cannot rot the way the message did.
+    """
+    from nexus.cli import main as cli_main
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        out = runner.invoke(main, ["t3", "prune-stale"]).output
+
+    def opts_of(*path: str) -> set[str]:
+        cmd = cli_main
+        for part in path:
+            cmd = cmd.get_command(None, part)  # type: ignore[union-attr]
+            assert cmd is not None, f"advertised command does not exist: {' '.join(path)}"
+        # secondary_opts carries the OFF half of a Click boolean pair
+        # (``--dry-run/--no-dry-run`` registers only ``--dry-run`` in .opts), and
+        # the message legitimately advertises the OFF half.
+        return {
+            o
+            for p in cmd.params
+            for o in (*getattr(p, "opts", []), *getattr(p, "secondary_opts", []))
+        }
+
+    # The two commands the message tells the operator to run must both exist...
+    prune_opts = opts_of("catalog", "prune-stale")
+    gc_opts = opts_of("t3", "gc")
+    # ...and every flag the message pairs with them must be a real option.
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("nx catalog prune-stale"):
+            target = prune_opts
+        elif stripped.startswith("nx t3 gc"):
+            target = gc_opts
+        else:
+            continue
+        for tok in stripped.split():
+            if tok.startswith("-") and tok.strip("[]"):
+                flag = tok.strip("[],")
+                assert flag in target, (
+                    f"{stripped!r} advertises {flag!r}, which is not an option of "
+                    f"that command (real options: {sorted(target)})"
+                )
+
+    # Non-vacuity: the loop above must actually have inspected the prune-stale
+    # line, not silently matched nothing.
+    assert "nx catalog prune-stale" in out
+    assert "--collection" in out, "the prune-stale line must name its real long flag"
+
+    # The enumeration one-liner must use the COLLECTION enumerator. `nx catalog
+    # list` lists documents and emits no collection name, so the loop the message
+    # used to print GC'd nothing and said nothing.
+    if "xargs" in out:
+        assert "nx collection list" in out
+        assert "nx catalog list" not in out
+
+
 def test_prune_stale_refuses_under_every_flag_combination(t3_db, runner):
     """Including the destructive one. --no-dry-run --confirm previously deleted;
     it must not now silently succeed as a no-op."""

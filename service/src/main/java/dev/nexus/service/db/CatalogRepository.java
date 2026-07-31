@@ -2823,23 +2823,12 @@ public final class CatalogRepository {
             ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name))));
     }
 
-    /**
-     * True if a LIVE (non-superseded) collection registry row exists for (tenant, name).
-     *
-     * <p>nexus-cecqy: since a rename retires the old name as a superseded tombstone instead
-     * of deleting it, "a row exists" and "the name is taken" stopped being the same
-     * question. {@link #renameCollection} selects its branch on THIS predicate, so a caller
-     * guarding a rename must use it too. {@code CatalogHandler.handleCollectionRename} used
-     * {@link #collectionExists} and therefore 409'd on a tombstone, which made undoing a
-     * rename unreachable over HTTP while the repo-level round-trip test — which bypasses
-     * the handler — passed.
-     */
-    public boolean liveCollectionExists(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
-            ctx.selectOne().from(CATALOG_COLLECTIONS)
-               .where(CATALOG_COLLECTIONS.NAME.eq(name)
-                   .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))));
-    }
+    // nexus-v6za0: liveCollectionExists(tenant, name) lived here between 1232585d and this
+    // commit. It answered a BOOLEAN — live or not — and that turned out to be the wrong
+    // shape: "not live" conflates an EMPTY rename tombstone (revivable) with a POPULATED
+    // supersede tombstone (merging onto it destroys data). Its two callers now read the row
+    // once via getCollection and branch on superseded_by itself, which is strictly more
+    // information from strictly fewer round-trips. Do not reintroduce the boolean form.
 
     /**
      * Rename a collection X-&gt;Y, re-homing every in-Postgres denorm-collection table in
@@ -2896,10 +2885,15 @@ public final class CatalogRepository {
             // a retired name, not an occupied one: routing it to the RDR-162 COPY branch
             // would repoint documents only and strand the chunks, so it must take the
             // canonical branch, where step 1's upsert REVIVES it.
-            // Same predicate as liveCollectionExists (inlined: already inside this txn's
-            // ctx). Change one, change both — a handler guarding on a DIFFERENT notion of
-            // "exists" than this branch selector is exactly how the round-trip rename
-            // became unreachable over HTTP.
+            // THIS IS THE AUTHORITATIVE BRANCH SELECTOR, and a caller guarding a rename must
+            // agree with it. handleCollectionRename guarding on a DIFFERENT notion of
+            // "exists" is exactly how the round-trip rename became unreachable over HTTP
+            // (nexus-u4e20), and a guard that could not tell an EMPTY rename tombstone from a
+            // POPULATED supersede tombstone is how that fix then admitted a silent two-
+            // collection merge (nexus-v6za0). The handler now reads superseded_by itself and
+            // permits exactly one non-live target: the tombstone whose superseded_by names
+            // the collection being renamed. Nothing MECHANICALLY pins these two in agreement
+            // — tracked as nexus-mijr4.
             boolean liveTargetExists = ctx.fetchExists(
                 ctx.selectOne().from(CATALOG_COLLECTIONS)
                    .where(CATALOG_COLLECTIONS.NAME.eq(newName)
@@ -2925,12 +2919,19 @@ public final class CatalogRepository {
             }
 
             // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
-            //    UPSERT, not a bare INSERT (nexus-cecqy): the one conflict that can reach
-            //    here is Y's own tombstone from an earlier rename Y->..., since a LIVE Y
-            //    took the COPY branch above. Renaming back onto a retired name REVIVES it
-            //    — superseded_by/at cleared, metadata refreshed from X — which is exactly
-            //    what the round trip means. A bare INSERT would collide on the
-            //    (tenant_id, name) PK and abort the whole re-home.
+            //    UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is
+            //    Y's own tombstone from an earlier rename Y->X, since a LIVE Y took the COPY
+            //    branch above. Renaming back onto that retired name REVIVES it — superseded_by/at
+            //    cleared, metadata refreshed from X — which is exactly what the round trip means.
+            //    A bare INSERT would collide on the (tenant_id, name) PK and abort the re-home.
+            //
+            //    nexus-v6za0 — an EARLIER VERSION OF THIS COMMENT CLAIMED Y's own rename
+            //    tombstone was the ONLY conflict that could reach here. That was false: a
+            //    supersede-marked Y is also non-live, also reaches this upsert, and unlike a
+            //    rename tombstone it still holds every chunk. CatalogHandler now gates the
+            //    revive on the tombstone's identity (superseded_by == oldName) so only the
+            //    round-trip undo arrives here, but do not restore the stronger claim — this
+            //    transaction is not itself the thing enforcing it.
             counts.put("catalog_collections_inserted",
                 ctx.insertInto(CATALOG_COLLECTIONS,
                         CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
@@ -2944,7 +2945,16 @@ public final class CatalogRepository {
                             CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                             CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                             CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
-                            CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                            // nexus-c29vr: the new row is LIVE by construction — never copy the
+                            // source's tombstone markers. This select-list used to carry
+                            // SUPERSEDED_BY/SUPERSEDED_AT straight through, and only the
+                            // DO UPDATE arm below cleared them. On the fresh-insert arm that
+                            // made a retired X rename into a BORN-DEAD Y (superseded_by copied
+                            // from X), permanently invisible to collectionForTuple, with all of
+                            // X's data re-homed onto it. The handler now refuses a retired
+                            // source, but "explicit beats incidental" applies to both arms.
+                            DSL.val("", CATALOG_COLLECTIONS.SUPERSEDED_BY),
+                            DSL.val(null, CATALOG_COLLECTIONS.SUPERSEDED_AT),
                             CATALOG_COLLECTIONS.CREATED_AT)
                         .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)))
                     .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
@@ -3014,8 +3024,13 @@ public final class CatalogRepository {
             // now-empty old name. The tombstone carries superseded_by != '', so it is
             // filtered out of tuple resolution by construction.
             //
-            // Renaming back INTO a tombstoned name is already refused: the handler 409s
-            // on collectionExists(newName), which sees tombstones (nexus-gaou3).
+            // Renaming back INTO a tombstoned name is ALLOWED, and is the point: it is the
+            // round-trip undo, and step 1's upsert revives the row (nexus-u4e20). An earlier
+            // version of this comment said the handler 409'd on it via collectionExists —
+            // true before nexus-cecqy introduced tombstones, false after, and it sat here
+            // contradicting the fix 120 lines above. The handler now permits exactly one
+            // revive: a tombstone whose superseded_by names the collection being renamed
+            // (nexus-v6za0). Every other non-live target 409s.
             counts.put("catalog_collections_superseded",
                 ctx.update(CATALOG_COLLECTIONS)
                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)

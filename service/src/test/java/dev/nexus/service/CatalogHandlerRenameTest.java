@@ -410,6 +410,111 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
+    void post_renameOntoASupersedeMarkedCollection_409sAndPreservesTheChain() throws Exception {
+        // nexus-v6za0 — THE REGRESSION 1232585d introduced. A tombstone has two provenances
+        // and the widened guard reasoned about only one:
+        //   (a) renameCollectionTxn step 3 leaves an EMPTY tombstone (children re-homed first);
+        //   (b) POST /collections/supersede leaves a FULLY POPULATED one — supersedeCollection
+        //       is a pure UPDATE that never touches chunks.
+        // liveCollectionExists() is false for BOTH, so before this fix a rename onto (b) passed
+        // the collision guard, took the canonical FULL-REHOME branch, overwrote the target's
+        // metadata with the source's, ERASED its superseded_by, and re-homed the source's
+        // chunks on top of the target's rows: two collections merged across two vector spaces.
+        seedCollections("hren__v6-src", "hren__v6-tgt", "hren__v6-successor");
+
+        // Mark the target superseded — the RDR-101 P6 / cross-model migration marking. Its
+        // data is untouched by design.
+        assertThat(post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hren__v6-tgt\",\"superseded_by\":\"hren__v6-successor\"}")
+            .statusCode()).isEqualTo(200);
+        assertThat(collectionRow("hren__v6-tgt").get("superseded_by")).isEqualTo("hren__v6-successor");
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__v6-src\",\"new_name\":\"hren__v6-tgt\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("merge");
+
+        // The supersession chain must survive the refusal — erasing it was the unaudited
+        // chain rewrite handleCollectionSupersede guard 2 exists to refuse.
+        assertThat(collectionRow("hren__v6-tgt").get("superseded_by")).isEqualTo("hren__v6-successor");
+        // ...and the source must be untouched: no half-done rename.
+        assertThat(collectionRow("hren__v6-src").get("superseded_by")).isEqualTo("");
+    }
+
+    @Test
+    void post_renameBackOntoOwnTombstone_stillRevives() throws Exception {
+        // The counterpart to the pin above: the identity gate must not break the round trip
+        // nexus-u4e20 exists to restore. A tombstone whose superseded_by NAMES THE COLLECTION
+        // BEING RENAMED is the undo, and it still revives.
+        seedCollections("hren__v6-rt");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__v6-rt\",\"new_name\":\"hren__v6-rt2\"}")
+            .statusCode()).isEqualTo(200);
+        assertThat(collectionRow("hren__v6-rt").get("superseded_by")).isEqualTo("hren__v6-rt2");
+
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__v6-rt2\",\"new_name\":\"hren__v6-rt\"}")
+            .statusCode()).isEqualTo(200);
+        assertThat(collectionRow("hren__v6-rt").get("superseded_by")).isEqualTo("");
+    }
+
+    @Test
+    void post_renameToItself_400s() throws Exception {
+        // nexus-mxzxs. handleCollectionSupersede's guard 0 comment claims this sibling refuses
+        // old==new "for the same reason" — true only INCIDENTALLY (collectionExists(newName)
+        // was true when newName==oldName), and 1232585d's widening removed that cover for
+        // tombstones. X->X onto a tombstoned X would revive it in step 1, no-op in step 2, and
+        // have step 3 stamp superseded_by = X ON X: the self-superseded row guard 0 calls fatal.
+        seedCollections("hren__self");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__self\",\"new_name\":\"hren__self\"}")
+            .statusCode()).isEqualTo(400);
+
+        // The tombstoned variant — the one the widened guard actually let through.
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__self\",\"new_name\":\"hren__self2\"}")
+            .statusCode()).isEqualTo(200);
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__self\",\"new_name\":\"hren__self\"}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(collectionRow("hren__self").get("superseded_by")).isEqualTo("hren__self2");
+    }
+
+    @Test
+    void post_renameFromARetiredSource_409s() throws Exception {
+        // nexus-c29vr. Step 1's INSERT used to copy superseded_by/at from the source row, so
+        // renaming a RETIRED X onto a free name produced a BORN-DEAD target: permanently
+        // filtered out of collectionForTuple, with all of X's data re-homed onto it. The
+        // select-list now clears those columns explicitly AND the source must be live.
+        seedCollections("hren__c29-src", "hren__c29-successor");
+        assertThat(post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hren__c29-src\",\"superseded_by\":\"hren__c29-successor\"}")
+            .statusCode()).isEqualTo(200);
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__c29-src\",\"new_name\":\"hren__c29-fresh\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("retired");
+        // The would-be born-dead row must not exist at all.
+        assertThat(collectionRow("hren__c29-fresh")).isNull();
+    }
+
+    @Test
+    void post_crossModelOntoAnABSENTtarget_409s() throws Exception {
+        // nexus-tnx48. 1232585d's converse guard fired only when the target was retired AND
+        // present, so cross_model:true onto a target that does not exist at all skipped every
+        // guard and still ran the canonical FULL-REHOME — moving chunks, taxonomy and aspects
+        // under a flag whose contract is documents-only. The guard now keys on !live, which
+        // covers absent and retired alike.
+        seedCollections("hren__tnx-src");
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__tnx-src\",\"new_name\":\"hren__tnx-absent\",\"cross_model\":true}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("does not exist");
+        assertThat(collectionRow("hren__tnx-absent")).isNull();
+    }
+
+    @Test
     void get_returns405() throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/rename"))

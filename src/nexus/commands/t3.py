@@ -179,7 +179,9 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
 
     \b
     It does not need rebuilding: the catalog-native pipeline already exists and
-    does strictly more. ``nx catalog prune-stale`` drops documents whose
+    covers the work, though NOT strictly — the retired verb swept every
+    collection and ``nx t3 gc`` has no such mode, so the GC half must be looped
+    (nexus-iitif). ``nx catalog prune-stale`` drops documents whose
     file_path is missing (resolving relative paths against the owner's
     repo_root, and refusing to classify what it cannot verify), and ``nx t3 gc``
     then collects the chunks those documents no longer reference. Doing it in
@@ -198,7 +200,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         "mistaken for one that found nothing.\n"
         "\n"
         "Use the catalog-native pipeline:\n"
-        "  nx catalog prune-stale [-c COLLECTION] --no-dry-run --confirm\n"
+        "  nx catalog prune-stale [--collection COLLECTION] --no-dry-run --confirm\n"
         "  nx t3 gc -c COLLECTION --no-dry-run --yes\n"
         "\n"
         "Prune first, GC second: deleting chunks while their document still "
@@ -208,7 +210,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         "there is no sweep-every-collection mode to replace the one this verb "
         "advertised. `nx catalog prune-stale` does take all collections. To GC "
         "every collection, enumerate and loop:\n"
-        "  nx catalog list --json | <select .name> | xargs -I{} "
+        "  nx collection list | awk '{print $1}' | xargs -I{} "
         "nx t3 gc -c {} --no-dry-run --yes\n"
         "(nexus-iitif tracks whether gc should gain an all-collections mode.)"
     )

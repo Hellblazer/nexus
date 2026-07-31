@@ -969,16 +969,24 @@ T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17
 
 Exits with an error explaining what to run instead. It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
 
-Use the catalog-native pipeline, which does strictly more:
+Use the catalog-native pipeline:
 
 ```
-nx catalog prune-stale [-c COLLECTION] --no-dry-run --confirm   # drop stale documents
-nx t3 gc -c COLLECTION --no-dry-run --yes                       # collect their chunks
+nx catalog prune-stale [--collection COLLECTION] --no-dry-run --confirm   # drop stale documents
+nx t3 gc -c COLLECTION --no-dry-run --yes                                 # collect their chunks
 ```
+
+Note the flags differ: `nx catalog prune-stale` takes `--collection` (no short form); `nx t3 gc` takes `-c`/`--collection` and **requires** it.
 
 Prune first, GC second. Deleting chunks while their document still references them leaves the dangling manifest `nx doctor` flags (nexus-5xn3k).
 
-`nx t3 gc` **requires** `-c` (the orphan diff is per-collection), so the retired verb's sweep-every-collection mode has no direct replacement — `nx catalog prune-stale` does take all collections, but the GC half must be looped per collection. Tracked as `nexus-iitif`.
+`nx t3 gc` **requires** `-c` (the orphan diff is per-collection), so the retired verb's sweep-every-collection mode has no direct replacement — `nx catalog prune-stale` does take all collections, but the GC half must be looped per collection:
+
+```
+nx collection list | awk '{print $1}' | xargs -I{} nx t3 gc -c {} --no-dry-run --yes
+```
+
+(`nx collection list` is the collection enumerator; `nx catalog list` lists *documents* and emits no collection name.) Tracked as `nexus-iitif`.
 
 ### nx t3 gc
 

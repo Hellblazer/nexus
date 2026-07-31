@@ -1108,6 +1108,39 @@ class CatalogRepositoryTest {
         assertThat(coll.get("superseded_by")).isEqualTo("code__nexus__voyage-code-3__v1");
     }
 
+    @Test @Order(61)
+    void collection_supersede_refusesToChainToADifferentTargetInTheUPDATEitself() {
+        // nexus-cecqy review: guard 2 lives in the HANDLER and read-then-wrote as two
+        // statements, so two concurrent supersedes of the same name to DIFFERENT targets
+        // could both pass. The precondition now rides in supersedeCollection's own WHERE.
+        //
+        // This pin exists because 1232585d shipped that conjunct with NO test at any layer:
+        // both pre-existing callers supersede a LIVE row and return 1, so deleting the
+        // conjunct left the suite green. Repo-level is the correct layer here — the SUBJECT
+        // is the WHERE clause, not the route.
+        String name = "code__chainguard__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "chainguard", "embedding_model", "voyage-code-3"));
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+            .as("guard: the first supersession must land, or the rest proves nothing")
+            .isEqualTo(1);
+
+        // A DIFFERENT target must match zero rows — this is what the handler reports as 409.
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v3", ""))
+            .as("chaining to a different target must match no rows")
+            .isEqualTo(0);
+        assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
+            .as("the original supersession must survive the refused chain")
+            .isEqualTo("code__chainguard__voyage-code-3__v2");
+
+        // The SAME target stays idempotent (the .or() disjunct) — re-asserting a supersession
+        // must not start failing.
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+            .as("re-asserting the same target is idempotent, not a chain")
+            .isEqualTo(1);
+    }
+
     @Test @Order(62)
     void collection_upsert_revivesASupersededRow() {
         // nexus-cecqy: a rename now RETIRES the old name as a tombstone instead of
