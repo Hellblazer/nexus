@@ -20,37 +20,22 @@ def git_identity(monkeypatch):
 
 
 def _assert_auto_link(count: int, cat, source_t, *, expected: int = 1) -> None:
-    """Assert auto-link's result, pinning the nexus-wji11 divergence.
+    """Assert auto-link created the expected links.
 
-    ``catalog_auto_link`` finds the just-stored document with
-    ``cat.by_doc_id(doc_id)`` where doc_id is a LEGACY meta id
-    ("test-doc-001"), not a tumbler. That method means two different things
-    on the two substrates (nexus-wji11, P2, OPEN — filed by this same port
-    from tests/test_catalog_knowledge_hook.py, so this is its SECOND site):
-
-      SQLite  by_doc_id(d) -> WHERE json_extract(metadata,'$.doc_id') = d
-      Service by_doc_id(d) -> resolve(d) -> GET /show?tumbler=d
-
-    So on the engine arm the lookup misses, auto_link logs
-    ``auto_link_skip_doc_not_in_catalog`` and returns 0, and no link is
-    created. Asserted AT THE BROKEN VALUE rather than xfailed, per the port's
-    standing rule: when nexus-wji11 is settled this fails loudly and points
-    at the assertion to restore.
-
-    NOT a bug filed by me — wji11 is deliberately a CONTRACT QUESTION (is
-    meta.doc_id still a lookup key, or is the tumbler the only document
-    identity?), and which side is right is Hal's call, not a defect to fix
-    under a test port.
+    nexus-wji11 SETTLED (Hal, 2026-07-26): the TUMBLER is the only document
+    identity (RDR-108). nexus-5axey class A3 then rewired this path —
+    ``catalog_auto_link`` takes the tumbler directly instead of resolving a
+    T3 chash through ``by_doc_id``, which asked a different question on each
+    substrate and so matched nothing in service mode. This assertion was
+    pinned AT THE BROKEN VALUE (count == 0) until that landed; this is the
+    promised restoration.
     """
 
-    assert count == 0, (
-        f"auto_link returned {count} on the service arm. If nexus-wji11 has "
-        f"been settled in favour of meta.doc_id lookup, delete this branch "
-        f"and restore the unconditional assertion above."
+    assert count == expected, (
+        f"auto_link created {count} link(s), expected {expected}"
     )
-    assert not cat.links_from(source_t, link_type="relates"), (
-        "service-mode by_doc_id missed the legacy meta id, so NO link should "
-        "have been created (nexus-wji11)"
+    assert cat.links_from(source_t, link_type="relates"), (
+        "auto_link reported success but no 'relates' link is readable back"
     )
 
 
@@ -392,7 +377,7 @@ class TestCatalogAutoLinkIntegration:
             tags="link-context",
         )
 
-        count = _catalog_auto_link("test-doc-001")
+        count = _catalog_auto_link(str(source_t))
 
         _assert_auto_link(count, cat, source_t)
         links = cat.links_from(source_t, link_type="relates")
@@ -473,8 +458,8 @@ class TestCatalogAutoLinkIntegration:
         )
 
         # Two stores in the same session both get linked
-        count1 = _catalog_auto_link("multi-doc-001")
-        count2 = _catalog_auto_link("multi-doc-002")
+        count1 = _catalog_auto_link(str(doc1_t))
+        count2 = _catalog_auto_link(str(doc2_t))
 
         _assert_auto_link(count1, cat, doc1_t)
         _assert_auto_link(count2, cat, doc2_t)

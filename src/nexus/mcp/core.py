@@ -2658,12 +2658,12 @@ def store_put(
         # write. Specific skip-count observability lives one layer down in
         # _catalog_auto_link.
         try:
-            n = _catalog_auto_link(doc_id)
+            n = _catalog_auto_link(catalog_doc_id)
         except Exception as auto_link_exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             structlog.get_logger().warning(
                 "store_put_auto_link_failed",
-                doc_id=doc_id,
+                tumbler=catalog_doc_id,
                 error=type(auto_link_exc).__name__,
                 detail=str(auto_link_exc)[:200],
             )

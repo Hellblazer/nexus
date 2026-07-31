@@ -71,3 +71,14 @@ mechanize, it matters enough to ship.
   path-derived fallback name. Repointed to the service catalog's
   `collection_for_repo`. Until this ships, sessions on the pinned tag keep
   using the fallback — same behaviour as before the fix, no new breakage.
+- `conexus/agents/_shared/ERROR_HANDLING.md` — nexus-cg13x: the TTL rule said
+  "Use `ttl=0` for permanent entries". That is true only because `memory_put`
+  coerces it; in the store, `0` means EXPIRE IMMEDIATELY (`expire()` selects
+  `WHERE ttl IS NOT NULL` and computes `effective_ttl = ttl * (1 +
+  log(access_count + 1))`, so a stored `0` is swept on the next pass — only
+  NULL is excluded). The corrected rule states that permanent is NULL, and
+  warns not to carry "0 means permanent" outside `memory_put`, naming the ETL
+  import endpoints as where it is still false. Until this ships, agents on the
+  pinned tag keep reading the old rule — harmless for MCP callers, who are
+  coerced either way, and the engine-side coercion that closes it for direct
+  POSTers is itself waiting on the next engine tag.

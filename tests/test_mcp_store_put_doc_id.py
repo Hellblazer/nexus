@@ -45,6 +45,12 @@ def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return catalog_dir
 
 
+
+def _is_chash(value: str) -> bool:
+    """True for a 64-hex T3 chunk id — the key type that must NOT reach the
+    auto-linker (nexus-5axey)."""
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value.lower())
+
 def _no_op(*args, **kwargs):
     pass
 
@@ -86,7 +92,7 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
          patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
-         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+         patch("nexus.mcp.core._catalog_auto_link", return_value=0) as auto_link_mock:
         result = store_put(
             content="# MCP finding: nexus-mcp-doc-id\n\nSubagents need catalog backref.",
             collection="knowledge",
@@ -95,6 +101,19 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
         )
 
     assert "Stored" in result, f"store_put failed: {result}"
+
+    # nexus-5axey class A3: store_put must hand the auto-linker the catalog
+    # TUMBLER, not the T3 chash. The predecessor passed `doc_id` (the chash),
+    # which by_doc_id tumbler-resolves in service mode — so it matched nothing
+    # and EVERY agent-stored document got zero links, with a DEBUG line as the
+    # only signal. This pins the CALL SITE: the helper's own tests exercise it
+    # directly and would not catch the wrong variable being threaded here.
+    assert auto_link_mock.call_count == 1, "store_put must invoke the auto-linker once"
+    passed_id = auto_link_mock.call_args[0][0]
+    assert passed_id and not _is_chash(passed_id), (
+        f"store_put passed {passed_id!r} to the auto-linker — that is a 64-hex "
+        "chash, not a catalog tumbler (nexus-5axey A3)"
+    )
 
     # Extract the stored collection name from the result message
     # ("Stored: <chunk_id>  →  <collection>"). ChromaDB's EphemeralClient

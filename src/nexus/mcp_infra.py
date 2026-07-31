@@ -443,8 +443,19 @@ def require_catalog():
     return cat, None
 
 
-def catalog_auto_link(doc_id: str) -> int:
+def catalog_auto_link(tumbler: str) -> int:
     """Create catalog links from T1 link-context to the just-stored document.
+
+    Takes the catalog TUMBLER, not a T3 chash (nexus-5axey class A3).
+    The predecessor took the chash and resolved it via ``by_doc_id``, which
+    asks a DIFFERENT question on each substrate — service mode tumbler-resolves
+    it, so a chash never matched and this returned 0 for every agent-stored
+    document on a service install, with a DEBUG line as the only signal. That
+    is the same silence nexus-a414 already had to fix once here. The caller
+    (mcp/core.py store_put) has the real tumbler in scope as
+    ``catalog_doc_id``; taking it directly removes both the wrong-key lookup
+    and a round trip. Tumbler is the only document identity (RDR-108, Hal
+    2026-07-26).
 
     Returns the number of links actually created (backward-compat int).
     Skip counts are surfaced via structlog: WARNING for invalid tumbler
@@ -471,9 +482,10 @@ def catalog_auto_link(doc_id: str) -> int:
         ]
         if not link_entries:
             return 0
-        entry = cat.by_doc_id(doc_id)
-        if entry is None:
-            _log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
+        if not tumbler:
+            # The catalog hook failed upstream, so there is no document to
+            # link to. Distinct from "no link contexts": worth a signal.
+            _log.debug("auto_link_skip_no_catalog_tumbler")
             return 0
     finally:
         try:
@@ -486,7 +498,7 @@ def catalog_auto_link(doc_id: str) -> int:
     # write-only daemon proxy, not the read-only get_catalog() handle.
     writer = get_catalog_writer()
     try:
-        result = auto_link(writer, entry.tumbler, contexts)
+        result = auto_link(writer, tumbler, contexts)
     finally:
         writer.close()
 
@@ -502,7 +514,7 @@ def catalog_auto_link(doc_id: str) -> int:
         log_method = _log.warning if recipe_compliant_zero else _log.info
         log_method(
             "auto_link_summary",
-            doc_id=doc_id,
+            tumbler=tumbler,
             created=result.created,
             skipped_invalid_tumbler=result.skipped_invalid_tumbler,
             skipped_missing_endpoint=result.skipped_missing_endpoint,
