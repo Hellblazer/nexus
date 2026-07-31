@@ -3018,6 +3018,27 @@ public final class CatalogRepository {
                 ctx.selectOne().from(CATALOG_COLLECTIONS)
                    .where(CATALOG_COLLECTIONS.NAME.eq(newName)
                        .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+            // WHY THIS RE-CHECKS EMPTINESS BUT NOT IDENTITY, which looks asymmetric.
+            // The handler checks both; this transaction re-checks only the first. That is
+            // deliberate, and the reason lives in a DIFFERENT method, so state it here or
+            // the next reader re-derives it (both reviewers raised this; one withdrew it
+            // after tracing the mechanism — nexus-2sovp carries the analysis).
+            //
+            //   EMPTINESS is a fact about ROWS IN OTHER TABLES. Nothing serialises those
+            //   against this rename, so a concurrent write can land between the handler's
+            //   look and this transaction. It must be re-measured HERE, in the snapshot
+            //   that is about to act on it.
+            //
+            //   IDENTITY is a fact about superseded_by on THIS row, and
+            //   supersedeCollection carries its own precondition IN THE WHERE CLAUSE
+            //   (SUPERSEDED_BY = '' OR SUPERSEDED_BY = :target — a DB-level
+            //   compare-and-swap added for nexus-cecqy). So the column cannot be moved to
+            //   a THIRD value underneath us: a concurrent supersede either matches zero
+            //   rows, or writes the value it already had. The handler's read stays true.
+            //
+            // If that CAS is ever weakened, this asymmetry becomes a hole and the identity
+            // check has to be re-checked here too. The guard below is not self-defending;
+            // it is defended by a precondition in another statement.
             if (targetRowExists && !liveTargetExists && !collectionIsEmpty(ctx, newName)) {
                 throw new CollectionMergeRefused(
                     "target collection " + newName + " is retired but still holds data; "

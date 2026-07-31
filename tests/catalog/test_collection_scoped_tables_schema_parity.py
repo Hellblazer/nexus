@@ -151,8 +151,12 @@ _ENTRY_RE = re.compile(
     r"[A-Z0-9_]+\.(?P<column>[A-Z0-9_]+)\s*\)"
 )
 
-#: Floor for the parsed-entry count. Not a magic number: the list held 17 entries when
-#: this gate was written and only ever grows. If the regex silently stops matching (a
+#: Floor for the parsed-entry count. Not a magic number: the list held 18 entries when
+#: this gate was written and only ever grows. (18, not 17 — the 17 elsewhere in this
+#: file is the PRE-FIX count and is correct there; gc_audit had already landed in the
+#: preceding commit by the time this gate existed. An earlier draft of this comment
+#: said 17, a wrong number stated as verified fact, caught in re-review.)
+#: If the regex silently stops matching (a
 #: refactor to a builder, a rename of the record) the parse returns a small set, every
 #: set-difference assertion below passes vacuously, and the gate reports GREEN while
 #: checking nothing. This turns that into a loud failure.
