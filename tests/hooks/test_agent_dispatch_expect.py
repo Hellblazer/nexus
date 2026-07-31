@@ -332,6 +332,38 @@ class TestFailOpen:
         assert proc.returncode == 0
         assert proc.stdout == ""
 
+    def test_empty_field_does_not_shift_the_parse(self, tmp_path: Path) -> None:
+        """A missing subagent_type must record NOTHING — never a row whose
+        name is the next field along.
+
+        Found by mutation, not by inspection: the parse used ``IFS=$'\\t'
+        read``, and tab is IFS *whitespace*, so bash COLLAPSES empty fields
+        and shifts every later value one position left.
+
+        HOW FAR THAT ACTUALLY GOT, stated precisely rather than talked up:
+        with the REAL field order a single shift puts ``tool_use_id`` in
+        the mode slot, the shellib rejects a mode that is not
+        background|sync, and nothing is written — so the corrupt-row
+        outcome needs a ``tool_use_id`` that is itself a valid mode, which
+        the framework never generates. It is a latent parse defect, not a
+        live one. What WAS live is subtler and worse for the suite: the
+        fail-open tests were reaching their exits through the SHIFTED path
+        (a payload with no session_id exited at the tool-name gate holding
+        ``tool_name`` in its session slot), so mutating the guard they name
+        left them green. That is why this test crafts the isolating input
+        instead of relying on a realistic one — it pins the PARSE."""
+        proc = _run(_pretooluse(subagent_type="", tool_use_id="background"), tmp_path)
+        assert proc.returncode == 0
+        assert not _expfile(tmp_path).exists(), (
+            "field shift produced a row: " + _expfile(tmp_path).read_text()
+        )
+
+    def test_empty_session_id_does_not_shift_the_parse(self, tmp_path: Path) -> None:
+        proc = _run(_pretooluse(session_id=""), tmp_path)
+        assert proc.returncode == 0
+        orch = tmp_path / "state" / "nexus" / "orchestration"
+        assert not orch.exists() or not list(orch.glob("*.expectations"))
+
     def test_unknown_subagent_type_charset_does_not_block(self, tmp_path: Path) -> None:
         """A type outside the ledger's charset is refused by the lib. The
         dispatch must still proceed — unrecorded, never blocked."""
