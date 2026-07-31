@@ -638,6 +638,34 @@ class CatalogEngineDefects70Test {
         assertThat(repo.getDocument(TENANT, first).get("alias_of")).isEqualTo("");
     }
 
+    /** The batch path resolves aliases too — and does it with ONE query for the
+     *  whole batch (batchAliasTargets), not one per document. */
+    @Test
+    void ekaxn_updateManyThroughAliasLandsOnCanonical() {
+        String owner = freshOwner();
+        String canonical = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "batch-canonical", "content_type", "code",
+            "source_uri", "file:///defects70/aliasbatch/canonical.md"));
+        String alias = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "batch-alias", "content_type", "code",
+            "source_uri", "file:///defects70/aliasbatch/alias.md"));
+        String plain = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "batch-plain", "content_type", "code",
+            "source_uri", "file:///defects70/aliasbatch/plain.md"));
+        repo.setAlias(TENANT, alias, canonical);
+
+        var results = repo.updateDocumentsMany(TENANT, List.of(
+            Map.of("tumbler", alias, "head_hash", "via-alias"),
+            Map.of("tumbler", plain, "head_hash", "direct")));
+        assertThat(results).containsExactly(1, 1);
+
+        assertThat(repo.getDocument(TENANT, canonical).get("head_hash")).isEqualTo("via-alias");
+        assertThat(repo.getDocument(TENANT, alias).get("head_hash")).isEqualTo("");
+        assertThat(repo.getDocument(TENANT, plain).get("head_hash"))
+            .as("a non-aliased entry in the same batch is unaffected")
+            .isEqualTo("direct");
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // nexus-tz1cx — metadata.doc_id lookup
     // ══════════════════════════════════════════════════════════════════════════

@@ -1049,6 +1049,14 @@ public final class CatalogRepository {
             var queries = new ArrayList<Query>();
             var queryIndexes = new ArrayList<Integer>();  // index into `updates` for each entry in `queries`
 
+            // nexus-ekaxn: ONE alias-resolution query for the whole batch (see
+            // batchAliasTargets) — never one per document.
+            var batchTumblers = new ArrayList<String>(updates.size());
+            for (var upd : updates) {
+                if (upd.get("tumbler") instanceof String t && !t.isBlank()) batchTumblers.add(t);
+            }
+            Map<String, String> aliasTargets = batchAliasTargets(ctx, tenant, batchTumblers);
+
             for (int i = 0; i < updates.size(); i++) {
                 var upd = updates.get(i);
                 Object tumblerObj = upd.get("tumbler");
@@ -1060,7 +1068,7 @@ public final class CatalogRepository {
                 fields.remove("tumbler");
                 Query query;
                 try {
-                    query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields);
+                    query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, aliasTargets);
                 } catch (IllegalArgumentException e) {
                     resultSlots[i] = -1;
                     continue;
@@ -1089,21 +1097,73 @@ public final class CatalogRepository {
      * Returns {@code null} when *fields* yields no settable column (mirrors
      * {@code updateDocument}'s 0-row short-circuit).
      */
+    /**
+     * The row an update ADDRESSED at *tumbler* must actually write (nexus-ekaxn).
+     *
+     * <p>An update addressed to an ALIAS must land on the CANONICAL target, not
+     * on the alias row. Only the engine can fix this half — the client cannot
+     * make {@code WHERE tumbler = ?} mean anything else.
+     *
+     * <p>CARVE-OUT: a write that SETS {@code alias_of} is a write about the
+     * pointer itself, so it must NOT hop. Without it, re-pointing an existing
+     * alias would rewrite its current canonical target's {@code alias_of}
+     * instead — turning a pointer edit into silent corruption of the row it
+     * points at.
+     *
+     * @param prefetched batch-resolved targets from
+     *                   {@link #batchAliasTargets}, or null to resolve
+     *                   single-doc (one extra SELECT)
+     */
+    private static String aliasTarget(DSLContext ctx, String tenant, String tumbler,
+                                      Map<String, Object> fields, Map<String, String> prefetched) {
+        if (fields.containsKey("alias_of")) return tumbler;
+        if (prefetched != null) return prefetched.getOrDefault(tumbler, tumbler);
+        return resolveAliasTarget(ctx, tenant, tumbler);
+    }
+
+    /**
+     * Resolve alias targets for a WHOLE batch in ONE query (nexus-ekaxn meets
+     * nexus-xedhp).
+     *
+     * <p>Load-bearing for {@link #updateDocumentsMany}: a per-entry
+     * {@link #resolveAliasTarget} would add one SELECT per document, which is
+     * precisely the N-round-trip cost that method exists to remove (175.5s /
+     * 1718 files on this repo's own shakeout). One {@code WHERE tumbler IN (?)}
+     * covers the batch; only the RARE genuinely-aliased rows then pay a chain
+     * walk. Tumblers absent from the result (unknown or tombstoned) map to
+     * themselves, so the UPDATE matches 0 rows — the same answer as before.
+     */
+    private static Map<String, String> batchAliasTargets(
+        DSLContext ctx, String tenant, List<String> tumblers
+    ) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (tumblers.isEmpty()) return out;
+        var rows = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.ALIAS_OF)
+                      .from(CATALOG_DOCUMENTS)
+                      .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                             .and(CATALOG_DOCUMENTS.TUMBLER.in(tumblers))
+                             .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                      .fetch();
+        for (var r : rows) {
+            String alias = r.value2();
+            out.put(r.value1(), (alias == null || alias.isBlank())
+                ? r.value1()
+                : resolveAliasTarget(ctx, tenant, r.value1()));
+        }
+        return out;
+    }
+
     private Query buildUpdateDocumentQuery(
         DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields
     ) {
-        // nexus-ekaxn (3): an update addressed to an ALIAS must land on the
-        // CANONICAL target, not on the alias row. Only the engine can fix this
-        // half — the client cannot make `WHERE tumbler = ?` mean anything else.
-        //
-        // CARVE-OUT: a write that SETS alias_of is a write about the pointer
-        // itself, so it must NOT hop. Without this carve-out, re-pointing an
-        // existing alias would rewrite its current canonical target's alias_of
-        // instead — turning a pointer edit into silent corruption of the row it
-        // points at.
-        String target = fields.containsKey("alias_of")
-            ? tumbler
-            : resolveAliasTarget(ctx, tenant, tumbler);
+        return buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, null);
+    }
+
+    private Query buildUpdateDocumentQuery(
+        DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields,
+        Map<String, String> prefetchedAliasTargets
+    ) {
+        String target = aliasTarget(ctx, tenant, tumbler, fields, prefetchedAliasTargets);
         for (String key : fields.keySet()) {
             // deleted_at keeps its documented silent-strip contract (callers must use
             // trash/restore); every OTHER unknown key is a caller error — fail loud.
