@@ -2997,6 +2997,110 @@ def _check_dangling_manifests() -> list[HealthResult]:
     )]
 
 
+def _check_next_seq_drift() -> list[HealthResult]:
+    """Name owners whose tumbler allocator has fallen BEHIND its own children
+    (nexus-0ehwe item 4).
+
+    THE WEDGE THIS SURFACES. ``registerDocument`` claims
+    ``catalog_owners.next_seq`` and inserts; the INSERT's only ON CONFLICT
+    arbiter is ``(tenant_id, source_uri)``, but the only unique key on
+    ``catalog_documents`` is ``(tenant_id, tumbler)`` — so a tumbler collision
+    has no arm and escapes as a bare 409. Pre-fix the counter's increment shared
+    the failing transaction and rolled back WITH it, making one drifted owner a
+    PERMANENT, TOTAL outage for that owner (nexus-pbawi, owner 1.12, fixed by
+    hand).
+
+    The engine now floors the claim past any drift, so a drifted owner
+    SELF-HEALS on its next registration rather than wedging. This check exists
+    because self-healing is silent: it reports which owners are ALREADY below
+    their high-water mark, so the blast radius is known rather than guessed, and
+    so an owner that never gets written to again does not sit drifted forever.
+
+    Counts TOMBSTONED children: the ``(tenant_id, tumbler)`` PK does not exclude
+    soft-deleted rows the way the partial ``source_uri`` index does, so a
+    deleted document's tumbler is still taken.
+
+    Read-only, per the RDR-185 rung shape. Degrades to a skip — a doctor check
+    must never crash the command it is diagnosing.
+    """
+    label = "tumbler allocator drift"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+        owners = cat.list_owners()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_next_seq_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
+    if not owners:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
+    if not any("next_seq" in o for o in owners):
+        # NON-VACUITY: an engine that predates nexus-0ehwe item 3 omits the
+        # field entirely, and every owner would then read as drift-free. Say so
+        # rather than render an all-clear this check cannot actually support.
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (engine does not report next_seq — needs the "
+                   "nexus-0ehwe engine change)",
+        )]
+
+    drifted: list[tuple[str, int, int]] = []
+    checked = 0
+    for owner in owners:
+        prefix = str(owner.get("tumbler_prefix", ""))
+        if not prefix or "next_seq" not in owner:
+            continue
+        try:
+            next_seq = int(owner.get("next_seq") or 0)
+            high = _highest_child_seq(cat, prefix)
+        except Exception as exc:  # noqa: BLE001 — one unreadable owner must not end the sweep
+            _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
+            continue
+        checked += 1
+        if high and next_seq <= high:
+            drifted.append((prefix, next_seq, high))
+
+    if checked == 0:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
+    if not drifted:
+        return [HealthResult(
+            label=label, ok=True, detail=f"none ({checked} owner(s) checked)",
+        )]
+
+    names = "; ".join(
+        f"{p} (next_seq={ns}, highest child={hi})" for p, ns, hi in drifted
+    )
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(drifted)} owner(s) whose allocator is at or below their "
+            f"highest existing tumbler: {names}. The engine floors past this on "
+            "the next registration, so these self-heal when next written to."
+        ),
+        fix_suggestions=[
+            "nx index <path>   (any registration into the owner floors it)",
+        ],
+    )]
+
+
+def _highest_child_seq(cat: Any, prefix: str) -> int:
+    """Highest numeric child sequence under *prefix*, tombstones INCLUDED."""
+    best = 0
+    for entry in cat.all_documents(limit=0):
+        tumbler = str(getattr(entry, "tumbler", "") or "")
+        if not tumbler.startswith(f"{prefix}."):
+            continue
+        tail = tumbler[len(prefix) + 1:]
+        if tail.isdigit():
+            best = max(best, int(tail))
+    return best
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -3028,6 +3132,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # resolve in T3 — the class `nx catalog reconcile` does not cover
     # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
     results.extend(_check_dangling_manifests())
+    # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
+    # their own children. Self-healing is silent, so the blast radius must
+    # be reportable rather than guessed.
+    results.extend(_check_next_seq_drift())
 
     results.extend(_check_tools())
     results.extend(_check_git_hooks())

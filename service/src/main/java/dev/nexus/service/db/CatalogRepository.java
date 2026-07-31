@@ -319,11 +319,15 @@ public final class CatalogRepository {
     /** Return all owners for tenant as list of maps. */
     public List<Map<String, Object>> listOwners(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
+            // nexus-0ehwe item 3: next_seq on the LIST too — the drift check
+            // must be able to sweep EVERY owner without N round trips.
             ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
-                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH,
+                       CATALOG_OWNERS.NEXT_SEQ)
                .from(CATALOG_OWNERS)
                .fetch()
-               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
+               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7(),
+                                  r.value8()))
         );
     }
 
@@ -526,12 +530,10 @@ public final class CatalogRepository {
                           .forUpdate()
                           .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
 
-            ctx.update(CATALOG_OWNERS)
-               .set(CATALOG_OWNERS.NEXT_SEQ, seq + 1)
-               .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
-               .execute();
+            // nexus-0ehwe: floor past a drifted counter instead of colliding.
+            long claimed = claimNextSeq(ctx, tenant, ownerPrefix, seq);
 
-            String tumbler = ownerPrefix + "." + (seq + 1);
+            String tumbler = ownerPrefix + "." + claimed;
 
             // Insert document
             String metaJson = jsonOrNull(fields.get("meta"));
@@ -735,7 +737,15 @@ public final class CatalogRepository {
                               .forUpdate()
                               .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
                 tClaim = System.nanoTime();
-                long cursor = seq;
+                // nexus-0ehwe, SECOND claim site: floor the cursor past a
+                // drifted counter exactly as the single-doc path does, or a
+                // batch into a wedged owner collides on (tenant_id, tumbler)
+                // with no ON CONFLICT arm and 409s the whole batch.
+                long cursor = Math.max(seq, highestChildSeq(ctx, tenant, ownerPrefix));
+                if (cursor != seq) {
+                    log.warn("event=next_seq_drift_healed_batch tenant={} owner={} next_seq={} floored_to={}",
+                        tenant, ownerPrefix, seq, cursor);
+                }
 
                 var insert = ctx.insertInto(CATALOG_DOCUMENTS,
                         CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
@@ -885,6 +895,73 @@ public final class CatalogRepository {
                        .fetchOne();
             return r != null ? docRowFromRecord(r.intoMap()) : null;
         });
+    }
+
+    /**
+     * Highest child sequence actually in use under *ownerPrefix*, INCLUDING
+     * tombstoned rows (nexus-0ehwe).
+     *
+     * <p>Tombstones matter: the only unique key on {@code catalog_documents} is
+     * {@code (tenant_id, tumbler)}, and it does NOT exclude soft-deleted rows —
+     * unlike the partial {@code source_uri} index. So a tumbler belonging to a
+     * deleted document is still taken, and an allocator that ignores tombstones
+     * will hand it out again and collide.
+     *
+     * <p>Returns 0 when the owner has no numeric children, which makes the
+     * caller's {@code max(next_seq, high_water) + 1} degrade to plain
+     * {@code next_seq + 1}.
+     */
+    private static long highestChildSeq(DSLContext ctx, String tenant, String ownerPrefix) {
+        // tumbler is "<prefix>.<n>"; the child segment starts one char past the dot.
+        int childStart = ownerPrefix.length() + 2;
+        Long max = ctx.select(DSL.field(
+                    "COALESCE(MAX(CAST(substring(tumbler FROM {0}) AS BIGINT)), 0)",
+                    Long.class, DSL.val(childStart)))
+               .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%"))
+                      // digits only — a deeper address like "1.2.3" is not a child seq
+                      .and(DSL.condition("substring(tumbler FROM {0}) ~ '^[0-9]+$'",
+                                         DSL.val(childStart))))
+               .fetchOne(0, Long.class);
+        return max == null ? 0L : max;
+    }
+
+    /**
+     * Claim the next tumbler sequence for *ownerPrefix*, self-healing past a
+     * drifted counter (nexus-0ehwe items 1 + 2).
+     *
+     * <p>THE WEDGE THIS REMOVES. {@code registerDocument} used to claim
+     * {@code next_seq} and insert; the INSERT's only ON CONFLICT arbiter is
+     * {@code (tenant_id, source_uri)}, so a {@code (tenant_id, tumbler)}
+     * collision had no arm and escaped as a bare {@code 409 integrity
+     * constraint violation}. The {@code next_seq} increment shared the failing
+     * transaction and rolled back WITH it, so the allocator never advanced:
+     * one drifted owner was a PERMANENT, TOTAL outage for that owner, and retry
+     * could never clear it (nexus-pbawi fixed one owner by hand).
+     *
+     * <p>Rather than catch the collision and retry, this prevents it: the claim
+     * is {@code max(next_seq, highest_child_seq) + 1}, so a counter that has
+     * fallen behind its own children is floored on the FIRST attempt. Monotonic
+     * by construction — it can only raise, and can never re-issue a tumbler —
+     * which is the same guarantee {@code EX_OWN_SEQ_GREATEST} gives the ETL
+     * import path.
+     *
+     * <p>Runs inside the caller's {@code SELECT ... FOR UPDATE} on the owner
+     * row, so two concurrent registrations cannot both claim the same value.
+     */
+    private static long claimNextSeq(DSLContext ctx, String tenant, String ownerPrefix, long nextSeq) {
+        long highWater = highestChildSeq(ctx, tenant, ownerPrefix);
+        long claim = Math.max(nextSeq, highWater) + 1;
+        if (claim != nextSeq + 1) {
+            log.warn("event=next_seq_drift_healed tenant={} owner={} next_seq={} high_water={} claimed={}",
+                tenant, ownerPrefix, nextSeq, highWater, claim);
+        }
+        ctx.update(CATALOG_OWNERS)
+           .set(CATALOG_OWNERS.NEXT_SEQ, claim)
+           .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+           .execute();
+        return claim;
     }
 
     /**
@@ -2864,12 +2941,14 @@ public final class CatalogRepository {
     public Map<String, Object> ownerByPrefix(String tenant, String tumblerPrefix) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
-                               CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+                               CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH,
+                               CATALOG_OWNERS.NEXT_SEQ)
                        .from(CATALOG_OWNERS)
                        .where(CATALOG_OWNERS.TUMBLER_PREFIX.eq(tumblerPrefix))
                        .fetchOne();
             return r != null
-                ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7())
+                ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7(),
+                           r.value8())
                 : null;
         });
     }
@@ -3814,6 +3893,27 @@ public final class CatalogRepository {
         m.put("bib_openalex_id",         nne((String) raw.getOrDefault("bib_openalex_id", null)));
         m.put("bib_doi",                 nne((String) raw.getOrDefault("bib_doi", null)));
         m.put("bib_enriched_at",         nne((String) raw.getOrDefault("bib_enriched_at", null)));
+        return m;
+    }
+
+    /**
+     * Owner row PLUS {@code next_seq} (nexus-0ehwe item 3).
+     *
+     * <p>next_seq was exposed on NO read path: not {@code ownerByPrefix},
+     * not {@code /owners/show}, not {@code /owners/list}. The only way to tell
+     * a drifted owner from a healthy one was to attempt a real registration and
+     * see whether it 409'd — a MUTATION used as a diagnostic. That is why the
+     * original wedge (nexus-pbawi) took a long investigation to localize, and
+     * why "how many other owners are already wedged?" was unanswerable.
+     *
+     * <p>An overload rather than a signature change: {@code ownerRow} has seven
+     * callers and most have no next_seq in scope.
+     */
+    private static Map<String, Object> ownerRow(String prefix, String name, String type,
+                                                  String repo, String desc, String root, String head,
+                                                  Long nextSeq) {
+        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head);
+        m.put("next_seq", nextSeq == null ? 0L : nextSeq);
         return m;
     }
 

@@ -1435,3 +1435,73 @@ class TestCheckDanglingManifests:
         assert r.ok is True
         assert "skipped" in r.detail, r.detail
         assert "none (" not in r.detail
+
+
+# ── nexus-0ehwe item 4: tumbler allocator drift ──────────────────────────────
+
+
+class TestCheckNextSeqDrift:
+    """Owners whose allocator has fallen behind their own children.
+
+    The engine now floors past drift, so a drifted owner SELF-HEALS on its next
+    registration. This check exists because that healing is SILENT: without it
+    the blast radius of the original wedge (nexus-pbawi) stays guessed, and an
+    owner never written to again sits drifted indefinitely.
+    """
+
+    def _cat(self, owners, tumblers):
+        cat = MagicMock()
+        cat.list_owners.return_value = owners
+        cat.all_documents.return_value = [
+            type("E", (), {"tumbler": t})() for t in tumblers
+        ]
+        return cat
+
+    def _run(self, monkeypatch, owners, tumblers):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(owners, tumblers), raising=False,
+        )
+        return h._check_next_seq_drift()[0]
+
+    def test_drifted_owner_is_named(self, monkeypatch) -> None:
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 3}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is False and r.warn is True
+        assert "1.12" in r.detail and "next_seq=3" in r.detail
+        assert "highest child=7" in r.detail
+
+    def test_healthy_owner_is_clean(self, monkeypatch) -> None:
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 9}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is True and "none" in r.detail
+
+    def test_engine_without_next_seq_reads_as_skipped_not_clean(
+        self, monkeypatch,
+    ) -> None:
+        """NON-VACUITY: an engine predating the nexus-0ehwe change omits the
+        field, and every owner would then look drift-free. That must render as
+        SKIPPED — a check whose silent-pass mode is 'the data was absent' is
+        the failure this whole class is about."""
+        r = self._run(monkeypatch, [{"tumbler_prefix": "1.12"}], ["1.12.7"])
+        assert r.ok is True
+        assert "skipped" in r.detail and "next_seq" in r.detail
+        assert "none (" not in r.detail
+
+    def test_deeper_addresses_are_not_mistaken_for_children(
+        self, monkeypatch,
+    ) -> None:
+        """'1.12.3.4' is a chunk address, not a child sequence of 1.12."""
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 2}],
+            ["1.12.1", "1.12.3.4"],
+        )
+        assert r.ok is True, f"deeper address counted as a child: {r.detail}"

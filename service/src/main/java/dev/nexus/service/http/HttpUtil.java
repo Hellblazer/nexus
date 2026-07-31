@@ -147,14 +147,48 @@ public final class HttpUtil {
         if (sqlState != null) {
             // nexus-7e057: class-23 integrity violations are caller errors (bad FK id
             // etc.), not server faults — typed 409 ahead of the generic 500.
-            log.warn("event={}_integrity_violation {} sqlstate={} error={}",
-                event, context, sqlState, e.getMessage());
+            // nexus-0ehwe item 6: carry the CONSTRAINT NAME. A bare "integrity
+            // constraint violation" is undiagnosable from the client — it cost
+            // the entire nexus-pbawi investigation, where the real answer
+            // (catalog_documents_pkey, i.e. a TUMBLER collision, not the
+            // source_uri arbiter the insert declares) was sitting in the
+            // driver's exception the whole time and was being discarded here.
+            String constraint = constraintName(e);
+            log.warn("event={}_integrity_violation {} sqlstate={} constraint={} error={}",
+                event, context, sqlState, constraint, e.getMessage());
             send(exchange, 409,
                 "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
-                + jsonString(sqlState) + "}");
+                + jsonString(sqlState)
+                + (constraint == null ? "" : ",\"constraint\":" + jsonString(constraint))
+                + "}");
             return true;
         }
         return false;
+    }
+
+    /**
+     * The violated constraint's name, walking the cause chain, or null
+     * (nexus-0ehwe item 6).
+     *
+     * <p>PostgreSQL reports it in {@code ServerErrorMessage}; the JDBC driver
+     * exposes it on {@link org.postgresql.util.PSQLException}. Reflection keeps
+     * this file free of a hard driver import for one optional field — a null
+     * simply omits the key rather than degrading the 409.
+     */
+    static String constraintName(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            try {
+                var m = t.getClass().getMethod("getServerErrorMessage");
+                Object sem = m.invoke(t);
+                if (sem != null) {
+                    Object name = sem.getClass().getMethod("getConstraint").invoke(sem);
+                    if (name instanceof String str && !str.isBlank()) return str;
+                }
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+                // not a PSQLException, or the driver shape changed — fall through
+            }
+        }
+        return null;
     }
 
     /** PostgreSQL SQLSTATE for insufficient_privilege — what an RLS refusal raises. */
