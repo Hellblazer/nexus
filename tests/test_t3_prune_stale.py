@@ -198,8 +198,15 @@ def test_prune_stale_message_advertises_only_flags_that_exist(t3_db, runner):
         else:
             continue
         for tok in stripped.split():
-            if tok.startswith("-") and tok.strip("[]"):
-                flag = tok.strip("[],")
+            # STRIP FIRST, THEN test. The advertised flag is always bracketed
+            # (``[-c`` / ``[--collection``), so testing startswith("-") on the RAW
+            # token skipped every optional flag — including the ``-c`` this test
+            # exists to catch. Caught in review of 351874c5: the mutation appeared
+            # to fail only because the ``--collection`` string-match below fired,
+            # not because the resolution machinery ran. A mutation going red tells
+            # you SOMETHING caught it, not WHICH thing did.
+            flag = tok.strip("[],")
+            if flag.startswith("-"):
                 assert flag in target, (
                     f"{stripped!r} advertises {flag!r}, which is not an option of "
                     f"that command (real options: {sorted(target)})"

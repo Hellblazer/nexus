@@ -91,9 +91,11 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
   ```bash
   source tests/e2e/lib/expectations.sh                    # in this checkout
   source ~/.claude/plugins/marketplaces/*/conexus/hooks/scripts/expectations.sh   # anywhere else
-  expectations_expect "$SESSION_ID" <unique-name> background   # BEFORE the Agent dispatch
+  expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
+  expectations_undeclared "$SESSION_ID"  # exit 1 + BLINDSPOT = false-clean, not a pass
   ```
-  The two copies are kept byte-identical by `tests/hooks/test_subagent_stop_hook.py`; edit `tests/e2e/lib/expectations.sh` and copy it over, never the reverse. Auto-writing the row from a PreToolUse hook — so no agent has to remember any of this — is `nexus-qc4p1`.
+  The two copies are kept byte-identical by `tests/hooks/test_subagent_stop_hook.py`; edit `tests/e2e/lib/expectations.sh` and copy it over, never the reverse.
+  **On EXPECT rows, check `nexus-qc4p1` before writing one — do not trust this paragraph for status.** As of 2026-07-31 the mechanizing PreToolUse hook is IMPLEMENTED BUT NOT MERGED (`conexus/hooks/hooks.json` on develop still has a `Bash`-only `PreToolUse` matcher), and once merged it stays INERT until the next plugin release. Whether to hand-write therefore changes over time, which is exactly the kind of state a checked-in doc holds badly — the bead is the source of truth. Two things that do NOT change: a row keyed on an invented name can never pair (SubagentStart stamps `agent_id` + `agent_type`; the Agent tool has no `name` parameter — nexus-nu7fo), and `expectations_expect` validates `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, so a plugin-namespaced type like `conexus:substantive-critic` must have its colon sanitized before it will be accepted at all. `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable, which is what two sessions failed to find.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
 ## Workflows
