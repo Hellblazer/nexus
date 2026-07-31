@@ -1224,7 +1224,7 @@ public final class CatalogRepository {
         // EXPLICIT chunk_count still wins (the orphan-backfill paths depend on
         // asserting a count the manifest does not yet carry).
         if (!fields.containsKey("chunk_count")) {
-            more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, target));
+            more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, reDerivedChunkCount(ctx, tenant, target));
         }
         // AND deleted_at IS NULL: refuse to update tombstoned documents
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
@@ -1241,6 +1241,42 @@ public final class CatalogRepository {
         return DSL.field(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
                             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))));
+    }
+
+    /**
+     * The re-derivation used by {@link #buildUpdateDocumentQuery} — the manifest
+     * count, EXCEPT that it will not zero a positive stored count against an
+     * EMPTY manifest (Hal decision 2026-07-30, the "H2 guard").
+     *
+     * <p>WHY THE ASYMMETRY. {@code chunk_count > 0} with an empty manifest is not
+     * noise — it is the GH #1371 / GH #1397 damage signature, and it is the ONLY
+     * discriminator {@code nx catalog reconcile} has: {@code manifest_heal.py}
+     * sorts unrebuildable documents into {@code lost} ("chunks LOST — a real
+     * gap") versus {@code never_chunked} ("expected: nothing to rebuild") on
+     * exactly this field. An unguarded re-derivation lets any INCIDENTAL update
+     * — a routine head_hash bump on an unrelated file — silently rewrite a real
+     * data-loss event as routine noise, while the underlying content stays
+     * unindexed. The document would still be found and rebuilt, but the operator
+     * would be told nothing was wrong.
+     *
+     * <p>WHAT THIS DOES NOT BREAK. The nexus-zq79 F4 contract this implements
+     * only ever moves the count UPWARD (a manifest landed rows that
+     * documents.chunk_count never learned about); its pin exercises 0 -> 5. The
+     * guard is inert in that direction. And zeroing remains fully available on
+     * the paths that MEAN it: an explicit {@code chunk_count} in the update wins
+     * outright (caller intent), and {@code purgeManifest} folds the count to 0
+     * itself. What is refused is only the incidental, unasked-for zeroing.
+     *
+     * <p>Expressed as a SQL CASE rather than a read-then-decide so the whole
+     * thing stays one statement — no extra round trip on the single-doc path,
+     * no read-then-write race with a concurrent manifest writer, and
+     * {@code updateDocumentsMany} inherits it for free.
+     */
+    private static Field<Integer> reDerivedChunkCount(DSLContext ctx, String tenant, String tumbler) {
+        Field<Integer> derived = manifestRowCount(ctx, tenant, tumbler);
+        return DSL.when(derived.eq(0).and(CATALOG_DOCUMENTS.CHUNK_COUNT.gt(0)),
+                        CATALOG_DOCUMENTS.CHUNK_COUNT)
+                  .otherwise(derived);
     }
 
     /**
@@ -1655,12 +1691,7 @@ public final class CatalogRepository {
      */
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
-        boolean allowDangling = Boolean.TRUE.equals(lnk.get("allow_dangling"))
-            || "true".equalsIgnoreCase(String.valueOf(lnk.get("allow_dangling")));
         return tenantScope.withTenant(tenant, ctx -> {
-            if (!allowDangling) {
-                requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
-            }
             var rec = ctx.insertInto(CATALOG_LINKS,
                     CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                     CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
@@ -1688,65 +1719,6 @@ public final class CatalogRepository {
                .fetchOne();
             return rec != null && Boolean.TRUE.equals(rec.value1());
         });
-    }
-
-    /**
-     * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
-     *
-     * <p>Extends {@link IllegalArgumentException} so the handler's existing
-     * ladder already maps it to 400; {@link #missing()} lets the wire response
-     * name which side dangles, which is what the client needs to distinguish
-     * this from any other 400 (the auto-linker counts
-     * {@code skipped_missing_endpoint} off exactly this signal — the local
-     * {@code link_if_absent} raised {@code ValueError} for it, and the service
-     * path silently wrote the dangling edge instead).
-     */
-    public static final class DanglingEndpointException extends IllegalArgumentException {
-        private static final long serialVersionUID = 1L;
-        private final transient List<String> missing;
-
-        DanglingEndpointException(List<String> missing, String message) {
-            super(message);
-            this.missing = List.copyOf(missing);
-        }
-
-        /** Which endpoint fields dangle: {@code from_tumbler}, {@code to_tumbler}, or both. */
-        public List<String> missing() {
-            return missing;
-        }
-    }
-
-    /**
-     * Reject a link whose {@code from}/{@code to} does not resolve to a LIVE
-     * (non-tombstoned) document in this tenant (nexus-9ssih).
-     *
-     * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
-     * path — and NOT to the {@code import*} family, which legitimately writes
-     * edges for documents whose live state the ETL leg does not control (same
-     * carve-out {@code physicalCollectionOf} already documents for the manifest
-     * write path). Callers that genuinely want an unvalidated edge pass
-     * {@code allow_dangling: true}, the parity of the local {@code link}'s own
-     * {@code allow_dangling} flag.
-     */
-    private static void requireLiveEndpoints(DSLContext ctx, String tenant, String fromT, String toT) {
-        List<String> missing = new ArrayList<>(2);
-        if (!liveDocument(ctx, tenant, fromT)) missing.add("from_tumbler");
-        if (!liveDocument(ctx, tenant, toT))   missing.add("to_tumbler");
-        if (missing.isEmpty()) return;
-        throw new DanglingEndpointException(missing,
-            "dangling link endpoint: " + String.join(", ", missing)
-            + " does not resolve to a live catalog document"
-            + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
-            + " Pass allow_dangling=true to write the edge anyway.");
-    }
-
-    private static boolean liveDocument(DSLContext ctx, String tenant, String tumbler) {
-        if (tumbler == null || tumbler.isBlank()) return false;
-        return ctx.fetchExists(
-            ctx.selectOne().from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */

@@ -490,20 +490,8 @@ public final class CatalogHandler implements HttpHandler {
     private void handleLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        boolean created;
-        try {
-            created = repo.upsertLink(tenant, body);
-        } catch (CatalogRepository.DanglingEndpointException e) {
-            // nexus-9ssih: a MACHINE-READABLE 400 — the auto-linker counts
-            // skipped_missing_endpoint off `code`, and must not confuse this
-            // with the generic malformed-body 400 the outer ladder produces.
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("error", e.getMessage());
-            payload.put("code", "dangling_endpoint");
-            payload.put("missing", e.missing());
-            HttpUtil.send(exchange, 400, MAPPER.writeValueAsString(payload));
-            return;
-        }
+        boolean created = repo.upsertLink(tenant, body);
+
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"created\":" + created + "}");
     }
 

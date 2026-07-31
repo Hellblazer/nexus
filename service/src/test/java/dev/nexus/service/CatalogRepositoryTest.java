@@ -718,26 +718,18 @@ class CatalogRepositoryTest {
             "link_type", "relates", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
 
-        // nexus-9ssih: upsertLink now REFUSES dangling endpoints by default, so
-        // seeding the damage this detector exists to find is exactly the
-        // allow_dangling case. The flag is on the SEED only — orphanedLinks
-        // itself is unchanged, and the three shapes below are still written
-        // into the table byte-for-byte as before.
         // Dangling TARGET (the document-deletion shape Steve hit).
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.live", "to_tumbler", "orph.gone",
             "link_type", "cites", "from_span", "", "to_span", "",
-            "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
-            "allow_dangling", true));
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
         // Dangling SOURCE.
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.vanished", "to_tumbler", "orph.live",
             "link_type", "cites", "from_span", "", "to_span", "",
-            "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
-            "allow_dangling", true));
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
         // BOTH endpoints gone.
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.x", "to_tumbler", "orph.y",
             "link_type", "cites", "from_span", "", "to_span", "",
-            "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
-            "allow_dangling", true));
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
 
         var orphans = repo.orphanedLinks(TENANT_A);
 

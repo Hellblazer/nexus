@@ -22,8 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * The 7.0.0 engine-defect arc — repository-level contract tests for the fix set
- * carried by beads nexus-mqd6t, nexus-e4gel, nexus-s4e1n, nexus-9ssih,
- * nexus-tz1cx, nexus-ekaxn, nexus-jqvzk and nexus-a3kbf.
+ * carried by beads nexus-mqd6t, nexus-e4gel, nexus-s4e1n, nexus-tz1cx,
+ * nexus-ekaxn, nexus-jqvzk and nexus-a3kbf.
+ *
+ * <p>nexus-9ssih was HELD OUT of this tag (Hal decision 2026-07-30) — see the
+ * note where its tests were, in the link section below. It ships in the next
+ * engine tag, in lockstep with its client half.
  *
  * <p>Every test here is the JAVA half of a Python contract that is currently
  * pinned by a {@code xfail(strict=True)} marker naming the same bead
@@ -376,6 +380,47 @@ class CatalogEngineDefects70Test {
         assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(99);
     }
 
+    /**
+     * THE H2 GUARD (Hal decision 2026-07-30): an incidental update must NOT
+     * zero a positive count against an EMPTY manifest.
+     *
+     * <p>That disagreement is the GH #1371 damage signature and the only
+     * discriminator `nx catalog reconcile` classifies on (manifest_heal.py
+     * sorts unrebuildable docs into "chunks LOST" vs "never-chunked" on exactly
+     * this field). Letting a routine head_hash bump heal the number would
+     * rewrite a real data-loss event as expected noise.
+     */
+    @Test
+    void e4gel_updateDoesNotZeroPositiveCountAgainstEmptyManifest() throws Exception {
+        String tumbler = "9101.1";
+        String coll = "code__defects70-h2guard__voyage-code-3__v1";
+        injectDamagedDoc(tumbler, coll, 7, "{\"content_hash\":\"deadbeef\"}");
+        assertThat(repo.getManifest(TENANT, tumbler))
+            .as("precondition: the damage shape is count>0 with an EMPTY manifest")
+            .isEmpty();
+
+        // The incidental update: a head_hash bump that never mentions chunk_count.
+        repo.updateDocument(TENANT, tumbler, Map.of("head_hash", "routine-bump"));
+
+        assertThat(repo.getDocument(TENANT, tumbler).get("chunk_count"))
+            .as("the damage signal must survive an update that did not ask to change it")
+            .isEqualTo(7);
+    }
+
+    /** ...but an EXPLICIT zero still wins: the guard refuses only the unasked-for one. */
+    @Test
+    void e4gel_explicitZeroStillClearsTheCount() throws Exception {
+        String tumbler = "9102.1";
+        String coll = "code__defects70-h2explicit__voyage-code-3__v1";
+        injectDamagedDoc(tumbler, coll, 7, "{\"content_hash\":\"deadbeef\"}");
+
+        repo.updateDocument(TENANT, tumbler, Map.of("chunk_count", 0));
+
+        assertThat(repo.getDocument(TENANT, tumbler).get("chunk_count"))
+            .as("caller intent wins — the guard is only about the incidental path")
+            .isEqualTo(0);
+    }
+
     /** appendManifestChunks must fold chunk_count like writeManifestRows does. */
     @Test
     void e4gel_appendManifestFoldsChunkCount() {
@@ -528,71 +573,19 @@ class CatalogEngineDefects70Test {
         assertThat(co).containsExactlyInAnyOrder("agent-y", "agent-z");
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // nexus-9ssih — dangling-endpoint rejection with allow_dangling opt-in
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test
-    void ssih_rejectsMissingToEndpoint() {
-        var p = linkPair("dangle-to");
-        var ex = assertThrows(CatalogRepository.DanglingEndpointException.class, () ->
-            repo.upsertLink(TENANT, Map.of(
-                "from_tumbler", p[0], "to_tumbler", p[1] + "0999",
-                "link_type", "cites", "created_by", "auto-linker")));
-        assertThat(ex.missing()).containsExactly("to_tumbler");
-        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).isEmpty();
-    }
-
-    @Test
-    void ssih_rejectsTombstonedEndpoint() {
-        var p = linkPair("dangle-tombstone");
-        assertThat(repo.deleteDocument(TENANT, p[1])).isEqualTo(1);
-        var ex = assertThrows(CatalogRepository.DanglingEndpointException.class, () ->
-            repo.upsertLink(TENANT, Map.of(
-                "from_tumbler", p[0], "to_tumbler", p[1],
-                "link_type", "cites", "created_by", "auto-linker")));
-        assertThat(ex.missing()).containsExactly("to_tumbler");
-    }
-
-    @Test
-    void ssih_reportsBothSidesWhenBothDangle() {
-        var p = linkPair("dangle-both");
-        var ex = assertThrows(CatalogRepository.DanglingEndpointException.class, () ->
-            repo.upsertLink(TENANT, Map.of(
-                "from_tumbler", p[0] + "0999", "to_tumbler", p[1] + "0999",
-                "link_type", "cites", "created_by", "auto-linker")));
-        assertThat(ex.missing()).containsExactlyInAnyOrder("from_tumbler", "to_tumbler");
-    }
-
-    @Test
-    void ssih_allowDanglingOptInStillWrites() {
-        var p = linkPair("dangle-allow");
-        String ghost = p[1] + "0999";
-        assertThat(repo.upsertLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", ghost,
-            "link_type", "cites", "created_by", "importer",
-            "allow_dangling", true))).isTrue();
-        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
-    }
-
-    @Test
-    void ssih_liveEndpointsStillLink() {
-        var p = linkPair("dangle-ok");
-        assertThat(repo.upsertLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", p[1],
-            "link_type", "cites", "created_by", "auto-linker"))).isTrue();
-    }
-
-    /** The ETL/import leg must stay unguarded: it legitimately writes edges for
-     *  documents whose live state it does not yet control. */
-    @Test
-    void ssih_importLinkPathIsExempt() {
-        var p = linkPair("dangle-import");
-        repo.importLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", p[1] + "0999",
-            "link_type", "cites", "created_by", "etl"));
-        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
-    }
+    // nexus-9ssih — HELD OUT OF THIS TAG (Hal decision 2026-07-30).
+    //
+    // The engine-side dangling-endpoint rejection is implemented and tested at
+    // commit 2d591901 on branch worktree-agent-a7495f323076364cf, and was
+    // REMOVED here rather than shipped: the cloud engine is shared and not
+    // client-version-gated, so a 400 that no deployed client catches
+    // (RefreshableHttpStoreMixin raises httpx.HTTPStatusError; auto_linker.py
+    // catches only ValueError, and eight further call sites catch nothing)
+    // would break every installed client on its next index pass. It ships in
+    // the NEXT engine tag, in lockstep with the client-side translation of
+    // code=="dangling_endpoint" into ValueError. The three nexus-9ssih xfails
+    // in tests/test_auto_linker.py therefore stay RED after this tag — that is
+    // expected, not a regression.
 
     // ══════════════════════════════════════════════════════════════════════════
     // nexus-ekaxn — alias following
