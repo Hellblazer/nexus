@@ -344,6 +344,72 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
+    void post_renameBackOntoATombstonedName_revivesItInsteadOf409() throws Exception {
+        // nexus-cecqy REGRESSION. Undoing a rename is the operation the tombstone change
+        // was built around, and it is the one the HTTP path stopped allowing.
+        //
+        // renameCollectionTxn selects its branch on a LIVE target (superseded_by = ''), so
+        // a tombstone at the target takes the canonical branch and step 1's upsert revives
+        // it. But this handler's collision guard called collectionExists(), a bare
+        // row-existence check that sees tombstones, so the request 409'd before reaching
+        // the repo. Before the tombstone change the old row was DELETEd and this round
+        // trip worked; the two predicates disagreeing is what broke it.
+        //
+        // The repo-level round-trip test (CatalogRenameCollectionTest @Order(40)) calls
+        // repo.renameCollection directly and so never crossed this guard.
+        seedCollections("hren__rt-a");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__rt-a\",\"new_name\":\"hren__rt-b\"}").statusCode()).isEqualTo(200);
+        // NON-VACUITY: the forward rename really did leave a tombstone at the old name —
+        // otherwise the guard below has nothing to trip on.
+        assertThat(collectionRow("hren__rt-a").get("superseded_by")).isEqualTo("hren__rt-b");
+
+        var back = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__rt-b\",\"new_name\":\"hren__rt-a\"}");
+        assertThat(back.statusCode())
+            .as("renaming back onto a RETIRED name is a revive, not a collision — "
+                + "an operator undoing a rename has no other verb to reach for")
+            .isEqualTo(200);
+
+        // The revived row must be LIVE again, or it stays invisible to collectionForTuple
+        // and the round trip only looks complete.
+        var revived = collectionRow("hren__rt-a");
+        assertThat(revived.get("superseded_by")).isEqualTo("");
+        // ...and the name it was renamed to is now the tombstone.
+        assertThat(collectionRow("hren__rt-b").get("superseded_by")).isEqualTo("hren__rt-a");
+    }
+
+    @Test
+    void post_renameOntoALIVEcollection_still409s() throws Exception {
+        // The other half: making the guard tombstone-aware must NOT weaken the nexus-gaou3
+        // collision check it was added for. A LIVE target is still a collision.
+        seedCollections("hren__live-src", "hren__live-tgt");
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__live-src\",\"new_name\":\"hren__live-tgt\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("target collection already exists");
+    }
+
+    @Test
+    void post_crossModelOntoATOMBSTONE_409s() throws Exception {
+        // cross_model:true means the RDR-162 COPY branch: the target already exists AND IS
+        // LIVE (the ETL just populated it), and only catalog_documents is repointed.
+        // A tombstoned target is not that. The repo would treat it as non-live and take the
+        // canonical FULL-REHOME branch instead — a more destructive operation than the flag
+        // promises — so the mismatch must fail loud rather than silently do something else.
+        seedCollections("hren__xm-t-src", "hren__xm-t-tgt");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__xm-t-tgt\",\"new_name\":\"hren__xm-t-retired\"}")
+            .statusCode()).isEqualTo(200);
+        assertThat(collectionRow("hren__xm-t-tgt").get("superseded_by")).isEqualTo("hren__xm-t-retired");
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__xm-t-src\",\"new_name\":\"hren__xm-t-tgt\",\"cross_model\":true}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("retired");
+    }
+
+    @Test
     void get_returns405() throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/rename"))

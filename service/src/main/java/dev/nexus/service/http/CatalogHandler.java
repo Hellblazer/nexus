@@ -1066,6 +1066,19 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
         }
         int updated = repo.supersedeCollection(tenant, name, supersededBy, supersededAt != null ? supersededAt : "");
+        if (updated == 0) {
+            // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
+            // means a concurrent supersede of the same old_name to a DIFFERENT target
+            // committed between our read above and this write. Report it as the same 409
+            // the serial case gets rather than replying 200 {"updated":0} — a zero the
+            // caller cannot distinguish from success is the defect this whole route was
+            // fixed for.
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "collection " + name + " was superseded to a different target "
+                    + "concurrently; refusing to chain a second supersede to "
+                    + supersededBy) + "}"); return;
+        }
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }
 
@@ -1091,10 +1104,32 @@ public final class CatalogHandler implements HttpHandler {
         // migrate. A plain rename onto an existing collection is a collision: fail loud with 409
         // unless the caller opts into the COPY branch via cross_model:true.
         boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
-        if (!crossModel && repo.collectionExists(tenant, newName)) {
+        // nexus-cecqy: LIVE, not merely present. A rename now retires the old name as a
+        // superseded tombstone, so "a row exists at newName" stopped meaning "the name is
+        // taken". This guard used collectionExists (any row) while renameCollection selects
+        // its branch on a LIVE target, and the disagreement made undoing a rename
+        // impossible over HTTP: rename X->Y, then rename Y->X, and the tombstone left at X
+        // by the first call 409'd the second. Renaming back onto a RETIRED name is a
+        // revive, which is what the repo's canonical branch already does.
+        if (!crossModel && repo.liveCollectionExists(tenant, newName)) {
             HttpUtil.send(exchange, 409,
                 "{\"error\":" + MAPPER.writeValueAsString("target collection already exists: " + newName
                     + " (pass cross_model:true only for a deliberate cross-model repoint)") + "}"); return;
+        }
+        // The converse mismatch. cross_model:true means the RDR-162 COPY branch, whose
+        // whole premise is that the target already exists AND IS LIVE (the ETL just
+        // populated it) so only catalog_documents needs repointing. A TOMBSTONED target is
+        // not that: renameCollection would see it as non-live and take the canonical
+        // FULL-REHOME branch instead — moving chunks, taxonomy and aspects that the flag
+        // promises not to touch. Fail loud rather than silently do the more destructive
+        // thing under a flag that says otherwise.
+        if (crossModel && !repo.liveCollectionExists(tenant, newName)
+                && repo.collectionExists(tenant, newName)) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString("target collection " + newName
+                    + " is retired (superseded), not a live cross-model target. cross_model:true "
+                    + "repoints documents onto an existing LIVE collection; it cannot revive a "
+                    + "tombstone. Drop cross_model to rename onto the retired name instead.") + "}"); return;
         }
         Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));

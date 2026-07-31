@@ -973,10 +973,12 @@ Use the catalog-native pipeline, which does strictly more:
 
 ```
 nx catalog prune-stale [-c COLLECTION] --no-dry-run --confirm   # drop stale documents
-nx t3 gc [-c COLLECTION] --no-dry-run --yes                     # collect their chunks
+nx t3 gc -c COLLECTION --no-dry-run --yes                       # collect their chunks
 ```
 
 Prune first, GC second. Deleting chunks while their document still references them leaves the dangling manifest `nx doctor` flags (nexus-5xn3k).
+
+`nx t3 gc` **requires** `-c` (the orphan diff is per-collection), so the retired verb's sweep-every-collection mode has no direct replacement — `nx catalog prune-stale` does take all collections, but the GC half must be looped per collection. Tracked as `nexus-iitif`.
 
 ### nx t3 gc
 

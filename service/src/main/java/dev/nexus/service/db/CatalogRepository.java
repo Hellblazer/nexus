@@ -2784,7 +2784,17 @@ public final class CatalogRepository {
                         ? DSL.currentOffsetDateTime()
                         : DSL.val(tsOrNull(supersededAt)))
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                   // nexus-cecqy (review): the handler's guard 2 reads the row, decides in
+                   // Java, then issues this UPDATE as a SEPARATE statement. Two concurrent
+                   // supersedes of the same old_name to DIFFERENT targets can both observe
+                   // superseded_by='' before either writes, both pass the guard, and the
+                   // later write silently wins — the unaudited chain rewrite guard 2 exists
+                   // to prevent, just moved from serial to concurrent. Carrying the
+                   // precondition in the WHERE closes that window: the loser matches zero
+                   // rows and the handler's rowcount check reports it.
+                   .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
+                       .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
                .execute()
         );
     }
@@ -2807,10 +2817,28 @@ public final class CatalogRepository {
         });
     }
 
-    /** True if a (tenant, name) collection registry row exists. RLS-scoped. */
+    /** True if a (tenant, name) collection registry row exists — INCLUDING a tombstone. RLS-scoped. */
     public boolean collectionExists(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
             ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name))));
+    }
+
+    /**
+     * True if a LIVE (non-superseded) collection registry row exists for (tenant, name).
+     *
+     * <p>nexus-cecqy: since a rename retires the old name as a superseded tombstone instead
+     * of deleting it, "a row exists" and "the name is taken" stopped being the same
+     * question. {@link #renameCollection} selects its branch on THIS predicate, so a caller
+     * guarding a rename must use it too. {@code CatalogHandler.handleCollectionRename} used
+     * {@link #collectionExists} and therefore 409'd on a tombstone, which made undoing a
+     * rename unreachable over HTTP while the repo-level round-trip test — which bypasses
+     * the handler — passed.
+     */
+    public boolean liveCollectionExists(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.NAME.eq(name)
+                   .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))));
     }
 
     /**
@@ -2868,6 +2896,10 @@ public final class CatalogRepository {
             // a retired name, not an occupied one: routing it to the RDR-162 COPY branch
             // would repoint documents only and strand the chunks, so it must take the
             // canonical branch, where step 1's upsert REVIVES it.
+            // Same predicate as liveCollectionExists (inlined: already inside this txn's
+            // ctx). Change one, change both — a handler guarding on a DIFFERENT notion of
+            // "exists" than this branch selector is exactly how the round-trip rename
+            // became unreachable over HTTP.
             boolean liveTargetExists = ctx.fetchExists(
                 ctx.selectOne().from(CATALOG_COLLECTIONS)
                    .where(CATALOG_COLLECTIONS.NAME.eq(newName)
