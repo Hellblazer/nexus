@@ -124,18 +124,20 @@ jobs:
           restore-keys: |
             chromadb-onnx-${{ runner.os }}-
 
-      - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
+      - name: Cache HuggingFace models (cross-encoder, MinerU)
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
-          # nexus-cxsbs: the docling PDF extractor downloads its layout +
-          # TableFormer models from HuggingFace at test time; an unreliable
-          # fetch raised LocalEntryNotFoundError -> silent PyMuPDF fallback ->
-          # ~21 test_pdf_extractor_integration failures (the recurring
-          # "docling flake"). Cache the whole HF hub dir so the models persist
-          # across runs. A cache written on develop/main is restorable by every
-          # PR via the base-branch fallback, so this is shared across branches.
-          # Same dir also holds the cross-encoder reranker and (under -m slow)
-          # MinerU's weights, so one cache covers all HF-backed models.
+          # DOCLING NO LONGER USES THIS. Its layout/TableFormer/CodeFormula
+          # models come from our OWN hosted mirror (release asset
+          # ci-assets-docling-v1) via NEXUS_DOCLING_ARTIFACTS_PATH — see the
+          # "Fetch docling models" step below. Anonymous HuggingFace fetches
+          # were the recurring "docling flake" (nexus-cxsbs): runners keep no
+          # layer cache, so a cache MISS re-fetched ~1.1GB from HF and failed on
+          # CAS data-processing errors / resets / 429s. Same reason the bge-768
+          # ONNX is self-hosted as ci-assets-bge-768-v1.
+          # This cache remains for the OTHER HF-backed models that still resolve
+          # through the hub: the cross-encoder reranker and (under -m slow)
+          # MinerU's weights.
           path: ~/.cache/huggingface
           # Key on uv.lock so a docling/transformers bump (new model) busts it;
           # restore-keys seeds from the last cache so unchanged models persist.
@@ -149,30 +151,45 @@ jobs:
       - name: Install project + dev deps
         run: uv sync --group dev
 
-      - name: Pre-fetch docling models (deterministic, retryable)
-        # nexus-cxsbs: warm the docling models BEFORE pytest so the flaky
-        # mid-test HF download becomes a deterministic up-front fetch that is
-        # allowed to retry. No-op on a cache hit; on a cold cache it downloads
-        # once (then the post-job cache-save persists it).
+      - name: Fetch docling models from our own mirror
+        # WE HOST THESE. Nothing here may reach HuggingFace.
         #
-        # nexus-c7gnx: the probe now runs a REAL extraction (docling loads its
-        # models lazily at convert() time, so merely building the converter does
-        # NOT download them). And it HARD-FAILS after 3 attempts: a cold cache +
-        # transient HF outage then fails LOUDLY here ("docling models could not
-        # be fetched") instead of silently falling back to PyMuPDF mid-suite and
-        # producing ~21 baffling extraction_method=='docling' assertion failures.
-        # A real extraction must yield extraction_method=='docling' (a one-line
-        # python -c; no heredoc, so YAML indentation stays intact). Probe lives in
-        # scripts/ci_warm_docling.py for readability.
+        # History (nexus-cxsbs / nexus-c7gnx): docling loads layout +
+        # TableFormer + CodeFormula LAZILY at convert() time, so an anonymous HF
+        # fetch happened mid-suite. When it failed it fell back to PyMuPDF and
+        # produced ~21 baffling extraction_method=='docling' assertion failures.
+        # The mitigation was an up-front warm with 3 retries — but each attempt
+        # costs ~25 minutes, so a genuine HF outage could not recover inside the
+        # job timeout: it burned 30 minutes and got CANCELLED (observed
+        # 2026-07-31 on PR #1433, pytest 3.12, "CAS data processing error"). A
+        # retry budget larger than the job budget is decoration.
+        #
+        # Now: one deterministic download of OUR release asset, and
+        # NEXUS_DOCLING_ARTIFACTS_PATH points docling at the extracted dir so it
+        # never resolves through the hub at all. Same pattern as the self-hosted
+        # bge-768 ONNX (ci-assets-bge-768-v1).
+        #
+        # Regenerate with:
+        #   docling-tools models download -o <dir> layout tableformer code_formula
+        #   tar -czf docling-artifacts-v1.tar.gz -C <dir> .
+        # then cut a -v2 tag if a docling bump changes the model set.
         run: |
           set -euo pipefail
-          for i in 1 2 3; do
-            if uv run python scripts/ci_warm_docling.py; then echo "docling models warm"; exit 0; fi
-            echo "docling pre-fetch attempt $i did not yield docling extraction"
-            if [ "$i" -lt 3 ]; then echo "retrying in 10s"; sleep 10; fi
-          done
-          echo "::error::docling models could not be fetched after 3 attempts (cold HF cache + HuggingFace unavailable). Failing the job here rather than letting the PDF integration tests fall back to PyMuPDF and fail with confusing assertions." >&2
-          exit 1
+          mkdir -p "$HOME/.cache/nexus/docling-artifacts"
+          curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
+            -o /tmp/docling-artifacts.tar.gz \
+            "https://github.com/${{ github.repository }}/releases/download/ci-assets-docling-v1/docling-artifacts-v1.tar.gz"
+          tar -xzf /tmp/docling-artifacts.tar.gz -C "$HOME/.cache/nexus/docling-artifacts"
+          rm -f /tmp/docling-artifacts.tar.gz
+          echo "NEXUS_DOCLING_ARTIFACTS_PATH=$HOME/.cache/nexus/docling-artifacts" >> "$GITHUB_ENV"
+
+      - name: Verify docling extracts from the mirrored models
+        # NON-VACUITY: proves docling actually performed the extraction
+        # (extraction_method == 'docling'), so a silently-empty or wrong-shaped
+        # artifacts dir fails HERE instead of degrading to PyMuPDF mid-suite.
+        # No retry loop: there is no network fetch left to be flaky, so a
+        # failure now means the artifacts are wrong and retrying cannot help.
+        run: uv run python scripts/ci_warm_docling.py
 
       - name: Run tests
         run: uv run pytest tests/ -q --durations=25
