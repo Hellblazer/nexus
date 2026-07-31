@@ -40,12 +40,14 @@ Fixture strategy: same Docker pgvector/pgvector:pg17 pattern as
 (``nexus_cq_tripwire_pg17``) so the two gates never collide on a shared
 Docker container when run concurrently.
 
-RUN THIS FILE IN ITS OWN PYTEST PROCESS (nexus-z6y58). Running the four
-Docker-backed integration gates together in ONE process errors at setup with
-``PSQLException: The connection attempt failed`` (measured: 7 passed / 4 errors,
-all in the write-seam gate); each file alone is green. The own-container-name
-reasoning above covers concurrent separate PROCESSES, not four container
-boot/teardown cycles inside one.
+If a setup here dies with ``PSQLException: The connection attempt failed``,
+suspect the Docker Desktop port-forwarding wedge before the test: after enough
+container cycles the mapped port accepts TCP but never completes the PG
+handshake, which presents as a fixture that cannot connect to a container
+``docker ps`` shows healthy. Probe the mapped port from the host with ``psql``
+(expect rc=124) and clear the stuck container. Investigated under nexus-z6y58:
+running all four Docker-backed gates in ONE pytest process is NOT the cause —
+four consecutive 4-in-one-process runs are clean on a healthy daemon.
 
 Prerequisites (identical to the write-seam gate):
   - ``service/target/nexus-service-1.0-SNAPSHOT.jar`` built and fresh.
@@ -777,22 +779,3 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
         "REPEAT /import/chunk call — the import seam's ON CONFLICT DO "
         f"UPDATE branch broke the collection stamp. Rows: {rows2!r}"
     )
-
-
-# ── nexus-bm8dd PROBE (temporary) ────────────────────────────────────────────
-
-def test_bm8dd_probe_ids_for_source(cat_client, vec_client):
-    import hashlib
-    src = "/probe/bm8dd/doc.md"
-    text = "bm8dd probe chunk body alpha beta gamma"
-    chash = hashlib.sha256(text.encode()).hexdigest()
-    vec_client.upsert_chunks(
-        _COLLECTION, [chash], [text],
-        metadatas=[{"source_path": src, "kind": "bm8dd-probe"}],
-    )
-    got = vec_client.ids_for_source(_COLLECTION, src)
-    print(f"\n[bm8dd-probe] ids_for_source -> {got!r} (expected [{chash!r}])")
-    deleted = vec_client.delete_by_source(_COLLECTION, src)
-    print(f"[bm8dd-probe] delete_by_source -> {deleted!r}")
-    assert got == [chash]
-    assert deleted == 1
