@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-jqvzk (i711w.1 item 20, Hal ruling 2026-07-30) — engine-side audit
+    record for DESTRUCTIVE T3 operations.
+
+    `nx t3 gc` deletes T3 chunks with NO audit record in service mode: the
+    ChunkOrphaned emission was local-catalog-only (commands/t3.py skips it
+    without cat._dir), and that leg died with the SQLite catalog. A destructive
+    verb whose only trace is its own stdout cannot answer "what did the GC take
+    on the 21st", which is precisely the question a ghost-class incident asks.
+
+    Append-only event log, tenant-scoped, FORCE RLS — the same shape as the
+    telemetry-002 consent log. The engine OWNS the record; the client writes
+    through POST /v1/catalog/gc_audit/record and reads it back via
+    GET /v1/catalog/gc_audit/list.
+
+    `chashes` is jsonb (an array of hex strings) rather than text[]: it is
+    written whole and read whole, never joined or indexed by element, and jsonb
+    matches how every other catalog payload column is carried through jOOQ here.
+    `chash_count` is stored separately so the common "how much did it take"
+    query never has to expand the array.
+
+    DRY-RUN rows are recorded too (`dry_run = true`): a preview that names the
+    chashes it WOULD delete is the artifact an operator wants to diff against
+    the destructive run that follows it.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-018-1" author="nexus-jqvzk">
+        <comment>Create gc_audit table (destructive-T3-op audit record)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.gc_audit (
+    id           BIGSERIAL   NOT NULL,
+    tenant_id    TEXT        NOT NULL,
+    operation    TEXT        NOT NULL,
+    collection   TEXT        NOT NULL DEFAULT '',
+    actor        TEXT        NOT NULL DEFAULT '',
+    dry_run      BOOLEAN     NOT NULL DEFAULT FALSE,
+    chash_count  INTEGER     NOT NULL DEFAULT 0,
+    chashes      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    details      JSONB,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT gc_audit_pk PRIMARY KEY (id)
+);
+
+-- Insertion-order read within a tenant (the audit trail).
+CREATE INDEX idx_gc_audit_tenant ON nexus.gc_audit (tenant_id, id DESC);
+-- "what happened to THIS collection" — the incident-triage access path.
+CREATE INDEX idx_gc_audit_collection ON nexus.gc_audit (tenant_id, collection, id DESC);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.gc_audit CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="catalog-018-2" author="nexus-jqvzk">
+        <comment>RLS on gc_audit</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.gc_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.gc_audit FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.gc_audit
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.gc_audit;
+            ALTER TABLE nexus.gc_audit NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.gc_audit DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
