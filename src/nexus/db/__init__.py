@@ -99,11 +99,11 @@ def read_legacy_catalog_counts(path: "Path") -> tuple[int | str, int | str]:
 
     REHOMED from ``nexus.db.migrations`` in RDR-158 P4 Stage 4
     (nexus-i711w) — the migration registry is deleted; this doctor probe is
-    the surviving consumer. It stays in the ``db/`` substrate for the same
-    reason the original docstring gave: the storage-boundary lint counts raw
-    ``sqlite3.connect`` sites outside ``db/`` and its epsilon-allow baseline
-    is a DOWNWARD-only ratchet, so a caller-side connect would have to bump
-    a count that is never permitted to rise.
+    the surviving consumer. Since RDR-186 P4 the storage-boundary lint's
+    ``sqlite3.connect`` arm honours no path prefix at all: this site is one
+    of the three read-only frozen-source diagnostics NAMED in
+    ``storage_boundary_lint.SQLITE_CONNECT_ALLOWLIST``; a caller-side
+    connect anywhere else is a hard violation.
 
     Returns ``("unknown", "unknown")`` for anything unreadable — a legacy
     file that cannot be opened must still be NAMED by the doctor row, never
@@ -121,7 +121,7 @@ def read_legacy_catalog_counts(path: "Path") -> tuple[int | str, int | str]:
     docs: int | str = "unknown"
     links: int | str = "unknown"
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)  # frozen-source-read: legacy .catalog.db row-count probe; named in SQLITE_CONNECT_ALLOWLIST
         try:
             for tbl, key in (("documents", "docs"), ("links", "links")):
                 try:

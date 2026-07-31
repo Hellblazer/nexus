@@ -520,12 +520,14 @@ is locked` daemon incidents):
   client side.
 - **Enforcement.** `nexus.storage_boundary_lint` (wired into `nx doctor
   --check-storage-boundary`) hard-fails any raw `sqlite3.connect` or
-  direct `T2Database(...)` construction outside `src/nexus/db/` +
-  `src/nexus/daemon/` that lacks a documented `# epsilon-allow:
-  <reason>` override. The genuinely-irreducible direct opens (bootstrap
-  `nx upgrade`, the daemon-unreachable fallback, read-only diagnostics,
-  the taxonomy CLI factory whose read-only subcommands need raw cursors)
-  each carry that justification.
+  direct `T2Database(...)` construction outside its explicit named
+  allowlists. The per-line `epsilon-allow` escape token was RETIRED at
+  RDR-186 P4 (census-to-zero): surviving sites — the three read-only
+  frozen-migration-source diagnostics (`SQLITE_CONNECT_ALLOWLIST`) and
+  the documented-irreducible direct constructions
+  (`T2DATABASE_CONSTRUCTION_ALLOWLIST`) — are enumerated per file with
+  exact counts in `storage_boundary_lint.py`; a new site is a hard
+  failure, never a comment to write.
 - **Bootstrap serialization.** `nx upgrade` and the daemon's own startup
   migration take an exclusive `fcntl.flock` on
   `~/.config/nexus/t2_migration.lock` before any schema write, and the

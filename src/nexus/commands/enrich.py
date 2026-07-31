@@ -1072,7 +1072,7 @@ def _select_entries(
         # Filter to entries whose existing aspect row has model_version
         # below the threshold. Rows without an existing aspect entry
         # are also included (they need first-time extraction).
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             outdated_paths = {
                 r.source_path
                 for r in db.document_aspects.list_by_extractor_version(
@@ -1306,12 +1306,12 @@ def _run_extraction(
     # indexer) is active. The `db` handle below is retained for READS
     # only (doc_id_lookup / manifest_lookup / skip checks); WAL permits
     # concurrent readers, so reads need no routing. The prior stale
-    # epsilon-allow claimed document_aspects.upsert was "not routable" —
+    # annotation claimed document_aspects.upsert was "not routable" —
     # true for the raw AspectRecord arg, but complete_aspect(asdict(...))
     # IS routable (added in nexus-zir76) and is the correct path.
     import dataclasses as _dataclasses  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.mcp_infra)
-    with T2Database(db_path) as db:  # epsilon-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
+    with T2Database(db_path) as db:  # boundary-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
         for i, entry in enumerate(entries, 1):
             source_path = entry.file_path or entry.title
             if not source_path:
@@ -1617,7 +1617,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
             collection, limit=limit if limit > 0 else None,
         )
@@ -1664,7 +1664,7 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         record = db.document_aspects.get(collection, source_path)
 
     if record is None:
@@ -1788,7 +1788,7 @@ def enrich_aspects_promote_field(field_name: str | None, history: bool) -> None:
         raise click.exceptions.Exit(2)
 
     try:
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             entries = list_promotions(db)
     except RuntimeError as exc:
         # RuntimeError from T2Database init when the service backend is
@@ -1947,7 +1947,7 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         )
         return
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         # nexus-6xp2: post-drop, source_path-keyed lookup is unreliable
         # when the writer used a non-uri_for source_uri. Tumbler-keyed
         # get_by_doc_id is exact; fall back to legacy (coll, path) get
@@ -2016,7 +2016,7 @@ def aspects_list_cmd(
                 "Catalog not initialized. Run 'nx catalog setup' first."
             )
         entries = cat.list_by_collection(collection)
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {
                 r.source_path for r in db.document_aspects.list_by_collection(
                     collection,
@@ -2049,7 +2049,7 @@ def aspects_list_cmd(
             click.echo(f"  ... and {len(gaps) - limit} more.")
         return
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
             collection, limit=(limit if limit else None),
         )

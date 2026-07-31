@@ -30,7 +30,7 @@ def _t2_diagnostic_connect(db_path: Path, sqlite3: Any) -> Any:
     opt-out (RDR-158 P3, nexus-7bomn) — read-only is the only correct posture
     against a frozen migration source.
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # epsilon-allow: nx doctor diagnostic — read-only inspection of the frozen migration source (service mode)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # frozen-source-read: nx doctor diagnostic — read-only (mode=ro) inspection of the frozen migration source; named in SQLITE_CONNECT_ALLOWLIST
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
@@ -855,7 +855,7 @@ def _run_check_storage_boundary(
         f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c / RDR-146 P0.1):\n"
         f"  violations:                {result.total_violations}\n"
         f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
-        f"  epsilon-allow connects:    {result.epsilon_allow_connects}\n"
+        f"  sqlite allowlisted connects: {result.sqlite_allowlisted_connects}\n"
         f"  T2Database constructions:  {result.t2database_constructions}\n"
         f"  catalog constructions:     {result.catalog_constructions}"
         f" (RDR-146 baseline {CATALOG_CONSTRUCTION_BASELINE},"
@@ -871,7 +871,7 @@ def _run_check_storage_boundary(
         "storage_boundary_lint",
         violations=result.total_violations,
         catalog_allowlist_count=result.catalog_allowlist_count,
-        epsilon_allow_connects=result.epsilon_allow_connects,
+        sqlite_allowlisted_connects=result.sqlite_allowlisted_connects,
         t2database_constructions=result.t2database_constructions,
         catalog_constructions=result.catalog_constructions,
         catalog_construction_baseline=CATALOG_CONSTRUCTION_BASELINE,
@@ -1105,10 +1105,12 @@ def _run_check_mineru() -> None:
     is_flag=True,
     default=False,
     help="RDR-120 P0.A. AST-scan for direct sqlite3.connect / "
-         "chromadb.{PersistentClient,CloudClient,EphemeralClient} "
-         "calls outside src/nexus/db/ (daemon-internal). P0-P4 also "
-         "allowlists src/nexus/catalog/. Per-line override via "
-         "`# epsilon-allow: <reason>` (reason >=8 chars). Records "
+         "voyageai.Client calls and T2Database/T3Database "
+         "constructions outside the named allowlists in "
+         "storage_boundary_lint.py. The per-line epsilon-allow "
+         "escape token is RETIRED (RDR-186 P4): surviving sites are "
+         "enumerated per file with exact counts; a new site is a "
+         "hard violation, not a comment to write. Records "
          "catalog-allowlist count to T2 key 120-phase-<N>-catalog-"
          "allowlist-count for the phase-boundary forcing function. "
          "Exits 1 with --fail-on-violation when violations exist.",

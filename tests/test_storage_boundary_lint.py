@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-120 P0.A: storage-boundary lint.
+"""RDR-120 P0.A: storage-boundary lint — terminal shape (RDR-186 P4).
 
-AST-scan for direct storage opens outside the allowed daemon-internal
-prefix. Banlist:
+AST-scan for direct storage opens outside the allowed substrate. Banlist:
 
 - ``sqlite3.connect(...)`` (and module-aliased forms such as
   ``import sqlite3 as _sqlite3; _sqlite3.connect(...)``)
-- ``chromadb.PersistentClient(...)``
-- ``chromadb.CloudClient(...)``
-- ``chromadb.EphemeralClient(...)``
+- ``voyageai.Client(...)`` (RDR-152 Seam B)
 
-Allowed prefixes:
+Allowlist model (RDR-186 P4, bead nexus-146xx.18):
 
-- ``src/nexus/db/`` — the daemon-internal substrate (always allowed)
-- ``src/nexus/catalog/`` — P0-P4 phase-allowlist (removed at P5)
-- per-line ``# epsilon-allow: <reason>`` override (>= 8 char reason)
+- The per-line ``# epsilon-allow: <reason>`` escape token is RETIRED —
+  a comment grants NOTHING. Several tests below pin exactly that.
+- Surviving legitimate sites are enumerated in EXPLICIT NAMED allowlists
+  (per-file exact counts) in ``storage_boundary_lint.py``.
+- ``src/nexus/db/`` path-prefix allowlisting survives for the voyageai
+  arm and the constructor arms; the ``sqlite3.connect`` arm honours the
+  named allowlist ONLY — a new connect anywhere, ``db/`` included, is a
+  hard violation (SQLite is deleted as a storage substrate).
 """
 from __future__ import annotations
 
@@ -29,7 +31,10 @@ SRC_ROOT = REPO_ROOT / "src" / "nexus"
 
 
 def _check(extra_files=None, allowlist_prefixes=None,
-           construction_allowlist_prefixes=None):
+           construction_allowlist_prefixes=None,
+           sqlite_connect_allowlist=None,
+           voyageai_client_allowlist=None,
+           t2database_construction_allowlist=None):
     """Run the lint and return its result."""
     from nexus.storage_boundary_lint import scan_repo
 
@@ -38,6 +43,9 @@ def _check(extra_files=None, allowlist_prefixes=None,
         allowlist_prefixes=allowlist_prefixes,
         extra_files=extra_files,
         construction_allowlist_prefixes=construction_allowlist_prefixes,
+        sqlite_connect_allowlist=sqlite_connect_allowlist,
+        voyageai_client_allowlist=voyageai_client_allowlist,
+        t2database_construction_allowlist=t2database_construction_allowlist,
     )
 
 
@@ -103,7 +111,7 @@ def test_catalog_allowlist_count_metric():
 
 
 # ---------------------------------------------------------------------------
-# Synthetic offender + epsilon-allow escape
+# Synthetic offender + retired-token inversion + named-allowlist budget
 # ---------------------------------------------------------------------------
 
 
@@ -127,29 +135,47 @@ def test_synthetic_offender_caught(synthetic_offender):
     assert matched[0].line == 3
 
 
-def test_epsilon_allow_per_line_override(tmp_path):
-    """A line tagged `# epsilon-allow: <reason>` (>= 8 chars) is skipped."""
-    target = tmp_path / "allowed.py"
-    target.write_text(
-        "import sqlite3\n"
-        "def ok():\n"
-        "    return sqlite3.connect('/tmp/x.db')  # epsilon-allow: test fixture only\n"
-    )
-    result = _check(extra_files=[target])
-    matched = [v for v in result.violations if v.file == str(target)]
-    assert not matched
-
-
-def test_epsilon_allow_with_short_reason_does_not_override(tmp_path):
-    target = tmp_path / "shortallow.py"
+def test_epsilon_allow_token_is_retired(tmp_path):
+    """RDR-186 P4: a line tagged `# epsilon-allow: <reason>` is a VIOLATION
+    like any other — the per-line escape machinery is gone, and a comment
+    grants nothing. (This test asserted the opposite until the census-to-zero
+    flip; the inversion is the bead's whole subject.)"""
+    target = tmp_path / "token_retired.py"
     target.write_text(
         "import sqlite3\n"
         "def bad():\n"
-        "    return sqlite3.connect('/tmp/x.db')  # epsilon-allow: x\n"
+        "    return sqlite3.connect('/tmp/x.db')  # epsilon-allow: a perfectly valid old-style reason\n"
     )
     result = _check(extra_files=[target])
     matched = [v for v in result.violations if v.file == str(target)]
-    assert len(matched) == 1
+    assert len(matched) == 1, (
+        "the retired epsilon-allow token must not suppress a violation"
+    )
+
+
+def test_named_sqlite_allowlist_budget_counts_not_violates(tmp_path):
+    """A connect covered by a named per-file allowlist entry is counted into
+    ``sqlite_allowlisted_connects`` instead of violating; a site BEYOND the
+    file's exact budget is a hard violation."""
+    from nexus.storage_boundary_lint import SQLITE_CONNECT_ALLOWLIST
+
+    base = _check()
+    target = tmp_path / "named_allowed.py"
+    target.write_text(
+        "import sqlite3\n"
+        "def ok():\n"
+        "    return sqlite3.connect('/tmp/x.db')\n"
+        "def excess():\n"
+        "    return sqlite3.connect('/tmp/y.db')\n"
+    )
+    result = _check(
+        extra_files=[target],
+        sqlite_connect_allowlist={**SQLITE_CONNECT_ALLOWLIST, str(target): 1},
+    )
+    matched = [v for v in result.violations if v.file == str(target)]
+    assert len(matched) == 1, "the site beyond the budget must violate"
+    assert matched[0].line == 5, "budget applies in line order (first N allowed)"
+    assert result.sqlite_allowlisted_connects == base.sqlite_allowlisted_connects + 1
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +265,13 @@ def test_result_has_file_line_symbol(tmp_path):
 # RDR-128 P0c (RF-5): T2Database construction detection + dual baseline
 # ---------------------------------------------------------------------------
 #
-# The lint counts two baseline populations so the single-writer cure
-# (P1/P3) is measurable from day one:
-#   * population 1 — ``sqlite3.connect`` sites carrying a deliberate
-#     ``# epsilon-allow:`` override (the raw-connect exceptions);
+# The lint counts two named-allowlist populations (RDR-186 P4 terminal
+# shape — formerly per-line-annotated baselines):
+#   * population 1 — ``sqlite3.connect`` sites named in
+#     SQLITE_CONNECT_ALLOWLIST (the read-only frozen-source diagnostics);
 #   * population 2 — direct ``T2Database(...)`` syntactic constructions
-#     outside the db/ + daemon/ construction-allowlist.
+#     named in T2DATABASE_CONSTRUCTION_ALLOWLIST outside the db/
+#     construction-allowlist.
 #
 # RDR-128 RF-1 cited 20 / 53 from a *codebase grep* (RDR §RF-1, line
 # "Verified ... codebase grep"). That grep over-counts: ``grep
@@ -312,34 +339,39 @@ def test_t2database_attribute_form_is_violation(tmp_path):
     assert len(matched) == 1
 
 
-def test_t2database_construction_annotated_is_documented(tmp_path):
-    """RDR-128 P3: a ``T2Database(...)`` carrying a valid ``# epsilon-allow:``
-    is counted into the documented population (``t2database_constructions``)
-    and is NOT a hard violation — the exact mirror of the ``sqlite3.connect``
-    epsilon-allow treatment. This is how an irreducible direct construction
-    (read-only diagnostic, bootstrap chicken-and-egg, by-design daemon
-    fallback) declares its lock-discipline justification."""
+def test_t2database_construction_named_allowlisted_is_counted(tmp_path):
+    """RDR-186 P4: a ``T2Database(...)`` covered by a named allowlist entry
+    is counted into ``t2database_constructions`` and is NOT a hard
+    violation. This is how an irreducible direct construction (read-only
+    diagnostic, service-routing helper, by-design offline path) survives —
+    a reviewed entry in T2DATABASE_CONSTRUCTION_ALLOWLIST, never a comment."""
+    from nexus.storage_boundary_lint import T2DATABASE_CONSTRUCTION_ALLOWLIST
+
     base = _check().t2database_constructions
-    target = tmp_path / "ctor_documented.py"
+    target = tmp_path / "ctor_named.py"
     target.write_text(
         "from nexus.db.t2 import T2Database\n"
         "def ok():\n"
-        "    return T2Database('/tmp/x.db')  "
-        "# epsilon-allow: read-only diagnostic, no WAL writer contention\n"
+        "    return T2Database('/tmp/x.db')\n"
     )
-    result = _check(extra_files=[target])
+    result = _check(
+        extra_files=[target],
+        t2database_construction_allowlist={
+            **T2DATABASE_CONSTRUCTION_ALLOWLIST, str(target): 1,
+        },
+    )
     assert result.t2database_constructions == base + 1
     assert [v for v in result.violations if v.file == str(target)] == []
 
 
-def test_t2database_construction_short_reason_is_violation(tmp_path):
-    """An epsilon-allow with a too-short (<8 char) reason does NOT suppress
-    the violation — same reason-length floor as the connect override."""
-    target = tmp_path / "ctor_shortreason.py"
+def test_t2database_construction_epsilon_token_does_not_suppress(tmp_path):
+    """RDR-186 P4 inversion: an old-style epsilon-allow comment on a
+    construction line grants nothing — un-allowlisted means violation."""
+    target = tmp_path / "ctor_token_retired.py"
     target.write_text(
         "from nexus.db.t2 import T2Database\n"
         "def bad():\n"
-        "    return T2Database('/tmp/x.db')  # epsilon-allow: x\n"
+        "    return T2Database('/tmp/x.db')  # epsilon-allow: read-only diagnostic, no WAL writer contention\n"
     )
     result = _check(extra_files=[target])
     assert [
@@ -395,19 +427,25 @@ def test_t3database_construction_aliased_import_is_violation(tmp_path):
     assert len(matched) == 1
 
 
-def test_t3database_construction_annotated_is_documented(tmp_path):
-    """A ``T3Database(...)`` carrying a valid ``# epsilon-allow:`` is counted
-    into the documented population and is NOT a hard violation — the mirror
-    of the T2Database / sqlite3.connect epsilon-allow treatment."""
+def test_t3database_construction_named_allowlisted_is_counted(tmp_path):
+    """A ``T3Database(...)`` covered by a named allowlist entry is counted
+    into the population and is NOT a hard violation — the mirror of the
+    T2Database / sqlite3.connect named-allowlist treatment (RDR-186 P4)."""
+    from nexus.storage_boundary_lint import T2DATABASE_CONSTRUCTION_ALLOWLIST
+
     base = _check().t2database_constructions
-    target = tmp_path / "t3_ctor_documented.py"
+    target = tmp_path / "t3_ctor_named.py"
     target.write_text(
         "from nexus.db.t3 import T3Database\n"
         "def ok():\n"
-        "    return T3Database(local_mode=True, local_path='/tmp/x')  "
-        "# epsilon-allow: read-only diagnostic, no daemon to contend with\n"
+        "    return T3Database(local_mode=True, local_path='/tmp/x')\n"
     )
-    result = _check(extra_files=[target])
+    result = _check(
+        extra_files=[target],
+        t2database_construction_allowlist={
+            **T2DATABASE_CONSTRUCTION_ALLOWLIST, str(target): 1,
+        },
+    )
     assert result.t2database_constructions == base + 1
     assert [v for v in result.violations if v.file == str(target)] == []
 
@@ -441,20 +479,27 @@ def test_doctor_fix_does_not_construct_t3database_directly():
     assert direct == [], f"doctor.py must not construct T3Database directly: {direct}"
 
 
-def test_epsilon_allow_connect_counted_as_population(tmp_path):
-    """An epsilon-allow'd ``sqlite3.connect`` is counted (population 1),
-    not silently dropped, and is NOT a hard violation."""
-    base = _check()
-    target = tmp_path / "eps_connect.py"
+def test_sqlite_connect_ignores_path_prefix_allowlist(tmp_path):
+    """RDR-186 P4: the ``sqlite3.connect`` arm honours NO path prefix — a
+    synthetic connect under ``src/nexus/db/`` is still a hard violation
+    (SQLite is deleted as a storage substrate; only the named allowlist
+    escapes, and this file is not in it)."""
+    from nexus.storage_boundary_lint import scan_repo
+
+    db_dir = tmp_path / "src" / "nexus" / "db"
+    db_dir.mkdir(parents=True)
+    target = db_dir / "sneaky.py"
     target.write_text(
         "import sqlite3\n"
-        "def ok():\n"
-        "    return sqlite3.connect('/tmp/x.db')  # epsilon-allow: documented exception\n"
+        "def bad():\n"
+        "    return sqlite3.connect('/tmp/x.db')\n"
     )
-    result = _check(extra_files=[target])
-    assert result.epsilon_allow_connects == base.epsilon_allow_connects + 1
-    # Still not a hard violation (the override suppresses that).
-    assert [v for v in result.violations if v.file == str(target)] == []
+    result = scan_repo(repo_root=tmp_path)
+    matched = [v for v in result.violations if v.symbol == "sqlite3.connect"]
+    assert len(matched) == 1, (
+        "a new sqlite3.connect under db/ must be a hard violation — the "
+        "path prefix grants nothing to the SQLite arm any more"
+    )
 
 
 def test_construction_allowlist_is_load_bearing(tmp_path):
@@ -479,173 +524,81 @@ def test_construction_allowlist_is_load_bearing(tmp_path):
 
 
 def test_dual_population_baseline_locked():
-    """Exact baseline lock (silent-corruption guard, RDR-128 P0c → P3 close).
+    """Terminal baseline lock (RDR-186 P4, bead nexus-146xx.18).
 
-    AST-authoritative counts. Locked as ``== N`` (never ``>=``): a
-    regression that adds a raw connect or an un-annotated ``T2Database(...)``
-    construction outside the daemon trips the assertion (the un-annotated
-    case via ``total_violations``), forcing either a daemon route or a
-    deliberate ``# epsilon-allow:`` exemption with justification.
+    The counts are no longer pasted literals with a hand-maintained bump
+    history (the full ratchet narrative 36 -> ... -> 24 constructions and
+    16 -> ... -> 2 connects lives in git history of this test): they DERIVE
+    from the named allowlists, so the ledger has one home. Exact equality
+    both directions:
 
-    RDR-128 P3 (nexus-sbxbe.3) flipped the lint from counted-only to
-    ENFORCING: ``t2database_constructions`` now counts the DOCUMENTED
-    survivors (annotated direct constructions), and any un-annotated
-    construction is a hard violation. The close drove un-annotated
-    constructions to ZERO — every surviving direct construction carries a
-    lock-discipline justification (the acceptance criterion's
-    "documented-irreducible set").
+    * an un-allowlisted site is a hard violation (``total_violations``);
+    * a deleted survivor drops the live metric below the allowlist sum,
+      failing here until the named entry is lowered (a stale entry is a
+      lie about the debt).
     """
-    result = _check()
-    # 16 = 15 pre-existing raw-connect exceptions + the RDR-128 P0b
-    # lock-acquirability probe (daemon.py). Unchanged by P3: the P3 routing
-    # added no raw sqlite3.connect sites (the migration-flock extension in
-    # upgrade.py uses fcntl.flock, not a connect), and the T2Database
-    # constructions it removed were not raw connects.
-    # 17 = +1 for RDR-152 P2.6 (nexus-gmiaf.16): commands/storage_cmd.py
-    # migrate_chash_cmd source-count query (ETL source-read, never T2Database).
-    # 18 = +1 for RDR-155 P5.2 (nexus-9n4pn): migration/vector_etl.py
-    # verify_taxonomy_consistency read-only T2 source read (mode=ro URI,
-    # taxonomy-consistency check; ETL-adjacent reader, never a T2 writer).
-    # 19 = +1 for RDR-178 Gap 2 (nexus-14ndm): health.py divergence check —
-    # read-only mode=ro URI on the local memory.db, doctor tripwire.
-    # 20 = +1 for RDR-178 P4 (nexus-s3dd4.5): migration/orchestrator.py
-    # chash-rows-by-collection ETL source read (migration SOURCE SQLite,
-    # never T2Database).
-    # 21 = +1 for RDR-178 Gap 7 (nexus-1sx01): migration/guided_upgrade.py
-    # already-migrated freshness probe — read-only mode=ro URI on the
-    # frozen migration source (annotation added at full-suite triage,
-    # 2026-07-02; the site itself landed 4776f0c8).
-    # 22 = +1 for RDR-185 P0.2 (nexus-n7u38.2): upgrade_ladder/completion.py
-    # ladder-local completion records (ladder.db) — its own substrate,
-    # deliberately outside T2Database/apply_pending so the store exists
-    # before the t2-schema rung it records (independent-audit HIGH finding;
-    # RDR-158-exempt; the pipeline_buffer.py own-substrate shape).
-    # 23 = +1 for RDR-185 P1.1 (nexus-n7u38.8): upgrade_ladder/rungs/
-    # t2_schema.py single _open() connect site — the T2-schema ladder rung
-    # is migration machinery (same chicken-and-egg substrate bootstrap as
-    # commands/upgrade.py:447: it migrates the store the daemon serves, so
-    # it cannot route through the daemon).
-    # 24 = +1 for RDR-185 P2.2 (nexus-n7u38.15): migration/wire_reid.py
-    # ChashRemapStore — the persisted old->new id map owns its substrate
-    # (chash_remap.db): a migration artifact that must outlive any store it
-    # maps (gate r1 rollback consults it; RDR-158-exempt; the
-    # pipeline_buffer/CompletionStore own-substrate shape).
-    # 25 = +1 for RDR-185 P2.3 (nexus-n7u38.16): migration/remap_cascade.py
-    # _connect — the cascade rewrites the LOCAL catalog.db/memory.db
-    # mid-migration BEFORE any daemon serves them (same migration-machinery
-    # class as storage_cmd/orchestrator source reads; quiesced context).
-    # 24 = -1 for RDR-186 .12: completion.py's ladder.db epsilon connect
-    # retired with the CompletionStore (shrink-side ratchet, same commit).
-    # 23 = -1 for RDR-186 .16: pipeline_buffer.py's pipeline.db epsilon
-    # connect retired with PipelineDB (buffer moved to nexus.pdf_pipeline
-    # in PG; shrink-side ratchet, same commit).
-    # 24 = +1 for RDR-180 land-then-transform (nexus-jxizy.10.7):
-    # migration/driver.py _open_source_ro — READ-ONLY (mode=ro URI)
-    # migration-SOURCE reads for the pre-land census + landing legs;
-    # never a destination (same migration-machinery class as
-    # remap_cascade._connect above).
-    # 22 = -2 for RDR-187 (nexus-piwya.10): storage_cmd.py migrate_chash_cmd
-    # retired (its ETL source-count read, the RDR-152 P2.6 +1 above) and
-    # orchestrator.py's chash-rows-by-collection source read (the RDR-178
-    # P4 +1 above) removed with the chash ETL leg — the counted sites are
-    # deleted code, not re-routed.
-    # 15 = -7 for RDR-155 P4b P2 (nexus-19svb/g37fr): the migration
-    # machinery's counted raw-connect sites (driver.py _open_source_ro,
-    # wire_reid.py ChashRemapStore, remap_cascade.py _connect,
-    # guided_upgrade.py already-migrated ro-connect, vector_etl.py,
-    # rungs/t2_schema.py _open) were whole-file deletions, and health.py's
-    # migration-divergence ro-connect died with the doctor row.
-    # DOWNWARD-only recount; never bump upward.
+    from nexus.storage_boundary_lint import (
+        SQLITE_CONNECT_ALLOWLIST,
+        T2DATABASE_CONSTRUCTION_ALLOWLIST,
+    )
 
-    # 15 -> 14: nexus-i711w Stage 2 sub-stage B deleted the `nx daemon t2`
-    # verb group from commands/daemon.py, taking its single epsilon-allow
-    # raw-connect with it. DOWNWARD-only recount; never bump upward.
-    # 14 -> 13: sub-stage A3 deleted the `nx plan repair` group's
-    # _open_plans_db raw-connect with plans/repair.py and the SQLite
-    # PlanLibrary. DOWNWARD-only recount; never bump upward.
-    # 13 -> 12: the terminal i711w deletion collapsed
-    # collection_audit._open_catalog_conn to `return None`, retiring its
-    # epsilon-allow ro-connect on the local .catalog.db. DOWNWARD-only
-    # recount; never bump upward.
-    # 12 -> 5: RDR-158 P3 (nexus-7bomn) removed the =sqlite opt-out and
-    # collapsed the selector-guarded SQLite arms: the console health-route
-    # reader, the session-end pre-fork tier summary, tier-status's local
-    # reader, doctor's --check-schema / aspect-queue / tier-discipline
-    # local legs, and _t2_diagnostic_connect's writable-WAL arm (its
-    # read-only frozen-source arm survives and is counted). DOWNWARD-only
-    # recount; never bump upward.
-    # 5 -> 4: RDR-158 P4 Stage 4 (nexus-i711w) deleted _run_upgrade's
-    # chicken-and-egg bootstrap connect (commands/upgrade.py) with the
-    # local-SQLite migration leg and db/migrations.py. DOWNWARD-only
-    # recount; never bump upward.
-    # 4 -> 2: RDR-158 P4 Stage 4 (nexus-i711w, critique Critical) — the
-    # backfill-source-uri and gc-pre-rdr096 repair verbs carried the last
-    # unguarded raw-connect writes into the frozen migration source; both
-    # are unconditional guided refusals now. DOWNWARD-only recount.
-    assert result.epsilon_allow_connects == 2, (
-        f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
+    result = _check()
+    # The default scan path-exempts db/ from nothing on the sqlite arm
+    # (RDR-186 P4), so the metric covers ALL of src/: the three read-only
+    # frozen-migration-source diagnostics and not one connect more.
+    assert result.sqlite_allowlisted_connects == sum(
+        SQLITE_CONNECT_ALLOWLIST.values()
+    ), (
+        f"named sqlite-connect ledger stale: live "
+        f"{result.sqlite_allowlisted_connects} != allowlist sum "
+        f"{sum(SQLITE_CONNECT_ALLOWLIST.values())}"
     )
-    # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
-    # db/ + daemon/. A new direct writer that lands without routing or an
-    # epsilon-allow justification fails CI here — the enforcement teeth that
-    # "close" the single-writer invariant.
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 3
+    # ZERO violations: every direct construction / connect outside the
+    # named allowlists fails CI here — the enforcement teeth.
     assert result.total_violations == 0, (
-        "un-annotated T2Database construction(s) or raw connect(s) outside "
-        f"the allowlist: {[(v.file, v.line, v.symbol) for v in result.violations]}"
+        "un-allowlisted construction(s) or connect(s): "
+        f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    # 30 = the documented-irreducible survivor set after the P3 close. P0c
-    # baselined 36 (all constructions, counted-only). P3 routed the hot-path
-    # and routable writers away (indexer/worker-poll/session-end/rename/
-    # scratch-promote/doctor-metric/aspect-delete/collection-delete) and
-    # annotated the genuinely-irreducible remainder with documented
-    # justifications: the daemon-unreachable fallback + t2_ctx worker-persist
-    # (mcp_infra), the bootstrap upgrade path, document_aspects.upsert /
-    # raw-DDL / raw-cursor writers, the read-only diagnostic/CLI reads, and
-    # the taxonomy CLI factory (raw-cursor reads + chroma-interleaved writes
-    # that cannot cross the daemon RPC). Each survivor's ``# epsilon-allow:``
-    # reason states why it cannot route.
-    #
-    # RDR-152 nexus-fjwxh: 31 -> 33. The T2 default flipped to SERVICE, so the
-    # CLI memory (t2_handle) and MCP/index write seam (t2_index_write) short-
-    # circuit to a direct T2Database in service mode — but in service mode that
-    # T2Database routes to the HTTP service (PG arbiter), NOT a raw SQLite
-    # writer, so the single-writer concern this lint guards does not apply.
-    # Both carry an ``# epsilon-allow:`` reason saying exactly that.
-    #
-    # nexus-2c51v: 33 -> 34. The `nx aspects requeue-failed` read path opens a
-    # direct `T2Database(mem_path)` for a read-only failed-row inspection
-    # (mirrors `aspects gc`); reads are WAL-concurrent-safe so no single-writer
-    # concern. Carries an `# epsilon-allow:` reason.
-    #
-    # nexus-qgc4b: 34 -> 35. `_taxonomy_incomplete` opens a read-only
-    # `T2Database(default_db_path())` to probe per-collection topic existence
-    # for the no-change index gate; read-only, WAL-safe. Carries an
-    # `# epsilon-allow:` reason.
-    #
-    # nexus-70x7y: 35 -> 34. DOWNWARD. `nx enrich aspects-promote-field` opened
-    # TWO T2Databases — a read-only one for `--history` and a WRITE one for the
-    # promotion's raw DDL. The runtime promotion verb is retired (schema changes
-    # go through Liquibase in every mode), so the write construction is gone;
-    # only the read-only `--history` open survives.
-    #
-    # RDR-158 P3 (nexus-7bomn): 34 -> 26. DOWNWARD. The =sqlite opt-out
-    # collapse deleted eight annotated constructions with their arms:
-    # operators/aspect_sql.py's three per-operator SQLite legs,
-    # merge_candidates._open_t2 (the verb is an unconditional refusal),
-    # collection_audit._open_t2 (taxonomy sections degrade to empty),
-    # mcp_infra.t2_index_write's SQLite arm, and the session-end launcher's
-    # pre-fork reader; commands/_helpers.t2_handle keeps its (annotated)
-    # service-routing construction.
-    #
-    # RDR-158 P4 Stage 4 (nexus-i711w): 26 -> 25. DOWNWARD. _run_upgrade's
-    # T3-step T2Database construction (commands/upgrade.py, the RDR-128 P3
-    # documented-irreducible bootstrap open) died with the local-SQLite
-    # migration leg and db/migrations.py.
-    # 25 -> 24: RDR-158 P4 Stage 5 final reviews — taxonomy
-    # backfill-source-collection retired with its annotated construction.
-    # DOWNWARD-only.
-    assert result.t2database_constructions == 24, (
-        f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
+    # The documented-irreducible construction survivor set, derived from
+    # the named allowlist (24 sites across 13 files at the RDR-186 P4 flip).
+    assert result.t2database_constructions == sum(
+        T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
+    ), (
+        f"named construction ledger stale: live "
+        f"{result.t2database_constructions} != allowlist sum "
+        f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
+    )
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 24
+
+
+def test_named_allowlists_point_at_live_files():
+    """Liveness: a named allowlist entry naming a dead file is a free slot
+    a future site could squat in without review (the same failure class the
+    mode-lint exclusion liveness tests closed, nexus-i711w)."""
+    from nexus.storage_boundary_lint import (
+        SQLITE_CONNECT_ALLOWLIST,
+        T2DATABASE_CONSTRUCTION_ALLOWLIST,
+        T2_RAW_HANDLE_ALLOWLIST,
+        VOYAGEAI_CLIENT_ALLOWLIST,
+    )
+
+    dead: list[str] = []
+    for allowlist_name, allowlist in (
+        ("SQLITE_CONNECT_ALLOWLIST", SQLITE_CONNECT_ALLOWLIST),
+        ("VOYAGEAI_CLIENT_ALLOWLIST", VOYAGEAI_CLIENT_ALLOWLIST),
+        ("T2DATABASE_CONSTRUCTION_ALLOWLIST", T2DATABASE_CONSTRUCTION_ALLOWLIST),
+        ("T2_RAW_HANDLE_ALLOWLIST", T2_RAW_HANDLE_ALLOWLIST),
+    ):
+        for rel, count in allowlist.items():
+            if not (REPO_ROOT / rel).is_file():
+                dead.append(f"{allowlist_name}[{rel!r}]")
+            if count < 1:
+                dead.append(f"{allowlist_name}[{rel!r}] has a zero budget")
+    assert not dead, (
+        "named allowlist entr(y/ies) grant nothing: "
+        + ", ".join(dead)
+        + " — delete the entry with the file it named."
     )
 
 
@@ -776,7 +729,10 @@ def test_catalog_construction_allowlist_includes_catalog_module():
 # Allowlist:
 #   src/nexus/db/     — the taxonomy implementation itself
 #   src/nexus/daemon/ — the daemon-side write host
-#   # epsilon-allow: <reason>  — per-line override (>= 8 char reason)
+#   _TAXONOMY_WRITE_SITE_ALLOWLIST — named per-file exact counts (RDR-186
+#   P4: the per-line epsilon-allow escape token is retired; the two
+#   surviving direct-write sites are enumerated here, and each carries a
+#   documentation-only ``boundary-allow`` comment at the site).
 #
 # ---------------------------------------------------------------------------
 
@@ -804,8 +760,16 @@ _TAXONOMY_WRITE_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/daemon/",
 )
 
-_TAXONOMY_EPSILON_TOKEN = "# epsilon-allow:"
-_TAXONOMY_EPSILON_MIN_REASON = 8
+#: RDR-186 P4 named survivor set: direct taxonomy-write call sites outside
+#: db/ + daemon/ that are deliberate. Per-file exact counts; a site beyond
+#: a file's budget — or in a file not listed — is a violation.
+_TAXONOMY_WRITE_SITE_ALLOWLIST: dict[str, int] = {
+    # Deprecated assign_topic shim, no external callers; T2 write routes
+    # through the store method.
+    "src/nexus/taxonomy.py": 1,
+    # `nx taxonomy split` service single-writer persist (split_topic).
+    "src/nexus/commands/taxonomy_cmd.py": 1,
+}
 
 
 def _is_inside_t2_index_write_lambda(node: ast.AST, tree: ast.AST) -> bool:
@@ -852,12 +816,15 @@ def _is_inside_t2_index_write_lambda(node: ast.AST, tree: ast.AST) -> bool:
     return False
 
 
-def _taxonomy_write_violations(path: pathlib.Path) -> list[tuple[int, str]]:
+def _taxonomy_write_violations(
+    path: pathlib.Path, allowed: int = 0
+) -> list[tuple[int, str]]:
     """Return (lineno, method_name) pairs for unrouted taxonomy write calls.
 
-    Skips calls that are:
-    - Inside a lambda body (correctly routed via t2_index_write)
-    - On a line tagged ``# epsilon-allow: <reason>`` (>= 8 char reason)
+    Skips calls inside a ``t2_index_write`` lambda (correctly routed), then
+    exempts the first *allowed* remaining sites in line order — the named
+    per-file budget from ``_TAXONOMY_WRITE_SITE_ALLOWLIST`` (RDR-186 P4:
+    the per-line escape token is retired; a comment grants nothing).
     """
     try:
         source = path.read_text()
@@ -868,7 +835,6 @@ def _taxonomy_write_violations(path: pathlib.Path) -> list[tuple[int, str]]:
     except SyntaxError:
         return []
 
-    source_lines = source.splitlines()
     violations: list[tuple[int, str]] = []
 
     for node in ast.walk(tree):
@@ -885,19 +851,10 @@ def _taxonomy_write_violations(path: pathlib.Path) -> list[tuple[int, str]]:
         if _is_inside_t2_index_write_lambda(node, tree):
             continue
 
-        # Check epsilon-allow on the call's line
-        lineno = node.lineno
-        if 1 <= lineno <= len(source_lines):
-            line = source_lines[lineno - 1]
-            tok_pos = line.find(_TAXONOMY_EPSILON_TOKEN)
-            if tok_pos >= 0:
-                reason = line[tok_pos + len(_TAXONOMY_EPSILON_TOKEN):].strip()
-                if len(reason) >= _TAXONOMY_EPSILON_MIN_REASON:
-                    continue
+        violations.append((node.lineno, method))
 
-        violations.append((lineno, method))
-
-    return violations
+    violations.sort()
+    return violations[allowed:]
 
 
 def _taxonomy_allowed(rel_posix: str) -> bool:
@@ -924,7 +881,9 @@ def test_no_direct_taxonomy_writes_in_src() -> None:
         rel = py.relative_to(REPO_ROOT).as_posix()
         if _taxonomy_allowed(rel):
             continue
-        hits = _taxonomy_write_violations(py)
+        hits = _taxonomy_write_violations(
+            py, allowed=_TAXONOMY_WRITE_SITE_ALLOWLIST.get(rel, 0)
+        )
         if hits:
             offenders[rel] = hits
 
@@ -938,9 +897,11 @@ def test_no_direct_taxonomy_writes_in_src() -> None:
         raise AssertionError(
             "RDR-151 Phase 3: direct taxonomy WRITE outside db/ or daemon/ "
             "bypasses the single-writer invariant. Route via "
-            "t2_index_write(lambda db: db.taxonomy.<method>(...)) or add "
-            f"# epsilon-allow: <reason> (>= {_TAXONOMY_EPSILON_MIN_REASON} chars). "
-            f"Violations:\n{formatted}"
+            "t2_index_write(lambda db: db.taxonomy.<method>(...)). The "
+            "per-line escape token is RETIRED (RDR-186 P4): a genuinely "
+            "irreducible site needs a named entry in "
+            "_TAXONOMY_WRITE_SITE_ALLOWLIST — a reviewed edit, never a "
+            f"comment. Violations:\n{formatted}"
         )
 
 
@@ -996,30 +957,36 @@ def test_taxonomy_write_lint_flags_lambda_inside_other_dispatcher(
     assert any(meth == "assign_topic" for _, meth in hits)
 
 
-def test_taxonomy_write_lint_allows_epsilon_allow(
+def test_taxonomy_write_lint_epsilon_token_does_not_suppress(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Self-test: a line tagged epsilon-allow with >= 8 char reason is skipped."""
-    fake = tmp_path / "fake_taxonomy_epsilon.py"
+    """Self-test (RDR-186 P4 inversion): an old-style epsilon-allow comment
+    on the call line grants NOTHING — the per-line escape is retired."""
+    fake = tmp_path / "fake_taxonomy_token_retired.py"
     fake.write_text(
-        "def ok(db):\n"
+        "def bad(db):\n"
         "    db.taxonomy.delete_topic(1)  # epsilon-allow: taxonomy CLI factory read-only\n"
     )
     hits = _taxonomy_write_violations(fake)
-    assert hits == [], f"epsilon-allow'd call was flagged: {hits}"
+    assert hits, "the retired epsilon-allow token must not suppress"
 
 
-def test_taxonomy_write_lint_rejects_short_epsilon_reason(
+def test_taxonomy_write_lint_named_budget_exempts_first_n(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Self-test: epsilon-allow with < 8 char reason does NOT suppress."""
-    fake = tmp_path / "fake_taxonomy_short_eps.py"
+    """Self-test: a named per-file budget exempts the first N sites in line
+    order; the site beyond the budget is still flagged."""
+    fake = tmp_path / "fake_taxonomy_budget.py"
     fake.write_text(
-        "def bad(db):\n"
-        "    db.taxonomy.delete_topic(1)  # epsilon-allow: ok\n"
+        "def a(db):\n"
+        "    db.taxonomy.delete_topic(1)\n"
+        "def b(db):\n"
+        "    db.taxonomy.delete_topic(2)\n"
     )
-    hits = _taxonomy_write_violations(fake)
-    assert hits, "short epsilon-allow reason must NOT suppress"
+    hits = _taxonomy_write_violations(fake, allowed=1)
+    assert hits == [(4, "delete_topic")], (
+        f"budget must exempt line 2 and keep line 4: {hits}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1068,9 +1035,10 @@ def test_catalog_db_access_in_consumer_is_counted(tmp_path):
     assert result.catalog_db_accesses == base + 1
 
 
-def test_catalog_db_access_epsilon_allow_suppresses(tmp_path):
-    """A ``._db`` access annotated with epsilon-allow is NOT counted
-    (mirrors the collection_health.py guarded path)."""
+def test_catalog_db_access_epsilon_token_does_not_suppress(tmp_path):
+    """RDR-186 P4 inversion: a ``._db`` access annotated with the retired
+    epsilon-allow token is counted like any other — a comment grants
+    nothing."""
     base = _db_access_check().catalog_db_accesses
     target = tmp_path / "guarded_consumer.py"
     target.write_text(
@@ -1078,7 +1046,7 @@ def test_catalog_db_access_epsilon_allow_suppresses(tmp_path):
         "    conn = cat._db._conn  # epsilon-allow: guarded SQLite-only path (service guard above)\n"
     )
     result = _db_access_check(extra_files=[target])
-    assert result.catalog_db_accesses == base
+    assert result.catalog_db_accesses == base + 1
 
 
 def test_catalog_db_access_in_catalog_module_not_counted(tmp_path):
@@ -1120,21 +1088,23 @@ def test_catalog_db_access_metric_dict_includes_field():
 # mode (the 6.0 default) that store resolves to an Http*Store with no ``.conn``
 # / ``._lock`` — the access raises AttributeError, which several call sites
 # swallow inside ``try/except``, silently dropping the operation (the exact
-# telemetry silent-loss class nexus-pyzk7 fixed). The lint counts un-annotated
-# raw-handle accesses outside src/nexus/db/ + src/nexus/daemon/ as a ratcheting
-# baseline; epsilon-allow (>= 8 char reason) marks a documented survivor (a
-# raw access inside a ``storage_backend_for(...)``-guarded SQLite-only branch
-# the AST cannot see, e.g. aspect_promotion.py / operators/aspect_sql.py).
+# telemetry silent-loss class nexus-pyzk7 fixed). The lint counts raw-handle
+# accesses outside src/nexus/db/ + src/nexus/daemon/ beyond the named
+# T2_RAW_HANDLE_ALLOWLIST budget (RDR-186 P4: the per-line escape token is
+# retired; the one hasattr-guarded survivor pair in catalog_cmds/report.py
+# is enumerated by file with an exact count).
 # ---------------------------------------------------------------------------
 
 
-def _raw_handle_check(extra_files=None, t2_raw_handle_access_allowlist_prefixes=None):
+def _raw_handle_check(extra_files=None, t2_raw_handle_access_allowlist_prefixes=None,
+                      t2_raw_handle_allowlist=None):
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
         repo_root=REPO_ROOT,
         extra_files=extra_files,
         t2_raw_handle_access_allowlist_prefixes=t2_raw_handle_access_allowlist_prefixes,
+        t2_raw_handle_allowlist=t2_raw_handle_allowlist,
     )
 
 
@@ -1163,9 +1133,9 @@ def test_t2_raw_handle_lock_is_counted(tmp_path):
     assert result.t2_raw_handle_accesses == base + 1
 
 
-def test_t2_raw_handle_epsilon_allow_suppresses(tmp_path):
-    """A raw-handle access tagged ``# epsilon-allow: <reason>`` is NOT counted
-    (the documented SQLite-only-branch survivor, e.g. aspect_sql.py)."""
+def test_t2_raw_handle_epsilon_token_does_not_suppress(tmp_path):
+    """RDR-186 P4 inversion: a raw-handle access tagged with the retired
+    epsilon-allow token IS counted — a comment grants nothing."""
     base = _raw_handle_check().t2_raw_handle_accesses
     target = tmp_path / "raw_guarded_consumer.py"
     target.write_text(
@@ -1175,7 +1145,30 @@ def test_t2_raw_handle_epsilon_allow_suppresses(tmp_path):
         "    return conn\n"
     )
     result = _raw_handle_check(extra_files=[target])
-    assert result.t2_raw_handle_accesses == base
+    assert result.t2_raw_handle_accesses == base + 1
+
+
+def test_t2_raw_handle_named_allowlist_exempts(tmp_path):
+    """A raw-handle reach covered by a named per-file budget is NOT counted
+    (the report.py hasattr-guarded survivor pattern); a reach beyond the
+    budget is."""
+    from nexus.storage_boundary_lint import T2_RAW_HANDLE_ALLOWLIST
+
+    base = _raw_handle_check().t2_raw_handle_accesses
+    target = tmp_path / "raw_named_consumer.py"
+    target.write_text(
+        "def ok(db):\n"
+        "    conn = db.taxonomy.conn\n"
+        "    with db.taxonomy._lock:\n"
+        "        pass\n"
+    )
+    result = _raw_handle_check(
+        extra_files=[target],
+        t2_raw_handle_allowlist={**T2_RAW_HANDLE_ALLOWLIST, str(target): 1},
+    )
+    assert result.t2_raw_handle_accesses == base + 1, (
+        "one site within budget exempt, the second counted"
+    )
 
 
 def test_t2_raw_handle_non_store_attr_not_matched(tmp_path):
@@ -1192,16 +1185,10 @@ def test_t2_raw_handle_non_store_attr_not_matched(tmp_path):
     assert result.t2_raw_handle_accesses == base
 
 
-def test_t2_raw_handle_short_epsilon_reason_does_not_suppress(tmp_path):
-    """An epsilon-allow with < 8 char reason does NOT suppress — same floor."""
-    base = _raw_handle_check().t2_raw_handle_accesses
-    target = tmp_path / "raw_shortreason.py"
-    target.write_text(
-        "def bad(db):\n"
-        "    return db.taxonomy.conn  # epsilon-allow: x\n"
-    )
-    result = _raw_handle_check(extra_files=[target])
-    assert result.t2_raw_handle_accesses == base + 1
+# test_t2_raw_handle_short_epsilon_reason_does_not_suppress retired with
+# the token machinery (RDR-186 P4): there is no reason-length floor to
+# test because there is no per-line escape at all — see
+# test_t2_raw_handle_epsilon_token_does_not_suppress.
 
 
 def test_t2_raw_handle_db_and_daemon_allowlisted(tmp_path):
@@ -1301,9 +1288,10 @@ def test_client_for_call_outside_db_is_violation(tmp_path):
     assert matched[0].line == 2
 
 
-def test_client_for_epsilon_allow_suppresses(tmp_path):
-    """A line tagged ``# epsilon-allow: <reason>`` (>= 8 chars) is skipped,
-    for consistency with every other rule in this module."""
+def test_client_for_epsilon_token_does_not_suppress(tmp_path):
+    """RDR-186 P4 inversion: the retired epsilon-allow token no longer
+    suppresses a ``._client_for`` violation — consistent with every other
+    rule in this module."""
     target = tmp_path / "client_for_allowed.py"
     target.write_text(
         "def ok(db, name):\n"
@@ -1311,7 +1299,7 @@ def test_client_for_epsilon_allow_suppresses(tmp_path):
     )
     result = _client_for_check(extra_files=[target])
     matched = [v for v in result.violations if v.file == str(target)]
-    assert matched == []
+    assert len(matched) == 1
 
 
 def test_client_for_allowed_in_db_directory(tmp_path):
@@ -1381,8 +1369,9 @@ def test_catalog_dir_access_in_consumer_is_counted(tmp_path):
     assert result.catalog_dir_accesses == base + 1
 
 
-def test_catalog_dir_access_epsilon_allow_suppresses(tmp_path):
-    """A ``._dir`` access annotated with epsilon-allow is NOT counted."""
+def test_catalog_dir_access_epsilon_token_does_not_suppress(tmp_path):
+    """RDR-186 P4 inversion: a ``._dir`` access annotated with the retired
+    epsilon-allow token IS counted."""
     base = _catalog_dir_check().catalog_dir_accesses
     target = tmp_path / "dir_guarded_consumer.py"
     target.write_text(
@@ -1390,7 +1379,7 @@ def test_catalog_dir_access_epsilon_allow_suppresses(tmp_path):
         "    return cat._dir  # epsilon-allow: documented deleted-backups path\n"
     )
     result = _catalog_dir_check(extra_files=[target])
-    assert result.catalog_dir_accesses == base
+    assert result.catalog_dir_accesses == base + 1
 
 
 def test_catalog_dir_access_in_catalog_module_not_counted(tmp_path):

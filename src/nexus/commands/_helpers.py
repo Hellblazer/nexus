@@ -45,11 +45,11 @@ def t2_handle() -> Iterator[Any]:
 
     Operator/debug paths that MUST work when the daemon is offline
     (``nx upgrade``, ``nx doctor``, ``_session_end_launcher``, etc.)
-    continue to construct ``T2Database(default_db_path())`` directly
-    with ``# epsilon-allow`` tokens — this helper is for the user-
-    facing memory/plan surface only.
+    continue to construct ``T2Database(default_db_path())`` directly —
+    each named in ``storage_boundary_lint.T2DATABASE_CONSTRUCTION_ALLOWLIST``
+    — this helper is for the user-facing memory/plan surface only.
 
-    Note: ``nx plan`` commands open T2 directly (epsilon-allow) and
+    Note: ``nx plan`` commands open T2 directly (named-allowlisted) and
     do NOT go through this helper — they must tolerate offline mode.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
@@ -78,7 +78,7 @@ def t2_handle() -> Iterator[Any]:
     #      service is unreachable/erroring when the actual RPC fires, raising
     #      an httpx transport or status error.
     try:
-        db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode routes to HTTP service, not a raw SQLite writer
+        db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode routes to HTTP service, not a raw SQLite writer
     except RuntimeError as exc:
         raise click.ClickException(
             f"T2 storage service unavailable: {exc}"

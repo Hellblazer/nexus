@@ -3119,7 +3119,7 @@ def _run_index(
             import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
             code_model = index_model_for_collection(code_collection)
             docs_model = index_model_for_collection(docs_collection)
-            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
+            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
 
     _log.debug("connecting to ChromaDB")
     # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through

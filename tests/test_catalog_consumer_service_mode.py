@@ -279,8 +279,9 @@ def test_scoring_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"scoring.py has ._db accesses that should have been migrated: {violations}"
     )
@@ -301,8 +302,9 @@ def test_repos_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"repos.py has ._db accesses that should have been migrated: {violations}"
     )
@@ -322,8 +324,9 @@ def test_health_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"health.py has ._db accesses that should have been migrated: {violations}"
     )
@@ -343,8 +346,9 @@ def test_pipeline_stages_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"pipeline_stages.py has ._db accesses: {violations}"
     )

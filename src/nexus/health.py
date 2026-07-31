@@ -1223,7 +1223,7 @@ def _check_t2_integrity() -> list[HealthResult]:
         return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
 
     try:
-        conn = sqlite3.connect(str(db_path))  # epsilon-allow: health PRAGMA integrity_check diagnostic — must operate when daemon offline; read-only
+        conn = sqlite3.connect(str(db_path))  # frozen-source-integrity-write: NOT mode=ro — the FTS5 integrity-check pseudo-command below requires a writable connection (checking command, no content change); named in SQLITE_CONNECT_ALLOWLIST with the write-shaped exception documented
         try:
             conn.execute(f"PRAGMA busy_timeout = {_INTEGRITY_BUSY_TIMEOUT_MS}")
             rows = conn.execute("PRAGMA integrity_check").fetchall()

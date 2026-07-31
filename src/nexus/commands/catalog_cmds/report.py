@@ -45,15 +45,15 @@ def _taxonomy_stats() -> dict | None:
         return None
 
     try:
-        with T2Database(db_path) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(db_path) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             # nexus-pyzk7: service-backed taxonomy has no raw .conn. This is a
             # read-only topic-stats display; skip cleanly in service mode rather
             # than relying on the AttributeError → except below (the docstring
             # promised a graceful skip the bare access did not deliver).
             if not hasattr(db.taxonomy, "conn"):
                 return None
-            conn = db.taxonomy.conn  # epsilon-allow: guarded by hasattr(db.taxonomy,'conn') skip above (nexus-pyzk7 Part 3)
-            with db.taxonomy._lock:  # epsilon-allow: guarded by hasattr(db.taxonomy,'conn') skip above (nexus-pyzk7 Part 3)
+            conn = db.taxonomy.conn  # boundary-allow: guarded by hasattr(db.taxonomy,'conn') skip above (nexus-pyzk7 Part 3)
+            with db.taxonomy._lock:  # boundary-allow: guarded by hasattr(db.taxonomy,'conn') skip above (nexus-pyzk7 Part 3)
                 topic_total = conn.execute(
                     "SELECT count(*) FROM topics"
                 ).fetchone()[0]

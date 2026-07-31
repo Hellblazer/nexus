@@ -305,7 +305,7 @@ def t2_ctx():
       service's /v1/telemetry/*/record endpoint), not a raw db.telemetry.conn.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
+    return T2Database(default_db_path())  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
 
@@ -324,7 +324,7 @@ def _service_t2_write_locked(write_fn):
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
 
     if _service_t2_db is None:
-        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode, PG is the arbiter
+        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode, PG is the arbiter
     try:
         return write_fn(_service_t2_db)
     except Exception:
@@ -335,7 +335,7 @@ def _service_t2_write_locked(write_fn):
         # for the rest of the process's lifetime.
         stale_db = _service_t2_db
         _service_t2_db = None
-        stale_db.close()  # epsilon-allow: error-triggered eviction, not per-call teardown
+        stale_db.close()  # error-triggered eviction, not per-call teardown
         raise
 
 

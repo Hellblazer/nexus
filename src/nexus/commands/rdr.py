@@ -215,7 +215,7 @@ def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
     try:
         from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        with T2Database(default_db_path()) as db:  # epsilon-allow: short-lived read-only preamble CLI
+        with T2Database(default_db_path()) as db:  # boundary-allow: short-lived read-only preamble CLI
             entries = db.get_all(project=f"{repo_name}_rdr")
             for entry in entries:
                 title = entry.get("title", "")

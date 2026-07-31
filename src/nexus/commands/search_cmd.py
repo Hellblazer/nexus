@@ -353,7 +353,7 @@ def search_cmd(
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
         from nexus.commands._helpers import default_db_path as _db_path  # noqa: PLC0415 — deferred import; only needed in this branch
         from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-        with T2Database(_db_path()) as _t2:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(_db_path()) as _t2:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             raw = search_cross_corpus(
                 q, target_collections, n_results=n, t3=db,
                 where=where_filter, link_boost=False,

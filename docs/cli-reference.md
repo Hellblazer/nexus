@@ -1738,7 +1738,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
 | `--check-mcp-logs` | Scan Claude Code's per-server MCP cache for nx-mcp silent-death signatures (`STDIO connection dropped`, `stdio transport error`). macOS only; skips cleanly elsewhere (RDR-094 Phase H, nexus-50u5) |
 | `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
-| `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `chromadb.{PersistentClient,CloudClient,EphemeralClient}` calls outside `src/nexus/db/` (daemon-internal); also allowlists `src/nexus/catalog/`. Per-line override via `# epsilon-allow: <reason>` (reason ≥8 chars) |
+| `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
 | `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session-id lease presence + reachability (RDR-149 P4). Exits 1 when a session-id resolves but the lease is missing or unreachable |

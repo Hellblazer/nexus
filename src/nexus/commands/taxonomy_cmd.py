@@ -30,7 +30,7 @@ def _T2Database(path):
     infrequent operator commands, not the automated hot path.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
-    return T2Database(path)  # epsilon-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
+    return T2Database(path)  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -1009,7 +1009,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
         # round-trip against CatalogTaxonomy's cursor and its chroma-coupled
         # statics (_create_centroid_collection / _batched_upsert), all deleted
         # in nexus-i711w Stage 2 sub-stage C.
-        child_count = db.taxonomy.split_topic(topic_id, k, t3)  # epsilon-allow: service single-writer persist
+        child_count = db.taxonomy.split_topic(topic_id, k, t3)  # boundary-allow: service single-writer persist
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
         if child_count:
             coll_scope = collection_name or collection

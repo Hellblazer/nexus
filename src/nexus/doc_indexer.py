@@ -417,7 +417,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai  # noqa: PLC0415 — heavy/optional dep (voyageai) deferred to call time to keep module import cheap
-    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
     if model == "voyage-context-3":
         # CCE API accepts single-element inputs — use it for all chunk counts.
         # The old >=2 requirement was our incorrect assumption; removing it ensures

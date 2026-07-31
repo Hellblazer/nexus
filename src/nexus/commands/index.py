@@ -771,7 +771,7 @@ def _collections_without_topics(collections: list[str]) -> set[str]:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     try:
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
             return {
                 col for col in collections
                 if not db.taxonomy.get_topics_for_collection(col)
@@ -1053,7 +1053,7 @@ def run_collection_postprocessing(
                     f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
                     f"(no files written this run)"
                 )
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for _tax_i, col_name in enumerate(_discover_targets, start=1):
                 _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")
                 try:

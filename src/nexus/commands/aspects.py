@@ -293,7 +293,7 @@ def aspects_requeue_failed(
 
     # Read is concurrent-safe (no single-writer concern); the facade routes
     # to the PG-service HTTP client.
-    with T2Database(mem_path) as db:  # epsilon-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
+    with T2Database(mem_path) as db:  # boundary-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
         failed = db.aspect_queue.list_failed(collection)
 
     if limit is not None:

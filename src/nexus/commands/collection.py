@@ -1115,7 +1115,7 @@ def _reembed_collection(
             )
         import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
 
-        voyage_client = voyageai.Client(api_key=key)  # epsilon-allow: Phase-4 deletion target — collection re-embed CLI utility
+        voyage_client = voyageai.Client(api_key=key)  # boundary-allow: Phase-4 deletion target — collection re-embed CLI utility
 
     processed = 0
     skipped = 0

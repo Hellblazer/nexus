@@ -89,7 +89,7 @@ def _seed_plan_templates() -> int:
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     seeded = 0
-    with T2Database(default_db_path()) as db:  # epsilon-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
+    with T2Database(default_db_path()) as db:  # boundary-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
         from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         from nexus.plans.loader import load_all_tiers  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 

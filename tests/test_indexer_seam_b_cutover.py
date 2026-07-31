@@ -474,13 +474,15 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
 
-def _lint_check(extra_files=None, allowlist_prefixes=None):
+def _lint_check(extra_files=None, allowlist_prefixes=None,
+                voyageai_client_allowlist=None):
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
         repo_root=REPO_ROOT,
         allowlist_prefixes=allowlist_prefixes,
         extra_files=extra_files,
+        voyageai_client_allowlist=voyageai_client_allowlist,
     )
 
 
@@ -502,9 +504,10 @@ def test_voyageai_client_in_indexer_surface_is_flagged(tmp_path):
     assert "voyageai" in matched[0].symbol
 
 
-def test_voyageai_client_in_indexer_surface_with_epsilon_allow_is_not_flagged(tmp_path):
-    """A voyageai.Client call with a valid epsilon-allow annotation on the same
-    line must NOT be flagged — the epsilon-allow mechanism applies uniformly."""
+def test_voyageai_client_epsilon_token_does_not_suppress(tmp_path):
+    """RDR-186 P4 inversion: the retired per-line epsilon-allow token no
+    longer suppresses a voyageai.Client violation — only a named entry in
+    VOYAGEAI_CLIENT_ALLOWLIST does."""
     target = tmp_path / "legacy_indexer.py"
     target.write_text(
         "import voyageai\n"
@@ -514,9 +517,31 @@ def test_voyageai_client_in_indexer_surface_with_epsilon_allow_is_not_flagged(tm
     )
     result = _lint_check(extra_files=[target])
     matched = [v for v in result.violations if v.file == str(target)]
-    assert matched == [], (
-        f"epsilon-allow'd voyageai.Client should not be flagged: {matched}"
+    assert len(matched) == 1, (
+        f"the retired epsilon-allow token must not suppress: {matched}"
     )
+
+
+def test_voyageai_client_named_allowlist_exempts(tmp_path):
+    """A voyageai.Client site covered by a named per-file budget is counted
+    into ``voyageai_allowlisted_count`` instead of violating."""
+    from nexus.storage_boundary_lint import VOYAGEAI_CLIENT_ALLOWLIST
+
+    base = _lint_check().voyageai_allowlisted_count
+    target = tmp_path / "named_legacy_indexer.py"
+    target.write_text(
+        "import voyageai\n"
+        "def embed_legacy(texts, api_key):\n"
+        "    client = voyageai.Client(api_key=api_key)\n"
+        "    return client.embed(texts)\n"
+    )
+    result = _lint_check(
+        extra_files=[target],
+        voyageai_client_allowlist={**VOYAGEAI_CLIENT_ALLOWLIST, str(target): 1},
+    )
+    matched = [v for v in result.violations if v.file == str(target)]
+    assert matched == []
+    assert result.voyageai_allowlisted_count == base + 1
 
 
 def test_voyageai_in_legacy_db_path_is_allowlisted():
@@ -557,119 +582,59 @@ def test_indexer_has_zero_unallowed_voyageai_after_cutover():
 
 
 def test_lint_baseline_unchanged_after_voyageai_extension():
-    """The existing baseline metrics (epsilon_allow_connects == 25,
-    total_violations == 0, t2database_constructions == 31) must remain
-    stable after adding voyageai to the BANLIST.
+    """The lint's baseline metrics stay stable with voyageai in the BANLIST.
 
-    This ensures the lint extension does not silently break existing counts.
-    (18 = +1 for RDR-155 P5.2 nexus-9n4pn: migration/vector_etl.py read-only
-    taxonomy-consistency T2 read; 19-21 = RDR-178 additions — health.py
-    divergence check (Gap 2), orchestrator.py chash source read (P4),
-    guided_upgrade.py freshness probe (Gap 7) — same bumps documented in
-    test_storage_boundary_lint.test_dual_population_baseline_locked.)
-
-    21 -> 25: the four RDR-185 ladder sites, each already justified at its
-    call site and in test_storage_boundary_lint's own copy of this baseline —
-    upgrade_ladder/completion.py (P0.2, the ladder's own substrate),
-    upgrade_ladder/rungs/t2_schema.py (P1.1), migration/wire_reid.py (P2.2,
-    the chash_remap map artifact) and migration/remap_cascade.py (P2.3, the
-    mid-migration local rewrite). total_violations stays 0 — these are
-    documented epsilon-allows, not boundary violations.
-
-    THIS COPY WENT STALE, and that is the finding worth keeping: the sibling
-    baseline in test_storage_boundary_lint.py was bumped to 25 as each landed
-    while this duplicate stayed at 21, so this test has been RED on develop
-    since P0.2/P1.1 — invisible because the arc ran narrow, path-scoped test
-    selections and never the full suite. Two independent copies of one number
-    is the drift; if a third consumer appears, derive it rather than paste it.
+    RDR-186 P4 terminal shape: the numbers DERIVE from the named allowlists
+    in storage_boundary_lint.py instead of being pasted literals kept in
+    lockstep with test_storage_boundary_lint's copy (the drift class the
+    old hand-bumped history here repeatedly demonstrated — see git history
+    of this test for the 25 -> ... -> 2 connect ledger narrative).
     """
+    from nexus.storage_boundary_lint import (
+        SQLITE_CONNECT_ALLOWLIST,
+        T2DATABASE_CONSTRUCTION_ALLOWLIST,
+    )
+
     result = _lint_check()
     assert result.total_violations == 0, (
         f"Baseline violation count changed after voyageai lint extension: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    # 25 -> 24: RDR-186 .12 retired completion.py's ladder.db epsilon connect
-    # (kept in lockstep with test_storage_boundary_lint's copy — same number,
-    # same commit; the derive-don't-paste note above still stands).
-    # 24 -> 23: RDR-186 .16 retired pipeline_buffer.py's pipeline.db connect.
-    # 24 = +1 for RDR-180 land-then-transform (nexus-jxizy.10.7):
-    # migration/driver.py _open_source_ro — READ-ONLY (mode=ro URI)
-    # migration-SOURCE reads for the pre-land census + landing legs;
-    # never a destination (same migration-machinery class as
-    # remap_cascade._connect above).
-    # 24 -> 22: RDR-187 (nexus-piwya.10) retired the two chash ETL connect
-    # sites — storage_cmd.py migrate_chash_cmd's source count and
-    # orchestrator.py's chash-rows-by-collection read (lockstep with
-    # test_storage_boundary_lint's copy; derive-don't-paste still stands).
-    # 22 -> 15: RDR-155 P4b P2 deleted the migration machinery's counted
-    # connect sites (driver/wire_reid/remap_cascade/guided_upgrade/
-    # vector_etl/t2_schema) + health.py's divergence ro-connect.
-    # 15 -> 14: nexus-i711w Stage 2 sub-stage B deleted the `nx daemon t2`
-    # verb group from commands/daemon.py, taking its single epsilon-allow
-    # raw-connect with it. DOWNWARD-only recount; never bump upward.
-    # 14 -> 13: nexus-i711w Stage 2 sub-stage A3 deleted the `nx plan repair`
-    # verb group, taking commands/plan.py's `_open_plans_db` epsilon-allow
-    # connect with it (lockstep with test_storage_boundary_lint's copy —
-    # same number; derive-don't-paste still stands). DOWNWARD-only recount.
-    # 13 -> 12: nexus-i711w terminal deletion — collection_audit.py's
-    # `_open_catalog_conn` collapsed to an unconditional `return None`, taking
-    # its `.catalog.db` epsilon-allow connect with it (lockstep with
-    # test_storage_boundary_lint's copy). DOWNWARD-only recount.
-    # 12 -> 5: RDR-158 P3 (nexus-7bomn) — the =sqlite opt-out collapse
-    # deleted the selector-guarded connect arms (console health reader,
-    # session-end pre-fork summary, tier-status local reader, three doctor
-    # local legs, _t2_diagnostic_connect's writable-WAL arm); lockstep with
-    # test_storage_boundary_lint's copy. DOWNWARD-only recount.
-    # 5 -> 4: RDR-158 P4 Stage 4 (nexus-i711w) deleted _run_upgrade's
-    # chicken-and-egg bootstrap connect (commands/upgrade.py) with the
-    # local-SQLite migration leg and db/migrations.py; lockstep with
-    # test_storage_boundary_lint's copy. DOWNWARD-only recount.
-    # 4 -> 2: RDR-158 P4 Stage 4 (nexus-i711w, critique Critical) — the
-    # backfill-source-uri and gc-pre-rdr096 repair verbs carried the last
-    # unguarded raw-connect writes into the frozen migration source; both
-    # are unconditional guided refusals now. DOWNWARD-only recount.
-    assert result.epsilon_allow_connects == 2, (
-        f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
+    assert result.sqlite_allowlisted_connects == sum(
+        SQLITE_CONNECT_ALLOWLIST.values()
+    ), (
+        f"sqlite allowlisted-connect ledger stale: "
+        f"{result.sqlite_allowlisted_connects}"
     )
-    # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-
-    # mode branches; both route to the HTTP service, not a raw SQLite writer).
-    # nexus-2c51v: 33 -> 34 (`nx aspects requeue-failed` epsilon-allow'd
-    # read-only T2Database open, mirrors `aspects gc`).
-    # nexus-qgc4b: 34 -> 35 (`_taxonomy_incomplete` epsilon-allow'd read-only
-    # T2Database open — no-change index gate topic-existence probe).
-    # 35 -> 34 (nexus-70x7y): the retired runtime promotion verb took the
-    # aspects-promote-field WRITE open with it; only the read-only --history
-    # open survives. Kept in lockstep with test_storage_boundary_lint's copy —
-    # same number, same commit (see the derive-don't-paste note above).
-    # 34 -> 26: RDR-158 P3 (nexus-7bomn) deleted eight annotated
-    # constructions with their =sqlite arms (aspect_sql x3, merge_candidates,
-    # collection_audit, mcp_infra sqlite arm, session-end pre-fork reader);
-    # lockstep with test_storage_boundary_lint's copy. DOWNWARD-only.
-    # 26 -> 25: RDR-158 P4 Stage 4 (nexus-i711w) — _run_upgrade's T3-step
-    # T2Database construction died with the local migration leg; lockstep
-    # with test_storage_boundary_lint's copy. DOWNWARD-only.
-    # 25 -> 24: RDR-158 P4 Stage 5 final reviews — taxonomy
-    # backfill-source-collection retired with its annotated construction.
-    # DOWNWARD-only.
-    assert result.t2database_constructions == 24, (
-        f"t2database_constructions baseline changed: {result.t2database_constructions}"
+    assert result.t2database_constructions == sum(
+        T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
+    ), (
+        f"t2database_constructions ledger stale: "
+        f"{result.t2database_constructions}"
     )
 
 
-def test_voyageai_epsilon_allow_count_ratchet():
-    """voyageai_epsilon_allow_count must be exactly 3 after the Seam B cutover:
+def test_voyageai_allowlisted_count_ratchet():
+    """voyageai_allowlisted_count must equal the named-allowlist sum — 3
+    after the Seam B cutover:
     - indexer.py (cloud/non-service legacy path)
     - doc_indexer.py (_embed_with_fallback legacy path)
     - commands/collection.py (re-embed CLI utility)
 
-    A new epsilon-allow on the service write path would increment this counter
-    and fail this assertion, preventing silent re-introduction of Python embedding
-    in service mode. The ratchet is locked; it must not grow without intent.
+    A new legacy Voyage call cannot be self-granted any more (the per-line
+    escape token is retired, RDR-186 P4): it would need a reviewed
+    VOYAGEAI_CLIENT_ALLOWLIST entry, and this exact-equality assertion
+    keeps the ledger honest in both directions.
     """
+    from nexus.storage_boundary_lint import VOYAGEAI_CLIENT_ALLOWLIST
+
     result = _lint_check()
-    assert result.voyageai_epsilon_allow_count == 3, (
-        f"voyageai_epsilon_allow_count changed from expected 3 to "
-        f"{result.voyageai_epsilon_allow_count}. "
-        f"A new voyageai.Client epsilon-allow was added — verify it is a "
-        f"Phase-4 deletion target and update this baseline if intentional."
+    assert result.voyageai_allowlisted_count == sum(
+        VOYAGEAI_CLIENT_ALLOWLIST.values()
+    ), (
+        f"voyageai_allowlisted_count ({result.voyageai_allowlisted_count}) "
+        f"!= named allowlist sum ({sum(VOYAGEAI_CLIENT_ALLOWLIST.values())}). "
+        f"A Phase-4 deletion target moved — update VOYAGEAI_CLIENT_ALLOWLIST "
+        f"to match reality (downward when a legacy path dies)."
     )
+    assert sum(VOYAGEAI_CLIENT_ALLOWLIST.values()) == 3
