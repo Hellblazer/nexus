@@ -2876,6 +2876,117 @@ public final class CatalogRepository {
         return counts;
     }
 
+    /**
+     * EVERY table that carries a denormalized collection name, as (count key, table, field).
+     *
+     * <p>THIS LIST IS THE SINGLE SOURCE OF TRUTH for two operations that must never disagree:
+     * {@code renameCollectionTxn} step 2 re-homes each entry, and {@link #collectionIsEmpty}
+     * asks whether any entry holds a row. They were separate literals for one commit and
+     * immediately drifted — the re-home covered 17 tables while the emptiness check covered 5,
+     * so a collection holding only taxonomy or aspect rows read as EMPTY and was merged
+     * (nexus-v6za0 attempt 3). Adding a table to one and not the other is now unexpressible.
+     *
+     * <p>Adding a denorm-collection table? Add it HERE and both operations pick it up.
+     *
+     * <p><strong>Equality with the SCHEMA is gated, and not from Java.</strong> Sharing this
+     * list makes the two consumers equal to EACH OTHER; it does nothing about a table that is
+     * missing from the list entirely — un-re-homed and invisible to the emptiness check at the
+     * same time, consistent and wrong. That is not theoretical: {@code gc_audit} landed
+     * 2026-07-30 and this list, written the next day, omitted it. The gate is
+     * {@code tests/catalog/test_collection_scoped_tables_schema_parity.py}, which asks
+     * {@code information_schema} directly. It lives in pytest because {@code service-ci} is
+     * NOT a required check on develop or main (nexus-hq9na) — a Java test of this invariant
+     * would be advisory at merge, which for this defect class is no gate at all (nexus-20890).
+     *
+     * <p>Tables deliberately NOT here, each documented with a reason in that gate's
+     * {@code _DOCUMENTED_EXCLUSIONS}: {@code pdf_pipeline} (transient work queue),
+     * {@code chash_remap} (permanent RF-186 ledger whose collection is inside its PK —
+     * nexus-4nll0), and {@code migration_jobs} (JSONB collection SETS, which a scalar UPDATE
+     * cannot rewrite — nexus-rvr1n). An exclusion that is not written down is
+     * indistinguishable from an omission, so the gate fails on an undocumented one.
+     */
+    private static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
+        new CollectionScopedTable("chunks_384",              CHUNKS_384,              CHUNKS_384.COLLECTION),
+        new CollectionScopedTable("chunks_768",              CHUNKS_768,              CHUNKS_768.COLLECTION),
+        new CollectionScopedTable("chunks_1024",             CHUNKS_1024,             CHUNKS_1024.COLLECTION),
+        new CollectionScopedTable("catalog_document_chunks", CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+        new CollectionScopedTable("topic_assignments",       TOPIC_ASSIGNMENTS,       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
+        new CollectionScopedTable("topics",                  TOPICS,                  TOPICS.COLLECTION),
+        new CollectionScopedTable("taxonomy_meta",           TAXONOMY_META,           TAXONOMY_META.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids_384",  TAXONOMY_CENTROIDS_384,  TAXONOMY_CENTROIDS_384.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids_768",  TAXONOMY_CENTROIDS_768,  TAXONOMY_CENTROIDS_768.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids_1024", TAXONOMY_CENTROIDS_1024, TAXONOMY_CENTROIDS_1024.COLLECTION),
+        new CollectionScopedTable("document_aspects",        DOCUMENT_ASPECTS,        DOCUMENT_ASPECTS.COLLECTION),
+        new CollectionScopedTable("document_highlights",     DOCUMENT_HIGHLIGHTS,     DOCUMENT_HIGHLIGHTS.COLLECTION),
+        new CollectionScopedTable("aspect_extraction_queue", ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.COLLECTION),
+        new CollectionScopedTable("catalog_documents",       CATALOG_DOCUMENTS,       CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
+        new CollectionScopedTable("relevance_log",           RELEVANCE_LOG,           RELEVANCE_LOG.COLLECTION),
+        new CollectionScopedTable("search_telemetry",        SEARCH_TELEMETRY,        SEARCH_TELEMETRY.COLLECTION),
+        new CollectionScopedTable("hook_failures",           HOOK_FAILURES,           HOOK_FAILURES.COLLECTION),
+        // nexus-jqvzk, added 2026-07-30 — and MISSED by the first version of this list,
+        // written 2026-07-31. Both reviewers found it independently by reading the
+        // changelogs; nothing mechanical did, which is what nexus-20890's gate now fixes.
+        // Same audit family as the three above, and re-homed for the same RDR-164 reason:
+        // "what happened to THIS collection" (idx_gc_audit_collection) must keep answering
+        // after a rename, or incident triage silently loses the collection's GC history.
+        new CollectionScopedTable("gc_audit",                GC_AUDIT,                GC_AUDIT.COLLECTION));
+
+    /** One denorm-collection table: its rename-count key, the table, and its collection column. */
+    private record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
+
+    /**
+     * The rename transaction refused to merge a populated retired target.
+     *
+     * <p>TYPED so the handler can map it to a 409 with this message intact. It was an
+     * {@code IllegalStateException} for one commit, which the handler's generic catch turned
+     * into {@code 500 {"error":"internal server error"}} — discarding a message that names the
+     * remedy. A refusal that reads as a server bug is only half of FAIL LOUD.
+     */
+    public static final class CollectionMergeRefused extends RuntimeException {
+        public CollectionMergeRefused(String message) { super(message); }
+    }
+
+    /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String)} for callers outside a txn. */
+    public boolean collectionIsEmpty(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> collectionIsEmpty(ctx, name));
+    }
+
+    /**
+     * True if {@code name} holds no row in ANY table listed in {@link #COLLECTION_SCOPED_TABLES}
+     * — which is, by construction, exactly the set {@code renameCollectionTxn} step 2 re-homes.
+     *
+     * <p>The scope is stated as "the re-home set", NOT as "no data of any kind". An earlier
+     * javadoc made the universal claim while the body enumerated five of seventeen tables,
+     * and a reader trusting the sentence would not have re-checked the list. Deliberate
+     * exclusions are enumerated on {@link #COLLECTION_SCOPED_TABLES} and gated by
+     * {@code test_collection_scoped_tables_schema_parity.py}.
+     *
+     * <p>RLS-scoped, and evaluated in the CALLER's {@code ctx} so it sees that transaction's
+     * uncommitted writes. It does NOT freeze a snapshot: the engine runs READ COMMITTED
+     * (no isolation override in {@code TenantScope}), where every statement takes a FRESH
+     * snapshot. So a concurrent committed INSERT can land between this check and the step 2
+     * UPDATEs that follow it. That window is narrow and intra-transaction, but it is real —
+     * an earlier version of this javadoc claimed the check "shares the caller's snapshot",
+     * which would have made it look airtight. Overstating a guarantee in a comment is the
+     * documented tell of all three failed attempts at this guard; do not restore it.
+     *
+     * <p>nexus-v6za0: this is the real precondition for reviving a retired registry row.
+     * Two earlier fixes tried to infer it from {@code superseded_by} — first via liveness,
+     * then via identity — and both leaked, because {@code renameCollectionTxn} step 3 and
+     * {@link #supersedeCollection} write that column identically. A rename tombstone is
+     * empty because its children were re-homed first; a supersede tombstone keeps
+     * everything, because supersede is a pure UPDATE. The column cannot tell them apart.
+     * Ask the data instead.
+     */
+    private boolean collectionIsEmpty(DSLContext ctx, String name) {
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
@@ -2885,19 +2996,33 @@ public final class CatalogRepository {
             // a retired name, not an occupied one: routing it to the RDR-162 COPY branch
             // would repoint documents only and strand the chunks, so it must take the
             // canonical branch, where step 1's upsert REVIVES it.
-            // THIS IS THE AUTHORITATIVE BRANCH SELECTOR, and a caller guarding a rename must
-            // agree with it. handleCollectionRename guarding on a DIFFERENT notion of
-            // "exists" is exactly how the round-trip rename became unreachable over HTTP
-            // (nexus-u4e20), and a guard that could not tell an EMPTY rename tombstone from a
-            // POPULATED supersede tombstone is how that fix then admitted a silent two-
-            // collection merge (nexus-v6za0). The handler now reads superseded_by itself and
-            // permits exactly one non-live target: the tombstone whose superseded_by names
-            // the collection being renamed. Nothing MECHANICALLY pins these two in agreement
-            // — tracked as nexus-mijr4.
+            // THIS IS THE AUTHORITATIVE BRANCH SELECTOR, and it now MEASURES the hazard
+            // instead of inferring it. Two prior fixes inferred, and both were wrong:
+            //   nexus-u4e20  guarded on "a row exists"  — could not see that a tombstone
+            //                is a retired name, not an occupied one. Undo unreachable.
+            //   nexus-v6za0  guarded on LIVENESS, then on IDENTITY (superseded_by ==
+            //                oldName). Both are proxies for EMPTINESS and both leak:
+            //                supersedeCollection is a pure UPDATE, so a supersede
+            //                tombstone is non-live AND populated, and nothing stops its
+            //                superseded_by naming the rename source. step 3 and
+            //                supersedeCollection write the column identically, so no
+            //                predicate over it can recover PROVENANCE.
+            // The canonical branch's actual precondition is that the target holds NO DATA,
+            // because step 1 revives the row and step 2 re-homes the source's children ON
+            // TOP of whatever is already there. So ask that question, in this transaction's
+            // own snapshot. A populated non-live target takes NEITHER branch: the COPY
+            // branch would strand its chunks, the canonical branch would merge them.
+            boolean targetRowExists = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
             boolean liveTargetExists = ctx.fetchExists(
                 ctx.selectOne().from(CATALOG_COLLECTIONS)
                    .where(CATALOG_COLLECTIONS.NAME.eq(newName)
                        .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+            if (targetRowExists && !liveTargetExists && !collectionIsEmpty(ctx, newName)) {
+                throw new CollectionMergeRefused(
+                    "target collection " + newName + " is retired but still holds data; "
+                    + "renaming onto it would merge two collections. Purge or restore it first.");
+            }
 
             if (liveTargetExists) {
                 // RDR-162 cross-model COPY branch: repoint catalog_documents; leave
@@ -2973,36 +3098,22 @@ public final class CatalogRepository {
                     .execute());
 
             // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
-            //    T3 chunk vectors (fk-002 RESTRICT).
-            counts.put("chunks_384",  ctx.update(CHUNKS_384).set(CHUNKS_384.COLLECTION, newName).where(CHUNKS_384.COLLECTION.eq(oldName)).execute());
-            counts.put("chunks_768",  ctx.update(CHUNKS_768).set(CHUNKS_768.COLLECTION, newName).where(CHUNKS_768.COLLECTION.eq(oldName)).execute());
-            counts.put("chunks_1024", ctx.update(CHUNKS_1024).set(CHUNKS_1024.COLLECTION, newName).where(CHUNKS_1024.COLLECTION.eq(oldName)).execute());
+            //    Driven by COLLECTION_SCOPED_TABLES so this loop and collectionIsEmpty can
+            //    never disagree about WHICH tables carry a collection name. They were two
+            //    literals for exactly one commit and drifted 17-vs-5 immediately, which is
+            //    how a taxonomy-only collection read as empty and got merged (nexus-v6za0).
+            //    Covers: T3 chunk vectors (fk-002 RESTRICT); the manifest's denormalized
+            //    collection, the combined-query join key that rename was the second door back
+            //    into the silently-empty-join state for (nexus-x6kdz); taxonomy assignments /
+            //    topics / meta (fk-002-5, fk-003, fk-003-4 RESTRICT); centroids (no FK to
+            //    topics, so an explicit re-home); aspects, highlights and the extraction
+            //    queue; catalog_documents itself; and the audit/telemetry tables.
             //    (chash_index leg RETIRED — RDR-187/nexus-piwya.9.)
-            // nexus-x6kdz: the manifest's denormalized collection (the
-            // combined-query join key) must re-home too — rename was the
-            // second door back into the silently-empty-join state.
-            counts.put("catalog_document_chunks",
-                ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
-                   .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
-            //    taxonomy: assignments (source_collection, fk-002-5 RESTRICT), topics (fk-003 RESTRICT), meta (fk-003-4 RESTRICT).
-            counts.put("topic_assignments", ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newName).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName)).execute());
-            counts.put("topics", ctx.update(TOPICS).set(TOPICS.COLLECTION, newName).where(TOPICS.COLLECTION.eq(oldName)).execute());
-            counts.put("taxonomy_meta", ctx.update(TAXONOMY_META).set(TAXONOMY_META.COLLECTION, newName).where(TAXONOMY_META.COLLECTION.eq(oldName)).execute());
-            //    centroids (no FK to topics — explicit re-home).
-            counts.put("taxonomy_centroids_384",  ctx.update(TAXONOMY_CENTROIDS_384).set(TAXONOMY_CENTROIDS_384.COLLECTION, newName).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(oldName)).execute());
-            counts.put("taxonomy_centroids_768",  ctx.update(TAXONOMY_CENTROIDS_768).set(TAXONOMY_CENTROIDS_768.COLLECTION, newName).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(oldName)).execute());
-            counts.put("taxonomy_centroids_1024", ctx.update(TAXONOMY_CENTROIDS_1024).set(TAXONOMY_CENTROIDS_1024.COLLECTION, newName).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(oldName)).execute());
-            //    aspect family (fk-003 RESTRICT; incl. doc-less rows).
-            counts.put("document_aspects",        ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.COLLECTION, newName).where(DOCUMENT_ASPECTS.COLLECTION.eq(oldName)).execute());
-            counts.put("document_highlights",     ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.COLLECTION, newName).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldName)).execute());
-            counts.put("aspect_extraction_queue", ctx.update(ASPECT_EXTRACTION_QUEUE).set(ASPECT_EXTRACTION_QUEUE.COLLECTION, newName).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldName)).execute());
-            //    catalog documents (physical_collection).
-            counts.put("catalog_documents", ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
-            //    audit tables (no FK, but re-homed: audit rows follow the new name — RDR-164
-            //    §Approach Phase 3: relevance_log + search_telemetry + hook_failures).
-            counts.put("relevance_log",     ctx.update(RELEVANCE_LOG).set(RELEVANCE_LOG.COLLECTION, newName).where(RELEVANCE_LOG.COLLECTION.eq(oldName)).execute());
-            counts.put("search_telemetry", ctx.update(SEARCH_TELEMETRY).set(SEARCH_TELEMETRY.COLLECTION, newName).where(SEARCH_TELEMETRY.COLLECTION.eq(oldName)).execute());
-            counts.put("hook_failures",     ctx.update(HOOK_FAILURES).set(HOOK_FAILURES.COLLECTION, newName).where(HOOK_FAILURES.COLLECTION.eq(oldName)).execute());
+            for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+                counts.put(t.countKey(),
+                    ctx.update(t.table()).set(t.collection(), newName)
+                       .where(t.collection().eq(oldName)).execute());
+            }
 
             // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
             //

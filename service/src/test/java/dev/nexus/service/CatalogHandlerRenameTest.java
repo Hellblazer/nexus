@@ -216,6 +216,21 @@ class CatalogHandlerRenameTest {
         }
     }
 
+    /** Seed a document row INTO a collection, so the collection is not empty.
+     *  nexus-v6za0 round 2: seedCollections creates a registry row ONLY. Every rename pin
+     *  written before this helper existed therefore exercised an EMPTY target, which is
+     *  precisely the case the merge hazard does not apply to — so they could not have
+     *  caught it, and the original P0 pin passed on its identity check alone. */
+    private void seedDocumentIn(String collection, String tumbler) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT + "', '" + tumbler + "', 'seeded', '" + collection + "') "
+                + "ON CONFLICT DO NOTHING");
+        }
+    }
+
     private Map<String, Object> collectionRow(String name) throws Exception {
         var resp = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
@@ -421,6 +436,9 @@ class CatalogHandlerRenameTest {
         // metadata with the source's, ERASED its superseded_by, and re-homed the source's
         // chunks on top of the target's rows: two collections merged across two vector spaces.
         seedCollections("hren__v6-src", "hren__v6-tgt", "hren__v6-successor");
+        // The hazard is a tombstone that STILL HOLDS DATA. Seed it, or this pin proves
+        // nothing about merging (nexus-v6za0 round 2).
+        seedDocumentIn("hren__v6-tgt", "9.601");
 
         // Mark the target superseded — the RDR-101 P6 / cross-model migration marking. Its
         // data is untouched by design.
@@ -512,6 +530,62 @@ class CatalogHandlerRenameTest {
         assertThat(resp.statusCode()).isEqualTo(409);
         assertThat(resp.body()).contains("does not exist");
         assertThat(collectionRow("hren__tnx-absent")).isNull();
+    }
+
+    @Test
+    void post_supersedeThenRenameSuccessorOntoIt_409sInsteadOfMerging() throws Exception {
+        // nexus-v6za0, SECOND ROUND. The 351874c5 identity gate discriminated
+        // DIRECTION, not PROVENANCE, and this is the arrangement that proved it:
+        // both reviewers found it independently and a probe confirmed 200-not-409.
+        // supersede(old -> its OWN successor) is the DOMINANT real shape (it is what
+        // `nx catalog doctor --collections-drift` steers operators into, nexus-e1k14);
+        // the original pin picked a THIRD-PARTY successor, the one arrangement where
+        // identity and provenance happen to agree.
+        // supersede(X -> Y) leaves X POPULATED with superseded_by = Y.
+        // Then rename Y -> X gives oldName == tgtSuperseded == Y, so the identity
+        // gate matches and permits the revive -> canonical FULL-REHOME -> merge.
+        seedCollections("hren__prov-x", "hren__prov-y");
+        seedDocumentIn("hren__prov-x", "9.602");
+        assertThat(post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hren__prov-x\",\"superseded_by\":\"hren__prov-y\"}")
+            .statusCode()).isEqualTo(200);
+        assertThat(collectionRow("hren__prov-x").get("superseded_by")).isEqualTo("hren__prov-y");
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__prov-y\",\"new_name\":\"hren__prov-x\"}");
+        assertThat(resp.statusCode())
+            .as("a POPULATED supersede tombstone must not be revived just because it points at the source")
+            .isEqualTo(409);
+        // NAME THE CONDITION. identityOk is TRUE here (superseded_by == oldName), so the only
+        // thing that can refuse is emptiness — assert the emptiness branch's text, or this pin
+        // would keep passing if the refusal ever came from somewhere else. Same lesson the
+        // Python half of this change records: a red test tells you SOMETHING caught it.
+        assertThat(resp.body()).contains("still holds data");
+        // ...and the target's data must be untouched by the refusal.
+        assertThat(collectionRow("hren__prov-x").get("superseded_by")).isEqualTo("hren__prov-y");
+    }
+
+    @Test
+    void post_renameOntoAnEMPTYTombstoneSupersededToAThirdParty_409sOnIdentity() throws Exception {
+        // The one arrangement where IDENTITY is the SOLE refusing condition. Without this,
+        // deleting identityOk from the handler leaves every test green (found in review):
+        // the merge pins all have emptiness false too, and the revive pin has identity true.
+        // Here the tombstone is EMPTY (a rename leaves it so) but points at a THIRD party,
+        // so reviving it would erase that supersession unaudited — the chain rewrite
+        // handleCollectionSupersede guard 2 refuses.
+        seedCollections("hren__id-x", "hren__id-z");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__id-x\",\"new_name\":\"hren__id-y\"}")
+            .statusCode()).isEqualTo(200);
+        // NON-VACUITY: the tombstone must be empty, or this pins emptiness rather than identity.
+        assertThat(collectionRow("hren__id-x").get("superseded_by")).isEqualTo("hren__id-y");
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__id-z\",\"new_name\":\"hren__id-x\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body())
+            .as("must refuse on the IDENTITY half, not the emptiness half")
+            .contains("Unwind the rename chain");
     }
 
     @Test
