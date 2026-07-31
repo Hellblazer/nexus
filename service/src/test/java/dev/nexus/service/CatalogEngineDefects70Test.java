@@ -181,6 +181,59 @@ class CatalogEngineDefects70Test {
             .doesNotContain(t);
     }
 
+    /**
+     * The FIFTH sibling (review H1 / critique C3): resolveChash's doc_id
+     * attribution. Same user-visible shape as BUG 2 — content served over
+     * /resolve_chash must not be attributed to a document the user deleted.
+     *
+     * <p>Two live documents are NOT required to make this fail: with the filter
+     * absent, the tombstoned doc's manifest row is still the only one matching,
+     * so the endpoint hands back a dead doc_id.
+     */
+    @Test
+    void mqd6t_resolveChash_doesNotAttributeToTombstonedDoc() throws Exception {
+        String owner = freshOwner();
+        String coll = "code__defects70-rchash__voyage-code-3__v1";
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "rchash", "content_type", "code",
+            "physical_collection", coll,
+            "source_uri", "file:///defects70/rchash/doc.md"));
+        String h = ch("defects70-rchash-chunk");
+        repo.writeManifest(TENANT, t, List.of(row(0, h)));
+        seedChunkRow(coll, h, "resolve-chash body");
+
+        var before = repo.resolveChash(TENANT, h, coll);
+        assertThat(before).as("precondition: the live doc is attributed").isNotNull();
+        assertThat(before.get("doc_id")).isEqualTo(t);
+
+        assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
+
+        var after = repo.resolveChash(TENANT, h, coll);
+        if (after != null) {
+            assertThat(after.get("doc_id"))
+                .as("resolve_chash must not attribute chunk content to a DELETED document")
+                .isNotEqualTo(t);
+        }
+    }
+
+    /**
+     * resyncChunkCount must not write through to a tombstoned row — the same
+     * non-resurrection rule updateDocument enforces (review M1 / critique C3).
+     */
+    @Test
+    void mqd6t_resyncChunkCount_refusesTombstonedTarget() {
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "resync-dead", "content_type", "prose", "chunk_count", 0,
+            "source_uri", "file:///defects70/resyncdead/doc.md"));
+        repo.appendManifestChunks(TENANT, t, List.of(row(0, ch("defects70-rs-0"))));
+        assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
+
+        assertThat(repo.resyncChunkCount(TENANT, t))
+            .as("a resync must not mutate a soft-deleted document")
+            .isEqualTo(0);
+    }
+
     /** Item-8 sub-finding: a soft-deleted doc's manifest must not stay publicly
      *  readable via /manifest/get while resolve() returns null. */
     @Test
@@ -277,9 +330,16 @@ class CatalogEngineDefects70Test {
     // nexus-e4gel — chunk_count re-derivation
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** nexus-zq79 F4: update() OMITTING chunk_count re-derives it from the manifest. */
+    /**
+     * nexus-zq79 F4: update() OMITTING chunk_count re-derives it from the manifest.
+     *
+     * <p>The stale seed is load-bearing (review L1). appendManifestChunks folds
+     * the count itself, so asserting 5 straight after the append would pass with
+     * the update-path re-derivation reverted — proving nothing. Forcing a
+     * disagreeing count first means only the update path can restore it.
+     */
     @Test
-    void e4gel_updateReDerivesChunkCountWhenOmitted() {
+    void e4gel_updateReDerivesChunkCountWhenOmitted() throws Exception {
         String owner = freshOwner();
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "rederive", "content_type", "prose", "chunk_count", 0,
@@ -288,6 +348,10 @@ class CatalogEngineDefects70Test {
             row(0, ch("defects70-rd-0")), row(1, ch("defects70-rd-1")),
             row(2, ch("defects70-rd-2")), row(3, ch("defects70-rd-3")),
             row(4, ch("defects70-rd-4"))));
+        forceStaleChunkCount(t, 99);
+        assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
+            .as("precondition: the count DISAGREES with the 5-row manifest")
+            .isEqualTo(99);
 
         repo.updateDocument(TENANT, t, Map.of("head_hash", "updated"));
 
@@ -330,15 +394,22 @@ class CatalogEngineDefects70Test {
         assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(3);
     }
 
-    /** Batch update shares the builder, so it shares the re-derivation. */
+    /**
+     * Batch update shares the builder, so it shares the re-derivation.
+     * Stale-seeded for the same reason as the single-doc case (review L1).
+     */
     @Test
-    void e4gel_updateManyReDerivesChunkCount() {
+    void e4gel_updateManyReDerivesChunkCount() throws Exception {
         String owner = freshOwner();
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "batch-rederive", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/batchrederive/doc.md"));
         repo.appendManifestChunks(TENANT, t, List.of(
             row(0, ch("defects70-br-0")), row(1, ch("defects70-br-1"))));
+        forceStaleChunkCount(t, 77);
+        assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
+            .as("precondition: the count DISAGREES with the 2-row manifest")
+            .isEqualTo(77);
 
         var results = repo.updateDocumentsMany(TENANT, List.of(
             Map.of("tumbler", t, "head_hash", "batched")));
@@ -843,6 +914,58 @@ class CatalogEngineDefects70Test {
                 ps.setString(6, metadataJson);
                 ps.setString(7, "file:///defects70/damaged/" + tumbler + ".md");
                 ps.executeUpdate();
+            }
+        }
+    }
+
+    /**
+     * Seed one row in {@code nexus.chunks_1024} so {@code resolveChash} has a
+     * chunk to find (it returns null before ever reaching the doc_id lookup
+     * otherwise). Mirrors the seeding shape used by ManifestCollectionStampTest.
+     */
+    private void seedChunkRow(String collection, String chash, String text) throws Exception {
+        // chunks_* carry an FK to catalog_collections on (tenant_id, collection).
+        repo.upsertCollection(TENANT, Map.of(
+            "name", collection, "content_type", "code",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var st = su.createStatement()) {
+                st.execute(
+                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                    + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), '"
+                    + text.replace("'", "''") + "', "
+                    + "('[' || repeat('0.1,', 1023) || '0.1]')::vector) "
+                    + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            }
+        }
+    }
+
+    /**
+     * Force ``chunk_count`` to a value that DISAGREES with the manifest, via a
+     * direct superuser write that bypasses both fold paths.
+     *
+     * <p>Review L1: without this, the update-path re-derivation tests were
+     * confounded by e4gel's OTHER half — {@code appendManifestChunks} now folds
+     * the count itself, so the count was already correct before
+     * {@code updateDocument} ran and reverting the update-path fix alone left
+     * those tests passing. Seeding a stale count is the only way to falsify the
+     * update path independently of the append path.
+     */
+    private void forceStaleChunkCount(String tumbler, int staleCount) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                "UPDATE nexus.catalog_documents SET chunk_count = ? "
+                + "WHERE tenant_id = ? AND tumbler = ?")) {
+                ps.setInt(1, staleCount);
+                ps.setString(2, TENANT);
+                ps.setString(3, tumbler);
+                int n = ps.executeUpdate();
+                if (n != 1) {
+                    throw new IllegalStateException(
+                        "forceStaleChunkCount seeded " + n + " rows for " + tumbler + ", expected 1");
+                }
             }
         }
     }

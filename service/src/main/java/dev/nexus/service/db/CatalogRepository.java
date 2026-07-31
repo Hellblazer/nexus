@@ -912,7 +912,13 @@ public final class CatalogRepository {
                                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(current))
                                     .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                              .fetchOne(CATALOG_DOCUMENTS.ALIAS_OF);
-            if (next == null || next.isBlank() || !seen.add(next)) return current;
+            if (next == null || next.isBlank()) return current;   // not an alias: the common exit
+            if (!seen.add(next)) {
+                // A cycle is corrupt data, not a routine shape.
+                log.warn("event=alias_chain_cycle tenant={} start={} stopped_at={} repeated={}",
+                    tenant, tumbler, current, next);
+                return current;
+            }
             // A pointer at a row that is gone (or tombstoned) stops the walk on
             // the last row that actually exists.
             boolean liveTarget = ctx.fetchExists(
@@ -920,7 +926,14 @@ public final class CatalogRepository {
                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(next))
                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
-            if (!liveTarget) return current;
+            if (!liveTarget) {
+                // critique C2: the fail-soft substitution is defensible, SILENCE
+                // about it is not — this is a broken pointer in the graph and the
+                // caller is about to receive a DIFFERENT row than it addressed.
+                log.warn("event=alias_target_not_live tenant={} start={} resolved_to={} broken_pointer={}",
+                    tenant, tumbler, current, next);
+                return current;
+            }
             current = next;
         }
         log.warn("event=alias_chain_hop_limit tenant={} start={} stopped_at={} max_hops={}",
@@ -2375,12 +2388,25 @@ public final class CatalogRepository {
         });
     }
 
-    /** Resync chunk_count on catalog_documents from manifest row count. */
+    /**
+     * Resync chunk_count on catalog_documents from manifest row count.
+     *
+     * <p>nexus-mqd6t (review M1 / critique C3): both halves are tombstone-scoped.
+     * The COUNT carries {@code liveParentDoc} for consistency with every other
+     * manifest-rooted read; the UPDATE carries {@code deleted_at IS NULL} so a
+     * resync cannot write through to a tombstoned row — the same
+     * non-resurrection rule {@code buildUpdateDocumentQuery} enforces. Without
+     * the write guard this was the one remaining path that mutated a
+     * soft-deleted document.
+     */
     public int resyncChunkCount(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                           .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant)))
                            .fetchOne(0, Integer.class);
-            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, count).where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)).execute();
+            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, count)
+                      .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
+                             .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute();
         });
     }
 
@@ -2484,9 +2510,16 @@ public final class CatalogRepository {
 
             // Lookup doc_id from catalog_document_chunks. ORDER BY doc_id for a
             // deterministic winner when a chash is referenced by multiple docs (dedup).
+            //
+            // nexus-mqd6t (review H1 / critique C3): the FIFTH sibling of the
+            // docsForChashes class, and the same user-visible shape — without
+            // liveParentDoc this attributes chunk content to a document the
+            // user DELETED. Worse than the plain read case: a chash shared by a
+            // live and a tombstoned doc has no live-preference in `ORDER BY
+            // doc_id ASC`, so the dead doc could win the tie outright.
             String docId = "";
             var docRow = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
-                            .where(CHK_CHASH_HEX.eq(chash))
+                            .where(CHK_CHASH_HEX.eq(chash).and(liveParentDoc(ctx, tenant)))
                             .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID.asc()).limit(1).fetchOne();
             if (docRow != null) docId = docRow.value1();
 
