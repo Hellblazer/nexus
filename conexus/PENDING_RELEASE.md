@@ -41,9 +41,24 @@ mechanize, it matters enough to ship.
   control, which is what failed on 2026-07-23.
 - `conexus/hooks/scripts/routing/registry.yaml` — nexus-vduer: registry entry for
   the consolidated two-check hook above.
+- `conexus/hooks/scripts/agent-dispatch-expect.sh` — nexus-qc4p1: NEW PreToolUse
+  hook on the Agent tool that auto-writes the RDR-184 Gap-1 EXPECT row from the
+  dispatch's own `subagent_type` + `run_in_background`. Until this ships, the
+  declaration stays a human step performed out of band — the step that produced
+  zero pairable declarations across five consecutive sessions and 25 dispatches.
+  Note the bead must NOT be closed on merge: merging makes it correct, the
+  release makes it live.
+- `conexus/hooks/hooks.json` — nexus-qc4p1: registers the hook above under
+  `PreToolUse` with matcher `Agent|Task`. Until this ships nothing fires it, so
+  the hook file alone is inert even though it is present in the tree.
 - `conexus/hooks/scripts/expectations.sh` — nexus-mk3tw: the Gap-1 guard reported
   `undeclared=0` while recognising none of the dispatches it saw. Until this
-  ships, that false-clean persists.
+  ships, that false-clean persists. ALSO nexus-qc4p1/nexus-nu7fo: the audit
+  surfaces now recognise a START row by agent_type (the key both hook payloads
+  actually carry), match N-of-type, and admit `:` in names so plugin-qualified
+  subagent types are legal. Until this ships, the installed copy keeps keying on
+  a name-morphology the Agent tool has no parameter to produce, so
+  `recognized=0` stays structurally pinned.
 - `conexus/commands/continuation.md` — nexus-mk3tw: documents that
   `expectations_undeclared`'s exit code is now load-bearing (exit 1 + BLINDSPOT).
 - `conexus/skills/orchestration/SKILL.md` — nexus-mk3tw: same, for the

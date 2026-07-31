@@ -27,10 +27,41 @@
 #     an unnamed background dispatch simply falls outside the guard
 #     (fail-open), it does not break anything.
 #
+# TYPE KEYING (nexus-qc4p1 / nexus-nu7fo, measured 2026-07-31 against the
+# live Claude Code hook payloads). The morphology above is unreachable in
+# the harness this repo actually runs in: its Agent tool takes NO `name`
+# parameter (tool_input is exactly description / prompt / subagent_type /
+# run_in_background), so every dispatch arrives UNNAMED — agent_id
+# "a<hash>", agent_type == subagent_type — and `recognized` was
+# structurally pinned at 0 across 25 consecutive dispatches. The one
+# value BOTH sides of the ledger can know is the agent TYPE:
+#   PreToolUse(Agent).tool_input.subagent_type == SubagentStart.agent_type
+# (verified identical, same session_id, for general-purpose x2 + Explore
+# in one turn). So EXPECT rows written by the PreToolUse hook
+# (agent-dispatch-expect.sh) are keyed on subagent_type, and the audit
+# surfaces below recognise a START row by EITHER key: the legacy
+# "a<name>-" morphology OR its agent_type matching an EXPECT name.
+#
+# WHY N-OF-TYPE AND NOT AN ORDINAL. Two dispatches of the same
+# subagent_type in one turn are indistinguishable at pairing time, and an
+# ordinal cannot fix that: the PreToolUse payload's per-call `tool_use_id`
+# is ABSENT from the SubagentStart payload, and `prompt_id` — present in
+# both — is the TURN id, identical across every dispatch in the message
+# (measured, same probe). There is no per-instance key in either
+# direction, so an ordinal invented at write time would be exactly as
+# unpairable as the name was. The audit therefore matches N EXPECT rows
+# of a type against N STARTs of that type (first-appearance order,
+# credit-consuming) and reports the DEFICIT.
+#
 # FORMAT — one file per orchestrator session, append-only TSV, three verbs:
-#   <iso-utc-ts> TAB EXPECT  TAB <name>     TAB <background|sync>
+#   <iso-utc-ts> TAB EXPECT  TAB <name>     TAB <background|sync> [TAB <dispatch_id>]
 #   <iso-utc-ts> TAB START   TAB <agent_id> TAB <agent_type>
 #   <iso-utc-ts> TAB BLOCKED TAB <agent_id>
+# The EXPECT row's optional 5th field is the dispatching tool_use_id. No
+# reader interprets it; it exists so (a) the writing hook is idempotent
+# under double registration and (b) two same-type dispatches inside one
+# second are not collapsed by the exact-duplicate-line filter, which
+# would silently under-count the N-of-type deficit.
 # No JSON: writers are bash one-liners and LLM-authored echos; a malformed
 # LINE costs one entry, a malformed json file would cost the session.
 # Reads are awk exact-field comparisons plus one quoted-literal glob
@@ -84,28 +115,42 @@ expectations_file() {
     printf '%s/%s.expectations\n' "$(_expectations_dir)" "$sid"
 }
 
-# expectations_expect <session_id> <name> <mode> — the ORCHESTRATOR write
-# path. MUST be called BEFORE the Agent dispatch (write-before-dispatch is
-# the load-bearing ordering — see header). mode is background|sync; only
-# background rows ever cause an agent to owe a report.
+# expectations_expect <session_id> <name> <mode> [dispatch_id] — the
+# ORCHESTRATOR write path. MUST be called BEFORE the Agent dispatch
+# (write-before-dispatch is the load-bearing ordering — see header). mode
+# is background|sync; only background rows ever cause an agent to owe a
+# report. <name> is a SUBAGENT TYPE when written by the PreToolUse hook
+# (the only key both sides of the ledger can know — see TYPE KEYING).
+# <dispatch_id> is optional and uninterpreted (see FORMAT).
 expectations_expect() {
-    local sid="$1" name="${2:-}" mode="${3:-}"
+    local sid="$1" name="${2:-}" mode="${3:-}" dispatch_id="${4:-}"
     if [[ -z "$sid" || -z "$name" || -z "$mode" ]]; then
-        echo "expectations_expect: ERROR — usage: expectations_expect <session_id> <name> <mode>" >&2
+        echo "expectations_expect: ERROR — usage: expectations_expect <session_id> <name> <mode> [dispatch_id]" >&2
         return 2
     fi
-    # Agent-tool name charset ([A-Za-z0-9_-]); also keeps the TSV intact.
-    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; then
-        echo "expectations_expect: ERROR — invalid name '$name' (must match Agent-tool name charset)" >&2
+    # Name charset. ':' is admitted (nexus-qc4p1) because subagent_type is
+    # now a legal name and plugin-qualified types carry it
+    # ('conexus:code-review-expert'). It is inert in both readers: awk
+    # compares fields exactly, and the one glob below is a quoted literal
+    # where ':' is not a metacharacter. Tab/newline stay excluded, which is
+    # what keeps the TSV intact.
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$ ]]; then
+        echo "expectations_expect: ERROR — invalid name '$name' (must match the agent-type charset)" >&2
         return 2
     fi
     if [[ "$mode" != "background" && "$mode" != "sync" ]]; then
         echo "expectations_expect: ERROR — mode must be 'background' or 'sync', got '$mode'" >&2
         return 2
     fi
-    local file
+    if [[ "$dispatch_id" == *$'\t'* || "$dispatch_id" == *$'\n'* ]]; then
+        echo "expectations_expect: ERROR — tab/newline in dispatch_id" >&2
+        return 2
+    fi
+    local file row
     file="$(expectations_file "$sid")" || return 2
-    _expectations_append "$file" "$(_expectations_ts)"$'\tEXPECT\t'"$name"$'\t'"$mode"
+    row="$(_expectations_ts)"$'\tEXPECT\t'"$name"$'\t'"$mode"
+    [[ -n "$dispatch_id" ]] && row+=$'\t'"$dispatch_id"
+    _expectations_append "$file" "$row"
 }
 
 # expectations_start <session_id> <agent_id> <agent_type> — the
@@ -135,6 +180,16 @@ expectations_start() {
 #   exact name (kills the subagent_type-collision false-block class).
 # Everything else — sync rows, unknown agents, unnamed morphology,
 # missing/unreadable file — returns 1 (fail-open, never block).
+#
+# DELIBERATELY NOT TYPE-KEYED (nexus-qc4p1 scope line). The audit surfaces
+# below now pair on agent_type; this one still requires the "a<name>-"
+# morphology, so in the no-name harness it keeps returning 1 for every
+# agent and the stop guard keeps never blocking — exactly its behaviour
+# before this change. Dropping the morphology gate here would be a
+# behaviour change to a live default-ON guard and would introduce a
+# false-block class the morphology gate exists to kill (a SYNC agent of a
+# type that ALSO had a background dispatch would be told it owes a
+# report). That is nu7fo's remaining half and needs its own decision.
 expectations_owes_report() {
     local sid="$1" agent_id="${2:-}" agent_type="${3:-}"
     [[ -n "$sid" && -n "$agent_id" && -n "$agent_type" ]] || return 1
@@ -142,8 +197,10 @@ expectations_owes_report() {
     # EXPECT name, so it can never owe. Checking it HERE (not just at
     # write time) makes that an enforced invariant rather than an
     # implicit cross-function one — and keeps the glob below literal
-    # (no caller-supplied metacharacters in the pattern).
-    [[ "$agent_type" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || return 1
+    # (no caller-supplied metacharacters in the pattern). Charset kept in
+    # lockstep with expectations_expect, ':' included, or the invariant
+    # this comment claims would stop being true.
+    [[ "$agent_type" =~ ^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$ ]] || return 1
     # Named-agent morphology gate: agent_id must be "a<agent_type>-...".
     [[ "$agent_id" == "a${agent_type}-"?* ]] || return 1
     local file
@@ -224,13 +281,25 @@ expectations_already_blocked() {
 # ones — indistinguishable from here, by construction).
 #
 # HARD FAILURE (never a silent pass): when checked > 0 and recognized ==
-# 0 — the guard saw dispatches but its morphology filter matched NONE of
-# them — that is the exact false-clean shape from the bead. The function
-# still prints every line (UNDECLARED rows if any, plus SUMMARY) but
-# returns exit 1 instead of 0, and prints a BLINDSPOT line calling it
-# out by name. A caller that only greps for "UNDECLARED" and ignores the
-# exit code repeats the original mistake; the exit code is the part that
+# 0 — the guard saw dispatches but its filters matched NONE of them —
+# that is the exact false-clean shape from the bead. The function still
+# prints every line (UNDECLARED rows if any, plus SUMMARY) but returns
+# exit 1 instead of 0, and prints a BLINDSPOT line calling it out by
+# name. A caller that only greps for "UNDECLARED" and ignores the exit
+# code repeats the original mistake; the exit code is the part that
 # cannot be misread as silence.
+#
+# WIDENED RECOGNISER (nexus-qc4p1): recognized now means "pairable by
+# EITHER key" — legacy name-morphology, OR the START row's agent_type
+# appearing among EXPECT names. The second key is what the PreToolUse
+# dispatch hook writes, and it is the only one reachable in a harness
+# whose Agent tool has no name parameter (see TYPE KEYING in the header).
+# Matching is N-OF-TYPE and credit-consuming in first-appearance order:
+# three STARTs of a type with two EXPECT rows yield exactly one
+# UNDECLARED line, so a PARTIAL mechanization failure is visible instead
+# of being absorbed by set membership. The BLINDSPOT hard failure is
+# unchanged and still fires when nothing at all was checkable — which is
+# precisely what an uninstalled/inert dispatch hook looks like.
 expectations_undeclared() {
     local sid="$1"
     [[ -n "$sid" ]] || return 0
@@ -238,22 +307,37 @@ expectations_undeclared() {
     file="$(expectations_file "$sid" 2>/dev/null)" || return 0
     [[ -r "$file" ]] || return 0
     awk -F'\t' '
+        # Recognition is decided in END, not on the START line: an EXPECT
+        # row for the type may be anywhere in the file, so a single pass
+        # cannot classify a START row as it arrives.
         $2 == "START" {
-            if (!($3 in allstart)) { allstart[$3] = 1; checked++ }
+            if (!($3 in allstart)) {
+                allstart[$3] = 1; checked++
+                order[++n] = $3; stype[$3] = $4
+                named[$3] = (index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2)
+            }
         }
-        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 {
-            if (!($3 in namedstart)) { namedstart[$3] = 1; recognized++ }
-            s[$3] = $4
-        }
-        $2 == "EXPECT" { e[$3] = 1 }
+        $2 == "EXPECT" { e[$3] = 1; credit[$3]++ }
         END {
             undeclared = 0
-            for (id in s) if (!(s[id] in e)) { print "UNDECLARED\t" id "\t" s[id]; undeclared++ }
+            for (i = 1; i <= n; i++) {
+                id = order[i]; t = stype[id]
+                # Recognised by EITHER key: legacy name-morphology, or the
+                # agent TYPE appearing among EXPECT names (the key the
+                # PreToolUse hook writes). Unrecognised ids are neither
+                # counted nor flagged — the pre-existing contract, so an
+                # ordinary undeclared sync dispatch is never false-flagged.
+                if (!named[id] && !(t in e)) continue
+                recognized++
+                if (credit[t] > 0) { credit[t]--; continue }   # N-of-type
+                print "UNDECLARED\t" id "\t" t
+                undeclared++
+            }
             unrecognized = checked - recognized
             printf "SUMMARY\tchecked=%d recognized=%d unrecognized=%d undeclared=%d\n", \
                 checked, recognized, unrecognized, undeclared
             if (checked > 0 && recognized == 0) {
-                print "BLINDSPOT\tguard recognised 0 of " checked " dispatched agent(s) by name-morphology - undeclared=" undeclared " here is NOT evidence of compliance, it means nothing was checkable"
+                print "BLINDSPOT\tguard recognised 0 of " checked " dispatched agent(s) by name-morphology or agent-type - undeclared=" undeclared " here is NOT evidence of compliance, it means nothing was checkable"
                 exit 1
             }
         }
@@ -292,12 +376,21 @@ expectations_undeclared() {
 # when it recognised 0 of N dispatches is worse than reporting nothing.
 #
 # checked = every unique agent_id that ever got a START row, regardless
-# of morphology. recognized = the subset with named morphology (the only
-# ones the AGENT/CLASSIFIED lines above can say anything about at all).
-# When checked > 0 and recognized == 0 this function still prints every
-# line it would normally print, but ALSO exits 1 instead of 0 — the exit
-# code is the part a caller cannot mistake for a clean run even if it
-# only skims stdout.
+# of morphology. recognized = the subset the AGENT/CLASSIFIED lines can
+# say anything about at all. When checked > 0 and recognized == 0 this
+# function still prints every line it would normally print, but ALSO
+# exits 1 instead of 0 — the exit code is the part a caller cannot
+# mistake for a clean run even if it only skims stdout.
+#
+# WIDENED RECOGNISER (nexus-qc4p1), matching expectations_undeclared:
+# recognized = named morphology OR agent_type present among EXPECT names,
+# and declared/undeclared is decided by N-OF-TYPE credit in
+# first-appearance order rather than set membership. EXPECTED_NO_START
+# likewise compares COUNTS (a type with 2 EXPECT rows and 1 START is
+# still short one). Agents pairable by neither key stay unlisted — the
+# pre-existing contract that keeps ordinary sync dispatches from
+# false-flagging — but they are still counted in checked, so the
+# BLINDSPOT line and its exit 1 still see them.
 expectations_census() {
     local sid="$1"
     [[ -n "$sid" ]] || return 0
@@ -319,18 +412,25 @@ expectations_census() {
         # printing iterates order[] only, so stray keys are inert.
         seen[$0]++ { next }                     # 3h0u6 exact-duplicate rows
         { rows[$2]++ }
-        $2 == "EXPECT"  { expect[$3] = 1 }
+        # expectrows[] is the immutable per-type total; credit[] is the
+        # copy the AGENT walk consumes for N-of-type matching.
+        $2 == "EXPECT"  { expect[$3] = 1; expectrows[$3]++; credit[$3]++ }
+        # Recognition (and therefore listing) is decided in END: an EXPECT
+        # row for a START row s agent_type may appear anywhere in the file.
         $2 == "START" {
-            if (!($3 in allstart)) { allstart[$3] = 1; checked++ }
+            if (!($3 in allstart)) {
+                allstart[$3] = 1; checked++
+                stype[$3] = $4; startcount[$4]++
+                named[$3] = (index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2)
+                if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
+            }
         }
-        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 {
-            if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
-            if (!($3 in namedstart)) { namedstart[$3] = 1; recognized++ }
-            name[$3] = $4
-        }
-        $2 == "START"   { started[$4] = 1 }
         $2 == "REPORTED" || $2 == "BLOCKED" || $2 == "WOULDBLOCK" {
             if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
+            # Explicit set, NOT "id in term": term[] is READ in the END
+            # loop, and an awk read auto-vivifies the key, so membership
+            # in term[] is worthless there (the caveat two comments up).
+            hasterm[$3] = 1
         }
         $2 == "REPORTED" {
             # Resolution strength (critique 2026-07-22): a REPORTED row that
@@ -355,18 +455,31 @@ expectations_census() {
             for (i = 1; i <= n; i++) {
                 id = order[i]
                 t = (term[id] == "") ? "NO_TERMINAL" : term[id]
-                if (name[id] == "") {
+                ty = stype[id]
+                if ((id in allstart) && !named[id] && !(ty in expect)) {
+                    # Started, but pairable by neither key. Listing it would
+                    # false-flag every ordinary sync dispatch as undeclared,
+                    # which is the pre-mk3tw over-firing this audit already
+                    # rejected once. It still counts in BLINDSPOT/checked.
+                    if (!(id in hasterm)) continue
+                    ty = ""
+                }
+                if (ty == "") {
                     print "AGENT\t" id "\t-\t" t "\tno-start"
                     nostart++
                 } else {
-                    d = (name[id] in expect) ? "declared" : "undeclared"
-                    print "AGENT\t" id "\t" name[id] "\t" t "\t" d
-                    if (d == "undeclared") undeclared++
+                    recognized++
+                    if (credit[ty] > 0) { credit[ty]--; d = "declared" }
+                    else               { d = "undeclared"; undeclared++ }
+                    print "AGENT\t" id "\t" ty "\t" t "\t" d
                 }
                 cls[t]++
             }
             ens = 0
-            for (nm in expect) if (!(nm in started)) { print "EXPECTED_NO_START\t" nm; ens++ }
+            # A declared type with FEWER starts than EXPECT rows: the
+            # dispatch was declared and never arrived (or arrived fewer
+            # times than declared). Counted per NAME, not per surplus unit.
+            for (nm in expect) if (startcount[nm] < expectrows[nm]) { print "EXPECTED_NO_START\t" nm; ens++ }
             printf "ROWS\texpect=%d start=%d reported=%d blocked=%d wouldblock=%d\n", \
                 rows["EXPECT"], rows["START"], rows["REPORTED"], rows["BLOCKED"], rows["WOULDBLOCK"]
             printf "CLASSIFIED\treported=%d blocked_resolved=%d (immediate=%d later=%d) blocked_unresolved=%d wouldblock=%d no_terminal=%d undeclared=%d no_start=%d expected_no_start=%d\n", \

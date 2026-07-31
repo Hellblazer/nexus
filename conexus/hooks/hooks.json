@@ -150,6 +150,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/agent-dispatch-expect.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

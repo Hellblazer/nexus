@@ -131,9 +131,21 @@ class TestHooksJsonStructure:
         )
 
     def test_hooks_json_pretooluse_matcher_is_bash(self) -> None:
+        """The pre-close verification hook fires on Bash, whatever position
+        its entry occupies. Keyed on the SCRIPT, not on ``PreToolUse[0]``:
+        PreToolUse now carries a second entry (the Agent-dispatch matcher,
+        nexus-qc4p1), and an index-positional assertion says nothing about
+        the hook it is named for once the list has more than one member."""
         data = json.loads(HOOKS_JSON.read_text())
-        pre_hooks = data["hooks"]["PreToolUse"]
-        assert pre_hooks[0]["matcher"] == "Bash"
+        owners = [
+            entry["matcher"]
+            for entry in data["hooks"]["PreToolUse"]
+            if any(
+                "pre_close_verification_hook.sh" in h.get("command", "")
+                for h in entry.get("hooks", [])
+            )
+        ]
+        assert owners == ["Bash"], owners
 
     def test_hooks_json_existing_hooks_unchanged(self) -> None:
         data = json.loads(HOOKS_JSON.read_text())
