@@ -2224,16 +2224,6 @@ _vector_client_instance: HttpVectorClient | None = None
 _version_probe_done: bool = False
 _version_probe_error: Exception | None = None
 
-#: nexus-ao29z: TEST-ONLY override — set by
-#: :func:`mark_version_probe_satisfied_for_tests` for harnesses that build and
-#: boot the engine under test themselves, where identity is known by
-#: construction and a `mvn package` JAR can only ever report a null
-#: release_version. Deliberately NOT cleared by
-#: :func:`reset_http_vector_client_for_tests`: `mcp_infra.reset_singletons()`
-#: calls that helper internally, so a non-sticky flag was silently undone
-#: between a fixture and the test body it was meant to cover.
-_version_probe_satisfied_override: bool = False
-
 #: nexus-5t1jp: monotonic timestamp of the cached probe FAILURE, driving the
 #: unreachable-class retry window below. None whenever no failure is cached.
 _version_probe_failed_at: float | None = None
@@ -2410,11 +2400,7 @@ def get_http_vector_client() -> HttpVectorClient:
     global _version_probe_failed_at
     from nexus.config import is_local_mode  # noqa: PLC0415 -- deferred for test patchability
 
-    # nexus-ao29z: an integration harness that BUILT and BOOTED this engine has
-    # no skew for the hosted-service gate to catch, and its `mvn package` JAR can
-    # only ever report a null release_version. Test-only; see
-    # mark_version_probe_satisfied_for_tests.
-    cloud_mode = not is_local_mode() and not _version_probe_satisfied_override
+    cloud_mode = not is_local_mode()
 
     if cloud_mode and (cached_failure := _authoritative_cached_probe_error()) is not None:
         _reraise_cached_probe_error(cached_failure)
@@ -2474,57 +2460,6 @@ def reset_http_vector_client_for_tests() -> None:
         _version_probe_done = False
         _version_probe_error = None
         _version_probe_failed_at = None
-
-
-def clear_version_probe_override_for_tests() -> None:
-    """Test helper: undo :func:`mark_version_probe_satisfied_for_tests`.
-
-    Only needed by a test that must observe the probe firing after a fixture in
-    the same process declared it satisfied.
-    """
-    global _version_probe_satisfied_override
-    with _vector_client_lock:
-        _version_probe_satisfied_override = False
-
-
-def mark_version_probe_satisfied_for_tests() -> None:
-    """Test helper: declare the cloud version probe already satisfied.
-
-    ONLY for harnesses that BUILD AND BOOT the engine under test themselves
-    (the ``-m integration`` gates that start ``service/target/*.jar`` against a
-    throwaway Postgres). For those, engine identity is known by construction and
-    there is no skew for the hosted-service compatibility gate to catch.
-
-    nexus-ao29z: without this, every such gate ERRORED at setup from 2026-07-09
-    (the fail-loud connection-path probe, commit 3cb14f96) until 2026-07-31 —
-    four of them, including the combined-query tripwire that exists precisely
-    because request-shape-only tests let a silent-empty-join reach a live tenant.
-    Neither side was wrong. ``release.properties`` ships ``release_version``
-    BLANK and is stamped only at native-build time from an
-    ``engine-service-vX.Y.Z`` tag, so a ``mvn package`` JAR reports null and the
-    probe correctly fail-closes on it (RDR-002 ez5.4). The fixtures then put the
-    client in cloud mode, and the gate refused the engine the test had just
-    built. The gap was in the harness.
-
-    This does NOT weaken the gate: its own contract stays pinned by hermetic
-    unit tests (tests/db/test_managed_endpoint.py,
-    tests/db/test_engine_floor_connection_path.py,
-    tests/db/test_http_vector_client_version_gate.py), none of which go through
-    this helper.
-
-    STICKY ON PURPOSE. It sets a dedicated override rather than the
-    ``_version_probe_done`` flag, so ``reset_http_vector_client_for_tests()``
-    does NOT undo it. Setting the shared flag was the first attempt and it broke
-    on the very next fixture: ``mcp_infra.reset_singletons()`` calls the reset
-    helper internally, so a fixture that marked-then-reset silently lost the
-    declaration and the probe fired mid-test. An ordering rule nobody can see
-    from the call site is not a fix. Use
-    :func:`clear_version_probe_override_for_tests` to undo it deliberately.
-    """
-    global _version_probe_satisfied_override
-    with _vector_client_lock:
-        _version_probe_satisfied_override = True
-
 
 def is_vector_service_mode() -> bool:
     """Return True unless NX_STORAGE_BACKEND_VECTORS explicitly opts out.

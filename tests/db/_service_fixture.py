@@ -44,6 +44,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -238,6 +239,58 @@ def _self_provision_pg_bundle() -> Path | None:
             stacklevel=2,
         )
         return None
+
+
+def unstamped_jar_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
+    """Return a skip reason if the shaded jar reports no ``release_version``,
+    else ``None``.
+
+    nexus-ao29z. ``release.properties`` ships ``release_version`` BLANK — it is
+    stamped only at native-release time from an ``engine-service-vX.Y.Z`` tag —
+    so a plain ``mvn package`` yields a jar that reports ``release_version=null``
+    on ``/version``. Since the fail-loud cloud probe landed (3cb14f96,
+    2026-07-09) the ``HttpVectorClient`` connection path fail-closes on exactly
+    that, so every gate booting a locally built jar AND driving the vector client
+    died at SETUP with an error about the "managed nexus service" — a message
+    that sends the reader looking at the hosted service rather than at their own
+    build.
+
+    CI's seam job hit this the same day and fixed it by STAMPING the gate jar
+    (ci.yml, "Stamp release_version into the gate JAR"), explicitly not by
+    bypassing the probe: the gate then exercises a CONFORMANT engine and the
+    hardening stays intact. ``scripts/build-gate-jar.sh`` is that step for a
+    developer's machine. This turns the confusing probe error into that remedy.
+
+    Applies only to tests marked ``needs_stamped_jar`` — the catalog-only
+    integration suites never construct a vector client and must not be gated on
+    a stamp they do not need.
+    """
+    if not jar.exists():
+        return None  # the freshness gate already reports a missing jar
+    try:
+        with zipfile.ZipFile(jar) as zf:
+            raw = zf.read("META-INF/nexus/release.properties").decode("utf-8")
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        return (
+            f"could not read release.properties from {_rel(jar)}: {exc} "
+            "(rebuild with: scripts/build-gate-jar.sh)"
+        )
+    for line in raw.splitlines():
+        if line.startswith("release_version="):
+            value = line.split("=", 1)[1].strip()
+            # VersionHandler.normalizeReleaseVersion maps blank/SNAPSHOT/dev to
+            # null, so mirror that here rather than only checking for empty.
+            if value and "snapshot" not in value.lower() and "dev" not in value.lower():
+                return None
+    return (
+        f"service jar is UNSTAMPED ({_rel(jar)} reports no release_version), so "
+        "the client's cloud version probe fail-closes on it and this gate cannot "
+        "construct a vector client. Rebuild with:\n"
+        "    scripts/build-gate-jar.sh\n"
+        "which stamps release_version from REQUIRED_ENGINE_VERSION the same way "
+        "CI's seam job does, and restores the working tree afterwards "
+        "(nexus-ao29z)."
+    )
 
 
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:

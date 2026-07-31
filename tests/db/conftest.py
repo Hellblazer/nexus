@@ -18,7 +18,10 @@ import os
 
 import pytest
 
-from tests.db._service_fixture import jar_freshness_skip_reason
+from tests.db._service_fixture import (
+    jar_freshness_skip_reason,
+    unstamped_jar_skip_reason,
+)
 
 _IN_CI = bool(
     os.environ.get("CI")
@@ -30,6 +33,13 @@ _IN_CI = bool(
 
 
 @pytest.fixture(scope="session")
+def _unstamped_jar_reason() -> str | None:
+    """Compute the release_version verdict ONCE per session (same rationale as
+    the freshness verdict: the jar does not change mid-run)."""
+    return unstamped_jar_skip_reason()
+
+
+@pytest.fixture(scope="session")
 def _jar_freshness_reason() -> str | None:
     """Compute the jar-freshness verdict ONCE per session (the jar and sources
     do not change mid-run); avoids an rglob+stat sweep on every test."""
@@ -38,7 +48,9 @@ def _jar_freshness_reason() -> str | None:
 
 @pytest.fixture(autouse=True)
 def _service_jar_freshness(
-    request: pytest.FixtureRequest, _jar_freshness_reason: str | None
+    request: pytest.FixtureRequest,
+    _jar_freshness_reason: str | None,
+    _unstamped_jar_reason: str | None,
 ) -> None:
     """Gate integration-marked tests on jar freshness.
 
@@ -57,3 +69,14 @@ def _service_jar_freshness(
         if _IN_CI:
             pytest.fail(_jar_freshness_reason)
         pytest.skip(_jar_freshness_reason)
+    # nexus-ao29z: a jar that is fresh but UNSTAMPED cannot serve any test that
+    # constructs a vector client — the cloud version probe fail-closes on a null
+    # release_version. Same disposition as freshness (skip locally with the
+    # remedy, fail in CI), and opt-in by marker because the catalog-only suites
+    # never build a vector client.
+    if request.node.get_closest_marker("needs_stamped_jar") is None:
+        return
+    if _unstamped_jar_reason is not None:
+        if _IN_CI:
+            pytest.fail(_unstamped_jar_reason)
+        pytest.skip(_unstamped_jar_reason)

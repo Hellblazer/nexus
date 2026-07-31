@@ -17,7 +17,8 @@ Prerequisite:
   - No VOYAGE_API_KEY or NX_VOYAGE_API_KEY needed (ONNX mode).
 
 Run:
-    cd service && mvn package -DskipTests && cd ..
+    scripts/build-gate-jar.sh          # NOT `mvn package`: this suite needs a
+                                       # release_version-stamped jar (nexus-ao29z)
     uv run pytest tests/db/test_indexer_seam_b_integration.py -m integration -v -s
 """
 from __future__ import annotations
@@ -70,6 +71,10 @@ _ALL_PREREQS = (
 
 pytestmark = [
     pytest.mark.integration,
+    # nexus-ao29z: this suite constructs a vector client, whose cloud version
+    # probe fail-closes on a jar with no release_version — which is every jar a
+    # plain `mvn package` produces. Build with scripts/build-gate-jar.sh.
+    pytest.mark.needs_stamped_jar,
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
@@ -271,16 +276,8 @@ def test_indexer_seam_b_index_search_round_trip(
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
 
     # Reset the singleton so new env vars are picked up
-    from nexus.db.http_vector_client import (
-        mark_version_probe_satisfied_for_tests,
-        reset_http_vector_client_for_tests,
-    )
+    from nexus.db.http_vector_client import reset_http_vector_client_for_tests
     reset_http_vector_client_for_tests()
-    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
-    # (release.properties is blank in source; stamped only at native-build time
-    # from a tag), so the cloud version probe fail-closes on it. Engine identity
-    # is known by construction here — there is no skew to catch.
-    mark_version_probe_satisfied_for_tests()
     # Also drop the mcp_infra T3 singleton: a prior module (e.g. the catalog
     # integration suite) may have cached a local-chroma T3 under ITS env,
     # which would silently absorb this test's writes instead of the seam
@@ -412,15 +409,9 @@ def test_store_put_get_roundtrip_ij9hg(
 
     from nexus.db.http_vector_client import (
         get_http_vector_client,
-        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
     reset_http_vector_client_for_tests()
-    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
-    # (release.properties is blank in source; stamped only at native-build time
-    # from a tag), so the cloud version probe fail-closes on it. Engine identity
-    # is known by construction here — there is no skew to catch.
-    mark_version_probe_satisfied_for_tests()
     # Drop the mcp_infra T3 singleton too — see the sibling test's comment.
     from nexus.mcp_infra import reset_singletons
     reset_singletons()

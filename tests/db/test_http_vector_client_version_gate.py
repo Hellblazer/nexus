@@ -25,9 +25,7 @@ from nexus.db.http_vector_client import (
     _PROBE_UNREACHABLE_RETRY_S,
     HttpVectorClient,
     _cloud_probe_failure_message,
-    clear_version_probe_override_for_tests,
     get_http_vector_client,
-    mark_version_probe_satisfied_for_tests,
     reset_http_vector_client_for_tests,
 )
 from nexus.db.managed_endpoint import (
@@ -60,14 +58,8 @@ def _caps() -> ManagedCapabilities:
 @pytest.fixture(autouse=True)
 def _reset_singleton_and_probe_cache():
     reset_http_vector_client_for_tests()
-    # nexus-ao29z: the test-only "probe satisfied" override is STICKY by design
-    # (reset_http_vector_client_for_tests deliberately does not clear it), so it
-    # must be cleared explicitly or one test that sets it silently disables the
-    # gate for every test after it in this process.
-    clear_version_probe_override_for_tests()
     yield
     reset_http_vector_client_for_tests()
-    clear_version_probe_override_for_tests()
 
 
 class TestCloudModeCompatible:
@@ -406,71 +398,3 @@ class TestProbeCacheStateHygiene:
 
         with pytest.raises(ManagedServiceUnreachable, match="validated snapshot"):
             get_http_vector_client()
-
-
-class TestIntegrationHarnessOverride:
-    """nexus-ao29z: the seam four engine-booting integration gates depend on.
-
-    Those harnesses build a `mvn package` JAR, which can only ever report a null
-    ``release_version`` (release.properties is blank in source, stamped at
-    native-build time from a tag), and then drive the client in cloud mode. From
-    2026-07-09 to 2026-07-31 the probe correctly fail-closed on it and all four
-    gates ERRORED at setup — including the combined-query tripwire that exists
-    because request-shape-only tests let a silent-empty-join reach a live tenant.
-
-    These pin the seam so it cannot rot back: the override must suppress the
-    probe, must SURVIVE a reset (the ordering trap that broke the first attempt),
-    and must be clearable.
-    """
-
-    def test_override_suppresses_the_probe(self, monkeypatch):
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        probe = MagicMock(side_effect=ManagedServiceIncompatible("unstamped dev jar"))
-        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
-
-        # NON-VACUITY: without the override this cloud-mode call DOES probe and
-        # DOES raise. If this half ever stops holding, the test below proves
-        # nothing about the override.
-        with pytest.raises(ManagedServiceIncompatible):
-            get_http_vector_client()
-        assert probe.call_count == 1
-
-        reset_http_vector_client_for_tests()
-        mark_version_probe_satisfied_for_tests()
-
-        client = get_http_vector_client()
-        assert isinstance(client, HttpVectorClient)
-        assert probe.call_count == 1, "the override must not re-probe"
-
-    def test_override_survives_reset(self, monkeypatch):
-        """The ordering trap. `mcp_infra.reset_singletons()` calls
-        `reset_http_vector_client_for_tests()` internally, so a fixture that
-        marked-then-reset lost the declaration and the probe fired mid-test.
-        Setting the shared `_version_probe_done` flag was the first attempt and
-        failed exactly here."""
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        probe = MagicMock(side_effect=ManagedServiceIncompatible("unstamped dev jar"))
-        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
-
-        mark_version_probe_satisfied_for_tests()
-        reset_http_vector_client_for_tests()
-
-        assert isinstance(get_http_vector_client(), HttpVectorClient)
-        assert probe.call_count == 0
-
-    def test_override_is_clearable(self, monkeypatch):
-        """It must be possible to put the gate back — otherwise one fixture
-        disables it for the rest of the process with no way to restore it."""
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        probe = MagicMock(side_effect=ManagedServiceIncompatible("unstamped dev jar"))
-        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
-
-        mark_version_probe_satisfied_for_tests()
-        assert isinstance(get_http_vector_client(), HttpVectorClient)
-
-        clear_version_probe_override_for_tests()
-        reset_http_vector_client_for_tests()
-
-        with pytest.raises(ManagedServiceIncompatible):
-            get_http_vector_client()
-        assert probe.call_count == 1

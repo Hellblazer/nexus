@@ -999,6 +999,11 @@ jobs:
               - 'tests/db/test_write_seam_gate_integration.py'
               - 'tests/db/test_http_combined_query_integration.py'
               - 'scripts/assert_write_seam_ran.py'
+              # nexus-ao29z: both modules are now gated by the needs_stamped_jar
+              # guard that lives in these two files, so a change there can skip
+              # or fail this job without touching a test.
+              - 'tests/db/conftest.py'
+              - 'tests/db/_service_fixture.py'
               - '.github/workflows/ci.yml'
               # Dep bump can change the Python env or service contract without
               # touching the above paths; gate on lockfile + manifest so such a

@@ -56,7 +56,8 @@ Prerequisites (identical to the write-seam gate):
   - No VOYAGE_API_KEY needed (service runs in LOCAL/ONNX bge-768 mode).
 
 Run locally:
-    cd service && mvn package -DskipTests && cd ..
+    scripts/build-gate-jar.sh          # NOT `mvn package`: this suite needs a
+                                       # release_version-stamped jar (nexus-ao29z)
     uv run pytest tests/db/test_http_combined_query_integration.py \\
         -o addopts="" -m integration -v -s
 
@@ -129,6 +130,10 @@ _ALL_PREREQS = _JAR.exists() and _JAVA_OK and _DOCKER_OK
 
 pytestmark = [
     pytest.mark.integration,
+    # nexus-ao29z: this suite constructs a vector client, whose cloud version
+    # probe fail-closes on a jar with no release_version — which is every jar a
+    # plain `mvn package` produces. Build with scripts/build-gate-jar.sh.
+    pytest.mark.needs_stamped_jar,
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
@@ -371,7 +376,6 @@ def vec_client(local_service: tuple[str, str], monkeypatch: pytest.MonkeyPatch):
     """HttpVectorClient singleton re-resolved against the live local_service."""
     from nexus.db.http_vector_client import (
         get_http_vector_client,
-        mark_version_probe_satisfied_for_tests,
         reset_http_vector_client_for_tests,
     )
 
@@ -383,11 +387,6 @@ def vec_client(local_service: tuple[str, str], monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
-    # nexus-ao29z: the JAR this harness builds and boots is unstamped by design
-    # (release.properties is blank in source; stamped only at native-build time
-    # from a tag), so the cloud version probe fail-closes on it. Engine identity
-    # is known by construction here — there is no skew to catch.
-    mark_version_probe_satisfied_for_tests()
 
     return get_http_vector_client()
 
