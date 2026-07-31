@@ -284,6 +284,63 @@ class TestIdempotence:
         rows = [ln for ln in _expfile(tmp_path).read_text().splitlines() if "\tEXPECT\t" in ln]
         assert len(rows) == 1, rows
 
+    def test_concurrent_double_registration_writes_one_row(self, tmp_path: Path) -> None:
+        """The shape the sequential test cannot reach. The write-side guard
+        is a bounded mkdir lock, so this is the case that can actually leak
+        a duplicate (nexus-3h0u6 is the same lesson on the START side)."""
+        import concurrent.futures
+
+        payload = _pretooluse(tool_use_id="toolu_race")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            for fut in [pool.submit(_run, payload, tmp_path) for _ in range(8)]:
+                assert fut.result().returncode == 0
+        rows = [ln for ln in _expfile(tmp_path).read_text().splitlines() if "\tEXPECT\t" in ln]
+        assert len(rows) == 1, rows
+
+    def test_duplicate_rows_do_not_inflate_the_credit_pool(self, tmp_path: Path) -> None:
+        """Belt to the lock's braces, and the one that actually matters.
+
+        A duplicate EXPECT row is NOT the harmless nuisance a duplicate START
+        row is: it inflates the N-of-type credit and MASKS an undeclared
+        start. The write-side lock is bounded, so it cannot be the only
+        defence — the READER dedupes by dispatch_id, where identity is
+        unambiguous. Fixture writes the duplicate directly, so it holds
+        regardless of whether the lock ever leaks one."""
+        _run(_pretooluse("general-purpose", tool_use_id="toolu_A"), tmp_path)
+        f = _expfile(tmp_path)
+        dup = f.read_text().splitlines()[0].split("\t")
+        dup[0] = "2099-01-01T00:00:00Z"          # different ts => not an exact-line dup
+        f.write_text(f.read_text() + "\t".join(dup) + "\n")
+        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
+        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
+        census = _lib_call("expectations_census", tmp_path, SESSION)
+        assert "undeclared=1" in census.stdout, (
+            "a re-registered dispatch inflated the credit pool and masked an "
+            "undeclared start:\n" + census.stdout
+        )
+        assert "expect=1" in census.stdout, census.stdout
+        undeclared = _lib_call("expectations_undeclared", tmp_path, SESSION)
+        assert "UNDECLARED\ta4dae47be426023ec\tgeneral-purpose" in undeclared.stdout
+
+    def test_stale_lockdir_is_reaped(self, tmp_path: Path) -> None:
+        """A lockdir left by a killed hook must not tax every later dispatch
+        in the session with the full lock budget, forever."""
+        import os
+        import time
+
+        _run(_pretooluse(tool_use_id="toolu_first"), tmp_path)
+        lock = Path(str(_expfile(tmp_path)) + ".expect.lock")
+        lock.mkdir()
+        old = time.time() - 3600
+        os.utime(lock, (old, old))
+        started = time.time()
+        proc = _run(_pretooluse(tool_use_id="toolu_second"), tmp_path)
+        assert proc.returncode == 0
+        assert not lock.exists(), "stale lockdir survived"
+        assert time.time() - started < 1.0, "paid the full lock budget on a stale lock"
+        rows = [ln for ln in _expfile(tmp_path).read_text().splitlines() if "\tEXPECT\t" in ln]
+        assert len(rows) == 2, rows
+
 
 class TestFailOpen:
     """A hook that errors must never block a legitimate dispatch. Exit 0 +
@@ -370,6 +427,86 @@ class TestFailOpen:
         proc = _run(_pretooluse(subagent_type="bad type/with slash"), tmp_path)
         assert proc.returncode == 0
         assert proc.stdout == ""
+
+
+#: VERBATIM captured PreToolUse payloads (2026-07-31), one sync dispatch and
+#: one background dispatch, exactly as the harness emitted them — including
+#: the ``effort`` object and the absence of ``agent_id``. Only the free-text
+#: prompt is shortened; every structural field is untouched. Hand-built
+#: fixtures encode what the author BELIEVES the payload looks like, which is
+#: the assumption this whole change was required to stop making.
+CAPTURED_PAYLOADS = [
+    {
+        "session_id": "e9a2c670-c452-408a-b796-a5fb5c2ede7e",
+        "transcript_path": "/tmp/probe/t.jsonl",
+        "cwd": "/private/tmp/nx-pretooluse-probe/work",
+        "prompt_id": "f7f8b968-d0e7-4959-a7f5-12ee29a5608d",
+        "permission_mode": "acceptEdits",
+        "effort": {"level": "high"},
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Agent",
+        "tool_input": {
+            "description": "probe-sync-a",
+            "prompt": "Reply with exactly SUBDONE and finish.",
+            "subagent_type": "general-purpose",
+            "run_in_background": False,
+        },
+        "tool_use_id": "toolu_01FP7i2pqZf83DZP3ZZ7aWbB",
+    },
+    {
+        "session_id": "d3516804-d87c-4620-b0b4-303661fe850d",
+        "transcript_path": "/tmp/probe/t.jsonl",
+        "cwd": "/private/tmp/nx-pretooluse-probe/work",
+        "prompt_id": "59a61524-cca7-44ef-a162-46b1352ab1af",
+        "permission_mode": "acceptEdits",
+        "effort": {"level": "high"},
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Agent",
+        "tool_input": {
+            "description": "probe-bg-b",
+            "prompt": "Reply with exactly BGDONE and finish.",
+            "subagent_type": "general-purpose",
+            "run_in_background": True,
+        },
+        "tool_use_id": "toolu_01528yfAkZL3w8Wt5LNuK1rm",
+    },
+]
+
+
+class TestCapturedPayloads:
+    """Replay the real bytes. Everything else in this file is a fixture the
+    author wrote; this class is the only part that cannot drift from what the
+    harness actually sends."""
+
+    def test_captured_sync_dispatch_records_sync(self, tmp_path: Path) -> None:
+        payload = CAPTURED_PAYLOADS[0]
+        proc = _run(json.dumps(payload), tmp_path)
+        assert proc.returncode == 0 and proc.stdout == ""
+        row = _expfile(tmp_path, payload["session_id"]).read_text()
+        assert row.split("\t")[1:] == [
+            "EXPECT", "general-purpose", "sync", "toolu_01FP7i2pqZf83DZP3ZZ7aWbB\n",
+        ], row
+
+    def test_captured_background_dispatch_records_background(self, tmp_path: Path) -> None:
+        payload = CAPTURED_PAYLOADS[1]
+        proc = _run(json.dumps(payload), tmp_path)
+        assert proc.returncode == 0 and proc.stdout == ""
+        row = _expfile(tmp_path, payload["session_id"]).read_text()
+        assert "\tEXPECT\tgeneral-purpose\tbackground\t" in row, row
+
+    def test_captured_payloads_carry_no_agent_id(self) -> None:
+        """The reason the EXPECT row cannot be keyed on an agent id: at
+        PreToolUse the agent does not exist yet. If a future harness starts
+        sending one, this fails and the pairing design should be revisited."""
+        for payload in CAPTURED_PAYLOADS:
+            assert "agent_id" not in payload
+
+    def test_captured_payloads_carry_no_name_parameter(self) -> None:
+        """The root cause of nexus-nu7fo, pinned against real bytes."""
+        for payload in CAPTURED_PAYLOADS:
+            assert set(payload["tool_input"]) == {
+                "description", "prompt", "subagent_type", "run_in_background",
+            }, payload["tool_input"]
 
 
 class TestPluginWiring:
