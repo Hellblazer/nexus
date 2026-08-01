@@ -59,7 +59,13 @@ class _FakeHttpCatalogClient:
 
     # -- reads (via _SharedServiceCatalogHandle) --
     def by_doc_id(self, doc_id):
-        return None  # fresh box: nothing registered yet
+        return None  # fresh box: nothing registered yet (TUMBLER-only, nexus-5axey)
+
+    def docs_for_chashes(self, chashes):
+        return {}  # fresh box: nothing in the manifest yet
+
+    def resolve(self, tumbler):
+        return None  # unused unless docs_for_chashes returns candidates
 
     def curator_owner_tumbler_by_name(self, name):
         return None  # fresh box: no curator owner yet
@@ -122,13 +128,23 @@ def test_fresh_box_service_mode_registers(fake_client):
 
 def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
     """Existing service-side entry short-circuits to its tumbler — the
-    dedup read must also run on a fresh box (no local catalog)."""
+    dedup read must also run on a fresh box (no local catalog).
+
+    nexus-5axey: the dedup read is now ``docs_for_chashes`` + ``resolve``
+    (chash-appropriate), not ``by_doc_id`` (TUMBLER-only, always mismatched
+    a chash-shaped doc_id)."""
 
     class _Existing:
         tumbler = "1.1.7"
+        content_type = "knowledge"
+        file_path = ""
 
     monkeypatch.setattr(
-        _FakeHttpCatalogClient, "by_doc_id", lambda self, doc_id: _Existing()
+        _FakeHttpCatalogClient, "docs_for_chashes",
+        lambda self, chashes: {_DOC_ID: ["1.1.7"]},
+    )
+    monkeypatch.setattr(
+        _FakeHttpCatalogClient, "resolve", lambda self, tumbler: _Existing()
     )
     tumbler = catalog_store_hook(
         title="fresh-box-note",
@@ -147,10 +163,10 @@ def test_fresh_box_service_unreachable_is_loud_not_silent(fake_client, monkeypat
     Pin the new trigger condition at runtime, not just via the static
     source-text scan in test_ou4tb_catalog_hook_loudness.py."""
 
-    def _unreachable(self, doc_id):
+    def _unreachable(self, chashes):
         raise ConnectionError("service unreachable (fresh box, transient)")
 
-    monkeypatch.setattr(_FakeHttpCatalogClient, "by_doc_id", _unreachable)
+    monkeypatch.setattr(_FakeHttpCatalogClient, "docs_for_chashes", _unreachable)
 
     audit_rows: list[dict] = []
     import nexus.hook_registry as hook_registry

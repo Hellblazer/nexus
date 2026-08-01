@@ -58,11 +58,14 @@ class TestByDocId:
             meta={"doc_id": "abc123"},
         )
         entry = cat.by_doc_id("abc123")
-        # nexus-wji11: by_doc_id is a TUMBLER lookup on the engine.
-        assert entry is None, (
-            "nexus-wji11 looks RESOLVED — restore the unconditional "
-            "assertions here"
-        )
+        # nexus-wji11/nexus-5axey (settled): by_doc_id is a TUMBLER-only
+        # lookup, permanently — tumbler is the only document identity.
+        # "abc123" is a meta.doc_id (chash-shaped) value, not a tumbler, so
+        # this is the correct terminal behavior, not a pending gap. Chash
+        # lookups go through
+        # nexus.catalog.store_hook.resolve_knowledge_doc_for_chash instead
+        # (see tests/test_5axey_chash_catalog_lookups.py).
+        assert entry is None
 
     def test_not_found(self, tmp_path):
         catalog_dir, cat = _make_catalog(tmp_path)
@@ -74,11 +77,8 @@ class TestByDocId:
         cat.register(owner, "A", content_type="knowledge", meta={"doc_id": "id1"})
         cat.register(owner, "B", content_type="knowledge", meta={"doc_id": "id2"})
         entry = cat.by_doc_id("id1")
-        # nexus-wji11: by_doc_id is a TUMBLER lookup on the engine.
-        assert entry is None, (
-            "nexus-wji11 looks RESOLVED — restore the unconditional "
-            "assertion here"
-        )
+        # nexus-wji11/nexus-5axey (settled): permanent TUMBLER-only lookup.
+        assert entry is None
 
 
 class TestListByCollection:
@@ -149,15 +149,13 @@ class TestStorePutHook:
             collection_name="knowledge__test",
         )
         entry = cat.by_doc_id("doc_abc123")
-        # nexus-wji11: on the engine by_doc_id is a TUMBLER lookup, so an
-        # entry carrying meta.doc_id is unreachable by that key. Whether
-        # that is a gap or a deliberate post-RDR-108 narrowing is the open
-        # question; either way the divergence is asserted, not hidden.
-        assert entry is None, (
-            "nexus-wji11 looks RESOLVED (by_doc_id found a meta.doc_id "
-            "entry in service mode) — settle the bead and restore the "
-            "unconditional assertions"
-        )
+        # nexus-wji11 (settled) / nexus-5axey: by_doc_id is a permanent
+        # TUMBLER-only lookup, so an entry carrying meta.doc_id is
+        # unreachable by that key — this is the correct terminal contract,
+        # not an open question. The hook's OWN chash dedup goes through
+        # nexus.catalog.store_hook.resolve_knowledge_doc_for_chash instead
+        # (see tests/test_5axey_chash_catalog_lookups.py::TestDedupA1).
+        assert entry is None
         # The registration itself must have landed on either substrate.
         assert any(
             e.title == "Test Knowledge"

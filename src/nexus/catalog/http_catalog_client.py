@@ -1111,6 +1111,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return self._docs_from(self._get("/list", **params))
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
+        """TUMBLER-only lookup, collapsed into :meth:`resolve` (nexus-5axey).
+
+        Despite the name, ``doc_id`` here MUST be a tumbler — the settled
+        wji11 contract is that tumbler is the only document identity, so a
+        chash cannot resolve through this method (it will simply mismatch,
+        same as any other malformed tumbler string). Callers with a
+        content-chash (T3 chunk natural id, e.g. a store_put's ``meta.doc_id``)
+        want :func:`nexus.catalog.store_hook.resolve_knowledge_doc_for_chash`
+        (backed by :meth:`docs_for_chashes`) instead — the class of bug this
+        distinction exists to prevent (dedup/delete-path/reap silently
+        mismatching every chash they were passed) is nexus-5axey.
+
+        Kept as a thin alias rather than removed: ``commands/collection.py``
+        and ``search_engine.py`` still call it with a genuine tumbler.
+        """
         return self.resolve(doc_id)
 
     def resolve_many(self, doc_ids: list[str]) -> "dict[str, CatalogEntry]":
