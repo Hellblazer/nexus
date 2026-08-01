@@ -1983,12 +1983,36 @@ public final class CatalogRepository {
         });
     }
 
-    /** Look up tumbler by (physical_collection, file_path). Returns null if not found. */
+    /**
+     * Look up tumbler by (physical_collection, file_path). Returns null if not found.
+     *
+     * <p>nexus-h77a2: restores the retired local arm's {@code (file_path = ? OR
+     * title = ?)} probe — the engine had narrowed to {@code file_path} only, so
+     * a doc registered with {@code title == abs_path} (the aspect worker's
+     * {@code _canonicalize_source_path} live path) never resolved.
+     *
+     * <p><b>wji11 disposition (settled, do not re-litigate):</b> the retired
+     * local arm ALSO preferred {@code metadata.doc_id} over the tumbler in its
+     * return value. That preference is NOT restored here. nexus-wji11 (Hal,
+     * 2026-07-26) settled the tumbler as the ONLY document identity, and this
+     * method already returns {@code TUMBLER} alone — under that ruling, that is
+     * correct, not a gap. Legacy 16-char {@code doc_id} callers migrate to the
+     * tumbler; they do not get a doc_id back from this lookup.
+     *
+     * <p>Also restores the local arm's {@code LIMIT 1} semantics: {@code
+     * fetchOne()} on a duplicate (collection, file_path) throws {@code
+     * TooManyRowsException} where the local arm quietly returned one row.
+     * {@code orderBy(TUMBLER)} makes the "one row" choice deterministic
+     * (lowest tumbler wins) rather than an arbitrary row order.
+     */
     public String lookupDocByCollectionAndPath(String tenant, String collection, String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
-                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
+                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
+                           .and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath).or(CATALOG_DOCUMENTS.TITLE.eq(filePath)))
                            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                       .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                       .limit(1)
                        .fetchOne();
             return r != null ? r.value1() : null;
         });
@@ -2019,7 +2043,7 @@ public final class CatalogRepository {
                .values(DSL.val(tenant),
                        DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                        DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
+                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
                        jsonbVal(metaJson))
                .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
                .doUpdate()
@@ -2154,7 +2178,18 @@ public final class CatalogRepository {
             if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+                // nexus-4j80w: '' rows (pre-fix service-written links with no
+                // stamped timestamp) must be UNMATCHABLE by a before-filter —
+                // '' < any-date is TRUE under TEXT comparison, and without this
+                // guard every such row matched every before-filter. Fail-safe:
+                // they can still be reached by non-temporal filters. Mirrors the
+                // local arm's guard (catalog_links.py: "created_at != '' AND
+                // created_at < ?"). No backfill of existing '' rows — stamping
+                // them with now() would lie about age, and stamping a sentinel
+                // epoch would make them match every before-filter, i.e. the
+                // exact hazard this guard exists to close.
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.ne(""))
+                           .and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
             // direction + tumbler: filter by tumbler in the appropriate column(s)
             if (tumbler != null && !tumbler.isBlank()) {
                 String dir = direction != null ? direction : "both";
@@ -2187,7 +2222,12 @@ public final class CatalogRepository {
             if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+                // nexus-4j80w: same non-empty guard as queryLinks — see that
+                // call site for the full rationale. This is the destructive
+                // twin (bulk_unlink); without the guard it deleted the entire
+                // link graph on any --created-at-before call.
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.ne(""))
+                           .and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
             return ctx.deleteFrom(CATALOG_LINKS).where(cond).execute();
         });
     }
@@ -3102,6 +3142,22 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * nexus-pzdol: {@code model_version} is stored as TEXT ({@code "v1"}..{@code "vN"}).
+     * Ordering by {@code NAME} (or by {@code model_version} itself) lexically puts
+     * {@code v10} above {@code v9} — a double-digit version silently regresses
+     * max-version resolution. This strips the {@code v} prefix and casts the digits
+     * to INTEGER so ordering is numeric, mirroring the retired local arm's
+     * {@code MAX(CAST(SUBSTR(model_version,2) AS INTEGER))} (catalog_docs.py).
+     * Malformed/legacy values (empty, no leading {@code v}) fall back to 0 rather
+     * than failing the cast — {@code LEGACY_GRANDFATHERED.eq(0)} already excludes
+     * the rows expected to be non-conformant, but this keeps the ORDER BY itself
+     * total rather than erroring on an unexpected shape.
+     */
+    private static final Field<Integer> COL_VERSION_NUM = DSL.field(
+        "CASE WHEN {0} ~ '^v[0-9]+$' THEN CAST(substring({0} from 2) as integer) ELSE 0 END",
+        Integer.class, CATALOG_COLLECTIONS.MODEL_VERSION);
+
     /** Find highest-versioned collection for (content_type, owner_id, embedding_model). */
     public Map<String, Object> collectionForTuple(String tenant, String contentType,
                                                     String ownerId, String embeddingModel) {
@@ -3114,7 +3170,8 @@ public final class CatalogRepository {
                               .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(embeddingModel))
                               .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(0))
                               .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
-                       .orderBy(CATALOG_COLLECTIONS.NAME.desc()).limit(1).fetchOne();
+                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.desc())
+                       .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
         });
@@ -4591,6 +4648,28 @@ public final class CatalogRepository {
 
     /** Non-null empty: returns "" if null. */
     private static String nne(String v) { return v != null ? v : ""; }
+
+    /**
+     * nexus-4j80w: {@code upsertLink}'s created_at default. The client never
+     * sends {@code created_at}; {@code nne()} alone defaulted it to {@code ""},
+     * and {@code "" < any-date} is TRUE under lexical TEXT comparison, so every
+     * service-written link matched EVERY {@code created_at_before} predicate —
+     * {@code bulk_unlink --created-at-before} deleted the entire link graph,
+     * and the MCP confirmation preview computed through the same predicate so
+     * it read as correct.
+     *
+     * <p>Stamp a REAL ISO-8601 UTC timestamp on insert instead, in the same
+     * fixed-width-micros + {@code "+00:00"} shape {@link #stampIndexedAt} uses
+     * (via {@link #INDEXED_AT_FMT}) — byte-identical to the local arm's
+     * {@code datetime.now(UTC).isoformat()}, so old (local-written) and new
+     * (service-written) rows sort consistently as TEXT. Only applies to the
+     * INSERT values list; the {@code doUpdate()} merge path never touches
+     * {@code created_at}, so an existing row's timestamp is never overwritten.
+     */
+    private static String createdAtOrNow(String createdAt) {
+        if (createdAt != null && !createdAt.isBlank()) return createdAt;
+        return java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT);
+    }
 
     /**
      * Null-or-empty normalizer: returns null for null or blank/empty strings, else returns v.

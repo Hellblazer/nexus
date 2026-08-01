@@ -195,19 +195,6 @@ def test_collection_for_existing_tuple_returns_same_version(catalog) -> None:
     assert name.model_version == 3
 
 
-@pytest.mark.xfail(
-
-
-    strict=True,
-
-
-    raises=AssertionError,
-
-
-    reason="nexus-pzdol: engine collectionForTuple orders by NAME lexically so v9 sorts above v10 (previously mislabelled nexus-cecqy family). ENGINE fix; flips with pzdol at merge.",
-
-
-)
 
 
 def test_collection_for_takes_max_existing_version(catalog) -> None:

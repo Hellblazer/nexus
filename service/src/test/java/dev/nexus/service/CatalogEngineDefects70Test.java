@@ -1161,4 +1161,192 @@ class CatalogEngineDefects70Test {
             .as("a collection move is not a repair — the gap must survive it, visibly")
             .isEqualTo(11);
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-4j80w — link created_at stamping + non-empty guard on before-filters
+    //
+    // Port-parity sweep D1: the client never sends created_at, and upsertLink's
+    // nne() default of '' sorted before EVERY real timestamp, so
+    // queryLinks/bulkDeleteLinks's created_at_before predicate matched every
+    // service-written link (bulk_unlink deleted the whole graph). Fixed both
+    // legs: upsertLink stamps a real ISO-8601 UTC timestamp when absent, and
+    // every created_at_before predicate gained a non-empty guard.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void j80w_upsertLinkStampsRealTimestampWhenCreatedAtAbsent() {
+        var p = linkPair("j80w-stamp");
+        repo.upsertLink(TENANT, Map.of(
+            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
+            "created_by", "j80w-test"));
+
+        Object createdAt = onlyEdge(p[0], p[1], "cites").get("created_at");
+        assertThat(createdAt)
+            .as("a new link must not be stamped with an empty created_at")
+            .isNotNull().isNotEqualTo("");
+        // must parse as a real ISO-8601 timestamp — throws if the default is malformed.
+        java.time.OffsetDateTime.parse(String.valueOf(createdAt));
+    }
+
+    @Test
+    void j80w_upsertLinkPreservesCallerSuppliedCreatedAt() {
+        var p = linkPair("j80w-caller-supplied");
+        String explicit = "2000-01-01T00:00:00.000000+00:00";
+        repo.upsertLink(TENANT, Map.of(
+            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
+            "created_by", "j80w-test", "created_at", explicit));
+
+        assertThat(onlyEdge(p[0], p[1], "cites").get("created_at")).isEqualTo(explicit);
+    }
+
+    @Test
+    void j80w_emptyCreatedAtRowIsUnmatchableByBeforeFilter() {
+        var p = linkPair("j80w-empty-unmatchable");
+        // importLink is the ETL leg — out of scope for this fix — and still
+        // writes '' when the caller supplies no created_at, giving a realistic
+        // pre-fix-shaped row to probe the guard against.
+        repo.importLink(TENANT, Map.of(
+            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
+            "created_by", "j80w-test"));
+
+        var results = repo.queryLinks(TENANT, p[0], null, null, null,
+            "9999-12-31T00:00:00+00:00", 100, 0, "both", null);
+        assertThat(results)
+            .as("a '' created_at row must be UNMATCHABLE by a before-filter (fail-safe)")
+            .isEmpty();
+
+        int deleted = repo.bulkDeleteLinks(TENANT, p[0], null, null, null, "9999-12-31T00:00:00+00:00");
+        assertThat(deleted).isZero();
+        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
+    }
+
+    @Test
+    void j80w_realTimestampRowStillMatchableByBeforeFilter() {
+        var p = linkPair("j80w-real-matchable");
+        repo.importLink(TENANT, Map.of(
+            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
+            "created_by", "j80w-test", "created_at", "2000-01-01T00:00:00+00:00"));
+
+        var results = repo.queryLinks(TENANT, p[0], null, null, null,
+            "9999-12-31T00:00:00+00:00", 100, 0, "both", null);
+        assertThat(results)
+            .as("a link with a real timestamp before the cutoff must still match")
+            .hasSize(1);
+    }
+
+    @Test
+    void j80w_bulkDeleteLinksWithBeforeFilterDeletesOnlyMatched() {
+        String owner = freshOwner();
+        String a = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "bulkdel-from", "content_type", "paper",
+            "source_uri", "file:///defects70/j80w-bulkdel/from.md"));
+        String past = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "bulkdel-past", "content_type", "paper",
+            "source_uri", "file:///defects70/j80w-bulkdel/past.md"));
+        String future = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "bulkdel-future", "content_type", "paper",
+            "source_uri", "file:///defects70/j80w-bulkdel/future.md"));
+        String blank = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "bulkdel-blank", "content_type", "paper",
+            "source_uri", "file:///defects70/j80w-bulkdel/blank.md"));
+
+        repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", past,
+            "link_type", "cites", "created_by", "j80w-test", "created_at", "2000-01-01T00:00:00+00:00"));
+        repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", future,
+            "link_type", "cites", "created_by", "j80w-test", "created_at", "2999-01-01T00:00:00+00:00"));
+        repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", blank,
+            "link_type", "cites", "created_by", "j80w-test"));
+
+        int deleted = repo.bulkDeleteLinks(TENANT, a, null, null, null, "2500-01-01T00:00:00+00:00");
+        assertThat(deleted).as("only the PAST-timestamped edge is before the cutoff").isEqualTo(1);
+
+        var remaining = repo.linksFrom(TENANT, a, List.of("cites"));
+        assertThat(remaining).hasSize(2);
+        assertThat(remaining.stream().map(e -> e.get("to_tumbler")).toList())
+            .as("the future-dated and blank-created_at edges must both survive")
+            .containsExactlyInAnyOrder(future, blank);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-pzdol — collectionForTuple numeric version ordering
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void pzdol_collectionForTupleTakesMaxNumericVersionNotLexical() {
+        String owner = freshOwner();
+        String contentType = "docs";
+        String embeddingModel = "voyage-context-3";
+        for (int v : new int[]{1, 2, 9, 10}) {
+            repo.upsertCollection(TENANT, Map.of(
+                "name", contentType + "__" + owner + "__" + embeddingModel + "__v" + v,
+                "content_type", contentType, "owner_id", owner,
+                "embedding_model", embeddingModel, "model_version", "v" + v));
+        }
+
+        var found = repo.collectionForTuple(TENANT, contentType, owner, embeddingModel);
+        assertThat(found).isNotNull();
+        assertThat(found.get("model_version"))
+            .as("v10 must win over v9 under NUMERIC ordering — lexical ordering picks v9")
+            .isEqualTo("v10");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-h77a2 — lookupDocByCollectionAndPath title-probe + duplicate handling
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void h77a2_titleProbeResolvesDocRegisteredWithTitleEqualToPath() {
+        String owner = freshOwner();
+        String coll = "knowledge__defects70-h77a2-title__voyage-context-3__v1";
+        String absPath = "/Users/somebody/git/nexus-clone/papers/foo.md";
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", absPath, "content_type", "paper",
+            "file_path", "papers/foo.md", "physical_collection", coll,
+            "source_uri", "file:///defects70/h77a2/foo.md"));
+
+        // file_path leg still resolves (unchanged).
+        assertThat(repo.lookupDocByCollectionAndPath(TENANT, coll, "papers/foo.md")).isEqualTo(t);
+
+        // title leg: file_path does NOT equal absPath, but title does.
+        assertThat(repo.lookupDocByCollectionAndPath(TENANT, coll, absPath))
+            .as("a doc registered with title == probed path must resolve via the title leg")
+            .isEqualTo(t);
+    }
+
+    @Test
+    void h77a2_missesCleanlyWhenNeitherLegMatches() {
+        String owner = freshOwner();
+        String coll = "knowledge__defects70-h77a2-miss__voyage-context-3__v1";
+        repo.registerDocument(TENANT, owner, Map.of(
+            "title", "papers/known.md", "content_type", "paper",
+            "file_path", "papers/known.md", "physical_collection", coll,
+            "source_uri", "file:///defects70/h77a2miss/known.md"));
+
+        assertThat(repo.lookupDocByCollectionAndPath(
+            TENANT, coll, "/Users/nobody/git/ghost/papers/stray.md")).isNull();
+    }
+
+    /** engine fetchOne() previously threw TooManyRowsException on a duplicate
+     *  (collection, file_path); the local arm's LIMIT-1 quietly returned one row. */
+    @Test
+    void h77a2_duplicateCollectionAndPathReturnsDeterministicSingleResultNotException() {
+        String owner1 = freshOwner();
+        String owner2 = freshOwner();
+        String coll = "knowledge__defects70-h77a2-dup__voyage-context-3__v1";
+        String samePath = "papers/dup.md";
+        String first = repo.registerDocument(TENANT, owner1, Map.of(
+            "title", "dup-1", "content_type", "paper",
+            "file_path", samePath, "physical_collection", coll,
+            "source_uri", "file:///defects70/h77a2dup/dup1.md"));
+        String second = repo.registerDocument(TENANT, owner2, Map.of(
+            "title", "dup-2", "content_type", "paper",
+            "file_path", samePath, "physical_collection", coll,
+            "source_uri", "file:///defects70/h77a2dup/dup2.md"));
+        assertThat(first).isNotEqualTo(second);
+
+        String expectedWinner = first.compareTo(second) < 0 ? first : second;
+        assertThat(repo.lookupDocByCollectionAndPath(TENANT, coll, samePath))
+            .as("must not throw; must deterministically pick the lexically-lowest tumbler")
+            .isEqualTo(expectedWinner);
+    }
 }

@@ -521,15 +521,6 @@ class TestGap2SourcePathNormalization:
         )
         monkeypatch.setattr(mod, "_resolve_catalog_reader", active_reader)
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-h77a2: engine lookupDocByCollectionAndPath lost the local arm's title-probe leg, so docs registered with title==path never resolve (previously misattributed to the closed nexus-5i864 — _canonicalize_source_path never calls resolve_path). Flips with h77a2.",
-
-    )
 
     def test_resolving_absolute_path_normalizes_to_canonical_relative(
         self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -660,15 +651,6 @@ class TestGap2SourcePathNormalization:
             e.get("event") == "aspect_source_path_uncanonical" for e in cap
         )
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-h77a2: engine lookupDocByCollectionAndPath lost the local arm's title-probe leg, so docs registered with title==path never resolve (previously misattributed to the closed nexus-5i864). Flips with h77a2.",
-
-    )
 
     def test_resolved_but_canonical_is_absolute_left_as_is(
         self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
