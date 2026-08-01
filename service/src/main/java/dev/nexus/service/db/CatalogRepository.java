@@ -3593,6 +3593,62 @@ public final class CatalogRepository {
     }
 
     /**
+     * nexus-34wrg option (c): the four audit tables in {@link #COLLECTION_SCOPED_TABLES}
+     * ({@code relevance_log}, {@code search_telemetry}, {@code hook_failures},
+     * {@code gc_audit}) hold no content — they are written as a SIDE EFFECT of ordinary
+     * reads and maintenance, never by a caller depositing data on purpose. A rename's
+     * empty-tombstone target can read as non-empty purely because a search happened to log
+     * telemetry against it, a GC pass audited it, or a hook failed against it — the refusal
+     * "it still holds data" is then misleading: there is no data and no merge hazard, only
+     * an audit breadcrumb. {@link #blockingTable} names WHICH table blocked so a caller can
+     * tell the two apart; this set is what turns that name into an actionable distinction.
+     */
+    private static final java.util.Set<String> AUDIT_ONLY_TABLES =
+        java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
+
+    /**
+     * nexus-34wrg option (c): which table blocked an emptiness check, and whether it is one
+     * of the audit-only tables (no content — see {@link #AUDIT_ONLY_TABLES}). Self-describing
+     * so a caller (the rename handler, {@link #CollectionMergeRefused}) never has to know the
+     * audit-table set itself to render an accurate message.
+     */
+    public record BlockingTable(String table, boolean auditOnly) {
+        /** Human-readable clause for a refusal message: "real data in 'x'" or "an audit trail entry in 'x' (no content)". */
+        public String describe() {
+            return auditOnly
+                ? "an audit trail entry in '" + table + "' (no content — it is written as a "
+                  + "side effect of reads/maintenance, not a merge hazard)"
+                : "real data in '" + table + "'";
+        }
+    }
+
+    /**
+     * RLS-scoped {@link #blockingTable(DSLContext, String)} for callers outside a txn
+     * (nexus-34wrg option (c)).
+     */
+    public java.util.Optional<BlockingTable> blockingTable(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> blockingTable(ctx, name));
+    }
+
+    /**
+     * The first table in {@link #COLLECTION_SCOPED_TABLES} (in list order) holding a row
+     * for {@code name}, or empty if none does — the diagnostic form {@link
+     * #collectionIsEmpty} collapses to a boolean. nexus-34wrg option (c): a bare "not empty"
+     * refusal cannot tell an operator whether a real-data table is populated or only an
+     * audit table logged against the name in passing; naming the table lets the caller
+     * decide.
+     */
+    private java.util.Optional<BlockingTable> blockingTable(DSLContext ctx, String name) {
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
+                return java.util.Optional.of(
+                    new BlockingTable(t.countKey(), AUDIT_ONLY_TABLES.contains(t.countKey())));
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
      * True if {@code name} holds no row in ANY table listed in {@link #COLLECTION_SCOPED_TABLES}
      * — which is, by construction, exactly the set {@code renameCollectionTxn} step 2 re-homes.
      *
@@ -3620,12 +3676,7 @@ public final class CatalogRepository {
      * Ask the data instead.
      */
     private boolean collectionIsEmpty(DSLContext ctx, String name) {
-        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
-            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
-                return false;
-            }
-        }
-        return true;
+        return blockingTable(ctx, name).isEmpty();
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName) {
@@ -3680,10 +3731,16 @@ public final class CatalogRepository {
             // If that CAS is ever weakened, this asymmetry becomes a hole and the identity
             // check has to be re-checked here too. The guard below is not self-defending;
             // it is defended by a precondition in another statement.
-            if (targetRowExists && !liveTargetExists && !collectionIsEmpty(ctx, newName)) {
-                throw new CollectionMergeRefused(
-                    "target collection " + newName + " is retired but still holds data; "
-                    + "renaming onto it would merge two collections. Purge or restore it first.");
+            if (targetRowExists && !liveTargetExists) {
+                var blocker = blockingTable(ctx, newName);
+                if (blocker.isPresent()) {
+                    // nexus-34wrg option (c): name WHICH table blocked so an operator can
+                    // tell an audit breadcrumb from real data instead of purging on faith.
+                    throw new CollectionMergeRefused(
+                        "target collection " + newName + " is retired but still holds "
+                        + blocker.get().describe() + "; renaming onto it would merge two "
+                        + "collections. Purge or restore it first.");
+                }
             }
 
             if (liveTargetExists) {

@@ -314,6 +314,74 @@ class CatalogRenameCollectionTest {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-34wrg option (c) — CollectionMergeRefused names WHICH table blocked
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(70)
+    void renameCollection_mergeRefusal_namesAuditOnlyTable_gcAudit() throws Exception {
+        // A retired target whose ONLY row anywhere is an audit breadcrumb (gc_audit) — the
+        // false-refusal shape nexus-34wrg exists to fix: no content, no merge hazard.
+        final String src = "knowledge__nrg-audit-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-audit-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            su.createStatement().execute("INSERT INTO nexus.gc_audit (tenant_id, operation, collection) VALUES ('"
+                + TENANT_A + "', 'purge', '" + tgt + "')");
+        }
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-audit-successor__minilm-l6-v2-384__v1", ""))
+            .as("precondition: target retired").isEqualTo(1);
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .as("must NAME gc_audit and identify it as an audit trail entry, not real data")
+            .hasMessageContaining("gc_audit")
+            .hasMessageContaining("audit trail entry")
+            .hasMessageContaining("no content");
+    }
+
+    @Test @Order(71)
+    void renameCollection_mergeRefusal_namesTheDataTable_whenRealDataExists() throws Exception {
+        // The other side of the same message: a retired target that holds REAL data (a
+        // document) must be named as such, distinctly from the audit-only case above.
+        final String src = "knowledge__nrg-data-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-data-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT_A + "', 'nrg-data-doc', 'Doc', '" + tgt + "')");
+        }
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-data-successor__minilm-l6-v2-384__v1", ""))
+            .as("precondition: target retired").isEqualTo(1);
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .as("must NAME catalog_documents as REAL data, not an audit breadcrumb")
+            .hasMessageContaining("real data in 'catalog_documents'");
+    }
+
+    @Test @Order(72)
+    void renameCollection_trulyEmptyRetiredTarget_revivesSuccessfully() throws Exception {
+        // A retired target with NOTHING in any scoped table — the legitimate undo-rename
+        // case nexus-34wrg protects: it must succeed, not be refused.
+        final String src = "knowledge__nrg-empty-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-empty-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+        }
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, src, ""))
+            .as("precondition: target retired").isEqualTo(1);
+
+        Map<String, Integer> counts = repo.renameCollection(TENANT_A, src, tgt);
+        assertThat(counts).as("truly-empty retired target revives without refusal").isNotNull();
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     /** Seed one full collection (all re-homed lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
