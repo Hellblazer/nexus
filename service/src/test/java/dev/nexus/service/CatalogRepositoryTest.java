@@ -866,6 +866,206 @@ class CatalogRepositoryTest {
         assertThat((List<?>) result.get("edges")).isEmpty();
     }
 
+    /**
+     * nexus-t7m8e leg (a)+(b): a tombstoned document must not act as a live
+     * relay. A(live) --cites--> D(tombstoned) --cites--> B(live): before the
+     * fix, D was added to the frontier with no liveness check, so B was
+     * reachable at depth 2 despite D being invisible. After the fix, every
+     * edge touching D is excluded from the traversal (both endpoints of an
+     * edge must be live), so D can never forward reachability to B.
+     */
+    @Test
+    void graphBFS_tombstonedRelay_unreachableAtDepth2() {
+        String tenant = "bfs-tomb-" + System.nanoTime();
+        String a = "tr.A", d = "tr.D", b = "tr.B";
+        for (String t : List.of(a, d, b)) {
+            repo.upsertDocument(tenant, Map.of("tumbler", t,
+                "title", "Relay " + t, "content_type", "paper", "corpus", "knowledge"));
+        }
+        repo.upsertLink(tenant, Map.of("from_tumbler", a, "to_tumbler", d,
+            "link_type", "cites", "created_by", "test"));
+        repo.upsertLink(tenant, Map.of("from_tumbler", d, "to_tumbler", b,
+            "link_type", "cites", "created_by", "test"));
+
+        assertThat(repo.deleteDocument(tenant, d))
+            .as("precondition: D must actually be tombstoned").isEqualTo(1);
+
+        var result = repo.graphBFS(tenant, List.of(a), List.of("cites"), "out", 2);
+        @SuppressWarnings("unchecked")
+        var nodes = (List<Map<String, Object>>) result.get("nodes");
+        @SuppressWarnings("unchecked")
+        var edges = (List<Map<String, Object>>) result.get("edges");
+        var nodeTumblers = tumblersOf(nodes);
+
+        assertThat(nodeTumblers)
+            .as("D is tombstoned — invisible as a node")
+            .doesNotContain(d);
+        assertThat(nodeTumblers)
+            .as("B is reachable ONLY via the tombstoned relay D — must be unreachable")
+            .doesNotContain(b);
+        for (var e : edges) {
+            assertThat(e.get("from_tumbler")).as("no edge may name the tombstoned relay").isNotEqualTo(d);
+            assertThat(e.get("to_tumbler")).as("no edge may name the tombstoned relay").isNotEqualTo(d);
+        }
+    }
+
+    /**
+     * nexus-t7m8e leg (a): structural invariant — every edge's endpoints must
+     * appear in the returned node set. A dangling reference (an edge naming a
+     * tumbler that was never registered at all, not merely tombstoned) is the
+     * other half of the same defect class the tombstone-relay test covers.
+     *
+     * <p>{@code upsertLink} itself now rejects a dangling endpoint at write
+     * time (nexus-9ssih) unless {@code allow_dangling=true} is passed — the
+     * import/ETL family and legacy pre-9ssih data are exactly the paths that
+     * can still leave one in the table, so graphBFS must defend independently
+     * rather than relying on the write-time guard alone. {@code allow_dangling}
+     * here exercises that defense-in-depth, not a live production write path.
+     */
+    @Test
+    void graphBFS_everyEdgeEndpoint_appearsInNodes() {
+        String tenant = "bfs-dangle-" + System.nanoTime();
+        String live = "dg.live";
+        repo.upsertDocument(tenant, Map.of("tumbler", live,
+            "title", "Live", "content_type", "paper", "corpus", "knowledge"));
+        // "dg.ghost" is never registered as a document — a dangling reference.
+        repo.upsertLink(tenant, Map.of("from_tumbler", live, "to_tumbler", "dg.ghost",
+            "link_type", "cites", "created_by", "test", "allow_dangling", true));
+
+        var result = repo.graphBFS(tenant, List.of(live), List.of("cites"), "out", 1);
+        @SuppressWarnings("unchecked")
+        var nodes = (List<Map<String, Object>>) result.get("nodes");
+        @SuppressWarnings("unchecked")
+        var edges = (List<Map<String, Object>>) result.get("edges");
+        var nodeTumblers = new java.util.HashSet<>(tumblersOf(nodes));
+
+        for (var e : edges) {
+            assertThat(nodeTumblers)
+                .as("edge from_tumbler %s must appear in nodes", e.get("from_tumbler"))
+                .contains((String) e.get("from_tumbler"));
+            assertThat(nodeTumblers)
+                .as("edge to_tumbler %s must appear in nodes", e.get("to_tumbler"))
+                .contains((String) e.get("to_tumbler"));
+        }
+        assertThat(edges)
+            .as("the dangling reference must not appear as an edge at all")
+            .noneMatch(e -> "dg.ghost".equals(e.get("to_tumbler")));
+    }
+
+    /**
+     * nexus-t7m8e leg (c): the ported 500-node cap. A 501-node star (1 seed +
+     * 500 direct children) truncates to EXACTLY 500 nodes, and the surviving
+     * set is IDENTICAL across two independent calls (deterministic ordering
+     * by (min_depth, tumbler), not database/HashSet iteration order).
+     */
+    @Test
+    void graphBFS_501NodeFixture_truncatesToExactly500Deterministically() {
+        String tenant = "bfs-cap-" + System.nanoTime();
+        String seed = "cap.seed";
+        repo.upsertDocument(tenant, Map.of("tumbler", seed,
+            "title", "Cap Seed", "content_type", "paper", "corpus", "knowledge"));
+        for (int i = 0; i < 500; i++) {
+            String child = String.format("cap.child.%04d", i);
+            repo.upsertDocument(tenant, Map.of("tumbler", child,
+                "title", "Cap Child " + i, "content_type", "paper", "corpus", "knowledge"));
+            repo.upsertLink(tenant, Map.of("from_tumbler", seed, "to_tumbler", child,
+                "link_type", "cites", "created_by", "test"));
+        }
+
+        var run1 = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+        var run2 = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+        @SuppressWarnings("unchecked")
+        var nodes1 = (List<Map<String, Object>>) run1.get("nodes");
+        @SuppressWarnings("unchecked")
+        var nodes2 = (List<Map<String, Object>>) run2.get("nodes");
+
+        assertThat(nodes1).as("501 reachable nodes truncate to exactly 500").hasSize(500);
+        assertThat(tumblersOf(nodes1))
+            .as("truncation is deterministic across repeated calls")
+            .containsExactlyInAnyOrderElementsOf(tumblersOf(nodes2));
+    }
+
+    /**
+     * nexus-t7m8e leg (c): depth cap applies BEFORE the node limit. A fixture
+     * with few depth-1 nodes but many depth-2 nodes (total > 500) must keep
+     * EVERY depth-1 node, truncating only the depth-2 layer.
+     */
+    @Test
+    void graphBFS_depth1Nodes_allSurvive_whenDepth2Truncated() {
+        String tenant = "bfs-cap-d2-" + System.nanoTime();
+        String seed = "cap2.seed";
+        repo.upsertDocument(tenant, Map.of("tumbler", seed,
+            "title", "Cap2 Seed", "content_type", "paper", "corpus", "knowledge"));
+        List<String> depth1 = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            String t = "cap2.d1." + i;
+            depth1.add(t);
+            repo.upsertDocument(tenant, Map.of("tumbler", t,
+                "title", "Cap2 D1 " + i, "content_type", "paper", "corpus", "knowledge"));
+            repo.upsertLink(tenant, Map.of("from_tumbler", seed, "to_tumbler", t,
+                "link_type", "cites", "created_by", "test"));
+        }
+        // 5 * 100 = 500 depth-2 nodes; total reachable = 1 + 5 + 500 = 506 > 500.
+        for (String d1 : depth1) {
+            for (int j = 0; j < 100; j++) {
+                String t = d1 + ".d2." + j;
+                repo.upsertDocument(tenant, Map.of("tumbler", t,
+                    "title", "Cap2 D2", "content_type", "paper", "corpus", "knowledge"));
+                repo.upsertLink(tenant, Map.of("from_tumbler", d1, "to_tumbler", t,
+                    "link_type", "cites", "created_by", "test"));
+            }
+        }
+
+        var result = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 2);
+        @SuppressWarnings("unchecked")
+        var nodes = (List<Map<String, Object>>) result.get("nodes");
+        var nodeTumblers = tumblersOf(nodes);
+
+        assertThat(nodeTumblers).as("total reachable set truncates to the 500 cap").hasSize(500);
+        assertThat(nodeTumblers)
+            .as("every depth-1 node survives truncation — only depth-2 is truncated")
+            .containsAll(depth1);
+    }
+
+    /**
+     * nexus-t7m8e leg (c): the graph_node_limit warning fires when the
+     * reachable set hits the cap.
+     */
+    @Test
+    void graphBFS_nodeCapWarning_fires() {
+        String tenant = "bfs-cap-warn-" + System.nanoTime();
+        String seed = "capw.seed";
+        repo.upsertDocument(tenant, Map.of("tumbler", seed,
+            "title", "Warn Seed", "content_type", "paper", "corpus", "knowledge"));
+        for (int i = 0; i < 500; i++) {
+            String child = String.format("capw.child.%04d", i);
+            repo.upsertDocument(tenant, Map.of("tumbler", child,
+                "title", "Warn Child " + i, "content_type", "paper", "corpus", "knowledge"));
+            repo.upsertLink(tenant, Map.of("from_tumbler", seed, "to_tumbler", child,
+                "link_type", "cites", "created_by", "test"));
+        }
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+            var warnings = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=graph_node_limit"))
+                .toList();
+            assertThat(warnings).as("graph_node_limit warning must fire at the cap threshold").hasSize(1);
+            assertThat(warnings.getFirst()).contains("tenant=" + tenant);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // MANIFEST
     // ══════════════════════════════════════════════════════════════════════════

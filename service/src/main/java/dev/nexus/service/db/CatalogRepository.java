@@ -45,6 +45,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -2301,6 +2302,17 @@ public final class CatalogRepository {
         "formalizes", "same-as");
 
     /**
+     * Port-parity sweep D8 (nexus-t7m8e comment, 2026-08-01): the local arm's
+     * {@code _MAX_GRAPH_NODES} cap (catalog_links.py, pre-RDR-158-P4-deletion),
+     * ported verbatim. graphBFS had no node cap — an unbounded BFS on a large
+     * graph. Depth cap (see {@code Math.min(maxDepth, 3)} in {@link #graphBFS})
+     * is applied BEFORE this node limit so the lowest-depth nodes always
+     * survive truncation; truncation itself is ordered by (min_depth, tumbler)
+     * so the surviving set is deterministic across repeated calls.
+     */
+    private static final int MAX_GRAPH_NODES = 500;
+
+    /**
      * BFS graph traversal from seed tumblers.
      * Mirrors Catalog.graph() / Catalog.graph_many(): breadth-first up to maxDepth hops.
      *
@@ -2353,6 +2365,21 @@ public final class CatalogRepository {
             :                                             DEFAULT_GRAPH_LINK_TYPES;
 
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-t7m8e leg (a)/(b): both endpoints of every traversed edge
+            // must be a LIVE document. INNER-joining CATALOG_DOCUMENTS on both
+            // from_tumbler and to_tumbler with deleted_at IS NULL closes two
+            // defects at once: (i) an edge naming a tumbler absent from the
+            // final node set (tombstoned OR never registered — a dangling
+            // reference) is never emitted, and (ii) a tombstoned document can
+            // no longer act as a live RELAY (A -> D(tombstoned) -> B is no
+            // longer reachable at depth 2 just because D is invisible — the
+            // join excludes the A->D and D->B edges alike, so D never enters
+            // the frontier).
+            var fromDocs = CATALOG_DOCUMENTS.as("cd_bfs_from");
+            var toDocs   = CATALOG_DOCUMENTS.as("cd_bfs_to");
+
+            Map<String, Integer> depthOf = new LinkedHashMap<>();
+            for (String s : seeds) depthOf.put(s, 0);
             Set<String> visited = new LinkedHashSet<>(seeds);
             List<Map<String, Object>> edges = new ArrayList<>();
             Set<String> frontier = new LinkedHashSet<>(seeds);
@@ -2375,26 +2402,56 @@ public final class CatalogRepository {
 
                 var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-                              .from(CATALOG_LINKS).where(dirCond).fetch();
+                              .from(CATALOG_LINKS)
+                              .join(fromDocs).on(fromDocs.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
+                              .join(toDocs).on(toDocs.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
+                              .where(dirCond
+                                     .and(fromDocs.DELETED_AT.isNull())
+                                     .and(toDocs.DELETED_AT.isNull()))
+                              .fetch();
                 for (var r : rows) {
                     Map<String, Object> lm = linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                                       r.value5(), r.value6(), r.value7(), r.value8(), r.value9());
                     edges.add(lm);
                     String fromT = (String) lm.get("from_tumbler");
                     String toT   = (String) lm.get("to_tumbler");
-                    if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); }
-                    if (!visited.contains(toT))   { next.add(toT);   visited.add(toT); }
+                    if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
+                    if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
                 }
                 frontier = next;
             }
 
+            // nexus-t7m8e leg (c): the 500-node cap, ported from the local arm
+            // (_MAX_GRAPH_NODES). Depth cap already applied above (the BFS ran
+            // at most `depth` rounds); ordering the FULL reachable set by
+            // (min_depth, tumbler) before truncating means the lowest-depth
+            // nodes always survive and the surviving 500 are deterministic
+            // across repeated calls on the same graph.
+            List<String> ordered = visited.stream()
+                .sorted(Comparator
+                    .comparingInt((String t) -> depthOf.getOrDefault(t, Integer.MAX_VALUE))
+                    .thenComparing(Comparator.naturalOrder()))
+                .toList();
+            boolean atOrOverCap = ordered.size() >= MAX_GRAPH_NODES;
+            Set<String> surviving = new LinkedHashSet<>(
+                atOrOverCap ? ordered.subList(0, MAX_GRAPH_NODES) : ordered);
+            if (atOrOverCap) {
+                log.warn("event=graph_node_limit tenant={} visited={} max_nodes={}",
+                          tenant, ordered.size(), MAX_GRAPH_NODES);
+            }
+
+            List<Map<String, Object>> survivingEdges = edges.stream()
+                .filter(e -> surviving.contains((String) e.get("from_tumbler"))
+                          && surviving.contains((String) e.get("to_tumbler")))
+                .toList();
+
             List<Map<String, Object>> nodes = new ArrayList<>();
-            if (!visited.isEmpty()) {
+            if (!surviving.isEmpty()) {
                 nodes = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(visited)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(surviving)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
-            return Map.of("nodes", nodes, "edges", edges);
+            return Map.of("nodes", nodes, "edges", survivingEdges);
         });
     }
 
