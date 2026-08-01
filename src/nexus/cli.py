@@ -37,6 +37,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from nexus.commands.catalog import catalog
+from nexus.commands.census import census_group
 from nexus.commands.collection import collection
 from nexus.commands.command_context import command_context
 from nexus.commands.console import console
@@ -144,6 +145,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 
 main.add_command(catalog)
+main.add_command(census_group, name="census")
 main.add_command(collection)
 main.add_command(command_context, name="command-context")
 main.add_command(console)

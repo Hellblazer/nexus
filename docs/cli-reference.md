@@ -2512,6 +2512,28 @@ In service mode the counts are read from the engine via `GET /v1/telemetry/tier_
 
 ---
 
+## nx census
+
+```
+nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json]
+```
+
+Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
+
+Reads the transcript JSONL Claude Code already writes under `~/.claude/projects/<slug>/` — no hook, no daemon, no new log — so it is retroactive over every transcript on disk. `--project-dir` (or `NX_CENSUS_PROJECT_DIR`) overrides the directory; the default is derived from the current working directory.
+
+**Roll-up rule, stated because leaving it unstated is what made the prior hand-derived baseline irreproducible:** a subagent's calls attribute to its **parent session**. `<sid>/subagents/**/agent-*.jsonl` rolls up to `<sid>`; orchestrator-vs-subagent is a *dimension* of a session, not a session boundary. Call totals are scope-independent, session counts are not — so counting sidechain files as their own sessions moves Serena from 13 sessions to 31 while leaving its 464 lifetime calls untouched. Every session count in the output names its scope: `sess` is either-scope, `orch sess` and `sub sess` split it.
+
+The split is the point, not a detail: the same instruction delivered at SubagentStart draws far more use than at SessionStart (`plan_search`: 12 orchestrator calls against 282 subagent calls), and a census that summed the two would hide it.
+
+**Two denominators, always.** `ALL MEASURABLE SESSIONS` and `SUBSTANTIAL SESSIONS` (at least 50 calls). Downstream work pre-registers predictions against the substantial subset, so emitting only one would leave those unfalsifiable against this command's own output.
+
+**Exits non-zero when the run measured *nothing*.** An empty, unreadable, unparseable, or tool-call-free scope reports `UNMEASURABLE` with a reason rather than a clean zero; a zero row inside a measurable run is a real zero. Sessions that legitimately carry no tool call are the majority of transcripts — they are counted, listed by reason, and reported as a share, but they do not fail the run. The exit code answers "did this measure anything at all", **not** "is this corpus healthy"; a caller needing a health threshold must read `unmeasurable_share`, not `$?`.
+
+**It reports counts and refuses a verdict.** Non-use of a capability may be a forgotten affordance or a correct rejection, and nothing in the transcript distinguishes them; `--json` carries a `verdict: null` field and per-tool counts so narrower slices stay derivable. The refusal governs what this command renders — it is not, and cannot be, an enforcement boundary against verdicts computed downstream from these numbers.
+
+---
+
 ## nx command-context
 
 Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
