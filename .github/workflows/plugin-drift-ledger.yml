@@ -69,8 +69,27 @@ jobs:
           echo "pinned refs: $refs"
           # A marketplace with no pinned ref is a defect, not a free pass.
           test -n "$refs"
+          version=$(python3 -c "
+          import tomllib
+          print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])
+          ")
           for ref in $refs; do
-            git fetch --depth=1 origin "refs/tags/$ref:refs/tags/$ref"
+            if git fetch --depth=1 origin "refs/tags/$ref:refs/tags/$ref"; then
+              continue
+            fi
+            # RELEASE WINDOW (first hit at the 7.0.0 cut): on the release
+            # branch the pin names the ABOUT-TO-BE-CUT tag — created only
+            # after the PR merges — so ref==v<pyproject version> with the
+            # tag absent is the documented sequencing, not drift. The
+            # in-repo tests (_in_release_window) apply the same contract:
+            # in the window the ledger must be EMPTY, and that IS checked.
+            # Any other missing tag is still a hard failure.
+            if [ "$ref" = "v$version" ]; then
+              echo "release window: $ref == v<pyproject> and not yet cut — tolerated"
+            else
+              echo "pinned ref $ref does not exist and is NOT this release's own tag" >&2
+              exit 1
+            fi
           done
           git tag -l
 
