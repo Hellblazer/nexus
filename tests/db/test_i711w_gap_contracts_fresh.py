@@ -351,15 +351,53 @@ class TestItem12CatalogReadsAfterRename:
 
     # nexus-i711w.1 item 12
     def test_registry_row_moved(self, cat, renamed) -> None:
+        """A rename RETIRES the old name; it does not destroy it.
+
+        This assertion was inverted on 2026-07-31 by nexus-cecqy /
+        nexus-g8z8n (commit 1d854b7a): renameCollection used to DELETE the
+        old registry row, which threw away the provenance needed to revive
+        it, so a rename back onto the old name could not tell "retired by
+        this very rename" from "an unrelated collection that happens to
+        share the name". The old row now survives carrying
+        ``superseded_by``, and the revive path keys on exactly that.
+
+        The pin is kept STRICT in both directions rather than relaxed to
+        "not live": a retired row whose ``superseded_by`` did not point at
+        the new name would satisfy a weaker assertion while leaving the
+        revive unable to prove provenance — which is the defect the change
+        exists to prevent.
+        """
         assert cat.get_collection(self._NEW) is not None, (
             "new registry row must exist (CatalogRepository.java:2391)"
         )
-        assert cat.get_collection(self._OLD) is None, (
-            "old registry row must be deleted (CatalogRepository.java:2442)"
+        old_row = cat.get_collection(self._OLD)
+        assert old_row is not None, (
+            "old registry row must SURVIVE the rename as a retired row — "
+            "deleting it destroys the provenance the revive path needs "
+            "(nexus-cecqy, CatalogRepository.java)"
         )
-        names = {c.get("name") for c in cat.list_collections()}
-        assert self._NEW in names
-        assert self._OLD not in names
+        assert old_row.get("superseded_by") == self._NEW, (
+            f"the retired row must name its successor, got "
+            f"{old_row.get('superseded_by')!r} (expected {self._NEW!r})"
+        )
+        by_name = {c.get("name"): c for c in cat.list_collections()}
+        assert self._NEW in by_name, "the live name must be listed"
+        # The retired row DOES surface here — list_collections() is the raw
+        # registry projection, not a live-only view (CatalogRepository
+        # .listCollections has no superseded_by predicate and selects the
+        # column precisely so callers can branch on it; catalog doctor does
+        # exactly that at catalog_cmds/doctor.py:258,661). Asserted rather
+        # than merely tolerated, because before 1d854b7a a rename DELETED
+        # the old row, so a retired row could only come from an explicit
+        # supersede — every rename now produces one, and any consumer that
+        # treats a listed row as live sees a collection that is not there.
+        assert self._OLD in by_name, (
+            "the retired row is expected in the raw registry projection"
+        )
+        assert by_name[self._OLD].get("superseded_by") == self._NEW, (
+            "a listed retired row must carry its successor so callers can "
+            "tell it from a live collection"
+        )
 
     # nexus-i711w.1 item 12
     def test_manifest_chash_attribution_follows_rename(self, cat, renamed) -> None:
