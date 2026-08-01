@@ -893,7 +893,7 @@ def manifest_write_batch_hook(
     # not accumulate across a session.
     cat = get_catalog_writer()
     try:
-        _manifest_write_loop(cat, by_doc)
+        _manifest_write_loop(cat, by_doc, collection)
     finally:
         # Production get_catalog_writer() returns a CatalogWriter (has close);
         # tests may patch it to a raw Catalog (no close). Guard so the hot
@@ -918,7 +918,64 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
     ]
 
 
-def _manifest_write_loop(cat, by_doc) -> None:
+def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
+                              collection: str | None) -> None:
+    """Delete T3 rows this document's manifest no longer references (nexus-39upx).
+
+    A re-index that changes the extracted text writes chunks under NEW chashes —
+    content addressing working as designed — and ``atomic_manifest_replace``
+    correctly repoints the manifest at them. Nothing removed the old vector
+    rows, so they persisted, unreferenced by any manifest and still returned by
+    vector search, which reads T3 directly. That is how a corruption fix could
+    leave the corrupted text searchable while every catalog-level check
+    reported the document clean.
+
+    UNION GUARD, and it is the whole reason this is not a two-line delete:
+    identical chunk text collapses to ONE T3 row shared by every document that
+    contains it (CLAUDE.md, catalog/T3 split). "Not in THIS document's
+    manifest" is therefore NOT "unreferenced" — deleting on that basis would
+    silently remove chunks other documents still depend on. Each candidate is
+    checked against ``docs_for_chashes`` and kept if ANY other document
+    references it.
+
+    Fail-open throughout: a sweep that cannot prove a row is orphaned leaves it
+    alone. Over-retention is recoverable; over-deletion is not.
+    """
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+
+    if not collection:
+        return
+    new = {c.get("chash") for c in chunks if c.get("chash")}
+    dropped = {h for h in before if h and h not in new}
+    if not dropped:
+        return
+    try:
+        refs = cat.docs_for_chashes(sorted(dropped)) or {}
+    except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_no_reverse_lookup",
+            doc_id=doc_id, candidates=len(dropped))
+        return
+    orphaned = [h for h in sorted(dropped)
+                if not any(d != doc_id for d in (refs.get(h) or []))]
+    shared = len(dropped) - len(orphaned)
+    if not orphaned:
+        return
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
+
+        make_t3().get_collection(collection).delete(ids=orphaned)
+    except Exception as exc:  # noqa: BLE001 — the index must not fail on cleanup
+        structlog.get_logger().warning(
+            "superseded_sweep_failed", doc_id=doc_id, collection=collection,
+            orphans=len(orphaned), error=str(exc))
+        return
+    structlog.get_logger().info(
+        "superseded_vectors_swept", doc_id=doc_id, collection=collection,
+        deleted=len(orphaned), kept_shared=shared)
+
+
+def _manifest_write_loop(cat, by_doc, collection: str | None = None) -> None:
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc
@@ -1018,7 +1075,22 @@ def _manifest_write_loop(cat, by_doc) -> None:
             # than the first, so the atomic-replace path is safe for the
             # streaming PDF / doc_indexer paths.
             if any(c["position"] == 0 for c in chunks):
+                # nexus-39upx: capture what the manifest referenced BEFORE the
+                # replace, so the vector rows that fall out of it can be swept.
+                # atomic_manifest_replace already fixes the CATALOG side of a
+                # shrink-reindex (the comment above); the T3 side was never
+                # done. Because a re-extraction that CHANGES text produces new
+                # chashes, the old rows stay in T3 referenced by nothing — and
+                # vector search reads T3, not the manifest, so superseded text
+                # keeps being retrieved while `nx catalog show` looks clean.
+                # Measured on 1.14.19 after the nexus-gtltb fix: 17 such rows.
+                _before: set[str] = set()
+                try:
+                    _before = {h for h in (cat.get_chunk_chashes(doc_id) or []) if h}
+                except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
+                    _before = set()
                 _manifest_write_with_retry(cat.atomic_manifest_replace, doc_id, chunks)
+                _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does
