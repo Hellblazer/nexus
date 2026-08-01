@@ -16,10 +16,24 @@
 # through every gate and were dead-on-arrival for cloud boxes.
 #
 # Gate-green on the engine does NOT mean client-visible. This gate is the
-# client-visible half. EXPECTED RED until the conexus edge passes the
-# engine's /version fields through and honors the ez5.1 /health contract
-# (or the client's /health consumer is changed deliberately) — a red run
-# here is the mechanized relay evidence, not a flake.
+# client-visible half.
+#
+# STATUS CHANGED 2026-08-01 — READ THIS BEFORE INTERPRETING A RED RUN.
+# This gate was written EXPECTED RED, and stayed red for as long as the
+# conexus edge stubbed /version and auth-gated /health. That condition is
+# now MET: on the engine-service-v0.1.60 deploy, conexus reported all four
+# legs passing with a TRUE EXIT 0 (the v0.1.59 run's exit code had been
+# swallowed by a shell redirect, so its PASS was only the sentinel line).
+# Independently confirmed from a dev box: an UNAUTHENTICATED GET of
+# https://api.conexus-nexus.com/version returns release_version, embedding_mode
+# and embedding_models.
+#
+# SO THE MEANING OF RED HAS INVERTED. A red run is no longer expected
+# evidence to be relayed — it is a REGRESSION of the public edge, and it
+# means the three client features named below have gone dead on arrival for
+# cloud boxes again. Do not read it as the known-pending state; that reading
+# is exactly what the old header would now license, which is why the header
+# was changed rather than left as history.
 #
 # Legs (all read-only; no writes, no config mutation, safe on a live box):
 #   A  /version contract through the edge: 200, release_version parseable
