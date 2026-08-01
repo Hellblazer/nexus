@@ -220,13 +220,14 @@ class TestPairsWithSubagentStart:
     def test_hand_written_row_must_carry_the_colon_verbatim(self, tmp_path: Path) -> None:
         """The HAND-WRITTEN path, which is what agents use while the hook is inert.
 
-        AGENTS.md told agents for weeks that ``expectations_expect``
-        validates ``^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`` and that a
-        plugin-namespaced type "must have its colon sanitized before it
-        is accepted at all". The charset at expectations.sh:137 actually
-        includes ``:``. Following that guidance was itself the thing that
-        produced ``recognized=0`` — four consecutive sessions read the
-        result as "the guard cannot recognise anything" (nexus-nu7fo).
+        The colon charset is the whole difference between a row that
+        pairs and one that cannot. This pins the POST-RELEASE contract:
+        the installed copy at v6.18.1 still rejects ``:`` outright
+        (rc=2, verified against the live install), so at the pinned tag
+        ``recognized=0`` is structural — the start stamp writes
+        ``agent_type`` WITH the colon while the installed recogniser
+        refuses colon-bearing types. nexus-mk3tw / nexus-qc4p1 lift that,
+        and this test is what stops it regressing once shipped.
 
         Two arms, one difference: the colon.
         """
@@ -247,9 +248,11 @@ class TestPairsWithSubagentStart:
     ) -> None:
         """The control arm. Sanitizing destroys the only shared key.
 
-        This is the exact signature of the four "broken guard" sessions,
-        and it is a DOCUMENTATION defect, not a design defect — which is
-        why it is pinned rather than merely described.
+        This is the exact signature of the four "broken guard" sessions.
+        At the pinned tag it is unavoidable; after the release it becomes
+        avoidable and therefore worth pinning, so that a future
+        re-narrowing of the charset shows up here rather than as another
+        run of silently unrecognised dispatches.
         """
         proc = _lib_call(
             "expectations_expect", tmp_path, SESSION,
