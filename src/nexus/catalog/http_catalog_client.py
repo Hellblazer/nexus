@@ -1082,15 +1082,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return self._docs_from(self._get("/list", **params))
         # limit == 0 means UNBOUNDED (canonical semantics).
         if content_type:
-            # The service's content_type branch (CatalogHandler.handleList ->
-            # documentsByContentType) ignores limit/offset and returns ALL matching rows
-            # in one shot. A pagination loop would re-fetch the same full set every page
-            # and never terminate, so issue a single unbounded request. (Service-side
-            # content_type+limit interaction is a CA-4 / P4 item: nexus-pwclh.)
+            # nexus-xoimv: the service's content_type branch (CatalogHandler.handleList ->
+            # documentsByContentType) now HONORS an explicit limit/offset — the accept-
+            # and-drop behaviour nexus-pwclh documented here is fixed. But this call
+            # deliberately sends neither: omitting them is the documented "absent from
+            # the query string" contract, which stays UNBOUNDED on every filter branch
+            # (same as before xoimv, now by design instead of by omission) — so a single
+            # request still returns ALL matching rows in one shot and a pagination loop
+            # here would just re-fetch the same full set every page and never terminate.
             return self._docs_from(self._get("/list", content_type=content_type))
-        # Unfiltered: the service respects limit/offset (listDocuments), so paginate
-        # exhaustively rather than silently capping — a hardcoded cap would truncate
-        # large catalogs with no error.
+        # Unfiltered: the service always respects limit/offset here (listDocuments
+        # defaults limit to 200 whether or not the caller sends one — unlike the filter
+        # branches above, which stay unbounded when limit is absent, per nexus-xoimv), so
+        # paginate exhaustively rather than silently capping — a hardcoded cap would
+        # truncate large catalogs with no error.
         page = 1000
         out: list[CatalogEntry] = []
         cur = offset

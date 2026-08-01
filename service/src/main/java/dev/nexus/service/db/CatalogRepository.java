@@ -71,9 +71,35 @@ public final class CatalogRepository {
 
     /**
      * RDR-159 P-1a: the fixed set of schema-qualified relations the migration
-     * count-verification may count. Mirrors {@code nexus.migration.orchestrator
-     * ._VERIFY_TABLES} on the Python side. A relation not in this set is never
+     * count-verification may count. A relation not in this set is never
      * counted (whitelist guard against arbitrary relation names).
+     *
+     * <p>The javadoc previously claimed this mirrors {@code
+     * nexus.migration.orchestrator._VERIFY_TABLES} on the Python side; that
+     * module (and the whole SQLite-era migration orchestrator it lived in)
+     * was deleted as part of the RDR-158 P4 SQLite retirement, so the symbol
+     * no longer exists to mirror. There is currently no {@code src/nexus/}
+     * caller of {@link dev.nexus.service.http.CatalogHandler}'s {@code
+     * /verify/relation-counts} route at all (the Python
+     * {@code relation_counts()} client method is presently callerless) — this
+     * set is retained for whichever migration-verify caller replaces the
+     * retired orchestrator.
+     *
+     * <p><b>nexus-20agh:</b> deliberately does NOT include {@code
+     * nexus.chash_index} — dropped by the {@code rdr187-001-drop-chash-index}
+     * changeset (RDR-187). Unlike {@link
+     * SchemaMigrator#CHASH_LEN_CONSTRAINTS}'s {@code chash_index} entry (which
+     * is a PRE-migration preflight that genuinely runs, on an aged box, in the
+     * window before that same changeset applies), this whitelist backs an
+     * HTTP-served verification route, and {@code Main} runs {@link
+     * SchemaMigrator#migrate} to completion — including the drop — BEFORE the
+     * HTTP server ever binds. So no caller, aged box or otherwise, can ever
+     * reach this route while {@code chash_index} still exists: there is no
+     * mid-migration window here to protect, only a table that is unqualified
+     * gone by the time anything could ask about it. Whitelisting it anyway
+     * would guarantee an unhandled "relation does not exist" SQL error the
+     * one time a stale caller's relation list still names it, instead of the
+     * intended silent-omit/INDETERMINATE contract below.
      */
     private static final Set<String> VERIFY_RELATIONS = Set.of(
         "nexus.memory",
@@ -83,7 +109,6 @@ public final class CatalogRepository {
         "nexus.topic_links",
         "nexus.hook_failures",
         "nexus.nx_answer_runs",
-        "nexus.chash_index",
         "nexus.catalog_owners",
         "nexus.catalog_documents",
         "nexus.catalog_collections",
@@ -1270,6 +1295,37 @@ public final class CatalogRepository {
      * — the bounds check is skipped in that case, mirroring the local
      * Python's {@code if entry.chunk_count and chunk_idx >= entry.chunk_count}.
      *
+     * <p><b>Staleness invariant (nexus-ojazb).</b> This bounds check trusts
+     * {@code documents.chunk_count} as an up-to-date mirror of the manifest
+     * ({@code catalog_document_chunks}) row count. That is true for every
+     * PRODUCTION manifest writer: {@link #writeManifestRows} (REPLACE, used by
+     * {@code writeManifest}/{@code writeManifestMany}), {@link
+     * #appendManifestChunks}, and {@link #purgeManifest} each fold {@code
+     * documents.chunk_count} in the SAME transaction as their manifest
+     * delete/insert (nexus-b6enc F5, nexus-e4gel), so a manifest written
+     * through any of those three has no read-after-write staleness window —
+     * pinned by {@code resolveChunk_writtenThroughNormalManifestPath_resolvesLastChunk}.
+     * {@link #buildUpdateDocumentQuery} (the {@code /update} endpoint)
+     * independently re-derives the count from the manifest via {@link
+     * #reDerivedChunkCount} whenever the caller does not name {@code
+     * chunk_count} explicitly, so a plain document update cannot desync it
+     * either.
+     *
+     * <p><b>Residual exposure.</b> The ETL import legs — {@link #importChunk}
+     * and {@link #importChunksBatch} (the {@code POST /v1/catalog/import/chunk}
+     * route) — insert/upsert manifest rows directly and do NOT fold {@code
+     * chunk_count}; a document whose manifest was populated ONLY through that
+     * leg (with no explicit {@code chunk_count} on registration/update and no
+     * follow-up {@link #resyncChunkCount}) can have a stale (typically 0,
+     * skipping the bounds check) count relative to the true manifest size.
+     * As of this writing that route has no caller anywhere in {@code
+     * src/nexus/} — it exists for a since-retired SQLite-era migration chain
+     * (RDR-158 P4) — so the window is real but currently unexercised in
+     * production. A future ETL/migration caller of {@code import/chunk} MUST
+     * call {@link #resyncChunkCount} (or set an explicit {@code chunk_count})
+     * once its import completes, or reintroduce the same fold this method's
+     * three production writers already carry.
+     *
      * @param tenant      tenant identifier
      * @param docTumbler  the document tumbler (chunk segment already stripped
      *                    by the caller — {@link dev.nexus.service.http.CatalogHandler})
@@ -1870,40 +1926,77 @@ public final class CatalogRepository {
         }
     }
 
-    /** Documents by physical_collection. */
-    public List<Map<String, Object>> documentsByCollection(String tenant, String collection) {
+    /**
+     * nexus-xoimv: {@code limit <= 0} means UNBOUNDED (no LIMIT clause
+     * applied beyond this large sentinel) — the absent-from-query-string
+     * default every {@code documentsBy*} filter method below preserves, so an
+     * existing caller that never sent {@code limit} keeps its pre-xoimv
+     * unbounded behaviour. An explicit positive {@code limit} is honored
+     * verbatim. {@code offset} is applied unconditionally (0 is the standard
+     * no-op). Kept as a real, very large {@code LIMIT} value (rather than
+     * omitting the clause) so every filter method can share one
+     * {@code .orderBy(TUMBLER).limit(n).offset(o)} shape — the same
+     * ternary-into-limit() convention {@link #listDocuments} already uses.
+     */
+    private static final int NO_LIMIT = Integer.MAX_VALUE;
+
+    /** Documents by physical_collection. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByCollection(
+            String tenant, String collection, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
-                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by file_path (exact). */
-    public List<Map<String, Object>> documentsByFilePath(String tenant, String filePath) {
+    /**
+     * Documents by file_path (exact). {@code limit <= 0} is unbounded
+     * (nexus-xoimv). Gained an explicit {@code ORDER BY tumbler} in the same
+     * change — previously unordered, so paginating it had no stable cursor.
+     */
+    public List<Map<String, Object>> documentsByFilePath(
+            String tenant, String filePath, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by source_uri (exact). */
-    public List<Map<String, Object>> documentsBySourceUri(String tenant, String uri) {
+    /**
+     * Documents by source_uri (exact). {@code limit <= 0} is unbounded
+     * (nexus-xoimv). Gained an explicit {@code ORDER BY tumbler} in the same
+     * change — previously unordered, so paginating it had no stable cursor.
+     */
+    public List<Map<String, Object>> documentsBySourceUri(
+            String tenant, String uri, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by owner tumbler prefix. */
-    public List<Map<String, Object>> documentsByOwner(String tenant, String ownerPrefix) {
+    /** Documents by owner tumbler prefix. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByOwner(
+            String tenant, String ownerPrefix, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1915,34 +2008,44 @@ public final class CatalogRepository {
      * {@code GET /list?owner=X&file_path=Y}: the owner-only path returns the
      * full owner list, which caused {@code HttpCatalogClient.by_file_path} to
      * mis-attribute a new file to an unrelated doc (silent manifest overwrite).
+     *
+     * <p>{@code limit <= 0} is unbounded (nexus-xoimv).
      */
     public List<Map<String, Object>> documentsByOwnerAndFilePath(
-            String tenant, String ownerPrefix, String filePath) {
+            String tenant, String ownerPrefix, String filePath, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by content_type. */
-    public List<Map<String, Object>> documentsByContentType(String tenant, String contentType) {
+    /** Documents by content_type. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByContentType(
+            String tenant, String contentType, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by corpus. */
-    public List<Map<String, Object>> documentsByCorpus(String tenant, String corpus) {
+    /** Documents by corpus. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByCorpus(
+            String tenant, String corpus, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.CORPUS.eq(corpus).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1987,42 +2090,6 @@ public final class CatalogRepository {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
                .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
-    }
-
-    /**
-     * Look up a document by the T3 {@code doc_id} carried in its metadata
-     * (nexus-tz1cx).
-     *
-     * <p>THE QUESTION THIS ANSWERS DID NOT EXIST SERVER-SIDE. The local
-     * catalog's {@code by_doc_id} ran
-     * {@code SELECT ... WHERE json_extract(metadata,'$.doc_id') = ?}; the
-     * service client had no such predicate to call, so it fell back to a
-     * TUMBLER resolve — a different question entirely, which returned null for
-     * exactly the inputs the method exists to find. Six live callers
-     * (store_hook's idempotency check and its store_delete ghost compensation
-     * among them) read that null as "no such document" and silently skipped
-     * their work.
-     *
-     * <p>Tombstone-filtered and tenant-scoped like every sibling read. When
-     * more than one live document carries the same {@code doc_id} — possible,
-     * since nothing constrains it — the lowest tumbler wins, deterministically,
-     * rather than an arbitrary row.
-     *
-     * @return the document row (same shape as {@link #getDocument}) or null
-     */
-    public Map<String, Object> documentByMetaDocId(String tenant, String docId) {
-        if (docId == null || docId.isBlank()) return null;
-        return tenantScope.withTenant(tenant, ctx -> {
-            var r = ctx.select(documentFields())
-                       .from(CATALOG_DOCUMENTS)
-                       .where(DSL.field("catalog_documents.metadata ->> 'doc_id'", String.class).eq(docId)
-                              .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
-                              .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                       .orderBy(CATALOG_DOCUMENTS.TUMBLER)
-                       .limit(1)
-                       .fetchOne();
-            return r != null ? docRowFromRecord(r.intoMap()) : null;
-        });
     }
 
     /**

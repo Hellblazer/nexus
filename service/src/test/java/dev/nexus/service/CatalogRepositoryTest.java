@@ -508,13 +508,13 @@ class CatalogRepositoryTest {
             "corpus", "knowledge", "file_path", "owner7/b.pdf"));
 
         // Exact existing path under the owner: exactly one, the right one.
-        var hit = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/b.pdf");
+        var hit = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/b.pdf", 0, 0);
         assertThat(hit).hasSize(1);
         assertThat(hit.get(0).get("tumbler")).isEqualTo("7.2");
 
         // Brand-new path under a POPULATED owner: zero (this is what stops the
         // corruption — the client no longer receives docs[0] of the owner).
-        var miss = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/brand-new.pdf");
+        var miss = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/brand-new.pdf", 0, 0);
         assertThat(miss).isEmpty();
     }
 
@@ -583,6 +583,23 @@ class CatalogRepositoryTest {
         assertThat(counts.get("nexus.catalog_documents")).isEqualTo(0L);
     }
 
+    @Test @Order(43)
+    void migration_relationCounts_droppedChashIndex_isIndeterminateNotException() {
+        // nexus-20agh: nexus.chash_index was dropped (RDR-187) and is no
+        // longer in VERIFY_RELATIONS. A caller (e.g. a stale relations list
+        // from before the drop) requesting it must get the same silent-omit
+        // treatment as any other unwhitelisted relation — an absent key the
+        // caller reads as INDETERMINATE — never an unhandled SQL exception
+        // from querying a table that no longer exists in this (post-drop,
+        // fully-migrated) integration schema.
+        var counts = repo.relationCounts(TENANT_A, List.of(
+            "nexus.chash_index",
+            "nexus.catalog_documents"
+        ));
+        assertThat(counts).doesNotContainKey("nexus.chash_index");
+        assertThat(counts).containsKey("nexus.catalog_documents");
+    }
+
     @Test @Order(16)
     void document_documentsByCollection() {
         repo.upsertDocument(TENANT_A, Map.of(
@@ -592,9 +609,72 @@ class CatalogRepositoryTest {
             "corpus", "knowledge",
             "physical_collection", "knowledge__unit_test_coll"
         ));
-        var docs = repo.documentsByCollection(TENANT_A, "knowledge__unit_test_coll");
+        var docs = repo.documentsByCollection(TENANT_A, "knowledge__unit_test_coll", 0, 0);
         assertThat(docs).hasSize(1);
         assertThat(docs.get(0).get("tumbler")).isEqualTo("4.1");
+    }
+
+    /**
+     * nexus-xoimv: repository-level signature check — {@code limit <= 0} is
+     * unbounded, an explicit positive {@code limit} is honored, and
+     * {@code limit}+{@code offset} together page without overlap or gap
+     * (ORDER BY tumbler gives a stable cursor). The HTTP-layer equivalent
+     * across all seven filter branches lives in
+     * {@code CatalogHandlerListPaginationTest}; this is the direct repo-level
+     * sanity check for the same new signature.
+     */
+    @Test @Order(17)
+    void documentsByCollection_limitAndOffset_pageWithoutOverlap() {
+        final String coll = "knowledge__xoimv_page_coll";
+        for (int i = 1; i <= 5; i++) {
+            repo.upsertDocument(TENANT_A, Map.of(
+                "tumbler", "4.20." + i, "title", "Page Doc " + i,
+                "content_type", "paper", "corpus", "knowledge",
+                "physical_collection", coll));
+        }
+        // limit <= 0: unbounded.
+        assertThat(repo.documentsByCollection(TENANT_A, coll, 0, 0)).hasSize(5);
+        // explicit limit: honored.
+        assertThat(repo.documentsByCollection(TENANT_A, coll, 2, 0)).hasSize(2);
+        // paging reconstructs the full ordered set with no overlap/gap.
+        var page1 = repo.documentsByCollection(TENANT_A, coll, 2, 0);
+        var page2 = repo.documentsByCollection(TENANT_A, coll, 2, 2);
+        var page3 = repo.documentsByCollection(TENANT_A, coll, 2, 4);
+        var reconstructed = new java.util.ArrayList<String>();
+        for (var page : List.of(page1, page2, page3)) {
+            for (var d : page) reconstructed.add((String) d.get("tumbler"));
+        }
+        assertThat(reconstructed).containsExactly(
+            "4.20.1", "4.20.2", "4.20.3", "4.20.4", "4.20.5");
+    }
+
+    /**
+     * nexus-xoimv: {@code documentsBySourceUri} pagination cannot be
+     * exercised through the HTTP handler ({@code catalog-016-source-uri-
+     * unique.xml} enforces a partial unique index on {@code (tenant_id,
+     * source_uri)} for any non-empty value, and a blank {@code source_uri}
+     * query param never routes into this branch in {@code handleList}) — so
+     * it is covered here, directly, using the empty-string {@code source_uri}
+     * every document without one carries by default (excluded from the
+     * unique index, so multiple live rows may share it).
+     */
+    @Test @Order(18)
+    void documentsBySourceUri_limitAndOffset_pageWithoutOverlap() {
+        final String tenant = "xoimv-source-uri-tenant";
+        for (int i = 1; i <= 4; i++) {
+            repo.upsertDocument(tenant, Map.of(
+                "tumbler", "8.30." + i, "title", "No-URI Doc " + i,
+                "content_type", "code", "corpus", "code"));
+        }
+        assertThat(repo.documentsBySourceUri(tenant, "", 0, 0)).hasSize(4);
+        assertThat(repo.documentsBySourceUri(tenant, "", 2, 0)).hasSize(2);
+        var page1 = repo.documentsBySourceUri(tenant, "", 2, 0);
+        var page2 = repo.documentsBySourceUri(tenant, "", 2, 2);
+        var reconstructed = new java.util.ArrayList<String>();
+        for (var page : List.of(page1, page2)) {
+            for (var d : page) reconstructed.add((String) d.get("tumbler"));
+        }
+        assertThat(reconstructed).containsExactly("8.30.1", "8.30.2", "8.30.3", "8.30.4");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2777,6 +2857,38 @@ class CatalogRepositoryTest {
         assertThat(result.get("chunk_index")).isEqualTo(999);
     }
 
+    @Test @Order(219)
+    void resolveChunk_writtenThroughNormalManifestPath_resolvesLastChunk() {
+        // nexus-ojazb pin: writeManifest (the normal production write path)
+        // folds documents.chunk_count = rows.size() in the SAME transaction
+        // (nexus-b6enc F5), so there is no staleness window for a manifest
+        // written through it — the last valid index (rows.size() - 1) must
+        // resolve, and rows.size() itself must be rejected as out of range.
+        // This does NOT cover the ETL importChunk/importChunksBatch legs,
+        // which do not fold chunk_count — see resolveChunk's javadoc.
+        final String tumbler = "9.9.103";
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", tumbler,
+            "title", "Normal Path Last Chunk Doc",
+            "content_type", "code",
+            "corpus", "code",
+            "physical_collection", "code__nexus__voyage-code-3__v1"
+        ));
+        repo.writeManifest(TENANT_A, tumbler, List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("np0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("np1"), "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", ch("np2"), "chunk_index", 2),
+            Map.<String, Object>of("position", 3, "chash", ch("np3"), "chunk_index", 3),
+            Map.<String, Object>of("position", 4, "chash", ch("np4"), "chunk_index", 4)
+        ));
+        var last = repo.resolveChunk(TENANT_A, tumbler, 4);
+        assertThat(last).as("last chunk (index rows.size()-1) must resolve").isNotNull();
+        assertThat(last.get("chunk_index")).isEqualTo(4);
+
+        var outOfRange = repo.resolveChunk(TENANT_A, tumbler, 5);
+        assertThat(outOfRange).as("index == rows.size() must be out of range").isNull();
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // importXBatch: ONE multi-row INSERT per method (nexus-1usso)
     // ══════════════════════════════════════════════════════════════════════════
@@ -3336,19 +3448,19 @@ class CatalogRepositoryTest {
             .as("listDocuments").containsExactly(live);
         assertThat(repo.countDocuments(tenant))
             .as("countDocuments — the inflated-counts symptom").isEqualTo(1);
-        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll")))
+        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll", 0, 0)))
             .as("documentsByCollection — the bead's own repro").containsExactly(live);
-        assertThat(tumblersOf(repo.documentsByFilePath(tenant, "/abs/dead.py")))
+        assertThat(tumblersOf(repo.documentsByFilePath(tenant, "/abs/dead.py", 0, 0)))
             .as("documentsByFilePath").isEmpty();
-        assertThat(tumblersOf(repo.documentsBySourceUri(tenant, "file:///abs/dead.py")))
+        assertThat(tumblersOf(repo.documentsBySourceUri(tenant, "file:///abs/dead.py", 0, 0)))
             .as("documentsBySourceUri").isEmpty();
-        assertThat(tumblersOf(repo.documentsByOwner(tenant, "9")))
+        assertThat(tumblersOf(repo.documentsByOwner(tenant, "9", 0, 0)))
             .as("documentsByOwner").containsExactly(live);
-        assertThat(tumblersOf(repo.documentsByOwnerAndFilePath(tenant, "9", "/abs/dead.py")))
+        assertThat(tumblersOf(repo.documentsByOwnerAndFilePath(tenant, "9", "/abs/dead.py", 0, 0)))
             .as("documentsByOwnerAndFilePath").isEmpty();
-        assertThat(tumblersOf(repo.documentsByContentType(tenant, "code")))
+        assertThat(tumblersOf(repo.documentsByContentType(tenant, "code", 0, 0)))
             .as("documentsByContentType").containsExactly(live);
-        assertThat(tumblersOf(repo.documentsByCorpus(tenant, "tombcorpus")))
+        assertThat(tumblersOf(repo.documentsByCorpus(tenant, "tombcorpus", 0, 0)))
             .as("documentsByCorpus").containsExactly(live);
         assertThat(tumblersOf(repo.descendants(tenant, "9")))
             .as("descendants").containsExactly(live);
@@ -3384,7 +3496,7 @@ class CatalogRepositoryTest {
         // simply empty, so without this the whole test passes against a
         // seeding bug — and it would have passed against the ORIGINAL defect
         // too if `live` were missing for an unrelated reason.
-        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll")))
+        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll", 0, 0)))
             .as("the LIVE doc is still returned — this test is not passing "
                 + "because the tenant is empty")
             .containsExactly(live);

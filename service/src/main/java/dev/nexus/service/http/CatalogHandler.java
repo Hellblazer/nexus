@@ -117,8 +117,6 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Documents ─────────────────────────────────────────────────
                 case "/register"              -> handleRegister(exchange, tenant, method);
                 case "/show"                  -> handleShow(exchange, tenant, method);
-                // nexus-tz1cx: metadata.doc_id lookup — NOT a tumbler resolve.
-                case "/by_doc_id"             -> handleByDocId(exchange, tenant, method);
                 case "/list"                  -> handleList(exchange, tenant, method);
                 case "/search"                -> handleSearch(exchange, tenant, method);
                 case "/update"                -> handleUpdate(exchange, tenant, method);
@@ -278,60 +276,70 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
-     * GET /v1/catalog/by_doc_id?doc_id=X — resolve a document by the T3
-     * {@code doc_id} carried in its metadata (nexus-tz1cx).
+     * GET /v1/catalog/list?limit=N&offset=N&content_type=X&collection=X&corpus=X&owner=X
      *
-     * <p>A DIFFERENT question from {@code /show}, which is a tumbler lookup.
-     * The client's {@code by_doc_id} had no route to ask this one and fell back
-     * to {@code /show}, answering null for every input the method exists to
-     * find. Response is the same document shape as {@code /show}; 404 on miss.
+     * <p>nexus-xoimv: {@code limit}/{@code offset} are now threaded through
+     * every filter branch below, not just the terminal (unfiltered) {@code
+     * listDocuments} call. THE SEMANTICS ARE DELIBERATELY ASYMMETRIC between
+     * "absent from the query string" and "explicit":
+     * <ul>
+     *   <li>{@code limit} ABSENT — the seven filter branches stay UNBOUNDED
+     *       (their pre-xoimv behaviour: {@code documentsByCollection} et al.
+     *       never took a limit at all). Naively defaulting the missing param
+     *       to 200 here — as the terminal branch always has — would silently
+     *       truncate every existing unbounded caller (the client's
+     *       {@code all_documents} treats {@code limit==0} as unbounded and
+     *       {@code list_by_collection} omits the param entirely when
+     *       {@code None}) from "return everything" to "return first page and
+     *       drop the rest", with no error to signal the shrinkage.</li>
+     *   <li>{@code limit} EXPLICIT — honored verbatim on every branch,
+     *       filtered or not.</li>
+     *   <li>The terminal (unfiltered) branch is UNCHANGED: it always applied
+     *       {@code limit=200} whether or not the caller sent one, and keeps
+     *       doing so here — only the seven filter branches gained the
+     *       absent/explicit distinction.</li>
+     *   <li>{@code offset} has no such asymmetry: absent defaults to 0 on
+     *       every branch, which is a no-op regardless of whether the branch
+     *       is bounded or unbounded, so it is passed straight through.</li>
+     * </ul>
      */
-    private void handleByDocId(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String docId = queryParam(exchange, "doc_id");
-        if (docId == null || docId.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"doc_id query param required\"}"); return;
-        }
-        var doc = repo.documentByMetaDocId(tenant, docId);
-        if (doc == null) {
-            HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return;
-        }
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(doc));
-    }
-
-    /** GET /v1/catalog/list?limit=N&offset=N&content_type=X&collection=X&corpus=X&owner=X */
     private void handleList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        int limit  = intParam(exchange, "limit",  200);
-        int offset = intParam(exchange, "offset", 0);
+        String rawLimit       = queryParam(exchange, "limit");
+        boolean limitExplicit = rawLimit != null && !rawLimit.isBlank();
+        int limit             = intParam(exchange, "limit",  200);
+        int offset            = intParam(exchange, "offset", 0);
+        // 0 signals "unbounded" to every documentsBy* filter method below —
+        // used ONLY when the caller did not send `limit` at all.
+        int filterLimit = limitExplicit ? limit : 0;
 
         // Optional filter dispatching
         String collection  = queryParam(exchange, "collection");
         String contentType = queryParam(exchange, "content_type");
-        String corpus      = queryParam(exchange, "corpus");
-        String owner       = queryParam(exchange, "owner");
-        String filePath    = queryParam(exchange, "file_path");
-        String sourceUri   = queryParam(exchange, "source_uri");
+        String corpus       = queryParam(exchange, "corpus");
+        String owner        = queryParam(exchange, "owner");
+        String filePath      = queryParam(exchange, "file_path");
+        String sourceUri     = queryParam(exchange, "source_uri");
 
         List<Map<String, Object>> docs;
         if (collection != null && !collection.isBlank()) {
-            docs = repo.documentsByCollection(tenant, collection);
+            docs = repo.documentsByCollection(tenant, collection, filterLimit, offset);
         } else if (contentType != null && !contentType.isBlank()) {
-            docs = repo.documentsByContentType(tenant, contentType);
+            docs = repo.documentsByContentType(tenant, contentType, filterLimit, offset);
         } else if (corpus != null && !corpus.isBlank()) {
-            docs = repo.documentsByCorpus(tenant, corpus);
+            docs = repo.documentsByCorpus(tenant, corpus, filterLimit, offset);
         } else if (owner != null && !owner.isBlank()
                    && filePath != null && !filePath.isBlank()) {
             // GH #1350 Fix B: owner+file_path must filter by BOTH. The owner-only
             // branch below ignored file_path and returned the full owner list,
             // driving the client's docs[0] mis-attribution (silent corruption).
-            docs = repo.documentsByOwnerAndFilePath(tenant, owner, filePath);
+            docs = repo.documentsByOwnerAndFilePath(tenant, owner, filePath, filterLimit, offset);
         } else if (owner != null && !owner.isBlank()) {
-            docs = repo.documentsByOwner(tenant, owner);
+            docs = repo.documentsByOwner(tenant, owner, filterLimit, offset);
         } else if (filePath != null && !filePath.isBlank()) {
-            docs = repo.documentsByFilePath(tenant, filePath);
+            docs = repo.documentsByFilePath(tenant, filePath, filterLimit, offset);
         } else if (sourceUri != null && !sourceUri.isBlank()) {
-            docs = repo.documentsBySourceUri(tenant, sourceUri);
+            docs = repo.documentsBySourceUri(tenant, sourceUri, filterLimit, offset);
         } else {
             docs = repo.listDocuments(tenant, limit, offset);
         }
@@ -477,9 +485,9 @@ public final class CatalogHandler implements HttpHandler {
             var doc = repo.getDocument(tenant, tumbler);
             docs = doc != null ? List.of(doc) : List.of();
         } else if (filePath != null && !filePath.isBlank()) {
-            docs = repo.documentsByFilePath(tenant, filePath);
+            docs = repo.documentsByFilePath(tenant, filePath, 0, 0);
         } else if (sourceUri != null && !sourceUri.isBlank()) {
-            docs = repo.documentsBySourceUri(tenant, sourceUri);
+            docs = repo.documentsBySourceUri(tenant, sourceUri, 0, 0);
         } else if (title != null && !title.isBlank()) {
             docs = repo.searchDocuments(tenant, title, null, 10);
         } else {

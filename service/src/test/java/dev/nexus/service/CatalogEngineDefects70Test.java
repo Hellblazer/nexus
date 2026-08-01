@@ -994,48 +994,6 @@ class CatalogEngineDefects70Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // nexus-tz1cx — metadata.doc_id lookup
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test
-    void tz1cx_documentByMetaDocIdFindsTheRow() {
-        String owner = freshOwner();
-        String docId = ch("defects70-bydocid");
-        String t = repo.registerDocument(TENANT, owner, Map.of(
-            "title", "by-doc-id", "content_type", "knowledge",
-            "source_uri", "file:///defects70/bydocid/doc.md",
-            "meta", Map.of("doc_id", docId, "other", "value")));
-
-        var found = repo.documentByMetaDocId(TENANT, docId);
-        assertThat(found).isNotNull();
-        assertThat(found.get("tumbler")).isEqualTo(t);
-    }
-
-    @Test
-    void tz1cx_documentByMetaDocIdMissesCleanly() {
-        assertThat(repo.documentByMetaDocId(TENANT, ch("defects70-nosuch-docid"))).isNull();
-        assertThat(repo.documentByMetaDocId(TENANT, "")).isNull();
-    }
-
-    @Test
-    void tz1cx_documentByMetaDocIdSkipsTombstoned() {
-        String owner = freshOwner();
-        String docId = ch("defects70-bydocid-tomb");
-        String t = repo.registerDocument(TENANT, owner, Map.of(
-            "title", "by-doc-id-tomb", "content_type", "knowledge",
-            "source_uri", "file:///defects70/bydocidtomb/doc.md",
-            "meta", Map.of("doc_id", docId)));
-        assertThat(repo.documentByMetaDocId(TENANT, docId)).isNotNull();
-
-        assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
-
-        assertThat(repo.documentByMetaDocId(TENANT, docId))
-            .as("the doc_id lookup is tombstone-filtered like every sibling read")
-            .isNull();
-        assertThat(t).isNotBlank();
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
     // nexus-jqvzk — gc-audit surface for destructive T3 operations
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -1282,7 +1240,7 @@ class CatalogEngineDefects70Test {
             .doesNotContainKey("content_hash");
 
         // Both are reachable through the collection scan the verb walks.
-        assertThat(repo.documentsByCollection(TENANT, coll))
+        assertThat(repo.documentsByCollection(TENANT, coll, 0, 0))
             .extracting(d -> d.get("tumbler"))
             .contains(rebuildable, registerOnly);
     }
@@ -1296,7 +1254,7 @@ class CatalogEngineDefects70Test {
             injectDamagedDoc("9003." + i, coll, i % 3, "{}");
         }
 
-        var all = repo.documentsByCollection(TENANT, coll);
+        var all = repo.documentsByCollection(TENANT, coll, 0, 0);
         assertThat(all).hasSize(70);
 
         java.util.Set<Object> paged = new java.util.LinkedHashSet<>();
