@@ -341,8 +341,19 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
     entry visible to ``nx catalog list`` until the next ``nx catalog gc``.
     Eventual consistency surprised users who expected delete to be atomic.
     Skipped silently when the catalog is uninitialised.
+
+    *doc_ids* are T3 chunk natural ids (chashes), not tumblers — nexus-5axey:
+    this used to call ``by_doc_id(doc_id)``, a TUMBLER-only lookup on the
+    engine (settled wji11 contract), so it silently mismatched every id here
+    and the reap never fired. :func:`resolve_knowledge_doc_for_chash` is the
+    chash-appropriate replacement (``docs_for_chashes``-backed); it also
+    applies the ``content_type == "knowledge"`` / no ``file_path`` filter
+    this reap always intended (store_put-origin entries only), so a T3
+    delete cannot reach into an unrelated code/docs catalog document that
+    happens to share the deleted chunk's content.
     """
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.store_hook import resolve_knowledge_doc_for_chash  # noqa: PLC0415 — deferred, avoids import cycle
 
     reader = None
     writer = None
@@ -356,7 +367,9 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
             return
         writer = make_catalog_writer()
         for doc_id in doc_ids:
-            entry = reader.by_doc_id(doc_id)
+            entry = resolve_knowledge_doc_for_chash(
+                reader, doc_id, log_event="catalog_reap"
+            )
             if entry is not None:
                 writer.delete_document(entry.tumbler)
     except Exception:  # noqa: BLE001 — best-effort catalog reap; failure logged at debug, cleanup in finally

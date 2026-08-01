@@ -568,21 +568,14 @@ class TestStoreDeleteAsymmetry:
         assert del_result.startswith("Deleted:"), del_result
         assert "WARNING" not in del_result
 
-        # nexus-tz1cx INVERTED PIN — strict-equivalent, deliberately NARROWED
-        # from a function-level xfail (terminal-deletion critique): the four
-        # setup asserts above stay LIVE so an unrelated store_put/store_delete
-        # regression cannot hide behind an absorbed AssertionError.
-        # store_delete_catalog_cleanup resolves via reader.by_doc_id, which
-        # tumbler-resolves on the service client and returns None for chash
-        # ids — the compensation silently no-ops and the row survives (third
-        # live confirmation, 2026-07-30; escalation recorded on the bead).
-        rows_after = _catalog_rows(catalog_env, "b6enc-del")
-        assert rows_after != [], (
-            "nexus-tz1cx appears FIXED: the catalog row was cleaned up. "
-            "Remove this inversion and restore the original contract — "
-            "assert _catalog_rows(catalog_env, 'b6enc-del') == [] and "
-            "_manifest_rows(catalog_env, tumbler) == []"
-        )
+        # nexus-tz1cx FIXED by nexus-5axey: store_delete_catalog_cleanup now
+        # resolves the chash via resolve_knowledge_doc_for_chash
+        # (docs_for_chashes-backed) instead of by_doc_id (TUMBLER-only on
+        # the service client, which always mismatched a chash and made the
+        # compensation a silent no-op). The catalog row + its manifest are
+        # both gone.
+        assert _catalog_rows(catalog_env, "b6enc-del") == []
+        assert _manifest_rows(catalog_env, tumbler) == []
 
     def test_delete_leaves_file_backed_docs_alone(
         self, catalog_env: Path, local_t3: T3Database,

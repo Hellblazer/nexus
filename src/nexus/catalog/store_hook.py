@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 
+import httpx
 import structlog
 
 _log = structlog.get_logger(__name__)
@@ -57,6 +58,69 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     return doc_id, [metadata]
 
 
+def resolve_knowledge_doc_for_chash(reader, chash: str, *, log_event: str):
+    """Resolve *chash* to the single store_put-origin catalog document it
+    identifies, or ``None`` if there is no match or the match is ambiguous.
+
+    nexus-5axey: ``by_doc_id`` is a TUMBLER-only lookup on the engine (the
+    settled wji11 contract: tumbler is the only document identity); it
+    cannot answer "which document has this content-chash in its
+    ``meta.doc_id``" — that used to alias ``resolve()`` and simply mismatch
+    every chash-shaped input. This is the chash-appropriate replacement,
+    built on :meth:`docs_for_chashes` (chash -> ``[doc_id, ...]``, the
+    reverse-manifest-lookup primitive present on every deployed engine).
+
+    chash -> document is one-to-many in general: identical chunk text in a
+    collection collapses to one T3 row, and the manifest can point many
+    documents at that shared chash (RDR-108's collapsing-by-design). For
+    store_put / memory-promote-origin documents specifically (identified by
+    ``content_type == "knowledge"`` with no ``file_path`` — the same filter
+    the pre-existing delete-path cleanup already applied) an UNAMBIGUOUS
+    single match is trusted. More than one candidate is treated
+    conservatively as "no safe match" — this function returns ``None`` and
+    logs at WARNING — rather than acting on an arbitrary pick or every
+    candidate: acting on the wrong one (or deleting/reconciling onto all of
+    them) is a worse outcome than leaving one ghost row for the periodic
+    ``nx catalog gc`` sweep to reap.
+
+    *log_event* names the calling site (e.g. ``"catalog_store_hook_dedup"``)
+    so the ambiguity warning is attributable to dedup vs. delete-path vs.
+    tombstone-reap without three near-identical log statements.
+
+    A malformed *chash* (not the hex digest production always produces —
+    e.g. a legacy non-hex meta.doc_id) 400s at the wire rather than simply
+    missing; that specific case is treated the same as a miss (``None``,
+    WARNING logged). Anything else (connectivity failure, 5xx, ...)
+    PROPAGATES — nexus-f1itv/ou4tb's fail-loud contract depends on this
+    reaching the caller's own broad except (WARNING + audit row), not
+    being silently absorbed into "proceed as if nothing existed".
+    """
+    try:
+        by_chash = reader.docs_for_chashes([chash])
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400:
+            raise
+        # 400 == the wire rejected *chash* itself (not valid hex) — a
+        # malformed input can never resolve, so it is a miss, not a fault.
+        _log.warning(f"{log_event}_malformed_chash", chash=chash, error=str(exc))
+        return None
+    matches = by_chash.get(chash, [])
+    candidates = []
+    for tumbler in matches:
+        entry = reader.resolve(tumbler)
+        if entry is not None and entry.content_type == "knowledge" and not entry.file_path:
+            candidates.append(entry)
+    if len(candidates) > 1:
+        _log.warning(
+            f"{log_event}_ambiguous_chash",
+            chash=chash,
+            candidate_count=len(candidates),
+            tumblers=[str(c.tumbler) for c in candidates],
+        )
+        return None
+    return candidates[0] if candidates else None
+
+
 def _find_ghost_by_title(reader, owner, title: str):
     """Return an existing GHOST catalog entry under *owner* whose title
     exactly matches *title*, or ``None``.
@@ -64,8 +128,9 @@ def _find_ghost_by_title(reader, owner, title: str):
     GH #1370 Defect 4a: a pre-existing catalog entry with the same
     title (e.g. a ghost with ``chunk_count=0`` and empty ``head_hash``,
     left behind by a pre-migration catalog or an earlier failed index)
-    is invisible to ``by_doc_id`` — that entry's ``meta.doc_id`` predates
-    this content's hash. Without this lookup, ``catalog_store_hook``
+    is invisible to :func:`resolve_knowledge_doc_for_chash` — that entry's
+    ``meta.doc_id`` predates this content's hash. Without this lookup,
+    ``catalog_store_hook``
     mints a brand-new document with a fresh tumbler and the ghost is
     never reconciled.
 
@@ -120,8 +185,8 @@ def catalog_store_hook_tracked(
     ``T3Database.put()`` as ``catalog_doc_id`` for chunk-write-time
     embedding (RDR-101 Phase 3 PR δ Stage B.4); *created* is True only
     when this call MINTED a brand-new document row (the
-    ``writer.register`` path). Dedup hits (``by_doc_id`` or the
-    GH #1370 ghost-by-title reconcile) return ``created=False`` so the
+    ``writer.register`` path). Dedup hits (:func:`resolve_knowledge_doc_for_chash`
+    or the GH #1370 ghost-by-title reconcile) return ``created=False`` so the
     nexus-b6enc C2 compensation never deletes a pre-existing row the
     put deduped onto. Returns ``("", False)`` when an error occurs, or
     in the SQLite opt-out mode
@@ -131,8 +196,10 @@ def catalog_store_hook_tracked(
 
     ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6;
     the FULL ``sha256(content)`` hex per RDR-180). It is consulted for legacy
-    ``meta.doc_id`` dedup via ``cat.by_doc_id``: catalog entries
-    written before Phase 4 stored the legacy 16-char sha256-of-
+    ``meta.doc_id`` dedup via :func:`resolve_knowledge_doc_for_chash`
+    (nexus-5axey; ``docs_for_chashes``-backed, since ``by_doc_id`` is a
+    TUMBLER-only lookup and cannot answer a chash-keyed question): catalog
+    entries written before Phase 4 stored the legacy 16-char sha256-of-
     collection-and-title under ``meta.doc_id``, so this lookup misses
     on those legacy entries and the hook re-registers. When that
     happens (or when this is the first-ever store for *title*), a
@@ -163,8 +230,13 @@ def catalog_store_hook_tracked(
         if reader is None:
             return "", False
 
-        # Dedup by chunk_chroma_id stored in legacy meta.doc_id.
-        existing = reader.by_doc_id(doc_id)
+        # Dedup by chash stored in meta.doc_id. nexus-5axey: by_doc_id is a
+        # TUMBLER-only lookup on the engine and always mismatched this
+        # chash-shaped doc_id; resolve_knowledge_doc_for_chash uses
+        # docs_for_chashes, the chash-appropriate reverse lookup.
+        existing = resolve_knowledge_doc_for_chash(
+            reader, doc_id, log_event="catalog_store_hook_dedup"
+        )
         if existing is not None:
             return str(existing.tumbler), False
 
@@ -381,7 +453,14 @@ def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
         reader = make_catalog_reader()
         if reader is None:
             return "", ""
-        entry = reader.by_doc_id(chash_doc_id)
+        # nexus-5axey: by_doc_id is a TUMBLER-only lookup (settled wji11
+        # contract) and always mismatched this chash-shaped id;
+        # resolve_knowledge_doc_for_chash is the chash-appropriate lookup
+        # and already applies the content_type == "knowledge" / no
+        # file_path filter below.
+        entry = resolve_knowledge_doc_for_chash(
+            reader, chash_doc_id, log_event="store_delete_catalog_lookup"
+        )
     except Exception as exc:  # noqa: BLE001 — lookup failure must not mask the successful T3 delete; surfaced to caller
         _log.warning(
             "store_delete_catalog_lookup_failed",
@@ -395,7 +474,7 @@ def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
             except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally
                 pass
 
-    if entry is None or entry.content_type != "knowledge" or entry.file_path:
+    if entry is None:
         return "", ""
 
     tumbler = str(entry.tumbler)

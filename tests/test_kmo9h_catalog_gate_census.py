@@ -147,8 +147,11 @@ def test_raw_catalog_construction_census_is_closed():
 
 
 class _Entry:
-    def __init__(self, tumbler: str) -> None:
+    def __init__(self, tumbler: str, *, content_type: str = "knowledge",
+                 file_path: str = "") -> None:
         self.tumbler = tumbler
+        self.content_type = content_type
+        self.file_path = file_path
 
 
 class _FakeHttpCatalogClient:
@@ -163,6 +166,21 @@ class _FakeHttpCatalogClient:
 
     def by_doc_id(self, doc_id):
         return self.by_doc_id_map.get(doc_id)
+
+    def docs_for_chashes(self, chashes):
+        # nexus-5axey: the reap's chash-appropriate lookup. Keyed the same
+        # as by_doc_id_map here since this fake seeds one entry per chash.
+        return {
+            chash: [self.by_doc_id_map[chash].tumbler]
+            for chash in chashes
+            if chash in self.by_doc_id_map
+        }
+
+    def resolve(self, tumbler):
+        for entry in self.by_doc_id_map.values():
+            if entry.tumbler == tumbler:
+                return entry
+        return None
 
     def lookup_doc_id_by_collection_and_path(self, collection, source_path):
         return f"resolved:{collection}:{source_path}"

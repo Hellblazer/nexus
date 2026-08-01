@@ -59,6 +59,32 @@ class CollectionName:
     embedding_model: str
     model_version: int
 
+    def __post_init__(self) -> None:
+        """Validate against the same canonical sets ``parse()`` uses.
+
+        nexus-fm3th: this was a bare frozen dataclass — only ``.parse()``
+        validated content_type/embedding_model, so a direct construction
+        (e.g. ``http_catalog_client.py``'s ``collection_for``) could mint
+        a non-conformant ``CollectionName`` from a bogus content_type or
+        embedding_model. Both branches import the SAME sets ``parse()``
+        checks against (``CONTENT_TYPES``, ``CANONICAL_EMBEDDING_MODELS``,
+        ``LOCAL_EMBEDDING_MODELS``) — no separate literal list to drift.
+        """
+        if self.content_type not in CONTENT_TYPES:
+            raise ValueError(
+                f"CollectionName: unknown content_type {self.content_type!r}; "
+                f"expected one of {sorted(CONTENT_TYPES)}"
+            )
+        if (
+            self.embedding_model not in CANONICAL_EMBEDDING_MODELS
+            and self.embedding_model not in LOCAL_EMBEDDING_MODELS
+        ):
+            allowed = sorted(CANONICAL_EMBEDDING_MODELS | LOCAL_EMBEDDING_MODELS)
+            raise ValueError(
+                f"CollectionName: non-canonical embedding_model "
+                f"{self.embedding_model!r}; expected one of {allowed}"
+            )
+
     def render(self) -> str:
         """Render to the physical T3 collection name."""
         return (
