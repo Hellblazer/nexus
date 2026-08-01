@@ -921,7 +921,7 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
 
 
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
-                              collection: str | None, reader=None) -> None:
+                              collection: str | None, *, reader) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
 
     A re-index that changes the extracted text writes chunks under NEW chashes —
@@ -954,11 +954,17 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     # nexus-kgos1: reads go to the READER. `cat` is a _ServiceCatalogWriter, a
     # closed-whitelist write-only proxy that raises AttributeError for every
     # read op — so routing this through it could never prove orphanhood and the
-    # sweep could never delete a row. Falling back to `cat` keeps the
-    # function-level tests above meaningful; production passes a real reader.
-    _reader = reader if reader is not None else cat
+    # sweep could never delete a row.
+    #
+    # `reader` is KEYWORD-ONLY AND REQUIRED, deliberately. It was briefly
+    # `reader=None` falling back to `cat`, to spare updating the older tests —
+    # and that default immediately re-created this very defect one call site
+    # over: tests/catalog/test_manifest_write_many.py drove the loop with a
+    # double carrying no read methods, so the sweep silently no-opped there and
+    # covered none of this. A missing wire-up must fail at the call, loudly,
+    # not degrade into the no-op we are here to remove.
     try:
-        refs = _reader.docs_for_chashes(sorted(dropped)) or {}
+        refs = reader.docs_for_chashes(sorted(dropped)) or {}
     except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
         structlog.get_logger().warning(
             "superseded_sweep_skipped_no_reverse_lookup",
@@ -983,7 +989,7 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
         deleted=len(orphaned), kept_shared=shared)
 
 
-def _manifest_write_loop(cat, by_doc, collection: str | None = None, reader=None) -> None:
+def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader) -> None:
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc
@@ -1100,9 +1106,8 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, reader=None
                 # the sweep returned immediately. It had never deleted a row.
                 # The silence is what hid it: the OTHER guard in the sweep logs.
                 _before: set[str] = set()
-                _reader = reader if reader is not None else cat
                 try:
-                    _before = {h for h in (_reader.get_chunk_chashes(doc_id) or []) if h}
+                    _before = {h for h in (reader.get_chunk_chashes(doc_id) or []) if h}
                 except Exception as _exc:  # noqa: BLE001 — no sweep beats a wrong sweep
                     import structlog  # noqa: PLC0415 — deferred: hot path
                     structlog.get_logger().warning(

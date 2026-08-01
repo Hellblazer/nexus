@@ -32,7 +32,7 @@ def test_superseded_chunks_are_deleted() -> None:
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
         _sweep_superseded_vectors(cat, "doc-A", {"old1", "old2", "keep"},
-                                  _chunks("keep", "new1"), "coll")
+                                  _chunks("keep", "new1"), "coll", reader=cat)
     col.delete.assert_called_once()
     assert sorted(col.delete.call_args.kwargs["ids"]) == ["old1", "old2"]
 
@@ -46,7 +46,7 @@ def test_chunk_shared_with_another_document_is_NOT_deleted() -> None:
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
         _sweep_superseded_vectors(cat, "doc-A", {"shared", "mine"},
-                                  _chunks("new"), "coll")
+                                  _chunks("new"), "coll", reader=cat)
     assert col.delete.call_args.kwargs["ids"] == ["mine"], "shared row must survive"
 
 
@@ -55,7 +55,7 @@ def test_nothing_dropped_means_no_delete_call() -> None:
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
-        _sweep_superseded_vectors(cat, "doc-A", {"a", "b"}, _chunks("a", "b"), "coll")
+        _sweep_superseded_vectors(cat, "doc-A", {"a", "b"}, _chunks("a", "b"), "coll", reader=cat)
     col.delete.assert_not_called()
 
 
@@ -67,14 +67,14 @@ def test_reverse_lookup_failure_deletes_NOTHING() -> None:
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
-        _sweep_superseded_vectors(cat, "doc-A", {"old"}, _chunks("new"), "coll")
+        _sweep_superseded_vectors(cat, "doc-A", {"old"}, _chunks("new"), "coll", reader=cat)
     col.delete.assert_not_called()
 
 
 def test_missing_collection_is_a_noop() -> None:
     cat = _cat({"old": ["doc-A"]})
     with patch("nexus.db.make_t3") as mk:
-        _sweep_superseded_vectors(cat, "doc-A", {"old"}, _chunks("new"), None)
+        _sweep_superseded_vectors(cat, "doc-A", {"old"}, _chunks("new"), None, reader=cat)
     mk.assert_not_called()
 
 
@@ -85,7 +85,7 @@ def test_delete_failure_does_not_raise_into_the_index() -> None:
     col.delete.side_effect = RuntimeError("t3 unreachable")
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
-        _sweep_superseded_vectors(cat, "doc-A", {"old"}, _chunks("new"), "coll")
+        _sweep_superseded_vectors(cat, "doc-A", {"old"}, _chunks("new"), "coll", reader=cat)
 
 
 def test_unreferenced_chash_with_empty_ref_list_is_deleted() -> None:
@@ -95,7 +95,7 @@ def test_unreferenced_chash_with_empty_ref_list_is_deleted() -> None:
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
         _sweep_superseded_vectors(cat, "doc-A", {"gone", "absent"},
-                                  _chunks("new"), "coll")
+                                  _chunks("new"), "coll", reader=cat)
     assert sorted(col.delete.call_args.kwargs["ids"]) == ["absent", "gone"]
 
 
@@ -195,3 +195,23 @@ def test_sweep_is_skipped_loudly_when_the_before_read_fails() -> None:
     col.delete.assert_not_called()          # fail-open: nothing deleted
     events = [c.args[0] for c in log.return_value.warning.call_args_list if c.args]
     assert "superseded_sweep_before_read_failed" in events, events
+
+
+def test_reader_is_required_not_defaulted() -> None:
+    """Omitting `reader` must be a TypeError, never a silent no-op sweep.
+
+    This was briefly `reader=None` falling back to `cat`, to avoid updating the
+    older tests. That default immediately re-created the very defect above one
+    call site over — tests/catalog/test_manifest_write_many.py drove the loop
+    with a double carrying no read methods, so the sweep walked into the caught
+    AttributeError and no-opped on every run, unasserted. A missing wire-up has
+    to fail at the call.
+    """
+    import pytest
+
+    from nexus.mcp_infra import _manifest_write_loop
+
+    with pytest.raises(TypeError, match="reader"):
+        _manifest_write_loop(MagicMock(), {}, "coll")          # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="reader"):
+        _sweep_superseded_vectors(MagicMock(), "doc-A", set(), [], "coll")  # type: ignore[call-arg]
