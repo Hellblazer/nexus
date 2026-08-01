@@ -413,7 +413,7 @@ class TestNoSQLiteAccess:
         un-guarded AttributeError (the thing the sentinel replaced) from
         passing as though the guard were present.
         """
-        with pytest.raises(AttributeError, match="service mode"):
+        with pytest.raises(AttributeError, match="local SQLite catalog was deleted"):
             _ = cat._db
 
 

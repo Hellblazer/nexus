@@ -392,5 +392,5 @@ def test_coverage_cmd_no_guard_service_mode(cat) -> None:
     # AttributeError, NOT a RuntimeError (nexus-xj744; hasattr() only swallows
     # AttributeError, so the guard must not break the probe idiom it exists to
     # protect). Contract pinned by tests/db/test_raw_handle_guard_contract.py.
-    with pytest.raises(AttributeError, match="service mode"):
+    with pytest.raises(AttributeError, match="local SQLite catalog was deleted"):
         _ = cat._db

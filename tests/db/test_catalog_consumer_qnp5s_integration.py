@@ -359,7 +359,7 @@ class TestNoSQLiteAccess:
         tests/db/test_raw_handle_guard_contract.py.
         """
         import pytest
-        with pytest.raises(AttributeError, match="service mode"):
+        with pytest.raises(AttributeError, match="local SQLite catalog was deleted"):
             _ = cat._db
 
 
