@@ -383,7 +383,18 @@ def builtin_plans_library():
     builtin_dir = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
     result = load_seed_directory(builtin_dir, library=lib)
     assert not result.errors, f"seed_loader errors: {result.errors}"
-    assert result.inserted, "no builtin templates loaded"
+    # PRESENCE, not insertion. load_seed_directory is idempotent: it reports
+    # templates it skipped because they were already in this tenant's library
+    # under skipped_existing, which is a SUCCESS state. Asserting on
+    # `inserted` demanded that THIS call mutate the library, so the fixture
+    # errored whenever the tenant already held the builtins — reproducibly,
+    # standalone, with skipped_existing listing all 12 files. What the tests
+    # below actually need is that the templates are THERE.
+    loaded = list(result.inserted) + list(result.skipped_existing)
+    assert loaded, (
+        "no builtin templates in the plan library: seed_loader neither "
+        f"inserted nor found any of {builtin_dir}"
+    )
     return lib
 
 
