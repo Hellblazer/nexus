@@ -2,17 +2,18 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """``nx migration`` — inspect or recover the cross-process migration sentinel.
 
-RDR-159 §"Atomicity + crash recovery". The guided upgrade (``nx
-migrate-to-service``) writes a ``migration.state`` sentinel that every
-long-lived reader polls to degrade-LOUD while a migration is in flight. A CLI
-crash between a clean T3 copy and the UNLOCK clear can STRAND that sentinel at
-``migrating`` / ``migrated-failed``, banner-wrapping every read surface forever.
+RDR-159 §"Atomicity + crash recovery". A migration writes a ``migration.state``
+sentinel that every long-lived reader polls to degrade-LOUD while a migration
+is in flight. A CLI crash between a clean T3 copy and the UNLOCK clear can
+STRAND that sentinel at ``migrating`` / ``migrated-failed``, banner-wrapping
+every read surface forever. Originally written by ``nx migrate-to-service``
+(deleted outright by RDR-155 P4b); on this release the same mechanism is used
+by the upgrade ladder's chash-rekey rung (``upgrade_ladder/rungs/chash_rekey.py``).
 
 ``nx migration --clear-state`` is the named escape hatch. Clearing is SAFE
-because a resumed ``nx migrate-to-service`` recomputes done-vs-total from live
-source-vs-target counts (the ETL is idempotent on ``(tenant, collection,
-chash)``), never trusting the stale marker. Bare ``nx migration`` prints the
-current sentinel read-only.
+because a resumed migration recomputes done-vs-total from live source-vs-target
+state rather than trusting the stale marker (idempotent by design). Bare
+``nx migration`` prints the current sentinel read-only.
 """
 from __future__ import annotations
 

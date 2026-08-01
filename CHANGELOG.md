@@ -32,6 +32,12 @@ identity pinned by this release is v0.1.60; the v0.1.61 floor bump follows in
   conexus==6.18.1, run `nx guided-upgrade`, then return to 7.x.
 - `nx catalog sync` / `nx catalog pull` are retired with the local catalog
   (the engine's Postgres is the durability story).
+- Two behavior changes callers may observe without any code change on their
+  side: `CollectionName(...)` now raises `ValueError` on an invalid
+  `content_type`/`embedding_model` (it previously minted a non-conformant
+  name silently), and `resolve()`'s declared `follow_alias=True` default is
+  now actually honored on the wire (alias tumblers resolve to their
+  canonical entry). Details under Added/Fixed.
 
 ### Added
 - `CollectionName` validates `content_type` / `embedding_model` at
@@ -45,6 +51,10 @@ identity pinned by this release is v0.1.60; the v0.1.61 floor bump follows in
   released conexus version (the mirror of `check_engine_release_floor.py`).
 - Tripwire `tests/hooks/test_heredoc_pipe_budget.py`: pins every hook-script
   heredoc body at the 512-byte macOS PIPE_BUF floor (see Fixed).
+- **Promotion history now works on the service backend** (nexus-70x7y).
+  `list_promotions` is implemented on `HttpDocumentAspectsStore` over
+  `GET /v1/aspects/promotion/list`; callers go through the store, and read
+  never creates the table.
 
 ### Fixed
 - `resolve(follow_alias=True)` — the declared default — is now actually sent
@@ -89,14 +99,6 @@ identity pinned by this release is v0.1.60; the v0.1.61 floor bump follows in
   extras prune stays a separate later changeset so the dual-read cutover is preserved).
   Invoking the command with a field name prints that recipe and exits 2; `--type` and `--prune`
   are gone rather than left as flags that silently do nothing.
-
-### Added
-- **Promotion history now works on the service backend** (nexus-70x7y). `list_promotions`
-  is implemented on `HttpDocumentAspectsStore` over `GET /v1/aspects/promotion/list` (the
-  engine endpoint already existed), and on the SQLite store as a plain read. Both callers go
-  through the store instead of reaching into a raw connection, and neither creates the table
-  on read — `migrations.migrate_aspect_promotion_log_table` is the sole creator.
-
 
 ## [6.18.1] - 2026-07-24
 

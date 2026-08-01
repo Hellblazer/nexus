@@ -8,7 +8,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 | Tier | Storage | Arbitrator | Transport | Durability | Use |
 |------|---------|------------|-----------|------------|-----|
-| T1 -- scratch | ChromaDB EphemeralClient / per-session HTTP server | none | Process-local | Session only | Working notes, hypotheses |
+| T1 -- scratch | Service-backed (`HttpScratchStore` via `nexus-service`); `NX_T1_ISOLATED=1` opts into a private in-process `InMemoryVectorClient` | nexus-service (`nx daemon service`) | nexus-service HTTP (isolated: process-local) | Session only | Working notes, hypotheses |
 | T2 -- memory | Postgres 17 via `nexus-service` (the only backend since RDR-158; `=sqlite` hard-errors) | nexus-service (`nx daemon service`) | nexus-service HTTP | Survives restarts | Per-project notes, session context |
 | T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
 | Catalog | Engine-owned Postgres tables (Liquibase-managed schema, RLS), reached via `HttpCatalogClient` through the `nexus-service` — no local JSONL event log, no `.catalog.db` (both deleted at RDR-158 P4, nexus-i711w) | nexus-service (`nx daemon service`) | nexus-service HTTP | Permanent | Document registry, typed link graph, provenance |
@@ -90,11 +90,19 @@ coexisting.
 
 ## T1 -- Session Scratch
 
-Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
+Service-backed since RDR-155 P4b: in service mode `get_t1_database` routes
+scratch to `HttpScratchStore` over the one `nexus-service`, scoped by the
+Claude session-id (both the parent session and any sibling resolve the same
+session-id from `~/.config/nexus/current_session`, so child agents and
+Bash-tool siblings share scratch space and see each other's entries).
+Concurrent independent Claude Code windows stay isolated because each has its
+own session-id.
 
-When a parent Claude Code session starts, the MCP server's chroma lifespan launches a ChromaDB server on a free localhost port and publishes a **leased registry record** at `~/.config/nexus/t1_addr.<session_id>` (RDR-149 P4, via `daemon/t1_lease.py`). The record is keyed on the Claude session-id; both the publisher and any sibling resolve the same session-id from `~/.config/nexus/current_session`, so child agents and Bash-tool siblings discover and connect to the same server — they share scratch space and see each other's entries. Liveness is lease freshness (TTL), not pid, giving pid-reuse immunity. Concurrent independent Claude Code windows stay isolated because each has its own session-id (the scope key is intentionally N-per-user).
-
-Falls back to a local `EphemeralClient` only under an explicit `NX_T1_ISOLATED=1` opt-in; otherwise a process that resolves no session-id (or finds no live lease) raises `T1ServerNotFoundError`. MCP-dispatched subprocesses inherit the endpoint via `NX_T1_HOST`/`NX_T1_PORT` (env passdown).
+The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
+lease discovery) retired with the chroma substrate. `NX_T1_ISOLATED=1` opts a
+process into a private, dependency-free in-process `InMemoryVectorClient`;
+otherwise a process outside service-mode routing raises
+`T1ServerNotFoundError` rather than silently inventing a private store.
 
 Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 

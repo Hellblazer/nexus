@@ -25,32 +25,40 @@ T2 `nexus_rdr/155-production-migration-complete`).
 > them when `nx upgrade` has blocked or something needs surgery, not to
 > perform a routine upgrade.
 
-The rung is a thin orchestrator over the same reused pieces this runbook
-describes: it **detects** the pre-RDR-160 Chroma footprint (a fresh user with
-nothing to migrate plans zero legs, *without* provisioning), **provisions and
-verifies** the service stack as a precondition (health-gate + version-pin; a
-not-ready or wrong-version service hard-fails with a remedy and NEVER
-migrates), runs the **voyage-capability gate** (refuses to migrate GENUINE
-voyage-model collections onto a bge-only service, since re-embedding voyage
-text into bge changes recall; a voyage-*named* collection whose stored vectors
-MEASURE as local bge-768 — the pre-RDR-109 mislabel class — does not trip the
-gate and is auto-remapped locally at no cost, nexus-nb7hr/nexus-119p9), then
-carries each collection's chunks: detect the footprint, set the cross-process
-migration sentinel (reads degraded-LOUD, never bare-empty), quiesce background
-indexing, pre-gate per-collection model support, run T2 `migrate all` then T3
-vectors for every detected leg, validate (taxonomy + counts + manifest
-orphans), and unlock on a clean verdict. Legacy (pre-RDR-108) chunk ids are
-converged as an in-flight wire transform rather than blocking — the correct id
-is a pure function of the chunk text being carried, so no re-index and no
-source files are required, and the old→new mapping is persisted so rollback
-resolves through it (RDR-185). On a validation block it leaves the migrated
-copy in place (sentinel `migrated-failed`) and OFFERS — never auto-invokes —
-`nx storage migrate vectors --rollback` (§6); the Chroma source is untouched
-throughout (RDR-176 immutable source). Preview with `nx upgrade --dry-run`.
+**On 7.x the Chroma-migration rung no longer exists.** RDR-155 P4b removed
+the substrate-ETL rung with the migration machinery — the ladder's sole data
+rung on this release is the RDR-180 chash rekey
+(`upgrade_ladder/registry.py`), and a pre-PG install is DETECTED and refused
+with the two-hop redirect: install `conexus==6.18.1` (the pinned last
+migration-capable release, `nexus.stranded_install.LAST_MIGRATION_CAPABLE`),
+run `nx upgrade` there, then return to 7.x.
+
+Everything the paragraph below describes is what that pinned 6.18.1 rung
+does — kept here because this runbook is what you work from *on that
+install* when the migration window needs to be driven or diagnosed: it
+detects the pre-RDR-160 Chroma footprint (a fresh user plans zero legs,
+without provisioning), provisions and verifies the service stack as a
+precondition (health-gate + version-pin; a not-ready or wrong-version
+service hard-fails and NEVER migrates), runs the voyage-capability gate
+(refuses to migrate GENUINE voyage-model collections onto a bge-only
+service; a voyage-*named* collection whose vectors MEASURE as bge-768 is
+auto-remapped locally, nexus-nb7hr/nexus-119p9), then carries each
+collection's chunks: sentinel set (reads degraded-LOUD), background indexing
+quiesced, per-collection model support pre-gated, T2 `migrate all` then T3
+vectors, validation (taxonomy + counts + manifest orphans), unlock on a
+clean verdict. Legacy chunk ids converge as an in-flight wire transform
+(RDR-185); on a validation block it leaves the migrated copy in place and
+OFFERS `nx storage migrate vectors --rollback` (§6); the Chroma source is
+untouched throughout (RDR-176 immutable source).
 
 The lower-level verbs this runbook's history refers to — `nx guided-upgrade`,
-`nx migrate-to-service` — are demoted internal primitives as of RDR-185: still
-callable for surgical use, out of `--help` and out of the user story. See
+`nx migrate-to-service` — were demoted internal primitives as of RDR-185, then
+**deleted outright** by RDR-155 P4b along with the rest of the Chroma read
+path: they are not present in this release. On 7.x, an install still carrying
+pre-PG data is DETECTED at every entry point and refused with the two-hop
+redirect — install `conexus==6.18.1`, run `nx guided-upgrade` there, then
+return to 7.x. The demoted-not-deleted survivors of the old upgrade graph are
+`nx migration`, `nx collection backfill-hash`, and `nx hooks update-all`. See
 [`cli-reference.md` § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives).
 
 ## 0.1 The two-release deprecation window (release cadence)
@@ -617,10 +625,12 @@ notes included (the same machinery that rekeyed 254,846 production rows on
 > are never weakened — wire re-id computes the CORRECT address for existing
 > content, it does not force a wrong id through.
 
-**On the demoted primitive path only** (`nx migrate-to-service` /
-`nx guided-upgrade`, surgical use), the pre-RDR-185 behaviour still stands:
-detection samples each data-bearing collection's first id page, a legacy id
-classifies the collection `unsupported`, and the run blocks before any write
+**On the demoted primitive path** (`nx migrate-to-service` /
+`nx guided-upgrade` — deleted from this tree by RDR-155 P4b; reachable only by
+installing the pinned `conexus==6.18.1` per the two-hop redirect), the
+pre-RDR-185 behaviour still stands there: detection samples each data-bearing
+collection's first id page, a legacy id classifies the collection
+`unsupported`, and the run blocks before any write
 (plus an ETL hard guard that validates every batch client-side, so a legacy id
 on a later page fails that collection cleanly rather than hitting a per-upsert
 409 wall). **The remedy for a block on that path is to run `nx upgrade`**, not

@@ -62,7 +62,14 @@ def link_cmd(
     writer = _cat_cmd._get_catalog_writer()
     ft = _cat_cmd._resolve_tumbler(cat, from_tumbler)
     tt = _cat_cmd._resolve_tumbler(cat, to_tumbler)
-    writer.link(ft, tt, link_type, created_by="user", from_span=from_span, to_span=to_span)
+    try:
+        writer.link(ft, tt, link_type, created_by="user", from_span=from_span, to_span=to_span)
+    except ValueError as exc:
+        # nexus-9ssih: engines >= v0.1.61 refuse a link whose endpoint is not
+        # a live document (400 code=dangling_endpoint, translated to
+        # ValueError by the client). Surface it as a clean CLI error, same
+        # pattern as every other except-ValueError site in catalog.py.
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Linked: {ft} → {tt} ({link_type})")
 
 

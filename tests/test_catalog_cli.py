@@ -2264,3 +2264,42 @@ class TestWhh61OrphanBackfillCarve:
         assert result.exit_code == 0
         for sub in self.SUBCOMMANDS:
             assert sub in result.output, f"{sub} not listed in group help"
+
+
+class TestLinkDanglingEndpointRefusal:
+    """nexus-9ssih CLI half (7.0.0 release review): engines >= v0.1.61 refuse
+    dangling-endpoint links as 400 code=dangling_endpoint, which the client
+    translates to ValueError. link_cmd must surface that as a clean
+    ClickException, not a raw traceback."""
+
+    def test_link_valueerror_is_a_clean_refusal(self, monkeypatch, tmp_path):
+        from nexus.commands import catalog as _cat_cmd
+
+        # Isolate every detector root: without this, the stranded-install
+        # banner can fire from MIXED roots (config under tmp, legacy chroma
+        # under the real ~/.local/share — nexus-rjod2) and pollute output.
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+
+        class _Writer:
+            def link(self, *a, **k):
+                raise ValueError(
+                    "link refused: an endpoint does not resolve to a live "
+                    "catalog document. Pass allow_dangling=True to write "
+                    "the edge anyway."
+                )
+        class _Cat:
+            pass
+
+        monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda: _Cat())
+        monkeypatch.setattr(_cat_cmd, "_get_catalog_writer", lambda: _Writer())
+        monkeypatch.setattr(_cat_cmd, "_resolve_tumbler", lambda cat, t: t)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "link", "1.1.1", "9.9.9", "--type", "cites"],
+        )
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            "dangling-endpoint refusal must be a ClickException, not a traceback"
+        )
+        assert "does not resolve" in result.output

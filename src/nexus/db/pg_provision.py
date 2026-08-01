@@ -1195,9 +1195,10 @@ def _backfill_diag_role(
     cluster (RDR-182 P2.1; review-foundations High, 2026-07-12).
 
     The fast idempotency path returns before ``_create_roles``, which is the
-    STEADY STATE for every existing install — exactly the population
-    ``nx guided-upgrade`` targets. Without this backfill the role never
-    exists there, the runAlways grants changeset skips forever, and the
+    STEADY STATE for every existing install — the population the (now-deleted)
+    ``nx guided-upgrade`` used to target, and that the upgrade ladder's
+    provisioning precondition converges today. Without this backfill the role
+    never exists there, the runAlways grants changeset skips forever, and the
     diagnostic path is inert everywhere except a from-scratch provision.
     Same repair philosophy as the pgvector-extension backfill above it:
     a re-run of ``nx init --service`` is a reliable repair.
@@ -1257,15 +1258,18 @@ def _read_credentials(creds_path: Path) -> dict[str, str]:
 def load_service_credentials_into_env(config_dir: Path | None = None) -> bool:
     """Load ``pg_credentials`` into ``os.environ`` for an in-process service flow.
 
-    The manual upgrade path sources ``pg_credentials`` between ``nx init
-    --service`` and ``nx migrate-to-service`` so the latter sees
-    ``NX_SERVICE_TOKEN`` / ``NX_STORAGE_BACKEND``. ``nx guided-upgrade`` runs both
-    in ONE process, so it must self-load the freshly-provisioned credentials
-    before driving the migration — otherwise ``NX_SERVICE_TOKEN`` is absent and
-    the migration fails. Uses ``setdefault`` for credential keys (a value the
-    user already exported wins) and forces ``NX_STORAGE_BACKEND=service`` (the
-    guided upgrade IS the service path). Returns True iff a token is present in
-    the environment afterwards.
+    Historical context (RDR-159): the manual upgrade path sourced
+    ``pg_credentials`` between ``nx init --service`` and ``nx
+    migrate-to-service`` so the latter saw ``NX_SERVICE_TOKEN`` /
+    ``NX_STORAGE_BACKEND``. The now-deleted ``nx guided-upgrade`` ran both in
+    ONE process, so it self-loaded the freshly-provisioned credentials before
+    driving the migration — otherwise ``NX_SERVICE_TOKEN`` would be absent and
+    the migration would fail. RDR-155 P4b deleted both migration verbs; no
+    current caller of this function is known (2026-08-01 sweep — see
+    ``load_service_credentials_into_env`` callers). Uses ``setdefault`` for
+    credential keys (a value the user already exported wins) and forces
+    ``NX_STORAGE_BACKEND=service``. Returns True iff a token is present in the
+    environment afterwards.
 
     No-op on the credential keys when the file is absent — the returned bool lets
     the caller decide whether a missing token is fatal.

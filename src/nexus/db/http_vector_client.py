@@ -2393,7 +2393,7 @@ def get_http_vector_client() -> HttpVectorClient:
       failure whose window elapsed is cleared and re-probed, so the
       session heals when the managed service comes back.
     * Local mode: the probe is skipped entirely. Local mode's own floor
-      enforcement (the native ``guided_upgrade`` / ``nx upgrade`` flow) is
+      enforcement (the ``nx upgrade`` / engine-convergence flow) is
       untouched by this gate.
     """
     global _vector_client_instance, _version_probe_done, _version_probe_error

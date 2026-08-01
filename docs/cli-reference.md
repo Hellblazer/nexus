@@ -664,10 +664,12 @@ nx catalog pull                  # refuses with guidance
 **Retired in 7.0.0 (catalog-git-DECISION Option C).** The nexus service's
 Postgres is the sole catalog authority in every mode — every write already
 lands there, so there is nothing to commit, push, or pull. Both verbs remain
-as guided refusals (`click.ClickException`, no traceback) so old scripts and
-the session-close Stop hook fail with an explanation instead of an
-uncaught `NotImplementedError`. The git-backed JSONL durability layer these
-verbs served no longer exists.
+as guided refusals (`click.ClickException`, no traceback) so an interactive
+caller or old script sees an explanation instead of an uncaught
+`NotImplementedError`. (Callers that suppress output, like the session-close
+Stop hook's best-effort `|| true` invocation, still exit non-zero silently —
+same as before, minus the buried traceback.) The git-backed JSONL durability
+layer these verbs served no longer exists.
 
 ### nx catalog reconcile
 
