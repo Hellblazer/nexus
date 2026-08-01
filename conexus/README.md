@@ -260,6 +260,7 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 | `Stop` | `hooks/scripts/stop_verification_hook.sh` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hooks/scripts/stop_failure_hook.py` | Advisory on abnormal session termination |
 | `PreToolUse` (`Bash`) | `hooks/scripts/pre_close_verification_hook.sh` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
+| `PreToolUse` (`Agent\|Task`) | `hooks/scripts/agent-dispatch-expect.sh` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
 | `SubagentStart` | `hooks/scripts/subagent-start.sh` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/auto-approve-nx-mcp.sh` | Auto-approve nexus and nexus-catalog MCP tool calls |
 

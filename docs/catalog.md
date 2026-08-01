@@ -6,13 +6,11 @@ While T3 stores document *content* as vector embeddings, the catalog stores docu
 
 ## Setup
 
-```bash
-nx catalog setup
-```
-
-One command. Creates the catalog, populates it from your existing T3 collections and repos, backfills `chunk_text_hash` metadata on any chunks missing it, and generates links from metadata. After this, `search`, `show`, `links`, and content-hash spans all work immediately.
-
-`nx doctor` will remind you if the catalog isn't set up yet. It's optional — everything else works without it.
+None needed. The catalog lives in the nexus service's Postgres and is
+provisioned by `nx init` with everything else — `search`, `show`, `links`,
+and content-hash spans work as soon as documents are indexed. (`nx catalog
+setup` was the retired local-catalog bootstrap; running it now prints a
+guided refusal.)
 
 ## Find documents
 
@@ -54,7 +52,7 @@ nx catalog link 1.1.5 1.2.3 --type implements
 
 Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`.
 
-Duplicate links are merged — the second creator is recorded in `co_discovered_by`. Linking to a deleted or non-existent document is rejected by default.
+Duplicate links are merged — the second creator is recorded in `co_discovered_by`. Linking to a deleted or non-existent document (a **dangling endpoint**) is refused by the engine (>= v0.1.61, nexus-9ssih) with a clear error naming both endpoints — older engines that don't emit the `dangling_endpoint` code accept the link silently. Bypassing the refusal (`allow_dangling=True`) is Python-API-only (`HttpCatalogClient.link()`); the `nx catalog link` CLI command has no flag for it.
 
 ### Spans (sub-document references)
 
@@ -279,26 +277,7 @@ Each `stale_chash` entry includes a `reason` field: `missing` (chunk deleted), `
 
 ## How it's stored
 
-The catalog lives in its own git repository at `~/.config/nexus/catalog/`. You never need to touch this directory — `nx catalog setup` creates it, and all commands manage it internally.
-
-```
-~/.config/nexus/catalog/
-  .git/                  # auto-created, tracks JSONL history
-  events.jsonl           # append-only event log — CANONICAL (RDR-101)
-  owners.jsonl           # legacy per-class log — still written, no longer canonical
-  documents.jsonl        # legacy per-class log — still written, no longer canonical
-  links.jsonl            # legacy per-class log — still written, no longer canonical
-  .catalog.db            # SQLite projection of events.jsonl (gitignored, rebuilt automatically)
-  .gitignore             # excludes .catalog.db
-```
-
-**`events.jsonl` is the truth.** Under RDR-101 (event-sourced writes, default on) every catalog mutation — register, update, link, unlink, set_alias, dedupe — appends an event to `events.jsonl` first, then projects it into SQLite. `events.jsonl` is canonical; SQLite (`.catalog.db`) is a deterministic, disposable projection — if it disappears, the system rebuilds it by replaying `events.jsonl` on the next access.
-
-The legacy per-class logs (`owners.jsonl`, `documents.jsonl`, `links.jsonl`) are still written during the RDR-101 cutover window for back-compat, but they are **not** the source of truth once `events.jsonl` is present and covers them (checked via a bootstrap guardrail comparing row counts). A catalog with no `events.jsonl`, or one materially sparser than the legacy `documents.jsonl`, falls back to legacy mode until re-bootstrapped (`nx catalog setup` from current T3 state).
-
-**Git is the history.** `nx catalog sync` commits the current JSONL state (events log plus legacy logs). This gives you version history for free — you can always see when a document was registered, when a link was created, or roll back a bad change with standard git tools. If you never call `sync`, the catalog still works — git is the durability layer, not the operational layer.
-
-**SQLite is the speed.** FTS5 full-text search, indexed link queries, and graph traversal all run against SQLite. It's rebuilt automatically by replaying `events.jsonl` whenever the log changes (detected by mtime/offset).
+The catalog lives in the nexus service's Postgres database — a Liquibase-managed schema (documents, links, aliases) behind row-level security — reached through `HttpCatalogClient` via the `make_catalog_reader`/`make_catalog_writer` factories (the same `nexus-service` that serves T2 and T3). There is no local event log, no per-class JSONL files, and no local SQLite projection: the local git/JSONL/`.catalog.db` catalog described in older docs was deleted at RDR-158 P4 (nexus-i711w terminal deletion). You never touch a local catalog directory — every write lands in Postgres directly, and every read comes from there too.
 
 ### Tumbler addressing
 
@@ -316,46 +295,17 @@ Every document gets a permanent hierarchical address called a **tumbler**. The f
 - `1.2.5.3` — Chunk 3 of document 5 from owner 2 (e.g., a paper collection)
 - `1.1` — Owner-level address (refers to all documents under that owner)
 
-Tumblers are assigned once and never reused. If you delete document `1.2.5` and compact the catalog, the number 5 is retired — the next document under that owner gets `1.2.6`. This means any external reference to a tumbler remains valid indefinitely.
+Tumblers are assigned once and never reused. If you delete document `1.2.5`, the number 5 is retired — the next document under that owner gets `1.2.6`. This means any external reference to a tumbler remains valid indefinitely.
 
 Tumbler comparison uses integer ordering with parent-before-child semantics: `1.1.3 < 1.1.3.0 < 1.1.10`. The `sorted()` function produces correct document ordering.
 
-### Compaction
+### Compaction (retired)
 
-Over time, JSONL files accumulate overwrites and tombstones. Two compaction modes:
+There is no client-side compaction step anymore — `nx catalog compact` and the automatic `defrag()` that used to run during `nx catalog sync` were JSONL-file operations, and both the files and `sync` retired with the local catalog (RDR-158 P4 / catalog-git-DECISION Option C). Deleted documents are tombstoned directly in Postgres; there is nothing to periodically rewrite.
 
-- **`defrag()`** — deduplicates overwrites but keeps tombstones (deletion markers). Runs automatically during `nx catalog sync` when files exceed 3x the live record count. Safe — no history lost.
-- **`compact()`** — removes everything except live records, including tombstones. Explicit admin action via `nx catalog compact`. Erases deletion history from JSONL (though git preserves it).
+## Durability
 
-## Durability and remote sync
-
-**Local-service users** (local nexus-service, bge-768): both T3 content (the service's Postgres) and the catalog live on your disk, so both are as durable as that disk. If that's fine, you're done.
-
-**Managed-cloud users** (a hosted nexus-service with pgvector + Voyage AI): your T3 content lives in the managed service's Postgres, but the catalog — the only record of what's indexed, how documents relate, and what their tumblers are — is still local. If you lose the disk, the catalog is gone. T3 content survives in the managed service, but you'd have to `backfill` to reconstruct the registry, and all links would be lost.
-
-**Fix this by adding a git remote:**
-
-```bash
-# Create a private repo (GitHub, GitLab, etc.) then:
-nx catalog init --remote git@github.com:you/nexus-catalog.git
-
-# Or add a remote to an existing catalog:
-cd ~/.config/nexus/catalog
-git remote add origin git@github.com:you/nexus-catalog.git
-```
-
-The catalog auto-syncs at session close — if JSONL files have changed, the Stop hook runs `nx catalog sync` automatically. This commits locally and pushes to the remote if one is configured. No manual sync needed during normal use.
-
-For manual sync:
-
-```bash
-nx catalog sync                # commit + push to remote
-nx catalog pull                # pull from remote + rebuild SQLite
-```
-
-**New machine restore**: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog. Your tumblers, links, and full document registry are restored instantly.
-
-**CI/ephemeral environments**: configure `NEXUS_CATALOG_PATH` to point at a persistent volume, or use `init --remote` on each run to clone from the remote. The catalog rebuilds SQLite from JSONL in milliseconds.
+The catalog is as durable as the nexus service's Postgres — the same database that holds T2 and (for local-service users) T3. Local-service installs (local nexus-service, bge-768) have the catalog on the same disk as T3 content; managed-cloud installs (hosted nexus-service with pgvector + Voyage AI) have the catalog in the same managed Postgres as T3 content. Either way there is a single system of record — not a local catalog durability layer separate from where your content lives. `nx catalog sync` / `nx catalog pull` (git commit/push/pull of a local JSONL mirror) are retired; back up the service's Postgres the way you would any other database.
 
 ## Admin and maintenance
 

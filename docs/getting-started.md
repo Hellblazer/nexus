@@ -56,24 +56,16 @@ nx memory get -p myproject -t auth-notes
 ### Catalog — document registry and link graph (optional)
 
 ```bash
-nx catalog setup               # one command: init + populate + generate links
 nx catalog search "auth"       # find documents by metadata
 nx catalog show "auth module"  # full entry with all links
 nx catalog links "paper X"     # explore the citation/implementation graph
 ```
 
-The catalog tracks every indexed document and the relationships between them. It's populated automatically when you index repos and PDFs. Run `setup` once to backfill from your existing collections and seed plan templates.
+The catalog tracks every indexed document and the relationships between them. It's populated automatically when you index repos and PDFs — there is no separate init/setup step (`nx catalog setup` / `init` are retired guided refusals; the nexus service owns the catalog).
 
 The enhanced `query` MCP tool uses catalog metadata for scoped search — `query(question="...", author="Fagin")` searches only that author's collections in a single call.
 
-If you use managed-cloud mode (a hosted nexus service), add a git remote so the local catalog survives disk loss:
-
-```bash
-cd ~/.config/nexus/catalog && git remote add origin git@github.com:you/nexus-catalog.git
-nx catalog sync
-```
-
-On a new machine, restore with: `nx catalog setup --remote git@github.com:you/nexus-catalog.git`
+The catalog lives in the nexus service's Postgres — the same database that holds T2 and (for local-service users) T3 — so it's as durable as that service's storage, with no separate local git/JSONL layer to configure (`nx catalog sync` / `pull` are retired).
 
 See [Document Catalog](catalog.md) for details.
 

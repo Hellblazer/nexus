@@ -655,43 +655,43 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
 
 
 @catalog.command("sync")
-@click.option("--message", "-m", default="catalog update")
+@click.option("--message", "-m", default="catalog update", help="Retired option (kept so old invocations parse).")
 def sync_cmd(message: str) -> None:
-    """Commit and push catalog changes."""
-    cat = _get_catalog_writer()
-    try:
-        cat.sync(message)
-    finally:
-        cat.close()
-    click.echo("Catalog synced.")
+    """Retired: the nexus service's Postgres is the sole catalog authority — nothing to sync."""
+    # catalog-git-DECISION OPTION C: git-backed JSONL durability was dropped
+    # with the local catalog substrate (RDR-158 P4). Guided refusal instead
+    # of letting HttpCatalogClient.sync() raise NotImplementedError as an
+    # uncaught traceback — same treatment as init_cmd/setup_cmd above.
+    raise click.ClickException(
+        "'nx catalog sync' is retired: the nexus service's Postgres is the sole "
+        "catalog authority (the local git/JSONL durability layer was removed). "
+        "Every write already lands in Postgres — there is nothing to commit or push."
+    )
 
 
 @catalog.command("pull")
 def pull_cmd() -> None:
-    """Pull catalog from remote and rebuild SQLite."""
-    cat = _get_catalog_writer()
-    try:
-        cat.pull()
-    finally:
-        cat.close()
-    click.echo("Catalog pulled and rebuilt.")
+    """Retired: the nexus service's Postgres is the sole catalog authority — nothing to pull."""
+    # catalog-git-DECISION OPTION C: see sync_cmd above.
+    raise click.ClickException(
+        "'nx catalog pull' is retired: the nexus service's Postgres is the sole "
+        "catalog authority (the local git/JSONL durability layer was removed). "
+        "'nx catalog search' and 'nx catalog links' already read live from the "
+        "service — no pull step is needed."
+    )
 
 
 @catalog.command("compact", hidden=True)
 def compact_cmd() -> None:
-    """Rewrite JSONL files to remove tombstones and duplicate overwrites."""
-    cat = _get_catalog_writer()
-    try:
-        removed = cat.compact()
-    finally:
-        cat.close()
-    total = 0
-    for filename, count in removed.items():
-        click.echo(f"  {filename}: {count} lines removed")
-        total += count
-    click.echo(f"Compaction complete ({total} lines removed).")
-    if total > 0:
-        click.echo("Run 'nx catalog sync' to commit the compacted files.")
+    """Retired: the JSONL files this compacted no longer exist."""
+    # catalog-git-DECISION OPTION C: see sync_cmd above. Same retirement,
+    # same refusal shape — this previously called through to a
+    # NotImplementedError and surfaced as an uncaught traceback.
+    raise click.ClickException(
+        "'nx catalog compact' is retired: the local JSONL/SQLite catalog it "
+        "compacted was removed — the nexus service's Postgres is the sole "
+        "catalog authority and needs no client-side compaction."
+    )
 
 
 @catalog.command("reconcile")

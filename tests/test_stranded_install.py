@@ -119,13 +119,14 @@ class TestLeafContract:
 
 
 class TestDisarmedUntilNPlusOne:
-    def test_constant_is_none_on_every_migration_capable_release(self) -> None:
-        """TRIPWIRE: ``LAST_MIGRATION_CAPABLE`` stays ``None`` until the N+1
-        cut (the release that deletes Chroma + the migration tool, RDR-155
-        P4b). Arming it earlier would trip every healthy 6.x box, where
-        ``memory.db`` / ``.catalog.db`` are still LIVE stores. Whoever flips
-        this intentionally at N+1 updates this test in the same commit."""
-        assert LAST_MIGRATION_CAPABLE is None
+    def test_constant_is_stamped_on_the_post_migration_release(self) -> None:
+        """TRIPWIRE (flipped at the 7.0.0 cut, 2026-08-01): the constant is
+        STAMPED to 6.18.1 — the last released version whose
+        ``nx guided-upgrade`` reads the pre-PG stores — arming detection at
+        every wired entry point. It was ``None`` (disarmed) on every 6.x
+        release; un-stamping it now would silently strand every Chroma-era
+        install that upgrades past the migration window."""
+        assert LAST_MIGRATION_CAPABLE == "6.18.1"
 
     def test_disarmed_returns_none_even_with_artifacts(self, dirs: tuple[Path, Path, Path]) -> None:
         config, chroma, catalog = dirs
@@ -134,8 +135,6 @@ class TestDisarmedUntilNPlusOne:
         (chroma / "chroma.sqlite3").write_bytes(b"x")
         (catalog / ".catalog.db").write_bytes(b"x")
         assert detect_stranded_install(config, chroma, catalog, last_migration_capable=None) is None
-        # And via the real (unstamped) constant:
-        assert detect_stranded_install(config, chroma, catalog) is None
 
 
 class TestArmedDetection:

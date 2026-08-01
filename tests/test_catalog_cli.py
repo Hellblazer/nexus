@@ -80,6 +80,45 @@ def initialized_catalog(catalog_env):
 # init to assert.
 
 
+class TestSyncPullRetired:
+    """catalog-git-DECISION OPTION C: `nx catalog sync` / `nx catalog pull`
+    used to shell out to HttpCatalogClient.sync()/pull(), which raise
+    NotImplementedError — an uncaught traceback, not a clean CLI refusal.
+    Both commands were converted to the same guided-refusal shape as
+    init_cmd/setup_cmd above; these pin that no traceback reaches the user.
+    """
+
+    def test_sync_is_a_clean_refusal(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "sync"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(
+            result.exception, SystemExit,
+        ), "sync should refuse via ClickException, not raise NotImplementedError"
+        assert "retired" in result.output.lower()
+        assert "nothing to commit" in result.output.lower() or "nothing to sync" in result.output.lower() or "postgres" in result.output.lower()
+
+    def test_pull_is_a_clean_refusal(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "pull"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(
+            result.exception, SystemExit,
+        ), "pull should refuse via ClickException, not raise NotImplementedError"
+        assert "retired" in result.output.lower()
+        assert "postgres" in result.output.lower()
+
+    def test_compact_is_a_clean_refusal(self):
+        """The hidden compact verb had the identical traceback bug."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "compact"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(
+            result.exception, SystemExit,
+        ), "compact should refuse via ClickException, not raise NotImplementedError"
+        assert "retired" in result.output.lower()
+
+
 class TestNotInitialized:
     @_needs_diagnosis_nexus_02avu
     def test_list_without_init(self, catalog_env):

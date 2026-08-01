@@ -644,6 +644,8 @@ Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `
 
 Span formats: `line-line` (positional), `chunk:char-char` (positional), `chash:<sha256hex>` (whole chunk, content-addressed), or `chash:<sha256hex>:<start>-<end>` (character range within a chunk). Content-hash spans survive re-indexing; positional spans may become stale.
 
+**Dangling endpoints are refused** (engine >= v0.1.61, nexus-9ssih): if either `FROM` or `TO` does not resolve to a live catalog document, the engine returns `400 {"code": "dangling_endpoint", ...}` and the CLI surfaces a clean `ValueError`-derived message naming both endpoints — no edge is written. Older engines that don't emit this code accept the link silently, same as before. `allow_dangling=True` bypasses the refusal but is **Python-API-only** (`HttpCatalogClient.link(..., allow_dangling=True)`) — the CLI `nx catalog link` command has no `--allow-dangling` flag.
+
 ### nx catalog unlink
 
 ```
@@ -652,14 +654,20 @@ nx catalog unlink FROM TO [--type TYPE]
 
 Remove link(s). Omit `--type` to remove all link types between the pair.
 
-### nx catalog sync / pull
+### nx catalog sync / pull (retired)
 
 ```
-nx catalog sync [-m MESSAGE]     # commit JSONL changes + push to remote (if configured)
-nx catalog pull                  # pull from remote + rebuild SQLite
+nx catalog sync [-m MESSAGE]     # refuses with guidance
+nx catalog pull                  # refuses with guidance
 ```
 
-`sync` is called automatically at session close (via the Stop hook) when JSONL files have changed. Manual use is rarely needed.
+**Retired in 7.0.0 (catalog-git-DECISION Option C).** The nexus service's
+Postgres is the sole catalog authority in every mode — every write already
+lands there, so there is nothing to commit, push, or pull. Both verbs remain
+as guided refusals (`click.ClickException`, no traceback) so old scripts and
+the session-close Stop hook fail with an explanation instead of an
+uncaught `NotImplementedError`. The git-backed JSONL durability layer these
+verbs served no longer exists.
 
 ### nx catalog reconcile
 
@@ -833,7 +841,21 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 
 ### nx catalog list / stats / owners / delete
 
-Standard catalog management. Run `nx catalog COMMAND --help` for details.
+```
+nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [-n/--limit N] [--offset N] [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); ambiguous names across multiple owners raise a clean error naming the candidates |
+| `--type` | Filter to a `content_type` (e.g. `code`, `rdr`, `knowledge`) |
+| `-n`, `--limit` | Page size. Default `50`. **Server-side cap (nexus-xoimv)** — the underlying query is limited at the source, not truncated client-side after a full fetch |
+| `--offset` | Skip this many entries (pagination) |
+| `--json` | Emit entries as a JSON array instead of text rows |
+
+The `Next page: --offset N` hint printed when more rows exist means "more entries exist beyond this page," not a total count — `--limit` bounds what the server returns, so the total catalog size is not implied by a single page.
+
+`stats`, `owners`, and `delete` remain standard catalog management. Run `nx catalog COMMAND --help` for details.
 
 ### nx catalog backfill-owner-id (removed)
 
@@ -1231,6 +1253,8 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | `-y` / `--yes` | Skip confirmation prompt |
 
 Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180; pre-cohort 32-hex IDs resolve via the permanent `chash_alias` route). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+
+Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. This reap is chash-keyed and best-effort: when a chash's `docs_for_chashes` lookup resolves to more than one candidate catalog document, the match is ambiguous and is deliberately left alone — nothing is guessed, and the ghost row waits for `nx catalog gc` rather than risking a wrong reap (nexus-5axey).
 
 **`get` flags:**
 

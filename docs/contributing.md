@@ -226,6 +226,11 @@ Every step below is **required**. Missing any one of them has caused problems in
    let releases ship against a stale, un-cloud-validated engine
    (nexus-i5c2u).
 
+   The reverse direction — an engine deploying ahead of the client commits
+   it requires — is a separate gate, `scripts/check_client_release_precondition.py`,
+   run from the `engine-release` skill before a new `engine-service-v*` tag
+   deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
+
 1. **Verify the full test suite passes (unit + integration)**
    ```bash
    uv run pytest tests/                    # unit tests (no API keys needed)
@@ -360,6 +365,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `docs/storage-tiers.md` | new storage capabilities |
 | `README.md` | high-level feature descriptions |
 | `src/nexus/upgrade_ladder/` | new DATA-convergence axes land as rungs registered in `registry.py` (the client-side T2 migration chain is deleted — RDR-158 P4 Stage 4; schema is Liquibase in the engine) |
+| `conexus/PENDING_RELEASE.md` | empty the pending-drift list for every entry this release ships — advancing `source.ref` is what makes the declared plugin changes live; a stale entry fails `tests/test_plugin_release_drift_ledger.py` |
 
 ### Pre-push release checklist
 

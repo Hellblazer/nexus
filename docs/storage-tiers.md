@@ -11,13 +11,13 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 | T1 -- scratch | ChromaDB EphemeralClient / per-session HTTP server | none | Process-local | Session only | Working notes, hypotheses |
 | T2 -- memory | Postgres 17 via `nexus-service` (the only backend since RDR-158; `=sqlite` hard-errors) | nexus-service (`nx daemon service`) | nexus-service HTTP | Survives restarts | Per-project notes, session context |
 | T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
-| Catalog | T2-store-backed (ninth domain store, separate `.catalog.db`; RDR-120 P5.A) + events.jsonl (canonical) | shared with T2 daemon | UDS + 127.0.0.1 loopback | Permanent | Document registry, typed link graph, provenance |
+| Catalog | Engine-owned Postgres tables (Liquibase-managed schema, RLS), reached via `HttpCatalogClient` through the `nexus-service` — no local JSONL event log, no `.catalog.db` (both deleted at RDR-158 P4, nexus-i711w) | nexus-service (`nx daemon service`) | nexus-service HTTP | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
 
 ### Storage / service-stack architecture
 
-How the access paths reach each substrate today (post-RDR-155). Both T3 and (by hard default) T2 serve through the one native `nexus-service`; SQLite is the T2 opt-out; ChromaDB survives only as the read-only migration source.
+How the access paths reach each substrate today (post-RDR-155). Both T3 and (by hard default) T2 serve through the one native `nexus-service`; there is no SQLite opt-out anymore (`=sqlite` hard-errors, RDR-158 P3) and ChromaDB is not a live substrate in any mode — pre-migration Chroma directories are untouched rollback artifacts that nothing in the running system reads.
 
 ```mermaid
 flowchart TD
@@ -44,11 +44,7 @@ flowchart TD
   SVC -->|"server-side embed<br/>bge-768 ONNX (local) / Voyage (cloud)<br/>+ ANN search"| PG[("Postgres 17 + pgvector<br/>T3 vectors")]
   SVC --> PGT2[("Postgres<br/>T2 domain stores")]
 
-  T2D["T2 daemon<br/>SQLite single-writer"]
-  T2D --> SQL[("nexus.db (SQLite + FTS5, WAL)<br/>+ .catalog.db")]
-
-  CHROMA[("legacy ChromaDB<br/>migration source · read-only")]
-  CHROMA -.->|"nx upgrade<br/>substrate rung ETL"| SVC
+  SVC --> CAT[("Postgres<br/>catalog (documents · links · manifests)")]
 ```
 
 (The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer — query decomposition, the operator DAG, taxonomy, the knowledge graph — which is substrate-agnostic; the diagram above is its storage-plane complement.)

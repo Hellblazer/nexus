@@ -4,6 +4,29 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.0.0] - 2026-08-01
+
+The pin advance that empties the PENDING_RELEASE ledger — everything below was
+merged-but-inert on develop and goes LIVE with this install:
+
+- Subagent git-write routing guard now denies the destructive verbs
+  (checkout/restore/stash/clean/reset/rm) and direct-push-to-main
+  (nexus-ays2l, nexus-vduer).
+- RDR-184 EXPECT declarations are mechanized: a PreToolUse hook on the Agent
+  tool writes the row from the dispatch's own subagent_type +
+  run_in_background; the recognizer keys on agent_type and admits
+  plugin-qualified names. STOP hand-writing EXPECT rows once installed
+  (nexus-qc4p1, nexus-mk3tw, nexus-nu7fo).
+- Hook scripts no longer deadlock under bash 5.3 on pipe-degraded macOS:
+  large heredoc python bodies extracted to sibling files
+  (subagent-stop-scan.py, divergence-language-scan.py); subagent-start's
+  phase-gate injection and sn's session-start reminder trimmed under the
+  512-byte PIPE_BUF floor (nexus-2gcqk).
+- SessionStart drops the deleted `nx daemon t2` invocation; rdr_hook.py
+  resolves collections via the service catalog (nexus-i711w).
+- Orchestration/continuation/plan-first skill updates; ERROR_HANDLING TTL
+  rule corrected (permanent is NULL, never 0) (nexus-cg13x, nexus-0yrjr).
+
 ## [6.18.1] - 2026-07-24
 
 Plugin version aligned with conexus 6.18.1. No plugin-side changes.

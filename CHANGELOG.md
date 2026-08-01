@@ -6,6 +6,79 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-08-01
+
+The post-migration MAJOR: the substrate retirements land, the stranded-install
+detector arms, and this release is the client payload for the
+engine-service-v0.1.61 deploy gate — that engine must not deploy before this
+version is released (enforced by `scripts/check_client_release_precondition.py`,
+new in this release and wired into the engine-release skill). The engine
+identity pinned by this release is v0.1.60; the v0.1.61 floor bump follows in
+7.0.1 after deploy + cloud gate.
+
+### BREAKING
+- The SQLite client substrate is retired everywhere: the seven SQLite T2
+  domain stores, the local JSONL/SQLite catalog, and the client migration
+  chain are deleted; `NX_STORAGE_BACKEND=sqlite` hard-errors with a guided
+  redirect (RDR-158 P4 / nexus-i711w). PG through the engine is the only
+  substrate, in every mode.
+- `chromadb` leaves the dependency tree. Existing Chroma directories are
+  untouched on disk as rollback artifacts, but nothing in this release reads
+  them.
+- `nx guided-upgrade` (the Chroma/SQLite migration tool) is not in this
+  release. `LAST_MIGRATION_CAPABLE` is stamped to **6.18.1**: a pre-PG
+  install upgrading to 7.0.0 is DETECTED at every entry point (`nx init`,
+  CLI, MCP, `nx doctor`) and refused with the two-hop redirect — install
+  conexus==6.18.1, run `nx guided-upgrade`, then return to 7.x.
+- `nx catalog sync` / `nx catalog pull` are retired with the local catalog
+  (the engine's Postgres is the durability story).
+
+### Added
+- `CollectionName` validates `content_type` / `embedding_model` at
+  construction — bogus values raise `ValueError` instead of minting
+  non-conformant collection names (nexus-fm3th).
+- `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` is wired end-to-end: the client forwards
+  `allow_cross_project` on register calls, backing the engine-side source_uri
+  containment guard (nexus-e7cys client half).
+- `scripts/check_client_release_precondition.py`: a blocking engine-DEPLOY
+  gate — refuses an engine tag whose required client commits are not in a
+  released conexus version (the mirror of `check_engine_release_floor.py`).
+- Tripwire `tests/hooks/test_heredoc_pipe_budget.py`: pins every hook-script
+  heredoc body at the 512-byte macOS PIPE_BUF floor (see Fixed).
+
+### Fixed
+- `resolve(follow_alias=True)` — the declared default — is now actually sent
+  on the wire; `resolve_alias()` resolves the canonical target instead of
+  returning its input (nexus-fguo5).
+- The three chash-passing `by_doc_id` callers are migrated to
+  `docs_for_chashes`: store-put dedup fires again, the delete-path lookup
+  hits, and `nx store delete` reaps the catalog row (nexus-5axey; the
+  auto-linker caller was fixed separately on develop).
+- Dangling-endpoint link refusals (`400 code=dangling_endpoint`) from newer
+  engines are translated to a clean skip instead of an unhandled HTTP error
+  (the nexus-9ssih client half — the reason this release precedes the
+  v0.1.61 engine deploy).
+- Plugin hook scripts no longer deadlock under bash 5.3 on pipe-degraded
+  macOS: >512-byte heredoc bodies moved to sibling files invoked by path
+  (`subagent-stop-scan.py`, `divergence-language-scan.py`); the sn
+  session-start hook and the phase-gate injection were trimmed under the
+  floor (nexus-2gcqk / nexus-nqqrr class).
+
+### Plugin surface now live (PENDING_RELEASE ledger emptied by this pin)
+- Subagent git-write routing guard covers the destructive verbs
+  (checkout/restore/stash/clean/reset/rm), and direct-push-to-main is
+  hook-denied (nexus-ays2l, nexus-vduer).
+- The RDR-184 EXPECT row is mechanized: a PreToolUse hook on Agent dispatches
+  writes it from `subagent_type` + `run_in_background`; the ledger recognizes
+  START rows by agent_type and admits plugin-qualified names — hand-written
+  declarations are retired (nexus-qc4p1, nexus-mk3tw, nexus-nu7fo).
+- SessionStart no longer invokes the deleted `nx daemon t2` verb;
+  `rdr_hook.py` resolves RDR collections via the service catalog
+  (nexus-i711w).
+- Orchestration/continuation/plan-first skill updates, the TTL rule
+  correction (permanent is NULL, never 0), and the context-economy routing
+  axis (nexus-cg13x, nexus-0yrjr).
+
 ### Changed
 - **`nx enrich aspects-promote-field` no longer promotes; it reports history** (nexus-70x7y).
   The RDR-089 Phase E mechanic ran a runtime `ALTER TABLE` + backfill against SQLite. Under
