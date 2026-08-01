@@ -1483,6 +1483,53 @@ class TestCheckNextSeqDrift:
         )
         assert r.ok is True and "none" in r.detail
 
+    def test_equality_is_the_healthy_steady_state_not_drift(
+        self, monkeypatch,
+    ) -> None:
+        """next_seq == highest child is NORMAL, and this is the boundary the
+        original ``<=`` predicate got wrong (nexus-k5sdi).
+
+        ``next_seq`` holds the LAST CLAIMED sequence, not the next to hand out:
+        claimNextSeq computes ``max(next_seq, high_water) + 1`` and stores the
+        claim, so equality holds after EVERY successful registration. The old
+        predicate therefore flagged every owner that had ever been written to —
+        including both owners a virgin install creates, which is how a fresh
+        box failed its own MVV with a warning describing correct behaviour.
+        """
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 7}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is True, f"equality must not read as drift: {r.detail}"
+        assert "none" in r.detail
+
+    def test_one_below_high_water_is_still_drift(self, monkeypatch) -> None:
+        """The tightened predicate must not blunt the real detection.
+
+        next_seq one below the high-water mark is the nexus-pbawi wedge in its
+        smallest form; narrowing ``<=`` to ``<`` must keep catching it.
+        """
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 6}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is False and r.warn is True
+        assert "next_seq=6" in r.detail and "highest child=7" in r.detail
+
+    def test_fresh_owner_with_its_first_document_is_clean(
+        self, monkeypatch,
+    ) -> None:
+        """The exact virgin-install shape from the failing MVV: an owner whose
+        first registration claimed 1, leaving next_seq=1 and one child at 1."""
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.1", "next_seq": 1}],
+            ["1.1.1"],
+        )
+        assert r.ok is True, f"a brand-new owner must be clean: {r.detail}"
+
     def test_engine_without_next_seq_reads_as_skipped_not_clean(
         self, monkeypatch,
     ) -> None:

@@ -3060,7 +3060,20 @@ def _check_next_seq_drift() -> list[HealthResult]:
             _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
             continue
         checked += 1
-        if high and next_seq <= high:
+        # STRICTLY less-than. ``next_seq`` holds the LAST CLAIMED sequence, not
+        # the next one to hand out: CatalogRepository.claimNextSeq computes
+        # ``claim = max(next_seq, high_water) + 1`` and stores ``claim``, so
+        # after every successful registration ``next_seq == highest child`` by
+        # construction. Equality is the healthy steady state of every owner
+        # that has ever been written to; only a counter that has fallen BELOW
+        # its own high-water mark is drift, which is what this docstring says
+        # and what the engine's own ``next_seq_drift_healed`` log keys on
+        # (it fires when ``claim != next_seq + 1``, i.e. high_water > next_seq).
+        #
+        # This was ``<=`` (nexus-k5sdi), which flagged every healthy owner. It
+        # went unnoticed because the check skipped entirely against engines that
+        # did not report next_seq, and no test covered the equality boundary.
+        if high and next_seq < high:
             drifted.append((prefix, next_seq, high))
 
     if checked == 0:
