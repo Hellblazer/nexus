@@ -83,7 +83,14 @@ parse_summary_count() {
 # optional =-decoration prefix covers that form. Empty on no match (`|| true`
 # keeps set -e/pipefail from aborting before the failure is reported).
 select_summary_line() {
-  grep -E '^(=+ )?[0-9]+ (failed|passed|skipped|deselected|error|xfailed|xpassed|warning)[a-z]*(,.*)? in [0-9.]+s' "$1" | tail -1 || true
+  # Strip ANSI before matching. --color=no above is the primary fix; this is
+  # the belt, because the guard this feeds must not be defeatable by anything
+  # that colourises the stream (a future wrapper, FORCE_COLOR in someone's
+  # env, a CI runner that allocates a PTY). A guard that silently inverts on
+  # a formatting change is worse than no guard.
+  sed $'s/\033\[[0-9;]*m//g' "$1" \
+    | grep -E '^(=+ )?[0-9]+ (failed|passed|skipped|deselected|error|xfailed|xpassed|warning)[a-z]*(,.*)? in [0-9.]+s' \
+    | tail -1 || true
 }
 
 # ── Self-test (NX_GATE_SELFTEST=1): exercise the parser against synthetic
@@ -344,7 +351,14 @@ if [ -x "$GATE_PG_BIN/initdb" ]; then
 fi   # else: host-PG / dev mode — fall through to auto-discovery
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
-  uv run pytest -m "integration and not lived_in and not cloud_mode" -q "$@" 2>&1 | tee "$SCRATCH/pytest.out"
+  # --color=no: this output is PARSED, so it must not depend on whether the
+  # caller has a TTY. `tee` writes to stdout as well as the file, so pytest
+  # sees a terminal when a human runs the gate by hand — exactly how the
+  # release checklist says to run it — and colorises. The summary line then
+  # begins with an escape sequence, the ^-anchored selector below misses it,
+  # and the vacuity guard trips on a run where every test passed. Observed
+  # live 2026-08-01: 467 passed, gate reported FAILED (passed=0).
+  uv run pytest -m "integration and not lived_in and not cloud_mode" -q --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e
 
