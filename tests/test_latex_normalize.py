@@ -376,3 +376,85 @@ def test_text_groups_keep_internal_spaces_inside_display() -> None:
     out = _normalize_mineru_latex(r"$$\text{some words} + x$$ and prose")
     assert r"\text{some words}" in out, out
     assert " and prose" in out, out
+
+
+# ── nexus-cfy5k: the inline pass must not treat an ESCAPED dollar as a delimiter ─
+#
+# Same PROSE-not-formula inversion as nexus-gtltb, a different trigger, and it
+# survived 57a392ff. MinerU emits literal currency as `\$`. The inline pass —
+# `\$([^$]+?)\$` — does not honour the backslash escape, so the PROSE BETWEEN two
+# `\$` occurrences is matched as an inline math span and gets
+# `re.sub(r"\s+", "", s)` applied to it.
+#
+# Live corruption, catalog doc 1.14.23, chunk 375b2d1ad6ab17a1, written AFTER the
+# gtltb fix landed:
+#     contracts above \$1M.Iftheenvironmentisarelationaldatabasewithtablesfor...
+#
+# It takes a PAIR: a lone `\$` has no closing delimiter and is inert, which is why
+# the class hid behind documents that mention money exactly once.
+
+
+def test_prose_between_escaped_dollars_keeps_its_spaces() -> None:
+    """The minimal repro. This is the whole bug in one line."""
+    src = r"costs \$5 and then \$9 later."
+    assert _normalize_mineru_latex(src) == src
+
+
+def test_currency_prose_from_the_live_corpus() -> None:
+    """The shape actually found corrupted in knowledge__semantic-operators."""
+    src = (
+        r"contracts above \$1M. If the environment is a relational database "
+        r"with tables for suppliers, contracts, and locations, the target is "
+        r"naturally SQL."
+    )
+    assert _normalize_mineru_latex(src) == src
+
+
+def test_single_escaped_dollar_is_inert() -> None:
+    """One `\\$` has no partner, so it must be a no-op — and must stay one."""
+    src = r"a budget of \$5 million was approved."
+    assert _normalize_mineru_latex(src) == src
+
+
+def test_escaped_dollar_does_not_swallow_following_real_inline_math() -> None:
+    """An escaped dollar must not consume the delimiter of a real formula.
+
+    The failure mode is the gtltb one: shifting what counts as a formula, so
+    real spans are skipped while prose is normalized.
+    """
+    out = _normalize_mineru_latex(r"it cost \$5 then $Q _ { \phi }$ tail")
+    assert r"$Q_{\phi}$" in out, out          # the real span WAS normalized
+    assert r"it cost \$5 then " in out, out   # the prose was not
+    assert " tail" in out, out
+
+
+def test_escaped_dollars_around_a_display_block() -> None:
+    """Both protections must compose, not fight."""
+    src = r"pay \$5 now $$a + b$$ or \$9 later and more prose"
+    out = _normalize_mineru_latex(src)
+    assert "$$a+b$$" in out, out
+    assert r"pay \$5 now " in out, out
+    assert r" or \$9 later and more prose" in out, out
+
+
+def test_escaped_backslash_before_dollar_is_a_real_delimiter() -> None:
+    r"""Backslash parity: `\\$x$` is a line break followed by real inline math.
+
+    `\\` is an escaped backslash, so the `$` after it is NOT escaped. A naive
+    `\\\$` match would misread it and protect a genuine delimiter.
+    """
+    out = _normalize_mineru_latex(r"line\\$Q _ { \phi }$ tail")
+    assert r"$Q_{\phi}$" in out, out
+
+
+def test_idempotent_with_escaped_dollars() -> None:
+    src = r"costs \$5 and then \$9 later, with $x _ { i }$ inline."
+    once = _normalize_mineru_latex(src)
+    assert _normalize_mineru_latex(once) == once
+
+
+def test_gtltb_control_still_clean_alongside_escapes() -> None:
+    """The gtltb fix must not regress while cfy5k is fixed."""
+    out = _normalize_mineru_latex(r"$$a + b$$ some prose here $c$ more prose $d$ end.")
+    assert "some prose here" in out, out
+    assert "more prose" in out, out
