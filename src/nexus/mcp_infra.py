@@ -893,7 +893,9 @@ def manifest_write_batch_hook(
     # not accumulate across a session.
     cat = get_catalog_writer()
     try:
-        _manifest_write_loop(cat, by_doc, collection)
+        # nexus-kgos1: `_gate` is the READER, already resolved above. The sweep's
+        # two reads must use it — `cat` is write-only and raises on both.
+        _manifest_write_loop(cat, by_doc, collection, reader=_gate)
     finally:
         # Production get_catalog_writer() returns a CatalogWriter (has close);
         # tests may patch it to a raw Catalog (no close). Guard so the hot
@@ -919,7 +921,7 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
 
 
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
-                              collection: str | None) -> None:
+                              collection: str | None, reader=None) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
 
     A re-index that changes the extracted text writes chunks under NEW chashes —
@@ -949,8 +951,14 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     dropped = {h for h in before if h and h not in new}
     if not dropped:
         return
+    # nexus-kgos1: reads go to the READER. `cat` is a _ServiceCatalogWriter, a
+    # closed-whitelist write-only proxy that raises AttributeError for every
+    # read op — so routing this through it could never prove orphanhood and the
+    # sweep could never delete a row. Falling back to `cat` keeps the
+    # function-level tests above meaningful; production passes a real reader.
+    _reader = reader if reader is not None else cat
     try:
-        refs = cat.docs_for_chashes(sorted(dropped)) or {}
+        refs = _reader.docs_for_chashes(sorted(dropped)) or {}
     except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
         structlog.get_logger().warning(
             "superseded_sweep_skipped_no_reverse_lookup",
@@ -975,7 +983,7 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
         deleted=len(orphaned), kept_shared=shared)
 
 
-def _manifest_write_loop(cat, by_doc, collection: str | None = None) -> None:
+def _manifest_write_loop(cat, by_doc, collection: str | None = None, reader=None) -> None:
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc
@@ -1084,13 +1092,26 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None) -> None:
                 # vector search reads T3, not the manifest, so superseded text
                 # keeps being retrieved while `nx catalog show` looks clean.
                 # Measured on 1.14.19 after the nexus-gtltb fix: 17 such rows.
+                #
+                # nexus-kgos1: this read goes to the READER. It was routed
+                # through `cat` — a write-only proxy that raises AttributeError
+                # for every read op — into a bare `except` that logged NOTHING,
+                # so `_before` was always empty, `dropped` was always empty, and
+                # the sweep returned immediately. It had never deleted a row.
+                # The silence is what hid it: the OTHER guard in the sweep logs.
                 _before: set[str] = set()
+                _reader = reader if reader is not None else cat
                 try:
-                    _before = {h for h in (cat.get_chunk_chashes(doc_id) or []) if h}
-                except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
+                    _before = {h for h in (_reader.get_chunk_chashes(doc_id) or []) if h}
+                except Exception as _exc:  # noqa: BLE001 — no sweep beats a wrong sweep
+                    import structlog  # noqa: PLC0415 — deferred: hot path
+                    structlog.get_logger().warning(
+                        "superseded_sweep_before_read_failed",
+                        doc_id=doc_id, collection=collection, error=str(_exc))
                     _before = set()
                 _manifest_write_with_retry(cat.atomic_manifest_replace, doc_id, chunks)
-                _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection)
+                _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
+                                          reader=reader)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does
