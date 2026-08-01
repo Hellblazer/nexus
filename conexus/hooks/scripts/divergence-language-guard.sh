@@ -54,32 +54,13 @@ except Exception: print('')
 printf '%s' "$FILE_PATH" | grep -q 'docs/rdr/post-mortem/' || allow
 [[ ! -f "$FILE_PATH" ]] && allow
 
-# Apply pre-filter and run the locked Rev 4 8-pattern bank.
-HITS=$(python3 - "$FILE_PATH" <<'PYEOF'
-import sys, re
-path = sys.argv[1]
-bank = re.compile(
-    r'divergence|workaround|limitation|deferred|follow-up\s+RDR|'
-    r'Phase\s+\d+\s+(deferred|required)|out\s+of\s+scope|not\s+in\s+scope',
-    re.IGNORECASE,
-)
-results = []
-try:
-    with open(path, encoding='utf-8', errors='replace') as f:
-        for i, line in enumerate(f, 1):
-            stripped = line.strip()
-            if stripped.startswith('#'):
-                continue
-            if stripped.startswith('|') and stripped.endswith('|'):
-                continue
-            if bank.search(stripped):
-                results.append(f"  line {i}: {stripped[:120]}")
-except Exception:
-    pass
-for r in results:
-    print(r)
-PYEOF
-)
+# Apply pre-filter and run the locked Rev 4 8-pattern bank. The scan
+# body lives in a SIBLING FILE, not a heredoc: bash 5.3 pipes heredoc
+# bodies and a >512B body deadlocks when macOS degrades pipe buffers
+# (nexus-2gcqk; tests/hooks/test_heredoc_pipe_budget.py). A missing
+# sibling file yields empty HITS -> allow, the advisory no-op.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HITS=$(python3 "$HERE/divergence-language-scan.py" "$FILE_PATH" 2>/dev/null || true)
 
 [[ -z "$HITS" ]] && allow
 

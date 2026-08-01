@@ -94,6 +94,33 @@ mechanize, it matters enough to ship.
   path-derived fallback name. Repointed to the service catalog's
   `collection_for_repo`. Until this ships, sessions on the pinned tag keep
   using the fallback — same behaviour as before the fix, no new breakage.
+- `conexus/hooks/scripts/subagent-stop.sh` — nexus-2gcqk: the transcript
+  report-scan moved from a 1017-byte heredoc to a sibling file invoked by path.
+  Bash 5.3 pipes heredoc bodies, and when macOS degrades pipes to 512 bytes
+  under pipe-memory exhaustion the write deadlocks — so on a long-uptime box
+  the INSTALLED stop-guard hangs until the hook timeout on every stop that
+  reaches the scan, and the guard silently never fires. Until this ships, the
+  live install keeps that failure mode; rebooting the box (restoring 16KB
+  pipes) is the only interim mitigation.
+- `conexus/hooks/scripts/subagent-stop-scan.py` — nexus-2gcqk: NEW sibling
+  file carrying the extracted transcript scan; does not exist at the pinned
+  tag, arrives with the same release as the subagent-stop.sh repoint.
+- `conexus/hooks/scripts/divergence-language-guard.sh` — nexus-2gcqk: same
+  extraction for the 691-byte pattern-bank heredoc; same degraded-pipe
+  deadlock until this ships.
+- `conexus/hooks/scripts/divergence-language-scan.py` — nexus-2gcqk: NEW
+  sibling file carrying the extracted pattern-bank scan; arrives with the
+  same release as the guard's repoint.
+- `conexus/hooks/scripts/subagent-start.sh` — nexus-2gcqk: the PHASE_GATE
+  heredoc body trimmed from 541 to under 512 bytes so the phase-gate context
+  injection cannot deadlock under degraded pipes. The other injection blocks
+  were already under the cap. Enforced tree-side by
+  `tests/hooks/test_heredoc_pipe_budget.py`.
+- `sn/hooks/scripts/session-start.sh` — nexus-2gcqk (review Critical 1): the
+  SN reminder heredoc was 519 bytes — 7 over the degraded-pipe cap — and the
+  hook fires on EVERY session start via PATH-resolved bash, so on a
+  pipe-degraded box every sn session start deadlocks to hook timeout.
+  Trimmed under the cap; now pinned by the same tripwire.
 - `conexus/agents/_shared/ERROR_HANDLING.md` — nexus-cg13x: the TTL rule said
   "Use `ttl=0` for permanent entries". That is true only because `memory_put`
   coerces it; in the store, `0` means EXPIRE IMMEDIATELY (`expire()` selects

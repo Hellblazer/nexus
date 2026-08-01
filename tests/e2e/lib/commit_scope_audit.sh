@@ -64,6 +64,9 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
+# Two heredocs, not one: bash 5.3 pipes each heredoc body and a >512B
+# body deadlocks when macOS degrades pipe buffers (nexus-2gcqk; pinned
+# by tests/hooks/test_heredoc_pipe_budget.py).
 usage() {
     cat >&2 <<'EOF'
 Usage: commit_scope_audit.sh <range> <pathspec> [<pathspec> ...]
@@ -71,6 +74,8 @@ Usage: commit_scope_audit.sh <range> <pathspec> [<pathspec> ...]
   <range>      A git rev-range (e.g. "HEAD~5..", "abc123..def456") OR
                "--since=<date>" (e.g. "--since=2026-07-15") to select
                commits by date instead of an explicit rev-range.
+EOF
+    cat >&2 <<'EOF'
   <pathspec>   One or more allowed path prefixes / patterns. A commit
                is IN SCOPE only if every file it touches matches at
                least one pathspec (prefix match on a directory, exact

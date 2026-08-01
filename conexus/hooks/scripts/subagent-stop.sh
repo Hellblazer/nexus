@@ -93,44 +93,17 @@ print("\t".join(f.replace("\t", " ").replace("\n", " ") for f in fields))
 # Anything else — python3 missing, a crash (e.g. the path is a readable
 # DIRECTORY), empty output, missing/non-regular/unreadable transcript
 # (echoed as SKIP) — fails OPEN, never through to the block branch.
+# The scan body lives in a SIBLING FILE, not a heredoc: bash 5.3 pipes
+# heredoc bodies and a >512B body deadlocks when macOS degrades pipe
+# buffers (nexus-2gcqk; tests/hooks/test_heredoc_pipe_budget.py). A
+# missing sibling file yields empty output -> fail-open, same as any
+# other scan crash.
 _scan_verdict() {
     if [[ -z "$TRANSCRIPT" || ! -f "$TRANSCRIPT" || ! -r "$TRANSCRIPT" ]]; then
         echo "SKIP"
         return 0
     fi
-    python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null
-import json, sys
-
-def scan(path) -> bool:
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or '"SendMessage"' not in line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("type") != "assistant":
-                continue
-            msg = entry.get("message") or {}
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("name") == "SendMessage"
-                ):
-                    return True
-    return False
-
-try:
-    print("FOUND" if scan(sys.argv[1]) else "NOTFOUND")
-except Exception:
-    print("SCANERROR")
-PYEOF
+    python3 "$HERE/subagent-stop-scan.py" "$TRANSCRIPT" 2>/dev/null
 }
 
 # _stamp_resolution_if_reported <strength> — nexus-hybv1: called from the
