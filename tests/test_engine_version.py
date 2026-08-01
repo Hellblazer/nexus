@@ -160,7 +160,42 @@ class TestRequiredEngineVersion:
         # shell redirect, so the PASS is the script's sentinel line, not a
         # captured 0. Equivalent by the script's own definition; not claimed as
         # a verified numeric code.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 59)
+        # ->(0,1,60) 2026-08-01: FIX-DELIVERY RULE. No hard client dependency —
+        # every route this release needs already existed — but local installs
+        # receive engine fixes ONLY through this floor/pin, so a cut + deployed
+        # + gated tag moves it unconditionally (Hal directive 2026-07-15, after
+        # the 14h GH #1402 incident; the carve-out version of this rule is what
+        # caused the identical 2026-07-14 v0.1.42 episode).
+        # What the fixes ARE matters here: TWO P0s, both found by REVIEW rather
+        # than by CI, both in CatalogRepository within one week.
+        #   nexus-v6za0  rename onto a POPULATED supersede tombstone silently
+        #                merged two collections across two vector spaces —
+        #                silent BY CONSTRUCTION, since cross-model means the
+        #                rows land in different chunks_<dim> tables so nothing
+        #                collides and nothing aborts. Third attempt at one
+        #                guard: liveness and identity were both proxies, and
+        #                both shipped or nearly shipped behind green suites.
+        #   nexus-upg3s  that fix's own regression — converging by identity
+        #                blanked repo_root/repo_hash/description when the
+        #                payload omitted them, and repo_root anchors
+        #                deriveSourceUri, so already-registered files re-tumble
+        #                (the nexus-3e4s class, itself a ~6,500-row event).
+        #   nexus-kjjab  a rotated NX_SERVICE_TOKEN 23505'd on the AUTH
+        #                BOOTSTRAP path and hard-aborted boot, HTTP never
+        #                binding, recurring on every restart.
+        # Pre-60 engines carry all three. An install left below this floor is
+        # exposed to two silent data-corruption paths, which is the strongest
+        # fix-delivery case the rule has had.
+        # THE v0.1.59 HONEST LIMIT ABOVE IS RESOLVED: conexus reports the
+        # client-path gate at TRUE EXIT 0, all four legs, on this deploy.
+        # Deployed + gated 2026-08-01: STEP-6 exit 0, parity 104/113 identical
+        # to the v0.1.59 baseline with zero per-query jaccard movement, recall
+        # 12/12 local == cloud, hybrid p95 1950.8ms < 2376ms bound; boot
+        # Liquibase 5 changesets ALL grant-class (no table rewrite, so the
+        # RDR-180 stale-planner-stats trap did not apply). Live /version
+        # independently confirmed UNAUTHENTICATED from a dev box. Relay
+        # [21320], reply [21321].
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 60)
 
 
 class TestParseEngineVersion:

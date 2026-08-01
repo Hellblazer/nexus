@@ -249,7 +249,44 @@ from __future__ import annotations
 #: swallowed by a shell redirect, so the PASS is the script's literal sentinel
 #: line rather than a captured 0. The script defines them as equivalent; the
 #: numeric code was not verified and is not being claimed.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 59)
+#:
+#: ── v0.1.60 (2026-08-01) ──────────────────────────────────────────────────
+#: THAT HONEST LIMIT IS NOW RESOLVED: conexus reports the client-path gate at
+#: TRUE EXIT 0, all four legs, on this deploy. The caveat above stands as the
+#: record of what v0.1.59's evidence actually was; it no longer applies.
+#: CONTENT — ten service/ commits, and TWO of them were P0s found by REVIEW,
+#: not by CI, both in the same file within one week:
+#:   nexus-v6za0  rename onto a POPULATED supersede tombstone silently merged
+#:                two collections across two vector spaces. Third attempt at
+#:                one guard; liveness and identity were both proxies for the
+#:                property that mattered, and both shipped or nearly shipped
+#:                behind green suites. It now MEASURES emptiness.
+#:   nexus-upg3s  that fix's OWN regression — converging by identity blanked
+#:                repo_root/repo_hash/description when the payload omitted
+#:                them. repo_root anchors deriveSourceUri, so it re-tumbles
+#:                already-registered files (the nexus-3e4s class). 24 green
+#:                tests missed it: the fixture created its owner WITHOUT the
+#:                fields the bug destroyed.
+#:   nexus-kjjab  a rotated NX_SERVICE_TOKEN raised an unhandled 23505 on the
+#:                AUTH BOOTSTRAP path and hard-aborted boot, HTTP never
+#:                binding. Plus the nexus-0ehwe arbiter class (pbawi/jq53b/
+#:                z3ssg) and the rename/supersede chain.
+#: SCHEMA: boot Liquibase applied 5 changesets, ALL GRANT-CLASS — no table
+#: rewritten, so the RDR-180 stale-planner-stats trap did not apply.
+#: Gates: native build trip-wire GREEN pre-tag (this set adds four new classes,
+#: and GraalVM reachability fails only in the release build, i.e. AFTER the
+#: tag); local full mvn suite on a tree verified BYTE-IDENTICAL to the tag
+#: target; STEP-6 exit 0 with parity 104/113 IDENTICAL to the v0.1.59 baseline
+#: and ZERO per-query jaccard movement; recall 12/12 local == cloud, no vacuous
+#: legs; hybrid p95 1950.8ms against a 2376ms bound.
+#: Deployed digest sha256:2b97cdd7...; live /version independently confirmed
+#: UNAUTHENTICATED from this box (release_version 0.1.60, embedding_mode
+#: voyage) — i.e. client-visibly, not merely engine-direct. Relay [21320],
+#: reply [21321].
+#: NOT EXERCISED: no token rotation was performed on this deploy, so kjjab's
+#: ordering hazard was not tested in production. Rotation is safe from here
+#: because the host now runs 0.1.60; it was NOT safe before it.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 60)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
