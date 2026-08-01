@@ -1971,14 +1971,30 @@ def _run_check_taxonomy_body(conn: Any) -> None:
     # topic_links pair is structurally possible. A doc_id with exactly
     # one projection assignment cannot produce a link (a link requires
     # from + to), so flagging it as drift is a false positive. Same
-    # logic if the co-occurring topic was assigned via a non-projection
-    # path (centroid, bertopic) — refresh_projection_links only
-    # aggregates ``assigned_by='projection'`` rows, so a centroid
-    # partner does not contribute to topic_links. nexus-346q: require
-    # a co-occurring projection assignment on the same doc before
-    # flagging drift. Shakeout on live data: 15 of 20 residual drift
-    # rows after a backfill were isolated topics that could never
-    # produce a link.
+    # The co-occurring partner must be NON-projection, which is the exact
+    # opposite of what this comment asserted until nexus-ypori.
+    #
+    # The materializer pairs a projection TARGET with a non-projection
+    # SOURCE — TaxonomyRepository.refreshProjectionLinks:1609-1610 is
+    # ``.and(src.ASSIGNED_BY.ne("projection"))`` under
+    # ``.where(tgt.ASSIGNED_BY.eq("projection"))``, and the SQLite-era
+    # implementation it replaced said the same (catalog_taxonomy.py:1312
+    # @ f24bdb85^). So a centroid partner is precisely what DOES produce a
+    # link, and two projection assignments on one doc produce NONE.
+    #
+    # nexus-346q asserted the inverse in its commit message, in this
+    # comment, and in a test that seeded projection+centroid and asserted
+    # no drift — pinning the bug rather than the behaviour. The guard
+    # therefore demanded the one condition under which the materializer
+    # never emits a link, then reported the absent link as drift: measured
+    # 0 of 50 flagged rows were linkable at all, while the 2 genuinely
+    # drifted topics were suppressed by the same guard.
+    #
+    # The original observation stands and is why a guard exists at all:
+    # a doc_id with exactly one projection assignment cannot produce a
+    # link (a link needs from + to), and 15 of 20 residual rows in the
+    # nexus-346q shakeout were such isolated topics. Only the partner's
+    # required assigned_by was wrong.
     # The NOT EXISTS form (``tl.from_topic_id = ta.topic_id OR
     # tl.to_topic_id = ta.topic_id``) defeats SQLite's index planner —
     # the OR forces a covering scan of topic_links per outer row, which
@@ -2002,7 +2018,7 @@ def _run_check_taxonomy_body(conn: Any) -> None:
                SELECT 1 FROM topic_assignments ta2
                 WHERE ta2.doc_id      = ta.doc_id
                   AND ta2.topic_id    != ta.topic_id
-                  AND ta2.assigned_by = 'projection'
+                  AND ta2.assigned_by != 'projection'
            )
         """
     ).fetchall()

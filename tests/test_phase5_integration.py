@@ -245,7 +245,7 @@ class TestDoctorCheckTaxonomy:
         assert "invariant holds" in result.output
 
     def test_drift_detected(self, runner: CliRunner, tmp_path: Path) -> None:
-        """Projection assignments with co-occurring projection partner but no
+        """Projection assignment with a co-occurring NON-projection partner but no
         topic_links row → exit 1. nexus-346q: drift detection requires the
         co-occurring partner since a link is structurally impossible without one."""
         db_path = self._setup_db(tmp_path)
@@ -260,7 +260,11 @@ class TestDoctorCheckTaxonomy:
             "VALUES (?, ?, ?, ?, ?)",
             (43, "partner-topic", "docs__other", 0, "2026-01-01T00:00:00Z"),
         )
-        # Two projection assignments on the same doc — a topic_links pair is
+        # projection + centroid on one doc — the shape refreshProjectionLinks
+        # actually emits a link for (nexus-ypori). This fixture said
+        # projection+projection until then, which produces NO link, so the
+        # test only passed because the check was inverted in the same
+        # direction. A topic_links pair is
         # structurally possible here, so the absence of topic_links is real drift.
         conn.execute(
             "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
@@ -270,7 +274,7 @@ class TestDoctorCheckTaxonomy:
         conn.execute(
             "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
             "VALUES (?, ?, ?)",
-            ("doc-xyz", 43, "projection"),
+            ("doc-xyz", 43, "centroid"),
         )
         conn.commit()
         conn.close()
@@ -314,13 +318,20 @@ class TestDoctorCheckTaxonomy:
         assert "invariant holds" in result.output
         assert "solitary-topic" not in result.output
 
-    def test_co_occurring_must_also_be_projection(
+    def test_co_occurring_non_projection_partner_IS_linkable(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        """nexus-346q: a projection assignment whose only co-occurring topic
-        was assigned via a non-projection path (centroid, bertopic) is still
-        structurally isolated from the projection perspective — no projection
-        pair means no aggregated topic_links row. Must not flag as drift.
+        """A projection assignment co-occurring with a NON-projection one is
+        exactly what the materializer links — so a missing link IS drift.
+
+        This test asserted the opposite until nexus-ypori, and in doing so
+        pinned the bug: it seeded projection+centroid, the one shape
+        refreshProjectionLinks definitely emits a row for
+        (TaxonomyRepository:1609 joins ``src.ASSIGNED_BY.ne("projection")``
+        under ``tgt.ASSIGNED_BY.eq("projection")``), and asserted the
+        invariant held with no link present. The check's guard was the
+        logical complement of the materializer, so it reported unlinkable
+        topics as drift and suppressed the linkable ones.
         """
         db_path = self._setup_db(tmp_path)
         conn = sqlite3.connect(str(db_path))
@@ -350,9 +361,49 @@ class TestDoctorCheckTaxonomy:
         with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
+        assert result.exit_code != 0, (
+            f"projection+centroid on one doc is linkable — a missing "
+            f"topic_links row must be reported as drift:\n{result.output}"
+        )
+        assert "projection-side" in result.output, result.output
+
+    def test_co_occurring_projection_only_partner_is_NOT_linkable(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Two PROJECTION assignments on one doc produce no link at all.
+
+        The true complement of the case above, and the one the old guard
+        wrongly treated as the linkable shape. refreshProjectionLinks
+        requires the source partner to be non-projection, so a doc carrying
+        only projection assignments can never contribute a topic_links row —
+        flagging it would be the false positive the guard exists to prevent.
+        """
+        db_path = self._setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        for tid, label, coll in (
+            (110, "proj-a", "docs__x"),
+            (111, "proj-b", "docs__y"),
+        ):
+            conn.execute(
+                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tid, label, coll, 0, "2026-01-01T00:00:00Z"),
+            )
+        for tid in (110, 111):
+            conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "VALUES (?, ?, ?)",
+                ("doc-both-proj", tid, "projection"),
+            )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.config.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
         assert result.exit_code == 0, result.output
         assert "invariant holds" in result.output
-        assert "projection-side" not in result.output
+        assert "proj-a" not in result.output
 
     def test_invariant_holds_with_matching_link(
         self, runner: CliRunner, tmp_path: Path
