@@ -26,15 +26,15 @@ hook does T1 flush + T2 expire only, which is fork-safe.
 
 **Pre-fork budget invariant** (historically "never import nexus.*
 before ``os.fork()``"): the parent must pay near-zero cost before
-forking off the daemon. Phase 1C (nexus-a52i) relaxed the letter of
-the import ban for the LOCAL-mode tier summary — a fast, bounded
-sqlite read — but the spirit is binding: nothing slow or network-bound
-may run pre-fork. The SERVICE-mode summary therefore prints AFTER the
-fork dispatch, from the parent, via a pinned-endpoint single-attempt
-read (nexus-ov13k review — the retrying transport's 20-50s worst case
+forking off the daemon. Nothing slow or network-bound may run
+pre-fork — the tier summary therefore prints AFTER the fork dispatch,
+from the parent, via a pinned-endpoint single-attempt read
+(nexus-ov13k review — the retrying transport's 20-50s worst case
 pre-fork would reproduce the exact "Hook cancelled" race this module
-exists to prevent). Heavy imports for the cleanup itself happen only
-inside ``_run_session_end_synchronously`` in the grandchild.
+exists to prevent; the Phase 1C pre-fork sqlite summary that once
+relaxed the import ban died with the =sqlite opt-out, RDR-158 P3).
+Heavy imports for the cleanup itself happen only inside
+``_run_session_end_synchronously`` in the grandchild.
 
 Shell invocation (wired into ``conexus/hooks/hooks.json``)::
 
@@ -127,96 +127,15 @@ def _daemonize_and_run() -> None:
     os._exit(0)
 
 
-def _print_tier_status_summary() -> None:
-    """Print a one-line tier-write summary to stderr BEFORE the fork.
-
-    Phase 1C of the tier-discipline restoration initiative
-    (nexus-a52i). Closes the visibility loop: every session that
-    persists findings now sees its own contribution count at close.
-
-    Best-effort: any failure is swallowed so launcher startup never
-    breaks. Suppressed entirely when there are zero writes (no point
-    printing for a transactional session that didn't intend to
-    persist anything).
-
-    Resolution: delegates to
-    :func:`nexus.session.resolve_active_session_id`. Short-circuits
-    when no session is bound -- a per-session summary makes no sense
-    without a session, and querying ``WHERE session_id = "unknown"``
-    would leak rows from unrelated invocations into the user-facing
-    summary.
-
-    Issue #594 / nexus-9e9a: this site shares the resolution chain
-    with the T1 chunk store and the tier-write audit log, so the
-    three surfaces never disagree on attribution.
-    """
-    try:
-        import sqlite3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        from pathlib import Path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-        from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-        session_id = resolve_active_session_id()
-        if not session_id:
-            return
-
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-            # nexus-ov13k: service-mode summaries print POST-fork (see
-            # _print_service_tier_summary + main()) — never from this
-            # pre-fork path. Both reviewers independently flagged that any
-            # network wait here (mixin worst case 20-50s: gateway backoff +
-            # lease-wait, unbounded by the client timeout kwarg) would sit
-            # AHEAD of the cleanup dispatch and reintroduce the exact
-            # pre-fork SIGTERM race this module exists to prevent.
-            return
-
-        db_path = default_db_path()
-        if not Path(db_path).exists():
-            return
-        conn = sqlite3.connect(str(db_path))  # epsilon-allow: session-end best-effort observation — must not block on daemon availability; read-only tier_writes check
-        try:
-            has_table = conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='tier_writes'"
-            ).fetchone()
-            if not has_table:
-                return
-            rows = conn.execute(
-                "SELECT tier, COUNT(*) FROM tier_writes "
-                "WHERE session_id = ? GROUP BY tier",
-                (session_id,),
-            ).fetchall()
-        finally:
-            conn.close()
-        by_tier = {tier: n for tier, n in rows}
-        total = sum(by_tier.values())
-        if total == 0:
-            return
-        parts = [
-            f"{tier}={by_tier.get(tier, 0)}"
-            for tier in ("T1", "T2", "T3", "plan")
-            if by_tier.get(tier, 0)
-        ]
-        sys.stderr.write(
-            f"nx tier writes (session {session_id[:8]}): "
-            f"total={total} {' '.join(parts)}\n"
-        )
-        sys.stderr.flush()
-    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
-        # Telemetry must never break session close.
-        pass
-
-
 def _print_service_tier_summary() -> None:
-    """Service-mode twin of :func:`_print_tier_status_summary` — POST-fork.
+    """Print the Phase-1C tier-write summary from the engine — POST-fork.
 
-    nexus-ov13k: service mode is the RDR-152 DEFAULT and records tier_writes
-    in the engine, so the sqlite reader saw an empty table and the
-    zero-writes suppression silently killed the Phase-1C summary for every
-    service-mode session (third consumer of the wyu1g blindness class;
-    tier-status and doctor fixed via nexus-59wjj).
+    nexus-ov13k: the engine records tier_writes, so the pre-fork sqlite
+    reader this replaced saw an empty table and the zero-writes suppression
+    silently killed the summary for every service-mode session (third
+    consumer of the wyu1g blindness class; tier-status and doctor fixed via
+    nexus-59wjj). The sqlite twin died with the =sqlite opt-out (RDR-158
+    P3, nexus-7bomn).
 
     Runs in the PARENT after :func:`_daemonize_and_run` has already forked
     the cleanup child, so no network wait can ever delay the cleanup
@@ -229,9 +148,6 @@ def _print_service_tier_summary() -> None:
     diagnosable from the logs).
     """
     try:
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        if storage_backend_for("telemetry") != StorageBackend.SERVICE:
-            return
         from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         session_id = resolve_active_session_id()
         if not session_id:
@@ -283,7 +199,10 @@ def _print_service_tier_summary() -> None:
 
 
 def main() -> None:
-    _print_tier_status_summary()
+    # The pre-fork SQLite tier summary died with the =sqlite opt-out
+    # (RDR-158 P3, nexus-7bomn): the service twin below prints POST-fork so
+    # a slow/hung service read can never delay the cleanup dispatch — the
+    # exact pre-fork SIGTERM race the old ordering had to guard against.
     if not hasattr(os, "fork"):
         # Windows etc — no fork, run synchronously.
         _run_session_end_synchronously()

@@ -42,7 +42,7 @@ def _write_config(fake_home: Path, data: dict) -> None:
 
 
 @pytest.mark.parametrize("args,section,key,expected", [
-    (["chroma_api_key=abc123"], "credentials", "chroma_api_key", "abc123"),
+    (["voyage_api_key=abc123"], "credentials", "voyage_api_key", "abc123"),
     (["voyage_api_key", "vk-space"], "credentials", "voyage_api_key", "vk-space"),
     (["pdf.extractor=mineru"], "pdf", "extractor", "mineru"),
     (["pdf.extractor", "mineru"], "pdf", "extractor", "mineru"),
@@ -82,23 +82,23 @@ def test_config_set_creates_dir(runner, fake_home) -> None:
 
 def test_config_set_preserves_existing(runner, fake_home) -> None:
     _write_config(fake_home, {"server": {"port": 9999}})
-    runner.invoke(main, ["config", "set", "chroma_api_key=x"])
+    runner.invoke(main, ["config", "set", "voyage_api_key=x"])
     data = _read_config(fake_home)
     assert data["server"]["port"] == 9999
-    assert data["credentials"]["chroma_api_key"] == "x"
+    assert data["credentials"]["voyage_api_key"] == "x"
 
 
 def test_config_set_updates_existing(runner, fake_home) -> None:
-    runner.invoke(main, ["config", "set", "chroma_api_key=first"])
-    runner.invoke(main, ["config", "set", "chroma_api_key=second"])
-    assert _read_config(fake_home)["credentials"]["chroma_api_key"] == "second"
+    runner.invoke(main, ["config", "set", "voyage_api_key=first"])
+    runner.invoke(main, ["config", "set", "voyage_api_key=second"])
+    assert _read_config(fake_home)["credentials"]["voyage_api_key"] == "second"
 
 
 def test_config_set_dotted_preserves_existing(runner, fake_home) -> None:
-    runner.invoke(main, ["config", "set", "chroma_api_key=abc"])
+    runner.invoke(main, ["config", "set", "voyage_api_key=abc"])
     runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
     data = _read_config(fake_home)
-    assert data["credentials"]["chroma_api_key"] == "abc"
+    assert data["credentials"]["voyage_api_key"] == "abc"
     assert data["pdf"]["extractor"] == "docling"
 
 
@@ -168,13 +168,13 @@ def test_config_get_masks_by_default(runner, fake_home) -> None:
 
 
 def test_config_get_prefers_env_var(runner, fake_home, monkeypatch) -> None:
-    runner.invoke(main, ["config", "set", "chroma_api_key=file-val"])
-    monkeypatch.setenv("CHROMA_API_KEY", "env-val")
-    result = runner.invoke(main, ["config", "get", "--show", "chroma_api_key"])
+    runner.invoke(main, ["config", "set", "voyage_api_key=file-val"])
+    monkeypatch.setenv("VOYAGE_API_KEY", "env-val")
+    result = runner.invoke(main, ["config", "get", "--show", "voyage_api_key"])
     assert "env-val" in result.output
 
 
-@pytest.mark.parametrize("key", ["chroma_api_key", "pdf.nonexistent_key", "ghost.setting"])
+@pytest.mark.parametrize("key", ["voyage_api_key", "pdf.nonexistent_key", "ghost.setting"])
 def test_config_get_missing_reports_not_set(runner, fake_home, key) -> None:
     result = runner.invoke(main, ["config", "get", key])
     assert result.exit_code == 0
@@ -205,17 +205,19 @@ def test_config_get_dotted_show_not_masked(runner, fake_home) -> None:
 
 
 def test_config_list_masks_values(runner, fake_home) -> None:
-    runner.invoke(main, ["config", "set", "chroma_api_key=super-secret"])
+    runner.invoke(main, ["config", "set", "voyage_api_key=super-secret"])
     result = runner.invoke(main, ["config", "list"])
     assert result.exit_code == 0
     assert "super-secret" not in result.output
-    assert "chroma_api_key" in result.output
+    assert "voyage_api_key" in result.output
 
 
 def test_config_list_shows_credential_names(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "list"])
     assert result.exit_code == 0
-    assert "chroma_api_key" in result.output
+    # RDR-155 P4b: the chroma_* credential rows died with the migration
+    # machinery; voyage is the surviving registered credential.
+    assert "chroma_api_key" not in result.output
     assert "voyage_api_key" in result.output
 
 

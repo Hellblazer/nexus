@@ -137,7 +137,7 @@ public final class MemoryHandler implements HttpHandler {
         String tags    = optStringOrEmpty(body, "tags");
         String session = optStringOrNull(body, "session");
         String agent   = optStringOrNull(body, "agent");
-        Integer ttl    = optInt(body, "ttl");
+        Integer ttl    = coercePermanentTtl(optInt(body, "ttl"));
 
         long id = repo.upsert(tenant, project, title, content, tags, session, agent, ttl);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
@@ -163,7 +163,7 @@ public final class MemoryHandler implements HttpHandler {
         String tags    = optStringOrEmpty(body, "tags");
         String session = optStringOrNull(body, "session");
         String agent   = optStringOrNull(body, "agent");
-        Integer ttl    = optInt(body, "ttl");
+        Integer ttl    = coercePermanentTtl(optInt(body, "ttl"));
         double minSim  = optDouble(body, "min_similarity", 0.5);
 
         long[] result = repo.putOrMerge(tenant, project, title, content, tags, session, agent, ttl, minSim);
@@ -455,6 +455,33 @@ public final class MemoryHandler implements HttpHandler {
         }
         int imported = repo.importBatch(tenant, rows);
         HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
+    }
+
+    /**
+     * Coerce a caller-supplied {@code ttl} of {@code <= 0} to NULL — permanent
+     * (nexus-cg13x).
+     *
+     * <p>{@code ttl = 0} does NOT mean permanent. {@code MemoryRepository.expire()}
+     * filters on {@code WHERE ttl IS NOT NULL} and computes
+     * {@code effective_ttl = ttl * (1 + log(access_count + 1))}, so a ttl of 0
+     * yields an effective TTL of 0 and the row is deleted by the very next
+     * sweep. Permanent is NULL — the only value that filter excludes.
+     *
+     * <p>The MCP layer has always coerced this ({@code mcp/core.py}), so MCP
+     * users were safe and the belief "0 means permanent" spread as though it
+     * were the substrate's contract. Anything POSTing here DIRECTLY inherited
+     * the footgun instead — which is what destroyed
+     * {@code nexus/deployed-engine-version} repeatedly, each time surviving an
+     * immediate read-back (a 200 and a row id prove the WRITE, not its
+     * DURABILITY) and only vanishing once a sweep ran. Coercing here makes the
+     * documented semantics true for EVERY caller rather than only MCP's.
+     *
+     * <p>Deliberately NOT applied to {@link #parseImportRow}: the ETL legs
+     * carry source values verbatim, and silently rewriting a migrated row's
+     * TTL would make the migration unfaithful.
+     */
+    private static Integer coercePermanentTtl(Integer ttl) {
+        return (ttl != null && ttl <= 0) ? null : ttl;
     }
 
     /** Parse + validate one import row (shared by /import and /import_batch). */

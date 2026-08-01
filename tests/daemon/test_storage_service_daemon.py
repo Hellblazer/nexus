@@ -433,6 +433,17 @@ class TestStorageServiceSupervisorUnit:
 # ---------------------------------------------------------------------------
 
 
+
+def _ssd_probe():
+    """nexus-7f7gb: the heartbeat's health seam is now the tri-state
+    ``_probe_service_health``; ``_service_healthy`` survives for the STARTUP
+    readiness gate, where UNREADY and UNKNOWN are equivalent. Heartbeat tests
+    stub the tri-state; startup tests keep stubbing the bool."""
+    from nexus.daemon.storage_service_daemon import HealthProbe
+
+    return HealthProbe
+
+
 class TestPGIndependentRecovery:
     """When PG dies while the jar is still alive, the run loop must restart
     PG directly without triggering a jar respawn (SIGNIFICANT-1 fix)."""
@@ -451,7 +462,7 @@ class TestPGIndependentRecovery:
         sup._publish(19001)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=True), \
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK), \
              patch.object(sup, "_pg_reachable", return_value=False), \
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             jar_running, pg_ok = sup.heartbeat_once()
@@ -739,7 +750,7 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         # Accumulate some unhealthy beats (below threshold)
-        with patch.object(sup, "_service_healthy", return_value=False), \
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
              patch.object(sup, "_pg_reachable", return_value=True), \
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             for _ in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
@@ -748,7 +759,7 @@ class TestStuckJvmDetection:
         assert sup._consecutive_unhealthy_heartbeats == _MAX_UNHEALTHY_HEARTBEATS - 1
 
         # One healthy beat — counter resets
-        with patch.object(sup, "_service_healthy", return_value=True), \
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK), \
              patch.object(sup, "_pg_reachable", return_value=True), \
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             jar_running, pg_ok = sup.heartbeat_once()
@@ -756,6 +767,69 @@ class TestStuckJvmDetection:
         assert jar_running is True and pg_ok is True
         assert sup._consecutive_unhealthy_heartbeats == 0, (
             "One healthy beat must reset _consecutive_unhealthy_heartbeats to 0"
+        )
+
+    def test_saturated_pool_silent_health_but_live_livez_never_restarts(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-hubc0: /health silent + /livez answering = SATURATED, not wedged.
+
+        ``GET /health`` takes a HikariCP connection, so under an indexing burst
+        it can block past its own timeout and go silent — indistinguishable,
+        before this change, from a wedged JVM. ``/livez`` touches no pool, so
+        an answer there is positive proof the process is alive and its HTTP
+        loop is responsive. The restart counter must therefore NEVER advance
+        on this combination, no matter how long it persists: restarting a busy
+        service severs in-flight clients, which retry, which adds load — the
+        self-amplifying loop nexus-7f7gb was filed for.
+
+        The lease is still NOT re-stamped (the service cannot serve reads right
+        now), so discoverers age it out via TTL. Degraded, not dead.
+        """
+        sup = _make_supervisor(config_dir, clock)
+        sup._proc = _FakeProc(pid=45010)
+        sup._service_port = 20010
+        sup._publish(20010)
+
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
+             patch.object(sup, "_probe_service_liveness", return_value=True), \
+             patch.object(sup, "_pg_reachable", return_value=True), \
+             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+            for beat in range(_MAX_UNHEALTHY_HEARTBEATS * 3):
+                jar_running, _pg_ok = sup.heartbeat_once()
+                assert jar_running is True, (
+                    f"beat {beat + 1}: a saturated pool must never signal exit"
+                )
+
+        assert sup._consecutive_unhealthy_heartbeats == 0, (
+            "a live /livez means the process is NOT wedged — the restart "
+            "counter must stay at zero however long saturation lasts"
+        )
+
+    def test_wedged_process_both_probes_silent_still_exits(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """...and the detection this replaces still fires: silence on BOTH
+        endpoints is a genuine wedge, and still exits for an OS restart within
+        the same bounded number of beats."""
+        sup = _make_supervisor(config_dir, clock)
+        sup._proc = _FakeProc(pid=45011)
+        sup._service_port = 20011
+        sup._publish(20011)
+
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
+             patch.object(sup, "_probe_service_liveness", return_value=False), \
+             patch.object(sup, "_pg_reachable", return_value=True), \
+             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+            results = [sup.heartbeat_once()[0] for _ in range(_MAX_UNHEALTHY_HEARTBEATS)]
+
+        assert results[:-1] == [True] * (_MAX_UNHEALTHY_HEARTBEATS - 1), (
+            "below threshold a wedge must not exit yet"
+        )
+        assert results[-1] is False, (
+            "at threshold a wedged process must still signal supervisor exit"
         )
 
     def test_compound_failure_below_threshold_returns_jar_alive(
@@ -1534,14 +1608,42 @@ class TestLeaseTtlAndHeapBound:
         assert rec.ttl == ttl_for_tier("storage_service") == 15.0
 
     def test_ttl_exceeds_worst_case_heartbeat_tick(self) -> None:
-        # The margin invariant (debugger RF-1 finding): a heartbeat tick can take
-        # up to _HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL; the TTL must exceed
-        # that with room, or a single slow tick grazes the TTL.
+        """The margin invariant (debugger RF-1 finding): a heartbeat tick can
+        take up to its probe budget + DEFAULT_HEARTBEAT_INTERVAL, and the TTL
+        must exceed that with room or a single slow tick grazes the TTL.
+
+        nexus-hubc0: the worst tick now includes BOTH probes, because a beat
+        whose /health goes silent then consults /livez. Understating the budget
+        here would make the invariant a lie — the formula tracks the code, not
+        just the constants.
+        """
         import nexus.daemon.storage_service_daemon as ssd_mod
         from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
 
-        worst_tick = ssd_mod._HEALTH_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+        worst_tick = (
+            ssd_mod._HEALTH_TIMEOUT + ssd_mod._LIVEZ_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+        )
         assert ttl_for_tier("storage_service") >= 3 * worst_tick
+
+    def test_ttl_has_real_margin_not_boundary(self) -> None:
+        """nexus-hubc0 acceptance: the invariant must hold with MARGIN, not at
+        the boundary. Pre-fix it was exactly equal (4.0 + 1.0 = 5.0, TTL 15 ==
+        3 x 5), so any future probe-budget increase silently broke it. Moving
+        the restart decision onto the dependency-free /livez is what bought the
+        headroom: /health no longer has to outlast a saturated pool, because a
+        /health timeout is no longer evidence of a wedge.
+        """
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
+
+        worst_tick = (
+            ssd_mod._HEALTH_TIMEOUT + ssd_mod._LIVEZ_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+        )
+        ttl = ttl_for_tier("storage_service")
+        assert ttl > 3 * worst_tick, (
+            f"TTL {ttl}s sits AT the 3x boundary for a {worst_tick}s worst tick "
+            "— restore headroom before raising either probe timeout"
+        )
 
     def test_spawn_service_applies_max_heap_when_set(
         self, config_dir: Path, clock: _FakeClock, monkeypatch

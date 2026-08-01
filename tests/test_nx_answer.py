@@ -12,6 +12,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -73,45 +74,9 @@ def _make_multi_step_match() -> Match:
     )
 
 
-# ── T2 migration ──────────────────────────────────────────────────────────────
-
-
-class TestNxAnswerRunsMigration:
-
-    def test_creates_table(self):
-        from nexus.db.migrations import migrate_nx_answer_runs
-
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-
-        cursor = conn.execute("PRAGMA table_info(nx_answer_runs)")
-        columns = {row[1] for row in cursor.fetchall()}
-        expected = {
-            "id", "question", "plan_id", "matched_confidence",
-            "step_count", "final_text", "cost_usd", "duration_ms",
-            "created_at",
-        }
-        assert expected <= columns
-
-    def test_idempotent(self):
-        from nexus.db.migrations import migrate_nx_answer_runs
-
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-        migrate_nx_answer_runs(conn)  # must not raise
-
-    def test_in_migrations_list(self):
-        from nexus.db.migrations import MIGRATIONS
-
-        versions = [(m.introduced, m.name) for m in MIGRATIONS]
-        assert any(
-            v == "4.5.0" and "nx_answer_runs" in n
-            for v, n in versions
-        ), f"4.5.0 nx_answer_runs migration not in MIGRATIONS: {versions}"
-
-
-# ── Plan-match gate ───────────────────────────────────────────────────────────
-
+# ── T2 migration tests DELETED (RDR-158 P4 Stage 4, nexus-i711w): the
+# migrate_nx_answer_runs chain died with nexus/db/migrations.py; the
+# nx_answer_runs table is engine-owned (Liquibase). ─────────────────────────
 
 class TestPlanMatchGate:
 
@@ -362,8 +327,8 @@ class TestRunRecording:
         ``_warn_telemetry_drop`` (best-effort telemetry), so
         ``warn.assert_not_called()`` is the backend-blind proof that the row
         landed (SQLite INSERT committed / service POST returned 2xx). Raw-row
-        content assertions stay behind ``has_raw_access`` at the call sites —
-        the Http store exposes no row-level read surface for nx_answer_runs."""
+        content assertions died with the raw SQLite store — the Http store
+        exposes no row-level read surface for nx_answer_runs."""
         from nexus.mcp import core as _core
 
         telemetry = db.telemetry
@@ -381,7 +346,6 @@ class TestRunRecording:
         return seen
 
     def test_record_run_trace_true(self, tmp_path):
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
@@ -394,16 +358,7 @@ class TestRunRecording:
             assert seen["question"] == "test question"
             assert seen["final_text"] == "the answer"
 
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT * FROM nx_answer_runs"
-                ).fetchone()
-                assert row is not None
-                assert row[1] == "test question"   # question
-                assert row[5] == "the answer"      # final_text
-
     def test_record_run_trace_false_redacts(self, tmp_path):
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
@@ -418,13 +373,6 @@ class TestRunRecording:
             assert seen["question"] == "[redacted]"
             assert seen["final_text"] == "[redacted]"
 
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT * FROM nx_answer_runs"
-                ).fetchone()
-                assert row[1] == "[redacted]"   # question
-                assert row[5] == "[redacted]"   # final_text
-
     def test_record_run_lands_via_t2_telemetry(self, tmp_path):
         """Regression for nexus-598n + nexus-pyzk7: the MCP call sites write
         through the telemetry *store* (``db.telemetry``), not a raw ``.conn``.
@@ -438,7 +386,6 @@ class TestRunRecording:
         backend-blind contract — asserted here on BOTH substrates via the
         no-silent-drop spy in ``_record_and_capture``.
         """
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         path = tmp_path / "mem.db"
@@ -453,12 +400,6 @@ class TestRunRecording:
             assert seen["question"] == "integration-probe"
             assert seen["plan_id"] == 7
             assert seen["step_count"] == 2
-
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT question, plan_id, step_count FROM nx_answer_runs"
-                ).fetchone()
-                assert row == ("integration-probe", 7, 2)
 
 
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
@@ -631,13 +572,16 @@ class TestPlanLibraryMetrics:
     """
 
     def _fresh_library(self):
-        """Return a PlanLibrary over an on-disk temp db + seed one plan."""
-        import tempfile
-        from pathlib import Path
-        from nexus.db.t2.plan_library import PlanLibrary
+        """Return a fresh plan library + seed one plan.
 
-        tmp = Path(tempfile.mkdtemp()) / "library.db"
-        lib = PlanLibrary(tmp)
+        Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite PlanLibrary is
+        deleted; HttpPlanLibrary on the suite's hermetic engine substrate
+        (autouse ``_pin_t2_substrate``, per-test tenant) is the only plan
+        library — the fresh tenant makes it a fresh library.
+        """
+        from nexus.db.t2.http_plan_library import HttpPlanLibrary
+
+        lib = HttpPlanLibrary()
         plan_id = lib.save_plan(
             query="anchor probe",
             plan_json=json.dumps({"steps": []}),
@@ -1526,6 +1470,13 @@ def _fake_t2_ctx(tmp_path):
     return _ctx
 
 
+
+#: structlog's ConsoleRenderer emits ANSI colour when FORCE_COLOR is set, which
+#: interleaves escape codes inside `key=value` pairs. Log-content assertions
+#: strip it so they measure the log's CONTENT in every environment.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 class TestNxAnswerEndToEnd:
     """nx_answer() orchestration wiring with fully mocked sub-calls.
 
@@ -1877,7 +1828,6 @@ class TestNxAnswerCostStub:
 
     def test_cost_usd_recorded_as_zero(self, tmp_path):
         """_nx_answer_record_run stores cost_usd=0.0 (P5 stub — not real cost)."""
-        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
@@ -1890,13 +1840,6 @@ class TestNxAnswerCostStub:
             # tracking ships, this test documents the before state and must
             # be updated.
             assert seen["cost_usd"] == 0.0
-
-            if has_raw_access(db.telemetry):
-                row = db.telemetry.conn.execute(
-                    "SELECT cost_usd FROM nx_answer_runs"
-                ).fetchone()
-                assert row is not None
-                assert row[0] == 0.0
 
     def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
         """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""
@@ -2038,7 +1981,13 @@ class TestSubagentTimeoutFloor:
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         await nx_plan_audit(plan_json='{"steps": []}', timeout=180.0)
         out = capsys.readouterr()
-        emitted = out.out + out.err
+        # Strip ANSI: structlog's ConsoleRenderer colorizes whenever FORCE_COLOR
+        # is set in the environment (independent of isatty, so capsys does not
+        # disable it), which splits `tool=nx_plan_audit` into
+        # `\x1b[36mtool\x1b[0m=\x1b[35mnx_plan_audit\x1b[0m` and breaks every
+        # plain substring assertion below. CI has no FORCE_COLOR, so this pin
+        # was green there and red in any developer terminal that sets it.
+        emitted = _ANSI_RE.sub("", out.out + out.err)
         assert "subagent_timeout_clamped" in emitted, (
             "expected a structured warning when caller timeout is below floor"
         )

@@ -27,10 +27,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 from structlog.testing import capture_logs
 
-from nexus.catalog.catalog import Catalog
 from nexus.registry import RepoRegistry
 from nexus.repos import _shim_log_level, from_catalog, read_dual
 
@@ -47,14 +48,17 @@ def _enable_debug_logging():
 
 
 @pytest.fixture
-def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     cfg = tmp_path / "config"
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
+    # through the factories, so a local-only handle left the service
+    # catalog empty. (The local Catalog.init that used to run here died
+    # with the local catalog in the terminal nexus-i711w deletion.)
+    return ActiveCatalog()
 
 
 @pytest.fixture

@@ -417,19 +417,60 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
     load_p50 = statistics.median(under_load)
     load_p95 = under_load[94]
     load_p99 = under_load[98]
-    ratio = load_p95 / baseline_p95 if baseline_p95 else float("inf")
+    # nexus-3m01p: FLOOR the denominator. This was a bare
+    # `load_p95 / baseline_p95`, which made the assertion a function of how
+    # lucky the BASELINE sample was rather than of how the code behaves under
+    # load. Measured on one machine, same tree, minutes apart:
+    #
+    #   loaded box:  baseline_p95=0.58ms load_p95=1.85ms -> 3.22x  FAILED
+    #   quiet box:   baseline_p95=1.61ms load_p95=3.42ms -> 2.13x  passed
+    #   quiet box, 5 runs: baseline_p95 1.70-2.18ms, load_p95 1.77-2.08ms, ~1.0x
+    #
+    # Note the direction: the FAILING run's load_p95 (1.85ms) sits inside the
+    # normal band. Nothing was slow. The 0.58ms baseline — a third of every
+    # other observation — shrank the denominator and manufactured the ratio.
+    # baseline[94] is the 6th-slowest of 100 sub-millisecond samples, so it is
+    # dominated by scheduler noise, and the tighter it lands the more likely a
+    # spurious failure. That is backwards for a regression gate.
+    #
+    # The floor sits below every non-anomalous baseline observed (1.70ms was the
+    # lowest of five clean runs), so it does not weaken the ratio in the regime
+    # the ratio is for; it only stops a sub-millisecond denominator from
+    # inventing one.
+    _BASELINE_FLOOR_MS = 1.0
+    denom = max(baseline_p95, _BASELINE_FLOOR_MS)
+    ratio = load_p95 / denom
 
     print(
         f"\n[rdr-063 under-load] memory_get n=100 entries=200 "
-        f"baseline_p95={baseline_p95:.2f}ms "
+        f"baseline_p95={baseline_p95:.2f}ms (denom={denom:.2f}ms) "
         f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
         f"load_p99={load_p99:.2f}ms ratio={ratio:.2f}x"
     )
 
-    assert load_p95 < baseline_p95 * 3.0, (
+    # NON-VACUITY: the measurement has to have happened at all. A zeroed or
+    # empty sample would satisfy both assertions below trivially.
+    assert load_p95 > 0.0, "under-load sample is degenerate; nothing was measured"
+
+    # (1) Relative: reads must not slow down against their OWN baseline on this
+    #     machine. Machine-independent, which is why it is worth keeping.
+    assert load_p95 < denom * 3.0, (
         f"memory.get p95 inflated under concurrent write load: "
-        f"baseline_p95={baseline_p95:.2f}ms load_p95={load_p95:.2f}ms "
-        f"ratio={ratio:.2f}x (threshold 3.0x)"
+        f"baseline_p95={baseline_p95:.2f}ms (denom={denom:.2f}ms) "
+        f"load_p95={load_p95:.2f}ms ratio={ratio:.2f}x (threshold 3.0x)"
+    )
+
+    # (2) Absolute: the thing an operator actually cares about. Starvation —
+    #     a read stuck behind a write transaction — costs tens to hundreds of
+    #     ms, not the ~2ms this measures; the ceiling is ~24x the highest
+    #     load_p95 observed (2.08ms) and ~11x the highest load_p99 (4.60ms), so
+    #     it cannot fire on ordinary noise and cannot be defeated by a lucky
+    #     baseline the way the ratio alone could.
+    _LOAD_P95_CEILING_MS = 50.0
+    assert load_p95 < _LOAD_P95_CEILING_MS, (
+        f"memory.get p95 under concurrent write load is {load_p95:.2f}ms, over "
+        f"the {_LOAD_P95_CEILING_MS:.0f}ms starvation ceiling — reads are being "
+        f"blocked by writers, not merely slowed (load_p99={load_p99:.2f}ms)"
     )
 
 
@@ -540,49 +581,9 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
 
 
 # ── RDR-129 B1 (nexus-qi1zb): serving busy_timeout raised 5000 -> 30000 ──────
-
-
-import pytest as _pytest
-
-
-def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
-    """The shared serving timeout is 30s and equals the bootstrap-migration
-    window (RDR-129 B1 'matching the bootstrap path')."""
-    from nexus.db.t2 import _BOOTSTRAP_BUSY_TIMEOUT_MS
-    from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-
-    assert SERVING_BUSY_TIMEOUT_MS == 30000
-    assert SERVING_BUSY_TIMEOUT_MS == _BOOTSTRAP_BUSY_TIMEOUT_MS
-
-
-@_pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: the 30s serving busy_timeout PRAGMA is a property of "
-    "the raw SQLite store connections; dies with the twins at the RDR-155 "
-    "P4b flip (the engine's PG pool owns its own timeouts)",
-)
-@_pytest.mark.parametrize(
-    "store_attr,conn_attr",
-    [
-        ("memory", "conn"),
-        ("plans", "conn"),
-        ("chash_index", "conn"),
-        ("taxonomy", "conn"),
-        ("telemetry", "conn"),
-        ("document_aspects", "conn"),
-        ("catalog", "_conn"),
-    ],
-)
-def test_every_serving_store_connection_uses_30s_busy_timeout(
-    tmp_path: Path, store_attr: str, conn_attr: str,
-) -> None:
-    """Each daemon-owned domain-store connection applies the 30s serving
-    busy_timeout. A partial bump would leave some stores at 5s and re-open the
-    cross-store contention drop class, so every store is pinned."""
-    from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-
-    with T2Database(tmp_path / "memory.db") as db:
-        store = getattr(db, store_attr)
-        conn = getattr(store, conn_attr)
-        got = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-        assert got == SERVING_BUSY_TIMEOUT_MS == 30000
+#
+# test_serving_busy_timeout_constant_matches_bootstrap RETIRED (nexus-i711w
+# terminal deletion): its subject was the SQLite serving-connection tuning
+# constant (``db/t2/_tuning.py``), which was deleted with the local SQLite
+# catalog store — the last consumer of the serving PRAGMA profile. The engine
+# substrate has no client-side busy_timeout to pin.

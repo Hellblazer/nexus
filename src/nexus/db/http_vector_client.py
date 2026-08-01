@@ -163,14 +163,9 @@ def _resolve_endpoint() -> tuple[str, str]:
                 "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
     if url is None or token is None:
-        # nexus-0rwwv: this is the EXACT wall an un-migrated 5.x→6.x user
-        # hits on their first `nx search` — their vector data sits in the
-        # retired local Chroma store and the stock remedy ("start the
-        # supervisor") is wrong for them. Append the migration pointer.
-        from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-            endpoint_failure_migration_hint,
-        )
-
+        # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
+        # migration module; stranded pre-PG installs are redirected by the
+        # stranded-install detector at CLI/MCP startup.
         raise RuntimeError(
             "nexus-service endpoint is not resolvable: T3 vector serving "
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
@@ -179,7 +174,6 @@ def _resolve_endpoint() -> tuple[str, str]:
             "endpoint lease this client auto-discovers), set the managed "
             "endpoint with 'nx config set service_url/service_token', or export "
             "NX_SERVICE_URL / NX_SERVICE_TOKEN explicitly."
-            + endpoint_failure_migration_hint()
         )
     return url, token
 
@@ -214,6 +208,102 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
 
 
 # ── HTTP transport ────────────────────────────────────────────────────────────
+#
+# nexus-gbt5u (GH #1419 Issue 3a): every request below is already bounded by
+# an explicit ``timeout``, and that was NOT enough — Steve Harris's indexing
+# run hung silently for 2+ hours without one firing.
+#
+# Python derives socket-timeout deadlines from the MONOTONIC clock, and on
+# Darwin that is ``mach_absolute_time()``, which does not advance while the
+# system is asleep. So a socket timeout budgets AWAKE time, not wall-clock
+# time: a laptop that sleeps mid-request burns almost none of a 600s budget.
+# On wake the peer is long gone, but the TCP connection is a zombie with no
+# RST coming, so the read simply never completes and the timeout — measured
+# in a clock that stood still — never fires. Bounded timeout, unbounded hang.
+#
+# TCP keepalive is what closes it: the OS probes an idle connection and tears
+# it down when the peer does not answer, surfacing as an ordinary connection
+# error that ``_request``'s existing retry path already handles. The idle
+# knob is the load-bearing part — bare SO_KEEPALIVE inherits a 2-HOUR OS
+# default on both Darwin and Linux, which would not have helped Steve at all.
+
+#: Seconds of idle before the first keepalive probe. Must beat the 2h OS
+#: default by a wide margin (that default is longer than the hang it is
+#: supposed to catch). 60s is well above any legitimate inter-packet gap on
+#: a live request — the engine streams responses continuously — while still
+#: detecting a dead peer within ~2 minutes of wake.
+_KEEPALIVE_IDLE_S = 60
+#: Seconds between probes once the peer stops answering.
+_KEEPALIVE_INTERVAL_S = 15
+#: Unanswered probes before the connection is declared dead (~2 min total).
+_KEEPALIVE_PROBES = 4
+
+
+def _enable_tcp_keepalive(sock: Any) -> None:
+    """Turn on TCP keepalive with a SHORT idle time. Never raises.
+
+    Best-effort by construction: a platform or transport that lacks any of
+    these options degrades to an unkeepalived-but-working connection. This is
+    a resilience improvement to the sleep/wake path, not a correctness gate —
+    failing a request because a socket option did not apply would trade a rare
+    hang for a common outage.
+    """
+    import socket as _socket  # noqa: PLC0415 — deferred import — branch-local
+
+    try:
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+    except Exception:  # noqa: BLE001 — see docstring: never gate a request on this
+        return
+    # Darwin spells the idle knob TCP_KEEPALIVE; Linux spells it TCP_KEEPIDLE.
+    idle_opt = getattr(_socket, "TCP_KEEPALIVE", None) or getattr(
+        _socket, "TCP_KEEPIDLE", None
+    )
+    for opt, value in (
+        (idle_opt, _KEEPALIVE_IDLE_S),
+        (getattr(_socket, "TCP_KEEPINTVL", None), _KEEPALIVE_INTERVAL_S),
+        (getattr(_socket, "TCP_KEEPCNT", None), _KEEPALIVE_PROBES),
+    ):
+        if opt is None:
+            continue
+        try:
+            sock.setsockopt(_socket.IPPROTO_TCP, opt, value)
+        except Exception:  # noqa: BLE001 — partial application is still an improvement
+            continue
+
+
+def _keepalive_opener() -> Any:
+    """A urllib opener whose connections carry :func:`_enable_tcp_keepalive`.
+
+    urllib offers no socket-options hook, so the connection classes are
+    subclassed to set the options immediately after ``connect()``. Built
+    fresh per call: openers are cheap, and caching one would pin the
+    endpoint/proxy resolution that ``_resolve_endpoint`` may change between
+    requests (RDR-149 lease rotation).
+    """
+    import http.client  # noqa: PLC0415 — deferred import — branch-local
+    import urllib.request  # noqa: PLC0415 — deferred import — branch-local
+
+    class _KeepAliveHTTPConnection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            super().connect()
+            _enable_tcp_keepalive(self.sock)
+
+    class _KeepAliveHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            super().connect()
+            _enable_tcp_keepalive(self.sock)
+
+    class _KeepAliveHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: Any) -> Any:
+            return self.do_open(_KeepAliveHTTPConnection, req)
+
+    class _KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req: Any) -> Any:
+            return self.do_open(_KeepAliveHTTPSConnection, req)
+
+    return urllib.request.build_opener(
+        _KeepAliveHTTPHandler, _KeepAliveHTTPSHandler,
+    )
 
 
 def _request_once(
@@ -239,7 +329,10 @@ def _request_once(
     req = urllib.request.Request(
         base_url + path, data=data, headers=headers, method=method
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # nexus-gbt5u: NOT urlopen — the module-level opener has no socket-options
+    # hook, so a sleep-orphaned connection could never be detected. See the
+    # transport-section comment above.
+    with _keepalive_opener().open(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
@@ -721,6 +814,33 @@ class _ServiceCollectionStub:
 
 
 # ── HttpVectorClient ─────────────────────────────────────────────────────────
+
+
+
+#: nexus-bm8dd: the four methods below address ``source_path`` in CHUNK metadata.
+#: RDR-102 D2 HARD-REMOVED that key from the chunk schema — it is not in
+#: ``metadata_schema.ALLOWED_TOP_LEVEL`` and ``make_chunk_metadata()`` raises
+#: ``TypeError`` if a caller passes it. So no chunk this codebase writes has
+#: carried a ``source_path`` since that change, every one of these where-filters
+#: matches nothing, and each returned its "no rows" value: ``[]``, ``0``, ``[]``,
+#: ``0``. Indistinguishable from "nothing to do".
+#:
+#: The damage is not the wasted call, it is the FALSE ALL-CLEAR:
+#: ``nx t3 prune-stale`` reported "0 stale" on every corpus, and the documented
+#: "delete this document's chunks and re-index" recovery silently deleted
+#: nothing. They now raise (no-silent-fallbacks directive).
+#:
+#: The replacement addressing is the catalog: a document's chunks are its
+#: manifest rows (``documents.tumbler -> document_chunks.doc_id ->
+#: document_chunks.chash``), and its path is ``resolve_path(tumbler)``. Use
+#: ``HttpCatalogClient.list_by_collection`` + ``get_manifests``.
+_SOURCE_PATH_RETIRED = (
+    "chunk metadata has carried no source_path since RDR-102 D2 removed it from "
+    "the schema, so this method can only ever match zero chunks (nexus-bm8dd). "
+    "Address a document's chunks through the catalog manifest instead: "
+    "HttpCatalogClient.list_by_collection() -> get_manifests() -> chashes, with "
+    "resolve_path(tumbler) for the on-disk path."
+)
 
 
 class HttpVectorClient:
@@ -1465,8 +1585,56 @@ class HttpVectorClient:
         :meth:`list_collections`: a collection whose every chunk belongs to
         trashed documents reads as absent — the Decision 6 single-enforcement
         -point semantics (consumers see live state only).
+
+        This conflates TOMBSTONED with truly ABSENT under one boolean. Callers
+        that must tell the two apart (rename/migration collision guards) use
+        :meth:`collection_probe` — or the module-level
+        :func:`nexus.db.collection_state.probe_collection_state`, which also
+        degrades cleanly for non-HttpVectorClient backends — instead of this
+        method alone (nexus-9n485).
         """
         return any(c.get("name") == name for c in self.list_collections())
+
+    def collection_exists_raw(self, name: str) -> bool:
+        """True if *name* has ANY physical chunk row for this tenant — LIVE or TOMBSTONED.
+
+        Hits ``GET /v1/vectors/collections`` directly — a bare ``SELECT
+        DISTINCT collection`` union over ``chunks_384``/``chunks_768``/
+        ``chunks_1024`` (:meth:`PgVectorRepository.listCollections` on the
+        Java side), NOT the tombstone-filtered ``collection_vector_stats``
+        view :meth:`collection_exists` reads. Trashing a document
+        (catalog-003) only sets ``catalog_documents.deleted_at`` — it never
+        deletes rows from the physical chunk tables (that is ``purge_trash``'s
+        job, a separate later step) — so a collection whose every document is
+        trashed still appears in this raw listing even though
+        :meth:`collection_exists` reads it as absent.
+
+        Raises rather than degrading to False on a service error: a caller
+        using this to distinguish "tombstoned" from "absent" must not read a
+        transient failure as a confident ABSENT (nexus-9n485; mirrors the
+        no-silent-fallback-for-correctness directive).
+        """
+        result = _get("/v1/vectors/collections", tenant=self._tenant)
+        names = {c.get("name", "") for c in result} if isinstance(result, list) else set()
+        return name in names
+
+    def collection_probe(self, name: str) -> "CollectionState":
+        """Three-state existence probe: PRESENT / TOMBSTONED / ABSENT.
+
+        Distinguishes "trashed — restore it first" (:data:`CollectionState.TOMBSTONED`)
+        from "never existed" (:data:`CollectionState.ABSENT`) — the ambiguity
+        :meth:`collection_exists` alone cannot resolve (nexus-9n485, RDR-156 P3
+        gate finding nexus-70r3c.13). The raw probe only runs when the live
+        check already says no — the common case (a name with live data) never
+        pays the extra round trip.
+        """
+        from nexus.db.collection_state import CollectionState  # noqa: PLC0415 — deferred to avoid an import cycle (collection_state -> http_vector_client)
+
+        if self.collection_exists(name):
+            return CollectionState.PRESENT
+        if self.collection_exists_raw(name):
+            return CollectionState.TOMBSTONED
+        return CollectionState.ABSENT
 
     def count(self, collection: str) -> int:
         """Number of chunks in *collection* visible to this tenant."""
@@ -1656,84 +1824,31 @@ class HttpVectorClient:
         raise NotImplementedError("delete_collection not implemented in HttpVectorClient")
 
     def ids_for_source(self, collection_name: str, source_path: str) -> list[str]:
-        """Return all chunk IDs for a given source path. Does not fetch content.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        Mirrors ``T3Database.ids_for_source``: paginates the service's
-        ``/v1/vectors/get`` where-filter endpoint at the 300-record quota and
-        returns an empty list when the collection does not exist (the service
-        returns no ids). Param name ``collection_name`` matches the oracle
-        (nexus-7zuzz).
+        Raises ``NotImplementedError``. See :data:`_SOURCE_PATH_RETIRED`: this
+        used to page ``/v1/vectors/get`` with ``where={"source_path": ...}``,
+        which has matched nothing since RDR-102 D2 removed the key from the
+        chunk schema — and returned ``[]``, which reads as "this source has no
+        chunks".
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        ids: list[str] = []
-        offset = 0
-        while True:
-            try:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": collection_name,
-                        "where": {"source_path": source_path},
-                        "include": [],
-                        "limit": page_limit,
-                        "offset": offset,
-                    },
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                # Match T3Database, which suppresses ONLY collection-not-found
-                # (404) and returns []. A 5xx / 422 / transport failure — or ANY
-                # error mid-pagination after ids were already collected — must
-                # NOT be masked as "no chunks": delete_by_source would then
-                # under-delete and report success, silently orphaning the
-                # unread chunks (review: over-broad catch). Re-raise so the
-                # prune-stale call site's except-clause reports SKIP loudly.
-                if exc.code == 404 and offset == 0:
-                    return []
-                raise
-            page = result.get("ids", []) or []
-            ids.extend(page)
-            if len(page) < page_limit:
-                break
-            offset += len(page)  # match T3Database oracle (not += page_limit)
-        return ids
+        raise NotImplementedError(
+            f"ids_for_source({collection_name!r}, {source_path!r}): {_SOURCE_PATH_RETIRED}"
+        )
 
     def delete_by_source(self, collection_name: str, source_path: str) -> int:
-        """Delete all chunks for a given source path; return the count deleted.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        nexus-vhyua: previously a NotImplementedError stub, which made
-        ``nx t3 prune-stale --no-dry-run`` print 'delete failed' per path and
-        silently do nothing in service mode (the post-P4a default). Now built
-        from existing primitives — ``ids_for_source`` (``/v1/vectors/get``
-        where-filter) + ``/v1/vectors/store-delete`` — so no new Java endpoint
-        is required. Param name ``collection_name`` matches
-        ``T3Database.delete_by_source`` (nexus-7zuzz).
-
-        Count semantics differ slightly from the oracle by design: T3Database
-        returns ``len(ids)`` (ids it asked to delete); this returns the sum of
-        the service's CONFIRMED ``deleted`` counts. They match unless a
-        concurrent delete already removed some — in which case the prune-stale
-        caller's ``deleted != len(ids)`` WARN correctly fires.
+        Raises ``NotImplementedError``. It returned ``0``, so the documented
+        "delete this document's chunks and re-index" recovery deleted nothing
+        and said so in a way indistinguishable from "there was nothing to
+        delete". Delete by chash instead: take the document's manifest rows from
+        ``HttpCatalogClient.get_manifests`` and pass them to
+        :meth:`delete_by_ids`.
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        ids = self.ids_for_source(collection_name, source_path)
-        if not ids:
-            return 0
-        # Batch at the 300-record write quota — a source with many chunks would
-        # otherwise exceed MAX_RECORDS_PER_WRITE in a single store-delete.
-        batch = QUOTAS.MAX_RECORDS_PER_WRITE
-        deleted = 0
-        for i in range(0, len(ids), batch):
-            result = _post(
-                "/v1/vectors/store-delete",
-                {"collection": collection_name, "ids": ids[i:i + batch]},
-                tenant=self._tenant,
-            )
-            deleted += int(result.get("deleted", 0))
-        return deleted
+        raise NotImplementedError(
+            f"delete_by_source({collection_name!r}, {source_path!r}): {_SOURCE_PATH_RETIRED}"
+        )
 
     def find_ids_by_title(self, collection: str, title: str) -> list[str]:
         """Return all chunk IDs whose title metadata exactly matches *title*.
@@ -1841,57 +1956,18 @@ class HttpVectorClient:
     def update_source_path(
         self, collection_name: str, old_path: str, new_path: str
     ) -> int:
-        """Rewrite source_path metadata for all chunks matching *old_path*.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        nexus-h8rf6.6: was missing entirely — ``nx doctor fix-paths``
-        (non-dry-run) crashed with ``AttributeError`` on the first row in
-        service mode (doctor.py calls it per-row with no guard). Built from
-        the where-filter get (:meth:`ids_for_source` shape) +
-        :meth:`update_chunks`; T3Database parity (returns count updated,
-        missing collection -> 0, idempotent). Matching rows are accumulated
-        across all pages BEFORE updating — updating mid-pagination would
-        shrink the where-match set and shift offsets.
+        Raises ``NotImplementedError``. There is nothing in a chunk to rewrite:
+        a document's path lives on its CATALOG row, which ``nx doctor
+        fix-paths`` already updates via ``writer.update(tumbler, file_path=...)``
+        on the line after it called this. The ``n`` chunks it reported repaired
+        was always 0.
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        ids: list[str] = []
-        metadatas: list[dict] = []
-        offset = 0
-        while True:
-            try:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": collection_name,
-                        "where": {"source_path": old_path},
-                        "include": ["metadatas"],
-                        "limit": page_limit,
-                        "offset": offset,
-                    },
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                # 404 on the first page = no such collection (T3 parity: 0).
-                # Mid-pagination failures must NOT be swallowed — the caller
-                # would under-update and report success.
-                if exc.code == 404 and offset == 0:
-                    return 0
-                raise
-            page_ids = result.get("ids", []) or []
-            page_metas = result.get("metadatas", []) or []
-            for doc_id, meta in zip(page_ids, page_metas):
-                ids.append(doc_id)
-                updated = dict(meta) if isinstance(meta, dict) else {}
-                updated["source_path"] = new_path
-                metadatas.append(updated)
-            offset += len(page_ids)
-            if len(page_ids) < page_limit:
-                break
-        if not ids:
-            return 0
-        self.update_chunks(collection_name, ids, metadatas)
-        return len(ids)
+        raise NotImplementedError(
+            f"update_source_path({collection_name!r}, {old_path!r} -> {new_path!r}): "
+            f"{_SOURCE_PATH_RETIRED}"
+        )
 
     def delete_by_chunk_ids(
         self, collection_name: str, chunk_ids: list[str],
@@ -1932,49 +2008,18 @@ class HttpVectorClient:
         return deleted
 
     def list_unique_source_paths(self, collection_name: str) -> list[str]:
-        """Return every distinct ``source_path`` value in *collection_name*.
+        """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
-        nexus-h8rf6.7: was missing — ``nx t3 prune-stale``'s staleness sweep
-        silently skipped every collection in service mode. Pages the plain
-        (no ``where``) ``/v1/vectors/get`` listing and dedupes locally, same
-        as T3Database. Empty/missing source_path values are skipped (MCP-put
-        chunks have no on-disk source by design). Missing collection -> [].
+        Raises ``NotImplementedError``. This one caused the worst of the
+        silences: it fed ``nx t3 prune-stale``'s sweep, and an empty list ended
+        the loop before it began, so the verb printed a clean "0 stale" on every
+        corpus regardless of how many indexed files had been deleted from disk.
+        The catalog answers this: ``HttpCatalogClient.list_by_collection`` gives
+        the documents, ``resolve_path(tumbler)`` gives each one's path.
         """
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        seen: set[str] = set()
-        offset = 0
-        while True:
-            try:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": collection_name,
-                        "include": ["metadatas"],
-                        "limit": page_limit,
-                        "offset": offset,
-                    },
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                if exc.code == 404 and offset == 0:
-                    return []
-                raise
-            page_ids = result.get("ids", []) or []
-            page_metas = result.get("metadatas", []) or []
-            if not page_ids:
-                break
-            for meta in page_metas:
-                if not isinstance(meta, dict):
-                    continue
-                src = meta.get("source_path") or ""
-                if src:
-                    seen.add(src)
-            offset += len(page_ids)
-            if len(page_ids) < page_limit:
-                break
-        return sorted(seen)
+        raise NotImplementedError(
+            f"list_unique_source_paths({collection_name!r}): {_SOURCE_PATH_RETIRED}"
+        )
 
     def list_chunks_with_metadata(
         self,
@@ -2348,7 +2393,7 @@ def get_http_vector_client() -> HttpVectorClient:
       failure whose window elapsed is cleared and re-probed, so the
       session heals when the managed service comes back.
     * Local mode: the probe is skipped entirely. Local mode's own floor
-      enforcement (the native ``guided_upgrade`` / ``nx upgrade`` flow) is
+      enforcement (the ``nx upgrade`` / engine-convergence flow) is
       untouched by this gate.
     """
     global _vector_client_instance, _version_probe_done, _version_probe_error
@@ -2415,7 +2460,6 @@ def reset_http_vector_client_for_tests() -> None:
         _version_probe_done = False
         _version_probe_error = None
         _version_probe_failed_at = None
-
 
 def is_vector_service_mode() -> bool:
     """Return True unless NX_STORAGE_BACKEND_VECTORS explicitly opts out.

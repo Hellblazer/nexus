@@ -236,9 +236,11 @@ def _report_stray_t2_launchagent_cleanup(config_dir: Path) -> None:
 def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import cycle)
     """Start the PERSISTENT storage-service supervisor and confirm it is serving.
 
-    Returns the live ``LeaseRecord`` so a programmatic caller (RDR-002
-    ``nx guided-upgrade`` provision sequence) can read the serving endpoint;
-    ``init_cmd`` ignores the return and uses it purely for its side effect.
+    Returns the live ``LeaseRecord`` so a programmatic caller can read the
+    serving endpoint; ``init_cmd`` ignores the return and uses it purely for
+    its side effect. (Historical: this return value was originally added for
+    the RDR-002 ``nx guided-upgrade`` provision sequence — that command was
+    deleted outright by RDR-155 P4b and is not present in this release.)
 
     RDR-157 P4.1: the final step of the ``nx init --service`` one-command
     collapse. nexus-qke1e: routes through ``ensure_storage_supervisor`` (the
@@ -623,7 +625,8 @@ def _provision_postgres_step() -> None:
 
 
 def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
-    """The full ``nx init --service`` service sequence — shared with guided-upgrade.
+    """The full ``nx init --service`` service sequence — also the ladder's
+    provisioning precondition (``upgrade_ladder/provisioning.py``).
 
     Provision PG, then (LOCAL mode only) lock the embedder + provision the bge-768
     ONNX the service reads, acquire the native binary, and start the persistent
@@ -631,11 +634,15 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
     ``None`` in cloud mode (embeddings run server-side via Voyage; there is no
     local service to start).
 
-    RDR-002: ``nx guided-upgrade`` reuses THIS so its provisioning cannot diverge
-    from ``nx init --service`` — the guided path previously called only
-    ``_provision_postgres_step`` + ``_start_service_step`` and skipped the
-    embedder/model fetch, so the service crashed on a missing bge ONNX. Raises
-    :class:`StorageServiceStartError` when no native binary is available.
+    RDR-002: the (now-deleted) ``nx guided-upgrade`` originally reused THIS so
+    its provisioning could not diverge from ``nx init --service`` — the guided
+    path previously called only ``_provision_postgres_step`` +
+    ``_start_service_step`` and skipped the embedder/model fetch, so the
+    service crashed on a missing bge ONNX. RDR-155 P4b deleted
+    ``guided_upgrade.py``; the same contract now holds between ``nx init
+    --service`` and the ladder's provisioning precondition, which calls this
+    function directly. Raises :class:`StorageServiceStartError` when no
+    native binary is available.
     """
     if not provision_service_stack(embedder):
         return None
@@ -946,7 +953,8 @@ def init_cmd(
     # supervisor, so a session supervisor is never started underneath a unit.
     #   autostart=yes → install the unit as the SOLE starter + poll its lease.
     #   autostart=no  → provision_and_start_service (session detach), as before
-    #                   (the SAME body guided_upgrade invokes — unchanged).
+    #                   (the SAME body the ladder's provisioning precondition
+    #                   invokes via `_default_serve` — unchanged).
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     autostart = _decide_autostart(assume_yes, no_autostart)

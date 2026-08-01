@@ -4,20 +4,20 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 **Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
-**One arbitrator per tier**: Since RDR-152, T2 hard-defaults to the **service backend** — the native `nexus-service` over Postgres 17 — and since RDR-155, T3 serving routes through that same service (pgvector). Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers — routes through the same arbitrator, so all T2 and vector traffic goes through one service. Start it via `nx daemon service start`. The SQLite+FTS5 substrate survives only as the per-store opt-out / rollback path (`NX_STORAGE_BACKEND[_<store>]=sqlite`), arbitrated by the dedicated T2 daemon (RDR-120, `nx daemon t2 install --autostart`) so the SQLite file has exactly one writer; the Claude Code plugin's SessionStart hook still auto-spawns that daemon for the rollback path.
+**One arbitrator per tier**: Since RDR-152, T2 hard-defaults to the **service backend** — the native `nexus-service` over Postgres 17 — and since RDR-155, T3 serving routes through that same service (pgvector). Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers — routes through the same arbitrator, so all T2 and vector traffic goes through one service. Start it via `nx daemon service start`. The SQLite+FTS5 substrate is GONE (RDR-158 P4, nexus-i711w): the stores were deleted and the `NX_STORAGE_BACKEND[_<store>]=sqlite` opt-out that used to select them now hard-errors with the stranded-install redirect (RDR-158 P3). Pre-migration SQLite files on disk are frozen migration sources only — migrate via the last migration-capable 6.x release.
 
 | Tier | Storage | Arbitrator | Transport | Durability | Use |
 |------|---------|------------|-----------|------------|-----|
-| T1 -- scratch | ChromaDB EphemeralClient / per-session HTTP server | none | Process-local | Session only | Working notes, hypotheses |
-| T2 -- memory | Postgres 17 via `nexus-service` (hard default, RDR-152); SQLite + FTS5 (WAL) as the opt-out (`NX_STORAGE_BACKEND=sqlite`) | nexus-service (`nx daemon service`); T2 daemon (`nx daemon t2`) on the SQLite path | nexus-service HTTP; UDS + loopback on the SQLite path | Survives restarts | Per-project notes, session context |
+| T1 -- scratch | Service-backed (`HttpScratchStore` via `nexus-service`); `NX_T1_ISOLATED=1` opts into a private in-process `InMemoryVectorClient` | nexus-service (`nx daemon service`) | nexus-service HTTP (isolated: process-local) | Session only | Working notes, hypotheses |
+| T2 -- memory | Postgres 17 via `nexus-service` (the only backend since RDR-158; `=sqlite` hard-errors) | nexus-service (`nx daemon service`) | nexus-service HTTP | Survives restarts | Per-project notes, session context |
 | T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
-| Catalog | T2-store-backed (ninth domain store, separate `.catalog.db`; RDR-120 P5.A) + events.jsonl (canonical) | shared with T2 daemon | UDS + 127.0.0.1 loopback | Permanent | Document registry, typed link graph, provenance |
+| Catalog | Engine-owned Postgres tables (Liquibase-managed schema, RLS), reached via `HttpCatalogClient` through the `nexus-service` — no local JSONL event log, no `.catalog.db` (both deleted at RDR-158 P4, nexus-i711w) | nexus-service (`nx daemon service`) | nexus-service HTTP | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
 
 ### Storage / service-stack architecture
 
-How the access paths reach each substrate today (post-RDR-155). Both T3 and (by hard default) T2 serve through the one native `nexus-service`; SQLite is the T2 opt-out; ChromaDB survives only as the read-only migration source.
+How the access paths reach each substrate today (post-RDR-155). Both T3 and (by hard default) T2 serve through the one native `nexus-service`; there is no SQLite opt-out anymore (`=sqlite` hard-errors, RDR-158 P3) and ChromaDB is not a live substrate in any mode — pre-migration Chroma directories are untouched rollback artifacts that nothing in the running system reads.
 
 ```mermaid
 flowchart TD
@@ -36,7 +36,6 @@ flowchart TD
 
   T3OPS -->|"always service"| REG
   T2OPS -->|"service backend<br/>HARD DEFAULT (RDR-152)"| REG
-  T2OPS -.->|"NX_STORAGE_BACKEND=sqlite<br/>(T2 opt-out)"| T2D
 
   REG["ServiceRegistry lease<br/>storage_service_addr.&lt;uid&gt;<br/>(host · port · token)"]
   REG --> SVC
@@ -45,11 +44,7 @@ flowchart TD
   SVC -->|"server-side embed<br/>bge-768 ONNX (local) / Voyage (cloud)<br/>+ ANN search"| PG[("Postgres 17 + pgvector<br/>T3 vectors")]
   SVC --> PGT2[("Postgres<br/>T2 domain stores")]
 
-  T2D["T2 daemon<br/>SQLite single-writer"]
-  T2D --> SQL[("nexus.db (SQLite + FTS5, WAL)<br/>+ .catalog.db")]
-
-  CHROMA[("legacy ChromaDB<br/>migration source · read-only")]
-  CHROMA -.->|"nx upgrade<br/>substrate rung ETL"| SVC
+  SVC --> CAT[("Postgres<br/>catalog (documents · links · manifests)")]
 ```
 
 (The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer — query decomposition, the operator DAG, taxonomy, the knowledge graph — which is substrate-agnostic; the diagram above is its storage-plane complement.)
@@ -95,11 +90,19 @@ coexisting.
 
 ## T1 -- Session Scratch
 
-Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
+Service-backed since RDR-155 P4b: in service mode `get_t1_database` routes
+scratch to `HttpScratchStore` over the one `nexus-service`, scoped by the
+Claude session-id (both the parent session and any sibling resolve the same
+session-id from `~/.config/nexus/current_session`, so child agents and
+Bash-tool siblings share scratch space and see each other's entries).
+Concurrent independent Claude Code windows stay isolated because each has its
+own session-id.
 
-When a parent Claude Code session starts, the MCP server's chroma lifespan launches a ChromaDB server on a free localhost port and publishes a **leased registry record** at `~/.config/nexus/t1_addr.<session_id>` (RDR-149 P4, via `daemon/t1_lease.py`). The record is keyed on the Claude session-id; both the publisher and any sibling resolve the same session-id from `~/.config/nexus/current_session`, so child agents and Bash-tool siblings discover and connect to the same server — they share scratch space and see each other's entries. Liveness is lease freshness (TTL), not pid, giving pid-reuse immunity. Concurrent independent Claude Code windows stay isolated because each has its own session-id (the scope key is intentionally N-per-user).
-
-Falls back to a local `EphemeralClient` only under an explicit `NX_T1_ISOLATED=1` opt-in; otherwise a process that resolves no session-id (or finds no live lease) raises `T1ServerNotFoundError`. MCP-dispatched subprocesses inherit the endpoint via `NX_T1_HOST`/`NX_T1_PORT` (env passdown).
+The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
+lease discovery) retired with the chroma substrate. `NX_T1_ISOLATED=1` opts a
+process into a private, dependency-free in-process `InMemoryVectorClient`;
+otherwise a process outside service-mode routing raises
+`T1ServerNotFoundError` rather than silently inventing a private store.
 
 Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 
@@ -155,7 +158,7 @@ Merges use SQLite's write lock via `with self.conn:` to ensure UPDATE and DELETE
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Domain split (RDR-063)**: T2 is implemented as **eight** domain stores under `src/nexus/db/t2/`, all sharing the one `nexus.db` — `MemoryStore` (memory), `PlanLibrary` (plans), `CatalogTaxonomy` (topics + topic_assignments + taxonomy_meta + topic_links), `Telemetry` (relevance_log), `ChashIndex` (RDR-086; **retired by RDR-187** — the PG table is dropped as of engine v0.1.51, the class remains a shim until the final 410 flip), `DocumentAspects` (RDR-089), `AspectExtractionQueue`, and `DocumentHighlights` (RDR-139 Layer E) — plus `CatalogStore`, a ninth store that uniquely opens its own separate `.catalog.db`. Each store opens its own `sqlite3.Connection` in WAL mode with `busy_timeout=30000` (raised from 5000 in RDR-129 B1), so reads in one domain are never blocked by writes in another. **Backend routing (RDR-152):** each store hard-defaults to the **service backend** (the `nexus-service` over Postgres); `NX_STORAGE_BACKEND[_<store>]=sqlite` is the opt-out. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.catalog`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+**Domain split (RDR-063, substrate cut over by RDR-158)**: T2 is implemented as **eight** service-backed domain stores under `src/nexus/db/t2/` — `HttpMemoryStore` (memory), `HttpPlanLibrary` (plans), `HttpTaxonomyStore` (topics + topic_assignments + taxonomy_meta + topic_links), `HttpTelemetryStore` (relevance_log + search/hook telemetry), `HttpChashIndex` (RDR-086; **retired by RDR-187** — the PG table is dropped as of engine v0.1.51, the class remains a shim until the final 410 flip), `HttpDocumentAspectsStore` (RDR-089), `HttpAspectQueue`, and `HttpDocumentHighlightsStore` (RDR-139 Layer E). The catalog is the engine's (`HttpCatalogClient`); the SQLite store classes and the local `.catalog.db` were deleted in RDR-158 P4 (nexus-i711w), and the `=sqlite` opt-out hard-errors (P3). **Backend routing (RDR-152/158):** every store routes through the `nexus-service` over Postgres — there is no other backend. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.catalog`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
 **Topic taxonomy**: `CatalogTaxonomy` discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku, and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [Architecture — Taxonomy](architecture.md#taxonomy) for architecture details.
 

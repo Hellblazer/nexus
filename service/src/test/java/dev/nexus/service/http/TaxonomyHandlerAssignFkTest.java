@@ -124,8 +124,30 @@ class TaxonomyHandlerAssignFkTest {
             .isEqualTo(409);
         assertThat(ex.bodyString()).contains("\"sqlstate\":\"23503\"");
         assertThat(ex.bodyString())
-            .contains("\"error\":\"integrity constraint violation\"")
-            .doesNotContain("topic_assignments");
+            .contains("\"error\":\"integrity constraint violation\"");
+
+        // nexus-0ehwe item 6 SUPERSEDES the original `.doesNotContain(
+        // "topic_assignments")` here. That assertion's intent was "send a CLEAN
+        // TYPED body, not the raw driver message" — not "never name a
+        // constraint". A bare "integrity constraint violation" is
+        // undiagnosable from the client: it cost the entire nexus-pbawi
+        // investigation, where the real answer (a TUMBLER collision on
+        // catalog_documents_pkey, not the source_uri arbiter the insert
+        // declares) was in the driver's exception the whole time and was being
+        // discarded. So the body now carries the constraint NAME as a
+        // structured field.
+        assertThat(ex.bodyString())
+            .as("the violated constraint must be nameable by the caller")
+            .contains("\"constraint\":\"topic_assignments_topic_id_fkey\"");
+
+        // The ORIGINAL intent still holds: no raw driver prose. A structured
+        // name is not the same as echoing the exception text, which would carry
+        // the failing SQL, the offending key values, and PG's own hint lines.
+        assertThat(ex.bodyString())
+            .as("the raw driver message must not be echoed into the response")
+            .doesNotContain("Detail:")
+            .doesNotContain("Key (")
+            .doesNotContain("insert or update on table");
     }
 
     @Test

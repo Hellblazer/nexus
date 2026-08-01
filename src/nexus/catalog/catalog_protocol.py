@@ -251,3 +251,44 @@ class CatalogWriter(Protocol):
 
     def compact(self) -> object:  # canonical
         ...
+
+
+#: The catalog's caller-facing mutating ops. This is a closed whitelist,
+#: not a denylist: adding a write method to the catalog client does NOT
+#: auto-expose it. ``_ServiceCatalogWriter`` (factory.py) enforces the
+#: whitelist at attribute-access time, and
+#: ``tests/catalog/test_catalog_protocol_fidelity.py`` pins
+#: ``CatalogWriter == CATALOG_WRITE_OPS``.
+#:
+#: History: RDR-146 P1.0 served the first 16 (the hot indexer/MCP write
+#: path) through the T2 daemon's write shim; P1.2 (nexus-5p2ci.21) added
+#: the last 6 admin/maintenance ops after an AST inventory of all 49
+#: cutover sites. The daemon and the rich local Catalog both died in
+#: RDR-158 P4 (nexus-i711w); the whitelist survives as the contract for
+#: the HTTP catalog writer.
+CATALOG_WRITE_OPS: tuple[str, ...] = (
+    "register_owner",
+    "ensure_owner_for_repo",
+    "register",
+    "register_many",
+    "update",
+    "link",
+    "link_if_absent",
+    "unlink",
+    "delete_document",
+    "register_collection",
+    "delete_collection_projection",
+    "supersede_collection",
+    "set_owner_head_hash",
+    "write_manifest",
+    "append_manifest_chunks",
+    "atomic_manifest_replace",
+    "resync_chunk_count_cache",
+    # P1.2 admin/maintenance additions:
+    "rename_collection",
+    "bulk_unlink",
+    "update_documents_collection_batch",
+    "sync",
+    "pull",
+    "compact",
+)

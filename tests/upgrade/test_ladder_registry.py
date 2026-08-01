@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-185 P0.1 (nexus-n7u38.1): ordered ladder registry + RQ2 hard edges.
 
-The five hard ordering edges (RDR-185 Research RQ2) are encoded as DATA in
-``nexus.upgrade_ladder.registry`` and enforced mechanically here — the
-``test_lifecycle_gate.py`` discipline: a docs rule alone degrades to hope.
-
-Edges: package → everything; engine → substrate ETL; T2 schema → all T2
-reads; chunk-identity → T3 ETL; embedder-era + chunk-identity CO-RESIDENT
-inside the substrate-ETL rung (the last two are encoded as co-residency,
-satisfied by construction rather than by sequencing).
+RDR-155 P4b re-ground: the t2-schema / substrate-etl rungs (and their
+co-resident axes) died with the migration machinery. The surviving edge
+set: package → everything; engine → chash-rekey. The graph validator and
+registry mechanics are unchanged and stay pinned here.
 """
 from __future__ import annotations
 
@@ -24,9 +20,8 @@ from nexus.upgrade_ladder.registry import (
     PRECONDITION_ENGINE,
     PRECONDITION_PACKAGE,
     PRECONDITION_PROCESS,
+    RUNG_CHASH_REKEY,
     RUNG_ORDER,
-    RUNG_SUBSTRATE_ETL,
-    RUNG_T2_SCHEMA,
     LadderOrderError,
     LadderRegistry,
     default_registry,
@@ -58,19 +53,15 @@ def test_package_edge_precedes_everything() -> None:
     assert (PRECONDITION_PACKAGE, ALL_RUNGS) in HARD_EDGES
 
 
-def test_engine_edge_targets_substrate_etl() -> None:
-    assert (PRECONDITION_ENGINE, RUNG_SUBSTRATE_ETL) in HARD_EDGES
+def test_engine_edge_targets_chash_rekey() -> None:
+    assert (PRECONDITION_ENGINE, RUNG_CHASH_REKEY) in HARD_EDGES
 
 
-def test_t2_schema_edge_precedes_all_rungs() -> None:
-    assert (RUNG_T2_SCHEMA, ALL_RUNGS) in HARD_EDGES
-
-
-def test_chunk_identity_and_embedder_are_co_resident_in_substrate_etl() -> None:
-    """RQ2 edges 4+5: chunk-identity → T3 ETL and embedder-era are in-flight
-    transforms INSIDE the substrate-ETL rung — one rung, never sequential."""
-    assert CO_RESIDENT_AXES["chunk-identity"] == RUNG_SUBSTRATE_ETL
-    assert CO_RESIDENT_AXES["embedder-era"] == RUNG_SUBSTRATE_ETL
+def test_co_resident_axes_registry_is_empty_post_p4b() -> None:
+    """RQ2 edges 4+5 lived INSIDE the substrate-ETL rung; that rung retired
+    at RDR-155 P4b, so the co-residency registry is empty — an entry
+    re-appearing here must come with a rung that actually hosts it."""
+    assert CO_RESIDENT_AXES == {}
 
 
 def test_preconditions_are_not_rungs() -> None:
@@ -110,9 +101,10 @@ def test_expanded_edges_are_acyclic_and_order_is_topological() -> None:
 
 
 def test_star_edges_expand_to_every_other_rung() -> None:
-    edges = expand_edges(((RUNG_T2_SCHEMA, ALL_RUNGS),), RUNG_ORDER)
-    assert (RUNG_T2_SCHEMA, RUNG_SUBSTRATE_ETL) in edges
-    assert (RUNG_T2_SCHEMA, RUNG_T2_SCHEMA) not in edges  # never self-edges
+    # synthetic multi-rung order: the expansion mechanics are order-generic
+    edges = expand_edges((("first", ALL_RUNGS),), ("first", "second", "third"))
+    assert ("first", "second") in edges and ("first", "third") in edges
+    assert ("first", "first") not in edges  # never self-edges
 
 
 def test_cycle_detection_fires_on_synthetic_cycle() -> None:
@@ -148,30 +140,21 @@ def test_registry_rejects_duplicate_names() -> None:
 
 
 def test_registry_accepts_canonical_order() -> None:
-    registry = LadderRegistry((StubRung(RUNG_T2_SCHEMA), StubRung(RUNG_SUBSTRATE_ETL)))
-    assert [r.name for r in registry] == [RUNG_T2_SCHEMA, RUNG_SUBSTRATE_ETL]
-
-
-def test_registry_rejects_hard_edge_violation() -> None:
-    """substrate-etl before t2-schema contradicts the T2-schema→all edge —
-    the registry must refuse to hold rungs in an unwalkable order."""
-    with pytest.raises(LadderOrderError, match=RUNG_T2_SCHEMA):
-        LadderRegistry((StubRung(RUNG_SUBSTRATE_ETL), StubRung(RUNG_T2_SCHEMA)))
+    registry = LadderRegistry((StubRung(RUNG_CHASH_REKEY),))
+    assert [r.name for r in registry] == [RUNG_CHASH_REKEY]
 
 
 def test_registry_allows_synthetic_names_alongside_canonical() -> None:
     """Interim rungs MAY wrap existing verbs under non-canonical names
     (Decision-Space option 2) — only edges over KNOWN names are enforced."""
     registry = LadderRegistry(
-        (StubRung(RUNG_T2_SCHEMA), StubRung("interim-wrapped-verb"), StubRung(RUNG_SUBSTRATE_ETL))
+        (StubRung("interim-wrapped-verb"), StubRung(RUNG_CHASH_REKEY))
     )
-    assert len(registry) == 3
+    assert len(registry) == 2
 
 
-def test_default_registry_order_is_canonical() -> None:
-    """The production registry validates clean and only ever holds canonical
-    rungs in canonical order (rungs land P1+: t2-schema .8, substrate-etl P2)."""
+def test_default_registry_is_rekey_only() -> None:
+    """The production registry post-P4b: exactly the chash-rekey rung, in
+    canonical order (RDR-155 P4b D-D: the ladder is rekey-only)."""
     registry = default_registry()
-    names = [r.name for r in registry]
-    canonical_positions = [RUNG_ORDER.index(n) for n in names if n in RUNG_ORDER]
-    assert canonical_positions == sorted(canonical_positions)
+    assert [r.name for r in registry] == list(RUNG_ORDER) == [RUNG_CHASH_REKEY]

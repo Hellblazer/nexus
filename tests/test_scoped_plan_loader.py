@@ -46,8 +46,17 @@ def fs(tmp_path: Path):
 
 @pytest.fixture()
 def library(tmp_path: Path):
-    from nexus.db.t2.plan_library import PlanLibrary
-    return PlanLibrary(tmp_path / "plans.db")
+    """Engine-backed plan library (per-test tenant via the autouse pin).
+
+    The SQLite PlanLibrary this fixture used to construct was deleted
+    (nexus-i711w Stage 2 sub-stage A3); ``T2Database(...).plans`` is the
+    HttpPlanLibrary the loader now targets in production.
+    """
+    from nexus.db.t2 import T2Database
+
+    db = T2Database(tmp_path / "plans.db")
+    yield db.plans
+    db.close()
 
 
 # ── Tier 1: global plugin seeds ────────────────────────────────────────────

@@ -68,21 +68,24 @@ def _cmd_pg_bin(args: argparse.Namespace) -> None:
     try:
         bins = discover_pg_binaries()
         val = getattr(bins, args.binary, None)
-    except PgBinaryNotFoundError:
-        # nexus-r0esi: discovery failure must not silently yield an empty
-        # path (the prod-copy.sh count verification then SKIPped every
-        # check and reported 'all passed'). Fall back to PATH; fail LOUD
-        # with a non-zero exit when nothing resolves.
-        import shutil
-
-        val = shutil.which(args.binary) if args.binary != "bin_dir" else None
-        if val is None:
-            print(
-                f"pg-bin: {args.binary} not found via discovery or PATH "
-                "(install postgresql@16 or set NEXUS_PG_BIN)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    except PgBinaryNotFoundError as exc:
+        # nexus-r0esi: discovery failure must not silently yield an empty path
+        # (the prod-copy.sh count verification then SKIPped every check and
+        # reported 'all passed'). That requirement is preserved — this exits
+        # non-zero, loudly.
+        #
+        # What was REMOVED is the shutil.which(...) PATH fallback that used to
+        # sit here. PATH is the HOST's PostgreSQL, and nexus never uses one
+        # (see _NO_HOST_FALLBACK in nexus/db/pg_provision.py). Resolving a
+        # sandbox's psql off PATH means verifying counts against a different
+        # PostgreSQL than the one under test — a quieter version of the very
+        # false-'all passed' this branch exists to prevent.
+        print(
+            f"pg-bin: {args.binary} not found. nexus uses the PostgreSQL it "
+            f"builds, never a host install.\n{exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if val is None:
         print(f"Unknown binary: {args.binary}", file=sys.stderr)
         sys.exit(1)
@@ -120,37 +123,6 @@ def _cmd_sqlite_counts(args: argparse.Namespace) -> None:
     print(json.dumps(counts))
 
 
-def _cmd_chroma_counts(args: argparse.Namespace) -> None:
-    """Print JSON counts from a Chroma sqlite3 file.
-
-    Opens the file in read-only mode (mode=ro URI) to prevent SQLite from
-    creating or updating the -shm sidecar on a WAL-mode database.
-    Chroma uses 'delete' journal mode rather than WAL so the sidecar risk is
-    lower here than for memory.db, but mode=ro is still the correct default
-    for any prod-path read.
-    """
-    sqlite_path = Path(args.chroma_sqlite)
-    if not sqlite_path.exists():
-        print(json.dumps({"error": f"not found: {sqlite_path}"}))
-        sys.exit(1)
-
-    uri = f"file:{sqlite_path}?mode=ro"
-    try:
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    except sqlite3.OperationalError as e:
-        print(json.dumps({"error": str(e)}))
-        sys.exit(1)
-    try:
-        collections = conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
-        embeddings = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        sys.exit(1)
-    finally:
-        conn.close()
-    print(json.dumps({"collections": collections, "embeddings": embeddings}))
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="RDR-152 sandbox helper")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -165,15 +137,11 @@ def main() -> None:
     sc = sub.add_parser("sqlite-counts", help="Row counts for T2 SQLite db")
     sc.add_argument("--db", required=True)
 
-    cc = sub.add_parser("chroma-counts", help="Count Chroma collections and embeddings")
-    cc.add_argument("--chroma-sqlite", required=True)
-
     args = p.parse_args()
     dispatch = {
         "provision": _cmd_provision,
         "pg-bin": _cmd_pg_bin,
         "sqlite-counts": _cmd_sqlite_counts,
-        "chroma-counts": _cmd_chroma_counts,
     }
     dispatch[args.cmd](args)
 

@@ -62,7 +62,7 @@ import java.util.regex.Pattern;
  *   <li><strong>Tenant scoping.</strong> Every operation takes an explicit {@code tenant}
  *       and executes inside {@link TenantScope#withTenant} so the {@code nexus.tenant} GUC
  *       stamps the transaction and FORCE RLS scopes every row. Unlike the Chroma-backed
- *       {@link VectorRepository} (where collection names were the access boundary), RLS is
+ *       {@code VectorRepository} (deleted at RDR-155 P4b; collection names were the access boundary there), RLS is
  *       the tenant boundary here.
  *   <li><strong>Runtime per-dim dispatch.</strong> The collection-name embedding-model
  *       segment (RDR-103 collection-name authority, third {@code __}-separated segment)
@@ -86,7 +86,7 @@ import java.util.regex.Pattern;
  *       through the {@link EmbedderRouter} constructor - {@code EmbedderRouter.embed()}
  *       (the plain {@link Embedder} interface) always falls back to ONNX regardless of
  *       collection. Production wiring MUST use the router constructor (exactly like the
- *       Chroma {@link VectorRepository}); wiring a router through the plain-Embedder
+ *       Chroma {@code VectorRepository} did); wiring a router through the plain-Embedder
  *       constructor would produce 384-dim ONNX vectors for 1024-dim collections (caught
  *       fail-loud by the dim check, but only at the first upsert). With the router
  *       constructor the embedding path is identical to the Chroma path's
@@ -106,11 +106,11 @@ import java.util.regex.Pattern;
  *       {@code SET LOCAL} discipline as the TenantScope GUC stamp).
  * </ul>
  *
- * <p>The Chroma-backed {@link VectorRepository} stays RUNNABLE through Phase 3 as the
+ * <p>The Chroma-backed {@code VectorRepository} stays RUNNABLE through Phase 3 as the
  * hybrid-parity comparand (plan invariant 3); Phase 4a retires it.
  *
  * <p><strong>P4a seam note:</strong> this class shares no interface with the Chroma
- * {@link VectorRepository} and its methods take an explicit {@code tenant} first parameter
+ * {@code VectorRepository} and its methods take an explicit {@code tenant} first parameter
  * (RLS is the tenant boundary here; Chroma had none). The Phase 4a serving cutover must
  * either introduce a port interface or rewrite {@code VectorHandler}'s call sites - it is
  * NOT a drop-in substitution. Recorded on the P4a impl bead (nexus-1k8s1).
@@ -244,7 +244,7 @@ public final class PgVectorRepository {
     /**
      * Collection-aware constructor - the PRODUCTION wiring (Seam B). Routes each
      * embed call by collection prefix via {@link EmbedderRouter#embedForCollection},
-     * exactly like the Chroma {@link VectorRepository} path.
+     * exactly like the Chroma {@code VectorRepository} path.
      *
      * @param tenantScope the ONLY DSLContext factory
      * @param docRouter   collection-aware embedder router for document indexing
@@ -2360,12 +2360,22 @@ public final class PgVectorRepository {
      *                               never a silently partial document (application-enforced
      *                               referential check, T2 nexus_rdr/155-manifest-fk-decision)
      */
+    // TOMBSTONE-EXEMPT (nexus-mqd6t): the CATALOG_DOCUMENT_CHUNKS manifest read
+    // below (step 2) carries no filter of its own -- it is gated by the
+    // PRECEDING live-document existence check (step 1): a tombstoned or
+    // unknown tumbler throws IllegalStateException before the manifest select
+    // ever runs. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
     public List<Map<String, Object>> fetchDocumentChunks(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx -> {
             // 1. The document must be visible under RLS. A foreign tenant's tumbler is
             //    indistinguishable from an unknown one (no existence leak).
+            // nexus-mqd6t (audit sibling): + deleted_at IS NULL. A tombstoned
+            // document must not serve its chunk TEXT either — this read is the
+            // document-content surface, and without the predicate a deleted
+            // document stayed fully readable here while /show returned 404.
             Integer doc = ctx.select(DSL.one()).from(CATALOG_DOCUMENTS)
-                             .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                             .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)
+                                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                              .fetchOne(0, Integer.class);
             if (doc == null) {
                 throw new IllegalStateException(
@@ -2831,8 +2841,12 @@ public final class PgVectorRepository {
                 ctx.select(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH), CATALOG_DOCUMENTS.SOURCE_URI)
                    .from(CATALOG_DOCUMENT_CHUNKS)
                    .join(CATALOG_DOCUMENTS)
+                   // nexus-mqd6t (audit sibling): the twin of docsForChashes —
+                   // this maps a search-hit chash back to its document's
+                   // source_uri, so a tombstoned document must not be named.
                    .on(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)
-                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)))
+                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                        .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).in(batch)))
                    .fetch());

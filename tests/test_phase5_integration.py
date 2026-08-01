@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -21,11 +21,8 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-@pytest.fixture(autouse=True)
-def _clear_upgrade_done() -> None:
-    from nexus.db import migrations
-
-    migrations._upgrade_done.clear()
+# NO _clear_upgrade_done fixture: the ``_upgrade_done`` fast-path set died
+# with ``nexus/db/migrations.py`` (RDR-158 P4 Stage 4, nexus-i711w).
 
 
 # ── hooks.json tests ────────────────────────────────────────────────────────
@@ -55,100 +52,30 @@ class TestHooksJson:
 
 
 class TestMcpVersionCheck:
-    def test_no_db_file_no_error(self) -> None:
-        from nexus.mcp_infra import check_version_compatibility
+    """What remains of the CLI-side startup version check.
 
-        with patch(
-            "nexus.mcp_infra.default_db_path",
-            return_value=Path("/nonexistent/memory.db"),
-        ):
-            check_version_compatibility()  # should not raise
+    The CLI <-> T2 schema-drift arm read the stored ``_nexus_version`` over the
+    daemon's ``database.hello`` op (RDR-120 P4) and retired with the daemon
+    (nexus-i711w Stage 2 sub-stage B). Its four tests went with it, and NOT only
+    because one turned red: all four patched ``mcp_infra.default_db_path``,
+    which ``check_version_compatibility`` no longer calls, so the three "no
+    warning" ones had become vacuous — they would have kept passing against a
+    function that no longer did anything they described.
 
-    def test_version_match_no_warning(self, tmp_path: Path) -> None:
-        from nexus.mcp_infra import check_version_compatibility
+    The never-block contract below is the surviving part, re-pointed at a call
+    site the function still makes.
+    """
 
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "CREATE TABLE _nexus_version (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO _nexus_version VALUES ('cli_version', '4.1.2')"
-        )
-        conn.commit()
-        conn.close()
+    def test_exception_does_not_block(self) -> None:
+        """A failure anywhere in the check must not break MCP startup.
 
-        with (
-            patch("nexus.mcp_infra.default_db_path", return_value=db_path),
-            patch("nexus.mcp_infra._pkg_version", return_value="4.1.2", create=True),
-            patch("importlib.metadata.version", return_value="4.1.2"),
-        ):
-            check_version_compatibility()  # no warning
-
-    def test_patch_divergence_no_warning(self, tmp_path: Path) -> None:
-        from nexus.mcp_infra import check_version_compatibility
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "CREATE TABLE _nexus_version (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO _nexus_version VALUES ('cli_version', '4.1.2')"
-        )
-        conn.commit()
-        conn.close()
-
-        with (
-            patch("nexus.mcp_infra.default_db_path", return_value=db_path),
-            patch("importlib.metadata.version", return_value="4.1.3"),
-        ):
-            check_version_compatibility()  # patch only — no warning
-
-    def test_minor_version_divergence_warns(self, tmp_path: Path) -> None:
-        """Minor version mismatch should emit a structured warning.
-
-        RDR-120 P4 (nexus-2ngox): the schema-version read routes
-        through ``T2Client.database.hello`` rather than a direct
-        sqlite open. Stub the daemon round trip with a fake client
-        whose ``hello`` reports the divergent version.
+        Patches ``importlib.metadata.version`` — reached on EVERY invocation —
+        rather than the retired ``default_db_path`` gate, so the try/except is
+        genuinely exercised instead of the patch landing on dead code.
         """
         from nexus.mcp_infra import check_version_compatibility
 
-        db_path = tmp_path / "memory.db"
-        db_path.touch()  # check_version_compatibility gates on db_path.exists()
-
-        class _FakeStore:
-            def hello(self):
-                return {"daemon_schema_version": "4.1.2"}
-
-        class _FakeClient:
-            database = _FakeStore()
-
-            def close(self) -> None:
-                pass
-
-        with (
-            patch("nexus.mcp_infra.default_db_path", return_value=db_path),
-            patch("importlib.metadata.version", return_value="4.2.0"),
-            patch(
-                "nexus.daemon.t2_client.make_t2_client",
-                return_value=_FakeClient(),
-            ),
-            patch("structlog.get_logger") as mock_get_logger,
-        ):
-            mock_log = mock_get_logger.return_value
-            check_version_compatibility()
-            mock_log.warning.assert_called_once()
-            call_kwargs = mock_log.warning.call_args
-            assert "version_mismatch" in str(call_kwargs)
-
-    def test_exception_does_not_block(self) -> None:
-        from nexus.mcp_infra import check_version_compatibility
-
-        with patch(
-            "nexus.mcp_infra.default_db_path", side_effect=RuntimeError("boom")
-        ):
+        with patch("importlib.metadata.version", side_effect=RuntimeError("boom")):
             check_version_compatibility()  # should not raise
 
 
@@ -283,64 +210,6 @@ class TestPluginCliVersionCheck:
 # ── doctor --check-schema tests ─────────────────────────────────────────────
 
 
-class TestDoctorCheckSchema:
-    def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-schema"])
-        assert result.exit_code == 0
-        assert "not found" in result.output.lower()
-
-    def test_healthy_schema(self, runner: CliRunner, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import Catalog
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
-
-        # nexus-4s2o: je0b PK migrations skip via MigrationRetry when
-        # the catalog is absent, leaving the stored version unbumped.
-        # Initialize the catalog so apply_pending completes cleanly.
-        Catalog.init(tmp_path / "catalog")
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-schema"])
-        assert result.exit_code == 0
-        assert "passed" in result.output.lower()
-
-    def test_missing_version_table(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE memory (id INTEGER PRIMARY KEY)")
-        conn.commit()
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-schema"])
-        assert result.exit_code == 0
-        # Should report issues
-        assert "nx upgrade" in result.output.lower() or _WARN_CHAR in result.output
-
-    def test_reports_search_telemetry_table(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """RDR-087 Phase 2.1: doctor --check-schema knows about search_telemetry."""
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-schema"])
-        assert result.exit_code == 0
-        assert "search_telemetry" in result.output
-
-
 # ── GH #252: nx doctor --check-taxonomy ─────────────────────────────────────
 
 
@@ -350,18 +219,145 @@ class TestDoctorCheckTaxonomy:
     """
 
     def _setup_db(self, tmp_path: Path) -> Path:
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
+        # RDR-158 P4 Stage 4 (nexus-i711w): frozen-DDL seed replaces the
+        # deleted apply_pending chain — same well-formed local schema.
+        from tests._t2_fixture_ops import bootstrap_migration_source
 
         db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
+        bootstrap_migration_source(db_path)
         return db_path
+
+    @staticmethod
+    def _no_service():
+        """Force the legacy-source branch (nexus-ypori).
+
+        --check-taxonomy asks the ENGINE first; these fixtures seed a local
+        SQLite file, so without this the service answers and the fixture is
+        never read. Patching the store to raise exercises the documented
+        fallback: no reachable service -> read the frozen migration source and
+        say so.
+        """
+        return patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            side_effect=RuntimeError("no service in test"),
+        )
+
+    # ── the SERVICE branch (nexus-ypori) ────────────────────────────────────
+
+    @staticmethod
+    def _service_reports(report: dict):
+        """Stub the engine's /links/drift answer."""
+        store = MagicMock()
+        store.get_link_drift.return_value = report
+        return patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            return_value=store,
+        )
+
+    def test_service_clean_exits_zero(self, runner: CliRunner) -> None:
+        with self._service_reports(
+            {"projection_total": 986, "drift_count": 0, "rows": []}
+        ):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code == 0, result.output
+        assert "986" in result.output
+        # MUST NOT pass via the legacy fallback. These three assertions exist
+        # because the first version of this test DID: the service branch threw
+        # UnboundLocalError on a mis-scoped import, fell through to the SQLite
+        # census, and "invariant holds" matched that path's wording too. A
+        # green test proved nothing about the branch it named.
+        assert "Engine check unavailable" not in result.output, result.output
+        assert "frozen SQLite" not in result.output, result.output
+        assert "legacy source" not in result.output, result.output
+
+    def test_service_drift_exits_nonzero_and_names_rows(
+        self, runner: CliRunner
+    ) -> None:
+        """The verdict comes from the ENGINE, not the frozen SQLite source.
+
+        This is the whole point of nexus-ypori: before it, this check read a
+        29-day-old migration relic and reported its rows as live faults while
+        the store the system actually writes went unexamined.
+        """
+        with self._service_reports({
+            "projection_total": 986,
+            "drift_count": 2,
+            "rows": [
+                {"topic_id": 1559, "label": None, "collection": "docs__x"},
+                {"topic_id": 1560, "label": "named", "collection": None},
+            ],
+        }):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code != 0, result.output
+        assert "2/986" in result.output
+        assert "Engine check unavailable" not in result.output, result.output
+        assert "(unlabelled id=1559)" in result.output
+        assert "named" in result.output
+        assert "[docs__x]" in result.output
+        # the remedy IS correct here — it rebuilds the Postgres view this
+        # verdict was computed from
+        assert "nx taxonomy project" in result.output
+        # and the legacy census must not have run
+        assert "frozen SQLite migration source" not in result.output
+
+    def test_service_truncates_the_row_list_but_not_the_count(
+        self, runner: CliRunner
+    ) -> None:
+        """drift_count is exact; rows are capped engine-side."""
+        with self._service_reports({
+            "projection_total": 100,
+            "drift_count": 37,
+            "rows": [
+                {"topic_id": i, "label": f"t{i}", "collection": None}
+                for i in range(1, 11)
+            ],
+        }):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code != 0
+        assert "37/100" in result.output
+        assert "… 27 more" in result.output
+        assert "Engine check unavailable" not in result.output, result.output
+
+    def test_engine_without_the_route_says_so_and_does_not_mask_it(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A 404 from an older engine must surface AS a 404.
+
+        Regression pin. The first version of this branch referenced
+        ``suppress`` before its import, so the cleanup in ``finally`` raised
+        UnboundLocalError *while handling* the 404 and REPLACED it — the
+        operator was told "cannot access local variable 'suppress'" when the
+        real answer was "your engine predates this route". A masked cause is
+        worse than a loud one, and the mock-only tests above could not see it
+        because none of them made the call raise.
+        """
+        import httpx
+
+        db_path = self._setup_db(tmp_path)
+        store = MagicMock()
+        store.get_link_drift.side_effect = httpx.HTTPStatusError(
+            "HttpTaxonomyStore./v1/taxonomy/links/drift failed: HTTP 404: not found",
+            request=MagicMock(), response=MagicMock(),
+        )
+        with patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            return_value=store,
+        ), patch("nexus.config.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 0, result.output
+        assert "no /links/drift route" in result.output, result.output
+        assert "suppress" not in result.output, (
+            f"the cleanup error masked the real cause:\n{result.output}"
+        )
+        # and it must still fall back rather than reporting nothing
+        assert "frozen SQLite migration source" in result.output
 
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
         assert result.exit_code == 0
         assert "not found" in result.output.lower()
@@ -371,13 +367,15 @@ class TestDoctorCheckTaxonomy:
     ) -> None:
         """Empty taxonomy tables still satisfy the invariant vacuously."""
         db_path = self._setup_db(tmp_path)
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
         assert result.exit_code == 0
         assert "invariant holds" in result.output
 
     def test_drift_detected(self, runner: CliRunner, tmp_path: Path) -> None:
-        """Projection assignments with co-occurring projection partner but no
+        """Projection assignment with a co-occurring NON-projection partner but no
         topic_links row → exit 1. nexus-346q: drift detection requires the
         co-occurring partner since a link is structurally impossible without one."""
         db_path = self._setup_db(tmp_path)
@@ -392,7 +390,11 @@ class TestDoctorCheckTaxonomy:
             "VALUES (?, ?, ?, ?, ?)",
             (43, "partner-topic", "docs__other", 0, "2026-01-01T00:00:00Z"),
         )
-        # Two projection assignments on the same doc — a topic_links pair is
+        # projection + centroid on one doc — the shape refreshProjectionLinks
+        # actually emits a link for (nexus-ypori). This fixture said
+        # projection+projection until then, which produces NO link, so the
+        # test only passed because the check was inverted in the same
+        # direction. A topic_links pair is
         # structurally possible here, so the absence of topic_links is real drift.
         conn.execute(
             "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
@@ -402,18 +404,30 @@ class TestDoctorCheckTaxonomy:
         conn.execute(
             "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
             "VALUES (?, ?, ?)",
-            ("doc-xyz", 43, "projection"),
+            ("doc-xyz", 43, "centroid"),
         )
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
-        assert result.exit_code == 1
+        # The exit code is now scoped to the SERVICE verdict (nexus-ypori);
+        # the legacy-source census is a NOTE, so detection is asserted on the
+        # output rather than on $?. Exiting non-zero here would block a release
+        # on the frozen migration source.
+        assert result.exit_code == 0, result.output
         assert "topic_links drift" in result.output
         assert "orphan-topic" in result.output
-        assert "nx taxonomy project" in result.output
+        # The `nx taxonomy project --backfill --persist` remedy must NOT be
+        # offered here. It rebuilds the POSTGRES materialized view and does
+        # nothing whatsoever to the frozen SQLite file this branch just read,
+        # so printing it would send an operator to run a verb that cannot
+        # change the thing they were shown.
+        assert "nx taxonomy project" not in result.output, result.output
+        assert "NOT the engine" in result.output
 
     def test_isolated_projection_topic_not_flagged(
         self, runner: CliRunner, tmp_path: Path
@@ -439,20 +453,29 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0, result.output
         assert "invariant holds" in result.output
         assert "solitary-topic" not in result.output
 
-    def test_co_occurring_must_also_be_projection(
+    def test_co_occurring_non_projection_partner_IS_linkable(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        """nexus-346q: a projection assignment whose only co-occurring topic
-        was assigned via a non-projection path (centroid, bertopic) is still
-        structurally isolated from the projection perspective — no projection
-        pair means no aggregated topic_links row. Must not flag as drift.
+        """A projection assignment co-occurring with a NON-projection one is
+        exactly what the materializer links — so a missing link IS drift.
+
+        This test asserted the opposite until nexus-ypori, and in doing so
+        pinned the bug: it seeded projection+centroid, the one shape
+        refreshProjectionLinks definitely emits a row for
+        (TaxonomyRepository:1609 joins ``src.ASSIGNED_BY.ne("projection")``
+        under ``tgt.ASSIGNED_BY.eq("projection")``), and asserted the
+        invariant held with no link present. The check's guard was the
+        logical complement of the materializer, so it reported unlinkable
+        topics as drift and suppressed the linkable ones.
         """
         db_path = self._setup_db(tmp_path)
         conn = sqlite3.connect(str(db_path))
@@ -479,12 +502,57 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 0, result.output
+        assert "topic_links drift" in result.output, (
+            f"projection+centroid on one doc is linkable — a missing "
+            f"topic_links row must be REPORTED as drift:\n{result.output}"
+        )
+        assert "projection-side" in result.output, result.output
+
+    def test_co_occurring_projection_only_partner_is_NOT_linkable(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Two PROJECTION assignments on one doc produce no link at all.
+
+        The true complement of the case above, and the one the old guard
+        wrongly treated as the linkable shape. refreshProjectionLinks
+        requires the source partner to be non-projection, so a doc carrying
+        only projection assignments can never contribute a topic_links row —
+        flagging it would be the false positive the guard exists to prevent.
+        """
+        db_path = self._setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        for tid, label, coll in (
+            (110, "proj-a", "docs__x"),
+            (111, "proj-b", "docs__y"),
+        ):
+            conn.execute(
+                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tid, label, coll, 0, "2026-01-01T00:00:00Z"),
+            )
+        for tid in (110, 111):
+            conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "VALUES (?, ?, ?)",
+                ("doc-both-proj", tid, "projection"),
+            )
+        conn.commit()
+        conn.close()
+
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0, result.output
         assert "invariant holds" in result.output
-        assert "projection-side" not in result.output
+        assert "proj-a" not in result.output
 
     def test_invariant_holds_with_matching_link(
         self, runner: CliRunner, tmp_path: Path
@@ -515,7 +583,9 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0
@@ -526,78 +596,72 @@ class TestDoctorCheckTaxonomy:
 
 
 class TestDoctorTrimTelemetry:
-    """``nx doctor --trim-telemetry [--days N]`` deletes ``search_telemetry``
-    rows older than the retention window. Default 30d; --days validates min=1.
+    """``nx doctor --trim-telemetry [--days N]`` — CLI contract over the
+    engine-side trim.
+
+    Converted from the old local-``memory.db`` pinned form (the SQLite arm
+    died in nexus-i711w Stage 2 sub-stage A): the verb routes to
+    ``HttpTelemetryStore`` and trim row-selection semantics are engine-side,
+    so these tests pin flag wiring + per-table output rendering against a
+    spy store. The ``local_t2_backend`` pin was removed with the fixture in
+    the Stage 5 sweep.
+
+    SERVICE HALF IS OWNED: tests/test_false_clean_diagnostics_service_mode.py
+    ::test_trim_routes_to_the_service_and_never_opens_sqlite, plus the
+    unresolvable-endpoint and mid-call transport-error cases in the same file.
     """
 
-    def _seed_and_trim(
-        self, runner: CliRunner, tmp_path: Path, *,
-        ages_days: list[int], trim_days: int,
-    ) -> tuple["object", int]:
-        """Seed rows at the given ages (days before now) and run the trim."""
-        from datetime import UTC, datetime, timedelta
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
+    def _spy_and_trim(
+        self, runner: CliRunner, *, trim_days: int | None,
+    ) -> tuple["object", "object"]:
+        """Run the trim against a spy HttpTelemetryStore (nexus-i711w Stage 2
+        sub-stage A: the verb's SQLite arm died; trim row-selection semantics
+        are engine-side now, so the CLI contract pinned here is flag wiring +
+        per-table output rendering)."""
+        from unittest.mock import MagicMock
 
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        now = datetime.now(UTC)
-        for i, age in enumerate(ages_days):
-            ts = (now - timedelta(days=age)).isoformat()
-            conn.execute(
-                "INSERT INTO search_telemetry "
-                "(ts, query_hash, collection, raw_count, kept_count, "
-                "top_distance, threshold) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ts, f"hash{i:02d}", f"coll__{i}", 3, 2, 0.30, 0.45),
-            )
-        conn.commit()
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(
-                main, ["doctor", "--trim-telemetry", "--days", str(trim_days)],
-            )
-        remaining_conn = sqlite3.connect(str(db_path))
-        remaining = remaining_conn.execute(
-            "SELECT COUNT(*) FROM search_telemetry"
-        ).fetchone()[0]
-        remaining_conn.close()
-        return result, remaining
+        spy = MagicMock()
+        spy.trim_search_telemetry.return_value = 1
+        spy.trim_hook_failures.return_value = 0
+        args = ["doctor", "--trim-telemetry"]
+        if trim_days is not None:
+            args += ["--days", str(trim_days)]
+        with patch(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            return_value=spy,
+        ):
+            result = runner.invoke(main, args)
+        return result, spy
 
     def test_trims_rows_older_than_default_30d(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner,
     ) -> None:
-        """Default 30d retention: rows at t-45d deleted, t-15d and t-0 kept."""
-        result, remaining = self._seed_and_trim(
-            runner, tmp_path, ages_days=[45, 15, 0], trim_days=30,
-        )
+        """Default 30d retention reaches the store as days=30; count rendered."""
+        result, spy = self._spy_and_trim(runner, trim_days=None)
         assert result.exit_code == 0, result.output
-        assert remaining == 2
+        spy.trim_search_telemetry.assert_called_once_with(days=30)
+        spy.trim_hook_failures.assert_called_once_with(days=30)
         assert "Trimmed 1 search_telemetry" in result.output
 
     def test_aggressive_retention_days_7(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner,
     ) -> None:
-        """``--days 7`` trims t-45d and t-15d; only t-0 survives."""
-        result, remaining = self._seed_and_trim(
-            runner, tmp_path, ages_days=[45, 15, 0], trim_days=7,
-        )
+        """``--days 7`` is passed through to both engine-side trims."""
+        result, spy = self._spy_and_trim(runner, trim_days=7)
         assert result.exit_code == 0, result.output
-        assert remaining == 1
+        spy.trim_search_telemetry.assert_called_once_with(days=7)
+        spy.trim_hook_failures.assert_called_once_with(days=7)
 
     def test_empty_table_is_safe(
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:
         """Trim on an empty table is a no-op (zero deletions reported)."""
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
+        # RDR-158 P4 Stage 4 (nexus-i711w): frozen-DDL seed replaces the
+        # deleted apply_pending chain.
+        from tests._t2_fixture_ops import bootstrap_migration_source
 
         db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
+        bootstrap_migration_source(db_path)
 
         with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--trim-telemetry"])
@@ -611,15 +675,10 @@ class TestDoctorTrimTelemetry:
         )
         assert result.exit_code != 0
 
-    def test_no_db_file_handled_gracefully(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """Trim against a missing DB reports 'not found' without crashing."""
-        db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--trim-telemetry"])
-        assert result.exit_code == 0
-        assert "not found" in result.output.lower()
+    # test_no_db_file_handled_gracefully DELETED (nexus-i711w Stage 2
+    # sub-stage A): the "T2 database not found — nothing to trim" arm was a
+    # SQLite-mode gate; the verb now always trims the engine-side tables and
+    # a missing local file is meaningless to it.
 
 
 _WARN_CHAR = "\u2717"  # ✗

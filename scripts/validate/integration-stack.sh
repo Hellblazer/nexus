@@ -26,9 +26,14 @@
 #   --python-only  T1/T2/catalog Python suites only (skip the Java T3 contract tests)
 #   --java-only    T3 Java serving contract tests only
 #
-# Prerequisites (darwin/aarch64 dev box): JDK/GraalVM on PATH or JAVA_HOME set,
-# and pg17 binaries at /opt/homebrew/opt/postgresql@17/bin (16/15 also work as
-# discover_pg_binaries fallbacks). Suites self-skip
+# Prerequisites (darwin/aarch64 dev box): JDK/GraalVM on PATH or JAVA_HOME set.
+# PostgreSQL is NOT a prerequisite you install: nexus uses the PG bundle it
+# builds, and the tests/db fixtures self-provision it (the signed
+# nexus-pg-<target> bundle for the pinned engine tag, into
+# ~/.cache/nexus-test-substrate/<tag>/). Host PostgreSQL is never probed —
+# the Homebrew/distro discovery fallbacks this comment used to name were
+# removed; see _NO_HOST_FALLBACK in src/nexus/db/pg_provision.py. Set
+# NEXUS_PG_BIN only to point at an already-extracted bundle. Suites self-skip
 # (not fail) when prerequisites are absent.
 
 set -euo pipefail

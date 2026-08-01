@@ -18,6 +18,7 @@ import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
 import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
@@ -44,6 +45,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -70,9 +72,35 @@ public final class CatalogRepository {
 
     /**
      * RDR-159 P-1a: the fixed set of schema-qualified relations the migration
-     * count-verification may count. Mirrors {@code nexus.migration.orchestrator
-     * ._VERIFY_TABLES} on the Python side. A relation not in this set is never
+     * count-verification may count. A relation not in this set is never
      * counted (whitelist guard against arbitrary relation names).
+     *
+     * <p>The javadoc previously claimed this mirrors {@code
+     * nexus.migration.orchestrator._VERIFY_TABLES} on the Python side; that
+     * module (and the whole SQLite-era migration orchestrator it lived in)
+     * was deleted as part of the RDR-158 P4 SQLite retirement, so the symbol
+     * no longer exists to mirror. There is currently no {@code src/nexus/}
+     * caller of {@link dev.nexus.service.http.CatalogHandler}'s {@code
+     * /verify/relation-counts} route at all (the Python
+     * {@code relation_counts()} client method is presently callerless) — this
+     * set is retained for whichever migration-verify caller replaces the
+     * retired orchestrator.
+     *
+     * <p><b>nexus-20agh:</b> deliberately does NOT include {@code
+     * nexus.chash_index} — dropped by the {@code rdr187-001-drop-chash-index}
+     * changeset (RDR-187). Unlike {@link
+     * SchemaMigrator#CHASH_LEN_CONSTRAINTS}'s {@code chash_index} entry (which
+     * is a PRE-migration preflight that genuinely runs, on an aged box, in the
+     * window before that same changeset applies), this whitelist backs an
+     * HTTP-served verification route, and {@code Main} runs {@link
+     * SchemaMigrator#migrate} to completion — including the drop — BEFORE the
+     * HTTP server ever binds. So no caller, aged box or otherwise, can ever
+     * reach this route while {@code chash_index} still exists: there is no
+     * mid-migration window here to protect, only a table that is unqualified
+     * gone by the time anything could ask about it. Whitelisting it anyway
+     * would guarantee an unhandled "relation does not exist" SQL error the
+     * one time a stale caller's relation list still names it, instead of the
+     * intended silent-omit/INDETERMINATE contract below.
      */
     private static final Set<String> VERIFY_RELATIONS = Set.of(
         "nexus.memory",
@@ -82,7 +110,6 @@ public final class CatalogRepository {
         "nexus.topic_links",
         "nexus.hook_failures",
         "nexus.nx_answer_runs",
-        "nexus.chash_index",
         "nexus.catalog_owners",
         "nexus.catalog_documents",
         "nexus.catalog_collections",
@@ -174,8 +201,50 @@ public final class CatalogRepository {
 
     private static final Field<String>  EX_LNK_FSPAN  = DSL.field("EXCLUDED.from_span",   String.class);
     private static final Field<String>  EX_LNK_TSPAN  = DSL.field("EXCLUDED.to_span",     String.class);
-    private static final Field<String>  EX_LNK_CRTBY  = DSL.field("EXCLUDED.created_by",  String.class);
     private static final Field<String>  EX_LNK_META   = DSL.field("EXCLUDED.metadata",    String.class);
+
+    /**
+     * nexus-s4e1n — the canonical link-merge metadata fold, in SQL.
+     *
+     * <p>Ports the local {@code catalog_links.py} merge (recovered from the
+     * pre-deletion tree) verbatim:
+     * <pre>
+     *   existing_meta = json.loads(row.metadata) if row.metadata else {}
+     *   existing_meta.update(meta)                     # incoming wins per key
+     *   co = existing_meta.get("co_discovered_by", [])
+     *   if created_by != row.created_by and created_by not in co:
+     *       co.append(created_by)
+     *   existing_meta["co_discovered_by"] = co
+     * </pre>
+     * The pre-fix {@code metadata = EXCLUDED.metadata} was a data-loss bug in
+     * both directions: it dropped every previously merged key, and it wrote
+     * SQL NULL whenever the second caller carried no metadata of its own.
+     * {@code src/nexus/mcp/catalog.py} advertises this fold ("Duplicate links
+     * are merged with co_discovered_by tracking") for service mode too.
+     *
+     * <p>{@code jsonb_build_object()} / {@code jsonb_build_array()} rather than
+     * the literals {@code '{}'::jsonb} / {@code '[]'::jsonb}: jOOQ plain-SQL
+     * templates treat braces as placeholder syntax, and the builder functions
+     * produce the identical empty values without them.
+     *
+     * <p>The {@code jsonb_typeof(...) = 'array'} guard keeps a caller who
+     * stored a non-array under that key from crashing the whole upsert — the
+     * bad value is replaced rather than concatenated into.
+     */
+    private static final String LNK_META_BASE =
+        "(coalesce(catalog_links.metadata, jsonb_build_object()) "
+        + "|| coalesce(EXCLUDED.metadata, jsonb_build_object()))";
+    private static final String LNK_META_CO_EXISTING =
+        "(case when jsonb_typeof(" + LNK_META_BASE + " -> 'co_discovered_by') = 'array' "
+        + "then " + LNK_META_BASE + " -> 'co_discovered_by' else jsonb_build_array() end)";
+    private static final Field<String> LNK_META_FOLD = DSL.field(
+        LNK_META_BASE + " || jsonb_build_object('co_discovered_by', "
+        + "case when EXCLUDED.created_by is not null and EXCLUDED.created_by <> '' "
+        + "      and EXCLUDED.created_by is distinct from catalog_links.created_by "
+        + "      and not (" + LNK_META_CO_EXISTING + " @> to_jsonb(EXCLUDED.created_by)) "
+        + "then " + LNK_META_CO_EXISTING + " || jsonb_build_array(EXCLUDED.created_by) "
+        + "else " + LNK_META_CO_EXISTING + " end)",
+        String.class);
 
     private static final Field<String>  EX_COL_CTYPE  = DSL.field("EXCLUDED.content_type", String.class);
     private static final Field<String>  EX_COL_OWNER  = DSL.field("EXCLUDED.owner_id",    String.class);
@@ -209,8 +278,195 @@ public final class CatalogRepository {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // UNIQUE-KEY COMPLETENESS (nexus-0ehwe / pbawi / jq53b / z3ssg)
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // An INSERT ... ON CONFLICT takes exactly ONE conflict target — naming two in one
+    // statement is a PostgreSQL *syntax* error, verified against PG 17. So on a table
+    // with more than one CALLER-determined unique key, every key the arbiter does not
+    // name is an unhandled 23505 path. Both catalog tables in this class are in that
+    // position, and each separates one ADDRESS key from one or more IDENTITY keys:
+    //
+    //   catalog_owners     address (tenant_id, tumbler_prefix)             = catalog_owners_pk
+    //                      identity (tenant_id, name, owner_type)          = catalog_owners_unique_name_type
+    //                      alias    (tenant_id, repo_hash) partial         = idx_catalog_owners_repo_hash
+    //   catalog_documents  address (tenant_id, tumbler)                    = catalog_documents_pk
+    //                      identity (tenant_id, source_uri) live-only      = ux_catalog_documents_live_source_uri
+    //
+    // The arbiter keeps naming the ADDRESS (or, at the register sites, the identity).
+    // The keys it does NOT name are handled HERE, by resolving them BEFORE the write —
+    // the same prevent-rather-than-catch stance claimNextSeq takes for the tumbler PK —
+    // with UniqueRaceRetry as the belt for the residual READ COMMITTED race.
+    //
+    // NOTE: catalog_links also carries two unique keys, but its PK is (tenant_id, id)
+    // with id BIGSERIAL and no insert site supplies it, so that key cannot collide.
+    // Server-generated keys are exempt; caller-determined ones are not. That, not
+    // "the arbiter matches the only unique key", is why catalog_links is clean.
+
+    /** Address key of {@code catalog_owners} (catalog-001-baseline.xml:46). */
+    static final String OWNERS_PK = "catalog_owners_pk";
+    /** Identity key of {@code catalog_owners} (catalog-001-baseline.xml:47). */
+    static final String OWNERS_NAME_TYPE = "catalog_owners_unique_name_type";
+    /** Alias key of {@code catalog_owners}, partial (catalog-001-baseline.xml:51). */
+    static final String OWNERS_REPO_HASH = "idx_catalog_owners_repo_hash";
+    /** Address key of {@code catalog_documents} (catalog-001-baseline.xml:96). */
+    static final String DOCUMENTS_PK = "catalog_documents_pk";
+    /** Identity key of {@code catalog_documents}, partial (catalog-016:153). */
+    static final String DOCUMENTS_LIVE_SOURCE_URI = "ux_catalog_documents_live_source_uri";
+
+    /** The {@code catalog_owners} keys no owner-site arbiter names. */
+    static final String[] OWNER_NON_ARBITRATED = {OWNERS_NAME_TYPE, OWNERS_REPO_HASH};
+    /** The {@code catalog_documents} keys the address-arbitrated sites do not name. */
+    static final String[] DOCUMENT_NON_ARBITRATED = {DOCUMENTS_LIVE_SOURCE_URI};
+
+    /**
+     * The owner address that already holds this identity, or {@code null}.
+     *
+     * <p>Resolution order is {@code (name, owner_type)} then {@code repo_hash}, and the
+     * two must AGREE: if the identity key and the alias key point at different owners,
+     * there is no single "the existing owner" and proceeding would pick one arbitrarily.
+     * That disagreement is itself refused.
+     *
+     * <p>{@code repo_hash} is only consulted when non-blank, mirroring the partial
+     * index's own predicate ({@code repo_hash IS NOT NULL AND repo_hash != ''}) — a
+     * blank hash is not an identity and must not alias every other blank-hash owner
+     * onto one row.
+     */
+    private static String resolveOwnerAddress(DSLContext ctx, String tenant,
+                                              String name, String ownerType, String repoHash) {
+        String byIdentity = null;
+        if (name != null && !name.isBlank() && ownerType != null && !ownerType.isBlank()) {
+            byIdentity = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX).from(CATALOG_OWNERS)
+                            .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                   .and(CATALOG_OWNERS.NAME.eq(name))
+                                   .and(CATALOG_OWNERS.OWNER_TYPE.eq(ownerType)))
+                            .limit(1)
+                            .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
+        }
+        String byRepoHash = null;
+        if (repoHash != null && !repoHash.isBlank()) {
+            byRepoHash = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX).from(CATALOG_OWNERS)
+                            .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                   .and(CATALOG_OWNERS.REPO_HASH.eq(repoHash)))
+                            .limit(1)
+                            .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
+        }
+        if (byIdentity != null && byRepoHash != null && !byIdentity.equals(byRepoHash)) {
+            throw new CatalogIdentityConflictException(
+                OWNERS_REPO_HASH, "repo_hash=" + repoHash, byRepoHash, byIdentity);
+        }
+        return byIdentity != null ? byIdentity : byRepoHash;
+    }
+
+    /**
+     * Refuse a write that would give one owner identity to two addresses.
+     *
+     * <p>Called with the address the caller ASKED for. A resolution to that same address
+     * is the ordinary idempotent case and returns quietly; a resolution to a DIFFERENT
+     * address is the rename/merge hazard and is refused by name.
+     */
+    private static void guardOwnerIdentity(DSLContext ctx, String tenant, String attemptedPrefix,
+                                           String name, String ownerType, String repoHash) {
+        String existing = resolveOwnerAddress(ctx, tenant, name, ownerType, repoHash);
+        if (existing != null && !existing.equals(attemptedPrefix)) {
+            boolean viaRepoHash = repoHash != null && !repoHash.isBlank()
+                && ctx.fetchExists(ctx.selectOne().from(CATALOG_OWNERS)
+                    .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_OWNERS.REPO_HASH.eq(repoHash))
+                           .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(existing))));
+            throw new CatalogIdentityConflictException(
+                viaRepoHash ? OWNERS_REPO_HASH : OWNERS_NAME_TYPE,
+                viaRepoHash ? "repo_hash=" + repoHash
+                            : "owner name=" + name + " owner_type=" + ownerType,
+                existing, attemptedPrefix);
+        }
+    }
+
+    /**
+     * The tumbler of the LIVE document that already holds {@code sourceUri}, or
+     * {@code null}.
+     *
+     * <p>Scoped to live rows and non-empty URIs to match the partial index's predicate
+     * exactly ({@code deleted_at IS NULL AND source_uri <> ''}). A tombstoned row does
+     * NOT hold its source_uri — re-registering it is legal and must not be refused.
+     */
+    private static String liveTumblerForSourceUri(DSLContext ctx, String tenant, String sourceUri) {
+        if (sourceUri == null || sourceUri.isEmpty()) return null;
+        return ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                  .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                         .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(sourceUri))
+                         .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                  .limit(1)
+                  .fetchOne(CATALOG_DOCUMENTS.TUMBLER);
+    }
+
+    /**
+     * Refuse an address-arbitrated document write that would move a live
+     * {@code source_uri} onto a second row.
+     *
+     * <p>Guards BOTH arms of the upsert, which is the half nexus-z3ssg named and the
+     * half that is easy to miss: a fresh INSERT at a new tumbler carrying an
+     * already-live source_uri violates the index, AND an insert whose PK conflict is
+     * cleanly HANDLED then violates it again from the DO UPDATE arm, because that arm
+     * sets {@code source_uri} from the excluded row. Both were reproduced against PG 17
+     * before this guard was written.
+     */
+    private static void guardDocumentIdentity(DSLContext ctx, String tenant,
+                                              String attemptedTumbler, String sourceUri) {
+        String existing = liveTumblerForSourceUri(ctx, tenant, sourceUri);
+        if (existing != null && !existing.equals(attemptedTumbler)) {
+            throw new CatalogIdentityConflictException(
+                DOCUMENTS_LIVE_SOURCE_URI, "source_uri=" + sourceUri, existing, attemptedTumbler);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // OWNERS
     // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * The DO UPDATE assignments for {@code upsertOwner}, PRESERVE-ON-OMIT when the row was
+     * reached by identity rather than by address (nexus-upg3s).
+     *
+     * <p><strong>The bug this exists to prevent.</strong> Resolving a prefix-less payload onto
+     * an existing owner makes the INSERT conflict on the PK and take the DO UPDATE arm. That
+     * arm used to assign EVERY column from EXCLUDED unconditionally — so a payload that merely
+     * OMITTED a field wrote emptiness over the incumbent's value ({@code s()} yields null for
+     * an absent key, {@code nne()} yields ""). The reachable shape is not exotic:
+     * {@code register_owner("nexus", "repo")} in http_catalog_client sends exactly
+     * {@code {name, owner_type}}, because that client builds its payload omit-if-falsy.
+     *
+     * <p>Before the identity-converge change, that same payload allocated a FRESH prefix,
+     * collided on {@code catalog_owners_unique_name_type}, and rolled back — a loud 23505 that
+     * changed nothing. Converging made the statement REACH a row it could never reach before,
+     * which turned a safe no-op into a silent partial overwrite.
+     *
+     * <p>{@code repo_root} is the severe one: {@code deriveSourceUri} anchors every derived
+     * source_uri on it (RDR-096 / nexus-3e4s), so blanking it makes the idempotency lookup miss
+     * and already-registered files draw NEW tumblers — the duplicate-document class
+     * catalog-016 exists to prevent, and one the partial unique index cannot catch because the
+     * resulting URIs genuinely differ.
+     *
+     * <p><strong>Scope, deliberately narrow.</strong> Only the converge path preserves. When the
+     * caller supplied an EXPLICIT prefix it named this row on purpose, and the blind overwrite
+     * there is pre-existing behaviour that this change does not touch — widening the fix to
+     * that path is a separate decision, not a bug fix.
+     *
+     * <p>Presence, not truthiness, is the test: a caller that explicitly sends {@code ""} means
+     * to clear the field and still can.
+     */
+    private static Map<Field<?>, Object> ownerUpdateSet(Map<String, Object> o, boolean converged) {
+        Map<Field<?>, Object> upd = new LinkedHashMap<>();
+        // Identity columns: always assigned. On the converge path these are what we matched
+        // on, so EXCLUDED already carries the incumbent's own values.
+        upd.put(CATALOG_OWNERS.NAME, EX_OWN_NAME);
+        upd.put(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE);
+        if (!converged || o.containsKey("repo_hash"))   upd.put(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO);
+        if (!converged || o.containsKey("description")) upd.put(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC);
+        if (!converged || o.containsKey("repo_root"))   upd.put(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT);
+        if (!converged || o.containsKey("head_hash"))   upd.put(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD);
+        return upd;
+    }
 
     /** Upsert an owner row. ON CONFLICT update all mutable fields. */
     public void upsertOwner(String tenant, Map<String, Object> o) {
@@ -222,6 +478,7 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
+        UniqueRaceRetry.run("upsertOwner", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
             // nexus-0cy4b: tumbler_prefix is NOT NULL. The SQLite catalog
             // (Catalog.register_owner) assigns the owner prefix server-side; the
@@ -229,15 +486,25 @@ public final class CatalogRepository {
             // the existing owner's prefix for this repo (idempotent), else
             // allocate 1.{MAX+1}. An explicit prefix (ETL/import) is honoured.
             String prefix = s(o, "tumbler_prefix");
+            String name = s(o, "name");
+            String ownerType = s(o, "owner_type");
+            String repoHash = s(o, "repo_hash");
+
+            // nexus-jq53b, Hal decision (a) 2026-07-28: (tenant, name, owner_type) IS
+            // an identity key, so register_owner is idempotent BY it. Resolve it BEFORE
+            // allocating, not after — the pre-fix order allocated a fresh prefix first,
+            // which made the ON CONFLICT (tenant_id, tumbler_prefix) arbiter miss the
+            // existing row and let catalog_owners_unique_name_type fire as a raw 23505.
+            // That is reachable with no concurrency at all: registering the same
+            // name+type twice was enough (the nexus-aqbrk sequential repro).
+            String existing = resolveOwnerAddress(ctx, tenant, name, ownerType, repoHash);
+            // nexus-upg3s: did this call land on an EXISTING row purely by IDENTITY — no
+            // address given, none allocated? That is the one case where the caller never
+            // named this row, so an OMITTED field means "leave it alone", not "blank it".
+            // See the DO UPDATE below; this flag is the whole reason it is conditional.
+            boolean convergedOnExisting = false;
             if (prefix == null || prefix.isBlank()) {
-                String repoHash = s(o, "repo_hash");
-                if (repoHash != null && !repoHash.isBlank()) {
-                    prefix = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX)
-                                .from(CATALOG_OWNERS)
-                                .where(CATALOG_OWNERS.REPO_HASH.eq(repoHash))
-                                .limit(1)
-                                .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX);
-                }
+                prefix = existing;
                 if (prefix == null || prefix.isBlank()) {
                     // Next owner number: MAX(int after the first dot) + 1 over
                     // '1.%' owners. RLS scopes this to the tenant.
@@ -251,7 +518,14 @@ public final class CatalogRepository {
                         .where(CATALOG_OWNERS.TUMBLER_PREFIX.like("1.%"))
                         .fetchOne(0, Integer.class);
                     prefix = "1." + ((maxNum == null ? 0 : maxNum) + 1);
+                } else {
+                    convergedOnExisting = true;
                 }
+            } else {
+                // An EXPLICIT prefix is an address. Honour it — but not by silently
+                // stealing an identity that already belongs to a different owner, and
+                // not by routing a rename through this path (Hal's jq53b constraint 1).
+                guardOwnerIdentity(ctx, tenant, prefix, name, ownerType, repoHash);
             }
             ctx.insertInto(CATALOG_OWNERS,
                     CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
@@ -262,25 +536,24 @@ public final class CatalogRepository {
                        s(o,"head_hash"))
                .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                .doUpdate()
-               .set(CATALOG_OWNERS.NAME, EX_OWN_NAME)
-               .set(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE)
-               .set(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO)
-               .set(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC)
-               .set(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT)
-               .set(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD)
+               .set(ownerUpdateSet(o, convergedOnExisting))
                .execute();
             return null;
-        });
+        }));
     }
 
     /** Return all owners for tenant as list of maps. */
     public List<Map<String, Object>> listOwners(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
+            // nexus-0ehwe item 3: next_seq on the LIST too — the drift check
+            // must be able to sweep EVERY owner without N round trips.
             ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
-                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH,
+                       CATALOG_OWNERS.NEXT_SEQ)
                .from(CATALOG_OWNERS)
                .fetch()
-               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
+               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7(),
+                                  r.value8()))
         );
     }
 
@@ -322,10 +595,29 @@ public final class CatalogRepository {
     // DOCUMENTS
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Upsert a document. ON CONFLICT (tenant_id, tumbler) update all mutable fields. */
+    /**
+     * Upsert a document. ON CONFLICT (tenant_id, tumbler) update all mutable fields.
+     *
+     * <p>nexus-mqd6t (Hal ruling, tombstone NON-RESURRECTION): this is the ONE
+     * sanctioned way a tombstoned row comes back. {@link #updateDocument}
+     * refuses tombstoned targets outright ({@code deleted_at IS NULL} in its
+     * WHERE), so an incidental field write can never resurrect a deleted
+     * document; an EXPLICIT register of the same tumbler clears the tombstone
+     * here. Before this, a register addressed at a tombstoned tumbler updated
+     * every column and left {@code deleted_at} set — the row was written and
+     * then stayed invisible to every reader, silently.
+     */
     public void upsertDocument(String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
+        UniqueRaceRetry.run("upsertDocument", DOCUMENT_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
+            // nexus-0ehwe arbiter class / nexus-z3ssg shape. This statement arbitrates
+            // the ADDRESS key (tenant_id, tumbler) and sets source_uri from the excluded
+            // row, so it can violate ux_catalog_documents_live_source_uri on BOTH arms:
+            // a fresh INSERT at a new tumbler carrying an already-live source_uri, and an
+            // insert whose PK conflict is cleanly HANDLED and whose DO UPDATE arm then
+            // moves that source_uri onto a second live row. Both reproduce on PG 17.
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -366,9 +658,14 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
                .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
+               // nexus-mqd6t: explicit un-tombstone (see the javadoc above).
+               // TOMBSTONE-EXEMPT (nexus-mqd6t): the ONE sanctioned resurrection --
+               // deliberately unconditional, no WHERE guard applies to an ON
+               // CONFLICT DO UPDATE arm. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
+               .set(CATALOG_DOCUMENTS.DELETED_AT, (java.time.OffsetDateTime) null)
                .execute();
             return null;
-        });
+        }));
     }
 
     /**
@@ -411,6 +708,104 @@ public final class CatalogRepository {
         return "file://" + p.normalize();
     }
 
+    /**
+     * nexus-e7cys: {@link #deriveSourceUri(String, String, String)} plus the
+     * nexus-3e4s cross-project containment guard, restored engine-side.
+     *
+     * <p>The local arm ({@code catalog.py}, deleted at RDR-158 P4) REJECTED an
+     * explicit {@code file://} {@code source_uri} whose path did not resolve
+     * inside a {@code "repo"} owner's {@code repo_root} — the signature of a
+     * ~6,500-row contamination class where one project's owner accumulated
+     * rows whose source_uri lived in a DIFFERENT project's working tree. The
+     * port to this class kept the RECOMBINATION leg (relative {@code
+     * file_path} anchored on {@code repoRoot}, which is inherently
+     * containment-safe by construction) but dropped the REJECTION leg: an
+     * explicit {@code source_uri} was returned verbatim, unchecked.
+     *
+     * <p>This overload restores the rejection leg with ONE deliberate
+     * departure from the local arm: it is LEXICAL, never REALPATH. The local
+     * guard resolved symlinks on both sides (tolerating e.g. macOS's
+     * {@code /private/var} vs {@code /var}) because it ran on the SAME
+     * filesystem the paths described. This server does not — a
+     * {@code file://} URI names a path on the CALLING client's filesystem,
+     * and resolving it against the server's own filesystem would be
+     * resolving against the wrong machine entirely (or, worse, silently
+     * "succeeding" against a same-named path that happens to exist on the
+     * server host by coincidence). A normalize()-then-{@code startsWith()}
+     * prefix check is the honest engine-side equivalent; the local arm's
+     * symlink tolerance is deliberately NOT restored here.
+     *
+     * <p>Scope, matching the local arm exactly: only {@code "repo"} owners
+     * with a non-empty {@code repoRoot} enforce the check; {@code "curator"}
+     * owners and pre-existing repo owners with no {@code repoRoot} pass
+     * through. Only {@code file://} URIs carry a filesystem identity to
+     * compare — {@code chroma://}, {@code https://}, etc. pass through
+     * unchanged. {@code allowCrossProject} is the wire form of the local
+     * arm's {@code NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1} escape hatch (see
+     * {@code src/nexus/catalog/types.py:143}): the CLIENT reads its own
+     * environment and populates this field, since the server has no access
+     * to the client's environment.
+     */
+    public static String deriveSourceUri(String sourceUri, String filePath, String repoRoot,
+                                          String ownerType, boolean allowCrossProject) {
+        String derived = deriveSourceUri(sourceUri, filePath, repoRoot);
+        if (!sourceUri.isEmpty()) {
+            // derived == sourceUri whenever sourceUri was non-empty (the 3-arg
+            // method's own early return) — this is exactly the explicit-uri
+            // (rejection-leg) case; the recombination leg never reaches here.
+            checkCrossProjectContainment(derived, ownerType, repoRoot, allowCrossProject);
+        }
+        return derived;
+    }
+
+    /** Thrown by {@link #checkCrossProjectContainment}; maps to 400 like {@link DanglingEndpointException}. */
+    public static final class CrossProjectSourceUriException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
+        CrossProjectSourceUriException(String message) {
+            super(message);
+        }
+    }
+
+    private static void checkCrossProjectContainment(
+            String sourceUri, String ownerType, String repoRoot, boolean allowCrossProject) {
+        if (sourceUri == null || sourceUri.isEmpty()) return;
+        if (!"repo".equals(ownerType)) return;
+        if (repoRoot == null || repoRoot.isEmpty()) return;
+
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(sourceUri);
+        } catch (IllegalArgumentException e) {
+            // Malformed URI is a different bug class; not this guard's job.
+            return;
+        }
+        if (!"file".equals(uri.getScheme())) return;
+        String rawPath = uri.getPath();
+        if (rawPath == null || rawPath.isEmpty()) return;
+
+        java.nio.file.Path filePath = java.nio.file.Paths.get(rawPath).normalize();
+        java.nio.file.Path root = java.nio.file.Paths.get(repoRoot).normalize();
+        if (filePath.startsWith(root)) return;
+
+        if (allowCrossProject) {
+            // nexus-e7cys: the override was actually EXERCISED (the check would
+            // have failed without it) — log so the bypass leaves an audit trail,
+            // matching the local arm's "never the right answer for normal
+            // indexing" framing of the env-var escape hatch.
+            log.warn("event=cross_project_source_uri_override_used repo_root={} source_uri={}",
+                      repoRoot, sourceUri);
+            return;
+        }
+        throw new CrossProjectSourceUriException(
+            "cross-project source_uri rejected (nexus-3e4s/nexus-e7cys): "
+            + "owner repo_root=" + repoRoot + " but source_uri=" + sourceUri
+            + " normalizes to " + filePath + ", which is outside the owner's "
+            + "repo_root. This is the signature of the contamination bug "
+            + "class. Pass allow_cross_project=true to bypass for emergency "
+            + "recovery.");
+    }
+
     private String ownerRepoRoot(org.jooq.DSLContext ctx, String tenant, String ownerPrefix) {
         String root = ctx.select(CATALOG_OWNERS.REPO_ROOT).from(CATALOG_OWNERS)
                          .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
@@ -419,32 +814,72 @@ public final class CatalogRepository {
         return root != null ? root : "";
     }
 
+    /**
+     * Ensure the owner row at {@code ownerPrefix} exists, and return its
+     * {@code repo_root} (nexus-0ehwe arbiter class).
+     *
+     * <p>Replaces a blind {@code INSERT ... ON CONFLICT (tenant_id, tumbler_prefix) DO
+     * NOTHING} at both register sites. That insert named only the ADDRESS key, so it was
+     * exposed to both of {@code catalog_owners}' other unique keys: an owner whose
+     * {@code (name, owner_type)} already lives at a different prefix raised a raw 23505
+     * that no arm caught (nexus-jq53b), and it is a documented TOCTOU guard that fires
+     * under exactly the concurrency the register path sees (nexus-z3ssg).
+     *
+     * <p>Costs no extra round trip. The SELECT that decides whether the row exists is
+     * the SAME one both callers already made for {@code repo_root} via
+     * {@link #ownerRepoRoot}; {@code repo_root} is {@code NOT NULL DEFAULT ''}, so a
+     * {@code null} here unambiguously means "no row at this address" rather than "row
+     * with an empty root".
+     */
+    private static String ensureOwnerRow(DSLContext ctx, String tenant, String ownerPrefix,
+                                         String ownerName, String ownerType) {
+        String repoRoot = ctx.select(CATALOG_OWNERS.REPO_ROOT).from(CATALOG_OWNERS)
+                             .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                    .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+                             .fetchOne(CATALOG_OWNERS.REPO_ROOT);
+        if (repoRoot != null) return repoRoot;
+
+        // Creating the row: its identity must not already belong to another address.
+        guardOwnerIdentity(ctx, tenant, ownerPrefix, ownerName, ownerType, null);
+        ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX,
+                       CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT,
+                       CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
+           .values(tenant, ownerPrefix, ownerName, ownerType, null, null, "", null, 0L)
+           .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
+           .doNothing()
+           .execute();
+        return "";
+    }
+
     public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
-        return tenantScope.withTenant(tenant, ctx -> {
-            // Ensure owner row exists (idempotent upsert with minimal fields)
-            ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
-                           CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
-               .values(tenant, ownerPrefix,
-                       s(fields, "owner_name", ownerPrefix),
-                       s(fields, "owner_type", "repo"),
-                       null, null, "", null, 0L)
-               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
-               .doNothing()
-               .execute();
+        return UniqueRaceRetry.run("registerDocument", OWNER_NON_ARBITRATED, () ->
+        tenantScope.withTenant(tenant, ctx -> {
+            // Ensure owner row exists. Resolve-first (nexus-0ehwe arbiter class): the
+            // blind DO-NOTHING upsert this replaces named only the address key and was
+            // exposed to catalog_owners' other two. Same round-trip count — this SELECT
+            // is the repo_root lookup that used to happen a few lines below.
+            String ownerType = s(fields, "owner_type", "repo");
+            String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
+                s(fields, "owner_name", ownerPrefix),
+                ownerType);
 
             // Idempotency check BEFORE claiming a sequence number — avoids permanent seq gaps
             // on re-registration of existing documents.
             // Idempotency check: only match LIVE (non-tombstoned) docs.
             // A tombstoned source_uri re-registration allocates a NEW tumbler;
             // the trash entry is left untouched (users can restore or purge it separately).
+            // nexus-e7cys: cross-project containment guard on an explicit source_uri;
+            // allow_cross_project is the wire form of the client's
+            // NEXUS_CATALOG_ALLOW_CROSS_PROJECT env-var escape hatch.
             String srcUri = deriveSourceUri(
                 s(fields, "source_uri", ""),
                 s(fields, "file_path", ""),
-                ownerRepoRoot(ctx, tenant, ownerPrefix));
+                repoRoot, ownerType, bool(fields, "allow_cross_project", false));
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
                                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
@@ -470,12 +905,10 @@ public final class CatalogRepository {
                           .forUpdate()
                           .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
 
-            ctx.update(CATALOG_OWNERS)
-               .set(CATALOG_OWNERS.NEXT_SEQ, seq + 1)
-               .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
-               .execute();
+            // nexus-0ehwe: floor past a drifted counter instead of colliding.
+            long claimed = claimNextSeq(ctx, tenant, ownerPrefix, seq);
 
-            String tumbler = ownerPrefix + "." + (seq + 1);
+            String tumbler = ownerPrefix + "." + claimed;
 
             // Insert document
             String metaJson = jsonOrNull(fields.get("meta"));
@@ -548,7 +981,7 @@ public final class CatalogRepository {
                 return winner.value1();
             }
             return tumbler;
-        });
+        }));
     }
 
     /**
@@ -579,22 +1012,23 @@ public final class CatalogRepository {
         if (docs == null || docs.isEmpty()) {
             return java.util.List.of();
         }
-        return tenantScope.withTenant(tenant, ctx -> {
+        return UniqueRaceRetry.run("registerDocumentMany", OWNER_NON_ARBITRATED, () ->
+        tenantScope.withTenant(tenant, ctx -> {
             // nexus-oub13: per-step wall timing — the live duoak.11 re-gate
             // measured ~38s/page client-side with no way to tell which step
             // (or whether the server at all) was the sink. One structured
             // line per page; negligible overhead at page granularity.
             long tStart = System.nanoTime();
-            // Ensure owner row exists (idempotent upsert, minimal fields) — once.
-            ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
-                           CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
-               .values(tenant, ownerPrefix,
-                       s(docs.get(0), "owner_name", ownerPrefix),
-                       s(docs.get(0), "owner_type", "repo"),
-                       null, null, "", null, 0L)
-               .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
-               .doNothing()
-               .execute();
+            // Ensure owner row exists — once. Resolve-first, same as the single-doc
+            // path (nexus-0ehwe arbiter class); this is also the repo_root lookup.
+            // One owner_type for the whole batch — the owner row is ensured ONCE
+            // from docs[0], so a per-doc re-read below could silently diverge from
+            // the owner's registered type if a caller ever sent mixed values
+            // (review 2026-08-01 finding on nexus-e7cys's batch guard).
+            String batchOwnerType = s(docs.get(0), "owner_type", "repo");
+            String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
+                s(docs.get(0), "owner_name", ownerPrefix),
+                batchOwnerType);
             long tOwner = System.nanoTime();
 
             // Batch idempotency: fetch existing LIVE docs for every source_uri and
@@ -603,14 +1037,15 @@ public final class CatalogRepository {
             // the owner's repo_root) when the caller sent none — see
             // deriveSourceUri. The derived value is used for lookup, insert,
             // and race patching alike.
-            String repoRoot = ownerRepoRoot(ctx, tenant, ownerPrefix);
             String[] uriOf = new String[docs.size()];
             java.util.List<String> srcUris = new java.util.ArrayList<>();
             java.util.List<String> filePaths = new java.util.ArrayList<>();
             for (int i = 0; i < docs.size(); i++) {
                 var d = docs.get(i);
+                // nexus-e7cys: per-doc containment guard, same as the single-doc path.
                 uriOf[i] = deriveSourceUri(
-                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot);
+                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot,
+                    batchOwnerType, bool(d, "allow_cross_project", false));
                 if (!uriOf[i].isEmpty()) srcUris.add(uriOf[i]);
                 String fp = s(d, "file_path", "");
                 if (!fp.isEmpty()) filePaths.add(fp);
@@ -679,7 +1114,15 @@ public final class CatalogRepository {
                               .forUpdate()
                               .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
                 tClaim = System.nanoTime();
-                long cursor = seq;
+                // nexus-0ehwe, SECOND claim site: floor the cursor past a
+                // drifted counter exactly as the single-doc path does, or a
+                // batch into a wedged owner collides on (tenant_id, tumbler)
+                // with no ON CONFLICT arm and 409s the whole batch.
+                long cursor = Math.max(seq, highestChildSeq(ctx, tenant, ownerPrefix));
+                if (cursor != seq) {
+                    log.warn("event=next_seq_drift_healed_batch tenant={} owner={} next_seq={} floored_to={}",
+                        tenant, ownerPrefix, seq, cursor);
+                }
 
                 var insert = ctx.insertInto(CATALOG_DOCUMENTS,
                         CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
@@ -793,18 +1236,167 @@ public final class CatalogRepository {
                 (tEnd - tStart) / 1_000_000);
 
             return java.util.Arrays.asList(out);
-        });
+        }));
     }
 
     /** Fetch a document by tumbler. Returns null if not found. */
     public Map<String, Object> getDocument(String tenant, String tumbler) {
+        return getDocument(tenant, tumbler, false);
+    }
+
+    /**
+     * Maximum {@code alias_of} hops before {@link #resolveAliasTarget} gives up
+     * (nexus-ekaxn; matches the local {@code resolve_alias(max_hops=16)} the
+     * service client declared and never implemented).
+     */
+    private static final int MAX_ALIAS_HOPS = 16;
+
+    /**
+     * Fetch a document by tumbler, optionally following the {@code alias_of}
+     * chain to its canonical target (nexus-ekaxn).
+     *
+     * <p>{@code followAlias=false} is the DEFAULT and is byte-for-byte the
+     * pre-fix behaviour, so a client that sends no {@code follow_alias} param
+     * sees exactly what it saw before.
+     *
+     * @param followAlias when true, hop {@code alias_of} up to
+     *                    {@value #MAX_ALIAS_HOPS} times, stopping early on a
+     *                    cycle or a pointer that resolves to nothing.
+     */
+    public Map<String, Object> getDocument(String tenant, String tumbler, boolean followAlias) {
         return tenantScope.withTenant(tenant, ctx -> {
+            String target = followAlias ? resolveAliasTarget(ctx, tenant, tumbler) : tumbler;
             var r = ctx.select(documentFields())
                        .from(CATALOG_DOCUMENTS)
-                       .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                       .where(CATALOG_DOCUMENTS.TUMBLER.eq(target).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                        .fetchOne();
             return r != null ? docRowFromRecord(r.intoMap()) : null;
         });
+    }
+
+    /**
+     * Highest child sequence actually in use under *ownerPrefix*, INCLUDING
+     * tombstoned rows (nexus-0ehwe).
+     *
+     * <p>Tombstones matter: the only unique key on {@code catalog_documents} is
+     * {@code (tenant_id, tumbler)}, and it does NOT exclude soft-deleted rows —
+     * unlike the partial {@code source_uri} index. So a tumbler belonging to a
+     * deleted document is still taken, and an allocator that ignores tombstones
+     * will hand it out again and collide.
+     *
+     * <p>Returns 0 when the owner has no numeric children, which makes the
+     * caller's {@code max(next_seq, high_water) + 1} degrade to plain
+     * {@code next_seq + 1}.
+     */
+    private static long highestChildSeq(DSLContext ctx, String tenant, String ownerPrefix) {
+        // TOMBSTONE-EXEMPT (nexus-mqd6t): tumbler allocator -- the tumbler PK
+        // does not exclude tombstones, and filtering would re-issue an
+        // already-taken child sequence number to a NEW document. See
+        // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
+        // tumbler is "<prefix>.<n>"; the child segment starts one char past the dot.
+        int childStart = ownerPrefix.length() + 2;
+        Long max = ctx.select(DSL.field(
+                    "COALESCE(MAX(CAST(substring(tumbler FROM {0}) AS BIGINT)), 0)",
+                    Long.class, DSL.val(childStart)))
+               .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%"))
+                      // digits only — a deeper address like "1.2.3" is not a child seq
+                      .and(DSL.condition("substring(tumbler FROM {0}) ~ '^[0-9]+$'",
+                                         DSL.val(childStart))))
+               .fetchOne(0, Long.class);
+        return max == null ? 0L : max;
+    }
+
+    /**
+     * Claim the next tumbler sequence for *ownerPrefix*, self-healing past a
+     * drifted counter (nexus-0ehwe items 1 + 2).
+     *
+     * <p>THE WEDGE THIS REMOVES. {@code registerDocument} used to claim
+     * {@code next_seq} and insert; the INSERT's only ON CONFLICT arbiter is
+     * {@code (tenant_id, source_uri)}, so a {@code (tenant_id, tumbler)}
+     * collision had no arm and escaped as a bare {@code 409 integrity
+     * constraint violation}. The {@code next_seq} increment shared the failing
+     * transaction and rolled back WITH it, so the allocator never advanced:
+     * one drifted owner was a PERMANENT, TOTAL outage for that owner, and retry
+     * could never clear it (nexus-pbawi fixed one owner by hand).
+     *
+     * <p>Rather than catch the collision and retry, this prevents it: the claim
+     * is {@code max(next_seq, highest_child_seq) + 1}, so a counter that has
+     * fallen behind its own children is floored on the FIRST attempt. Monotonic
+     * by construction — it can only raise, and can never re-issue a tumbler —
+     * which is the same guarantee {@code EX_OWN_SEQ_GREATEST} gives the ETL
+     * import path.
+     *
+     * <p>Runs inside the caller's {@code SELECT ... FOR UPDATE} on the owner
+     * row, so two concurrent registrations cannot both claim the same value.
+     */
+    private static long claimNextSeq(DSLContext ctx, String tenant, String ownerPrefix, long nextSeq) {
+        long highWater = highestChildSeq(ctx, tenant, ownerPrefix);
+        long claim = Math.max(nextSeq, highWater) + 1;
+        if (claim != nextSeq + 1) {
+            log.warn("event=next_seq_drift_healed tenant={} owner={} next_seq={} high_water={} claimed={}",
+                tenant, ownerPrefix, nextSeq, highWater, claim);
+        }
+        ctx.update(CATALOG_OWNERS)
+           .set(CATALOG_OWNERS.NEXT_SEQ, claim)
+           .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+           .execute();
+        return claim;
+    }
+
+    /**
+     * Walk {@code alias_of} from *tumbler* to the canonical document tumbler
+     * (nexus-ekaxn). Bounded at {@value #MAX_ALIAS_HOPS} hops and cycle-safe
+     * (a visited set, so A→B→A terminates on the row it started from rather
+     * than spinning).
+     *
+     * <p>Fail-SOFT by construction, and deliberately so: a pointer that names a
+     * missing or tombstoned row resolves to the LAST live row on the chain, not
+     * to null. Returning null would turn "this alias is stale" into "this
+     * document does not exist" for every caller — a strictly worse answer than
+     * the alias row itself, which is what the pre-fix behaviour already gave.
+     *
+     * @return the canonical tumbler, or *tumbler* itself when it is not an alias
+     */
+    private static String resolveAliasTarget(DSLContext ctx, String tenant, String tumbler) {
+        String current = tumbler;
+        Set<String> seen = new LinkedHashSet<>();
+        seen.add(current);
+        for (int hop = 0; hop < MAX_ALIAS_HOPS; hop++) {
+            String next = ctx.select(CATALOG_DOCUMENTS.ALIAS_OF)
+                             .from(CATALOG_DOCUMENTS)
+                             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(current))
+                                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                             .fetchOne(CATALOG_DOCUMENTS.ALIAS_OF);
+            if (next == null || next.isBlank()) return current;   // not an alias: the common exit
+            if (!seen.add(next)) {
+                // A cycle is corrupt data, not a routine shape.
+                log.warn("event=alias_chain_cycle tenant={} start={} stopped_at={} repeated={}",
+                    tenant, tumbler, current, next);
+                return current;
+            }
+            // A pointer at a row that is gone (or tombstoned) stops the walk on
+            // the last row that actually exists.
+            boolean liveTarget = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(next))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+            if (!liveTarget) {
+                // critique C2: the fail-soft substitution is defensible, SILENCE
+                // about it is not — this is a broken pointer in the graph and the
+                // caller is about to receive a DIFFERENT row than it addressed.
+                log.warn("event=alias_target_not_live tenant={} start={} resolved_to={} broken_pointer={}",
+                    tenant, tumbler, current, next);
+                return current;
+            }
+            current = next;
+        }
+        log.warn("event=alias_chain_hop_limit tenant={} start={} stopped_at={} max_hops={}",
+            tenant, tumbler, current, MAX_ALIAS_HOPS);
+        return current;
     }
 
     /**
@@ -819,6 +1411,37 @@ public final class CatalogRepository {
      * <p>{@code chunkCount} of 0 (or absent) means the count is not yet known
      * — the bounds check is skipped in that case, mirroring the local
      * Python's {@code if entry.chunk_count and chunk_idx >= entry.chunk_count}.
+     *
+     * <p><b>Staleness invariant (nexus-ojazb).</b> This bounds check trusts
+     * {@code documents.chunk_count} as an up-to-date mirror of the manifest
+     * ({@code catalog_document_chunks}) row count. That is true for every
+     * PRODUCTION manifest writer: {@link #writeManifestRows} (REPLACE, used by
+     * {@code writeManifest}/{@code writeManifestMany}), {@link
+     * #appendManifestChunks}, and {@link #purgeManifest} each fold {@code
+     * documents.chunk_count} in the SAME transaction as their manifest
+     * delete/insert (nexus-b6enc F5, nexus-e4gel), so a manifest written
+     * through any of those three has no read-after-write staleness window —
+     * pinned by {@code resolveChunk_writtenThroughNormalManifestPath_resolvesLastChunk}.
+     * {@link #buildUpdateDocumentQuery} (the {@code /update} endpoint)
+     * independently re-derives the count from the manifest via {@link
+     * #reDerivedChunkCount} whenever the caller does not name {@code
+     * chunk_count} explicitly, so a plain document update cannot desync it
+     * either.
+     *
+     * <p><b>Residual exposure.</b> The ETL import legs — {@link #importChunk}
+     * and {@link #importChunksBatch} (the {@code POST /v1/catalog/import/chunk}
+     * route) — insert/upsert manifest rows directly and do NOT fold {@code
+     * chunk_count}; a document whose manifest was populated ONLY through that
+     * leg (with no explicit {@code chunk_count} on registration/update and no
+     * follow-up {@link #resyncChunkCount}) can have a stale (typically 0,
+     * skipping the bounds check) count relative to the true manifest size.
+     * As of this writing that route has no caller anywhere in {@code
+     * src/nexus/} — it exists for a since-retired SQLite-era migration chain
+     * (RDR-158 P4) — so the window is real but currently unexercised in
+     * production. A future ETL/migration caller of {@code import/chunk} MUST
+     * call {@link #resyncChunkCount} (or set an explicit {@code chunk_count})
+     * once its import completes, or reintroduce the same fold this method's
+     * three production writers already carry.
      *
      * @param tenant      tenant identifier
      * @param docTumbler  the document tumbler (chunk segment already stripped
@@ -928,6 +1551,14 @@ public final class CatalogRepository {
             var queries = new ArrayList<Query>();
             var queryIndexes = new ArrayList<Integer>();  // index into `updates` for each entry in `queries`
 
+            // nexus-ekaxn: ONE alias-resolution query for the whole batch (see
+            // batchAliasTargets) — never one per document.
+            var batchTumblers = new ArrayList<String>(updates.size());
+            for (var upd : updates) {
+                if (upd.get("tumbler") instanceof String t && !t.isBlank()) batchTumblers.add(t);
+            }
+            Map<String, String> aliasTargets = batchAliasTargets(ctx, tenant, batchTumblers);
+
             for (int i = 0; i < updates.size(); i++) {
                 var upd = updates.get(i);
                 Object tumblerObj = upd.get("tumbler");
@@ -939,7 +1570,7 @@ public final class CatalogRepository {
                 fields.remove("tumbler");
                 Query query;
                 try {
-                    query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields);
+                    query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, aliasTargets);
                 } catch (IllegalArgumentException e) {
                     resultSlots[i] = -1;
                     continue;
@@ -968,9 +1599,78 @@ public final class CatalogRepository {
      * Returns {@code null} when *fields* yields no settable column (mirrors
      * {@code updateDocument}'s 0-row short-circuit).
      */
+    /**
+     * The row an update ADDRESSED at *tumbler* must actually write (nexus-ekaxn).
+     *
+     * <p>An update addressed to an ALIAS must land on the CANONICAL target, not
+     * on the alias row. Only the engine can fix this half — the client cannot
+     * make {@code WHERE tumbler = ?} mean anything else.
+     *
+     * <p>CARVE-OUT: a write that SETS {@code alias_of} is a write about the
+     * pointer itself, so it must NOT hop. Without it, re-pointing an existing
+     * alias would rewrite its current canonical target's {@code alias_of}
+     * instead — turning a pointer edit into silent corruption of the row it
+     * points at.
+     *
+     * @param prefetched batch-resolved targets from
+     *                   {@link #batchAliasTargets}, or null to resolve
+     *                   single-doc (one extra SELECT)
+     */
+    private static String aliasTarget(DSLContext ctx, String tenant, String tumbler,
+                                      Map<String, Object> fields, Map<String, String> prefetched) {
+        if (fields.containsKey("alias_of")) return tumbler;
+        if (prefetched != null) return prefetched.getOrDefault(tumbler, tumbler);
+        return resolveAliasTarget(ctx, tenant, tumbler);
+    }
+
+    /**
+     * Resolve alias targets for a WHOLE batch in ONE query (nexus-ekaxn meets
+     * nexus-xedhp).
+     *
+     * <p>Load-bearing for {@link #updateDocumentsMany}: a per-entry
+     * {@link #resolveAliasTarget} would add one SELECT per document, which is
+     * precisely the N-round-trip cost that method exists to remove (175.5s /
+     * 1718 files on this repo's own shakeout). One {@code WHERE tumbler IN (?)}
+     * covers the batch; only the RARE genuinely-aliased rows then pay a chain
+     * walk. Tumblers absent from the result (unknown or tombstoned) map to
+     * themselves, so the UPDATE matches 0 rows — the same answer as before.
+     */
+    private static Map<String, String> batchAliasTargets(
+        DSLContext ctx, String tenant, List<String> tumblers
+    ) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (tumblers.isEmpty()) return out;
+        var rows = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.ALIAS_OF)
+                      .from(CATALOG_DOCUMENTS)
+                      .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                             .and(CATALOG_DOCUMENTS.TUMBLER.in(tumblers))
+                             .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                      .fetch();
+        for (var r : rows) {
+            String alias = r.value2();
+            out.put(r.value1(), (alias == null || alias.isBlank())
+                ? r.value1()
+                : resolveAliasTarget(ctx, tenant, r.value1()));
+        }
+        return out;
+    }
+
     private Query buildUpdateDocumentQuery(
         DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields
     ) {
+        return buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, null);
+    }
+
+    // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the ctx.update(CATALOG_DOCUMENTS)
+    // initiator below and its .where(...DELETED_AT.isNull()...) guard are
+    // different Java statements -- the SET clause is built across a loop over
+    // *fields*. ONE query, split across statements; see
+    // TombstoneFilterGateTest.WIDEN.
+    private Query buildUpdateDocumentQuery(
+        DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields,
+        Map<String, String> prefetchedAliasTargets
+    ) {
+        String target = aliasTarget(ctx, tenant, tumbler, fields, prefetchedAliasTargets);
         for (String key : fields.keySet()) {
             // deleted_at keeps its documented silent-strip contract (callers must use
             // trash/restore); every OTHER unknown key is a caller error — fail loud.
@@ -1010,10 +1710,108 @@ public final class CatalogRepository {
             more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
         }
         if (more == null) return null;
+        // nexus-e4gel / nexus-zq79 F4: when the caller does NOT name chunk_count,
+        // re-derive it from the manifest — the manifest IS the count's source of
+        // truth (nexus-b6enc F5, already enforced by writeManifestRows /
+        // purgeManifest). Without this an /update that follows a manifest change
+        // pins a stale count until someone calls /manifest/resync by hand. An
+        // EXPLICIT chunk_count still wins (the orphan-backfill paths depend on
+        // asserting a count the manifest does not yet carry).
+        if (!fields.containsKey("chunk_count")) {
+            more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, reDerivedChunkCount(ctx, tenant, target));
+        }
+        // nexus-927mo: /update must refresh indexed_at when it CHANGES head_hash —
+        // the same re-index-refresh contract the manifest write paths already
+        // enforce via stampIndexedAt (nexus-p5qk8/GH #1397), which this method
+        // never shared. Before this, a head_hash-only update (re-index that
+        // finds an unchanged chunk set, so no manifest write follows) left
+        // indexed_at frozen at the last manifest write or register time, and
+        // `nx catalog show` last_indexed never advanced for that class of
+        // re-index. A no-op update (same head_hash resubmitted) must NOT stamp —
+        // only an actual change advances it — so this compares against the OLD
+        // row's head_hash via a single-statement CASE (mirrors
+        // reDerivedChunkCount immediately above: no read-then-write race with a
+        // concurrent writer, and updateDocumentsMany's ctx.batch(...) inherits it
+        // for free since it is folded into the same Query). An explicit
+        // caller-supplied indexed_at still wins outright — checked here, before
+        // this SET is added, exactly like chunk_count's explicit-wins rule.
+        if (!fields.containsKey("indexed_at") && fields.get("head_hash") != null) {
+            more = more.set(CATALOG_DOCUMENTS.INDEXED_AT,
+                             stampedIndexedAtOnHeadHashChange(String.valueOf(fields.get("head_hash"))));
+        }
         // AND deleted_at IS NULL: refuse to update tombstoned documents
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+    }
+
+    /**
+     * The head_hash-triggered indexed_at refresh used by
+     * {@link #buildUpdateDocumentQuery} (nexus-927mo). {@code IS DISTINCT FROM}
+     * is the null-safe comparison — a document whose head_hash has never been
+     * set (empty string, per {@link #registerDocument}'s default) still counts
+     * a first real head_hash as a change.
+     */
+    private static Field<String> stampedIndexedAtOnHeadHashChange(String newHeadHash) {
+        return DSL.when(CATALOG_DOCUMENTS.HEAD_HASH.isDistinctFrom(newHeadHash),
+                        DSL.val(java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT)))
+                  .otherwise(CATALOG_DOCUMENTS.INDEXED_AT);
+    }
+
+    /**
+     * Correlated {@code SELECT count(*)} over a document's manifest rows, used
+     * as a SET expression so the fold happens inside the same statement (no
+     * read-then-write race with a concurrent manifest writer).
+     *
+     * <p>A-1 constraint: stays unfiltered ONLY because every caller already
+     * guards the OUTER update's WHERE with {@code DELETED_AT.isNull()} (see
+     * {@link #buildUpdateDocumentQuery}, {@link #writeManifestRows}, {@link
+     * #appendManifestChunks}) — filtering this subquery in isolation would
+     * silently zero the count instead of failing loud on those guarded
+     * D-5/eldyi paths. Do not filter it here.
+     */
+    // TOMBSTONE-EXEMPT (nexus-mqd6t): see the A-1 constraint above. See
+    // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
+    private static Field<Integer> manifestRowCount(DSLContext ctx, String tenant, String tumbler) {
+        return DSL.field(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                                   .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))));
+    }
+
+    /**
+     * The re-derivation used by {@link #buildUpdateDocumentQuery} — the manifest
+     * count, EXCEPT that it will not zero a positive stored count against an
+     * EMPTY manifest (Hal decision 2026-07-30, the "H2 guard").
+     *
+     * <p>WHY THE ASYMMETRY. {@code chunk_count > 0} with an empty manifest is not
+     * noise — it is the GH #1371 / GH #1397 damage signature, and it is the ONLY
+     * discriminator {@code nx catalog reconcile} has: {@code manifest_heal.py}
+     * sorts unrebuildable documents into {@code lost} ("chunks LOST — a real
+     * gap") versus {@code never_chunked} ("expected: nothing to rebuild") on
+     * exactly this field. An unguarded re-derivation lets any INCIDENTAL update
+     * — a routine head_hash bump on an unrelated file — silently rewrite a real
+     * data-loss event as routine noise, while the underlying content stays
+     * unindexed. The document would still be found and rebuilt, but the operator
+     * would be told nothing was wrong.
+     *
+     * <p>WHAT THIS DOES NOT BREAK. The nexus-zq79 F4 contract this implements
+     * only ever moves the count UPWARD (a manifest landed rows that
+     * documents.chunk_count never learned about); its pin exercises 0 -> 5. The
+     * guard is inert in that direction. And zeroing remains fully available on
+     * the paths that MEAN it: an explicit {@code chunk_count} in the update wins
+     * outright (caller intent), and {@code purgeManifest} folds the count to 0
+     * itself. What is refused is only the incidental, unasked-for zeroing.
+     *
+     * <p>Expressed as a SQL CASE rather than a read-then-decide so the whole
+     * thing stays one statement — no extra round trip on the single-doc path,
+     * no read-then-write race with a concurrent manifest writer, and
+     * {@code updateDocumentsMany} inherits it for free.
+     */
+    private static Field<Integer> reDerivedChunkCount(DSLContext ctx, String tenant, String tumbler) {
+        Field<Integer> derived = manifestRowCount(ctx, tenant, tumbler);
+        return DSL.when(derived.eq(0).and(CATALOG_DOCUMENTS.CHUNK_COUNT.gt(0)),
+                        CATALOG_DOCUMENTS.CHUNK_COUNT)
+                  .otherwise(derived);
     }
 
     /**
@@ -1032,6 +1830,11 @@ public final class CatalogRepository {
     // hard path must explicitly purge that doc's assignments by its
     // manifest chashes (deleteCollection does the collection-scoped
     // equivalent at line ~1917). Pinned by CatalogDocumentCascadeTest.
+    // TOMBSTONE-EXEMPT note (nexus-mqd6t): this method's DELETED_AT.isNull()
+    // WHERE guard is IDEMPOTENCY (double-tombstone must not reset the purge
+    // age clock), a different reason than the read-invisibility concern this
+    // gate otherwise enforces -- it passes TombstoneFilterGateTest on its own
+    // merits (the guard is present) and is not a TOMBSTONE_EXEMPT table entry.
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(CATALOG_DOCUMENTS)
@@ -1059,6 +1862,10 @@ public final class CatalogRepository {
      *         membership, not position, unlike updateDocumentsMany's
      *         positional contract, since there's only one outcome shape
      *         here: deleted or not).
+     *
+     * <p>TOMBSTONE-EXEMPT note (nexus-mqd6t): same idempotency rationale as
+     * {@link #deleteDocument} — passes on its own merits, not a {@code
+     * TombstoneFilterGateTest.TOMBSTONE_EXEMPT} table entry.
      */
     public Set<String> deleteDocumentsMany(String tenant, List<String> tumblers) {
         if (tumblers.isEmpty()) return Set.of();
@@ -1077,6 +1884,11 @@ public final class CatalogRepository {
      * FTS search over title/author/corpus/file_path using OR'd tsquery.
      * Optionally filter by content_type. Returns up to limit results.
      */
+    // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the WHERE Condition is assembled
+    // into a local variable in an earlier statement (folding the FTS match
+    // with DELETED_AT.isNull()) and applied via .where(where) in the
+    // ctx.select(...) initiator's own statement below. See
+    // TombstoneFilterGateTest.WIDEN.
     public List<Map<String, Object>> searchDocuments(String tenant, String query,
                                                       String contentType, int limit) {
         if (query == null || query.isBlank()) return List.of();
@@ -1088,19 +1900,28 @@ public final class CatalogRepository {
             // opaque filename lexeme never satisfies). Skipped when the
             // query has no separator: translate() would be a no-op and the
             // leg identical to the plain simple leg.
+            //
+            // nexus-23wlw census: EVERY leg is folded, because catalog-017
+            // folds the STORED column. Both halves are required and a
+            // one-sided change is silently wrong in a way tests without an
+            // accented query would not catch — the stored lexemes become
+            // folded, so an unfolded query stops matching accented input that
+            // matched before. Injection safety is unchanged: fold_diacritics
+            // and translate wrap the BIND PARAMETER, never the literal.
             boolean hasSeparator = query.chars()
                 .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
             Condition ftsMatch = hasSeparator
                 ? DSL.condition(
-                    "fts_vector @@ plainto_tsquery('english', {0}) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', {0}) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', translate({0}, '/.-_', '    '))",
+                    "fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics({0})) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics({0})) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', "
+                    + "nexus.fold_diacritics(translate({0}, '/.-_', '    ')))",
                     DSL.val(query))
                 : DSL.condition(
-                    "fts_vector @@ plainto_tsquery('english', {0}) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', {0})",
+                    "fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics({0})) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics({0}))",
                     DSL.val(query));
-            Condition where = ftsMatch;
+            Condition where = ftsMatch.and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
             if (contentType != null && !contentType.isBlank()) {
                 where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
             }
@@ -1118,6 +1939,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields())
                .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit <= 0 ? 200 : limit)
                .offset(offset)
@@ -1129,7 +1951,9 @@ public final class CatalogRepository {
     /** Count all documents for this tenant. */
     public long countDocuments(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectCount().from(CATALOG_DOCUMENTS).fetchOne(0, Long.class)
+            ctx.selectCount().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+               .fetchOne(0, Long.class)
         );
     }
 
@@ -1147,6 +1971,16 @@ public final class CatalogRepository {
      * unrecognised relation is silently omitted from the result (never a SQL
      * passthrough — the names are not user-authored beyond this fixed set).
      * The caller treats a missing relation as INDETERMINATE, never a pass.
+     *
+     * <p>TOMBSTONE-EXEMPT note (nexus-mqd6t): this is a migration physical
+     * row-count verify, deliberately including tombstones — it counts real
+     * rows in the named relation, whatever that relation is, not "documents
+     * visible to a reader." Not a {@code TombstoneFilterGateTest.TOMBSTONE_EXEMPT}
+     * table entry: the table it selects from is resolved dynamically ({@code
+     * DSL.table(DSL.name(...))} from the caller's relation string), so the
+     * literal {@code CATALOG_DOCUMENTS} token this gate scans for never
+     * appears here — structurally outside the gate's reach, not a suppressed
+     * violation.
      */
     public Map<String, Long> relationCounts(String tenant, List<String> relations) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -1247,39 +2081,77 @@ public final class CatalogRepository {
         }
     }
 
-    /** Documents by physical_collection. */
-    public List<Map<String, Object>> documentsByCollection(String tenant, String collection) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)).orderBy(CATALOG_DOCUMENTS.TUMBLER)
-               .fetch().map(r -> docRowFromRecord(r.intoMap()))
-        );
-    }
+    /**
+     * nexus-xoimv: {@code limit <= 0} means UNBOUNDED (no LIMIT clause
+     * applied beyond this large sentinel) — the absent-from-query-string
+     * default every {@code documentsBy*} filter method below preserves, so an
+     * existing caller that never sent {@code limit} keeps its pre-xoimv
+     * unbounded behaviour. An explicit positive {@code limit} is honored
+     * verbatim. {@code offset} is applied unconditionally (0 is the standard
+     * no-op). Kept as a real, very large {@code LIMIT} value (rather than
+     * omitting the clause) so every filter method can share one
+     * {@code .orderBy(TUMBLER).limit(n).offset(o)} shape — the same
+     * ternary-into-limit() convention {@link #listDocuments} already uses.
+     */
+    private static final int NO_LIMIT = Integer.MAX_VALUE;
 
-    /** Documents by file_path (exact). */
-    public List<Map<String, Object>> documentsByFilePath(String tenant, String filePath) {
+    /** Documents by physical_collection. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByCollection(
+            String tenant, String collection, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
-               .fetch().map(r -> docRowFromRecord(r.intoMap()))
-        );
-    }
-
-    /** Documents by source_uri (exact). */
-    public List<Map<String, Object>> documentsBySourceUri(String tenant, String uri) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri))
-               .fetch().map(r -> docRowFromRecord(r.intoMap()))
-        );
-    }
-
-    /** Documents by owner tumbler prefix. */
-    public List<Map<String, Object>> documentsByOwner(String tenant, String ownerPrefix) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%"))
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
+    /**
+     * Documents by file_path (exact). {@code limit <= 0} is unbounded
+     * (nexus-xoimv). Gained an explicit {@code ORDER BY tumbler} in the same
+     * change — previously unordered, so paginating it had no stable cursor.
+     */
+    public List<Map<String, Object>> documentsByFilePath(
+            String tenant, String filePath, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
+    /**
+     * Documents by source_uri (exact). {@code limit <= 0} is unbounded
+     * (nexus-xoimv). Gained an explicit {@code ORDER BY tumbler} in the same
+     * change — previously unordered, so paginating it had no stable cursor.
+     */
+    public List<Map<String, Object>> documentsBySourceUri(
+            String tenant, String uri, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
+    /** Documents by owner tumbler prefix. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByOwner(
+            String tenant, String ownerPrefix, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1291,33 +2163,44 @@ public final class CatalogRepository {
      * {@code GET /list?owner=X&file_path=Y}: the owner-only path returns the
      * full owner list, which caused {@code HttpCatalogClient.by_file_path} to
      * mis-attribute a new file to an unrelated doc (silent manifest overwrite).
+     *
+     * <p>{@code limit <= 0} is unbounded (nexus-xoimv).
      */
     public List<Map<String, Object>> documentsByOwnerAndFilePath(
-            String tenant, String ownerPrefix, String filePath) {
+            String tenant, String ownerPrefix, String filePath, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath)))
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by content_type. */
-    public List<Map<String, Object>> documentsByContentType(String tenant, String contentType) {
+    /** Documents by content_type. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByContentType(
+            String tenant, String contentType, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType))
+               .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Documents by corpus. */
-    public List<Map<String, Object>> documentsByCorpus(String tenant, String corpus) {
+    /** Documents by corpus. {@code limit <= 0} is unbounded (nexus-xoimv). */
+    public List<Map<String, Object>> documentsByCorpus(
+            String tenant, String corpus, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.CORPUS.eq(corpus))
+               .where(CATALOG_DOCUMENTS.CORPUS.eq(corpus).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .limit(limit > 0 ? limit : NO_LIMIT)
+               .offset(offset)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1326,39 +2209,74 @@ public final class CatalogRepository {
     public List<Map<String, Object>> descendants(String tenant, String prefix) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TUMBLER.like(prefix + ".%"))
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(prefix + ".%").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
 
-    /** Update physical_collection for one document. */
+    /**
+     * Update physical_collection for one document.
+     *
+     * <p>nexus-eldyi: guarded — silent 0-row no-op on a tombstoned target
+     * (unlike the manifest writers above, no typed refusal here: this method
+     * already returns the real {@code int} rows-affected, so a caller reading
+     * 0 gets the honest answer without needing an exception to surface it).
+     */
     public int updateDocumentCollection(String tenant, String tumbler, String newCollection) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
     }
 
-    /** Update physical_collection for many documents. */
+    /** Update physical_collection for many documents. Guarded like the single-doc form above (nexus-eldyi). */
     public int updateDocumentsCollectionBatch(String tenant, List<String> tumblers, String newCollection) {
         if (tumblers.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection).where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection)
+               .where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
     }
 
-    /** Set alias_of for a document. */
+    /** Set alias_of for a document. Guarded — silent 0-row no-op on a tombstoned target (nexus-eldyi; see updateDocumentCollection). */
     public int setAlias(String tenant, String tumbler, String aliasOf) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf)).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
     }
 
-    /** Look up tumbler by (physical_collection, file_path). Returns null if not found. */
+    /**
+     * Look up tumbler by (physical_collection, file_path). Returns null if not found.
+     *
+     * <p>nexus-h77a2: restores the retired local arm's {@code (file_path = ? OR
+     * title = ?)} probe — the engine had narrowed to {@code file_path} only, so
+     * a doc registered with {@code title == abs_path} (the aspect worker's
+     * {@code _canonicalize_source_path} live path) never resolved.
+     *
+     * <p><b>wji11 disposition (settled, do not re-litigate):</b> the retired
+     * local arm ALSO preferred {@code metadata.doc_id} over the tumbler in its
+     * return value. That preference is NOT restored here. nexus-wji11 (Hal,
+     * 2026-07-26) settled the tumbler as the ONLY document identity, and this
+     * method already returns {@code TUMBLER} alone — under that ruling, that is
+     * correct, not a gap. Legacy 16-char {@code doc_id} callers migrate to the
+     * tumbler; they do not get a doc_id back from this lookup.
+     *
+     * <p>Also restores the local arm's {@code LIMIT 1} semantics: {@code
+     * fetchOne()} on a duplicate (collection, file_path) throws {@code
+     * TooManyRowsException} where the local arm quietly returned one row.
+     * {@code orderBy(TUMBLER)} makes the "one row" choice deterministic
+     * (lowest tumbler wins) rather than an arbitrary row order.
+     */
     public String lookupDocByCollectionAndPath(String tenant, String collection, String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
-                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath)))
+                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
+                           .and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath).or(CATALOG_DOCUMENTS.TITLE.eq(filePath)))
+                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                       .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                       .limit(1)
                        .fetchOne();
             return r != null ? r.value1() : null;
         });
@@ -1377,21 +2295,28 @@ public final class CatalogRepository {
      */
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
+        boolean allowDangling = Boolean.TRUE.equals(lnk.get("allow_dangling"))
+            || "true".equalsIgnoreCase(String.valueOf(lnk.get("allow_dangling")));
         return tenantScope.withTenant(tenant, ctx -> {
+            if (!allowDangling) {
+                requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
+            }
             var rec = ctx.insertInto(CATALOG_LINKS,
                     CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                     CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
                .values(DSL.val(tenant),
                        DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                        DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
+                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
                        jsonbVal(metaJson))
                .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
                .doUpdate()
                .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
                .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
-               .set(CATALOG_LINKS.CREATED_BY, EX_LNK_CRTBY)
-               .set(F_LNK_META,  EX_LNK_META)
+               // nexus-s4e1n: created_by is DELIBERATELY NOT SET on the merge
+               // path. A second creator of the same edge does not take over the
+               // attribution — it is folded into meta['co_discovered_by'] below.
+               .set(F_LNK_META,  LNK_META_FOLD)
                // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
                // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
                // recognized table returns the table's OWN record shape with the extra
@@ -1403,6 +2328,65 @@ public final class CatalogRepository {
                .fetchOne();
             return rec != null && Boolean.TRUE.equals(rec.value1());
         });
+    }
+
+    /**
+     * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
+     *
+     * <p>Extends {@link IllegalArgumentException} so the handler's existing
+     * ladder already maps it to 400; {@link #missing()} lets the wire response
+     * name which side dangles, which is what the client needs to distinguish
+     * this from any other 400 (the auto-linker counts
+     * {@code skipped_missing_endpoint} off exactly this signal — the local
+     * {@code link_if_absent} raised {@code ValueError} for it, and the service
+     * path silently wrote the dangling edge instead).
+     */
+    public static final class DanglingEndpointException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+        private final transient List<String> missing;
+
+        DanglingEndpointException(List<String> missing, String message) {
+            super(message);
+            this.missing = List.copyOf(missing);
+        }
+
+        /** Which endpoint fields dangle: {@code from_tumbler}, {@code to_tumbler}, or both. */
+        public List<String> missing() {
+            return missing;
+        }
+    }
+
+    /**
+     * Reject a link whose {@code from}/{@code to} does not resolve to a LIVE
+     * (non-tombstoned) document in this tenant (nexus-9ssih).
+     *
+     * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
+     * path — and NOT to the {@code import*} family, which legitimately writes
+     * edges for documents whose live state the ETL leg does not control (same
+     * carve-out {@code physicalCollectionOf} already documents for the manifest
+     * write path). Callers that genuinely want an unvalidated edge pass
+     * {@code allow_dangling: true}, the parity of the local {@code link}'s own
+     * {@code allow_dangling} flag.
+     */
+    private static void requireLiveEndpoints(DSLContext ctx, String tenant, String fromT, String toT) {
+        List<String> missing = new ArrayList<>(2);
+        if (!liveDocument(ctx, tenant, fromT)) missing.add("from_tumbler");
+        if (!liveDocument(ctx, tenant, toT))   missing.add("to_tumbler");
+        if (missing.isEmpty()) return;
+        throw new DanglingEndpointException(missing,
+            "dangling link endpoint: " + String.join(", ", missing)
+            + " does not resolve to a live catalog document"
+            + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
+            + " Pass allow_dangling=true to write the edge anyway.");
+    }
+
+    private static boolean liveDocument(DSLContext ctx, String tenant, String tumbler) {
+        if (tumbler == null || tumbler.isBlank()) return false;
+        return ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */
@@ -1458,7 +2442,18 @@ public final class CatalogRepository {
             if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+                // nexus-4j80w: '' rows (pre-fix service-written links with no
+                // stamped timestamp) must be UNMATCHABLE by a before-filter —
+                // '' < any-date is TRUE under TEXT comparison, and without this
+                // guard every such row matched every before-filter. Fail-safe:
+                // they can still be reached by non-temporal filters. Mirrors the
+                // local arm's guard (catalog_links.py: "created_at != '' AND
+                // created_at < ?"). No backfill of existing '' rows — stamping
+                // them with now() would lie about age, and stamping a sentinel
+                // epoch would make them match every before-filter, i.e. the
+                // exact hazard this guard exists to close.
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.ne(""))
+                           .and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
             // direction + tumbler: filter by tumbler in the appropriate column(s)
             if (tumbler != null && !tumbler.isBlank()) {
                 String dir = direction != null ? direction : "both";
@@ -1491,27 +2486,121 @@ public final class CatalogRepository {
             if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+                // nexus-4j80w: same non-empty guard as queryLinks — see that
+                // call site for the full rationale. This is the destructive
+                // twin (bulk_unlink); without the guard it deleted the entire
+                // link graph on any --created-at-before call.
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.ne(""))
+                           .and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
             return ctx.deleteFrom(CATALOG_LINKS).where(cond).execute();
         });
     }
+
+    /**
+     * The default graph-traversal link-type allow-list (nexus-ybj1b).
+     *
+     * <p>A faithful port of {@code catalog_links._filter_link_types}'s default
+     * branch — the SERVER is the owner now, because the Python local path it
+     * mirrors is RDR-158 P4 retirement debt.
+     *
+     * <p>Note this is an ALLOW-list, not "everything except
+     * implements-heuristic". That distinction is load-bearing and is the local
+     * contract: a CUSTOM link type is also excluded from default traversal,
+     * and callers who want it must name it in {@code link_types} (or pass
+     * {@code include_heuristic}). Implementing this as a deny-list would look
+     * equivalent on the heuristic repro and silently diverge on custom types.
+     *
+     * <p>Why any of it exists (nexus-6ppk): {@code implements-heuristic} is
+     * auto-emitted whenever a code chunk's symbols match an RDR's terminology,
+     * so high-traffic infrastructure RDRs accumulate 500-660 inbound heuristic
+     * edges each. The 2026-05-08 production probe measured 15,490 of them —
+     * 66% of all 23,582 links — which drowns the ~6% hand-curated edges and
+     * makes the node cap return mostly noise.
+     */
+    private static final List<String> DEFAULT_GRAPH_LINK_TYPES = List.of(
+        "cites", "implements", "relates", "contains",
+        "supersedes", "describes", "quotes", "comments",
+        "formalizes", "same-as");
+
+    /**
+     * Port-parity sweep D8 (nexus-t7m8e comment, 2026-08-01): the local arm's
+     * {@code _MAX_GRAPH_NODES} cap (catalog_links.py, pre-RDR-158-P4-deletion),
+     * ported verbatim. graphBFS had no node cap — an unbounded BFS on a large
+     * graph. Depth cap (see {@code Math.min(maxDepth, 3)} in {@link #graphBFS})
+     * is applied BEFORE this node limit so the lowest-depth nodes always
+     * survive truncation; truncation itself is ordered by (min_depth, tumbler)
+     * so the surviving set is deterministic across repeated calls.
+     */
+    private static final int MAX_GRAPH_NODES = 500;
 
     /**
      * BFS graph traversal from seed tumblers.
      * Mirrors Catalog.graph() / Catalog.graph_many(): breadth-first up to maxDepth hops.
      *
      * @param seeds      starting tumblers
-     * @param linkTypes  empty = all types; non-empty = only these types
+     * @param linkTypes  empty = server default (see below); non-empty = only these types
      * @param direction  "out"=from only, "in"=to only, "both"=both
      * @param maxDepth   BFS depth cap (1-3)
      * @return map with "nodes" (list of tumblers) and "edges" (list of link maps)
      */
     public Map<String, Object> graphBFS(String tenant, List<String> seeds,
                                          List<String> linkTypes, String direction, int maxDepth) {
+        return graphBFS(tenant, seeds, linkTypes, direction, maxDepth, false);
+    }
+
+    /**
+     * BFS graph traversal, honouring {@code includeHeuristic} (nexus-ybj1b).
+     *
+     * <p>THE DEFECT THIS CLOSES. {@code Catalog.graph}/{@code graph_many}
+     * exclude {@code implements-heuristic} by default and let callers opt back
+     * in. The HTTP client sent the flag with the comment "forwarded to service
+     * for future support; currently informational" — and the server read only
+     * {@code link_types}, so {@code include_heuristic} appeared NOWHERE in
+     * this module. Both directions were broken: the default did not exclude
+     * (the 2:1 flood was silently reinstated for every service-mode user, on
+     * the 6.0 default backend) and the opt-in was indistinguishable from it.
+     *
+     * <p>A flag the client sends and the server ignores is a silent contract
+     * break, which is why this is fixed server-side where the traversal and
+     * the semantics both live, rather than by having the client enumerate
+     * types — that stopgap only works when the caller supplied none, and turns
+     * "all types except one" into a list that goes stale as link types are
+     * added.
+     *
+     * <p>Three cases, matching {@code _filter_link_types} exactly:
+     * <ul>
+     *   <li>caller named types — they win untouched, heuristic included if
+     *       they asked for it. The caller knows what they want.</li>
+     *   <li>no types, {@code includeHeuristic} — no filter at all, every type.</li>
+     *   <li>no types, default — {@link #DEFAULT_GRAPH_LINK_TYPES}.</li>
+     * </ul>
+     */
+    public Map<String, Object> graphBFS(String tenant, List<String> seeds,
+                                         List<String> linkTypes, String direction, int maxDepth,
+                                         boolean includeHeuristic) {
         if (seeds == null || seeds.isEmpty()) return Map.of("nodes", List.of(), "edges", List.of());
         int depth = Math.min(Math.max(maxDepth, 1), 3);
+        final List<String> effectiveTypes =
+            (linkTypes != null && !linkTypes.isEmpty()) ? linkTypes
+            : includeHeuristic                          ? List.of()
+            :                                             DEFAULT_GRAPH_LINK_TYPES;
 
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-t7m8e leg (a)/(b): both endpoints of every traversed edge
+            // must be a LIVE document. INNER-joining CATALOG_DOCUMENTS on both
+            // from_tumbler and to_tumbler with deleted_at IS NULL closes two
+            // defects at once: (i) an edge naming a tumbler absent from the
+            // final node set (tombstoned OR never registered — a dangling
+            // reference) is never emitted, and (ii) a tombstoned document can
+            // no longer act as a live RELAY (A -> D(tombstoned) -> B is no
+            // longer reachable at depth 2 just because D is invisible — the
+            // join excludes the A->D and D->B edges alike, so D never enters
+            // the frontier).
+            var fromDocs = CATALOG_DOCUMENTS.as("cd_bfs_from");
+            var toDocs   = CATALOG_DOCUMENTS.as("cd_bfs_to");
+
+            Map<String, Integer> depthOf = new LinkedHashMap<>();
+            for (String s : seeds) depthOf.put(s, 0);
             Set<String> visited = new LinkedHashSet<>(seeds);
             List<Map<String, Object>> edges = new ArrayList<>();
             Set<String> frontier = new LinkedHashSet<>(seeds);
@@ -1528,32 +2617,62 @@ public final class CatalogRepository {
                 } else {
                     dirCond = CATALOG_LINKS.FROM_TUMBLER.in(fl).or(CATALOG_LINKS.TO_TUMBLER.in(fl));
                 }
-                if (!linkTypes.isEmpty()) {
-                    dirCond = dirCond.and(CATALOG_LINKS.LINK_TYPE.in(linkTypes));
+                if (!effectiveTypes.isEmpty()) {
+                    dirCond = dirCond.and(CATALOG_LINKS.LINK_TYPE.in(effectiveTypes));
                 }
 
                 var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-                              .from(CATALOG_LINKS).where(dirCond).fetch();
+                              .from(CATALOG_LINKS)
+                              .join(fromDocs).on(fromDocs.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
+                              .join(toDocs).on(toDocs.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
+                              .where(dirCond
+                                     .and(fromDocs.DELETED_AT.isNull())
+                                     .and(toDocs.DELETED_AT.isNull()))
+                              .fetch();
                 for (var r : rows) {
                     Map<String, Object> lm = linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                                       r.value5(), r.value6(), r.value7(), r.value8(), r.value9());
                     edges.add(lm);
                     String fromT = (String) lm.get("from_tumbler");
                     String toT   = (String) lm.get("to_tumbler");
-                    if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); }
-                    if (!visited.contains(toT))   { next.add(toT);   visited.add(toT); }
+                    if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
+                    if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
                 }
                 frontier = next;
             }
 
+            // nexus-t7m8e leg (c): the 500-node cap, ported from the local arm
+            // (_MAX_GRAPH_NODES). Depth cap already applied above (the BFS ran
+            // at most `depth` rounds); ordering the FULL reachable set by
+            // (min_depth, tumbler) before truncating means the lowest-depth
+            // nodes always survive and the surviving 500 are deterministic
+            // across repeated calls on the same graph.
+            List<String> ordered = visited.stream()
+                .sorted(Comparator
+                    .comparingInt((String t) -> depthOf.getOrDefault(t, Integer.MAX_VALUE))
+                    .thenComparing(Comparator.naturalOrder()))
+                .toList();
+            boolean atOrOverCap = ordered.size() >= MAX_GRAPH_NODES;
+            Set<String> surviving = new LinkedHashSet<>(
+                atOrOverCap ? ordered.subList(0, MAX_GRAPH_NODES) : ordered);
+            if (atOrOverCap) {
+                log.warn("event=graph_node_limit tenant={} visited={} max_nodes={}",
+                          tenant, ordered.size(), MAX_GRAPH_NODES);
+            }
+
+            List<Map<String, Object>> survivingEdges = edges.stream()
+                .filter(e -> surviving.contains((String) e.get("from_tumbler"))
+                          && surviving.contains((String) e.get("to_tumbler")))
+                .toList();
+
             List<Map<String, Object>> nodes = new ArrayList<>();
-            if (!visited.isEmpty()) {
+            if (!surviving.isEmpty()) {
                 nodes = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(visited)))
+                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(surviving)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
-            return Map.of("nodes", nodes, "edges", edges);
+            return Map.of("nodes", nodes, "edges", survivingEdges);
         });
     }
 
@@ -1573,9 +2692,10 @@ public final class CatalogRepository {
      * Shared REPLACE body (delete all rows for docId, then insert the provided
      * rows) used by both {@link #writeManifest} (one doc per transaction) and
      * {@link #writeManifestMany} (N docs, one transaction each). Assumes
-     * {@code ctx} is already scoped to {@code tenant}. Does NOT touch
-     * documents.chunk_count — {@code writeManifest}'s public behavior is unchanged;
-     * the chunk_count fold-in is {@code writeManifestMany}'s addition.
+     * {@code ctx} is already scoped to {@code tenant}. Folds
+     * {@code documents.chunk_count = rows.size()} in the SAME transaction
+     * (nexus-b6enc F5 — previously only {@code writeManifestMany} folded the
+     * count, so the single-doc REPLACE left a stale count behind).
      */
     /**
      * nexus-x6kdz: the doc's physical_collection, stamped onto every manifest
@@ -1587,7 +2707,27 @@ public final class CatalogRepository {
      * (silent-empty, found by the 6.5.0 live shakeout). Returns null when the
      * doc has no physical_collection (ghost/sourceless docs) — those rows stay
      * NULL, same as the backfill's own skip semantics.
+     *
+     * <p>nexus-23wlw: DELIBERATELY NOT tombstone-filtered. Every other read
+     * gained {@code deleted_at IS NULL} because a tombstone must be invisible
+     * to readers; this is not a reader. Its only callers are the manifest
+     * WRITE paths ({@code writeManifestRows}, {@code appendManifestChunks},
+     * and the two import-chunk paths), where filtering would silently stamp
+     * NULL onto rows being written for a tombstoned doc — re-introducing the
+     * exact silent-empty class the nexus-x6kdz stamp above exists to fix, and
+     * doing it on the ETL/import leg, which legitimately writes manifests for
+     * documents whose live state it does not control. If a future caller uses
+     * this as a read, filter it there rather than here.
+     *
+     * <p>nexus-eg5gx: this is NOT "the ONE unfiltered read in this class" —
+     * that claim went stale the moment other deliberate exemptions were
+     * documented ({@code highestChildSeq}, {@code upsertDocument}, {@code
+     * manifestRowCount}, {@code renameCollectionTxn}). The authoritative,
+     * exhaustive list is {@link TombstoneFilterGateTest#TOMBSTONE_EXEMPT} —
+     * consult that table, not a count claimed in any one method's javadoc.
      */
+    // TOMBSTONE-EXEMPT (nexus-mqd6t): manifest WRITE-path helper, not a
+    // reader -- see the javadoc above. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
     private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {
         String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                        .from(CATALOG_DOCUMENTS)
@@ -1611,12 +2751,56 @@ public final class CatalogRepository {
         // datetime.now(UTC).isoformat(): indexed_at is TEXT and MAX()'d
         // lexicographically (catalog-009 collection_health_meta) — mixed
         // widths/suffixes would break sortability at second-boundary ties.
+        //
+        // nexus-eldyi: guarded with deleted_at IS NULL — the non-resurrection
+        // rule buildUpdateDocumentQuery enforces was bypassed here, so a
+        // manifest write against a tombstoned doc_id still stamped its
+        // indexed_at. ADVISORY write (a provenance timestamp, not data the
+        // manifest count depends on): a 0-row no-op is the correct outcome,
+        // no typed refusal needed — unlike the manifest ROW writers below,
+        // which fail loud (see writeManifestRows / appendManifestChunks /
+        // purgeManifest).
         ctx.update(CATALOG_DOCUMENTS)
            .set(CATALOG_DOCUMENTS.INDEXED_AT,
                 java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT))
            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
            .execute();
+    }
+
+    /**
+     * Refused write against a tombstoned document (nexus-eldyi). Thrown by the
+     * manifest ROW writers ({@link #writeManifestRows}, {@link
+     * #appendManifestChunks}, {@link #purgeManifest}) when their guarded
+     * CATALOG_DOCUMENTS update affects 0 rows BECAUSE the target is
+     * tombstoned — distinct from "tumbler unknown", which stays a silent 0/no-op
+     * (the long-standing contract for a doc_id that was never registered).
+     * These three are void or return an UNRELATED count (deleted
+     * catalog_document_chunks rows, not the guarded documents-row update), so a
+     * silent no-op here would misreport success on a data-bearing write; a
+     * per-int-return-value writer (updateDocumentCollection,
+     * updateDocumentsCollectionBatch, setAlias) does not need this — the
+     * caller already sees the honest 0.
+     */
+    public static final class TombstonedDocumentException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        TombstonedDocumentException(String docId, String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Does *docId* exist AND carry a non-null deleted_at (nexus-eldyi)? Used
+     * ONLY after a guarded UPDATE already returned 0 rows — an extra read on
+     * the rare refusal path, never on the common live-doc path.
+     */
+    private static boolean isTombstonedDocument(DSLContext ctx, String tenant, String docId) {
+        return ctx.fetchExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()));
     }
 
     private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
@@ -1635,6 +2819,25 @@ public final class CatalogRepository {
                        i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"),
                        coll)
                .execute();
+        }
+        // nexus-b6enc F5: the manifest IS the count's source of truth — fold
+        // it in the same transaction so no REPLACE can leave a stale count.
+        // nexus-eldyi: guarded — a tombstoned doc_id must not have its
+        // CATALOG_DOCUMENTS row mutated. FAIL LOUD (not the stampIndexedAt
+        // silent-noop shape): this is a data-bearing manifest writer with a
+        // VOID public signature (writeManifest/writeManifestMany), so a
+        // silent 0-row update here would misreport success to the caller
+        // while quietly discarding the just-written manifest rows above (this
+        // throw rolls back the whole per-doc transaction, including the
+        // delete+insert above — TenantScope.withTenant wraps this in one txn).
+        int updated = ctx.update(CATALOG_DOCUMENTS)
+           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
+           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
+                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+           .execute();
+        if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+            throw new TombstonedDocumentException(docId,
+                "writeManifest refused: document is tombstoned: " + docId);
         }
     }
 
@@ -1669,12 +2872,10 @@ public final class CatalogRepository {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
                     }
+                    // (chunk_count folds inside writeManifestRows — nexus-b6enc
+                    // F5 unified the fold for the single-doc and batch paths.)
                     tenantScope.withTenant(tenant, ctx -> {
                         writeManifestRows(ctx, tenant, docId, rows);
-                        ctx.update(CATALOG_DOCUMENTS)
-                           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
-                           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
-                           .execute();
                         return null;
                     });
                     okDocs++;
@@ -1744,7 +2945,8 @@ public final class CatalogRepository {
         // runtime exception's message can carry internal state (e.g. the
         // TenantScope admission-queue message wraps a null-SQLState
         // SQLTransientConnectionException and would fall through here).
-        if (e instanceof IllegalArgumentException && e.getMessage() != null) {
+        if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException)
+                && e.getMessage() != null) {
             out.put("reason", e.getMessage());
         } else {
             out.put("reason", "internal error (" + e.getClass().getSimpleName() + ")");
@@ -1773,16 +2975,63 @@ public final class CatalogRepository {
                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                    .execute();
             }
+            // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
+            // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
+            // path folded and the APPEND path did not, so an append-grown
+            // manifest carried a stale count until someone ran /manifest/resync.
+            // count(*) rather than += rows.size(): appends upsert BY POSITION,
+            // so an append that overwrites existing positions adds no rows.
+            if (!rows.isEmpty()) {
+                // nexus-eldyi: guarded, fail loud — same reasoning as
+                // writeManifestRows (data-bearing, VOID public signature; the
+                // throw rolls back the append written above in this same txn).
+                int updated = ctx.update(CATALOG_DOCUMENTS)
+                   .set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, docId))
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .execute();
+                if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+                    throw new TombstonedDocumentException(docId,
+                        "appendManifestChunks refused: document is tombstoned: " + docId);
+                }
+            }
             return null;
         });
     }
 
-    /** Get manifest rows for docId, ordered by position. */
+    /**
+     * nexus-mqd6t: the manifest reads below are READS, so a tombstoned parent
+     * document must be invisible through them — the same rule nexus-23wlw
+     * applied to the {@code catalog_documents} reads. {@code catalog_document_chunks}
+     * carries no {@code deleted_at} of its own (the soft delete is on the parent
+     * and the fk-001 CASCADE deliberately does not fire, RDR-156 P1.2), so the
+     * filter has to be an EXISTS against a live parent rather than a column
+     * predicate. Without it a soft-deleted document's manifest stayed publicly
+     * readable via {@code /manifest/get} while {@code /show} returned 404.
+     *
+     * <p>Deliberately an EXISTS and not a JOIN: {@code catalog_document_chunks}
+     * has no FK-guaranteed 1:1 to {@code catalog_documents} (import legs write
+     * manifest rows for documents they do not own), so a JOIN could both drop
+     * rows and — with a duplicated tumbler — multiply them. EXISTS filters
+     * without touching cardinality.
+     */
+    private static Condition liveParentDoc(DSLContext ctx, String tenant) {
+        return DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+    }
+
+    /** Get manifest rows for docId, ordered by position. Tombstoned docs read empty (nexus-mqd6t). */
     public List<Map<String, Object>> getManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
-               .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+               .from(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant)))
+               .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
                .fetch().map(r -> {
                    Map<String, Object> m = new LinkedHashMap<>();
                    m.put("doc_id",      r.value1());
@@ -1798,21 +3047,53 @@ public final class CatalogRepository {
         );
     }
 
-    /** Purge all manifest rows for a document. */
+    /**
+     * Purge all manifest rows for a document, zeroing the parent's
+     * {@code chunk_count} in the SAME transaction (nexus-b6enc F5 — a purge
+     * that leaves the count standing manufactures a ghost: a document
+     * claiming chunks with no manifest rows behind it).
+     */
     public int purgeManifest(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute()
-        );
+        return tenantScope.withTenant(tenant, ctx -> {
+            int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                             .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+            // nexus-eldyi: guarded, fail loud. *deleted* counts
+            // catalog_document_chunks rows (a DIFFERENT table with no
+            // deleted_at of its own), so it stays an honest count regardless
+            // of tombstone status — but it does NOT reflect whether this
+            // CATALOG_DOCUMENTS fold succeeded, so a caller reading
+            // deleted > 0 could otherwise believe the parent row's
+            // chunk_count was zeroed when the guard silently refused it.
+            int updated = ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 0)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .execute();
+            if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+                throw new TombstonedDocumentException(docId,
+                    "purgeManifest refused: document is tombstoned: " + docId);
+            }
+            return deleted;
+        });
     }
 
-    /** Get chashes for a physical_collection via manifest join. */
+    /**
+     * Get chashes for a physical_collection via manifest join.
+     *
+     * <p>nexus-mqd6t BUG 1: this is the T3 GC ALIVE-SET (commands/t3.py). It
+     * joined {@code catalog_documents} but filtered only on
+     * {@code physical_collection}, so a tombstoned document's chunks stayed in
+     * the returned set and {@code nx t3 gc} treated their vectors as still
+     * referenced — a permanent, silent under-collection.
+     */
     public Set<String> chashesForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.selectDistinct(CHK_CHASH_HEX)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
                                            .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
-                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
+                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
+                                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                           .fetch();
             Set<String> result = new LinkedHashSet<>();
             for (var r : rows) result.add(r.value1());
@@ -1820,12 +3101,20 @@ public final class CatalogRepository {
         });
     }
 
-    /** Get document tumblers that contain any of the given chashes. */
+    /**
+     * Get document tumblers that contain any of the given chashes.
+     *
+     * <p>nexus-mqd6t BUG 2 (the user-visible one): this backs search-hit
+     * attribution (search_engine.py maps result chunks back to documents). It
+     * did not reference {@code catalog_documents} at all, so a hit could be
+     * attributed to a document the user had deleted.
+     */
     public List<String> docsForChashes(String tenant, List<String> chashes) {
         if (chashes.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
-               .where(CHK_CHASH_HEX.in(chashes)).fetch().map(r -> r.value1())
+               .where(CHK_CHASH_HEX.in(chashes).and(liveParentDoc(ctx, tenant)))
+               .fetch().map(r -> r.value1())
         );
     }
 
@@ -1845,7 +3134,10 @@ public final class CatalogRepository {
             var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                                   CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                           .from(CATALOG_DOCUMENT_CHUNKS)
-                          .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds))
+                          // nexus-mqd6t: batch twin of getManifest's tombstone filter.
+                          // Load-bearing beyond parity — HttpCatalogClient.docs_for_chashes
+                          // reconstructs its chash -> doc_id map from THIS read.
+                          .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds).and(liveParentDoc(ctx, tenant)))
                           .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                           .fetch();
             Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
@@ -1893,12 +3185,25 @@ public final class CatalogRepository {
         });
     }
 
-    /** Resync chunk_count on catalog_documents from manifest row count. */
+    /**
+     * Resync chunk_count on catalog_documents from manifest row count.
+     *
+     * <p>nexus-mqd6t (review M1 / critique C3): both halves are tombstone-scoped.
+     * The COUNT carries {@code liveParentDoc} for consistency with every other
+     * manifest-rooted read; the UPDATE carries {@code deleted_at IS NULL} so a
+     * resync cannot write through to a tombstoned row — the same
+     * non-resurrection rule {@code buildUpdateDocumentQuery} enforces. Without
+     * the write guard this was the one remaining path that mutated a
+     * soft-deleted document.
+     */
     public int resyncChunkCount(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                           .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant)))
                            .fetchOne(0, Integer.class);
-            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, count).where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)).execute();
+            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, count)
+                      .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
+                             .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute();
         });
     }
 
@@ -2002,9 +3307,16 @@ public final class CatalogRepository {
 
             // Lookup doc_id from catalog_document_chunks. ORDER BY doc_id for a
             // deterministic winner when a chash is referenced by multiple docs (dedup).
+            //
+            // nexus-mqd6t (review H1 / critique C3): the FIFTH sibling of the
+            // docsForChashes class, and the same user-visible shape — without
+            // liveParentDoc this attributes chunk content to a document the
+            // user DELETED. Worse than the plain read case: a chash shared by a
+            // live and a tombstoned doc has no live-preference in `ORDER BY
+            // doc_id ASC`, so the dead doc could win the tie outright.
             String docId = "";
             var docRow = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
-                            .where(CHK_CHASH_HEX.eq(chash))
+                            .where(CHK_CHASH_HEX.eq(chash).and(liveParentDoc(ctx, tenant)))
                             .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID.asc()).limit(1).fetchOne();
             if (docRow != null) docId = docRow.value1();
 
@@ -2072,6 +3384,17 @@ public final class CatalogRepository {
                .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
                .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+               // nexus-cecqy: an explicit registration REVIVES a tombstone. Since a rename
+               // now retires the old name instead of deleting it, re-creating a collection
+               // under that name would otherwise land on a row still marked superseded —
+               // and superseded rows are excluded from collectionForTuple, so the live
+               // collection would be unreachable as a write target while `nx catalog
+               // doctor --collections-drift` stayed quiet (it deliberately permits a
+               // superseded row to be absent from T3). /collections/upsert is the caller
+               // asserting "this collection exists and is current"; a caller that wants it
+               // retired says so via /collections/supersede.
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
                .execute();
             return null;
         });
@@ -2180,20 +3503,86 @@ public final class CatalogRepository {
 
     /**
      * Supersede a collection.
-     * nz() for superseded_at: '' is invalid in the timestamptz column after catalog-002-1-temporal-typing.
+     *
+     * <p>nz() for superseded_at: '' is invalid in the timestamptz column after
+     * catalog-002-1-temporal-typing.
+     *
+     * <p><b>nexus-g8z8n guard 4 — the supersession is self-timestamping.</b> This used
+     * to bind superseded_at ONLY from the request body, and no caller ever sent one, so
+     * every supersession landed with superseded_at NULL: recorded but undatable, hence
+     * unauditable. A blank/absent value now stamps {@code now()} server-side (the DB
+     * clock, not the client's), matching the retired local implementation which stamped
+     * {@code datetime.now(UTC)}. An explicit value still wins — backfills and migrations
+     * must be able to assert a historical instant.
+     *
+     * <p>The three PRECONDITION guards (old registered; not already superseded to a
+     * DIFFERENT target; new registered) live in {@code CatalogHandler
+     * .handleCollectionSupersede}, alongside the identical handler-side guards its
+     * sibling verb {@code handleCollectionRename} already carries (nexus-hz785 404,
+     * nexus-gaou3 409). This method stays a pure UPDATE.
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
+        // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
+        // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
+        Field<java.time.OffsetDateTime> stampedAt = supersededAt == null || supersededAt.isBlank()
+            ? DSL.currentOffsetDateTime()
+            : DSL.val(tsOrNull(supersededAt));
         return tenantScope.withTenant(tenant, ctx ->
-            // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
-            // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
             ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
-               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, tsOrNull(supersededAt))
+               // nexus-0svvu (a): the WHERE's same-target disjunct below (nexus-cecqy) is
+               // deliberately permissive — re-asserting the SAME target must match the
+               // row, or the canonical rename's paired supersede(X, Y) call would 409 on
+               // its own tombstone. That permissiveness has a cost a bare SET does not
+               // pay for: two concurrent supersedes to the SAME target both match, and an
+               // unconditional SET would re-stamp superseded_at on the SECOND (loser's)
+               // write too — moving the supersession's recorded instant on every retry,
+               // exactly what the handler's serial-path idempotence comment (guard 2,
+               // above) says must never happen. Do NOT fix this by weakening the WHERE:
+               // it is the single source of the DIFFERENT-target refusal, and
+               // renameCollectionTxn's documented emptiness/identity asymmetry
+               // (nexus-2sovp) depends on this CAS staying exactly this strict. Move the
+               // guard into the SET instead — stamp only on the transition OUT OF ''
+               // (a genuine first supersede); a row that already carries THIS target
+               // keeps whatever instant it already has.
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                    DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""), stampedAt)
+                       .otherwise(CATALOG_COLLECTIONS.SUPERSEDED_AT))
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                   // nexus-cecqy (review): the handler's guard 2 reads the row, decides in
+                   // Java, then issues this UPDATE as a SEPARATE statement. Two concurrent
+                   // supersedes of the same old_name to DIFFERENT targets can both observe
+                   // superseded_by='' before either writes, both pass the guard, and the
+                   // later write silently wins — the unaudited chain rewrite guard 2 exists
+                   // to prevent, just moved from serial to concurrent. Carrying the
+                   // precondition in the WHERE closes that window: the loser matches zero
+                   // rows and the handler's rowcount check reports it. LOAD-BEARING: do not
+                   // weaken or remove this conjunct (nexus-0svvu, nexus-2sovp) — it is what
+                   // makes renameCollectionTxn's own identity re-check (further below)
+                   // unnecessary in the common case, since superseded_by cannot move to a
+                   // THIRD value underneath an observed read once this CAS is in place.
+                   .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
+                       .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
                .execute()
         );
     }
+
+    /**
+     * nexus-pzdol: {@code model_version} is stored as TEXT ({@code "v1"}..{@code "vN"}).
+     * Ordering by {@code NAME} (or by {@code model_version} itself) lexically puts
+     * {@code v10} above {@code v9} — a double-digit version silently regresses
+     * max-version resolution. This strips the {@code v} prefix and casts the digits
+     * to INTEGER so ordering is numeric, mirroring the retired local arm's
+     * {@code MAX(CAST(SUBSTR(model_version,2) AS INTEGER))} (catalog_docs.py).
+     * Malformed/legacy values (empty, no leading {@code v}) fall back to 0 rather
+     * than failing the cast — {@code LEGACY_GRANDFATHERED.eq(0)} already excludes
+     * the rows expected to be non-conformant, but this keeps the ORDER BY itself
+     * total rather than erroring on an unexpected shape.
+     */
+    private static final Field<Integer> COL_VERSION_NUM = DSL.field(
+        "CASE WHEN {0} ~ '^v[0-9]+$' THEN CAST(substring({0} from 2) as integer) ELSE 0 END",
+        Integer.class, CATALOG_COLLECTIONS.MODEL_VERSION);
 
     /** Find highest-versioned collection for (content_type, owner_id, embedding_model). */
     public Map<String, Object> collectionForTuple(String tenant, String contentType,
@@ -2207,17 +3596,25 @@ public final class CatalogRepository {
                               .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(embeddingModel))
                               .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(0))
                               .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
-                       .orderBy(CATALOG_COLLECTIONS.NAME.desc()).limit(1).fetchOne();
+                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.desc())
+                       .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
         });
     }
 
-    /** True if a (tenant, name) collection registry row exists. RLS-scoped. */
+    /** True if a (tenant, name) collection registry row exists — INCLUDING a tombstone. RLS-scoped. */
     public boolean collectionExists(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
             ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name))));
     }
+
+    // nexus-v6za0: liveCollectionExists(tenant, name) lived here between 1232585d and this
+    // commit. It answered a BOOLEAN — live or not — and that turned out to be the wrong
+    // shape: "not live" conflates an EMPTY rename tombstone (revivable) with a POPULATED
+    // supersede tombstone (merging onto it destroys data). Its two callers now read the row
+    // once via getCollection and branch on superseded_by itself, which is strictly more
+    // information from strictly fewer round-trips. Do not reintroduce the boolean form.
 
     /**
      * Rename a collection X-&gt;Y, re-homing every in-Postgres denorm-collection table in
@@ -2231,7 +3628,11 @@ public final class CatalogRepository {
      * <ol>
      *   <li>INSERTs a new registry row Y, copying X's metadata;</li>
      *   <li>UPDATEs every child denorm collection X-&gt;Y (Y now exists, FK satisfied);</li>
-     *   <li>DELETEs the old registry row X (no child references X now, RESTRICT satisfied).</li>
+     *   <li>RETIRES the old registry row X as a superseded tombstone —
+     *       {@code superseded_by = Y}, {@code superseded_at = now()} (nexus-cecqy; this
+     *       step DELETEd X until 2026-07-31, which destroyed the rename's audit trail
+     *       and made the CLI's follow-up supersede a zero-row no-op it nonetheless
+     *       announced).</li>
      * </ol>
      * Telemetry tables (search_telemetry, hook_failures) have no FK but ARE re-homed — a
      * rename is not a delete, audit rows follow the new name.
@@ -2243,27 +3644,303 @@ public final class CatalogRepository {
      * rows untouched — preserving pre-RDR-164 RDR-162 behavior.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
-        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName);
-        // Post-commit (nexus-h8rf6 wave review): the canonical branch DELETEs the
-        // old registry row — evict it so a later same-named collection re-registers.
-        // The cross-model COPY branch leaves both registry rows untouched (no key
-        // in counts), so nothing is evicted there.
-        if (counts.containsKey("catalog_collections_deleted")) {
+        return renameCollection(tenant, oldName, newName, null);
+    }
+
+    /**
+     * Same as {@link #renameCollection(String, String, String)}, plus an ADDITIVE identity
+     * belt (nexus-2sovp) for callers that can supply what they observed the target's
+     * {@code superseded_by} to be at their own read.
+     *
+     * <p>{@code expectedTargetSupersededBy} is the caller's OWN observation, not a value this
+     * method derives — {@link dev.nexus.service.http.CatalogHandler#handleCollectionRename}
+     * passes the value it just read (its {@code tgtSuperseded}) so the transaction verifies
+     * the SAME fact the handler's identity gate already checked, in its own snapshot, rather
+     * than trusting time to not have passed between the two. {@code null} means "no
+     * expectation to verify" (the 3-arg overload's contract, unchanged) — existing callers
+     * that never observed the target keep exactly their current behavior.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
+                                                   String expectedTargetSupersededBy) {
+        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy);
+        // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
+        // registry row — evict it so a later same-named collection re-registers. The
+        // cross-model COPY branch leaves both registry rows untouched (no key in
+        // counts), so nothing is evicted there.
+        //
+        // nexus-cecqy: the key is catalog_collections_superseded since the retire stopped
+        // being a DELETE. The eviction is still right — the row survives, so the skipped
+        // INSERT ... ON CONFLICT DO NOTHING would be a no-op either way, but a caller
+        // re-registering the old name must reach upsertCollection rather than be short-
+        // circuited by a stale KNOWN entry.
+        if (counts.containsKey("catalog_collections_superseded")) {
             CollectionRegistry.evict(tenant, oldName);
             CollectionRegistry.markKnown(tenant, newName);
         }
         return counts;
     }
 
-    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName) {
+    /**
+     * EVERY table that carries a denormalized collection name, as (count key, table, field).
+     *
+     * <p>THIS LIST IS THE SINGLE SOURCE OF TRUTH for two operations that must never disagree:
+     * {@code renameCollectionTxn} step 2 re-homes each entry, and {@link #collectionIsEmpty}
+     * asks whether any entry holds a row. They were separate literals for one commit and
+     * immediately drifted — the re-home covered 17 tables while the emptiness check covered 5,
+     * so a collection holding only taxonomy or aspect rows read as EMPTY and was merged
+     * (nexus-v6za0 attempt 3). Adding a table to one and not the other is now unexpressible.
+     *
+     * <p>Adding a denorm-collection table? Add it HERE and both operations pick it up.
+     *
+     * <p><strong>Equality with the SCHEMA is gated, and not from Java.</strong> Sharing this
+     * list makes the two consumers equal to EACH OTHER; it does nothing about a table that is
+     * missing from the list entirely — un-re-homed and invisible to the emptiness check at the
+     * same time, consistent and wrong. That is not theoretical: {@code gc_audit} landed
+     * 2026-07-30 and this list, written the next day, omitted it. The gate is
+     * {@code tests/catalog/test_collection_scoped_tables_schema_parity.py}, which asks
+     * {@code information_schema} directly. It lives in pytest because {@code service-ci} is
+     * NOT a required check on develop or main (nexus-hq9na) — a Java test of this invariant
+     * would be advisory at merge, which for this defect class is no gate at all (nexus-20890).
+     *
+     * <p>Tables deliberately NOT here, each documented with a reason in that gate's
+     * {@code _DOCUMENTED_EXCLUSIONS}: {@code pdf_pipeline} (transient work queue),
+     * {@code chash_remap} (permanent RF-186 ledger whose collection is inside its PK —
+     * nexus-4nll0), and {@code migration_jobs} (JSONB collection SETS, which a scalar UPDATE
+     * cannot rewrite — nexus-rvr1n). An exclusion that is not written down is
+     * indistinguishable from an omission, so the gate fails on an undocumented one.
+     */
+    private static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
+        new CollectionScopedTable("chunks_384",              CHUNKS_384,              CHUNKS_384.COLLECTION),
+        new CollectionScopedTable("chunks_768",              CHUNKS_768,              CHUNKS_768.COLLECTION),
+        new CollectionScopedTable("chunks_1024",             CHUNKS_1024,             CHUNKS_1024.COLLECTION),
+        new CollectionScopedTable("catalog_document_chunks", CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+        new CollectionScopedTable("topic_assignments",       TOPIC_ASSIGNMENTS,       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
+        new CollectionScopedTable("topics",                  TOPICS,                  TOPICS.COLLECTION),
+        new CollectionScopedTable("taxonomy_meta",           TAXONOMY_META,           TAXONOMY_META.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids_384",  TAXONOMY_CENTROIDS_384,  TAXONOMY_CENTROIDS_384.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids_768",  TAXONOMY_CENTROIDS_768,  TAXONOMY_CENTROIDS_768.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids_1024", TAXONOMY_CENTROIDS_1024, TAXONOMY_CENTROIDS_1024.COLLECTION),
+        new CollectionScopedTable("document_aspects",        DOCUMENT_ASPECTS,        DOCUMENT_ASPECTS.COLLECTION),
+        new CollectionScopedTable("document_highlights",     DOCUMENT_HIGHLIGHTS,     DOCUMENT_HIGHLIGHTS.COLLECTION),
+        new CollectionScopedTable("aspect_extraction_queue", ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.COLLECTION),
+        new CollectionScopedTable("catalog_documents",       CATALOG_DOCUMENTS,       CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
+        new CollectionScopedTable("relevance_log",           RELEVANCE_LOG,           RELEVANCE_LOG.COLLECTION),
+        new CollectionScopedTable("search_telemetry",        SEARCH_TELEMETRY,        SEARCH_TELEMETRY.COLLECTION),
+        new CollectionScopedTable("hook_failures",           HOOK_FAILURES,           HOOK_FAILURES.COLLECTION),
+        // nexus-jqvzk, added 2026-07-30 — and MISSED by the first version of this list,
+        // written 2026-07-31. Both reviewers found it independently by reading the
+        // changelogs; nothing mechanical did, which is what nexus-20890's gate now fixes.
+        // Same audit family as the three above, and re-homed for the same RDR-164 reason:
+        // "what happened to THIS collection" (idx_gc_audit_collection) must keep answering
+        // after a rename, or incident triage silently loses the collection's GC history.
+        new CollectionScopedTable("gc_audit",                GC_AUDIT,                GC_AUDIT.COLLECTION));
+
+    /** One denorm-collection table: its rename-count key, the table, and its collection column. */
+    private record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
+
+    /**
+     * The rename transaction refused to merge a populated retired target.
+     *
+     * <p>TYPED so the handler can map it to a 409 with this message intact. It was an
+     * {@code IllegalStateException} for one commit, which the handler's generic catch turned
+     * into {@code 500 {"error":"internal server error"}} — discarding a message that names the
+     * remedy. A refusal that reads as a server bug is only half of FAIL LOUD.
+     */
+    public static final class CollectionMergeRefused extends RuntimeException {
+        public CollectionMergeRefused(String message) { super(message); }
+    }
+
+    /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String)} for callers outside a txn. */
+    public boolean collectionIsEmpty(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> collectionIsEmpty(ctx, name));
+    }
+
+    /**
+     * nexus-34wrg option (c): the four audit tables in {@link #COLLECTION_SCOPED_TABLES}
+     * ({@code relevance_log}, {@code search_telemetry}, {@code hook_failures},
+     * {@code gc_audit}) hold no content — they are written as a SIDE EFFECT of ordinary
+     * reads and maintenance, never by a caller depositing data on purpose. A rename's
+     * empty-tombstone target can read as non-empty purely because a search happened to log
+     * telemetry against it, a GC pass audited it, or a hook failed against it — the refusal
+     * "it still holds data" is then misleading: there is no data and no merge hazard, only
+     * an audit breadcrumb. {@link #blockingTable} names WHICH table blocked so a caller can
+     * tell the two apart; this set is what turns that name into an actionable distinction.
+     */
+    private static final java.util.Set<String> AUDIT_ONLY_TABLES =
+        java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
+
+    /**
+     * nexus-34wrg option (c): which table blocked an emptiness check, and whether it is one
+     * of the audit-only tables (no content — see {@link #AUDIT_ONLY_TABLES}). Self-describing
+     * so a caller (the rename handler, {@link #CollectionMergeRefused}) never has to know the
+     * audit-table set itself to render an accurate message.
+     */
+    public record BlockingTable(String table, boolean auditOnly) {
+        /** Human-readable clause for a refusal message: "real data in 'x'" or "an audit trail entry in 'x' (no content)". */
+        public String describe() {
+            return auditOnly
+                ? "an audit trail entry in '" + table + "' (no content — it is written as a "
+                  + "side effect of reads/maintenance, not a merge hazard)"
+                : "real data in '" + table + "'";
+        }
+    }
+
+    /**
+     * RLS-scoped {@link #blockingTable(DSLContext, String)} for callers outside a txn
+     * (nexus-34wrg option (c)).
+     */
+    public java.util.Optional<BlockingTable> blockingTable(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> blockingTable(ctx, name));
+    }
+
+    /**
+     * The first table in {@link #COLLECTION_SCOPED_TABLES} (in list order) holding a row
+     * for {@code name}, or empty if none does — the diagnostic form {@link
+     * #collectionIsEmpty} collapses to a boolean. nexus-34wrg option (c): a bare "not empty"
+     * refusal cannot tell an operator whether a real-data table is populated or only an
+     * audit table logged against the name in passing; naming the table lets the caller
+     * decide.
+     */
+    private java.util.Optional<BlockingTable> blockingTable(DSLContext ctx, String name) {
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
+                return java.util.Optional.of(
+                    new BlockingTable(t.countKey(), AUDIT_ONLY_TABLES.contains(t.countKey())));
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
+     * True if {@code name} holds no row in ANY table listed in {@link #COLLECTION_SCOPED_TABLES}
+     * — which is, by construction, exactly the set {@code renameCollectionTxn} step 2 re-homes.
+     *
+     * <p>The scope is stated as "the re-home set", NOT as "no data of any kind". An earlier
+     * javadoc made the universal claim while the body enumerated five of seventeen tables,
+     * and a reader trusting the sentence would not have re-checked the list. Deliberate
+     * exclusions are enumerated on {@link #COLLECTION_SCOPED_TABLES} and gated by
+     * {@code test_collection_scoped_tables_schema_parity.py}.
+     *
+     * <p>RLS-scoped, and evaluated in the CALLER's {@code ctx} so it sees that transaction's
+     * uncommitted writes. It does NOT freeze a snapshot: the engine runs READ COMMITTED
+     * (no isolation override in {@code TenantScope}), where every statement takes a FRESH
+     * snapshot. So a concurrent committed INSERT can land between this check and the step 2
+     * UPDATEs that follow it. That window is narrow and intra-transaction, but it is real —
+     * an earlier version of this javadoc claimed the check "shares the caller's snapshot",
+     * which would have made it look airtight. Overstating a guarantee in a comment is the
+     * documented tell of all three failed attempts at this guard; do not restore it.
+     *
+     * <p>nexus-v6za0: this is the real precondition for reviving a retired registry row.
+     * Two earlier fixes tried to infer it from {@code superseded_by} — first via liveness,
+     * then via identity — and both leaked, because {@code renameCollectionTxn} step 3 and
+     * {@link #supersedeCollection} write that column identically. A rename tombstone is
+     * empty because its children were re-homed first; a supersede tombstone keeps
+     * everything, because supersede is a pure UPDATE. The column cannot tell them apart.
+     * Ask the data instead.
+     */
+    private boolean collectionIsEmpty(DSLContext ctx, String name) {
+        return blockingTable(ctx, name).isEmpty();
+    }
+
+    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
+                                                        String expectedTargetSupersededBy) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
-            boolean targetExists = ctx.fetchExists(
+            // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
+            // as a superseded tombstone instead of deleting it, a round-trip rename
+            // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is
+            // a retired name, not an occupied one: routing it to the RDR-162 COPY branch
+            // would repoint documents only and strand the chunks, so it must take the
+            // canonical branch, where step 1's upsert REVIVES it.
+            // THIS IS THE AUTHORITATIVE BRANCH SELECTOR, and it now MEASURES the hazard
+            // instead of inferring it. Two prior fixes inferred, and both were wrong:
+            //   nexus-u4e20  guarded on "a row exists"  — could not see that a tombstone
+            //                is a retired name, not an occupied one. Undo unreachable.
+            //   nexus-v6za0  guarded on LIVENESS, then on IDENTITY (superseded_by ==
+            //                oldName). Both are proxies for EMPTINESS and both leak:
+            //                supersedeCollection is a pure UPDATE, so a supersede
+            //                tombstone is non-live AND populated, and nothing stops its
+            //                superseded_by naming the rename source. step 3 and
+            //                supersedeCollection write the column identically, so no
+            //                predicate over it can recover PROVENANCE.
+            // The canonical branch's actual precondition is that the target holds NO DATA,
+            // because step 1 revives the row and step 2 re-homes the source's children ON
+            // TOP of whatever is already there. So ask that question, in this transaction's
+            // own snapshot. A populated non-live target takes NEITHER branch: the COPY
+            // branch would strand its chunks, the canonical branch would merge them.
+            boolean targetRowExists = ctx.fetchExists(
                 ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
+            boolean liveTargetExists = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.NAME.eq(newName)
+                       .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+            // WHY THIS RE-CHECKS EMPTINESS BUT NOT IDENTITY, which looks asymmetric.
+            // The handler checks both; this transaction re-checks only the first. That is
+            // deliberate, and the reason lives in a DIFFERENT method, so state it here or
+            // the next reader re-derives it (both reviewers raised this; one withdrew it
+            // after tracing the mechanism — nexus-2sovp carries the analysis).
+            //
+            //   EMPTINESS is a fact about ROWS IN OTHER TABLES. Nothing serialises those
+            //   against this rename, so a concurrent write can land between the handler's
+            //   look and this transaction. It must be re-measured HERE, in the snapshot
+            //   that is about to act on it.
+            //
+            //   IDENTITY is a fact about superseded_by on THIS row, and
+            //   supersedeCollection carries its own precondition IN THE WHERE CLAUSE
+            //   (SUPERSEDED_BY = '' OR SUPERSEDED_BY = :target — a DB-level
+            //   compare-and-swap added for nexus-cecqy). So the column cannot be moved to
+            //   a THIRD value underneath us: a concurrent supersede either matches zero
+            //   rows, or writes the value it already had. The handler's read stays true.
+            //
+            // If that CAS is ever weakened, this asymmetry becomes a hole and the identity
+            // check has to be re-checked here too. The guard below is not self-defending;
+            // it is defended by a precondition in another statement.
+            //
+            // nexus-2sovp, ADDITIVE BELT (2026-08-01, Hal-adjudicated): the paragraph above
+            // is what makes the asymmetry SAFE TODAY — there is exactly one caller
+            // (CatalogHandler.handleCollectionRename), and its identity gate cannot go stale
+            // because of the CAS. That is a fact about the CURRENT caller graph, not about
+            // this method. A future non-HTTP caller (a CLI path, a migration step, a
+            // scheduled repair) that calls renameCollection without replicating the
+            // handler's identity pre-check would inherit the emptiness protection below and
+            // NONE of the identity protection — silently. The belt below is optional
+            // (opt-in via a non-null expectedTargetSupersededBy) precisely so it can be
+            // additive: it does not change behavior for any caller that passes null, and it
+            // re-verifies — it does not replace — the emptiness check above.
+            if (targetRowExists && !liveTargetExists) {
+                var blocker = blockingTable(ctx, newName);
+                if (blocker.isPresent()) {
+                    // nexus-34wrg option (c): name WHICH table blocked so an operator can
+                    // tell an audit breadcrumb from real data instead of purging on faith.
+                    throw new CollectionMergeRefused(
+                        "target collection " + newName + " is retired but still holds "
+                        + blocker.get().describe() + "; renaming onto it would merge two "
+                        + "collections. Purge or restore it first.");
+                }
+            }
+            if (targetRowExists && !liveTargetExists && expectedTargetSupersededBy != null) {
+                String actualTargetSupersededBy = ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                    .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName))
+                    .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY);
+                if (!expectedTargetSupersededBy.equals(actualTargetSupersededBy)) {
+                    throw new CollectionMergeRefused(
+                        "target collection " + newName + " is retired by " + actualTargetSupersededBy
+                        + ", not " + expectedTargetSupersededBy + " as observed at the caller's own read; "
+                        + "refusing to revive a tombstone whose identity changed underneath this rename.");
+                }
+            }
 
-            if (targetExists) {
+            if (liveTargetExists) {
                 // RDR-162 cross-model COPY branch: repoint catalog_documents; leave
                 // both registry rows (renaming the source would collide on the name PK).
+                // TOMBSTONE-EXEMPT (nexus-mqd6t): deliberately NOT filtered on
+                // DELETED_AT.isNull() -- a rename must repoint ALL documents under
+                // the old physical_collection name, tombstoned or not, so a
+                // tombstoned document's physical_collection tracks the collection's
+                // CURRENT name. Filtering here would leave a later restore pointing
+                // at a retired collection name (found during TombstoneFilterGateTest
+                // authorship; undocumented before this). See
+                // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
                 counts.put("catalog_documents",
                     ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName)
                        .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
@@ -2281,6 +3958,19 @@ public final class CatalogRepository {
             }
 
             // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
+            //    UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is
+            //    Y's own tombstone from an earlier rename Y->X, since a LIVE Y took the COPY
+            //    branch above. Renaming back onto that retired name REVIVES it — superseded_by/at
+            //    cleared, metadata refreshed from X — which is exactly what the round trip means.
+            //    A bare INSERT would collide on the (tenant_id, name) PK and abort the re-home.
+            //
+            //    nexus-v6za0 — an EARLIER VERSION OF THIS COMMENT CLAIMED Y's own rename
+            //    tombstone was the ONLY conflict that could reach here. That was false: a
+            //    supersede-marked Y is also non-live, also reaches this upsert, and unlike a
+            //    rename tombstone it still holds every chunk. CatalogHandler now gates the
+            //    revive on the tombstone's identity (superseded_by == oldName) so only the
+            //    round-trip undo arrives here, but do not restore the stronger claim — this
+            //    transaction is not itself the thing enforcing it.
             counts.put("catalog_collections_inserted",
                 ctx.insertInto(CATALOG_COLLECTIONS,
                         CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
@@ -2294,46 +3984,84 @@ public final class CatalogRepository {
                             CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                             CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                             CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
-                            CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                            // nexus-c29vr: the new row is LIVE by construction — never copy the
+                            // source's tombstone markers. This select-list used to carry
+                            // SUPERSEDED_BY/SUPERSEDED_AT straight through, and only the
+                            // DO UPDATE arm below cleared them. On the fresh-insert arm that
+                            // made a retired X rename into a BORN-DEAD Y (superseded_by copied
+                            // from X), permanently invisible to collectionForTuple, with all of
+                            // X's data re-homed onto it. The handler now refuses a retired
+                            // source, but "explicit beats incidental" applies to both arms.
+                            DSL.val("", CATALOG_COLLECTIONS.SUPERSEDED_BY),
+                            DSL.val(null, CATALOG_COLLECTIONS.SUPERSEDED_AT),
                             CATALOG_COLLECTIONS.CREATED_AT)
                         .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)))
+                    .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                    .doUpdate()
+                    .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
+                    .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+                    .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+                    .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+                    .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+                    .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+                    // Revive: clear the tombstone markers rather than copying X's (which
+                    // are '' / NULL anyway — the CLI refuses to rename an already-
+                    // superseded row, so X is live). Explicit beats incidental here.
+                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+                    .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
                     .execute());
 
             // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
-            //    T3 chunk vectors (fk-002 RESTRICT).
-            counts.put("chunks_384",  ctx.update(CHUNKS_384).set(CHUNKS_384.COLLECTION, newName).where(CHUNKS_384.COLLECTION.eq(oldName)).execute());
-            counts.put("chunks_768",  ctx.update(CHUNKS_768).set(CHUNKS_768.COLLECTION, newName).where(CHUNKS_768.COLLECTION.eq(oldName)).execute());
-            counts.put("chunks_1024", ctx.update(CHUNKS_1024).set(CHUNKS_1024.COLLECTION, newName).where(CHUNKS_1024.COLLECTION.eq(oldName)).execute());
+            //    Driven by COLLECTION_SCOPED_TABLES so this loop and collectionIsEmpty can
+            //    never disagree about WHICH tables carry a collection name. They were two
+            //    literals for exactly one commit and drifted 17-vs-5 immediately, which is
+            //    how a taxonomy-only collection read as empty and got merged (nexus-v6za0).
+            //    Covers: T3 chunk vectors (fk-002 RESTRICT); the manifest's denormalized
+            //    collection, the combined-query join key that rename was the second door back
+            //    into the silently-empty-join state for (nexus-x6kdz); taxonomy assignments /
+            //    topics / meta (fk-002-5, fk-003, fk-003-4 RESTRICT); centroids (no FK to
+            //    topics, so an explicit re-home); aspects, highlights and the extraction
+            //    queue; catalog_documents itself; and the audit/telemetry tables.
             //    (chash_index leg RETIRED — RDR-187/nexus-piwya.9.)
-            // nexus-x6kdz: the manifest's denormalized collection (the
-            // combined-query join key) must re-home too — rename was the
-            // second door back into the silently-empty-join state.
-            counts.put("catalog_document_chunks",
-                ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
-                   .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
-            //    taxonomy: assignments (source_collection, fk-002-5 RESTRICT), topics (fk-003 RESTRICT), meta (fk-003-4 RESTRICT).
-            counts.put("topic_assignments", ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newName).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName)).execute());
-            counts.put("topics", ctx.update(TOPICS).set(TOPICS.COLLECTION, newName).where(TOPICS.COLLECTION.eq(oldName)).execute());
-            counts.put("taxonomy_meta", ctx.update(TAXONOMY_META).set(TAXONOMY_META.COLLECTION, newName).where(TAXONOMY_META.COLLECTION.eq(oldName)).execute());
-            //    centroids (no FK to topics — explicit re-home).
-            counts.put("taxonomy_centroids_384",  ctx.update(TAXONOMY_CENTROIDS_384).set(TAXONOMY_CENTROIDS_384.COLLECTION, newName).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(oldName)).execute());
-            counts.put("taxonomy_centroids_768",  ctx.update(TAXONOMY_CENTROIDS_768).set(TAXONOMY_CENTROIDS_768.COLLECTION, newName).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(oldName)).execute());
-            counts.put("taxonomy_centroids_1024", ctx.update(TAXONOMY_CENTROIDS_1024).set(TAXONOMY_CENTROIDS_1024.COLLECTION, newName).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(oldName)).execute());
-            //    aspect family (fk-003 RESTRICT; incl. doc-less rows).
-            counts.put("document_aspects",        ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.COLLECTION, newName).where(DOCUMENT_ASPECTS.COLLECTION.eq(oldName)).execute());
-            counts.put("document_highlights",     ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.COLLECTION, newName).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldName)).execute());
-            counts.put("aspect_extraction_queue", ctx.update(ASPECT_EXTRACTION_QUEUE).set(ASPECT_EXTRACTION_QUEUE.COLLECTION, newName).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldName)).execute());
-            //    catalog documents (physical_collection).
-            counts.put("catalog_documents", ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
-            //    audit tables (no FK, but re-homed: audit rows follow the new name — RDR-164
-            //    §Approach Phase 3: relevance_log + search_telemetry + hook_failures).
-            counts.put("relevance_log",     ctx.update(RELEVANCE_LOG).set(RELEVANCE_LOG.COLLECTION, newName).where(RELEVANCE_LOG.COLLECTION.eq(oldName)).execute());
-            counts.put("search_telemetry", ctx.update(SEARCH_TELEMETRY).set(SEARCH_TELEMETRY.COLLECTION, newName).where(SEARCH_TELEMETRY.COLLECTION.eq(oldName)).execute());
-            counts.put("hook_failures",     ctx.update(HOOK_FAILURES).set(HOOK_FAILURES.COLLECTION, newName).where(HOOK_FAILURES.COLLECTION.eq(oldName)).execute());
+            for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+                counts.put(t.countKey(),
+                    ctx.update(t.table()).set(t.collection(), newName)
+                       .where(t.collection().eq(oldName)).execute());
+            }
 
-            // 3. Delete the old registry row X (RESTRICT children are now re-homed onto Y).
-            counts.put("catalog_collections_deleted",
-                ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)).execute());
+            // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
+            //
+            // This used to DELETE X. The delete was never required — by this point every
+            // RESTRICT child has been re-homed onto Y, so X is childless and free to
+            // either go or stay — and it destroyed the rename's own audit trail: the CLI
+            // called supersede_collection(X, Y) immediately afterwards, that UPDATE
+            // matched ZERO rows, and the operator was told "Emitted
+            // CollectionSuperseded(X -> Y)" about something that had not happened. X
+            // ended ABSENT rather than marked-superseded and the rename became
+            // unrecoverable history.
+            //
+            // Keeping X ALIVE-but-unmarked was the other candidate and is worse: X and Y
+            // share the (content_type, owner_id, embedding_model) tuple (step 1 copies
+            // the metadata), and collectionForTuple resolves that tuple with
+            // `superseded_by = '' ORDER BY name DESC LIMIT 1`. An unmarked X wins that
+            // race whenever it sorts ABOVE Y — e.g. renaming to fix a typo,
+            // code__zold__... -> code__anew__... — handing every subsequent write the
+            // now-empty old name. The tombstone carries superseded_by != '', so it is
+            // filtered out of tuple resolution by construction.
+            //
+            // Renaming back INTO a tombstoned name is ALLOWED, and is the point: it is the
+            // round-trip undo, and step 1's upsert revives the row (nexus-u4e20). An earlier
+            // version of this comment said the handler 409'd on it via collectionExists —
+            // true before nexus-cecqy introduced tombstones, false after, and it sat here
+            // contradicting the fix 120 lines above. The handler now permits exactly one
+            // revive: a tombstone whose superseded_by names the collection being renamed
+            // (nexus-v6za0). Every other non-live target 409s.
+            counts.put("catalog_collections_superseded",
+                ctx.update(CATALOG_COLLECTIONS)
+                   .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
+                   .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, DSL.currentOffsetDateTime())
+                   .where(CATALOG_COLLECTIONS.NAME.eq(oldName))
+                   .execute());
             return counts;
         });
     }
@@ -2377,12 +4105,14 @@ public final class CatalogRepository {
     public Map<String, Object> ownerByPrefix(String tenant, String tumblerPrefix) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
-                               CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+                               CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH,
+                               CATALOG_OWNERS.NEXT_SEQ)
                        .from(CATALOG_OWNERS)
                        .where(CATALOG_OWNERS.TUMBLER_PREFIX.eq(tumblerPrefix))
                        .fetchOne();
             return r != null
-                ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7())
+                ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7(),
+                           r.value8())
                 : null;
         });
     }
@@ -2397,7 +4127,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.CHUNK_COUNT)
                           .from(CATALOG_DOCUMENTS)
-                          .where(CATALOG_DOCUMENTS.TUMBLER.in(docIds))
+                          .where(CATALOG_DOCUMENTS.TUMBLER.in(docIds).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                           .fetch();
             Map<String, Integer> result = new LinkedHashMap<>();
             for (var r : rows) {
@@ -2522,7 +4252,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne(""))
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
         );
@@ -2555,6 +4285,82 @@ public final class CatalogRepository {
      * Replaces direct SQLite LEFT JOIN query in orphans_cmd.
      * Returns list of dicts with tumbler, title, content_type, file_path.
      */
+    /**
+     * Links whose {@code from_tumbler} or {@code to_tumbler} resolves to no live
+     * document (nexus-ysrwi, GH #1419 issue 7).
+     *
+     * <p>Steve Harris's backup held 5 of 52 links pointing at tumblers with no
+     * document anywhere in the same {@code pg_dump} — orphans left by document
+     * deletion without link cleanup. {@code catalog_links} carries a PK and a
+     * UNIQUE constraint but NO foreign key to {@code catalog_documents}
+     * (catalog-001-baseline.xml), so nothing structurally prevents them.
+     *
+     * <p>This is the DETECTION half. Enforcement (an FK with ON DELETE, or
+     * delete-time cleanup) is nexus-tk070's FK-census decision — a check the
+     * client can render is useful either way, and remains useful after an FK
+     * lands because an FK does not retroactively clean rows already orphaned.
+     *
+     * <p>The client cannot compute this itself: {@code HttpCatalogClient.link_audit}
+     * is a service-mode stub, and the only batch existence primitive available
+     * ({@code chunk_counts_for_docs}) omits documents that merely lack a
+     * chunk_count, which would report live documents as dangling.
+     *
+     * <p>{@code side} names which endpoint dangles ({@code "from"}, {@code "to"},
+     * or {@code "both"}) so an operator can tell a deleted target from a
+     * deleted source without a second query.
+     */
+    public List<Map<String, Object>> orphanedLinks(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // NOT EXISTS rather than a LEFT JOIN: RLS-safe by construction (the
+            // subquery is tenant-scoped by the same GUC) and it cannot multiply
+            // rows when a tumbler somehow has duplicate document rows.
+            var fromMissing = DSL.notExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            );
+            var toMissing = DSL.notExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            );
+            return ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER,
+                              CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                              CATALOG_LINKS.CREATED_BY)
+                      .from(CATALOG_LINKS)
+                      .where(fromMissing.or(toMissing))
+                      .orderBy(CATALOG_LINKS.ID)
+                      .fetch()
+                      .map(r -> {
+                          boolean fm = r.get(CATALOG_LINKS.FROM_TUMBLER) != null
+                              && !documentExists(ctx, r.get(CATALOG_LINKS.FROM_TUMBLER));
+                          boolean tm = r.get(CATALOG_LINKS.TO_TUMBLER) != null
+                              && !documentExists(ctx, r.get(CATALOG_LINKS.TO_TUMBLER));
+                          Map<String, Object> m = new LinkedHashMap<>();
+                          m.put("id", r.get(CATALOG_LINKS.ID));
+                          m.put("from_tumbler", r.get(CATALOG_LINKS.FROM_TUMBLER));
+                          m.put("to_tumbler", r.get(CATALOG_LINKS.TO_TUMBLER));
+                          m.put("link_type", r.get(CATALOG_LINKS.LINK_TYPE));
+                          m.put("created_by", r.get(CATALOG_LINKS.CREATED_BY));
+                          m.put("side", fm && tm ? "both" : (fm ? "from" : "to"));
+                          return m;
+                      });
+        });
+    }
+
+    /**
+     * nexus-23wlw: LIVE-only, and it MUST stay in lockstep with the
+     * {@code fromMissing}/{@code toMissing} predicates in {@link #orphanedLinks}.
+     * That method uses those predicates to select the dangling links and this
+     * one to label WHICH side dangles; if the two disagree about tombstones, a
+     * link is reported as orphaned with {@code side} naming neither endpoint.
+     */
+    private boolean documentExists(org.jooq.DSLContext ctx, String tumbler) {
+        return ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+        );
+    }
+
     public List<Map<String, Object>> orphanedDocs(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
             // Documents with no outgoing links (from_tumbler not in links)
@@ -2568,7 +4374,7 @@ public final class CatalogRepository {
             );
             return ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH)
                       .from(CATALOG_DOCUMENTS)
-                      .where(noOut.and(noIn))
+                      .where(noOut.and(noIn).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                       .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                       .fetch()
                       .map(r -> {
@@ -2593,7 +4399,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.FILE_PATH.startsWith("/"))
+               .where(CATALOG_DOCUMENTS.FILE_PATH.startsWith("/").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch()
                .map(r -> {
@@ -2711,7 +4517,8 @@ public final class CatalogRepository {
                 var rows = ctx.select(contentType, DSL.count().cast(Long.class), linkedCount)
                               .from(CATALOG_DOCUMENTS)
                               .where(CATALOG_DOCUMENTS.TUMBLER.like(likePat)
-                                  .or(CATALOG_DOCUMENTS.TUMBLER.eq(ownerPrefix)))
+                                  .or(CATALOG_DOCUMENTS.TUMBLER.eq(ownerPrefix))
+                                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                               .groupBy(contentType)
                               .fetch();
                 for (var r : rows) {
@@ -2778,6 +4585,10 @@ public final class CatalogRepository {
                         CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
                         CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ);
                 for (var o : batch) {
+                    // Same identity guard as doImportOwner (nexus-0ehwe arbiter class) —
+                    // the batch form is not exempt from the keys its arbiter omits.
+                    guardOwnerIdentity(ctx, tenant, s(o, "tumbler_prefix"),
+                                       s(o, "name"), s(o, "owner_type"), s(o, "repo_hash"));
                     insert = insert.values(tenant,
                             s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
                             s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
@@ -2802,6 +4613,14 @@ public final class CatalogRepository {
     private static final int MAX_BATCH_PARAMS = 30_000;
 
     private void doImportOwner(DSLContext ctx, String tenant, Map<String, Object> o) {
+        // nexus-0ehwe arbiter class. The ETL replays an authoritative snapshot at an
+        // EXPLICIT address, so the address wins — but the snapshot may still carry an
+        // identity that now lives at a different prefix (SQLite permitted two owners to
+        // share name+owner_type; PG's catalog_owners_unique_name_type forbids it, the
+        // substrate disagreement nexus-aqbrk recorded). Converging would MERGE two
+        // distinct owners, so this refuses by name instead of raising a raw 23505.
+        guardOwnerIdentity(ctx, tenant, s(o, "tumbler_prefix"),
+                           s(o, "name"), s(o, "owner_type"), s(o, "repo_hash"));
         ctx.insertInto(CATALOG_OWNERS,
                 CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
                 CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
@@ -2854,6 +4673,8 @@ public final class CatalogRepository {
                         CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT);
                 for (var d : batch) {
                     String metaJson = jsonOrNull(d.get("metadata"));
+                    // Same identity guard as doImportDocument (nexus-0ehwe arbiter class).
+                    guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                             nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
@@ -2899,6 +4720,9 @@ public final class CatalogRepository {
     private void doImportDocument(DSLContext ctx, String tenant, Map<String, Object> d) {
         String metaJson = jsonOrNull(d.get("metadata"));
         {
+            // nexus-0ehwe arbiter class: address-arbitrated, and the DO UPDATE arm sets
+            // source_uri — so both arms are exposed to ux_catalog_documents_live_source_uri.
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -3253,6 +5077,27 @@ public final class CatalogRepository {
         return m;
     }
 
+    /**
+     * Owner row PLUS {@code next_seq} (nexus-0ehwe item 3).
+     *
+     * <p>next_seq was exposed on NO read path: not {@code ownerByPrefix},
+     * not {@code /owners/show}, not {@code /owners/list}. The only way to tell
+     * a drifted owner from a healthy one was to attempt a real registration and
+     * see whether it 409'd — a MUTATION used as a diagnostic. That is why the
+     * original wedge (nexus-pbawi) took a long investigation to localize, and
+     * why "how many other owners are already wedged?" was unanswerable.
+     *
+     * <p>An overload rather than a signature change: {@code ownerRow} has seven
+     * callers and most have no next_seq in scope.
+     */
+    private static Map<String, Object> ownerRow(String prefix, String name, String type,
+                                                  String repo, String desc, String root, String head,
+                                                  Long nextSeq) {
+        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head);
+        m.put("next_seq", nextSeq == null ? 0L : nextSeq);
+        return m;
+    }
+
     private static Map<String, Object> ownerRow(String prefix, String name, String type,
                                                   String repo, String desc, String root, String head) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -3318,6 +5163,13 @@ public final class CatalogRepository {
     private static Integer i(Map<String, Object> m, String k) {
         Object v = m.get(k);
         if (v instanceof Number n) return n.intValue();
+        // nexus-cecqy: JSON booleans coerce to 0/1. Our integer columns that model flags
+        // (catalog_collections.legacy_grandfathered) are sent by Python clients as real
+        // JSON booleans, and this returned null for them — so the caller's value was
+        // silently replaced by the ni(..., 0) default and the flag could NEVER be set
+        // through /collections/upsert, by any caller, explicit or derived. That is why
+        // the client-side derivation alone did not move the stored value.
+        if (v instanceof Boolean b) return b ? 1 : 0;
         return null;
     }
 
@@ -3327,8 +5179,38 @@ public final class CatalogRepository {
         return null;
     }
 
+    /** Boolean field extraction tolerant of a real JSON boolean or its string form. */
+    private static boolean bool(Map<String, Object> m, String k, boolean def) {
+        Object v = m.get(k);
+        if (v == null) return def;
+        if (v instanceof Boolean b) return b;
+        return "true".equalsIgnoreCase(String.valueOf(v));
+    }
+
     /** Non-null empty: returns "" if null. */
     private static String nne(String v) { return v != null ? v : ""; }
+
+    /**
+     * nexus-4j80w: {@code upsertLink}'s created_at default. The client never
+     * sends {@code created_at}; {@code nne()} alone defaulted it to {@code ""},
+     * and {@code "" < any-date} is TRUE under lexical TEXT comparison, so every
+     * service-written link matched EVERY {@code created_at_before} predicate —
+     * {@code bulk_unlink --created-at-before} deleted the entire link graph,
+     * and the MCP confirmation preview computed through the same predicate so
+     * it read as correct.
+     *
+     * <p>Stamp a REAL ISO-8601 UTC timestamp on insert instead, in the same
+     * fixed-width-micros + {@code "+00:00"} shape {@link #stampIndexedAt} uses
+     * (via {@link #INDEXED_AT_FMT}) — byte-identical to the local arm's
+     * {@code datetime.now(UTC).isoformat()}, so old (local-written) and new
+     * (service-written) rows sort consistently as TEXT. Only applies to the
+     * INSERT values list; the {@code doUpdate()} merge path never touches
+     * {@code created_at}, so an existing row's timestamp is never overwritten.
+     */
+    private static String createdAtOrNow(String createdAt) {
+        if (createdAt != null && !createdAt.isBlank()) return createdAt;
+        return java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT);
+    }
 
     /**
      * Null-or-empty normalizer: returns null for null or blank/empty strings, else returns v.
@@ -3387,6 +5269,140 @@ public final class CatalogRepository {
         if (v == null) return null;
         if (v instanceof String sv) return sv.isBlank() ? null : sv;
         try { return MAPPER.writeValueAsString(v); } catch (Exception e) { return null; }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GC AUDIT  (nexus-jqvzk — engine-side record for destructive T3 ops)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** Hard cap on chashes persisted per audit row; the count is always exact. */
+    public static final int GC_AUDIT_MAX_CHASHES = 5000;
+
+    /**
+     * Record ONE destructive (or dry-run) T3 operation (nexus-jqvzk).
+     *
+     * <p>Append-only: an audit row is never updated or deleted by this service.
+     * The row is written on the CALLER's say-so — the engine does not perform
+     * the T3 deletion itself (the gc verb does), so this records what the
+     * caller reports, and the caller writes it in the same breath as the
+     * delete. That is the honest boundary: it is an audit trail, not a
+     * two-phase commit.
+     *
+     * <p>{@code chashes} is TRUNCATED at {@value #GC_AUDIT_MAX_CHASHES} entries
+     * so one enormous collection-wide sweep cannot write an unbounded row;
+     * {@code chash_count} always carries the FULL count, and
+     * {@code details.chashes_truncated} records that the list is partial —
+     * never a silently short list.
+     *
+     * @param audit {@code {operation, collection, actor, dry_run, chashes[], details{}}}
+     * @return the new audit row's id
+     */
+    public long recordGcAudit(String tenant, Map<String, Object> audit) {
+        String operation = s(audit, "operation", "");
+        if (operation.isBlank()) {
+            throw new IllegalArgumentException("gc_audit: 'operation' is required");
+        }
+        List<String> chashes = new ArrayList<>();
+        if (audit.get("chashes") instanceof List<?> raw) {
+            for (Object o : raw) {
+                if (o != null) chashes.add(o.toString());
+            }
+        }
+        int fullCount = chashes.size();
+        boolean truncated = fullCount > GC_AUDIT_MAX_CHASHES;
+        List<String> stored = truncated ? chashes.subList(0, GC_AUDIT_MAX_CHASHES) : chashes;
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (audit.get("details") instanceof Map<?, ?> d) {
+            for (var e : d.entrySet()) details.put(String.valueOf(e.getKey()), e.getValue());
+        }
+        if (truncated) {
+            details.put("chashes_truncated", true);
+            details.put("chashes_stored", GC_AUDIT_MAX_CHASHES);
+        }
+
+        boolean dryRun = Boolean.TRUE.equals(audit.get("dry_run"))
+            || "true".equalsIgnoreCase(String.valueOf(audit.get("dry_run")));
+
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.insertInto(GC_AUDIT)
+               .set(GC_AUDIT.TENANT_ID,   tenant)
+               .set(GC_AUDIT.OPERATION,   operation)
+               .set(GC_AUDIT.COLLECTION,  s(audit, "collection", ""))
+               .set(GC_AUDIT.ACTOR,       s(audit, "actor", ""))
+               .set(GC_AUDIT.DRY_RUN,     dryRun)
+               .set(GC_AUDIT.CHASH_COUNT, fullCount)
+               .set(gcAuditChashes(),     jsonbVal(jsonOrNull(stored)))
+               .set(gcAuditDetails(),     jsonbVal(details.isEmpty() ? null : jsonOrNull(details)))
+               .returningResult(GC_AUDIT.ID)
+               .fetchOne()
+               .value1());
+    }
+
+    /**
+     * Read the audit trail, newest first (nexus-jqvzk).
+     *
+     * @param collection optional exact {@code physical_collection} filter
+     * @param operation  optional exact operation filter
+     */
+    public List<Map<String, Object>> listGcAudit(String tenant, String collection,
+                                                  String operation, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition cond = GC_AUDIT.TENANT_ID.eq(tenant);
+            if (collection != null && !collection.isBlank()) cond = cond.and(GC_AUDIT.COLLECTION.eq(collection));
+            if (operation != null && !operation.isBlank())   cond = cond.and(GC_AUDIT.OPERATION.eq(operation));
+            return ctx.select(GC_AUDIT.ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.ACTOR,
+                              GC_AUDIT.DRY_RUN, GC_AUDIT.CHASH_COUNT, gcAuditChashes(), gcAuditDetails(),
+                              GC_AUDIT.CREATED_AT)
+                      .from(GC_AUDIT)
+                      .where(cond)
+                      .orderBy(GC_AUDIT.ID.desc())
+                      .limit(limit <= 0 ? 100 : limit)
+                      .offset(Math.max(offset, 0))
+                      .fetch()
+                      .map(r -> {
+                          Map<String, Object> m = new LinkedHashMap<>();
+                          m.put("id",          r.value1());
+                          m.put("operation",   r.value2());
+                          m.put("collection",  r.value3());
+                          m.put("actor",       r.value4());
+                          m.put("dry_run",     r.value5());
+                          m.put("chash_count", r.value6());
+                          m.put("chashes",     parseJsonList(r.value7()));
+                          m.put("details",     parseJsonMap(r.value8()));
+                          m.put("created_at",  r.value9() != null ? r.value9().toString() : null);
+                          return m;
+                      });
+        });
+    }
+
+    /** jsonb columns read as String so the same MAPPER round-trip as F_DOC_META applies. */
+    private static Field<String> gcAuditChashes() {
+        return DSL.field(DSL.name("gc_audit", "chashes"), String.class);
+    }
+
+    private static Field<String> gcAuditDetails() {
+        return DSL.field(DSL.name("gc_audit", "details"), String.class);
+    }
+
+    private static List<Object> parseJsonList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return MAPPER.readValue(json, new TypeReference<List<Object>>() {});
+        } catch (Exception e) {
+            log.warn("event=gc_audit_chashes_unparseable error={}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static Map<String, Object> parseJsonMap(String json) {
+        if (json == null || json.isBlank()) return Map.of();
+        try {
+            return MAPPER.readValue(json, MAP_TYPE);
+        } catch (Exception e) {
+            log.warn("event=gc_audit_details_unparseable error={}", e.getMessage());
+            return Map.of();
+        }
     }
 
     /**

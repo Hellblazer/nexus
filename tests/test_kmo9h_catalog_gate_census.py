@@ -34,14 +34,24 @@ _SRC = Path(nexus.__file__).parent
 #: Exact allowlist: file (relative to src/nexus) -> occurrence count of
 #: ``Catalog.is_initialized`` (any receiver spelled ``*Catalog``). Every
 #: entry is deliberate:
-#: - catalog/factory.py: the SQLite-branch presence checks INSIDE the
+#: - catalog/factory.py: the SQLite-branch presence check INSIDE the
 #:   factory — the single place presence semantics live (f1itv contract).
+#:   2 -> 1 (nexus-i711w Stage 2 sub-stage C-store): make_catalog_admin held
+#:   the second one and was deleted with the two deep-maintenance verbs it
+#:   served (dedupe-owners, undelete). A SHRINK, caught by this census's own
+#:   exact-equality assert rather than by the author — which is the argument
+#:   for two-sided ledgers over one-sided counts (cf. nexus-th15h).
 #: - catalog/catalog.py: the definition + intra-class uses.
 #: - commands/catalog.py: SQLite-opt-out-only guards (service mode
 #:   bypasses via storage_backend_for / refuses setup divergence).
-#: - commands/catalog_cmds/doctor.py: local-artifact doctor verbs (the
-#:   event log / JSONL / projection ARE local by design) — diagnostics
-#:   routed through _local_artifacts_missing_error for mode honesty.
+#: - commands/catalog_cmds/doctor.py: REMOVED (was 4). The local-artifact
+#:   doctor surface — synthesize-log, _check_bootstrap_status,
+#:   _run_replay_equality, _run_t3_doc_id_coverage — held all four gates and
+#:   was deleted in nexus-i711w Stage 2 sub-stage C-store. The verbs were
+#:   local-only by design (the event log / JSONL / projection ARE local) and
+#:   already refused in service mode; replay-equality has no service meaning
+#:   at all. doctor itself survives with its six service-capable checks and
+#:   now reaches the catalog only through the factory.
 #: - db/collection_purge.py: unreachable in service mode (early return
 #:   at the atomic engine cascade) — verified nexus-e9ru2.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101);
@@ -51,16 +61,13 @@ _SRC = Path(nexus.__file__).parent
 #:   dies at RDR-155 P4b.
 #: - indexer.py: the CORRECT service-aware form (catalog_service_mode
 #:   boolean) — the pattern the sweep normalized everything else to.
-_ALLOWED: dict[str, int] = {
-    "catalog/factory.py": 2,
-    "collection_audit.py": 1,  # sqlite-only branch AFTER the service check (e9ru2)
-    "commands/catalog.py": 2,
-    "commands/catalog_cmds/doctor.py": 4,
-    "db/collection_purge.py": 1,
-    "catalog/synthesizer.py": 1,
-    "db/embed_migrate.py": 1,
-    "indexer.py": 3,
-}
+#: EMPTIED by the nexus-i711w terminal deletion: every allowed site died with
+#: the local catalog (factory SQLite leg, collection_audit else-leg, the
+#: init/setup verbs, collection_purge local leg, synthesizer, embed_migrate's
+#: handle, indexer's three gates). Kept as an empty two-sided tombstone pin:
+#: the Catalog class no longer exists, so ANY new ``Catalog.is_initialized``
+#: is a reintroduction and fails this census. Delete the file at Stage 4/5.
+_ALLOWED: dict[str, int] = {}
 
 #: Matches ``Catalog.is_initialized`` including aliased imports
 #: (``_Catalog.is_initialized``); comment-only lines are skipped so prose
@@ -98,18 +105,15 @@ def test_is_initialized_census_is_closed():
 #: factory entirely — the pre-fix ``document_aspects._resolve_doc_id``
 #: shape, which read the FROZEN migration-source catalog on migrated
 #: service-mode boxes with no gate at all. Allowed sites:
-#: - daemon/t2_daemon.py: the T2 daemon IS the local single-writer that
-#:   CatalogWriter proxies to in SQLite mode — local by definition.
+#: (daemon/t2_daemon.py held one — the T2 daemon WAS the local single-writer
+#: CatalogWriter proxied to in SQLite mode. Removed with the daemon in
+#: nexus-i711w Stage 2 sub-stage B. DOWNWARD-only edit.)
 #: - db/collection_purge.py: local-mode fan-out branch only (service mode
 #:   returns earlier at the atomic engine cascade — verified nexus-e9ru2).
 #: - db/embed_migrate.py: Chroma-era tool on frozen sources; dies at P4b.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101).
-_RAW_ALLOWED: dict[str, int] = {
-    "daemon/t2_daemon.py": 1,
-    "db/collection_purge.py": 1,
-    "db/embed_migrate.py": 1,
-    "catalog/synthesizer.py": 1,
-}
+#: EMPTIED by the nexus-i711w terminal deletion (see _ALLOWED above).
+_RAW_ALLOWED: dict[str, int] = {}
 
 _RAW_PATTERN = re.compile(r"Catalog\(\s*\w+,\s*\w+\s*/\s*\"\.catalog\.db\"")
 
@@ -143,8 +147,11 @@ def test_raw_catalog_construction_census_is_closed():
 
 
 class _Entry:
-    def __init__(self, tumbler: str) -> None:
+    def __init__(self, tumbler: str, *, content_type: str = "knowledge",
+                 file_path: str = "") -> None:
         self.tumbler = tumbler
+        self.content_type = content_type
+        self.file_path = file_path
 
 
 class _FakeHttpCatalogClient:
@@ -159,6 +166,21 @@ class _FakeHttpCatalogClient:
 
     def by_doc_id(self, doc_id):
         return self.by_doc_id_map.get(doc_id)
+
+    def docs_for_chashes(self, chashes):
+        # nexus-5axey: the reap's chash-appropriate lookup. Keyed the same
+        # as by_doc_id_map here since this fake seeds one entry per chash.
+        return {
+            chash: [self.by_doc_id_map[chash].tumbler]
+            for chash in chashes
+            if chash in self.by_doc_id_map
+        }
+
+    def resolve(self, tumbler):
+        for entry in self.by_doc_id_map.values():
+            if entry.tumbler == tumbler:
+                return entry
+        return None
 
     def lookup_doc_id_by_collection_and_path(self, collection, source_path):
         return f"resolved:{collection}:{source_path}"
@@ -212,20 +234,16 @@ def test_catalog_writer_helper_no_false_setup_error(service_mode_fresh_box):
         writer.close()
 
 
-def test_document_aspects_identity_probe_routes_service(service_mode_fresh_box):
-    """Pre-fix: _resolve_doc_id opened the LOCAL catalog directly — frozen
-    (stale) reads on migrated boxes, silent skip on fresh ones."""
-    from nexus.db.t2.document_aspects import _resolve_doc_id
-
-    class _Record:
-        collection = "docs__x__bge-base-en-v15-768__v1"
-        source_path = "notes/a.md"
-        source_uri = ""
-
-    assert (
-        _resolve_doc_id(_Record())
-        == "resolved:docs__x__bge-base-en-v15-768__v1:notes/a.md"
-    )
+# test_document_aspects_identity_probe_routes_service DELETED (nexus-i711w
+# Stage 2 sub-stage A3): its subject was ``document_aspects._resolve_doc_id``
+# — the SQLite DocumentAspects.upsert's catalog identity probe, whose kmo9h
+# fix routed it through the factory instead of the frozen local catalog. The
+# store (and the probe) died with the SQLite substrate; the Http store sends
+# ``record.doc_id`` verbatim and the surviving client-side resolution lives
+# in aspect_worker (``lookup_doc_id_by_collection_and_path`` via the
+# factory-routed reader, tests/test_aspect_worker.py). The class-B census
+# above (`test_raw_catalog_construction_census_is_closed`) still tripwires
+# the raw-local-Catalog shape this test existed to prevent.
 
 
 def test_catalog_setup_refuses_divergence_in_service_mode(
@@ -243,19 +261,6 @@ def test_catalog_setup_refuses_divergence_in_service_mode(
     assert not service_mode_fresh_box.exists(), (
         "setup must not have created a local catalog dir in service mode"
     )
-
-
-def test_doctor_uninitialized_message_is_mode_honest(tmp_path, monkeypatch):
-    from nexus.commands.catalog_cmds.doctor import _local_artifacts_missing_error
-
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-    msg = _local_artifacts_missing_error(tmp_path).message
-    assert "Do NOT run 'nx catalog setup'" in msg
-    assert "owned by the nexus service" in msg
-
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-    msg = _local_artifacts_missing_error(tmp_path).message
-    assert "Run 'nx catalog setup' first" in msg
 
 
 def test_audit_render_distinguishes_skipped_from_clean():

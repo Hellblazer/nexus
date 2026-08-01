@@ -14,19 +14,40 @@ Conservative: a non-empty unreferenced collection is preserved
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
 
 class TestCollectionGCCli:
+    """``nx catalog collection-gc`` over LOCAL, INJECTED artifacts.
+
+    nexus-aqbrk: PINNED. Every test here patches ``nexus.db.make_t3`` to a
+    local EphemeralClient T3 (it has to — the subject is zombie collections,
+    which the test must be able to create) and seeds a real local Catalog.
+    Under the engine substrate the catalog half diverged: the seed went to
+    the local .catalog.db while the CLI's ``_get_catalog()`` read the SERVICE
+    catalog, and the writes died on the frozen-migration-source invariant —
+    ``sqlite3.OperationalError: attempt to write a readonly database``.
+
+    Pinning the catalog makes both halves local again, matching the T3
+    injection the test already required. Converting instead would leave a
+    local T3 reconciled against a service catalog, which is neither the
+    production shape nor a coherent test.
+
+    NO SERVICE COVERAGE IS LOST, and that is checked rather than asserted:
+    the verb's only substrate-touching operations are ``list_collections``
+    and ``distinct_doc_collections``, BOTH parity-registered in
+    tests/catalog/test_shape_parity_tripwire.py. Everything else in
+    ``collection_gc_cmd`` is set arithmetic over collection names, which is
+    substrate-independent by construction.
+    """
+
     @pytest.fixture()
     def runner(self) -> CliRunner:
         return CliRunner()
@@ -49,18 +70,16 @@ class TestCollectionGCCli:
         )
 
     @pytest.fixture()
-    def catalog_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> Catalog:
-        catalog_dir = tmp_path / "catalog"
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        Catalog.init(catalog_dir)
-        return Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    def catalog_env(self) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: seeding routes through the ACTIVE
+        # (service) catalog; the local Catalog.init seeding died with
+        # nexus.catalog.catalog and ActiveCatalog needs no local init.
+        return ActiveCatalog()
 
     def _seed(
         self,
         t3_db: T3Database,
-        catalog: Catalog,
+        catalog: ActiveCatalog,
         monkeypatch: pytest.MonkeyPatch,
         *,
         zombie_collections: list[str],
@@ -203,16 +222,15 @@ class TestCollectionGCCli:
         # Seed an empty T3 collection AND a documents row referencing it.
         empty_referenced = "rdr__doc-referenced__voyage-context-3__v1"
         t3_db._client.get_or_create_collection(empty_referenced)
-        # Direct insert into documents to skip the register flow.
-        catalog_env._db.execute(  # epsilon-allow: gc test fixture seeds an orphaned documents row to verify the document-reference protection guard
-            "INSERT INTO documents "
-            "(tumbler, title, author, year, content_type, file_path, "
-            " corpus, physical_collection, chunk_count, head_hash, "
-            " indexed_at, source_uri, alias_of) "
-            "VALUES (?, '', '', 0, 'paper', '', '', ?, 0, '', '', '', '')",
-            ("9.9.9", empty_referenced),
+        # Register a document referencing the collection. Was a raw INSERT at a
+        # pinned tumbler "to skip the register flow"; the assertion only needs
+        # SOME document row pointing at empty_referenced, and register() is the
+        # path that exists on both substrates (nexus-i711w C-store).
+        owner = catalog_env.register_owner("gc-protect", "repo", repo_hash="gcp")
+        catalog_env.register(
+            owner, "protected", content_type="paper",
+            file_path="protected.md", physical_collection=empty_referenced,
         )
-        catalog_env._db.commit()
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
 
         result = runner.invoke(main, ["catalog", "collection-gc", "--apply"])

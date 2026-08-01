@@ -34,7 +34,7 @@ import pytest
 
 # The src/nexus/daemon/ modules RDR-152 Phase 4 (gmiaf.24) deletes.
 _P4_DELETE_SET = frozenset({
-    "t2_daemon", "t3_daemon", "discovery", "spin_guard",
+    "t2_daemon", "discovery", "spin_guard",
     "t1_lease", "t2_client", "catalog_write_shim",
 })
 

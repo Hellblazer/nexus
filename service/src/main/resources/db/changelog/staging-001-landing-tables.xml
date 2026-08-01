@@ -245,7 +245,19 @@ BEGIN
     END LOOP;
 END $$;
         </sql>
+        <!-- splitStatements="false" is LOAD-BEARING and was missing here.
+             As raw <rollback> text this body was split on ';' — including the
+             ';' inside the DECLARE section — so PostgreSQL received the
+             fragment `DO $$ DECLARE rel RECORD` and failed with "Unterminated
+             dollar quote started at position 3". That took out the whole
+             rollback chain six positions before it reached the v0.1.57 FTS
+             changesets, which is how it was found (2026-07-27, verifying
+             whether 0.1.56 was still a rollback target). The forward <sql>
+             above always had the attribute; only the rollback lacked it, so
+             the defect was invisible on every deploy and fatal on the one
+             path an incident response would actually use. -->
         <rollback>
+            <sql splitStatements="false" stripComments="false">
 DO $$
 DECLARE
     rel RECORD;
@@ -264,6 +276,7 @@ BEGIN
     END LOOP;
     REVOKE USAGE ON SCHEMA staging FROM nexus_svc;
 END $$;
+            </sql>
         </rollback>
     </changeSet>
 

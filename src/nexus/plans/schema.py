@@ -28,15 +28,64 @@ import logging
 from typing import Any
 
 __all__ = [
+    "TYPED_BINDING_DOMAINS",
+    "TYPED_FILTER_BINDINGS",
     "PlanTemplateDuplicateError",
     "PlanTemplateLoader",
     "PlanTemplateSchemaError",
     "canonical_dimensions_json",
+    "unsatisfiable_typed_binding",
     "validate_plan_steps",
     "validate_plan_template",
 ]
 
 _log = logging.getLogger(__name__)
+
+#: Plan bindings whose domain is enumerated or numeric rather than free
+#: text — catalog metadata filters and retrieval knobs. There is no
+#: defensible way to derive one from a question string: ``content_type``
+#: accepts ``code`` / ``paper`` / ``rdr`` / ``knowledge``, so a
+#: 90-character sentence matches no document at all (observed 2026-07-25
+#: on builtin plan 14, which returned zero results while the identical
+#: query with no ``content_type`` returned the correct paper as its top
+#: hit). Lives here rather than in ``nexus.mcp.core`` so the matcher can
+#: consult it without importing the MCP layer.
+TYPED_FILTER_BINDINGS: frozenset[str] = frozenset({
+    "content_type", "author", "subtree", "year",
+    "corpus", "collection", "follow_links", "depth", "limit",
+})
+
+#: Legal values for the typed bindings with a small closed domain,
+#: surfaced in errors so a caller knows what a satisfying value is.
+TYPED_BINDING_DOMAINS: dict[str, str] = {
+    # NOT a closed domain — the live catalog also carries prose,
+    # blog_post and others, and grows as new content is indexed. Phrased
+    # as examples so the hint cannot become quietly wrong.
+    "content_type": "a catalog content type, e.g. code / prose / rdr / paper / knowledge",
+    "year": "a four-digit year",
+    "depth": "a positive integer",
+    "limit": "a positive integer",
+}
+
+
+def unsatisfiable_typed_binding(
+    *,
+    required: list[str],
+    defaults: dict[str, Any] | None,
+    available: frozenset[str],
+) -> str | None:
+    """Return the first typed binding nothing can supply, else ``None``.
+
+    A binding is satisfiable when the caller supplies it or the plan
+    carries a default for it. Free-text bindings are always satisfiable —
+    ``nx_answer`` aliases them from the question text — so only members of
+    :data:`TYPED_FILTER_BINDINGS` can make a plan unrunnable.
+    """
+    have = defaults or {}
+    for req in required:
+        if req in TYPED_FILTER_BINDINGS and req not in available and req not in have:
+            return req
+    return None
 
 
 # ── Canonical-JSON primitive (P4c) ──────────────────────────────────────────

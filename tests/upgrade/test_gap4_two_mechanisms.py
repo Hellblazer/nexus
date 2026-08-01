@@ -344,35 +344,31 @@ def test_rung_convergence_is_re_derived_live_never_cached() -> None:
     are inert inputs a live computation interprets; the answer tracks the
     world in both directions exactly as this test demands).
     """
-    from nexus.migration.detection import CollectionClassification  # noqa: PLC0415 — test-local fixture construction
-    from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung  # noqa: PLC0415 — test-local fixture construction
+    # RDR-155 P4b re-ground: the substrate-etl rung died with the migration
+    # machinery; the surviving chash-rekey rung carries the same
+    # level-triggered contract — detect() reads the LIVE store probes, never
+    # a remembered verdict.
+    from nexus.upgrade_ladder.rungs.chash_rekey import ChashRekeyRung  # noqa: PLC0415 — test-local fixture construction
 
-    legacy = CollectionClassification(
-        collection="knowledge__old", leg="local", model="voyage-context-3",
-        dim=1024, support="supported-voyage-1024", source_count=10,
-        has_data=True, legacy_ids=True,
-    )
-    world = {"target_rows": 0}
-    rung = SubstrateEtlRung(
-        footprint_fn=lambda: True,
-        classify_fn=lambda: [legacy],
-        voyage_key_fn=lambda: True,
-        target_counts_fn=lambda: {"knowledge__old": world["target_rows"]},
-        unreflected_fn=lambda: [],
-        cascade_only_fn=lambda _r: "",
-        # Pin the membership seam like every other rung test (critic-146xx-7
-        # hygiene): None = could-not-tell, so count-equality alone drives
-        # this test's world-tracking assertions — no engine construction.
-        membership_fn=lambda _s, _t: None,
+    world = {"nonconformant": 5, "validated": False}
+    rung = ChashRekeyRung(
+        rekey_fn=lambda _policy: {},
+        detect_probe_fn=lambda: world["nonconformant"],
+        validated_probe_fn=lambda: world["validated"],
+        applicable_fn=lambda: True,
     )
 
-    assert rung.detect().pending is True, "nothing migrated yet — must read pending"
-    world["target_rows"] = 10  # the world converges underneath the rung
+    assert rung.detect().pending is True, "nothing rekeyed yet — must read pending"
+    world["nonconformant"] = 0  # the world converges underneath the rung
+    world["validated"] = True
     assert rung.detect().pending is False, (
         "the rung answered from a remembered verdict, not the live world — a "
         "cached convergence fact is the Gap-4 third mechanism"
     )
-    world["target_rows"] = 0  # ...and regresses (a rollback, a dropped target)
+    # ...and regresses (constraints dropped, legacy rows re-appear): the
+    # validated marker is store DATA, so a regressed world un-validates.
+    world["nonconformant"] = 3
+    world["validated"] = False
     assert rung.detect().pending is True, (
         "the rung kept saying converged after the world stopped being — "
         "level-triggered reconciliation means the answer follows the world "

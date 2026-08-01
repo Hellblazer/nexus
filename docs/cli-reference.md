@@ -113,7 +113,7 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
-| `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
+| `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
 
 ### PDF Extraction Backends
@@ -523,23 +523,25 @@ Day 2 Ops: remove a single aspect row. Use when re-indexing a document with a co
 ### nx enrich aspects-promote-field
 
 ```
-nx enrich aspects-promote-field NAME [--type {TEXT|INTEGER|REAL}] [--prune] [--history]
+nx enrich aspects-promote-field [--history]
 ```
 
-Promote a recurring `extras.<name>` key into a fixed column on `document_aspects` (RDR-089 Phase E). Three-phase mechanic:
+Show the `extras` -> fixed-column promotion history (RDR-089 Phase E).
 
-1. `ALTER TABLE document_aspects ADD COLUMN <name> <type>` (idempotent — re-running on an already-promoted field is a no-op).
-2. Backfill: copy the value of `extras.<name>` into the new column for every existing row via `json_extract`.
-3. (Optional) `--prune` removes the `extras.<name>` key after backfill so the source of truth is the new column.
+**The runtime promotion verb is retired** (nexus-70x7y, 2026-07-25). It ran an `ALTER TABLE` + backfill directly against SQLite; under the ALL-DDL-through-Liquibase directive there is no substrate where that is legal, so it was deleted rather than reimplemented service-side. Invoking the command with a field name prints the replacement recipe and exits 2.
 
-The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. `--history` lists past promotions instead of running a new one. Reserved names (the 12 RDR-locked column names) and unsafe identifiers (digit prefix, hyphen, quote, semicolon, SQL-injection patterns, empty) are rejected before any DDL runs.
+Promoting `extras.<name>` is now ONE Liquibase changeset that does all three phases together:
+
+1. `ALTER TABLE nexus.document_aspects ADD COLUMN <name> <TYPE>;`
+2. `UPDATE nexus.document_aspects SET <name> = extras->>'<name>' WHERE <name> IS NULL AND extras ? '<name>';`
+3. `INSERT` the promotion event into `nexus.aspect_promotion_log`, so `--history` still reports it.
+
+The optional extras prune (`SET extras = extras - '<name>'`) is a **separate, later** changeset — run it only once every reader consumes the typed column, preserving the dual-read cutover. Record it with `pruned = 1`. The full changeset template lives in `src/nexus/aspect_promotion.py`.
 
 | Flag | Description |
 |------|-------------|
-| `NAME` (positional) | The `extras.<name>` key to promote into a fixed column. Validated against an alphanumeric+underscore identifier rule |
-| `--type {TEXT|INTEGER|REAL}` | SQL column type. Default `TEXT`. `BLOB`, `JSON`, and other types are rejected |
-| `--prune` | After backfill, remove the `extras.<name>` key from every row. Use when the new column should replace the extras key as the source of truth. **Destructive** — re-running with `--prune` after data has been written to the new column has no effect, but rolling back requires reverting the schema change manually |
-| `--history` | List prior promotions from the audit log instead of running a new promotion |
+| `--history` | List prior promotions from `aspect_promotion_log`, oldest first. Reads whichever `document_aspects` backend is configured: the local table on SQLite, `GET /v1/aspects/promotion/list` on the service backend |
+| `FIELD_NAME` (positional, optional) | Accepted for compatibility with the retired form. Supplying it prints the changeset recipe and exits 2 |
 
 ---
 
@@ -594,29 +596,19 @@ Idempotent; safe on a missing table or empty database. Dry-run by default; `--ap
 
 Document catalog — track indexed documents and the relationships between them.
 
-### nx catalog setup
+### nx catalog setup / init (retired)
 
 ```
-nx catalog setup [--remote URL]
+nx catalog setup      # refuses with guidance
+nx catalog init       # refuses with guidance
 ```
 
-One-command onboarding: creates the catalog, populates from existing T3 collections and repos, generates links. Run once after installing or upgrading. Warns if no git remote is configured (cloud users should add one for durability).
-
-On a new machine with an existing catalog remote: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog.
-
-**Service mode (the default): this command refuses.** The nexus service owns
-the live catalog — `nx catalog search` / `nx catalog links` already work
-against it with nothing to set up, and creating a local catalog here would
-build a divergent store the service never reads (nexus-kmo9h). The command
-applies only to the SQLite opt-out mode (`NX_STORAGE_BACKEND_CATALOG=sqlite`).
-
-### nx catalog init
-
-```
-nx catalog init [--remote URL]
-```
-
-Low-level primitive: initialize the catalog git repository at the config-dir catalog path, without populating it. `nx catalog setup` (init + populate + link) is the normal onboarding path; use `init` only when you want an empty catalog deliberately. Same service-mode caveat as `setup`: a local catalog created here is a divergent store the service never reads.
+**Retired in 7.0.0 (nexus-i711w).** The nexus service owns the catalog in
+every mode and documents are registered automatically at index/store time —
+there is nothing to initialize or set up. Both verbs remain as guided
+refusals so old scripts fail with an explanation instead of a usage error.
+The local SQLite catalog (and the `NX_STORAGE_BACKEND_CATALOG=sqlite`
+opt-out these verbs served) no longer exists.
 
 ### nx catalog search
 
@@ -652,6 +644,8 @@ Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `
 
 Span formats: `line-line` (positional), `chunk:char-char` (positional), `chash:<sha256hex>` (whole chunk, content-addressed), or `chash:<sha256hex>:<start>-<end>` (character range within a chunk). Content-hash spans survive re-indexing; positional spans may become stale.
 
+**Dangling endpoints are refused** (engine >= v0.1.61, nexus-9ssih): if either `FROM` or `TO` does not resolve to a live catalog document, the engine returns `400 {"code": "dangling_endpoint", ...}` and the CLI surfaces a clean `ValueError`-derived message naming both endpoints — no edge is written. Older engines that don't emit this code accept the link silently, same as before. `allow_dangling=True` bypasses the refusal but is **Python-API-only** (`HttpCatalogClient.link(..., allow_dangling=True)`) — the CLI `nx catalog link` command has no `--allow-dangling` flag.
+
 ### nx catalog unlink
 
 ```
@@ -660,14 +654,22 @@ nx catalog unlink FROM TO [--type TYPE]
 
 Remove link(s). Omit `--type` to remove all link types between the pair.
 
-### nx catalog sync / pull
+### nx catalog sync / pull (retired)
 
 ```
-nx catalog sync [-m MESSAGE]     # commit JSONL changes + push to remote (if configured)
-nx catalog pull                  # pull from remote + rebuild SQLite
+nx catalog sync [-m MESSAGE]     # refuses with guidance
+nx catalog pull                  # refuses with guidance
 ```
 
-`sync` is called automatically at session close (via the Stop hook) when JSONL files have changed. Manual use is rarely needed.
+**Retired in 7.0.0 (catalog-git-DECISION Option C).** The nexus service's
+Postgres is the sole catalog authority in every mode — every write already
+lands there, so there is nothing to commit, push, or pull. Both verbs remain
+as guided refusals (`click.ClickException`, no traceback) so an interactive
+caller or old script sees an explanation instead of an uncaught
+`NotImplementedError`. (Callers that suppress output, like the session-close
+Stop hook's best-effort `|| true` invocation, still exit non-zero silently —
+same as before, minus the buried traceback.) The git-backed JSONL durability
+layer these verbs served no longer exists.
 
 ### nx catalog reconcile
 
@@ -794,21 +796,16 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot restorable via `nx catalog undelete`.
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). **Not reversible in-product**: the pre-delete JSONL backup snapshots died with the local catalog in 7.0.0 (nexus-i711w).
 
-### nx catalog list-backups / undelete / vacuum-backups
+### nx catalog list-backups / vacuum-backups (removed)
 
-```
-nx catalog list-backups
-nx catalog undelete BACKUP
-nx catalog vacuum-backups [--older-than-days N] [--no-dry-run]
-```
-
-Lifecycle verbs over the JSONL snapshots that destructive catalog verbs (`delete`, `gc`, `prune-stale`, `link-bulk-delete`) write under `$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` BEFORE deleting (RDR-106).
-
-- `list-backups` shows each recoverable snapshot: filename, originating verb, timestamp, row count, reason.
-- `undelete BACKUP` restores the documents (and their inbound/outbound links) from a snapshot. `BACKUP` is a filename inside `.deleted-backups/` or an absolute path. Documents are restored with their ORIGINAL tumblers (the minting path is bypassed) as `DocumentRegistered` events, links via idempotent `link_if_absent`; re-running on an already-restored backup is a no-op.
-- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes. Vacuumed rows are no longer recoverable via `undelete`.
+Removed in 7.0.0 (nexus-i711w) together with the RDR-106 pre-delete JSONL
+snapshot machinery: snapshots were written by the LOCAL catalog, which no
+longer exists. Historical snapshots under
+`$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` remain plain JSONL you can
+inspect by hand. Treat the destructive catalog verbs (`delete`, `gc`,
+`prune-stale`, `link-bulk-delete`) as **not reversible in-product**.
 
 ### nx catalog remediate-paths
 
@@ -832,7 +829,7 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
 ```
 
-Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes an `undelete`-restorable backup snapshot before deleting.
+Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -846,23 +843,27 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 
 ### nx catalog list / stats / owners / delete
 
-Standard catalog management. Run `nx catalog COMMAND --help` for details.
-
-### nx catalog dedupe-owners
-
 ```
-nx catalog dedupe-owners [--apply] [--json]
+nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [-n/--limit N] [--offset N] [--json]
 ```
 
-Consolidate orphan owners (nexus-tmbh). Classifies each curator owner as `alias` (synthetic `<repo>-<hash>` names mapping to a canonical repo owner: each doc is aliased via `documents.alias_of`, matched by file_path; rows stay so external references keep resolving), `remove` (`int-cce-*` / `int-prov-*` / `pdf-e2e-*` test leakage predating RDR-060's autouse fixture; documents, links, and the owner row deleted with JSONL tombstones), or `skip` (everything else, manual review). Dry-run by default; `--apply` commits, then `nx catalog sync` pushes the audit trail. `--json` emits the full plan.
+| Flag | Description |
+|------|-------------|
+| `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); ambiguous names across multiple owners raise a clean error naming the candidates |
+| `--type` | Filter to a `content_type` (e.g. `code`, `rdr`, `knowledge`) |
+| `-n`, `--limit` | Page size. Default `50`. **Server-side cap (nexus-xoimv)** — the underlying query is limited at the source, not truncated client-side after a full fetch |
+| `--offset` | Skip this many entries (pagination) |
+| `--json` | Emit entries as a JSON array instead of text rows |
 
-### nx catalog backfill-owner-id
+The `Next page: --offset N` hint printed when more rows exist means "more entries exist beyond this page," not a total count — `--limit` bounds what the server returns, so the total catalog size is not implied by a single page.
 
-```
-nx catalog backfill-owner-id [--no-dry-run] [--no-from-documents]
-```
+`stats`, `owners`, and `delete` remain standard catalog management. Run `nx catalog COMMAND --help` for details.
 
-One-time RDR-137 P1.5a migration: populate `collections.owner_id` for rows where it is empty. The store's auto-migration already handles conformant four-segment names on every DB open; this verb adds the documents-table fallback that recovers `owner_id` for legacy 2-segment names (e.g. `knowledge__delos`) by inferring the owner from documents physically registered against the collection. Ambiguous rows (documents from multiple owners) are skipped with a warning. Report-only by default. SQLite-only: refuses in service mode; run it locally before switching.
+### nx catalog backfill-owner-id (removed)
+
+Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
+through a raw SQLite handle on the local catalog, which no longer exists;
+it already refused in service mode, now the only mode.
 
 ### nx catalog backfill-collections
 
@@ -896,16 +897,6 @@ nx catalog collection-gc [--apply]
 
 Sweep zombie T3 collections, the junkyard pattern flagged by `nx catalog doctor --collections-drift`: collections pre-created by an interrupted index or deleted worktree (`get_or_create_collection`) that never received a chunk. Conservative: a collection is deleted only when it has 0 chunks AND is not in the collections projection AND is not referenced by any `documents.physical_collection` row AND is not bypass-schema (`taxonomy__*`). Dry-run by default; `--apply` deletes. Stale projection rows (row exists, T3 collection gone) are NOT handled here (the event log is append-only), so those need an explicit `supersede_collection`; use the recipe printed by `nx catalog doctor --collections-drift`.
 
-### nx catalog chash-reconcile
-
-```
-nx catalog chash-reconcile [--apply]
-```
-
-Sweep stale rows from the LOCAL SQLite `chash_index`, the routing table that resolves `chash:<hex>` link spans to their (collection, chunk). Rows are not cascaded when a collection is deleted from T3, so they linger as ghosts pointing at non-existent collections. Dry-run by default; `--apply` deletes; reports per-ghost-collection row counts.
-
-Scope (RDR-187): meaningful only on pre-migration installs whose SQLite router still routes. On a migrated (service-mode) install there is no local router to sweep: the verb exits at the "No T2 db" guard, and server-side the question "which collections hold chunks" is answered from the chunks tables themselves, which cannot go stale.
-
 ### nx catalog rename-collection
 
 ```
@@ -922,6 +913,14 @@ Validation gates fire BEFORE any side effect:
 
 Default is report-only; both `--no-dry-run` AND `--yes` are required to actually rename.
 
+The old name survives the rename as a **superseded tombstone**: its projection row
+stays, carrying `superseded_by` = the new name and a `superseded_at` timestamp, so a
+rename remains auditable after the fact. It holds no chunks or documents (everything
+re-homes onto the new name) and `superseded_by` keeps it out of collection-for-tuple
+resolution, so it can never be picked as a write target. Renaming *back* onto a
+tombstoned name revives it. Before 7.0.0 the row was deleted instead, which silently
+discarded the rename's history (nexus-cecqy).
+
 ### nx catalog migrate-fallback
 
 ```
@@ -937,16 +936,15 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ### nx catalog doctor
 
 ```
-nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift]
-                  [--strict-not-in-t3] [--chunk-size-distribution] [--chunk-text-dedup]
+nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
-- `--replay-equality`: synthesizer + projector round-trip against live SQLite (Phase 1).
-- `--t3-doc-id-coverage`: every non-orphan T3 chunk carries a `doc_id` matching the event log (Phase 2).
+
+> `--replay-equality`, `--t3-doc-id-coverage` and `--strict-not-in-t3` were removed in 7.0.0. All three read their expectations out of the local `events.jsonl`, and replay-equality diffed a projection rebuilt from it against the local `.catalog.db` — artifacts that do not exist in service mode, where the catalog is owned by the nexus service. They already refused there; they are now gone along with the local catalog.
+
 - `--collections-drift`: every T3 collection and every distinct `documents.physical_collection` has a row in the collections projection (Phase 6 release gate).
-- `--strict-not-in-t3` (modifier for `--t3-doc-id-coverage`): treat "event log claims a chunk T3 doesn't have" as a hard failure instead of a warning (warning is the default so legitimate deletions don't permanently red the doctor).
 - `--chunk-size-distribution`: per-collection chunk-size stats (p50/p95/p99/max); FAIL on any chunk over `MAX_DOCUMENT_BYTES`, WARN when >5% of chunks are micro-chunks (<100 bytes).
 - `--chunk-text-dedup`: chunk-text-hash duplication ratios — within-collection dupes >5% signal a chunker bug; >100 cross-collection dupes flag a cross-ingest investigation lead.
 - `--t3-vs-catalog`: projection-vs-T3 triage — T3 collections with no catalog documents (orphan), projected collections with 0 chunks (zombie), and catalog documents whose `physical_collection` is gone from T3.
@@ -964,20 +962,6 @@ nx catalog verify [--collection NAME] [--heal] [--json]
 Reconcile catalog tumblers against their T3 collections: reports *ghost* tumblers, catalog entries whose `meta.doc_id` has no matching row in T3. Ghosts most commonly survive from 4.9.7/4.9.8 installs where an oversize `store_put` silently truncated before the #244 guard landed; fresh writes cannot create new ones. The sweep is cheap (one batched id-existence probe per 300-id page; no ANN, no payload). Entries without a `doc_id` are skipped as unverifiable.
 
 `--heal` enters an interactive loop per ghost: drop the tumbler, print the `nx store put` template that would repopulate it, skip, or quit. `--json` emits a machine-parseable `{collection: [{tumbler, title, doc_id}]}` map on stdout (CI-friendly). Collections that cannot be read are reported to stderr as SKIPPED, never silently folded in as "all ghosts" or "no ghosts" (nexus-ou4tb), and the exit code marks the verify incomplete.
-
-### nx catalog synthesize-log
-
-```
-nx catalog synthesize-log [--check] [--dry-run] [--no-verify] [--force]
-```
-
-Rebuild `events.jsonl` from the catalog's JSONL state in place: the companion to `nx catalog doctor` for catalogs stuck in bootstrap-fallback mode (sparse event log vs `documents.jsonl`). The lossless alternative to `rm -rf catalog && nx catalog setup`, which would discard user-authored typed links and owner registrations (not reconstructible from T3 alone).
-
-- `--check`: detect fallback mode without writing; exit 0 when healthy, 1 when fallback is active.
-- Default run is a no-op unless fallback is active; `--force` synthesizes anyway, harvesting existing event-log doc_ids first so T3 chunk metadata referencing them does not go stale.
-- `--dry-run`: print per-event-type counts, write nothing.
-
-Safety: snapshots the entire catalog directory to a sibling before writing (retained even on PASS, for forensics), writes atomically (tmp + fsync + rename), then verifies via the doctor's replay-equality check. On verify FAIL the failed state is rotated aside and the snapshot restored; three artifacts remain for forensics. `--no-verify` skips the verification (only when you have verified independently).
 
 ### nx catalog orphan-backfill
 
@@ -1005,13 +989,28 @@ Owner resolution: `--owner` overrides; otherwise the owner is looked up from the
 
 T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
 
-### nx t3 prune-stale
+### nx t3 prune-stale — RETIRED in 7.0.0
+
+Exits with an error explaining what to run instead. It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
+
+Use the catalog-native pipeline:
 
 ```
-nx t3 prune-stale [-c COLLECTION] [--no-dry-run --confirm]
+nx catalog prune-stale [--collection COLLECTION] --no-dry-run --confirm   # drop stale documents
+nx t3 gc -c COLLECTION --no-dry-run --yes                                 # collect their chunks
 ```
 
-Sweep T3 chunks whose `source_path` is missing from disk. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete.
+Note the flags differ: `nx catalog prune-stale` takes `--collection` (no short form); `nx t3 gc` takes `-c`/`--collection` and **requires** it.
+
+Prune first, GC second. Deleting chunks while their document still references them leaves the dangling manifest `nx doctor` flags (nexus-5xn3k).
+
+`nx t3 gc` **requires** `-c` (the orphan diff is per-collection), so the retired verb's sweep-every-collection mode has no direct replacement — `nx catalog prune-stale` does take all collections, but the GC half must be looped per collection:
+
+```
+nx collection list | awk '{print $1}' | xargs -I{} nx t3 gc -c {} --no-dry-run --yes
+```
+
+(`nx collection list` is the collection enumerator; `nx catalog list` lists *documents* and emits no collection name.) Tracked as `nexus-iitif`.
 
 ### nx t3 gc
 
@@ -1256,6 +1255,8 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | `-y` / `--yes` | Skip confirmation prompt |
 
 Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180; pre-cohort 32-hex IDs resolve via the permanent `chash_alias` route). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+
+Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. This reap is chash-keyed and best-effort: when a chash's `docs_for_chashes` lookup resolves to more than one candidate catalog document, the match is ambiguous and is deliberately left alone — nothing is guessed, and the ghost row waits for `nx catalog gc` rather than risking a wrong reap (nexus-5axey).
 
 **`get` flags:**
 
@@ -1760,13 +1761,13 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary (as of 6.16.0 an optional-accelerator advisory — missing rg renders install hints, never a failed doctor; hybrid search is simply disabled), git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud / Voyage credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE` / `VOYAGE_API_KEY`) are informational only as of 6.13.1: they describe migration-source config (read by the legacy-store ETL, not by serving) and are never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. Any install with no Chroma keys is healthy; a missing migration-source credential surfaces from the migration command itself.
+Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, and the service bge-768 model in local-service mode. Then: Voyage AI key, ripgrep binary (as of 6.16.0 an optional-accelerator advisory — missing rg renders install hints, never a failed doctor; hybrid search is simply disabled), git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
 
-Migration-health checks (RDR-178): the newest `<config>/migration-reports/migration-*.json` is read and doctor fails loud (fatal) when `summary.total_failed > 0` or the recorded verification verdict is `mismatch`/`indeterminate` — with the report path, per-store failure counts, and a re-run suggestion (`nx storage migrate all --verify-fill`). A legacy report written by pre-6.2 tooling (no verification key at all) with zero failures is a non-fatal WARN, not a failure. Once the newest report records a cloud `target.service_url`, a write-divergence check warns (non-fatal) when `memory.db`'s freshest local write postdates the report's `completed_at` — local writes have landed after the cloud cutover and are not in the cloud tier.
+Migration-report checks retired (RDR-155 P4b): the RDR-178 migration-report / write-divergence doctor rows died with the migration machinery; `<config>/migration-reports/*.json` files on disk remain as inert audit artifacts.
 
 Orchestration-hook plugin floor (nexus-3xg21): a soft-warn row checks Claude Code's `installed_plugins.json` for the conexus plugin version — a plugin older than v6.14.0 carries no RDR-184 orchestration hooks (no subagent stop-guard, no expectations ledger) and doctor says so with `/plugin update conexus` as the fix. A box with no plugin install shows a not-applicable pass.
 
-Stranded-install check (nexus-gynt2): a doctor row (`Stranded pre-PG install`) guards the post-Chroma-deletion era. On every migration-capable release it reports `detector disarmed — this release ships the migration tool` and does nothing. On the future release that removes the migration tool (RDR-155 P4b), a box still carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`, or `catalog/.catalog.db` present with no verified migration report) fails doctor fatally with the two-hop instruction: install the pinned last migration-capable release, run `nx upgrade` there (the ladder converges the data migration), then upgrade back. The same detection also refuses `nx init`, banners every CLI invocation on such a box, and surfaces through both MCP servers' `instructions` channel at startup.
+Stranded-install check (nexus-gynt2): a doctor row (`Stranded pre-PG install`) guards the post-Chroma-deletion era. On a release that no longer ships the migration tool (RDR-155 P4b — this one), a box still carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`, or `catalog/.catalog.db` present with no verified migration report) fails doctor fatally with the two-hop instruction: install the pinned last migration-capable release, run `nx upgrade` there (the ladder converges the data migration), then upgrade back. The same detection also refuses `nx init`, banners every CLI invocation on such a box, and surfaces through both MCP servers' `instructions` channel at startup.
 
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
@@ -1784,11 +1785,9 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / orphan chroma children / trackers re-parented to init after ungraceful MCP shutdowns) |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252). Exits 1 on drift |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
-| `--check-tmpdirs` | List orphan `nx_t1_*` tmpdirs that no session record points at and are older than 24h (RDR-094 Phase 3). Read-only; pair with `--reap-tmpdirs` to actually delete them |
-| `--reap-tmpdirs` | With `--check-tmpdirs`, run `sweep_orphan_tmpdirs` and report the count reaped |
 | `--check-mcp-logs` | Scan Claude Code's per-server MCP cache for nx-mcp silent-death signatures (`STDIO connection dropped`, `stdio transport error`). macOS only; skips cleanly elsewhere (RDR-094 Phase H, nexus-50u5) |
 | `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
-| `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `chromadb.{PersistentClient,CloudClient,EphemeralClient}` calls outside `src/nexus/db/` (daemon-internal); also allowlists `src/nexus/catalog/`. Per-line override via `# epsilon-allow: <reason>` (reason ≥8 chars) |
+| `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
 | `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session-id lease presence + reachability (RDR-149 P4). Exits 1 when a session-id resolves but the lease is missing or unreachable |
@@ -1846,11 +1845,13 @@ nx doctor --check-quotas            # Vector-store limits + embedder caps + rera
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) the per-request limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) which the managed-cloud path still honours, plus a reachability probe that fires only when a ChromaDB Cloud migration source is configured; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
 
 Exit codes:
-- `0` — reachable cloud tenant or local-mode (limits are reference-only).
-- `1` — cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
+- `0` — the T3 vector store is reachable.
+- `1` — unreachable; the report is not actionable without a working store. Suitable as a CI gate.
+
+**Breaking change in 7.0.0**: the JSON section key `chromadb` was renamed to `vector_store`. It had carried the dependency's name for machine-consumer stability; RDR-155 P4b removed the dependency, and a MAJOR release is the point at which this documented payload's shape changes. Dashboards and CI gates parsing `--json` must read `vector_store`. The `voyage`, `cross_encoder` and `retry` sections are unchanged.
 
 ```
 nx doctor --check-post-store-hooks   # Enumerate registered post-store hook chains
@@ -2006,17 +2007,18 @@ heuristic (`how` / `what` → research; `why` → review), tags confident matche
 `backfill` and wh-fallback rows `backfill-low-conf`, and lists each low-conf
 row (id, inferred verb, original query) for operator review.
 
-These verbs mutate row content via raw SQL against the local T2 SQLite, so in
-service mode the whole group refuses (the local file is the frozen
-pre-migration snapshot; repairing it would be a silent no-op against the live
-library). Set `NX_STORAGE_BACKEND=sqlite` to deliberately repair the local
-file.
+These verbs mutated row content via raw SQL against the local T2 SQLite.
+The group was deleted with the SQLite plan library (RDR-158 P4), and the
+`NX_STORAGE_BACKEND=sqlite` escape hatch that could reach the local file is
+retired (P3 — setting it is a hard error). The local file, where present, is
+a frozen pre-migration snapshot.
 
 ---
 
 ## nx daemon
 
-T2 and T3 daemon lifecycle (RDR-120). Since conexus 4.34.0, all
+Storage daemon lifecycle (RDR-120; the `t3` sub-group retired at
+RDR-155 P4b — T3 serves through `nx daemon service`). Since conexus 4.34.0, all
 user-facing CLI commands that touch persistent state (`nx memory`,
 `nx index`, `nx store`, `nx catalog`, `nx_answer` and the MCP
 tools) route through the T2 daemon process so multi-process
@@ -2039,12 +2041,10 @@ available as an advanced pre-stage/override (below).
 
 `nx init` provisions and starts the service backend and offers to register the
 OS autostart unit (prompt, default yes; `--yes` accepts, `--no-autostart`
-declines — see [nx init](#nx-init)). In the default all-SERVICE config T2
-(notes/plans) is served by the same service, so there is **no** separate
-`nx daemon t2 install` step. The deprecated `nx init --service` flag still works
-but plain `nx init` is the path now. (`nx daemon t2 install --autostart` remains
-available as an explicit opt-in for a SQLite T2 backend, e.g.
-`NX_STORAGE_BACKEND=sqlite`.)
+declines — see [nx init](#nx-init)). T2 (notes/plans) is served by the same
+service, so there is no separate T2 install step — the `nx daemon t2` verb
+group is retired (see below). The deprecated `nx init --service` flag still
+works but plain `nx init` is the path now.
 
 Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 
@@ -2052,14 +2052,11 @@ T3 (the permanent vector store) serves through the native nexus-service over
 Postgres + pgvector in **both** local and cloud mode (`nx daemon service`); the
 legacy `nx daemon t3` ChromaDB daemon is a retired serving path.
 
-On the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`), the conexus
-plugin's SessionStart hook auto-spawns the SQLite T2 daemon via
-`nx daemon t2 ensure-running` on every Claude Code session start (a silent
-no-op in the default service config, where T2 is served by the nexus-service).
-For a SQLite T2 daemon that survives reboots independent of Claude Code, use
-`nx daemon t2 install --autostart`. In the default service config the service's
-own autostart unit (`nx daemon service install --autostart`, or accepting the
-`nx init` prompt) covers reboot-persistence for every tier.
+The service's own autostart unit (`nx daemon service install --autostart`, or
+accepting the `nx init` prompt) covers reboot-persistence for every tier. The
+plugin's SessionStart hook no longer spawns anything for T2 — the
+`nx daemon t2 ensure-running` call it used to make is retired with the rest of
+that verb group (see below).
 
 ### nx daemon restart-stale
 
@@ -2100,175 +2097,24 @@ This runs automatically on the first `nx` invocation after a version change
 (long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
 `nx doctor` or this verb is the path there).
 
-### nx daemon t2 start
+### nx daemon t2 — RETIRED
 
-Start the T2 daemon in the foreground. The daemon IS this Python
-process (asyncio event loop until SIGTERM/SIGINT). Run under
-launchd / systemd via `nx daemon t2 install --autostart` for
-production use; direct foreground invocation is for debugging or
-explicit one-shot starts.
+The entire `nx daemon t2` verb group (`start`, `stop`, `status`,
+`ensure-running`, `install --autostart`, `uninstall --autostart`) has been
+removed. It ran a SQLite-backed T2 daemon that arbitrated a single writer
+across the host CLI, the MCP server, and dev-container clients. T2 is served
+by the nexus-service over Postgres, which is the write arbiter, so there is
+nothing left for it to arbitrate.
 
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override (default: `~/.config/nexus/`) |
-| `--db-path PATH` | Override the memory.db path (default: `nexus.config.default_db_path()`) |
+**If you have a leftover autostart unit** from a pre-retirement install
+(`com.nexus.t2.plist` on macOS, `nexus-t2.service` on Linux), it will try to
+run `nx daemon t2 start` on every boot and fail. `nx upgrade` removes it for
+you on the next run — on every install, not just service-backed ones. To
+check by hand: `launchctl list | grep com.nexus.t2` (macOS) or
+`systemctl --user list-unit-files | grep nexus-t2` (Linux).
 
-Fails fast with `T2DaemonError` if another T2 daemon already holds
-the spawn lock on the same config_dir.
-
-### nx daemon t2 stop
-
-Send SIGTERM to the running T2 daemon. Reads the PID from the
-discovery file at `~/.config/nexus/t2_addr.<uid>` and signals it.
-Idempotent — exits cleanly if no daemon is running.
-
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override |
-
-### nx daemon t2 status
-
-Print the T2 daemon discovery JSON: PID, UDS path, TCP host/port,
-daemon version, start time.
-
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override |
-| `--json` | Output raw JSON (default: pretty-print) |
-
-The recorded PID is probed for liveness (`os.kill(pid, 0)`). A discovery
-file whose PID is no longer running is reported as `STALE` (with `--json`,
-an `"alive": false` field) and exits 1, so a daemon that died leaving a
-stale discovery file is not reported as running. Exit code 1 also when no
-discovery file exists — except in service mode: when the memory store is
-in SERVICE mode and no local T2 discovery file exists, the command reports
-that T2 is served by the nexus-service (no local daemon expected) and
-exits 0 instead of erroring (GH #1405).
-
-The output also includes `restarts_in_window` (RDR-140 P4): the number
-of cold respawns the crash-loop guard has recorded in the current window
-(see `ensure-running` below). A rising count across successive `status`
-calls is the crash-loop signal. `0` once the daemon converges.
-
-### nx daemon t2 ensure-running
-
-Idempotent: silent no-op if the T2 daemon is already running on the
-named config_dir, otherwise spawns it in the background (detached
-subprocess) and polls the discovery file until reachable (or the
-timeout expires).
-
-Service mode (RDR-176; nexus-daemon-6.6.1-service-mode-skip): when the
-memory store is in SERVICE mode, the SQLite T2 tier is a frozen
-migration source and the Java service is the live substrate — no
-client ever connects to a local T2 daemon. `ensure-running` detects
-this up front and returns immediately (`SERVICE_MODE_SKIP`, exit 0)
-without attempting a spawn. Prior to 6.6.1 this check was missing:
-every session-start call cold-spawned a process that exited instantly
-by design, and repeated calls across concurrent MCP sessions could
-trip the crash-loop guard below with a misleading
-"crash-loop suppressed" error even though nothing was actually broken.
-
-Stale discovery files left behind by crashed daemons trigger a
-fresh spawn rather than a false-positive — the probe is
-`os.kill(pid, 0)` against the discovery-file PID.
-
-Version-aware (nexus-5ldk1): a live daemon whose `daemon_version`
-differs from the installed `conexus` is treated as stale. The command
-gracefully cycles it (SIGTERM drains in-flight RPC, then respawns) so
-the running daemon matches the installed code. This is why `nx upgrade`,
-`scripts/reinstall-tool.sh`, and the plugin / `.mcpb` session-start
-hooks all call `ensure-running` after an install: the daemon comes up on
-the new version without a manual restart. A daemon already matching the
-installed version is left untouched.
-
-Crash-loop guard (RDR-140 P4). Each cold respawn driven by
-`ensure-running` is recorded in a sentinel file beside the discovery
-file. After `_CRASHLOOP_MAX_RESTARTS` (default 5) respawns within
-`_CRASHLOOP_WINDOW_S` (default 300s) without the daemon converging,
-`ensure-running` stops respawning, logs once at `error`
-(`t2_daemon_crash_loop_suppressed`), and exits 1, instead of an endless
-crash-loop with a traceback per attempt. The counter clears when a
-spawned daemon becomes reachable, and re-arms for a fresh window once the
-prior restarts age out.
-
-Scope: this guard bounds the `ensure-running`-driven respawn path (the
-dominant source of churn, since the plugin / `.mcpb` session-start hooks
-call `ensure-running` on every MCP-server boot). It does NOT bound the
-launchd / systemd path: `install --autostart` runs `nx daemon t2 start`
-directly, which never consults the sentinel, so a daemon failing under
-`KeepAlive` is rate-limited only by the supervisor's own throttle
-(launchd `ThrottleInterval`, systemd `RestartSec`). Known limitation: a
-daemon that becomes briefly reachable then dies repeatedly (flapping)
-resets the counter each cycle, so the guard fires only for a daemon that
-never reaches the discovery-written state within the spawn timeout.
-Inspect the daemon log, then re-run `ensure-running` after fixing the
-root cause.
-
-| Flag | Description |
-|------|-------------|
-| `--config-dir PATH` | Config directory override |
-| `--timeout SECONDS` | Wait up to N seconds for spawn (default: 5.0) |
-| `--quiet` | Suppress "already running" / "spawned" messages; only print errors |
-
-Exit codes:
-- `0`: reachable (already running OR successfully spawned)
-- `1`: spawned but did not become reachable within `--timeout`
-
-Used by the conexus plugin's SessionStart hook; safe to invoke from any
-post-install script that needs the daemon up before running other
-commands.
-
-### nx daemon t2 install --autostart
-
-Write a launchd plist (macOS) or systemd user unit (Linux) so the
-T2 daemon starts at login / boot and respawns on crash.
-
-| Flag | Description |
-|------|-------------|
-| `--autostart` | Required. Confirms intent to write an OS autostart entry. |
-| `--force` | Overwrite an existing plist / unit file when its content differs from the freshly rendered template. |
-
-The plist / unit file lands in the per-user autostart directory:
-
-- macOS: `~/Library/LaunchAgents/com.nexus.t2.plist` (`KeepAlive=true`, `RunAtLoad=true`)
-- Linux: `~/.config/systemd/user/nexus-t2.service` (`Restart=on-failure`, `WantedBy=default.target`)
-
-After write, the command activates the unit:
-
-- macOS: `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.nexus.t2.plist`
-- Linux: `systemctl --user enable --now nexus-t2.service`
-
-Logs:
-- macOS: `~/Library/Logs/nexus-t2.log` / `nexus-t2.err`
-- Linux: `journalctl --user -u nexus-t2.service`
-
-Idempotent — running twice doesn't duplicate the plist or the
-service unit. Re-render and re-activate on `conexus` upgrades by
-running `nx daemon t2 install --autostart` again (the rendered
-template's `__NX_BIN__` resolves to the current `nx` binary path).
-
-### nx daemon t2 uninstall --autostart
-
-Reverse of `install --autostart`: deactivate via
-`launchctl bootout` (macOS) / `systemctl --user disable --now`
-(Linux) then unlink the plist / unit file.
-
-| Flag | Description |
-|------|-------------|
-| `--autostart` | Required. |
-
-### nx daemon t3 start / stop / status / install / uninstall
-
-> **Legacy / retired serving path (6.0).** T3 no longer serves from ChromaDB.
-> The permanent vector store now serves through the native nexus-service over
-> Postgres + pgvector — see `nx daemon service` below and `nx init`.
-> `nx daemon t3` (the managed `chroma run` subprocess) remains only for reading a
-> pre-6.0 ChromaDB store as the **migration source** (the substrate rung `nx
-> upgrade` walks; the source is left byte-untouched as the rollback target).
-
-Same shape as the `t2` subcommands, applies to the legacy T3 ChromaDB daemon.
-It wraps the upstream `chroma run` server lifecycle under launchd / systemd
-supervision (templates `com.nexus.t3.plist` / `nexus-t3.service`).
+Reboot-persistence for every tier is now the service's own unit:
+`nx daemon service install --autostart`, or accepting the `nx init` prompt.
 
 ### nx daemon service start / stop / status
 
@@ -2358,6 +2204,15 @@ accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
 
+> **Known limitation (nexus-oyo2g):** `nx daemon service stop` decides what to
+> signal from the discovery lease (15s TTL). A supervisor whose heartbeat has
+> stalled is alive and serving while invisible to that check, so `stop` can
+> report "already stopped" having signalled nothing — and a following `start`
+> short-circuits once the heartbeat revives. `nx upgrade`'s engine convergence
+> is immune (it sweeps the stack from the process table, 7.0.0); if a manual
+> `stop && start` doesn't take, check `nx doctor` for a stale-supervisor
+> process-skew warning.
+
 | Flag | Description |
 |------|-------------|
 | `--autostart` | Required. Install the OS autostart unit. |
@@ -2429,58 +2284,49 @@ The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-c
 Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger
 converges everything else — it brings the package, engine, and process
 preconditions current, then walks one ordered ladder that auto-applies whichever
-data migrations your install actually needs (T2 schema, the ChromaDB →
-Postgres+pgvector substrate move, pre-RDR-108 chunk identity, embedder era), each
-rung detecting, converging, and verifying before it records completion, resumable
-and idempotent, with your existing store left byte-untouched as a rollback
-target. There is nothing to sequence by hand and no era to know: `nx doctor`
-reports pending rungs read-only, `nx upgrade` walks them, and an install that has
-been dormant for a year converges the same way a current one no-ops. You are
-asked to decide only what the product cannot derive for you — **billed
-re-embedding** (a cost preview before anything charges; silent when nothing
-bills), a **source collection that has vanished** (re-acquire or drop: the walk
-defers rather than guessing), and **rollback**, which is always yours to invoke
-and never automatic (`nx storage migrate vectors --rollback`, printed as the
-remedy where a migration blocks).
+data migrations your install actually needs (the pre-RDR-108 chunk-identity
+rekey is the standing rung; RDR-155 P4b retired the T2-schema and
+Chroma→pgvector substrate rungs together with the migration machinery — a
+pre-PG install is redirected to the pinned last migration-capable release by
+the stranded-install detector), each rung detecting, converging, and verifying
+before it records completion, resumable and idempotent. There is nothing to
+sequence by hand and no era to know: `nx doctor` reports pending rungs
+read-only, `nx upgrade` walks them, and an install that has been dormant for a
+year converges the same way a current one no-ops. You are asked to decide only
+what the product cannot derive for you — **billed re-embedding** (a cost
+preview before anything charges; silent when nothing bills).
 
 ```
 nx upgrade                        # Converge: preconditions, then every pending rung
 nx upgrade --dry-run              # Report what is pending, read-only — changes nothing
-nx upgrade --force                # Reset the T2 version gate and re-run all migrations
 nx upgrade --auto                 # Quiet mode for hook invocation (exit 0 always)
 nx upgrade --yes                  # Unattended: pre-approve the billed re-embed (=NX_ASSUME_YES=1)
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--dry-run` | Report pending T2 migrations and pending ladder rungs without executing (creates base tables if absent). Each rung's read-only `detect()` — the completion store is never opened |
-| `--force` | Reset the T2 version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
-| `--auto` | Quiet mode for the SessionStart hook. T3 upgrade steps and the engine install are skipped (hook timeout budget); exit 0 always |
+| `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`; the completion store is never opened. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 
 **Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 
-**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin — T2 migrations apply silently on every session start. Long rungs and T3 upgrade steps run only via explicit `nx upgrade`.
+**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin — pending ladder rungs and preconditions converge silently on every session start. Long rungs run only via explicit `nx upgrade`.
 
-**How the T2 rung works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
-
-**Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`. A new data axis becomes a ladder rung in `src/nexus/upgrade_ladder/rungs/`, registered in `registry.py` — not a new verb.
+**Local T2 migrations are RETIRED** (RDR-158 P4 Stage 4, nexus-i711w): the client-side migration chain (`src/nexus/db/migrations.py`, `MIGRATIONS`, `T3UpgradeStep`) is deleted. Schema is engine-owned via Liquibase in every mode; the local `.db` files are a frozen migration source that `nx upgrade` never touches. New schema changes go through Liquibase changesets in the engine; a new DATA axis becomes a ladder rung in `src/nexus/upgrade_ladder/rungs/`, registered in `registry.py` — not a new verb.
 
 ### Internal upgrade primitives
 
-These verbs' only job was upgrade-cycle work the ladder now does, so they are
-**demoted**: still callable and still tested (surgical/dev use and existing
-scripts keep working), but out of `--help` and out of the story above. Nothing
-routine should need them; if you find yourself reaching for one, `nx doctor` and
-`nx upgrade` are the supported path.
+RDR-155 P4b **deleted** the migration verbs outright (`nx guided-upgrade`,
+`nx migrate-to-service`, `nx migration-audit`, the `nx storage` migrate
+group, `nx daemon t3`): installs still carrying pre-PG data use the pinned
+last migration-capable release (the stranded-install banner names it). The
+remaining demoted-not-deleted primitives — still callable, out of `--help`:
 
 | Demoted verb | Its only job was | Now done by |
 |---|---|---|
-| `nx guided-upgrade` | provision + migrate | the provisioning precondition + the substrate rung |
-| `nx migrate-to-service` | the T3 substrate ETL (+ `--dry-run` pregate) | the substrate rung; preview is `nx upgrade --dry-run` |
 | `nx migration` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
-| `nx migration-audit` | a forensic diagnostic | `nx doctor` is the diagnostic surface |
 | `nx collection backfill-hash` | upgrade-era `chunk_text_hash` repair | the ladder's manifest heal |
 | `nx hooks update-all` | manual managed-hook sweep | `nx upgrade` refreshes managed hooks itself |
 
@@ -2689,117 +2535,6 @@ nx service token list [--tenant TENANT]
 
 List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
 
-## nx storage
-
-> Running a real migration window? The operational narrative (quiescence,
-> mid-run failure playbook, cutover validation, rollback) lives in
-> [`docs/migration-runbook.md`](migration-runbook.md); this section is the
-> flag reference.
-
-### nx storage migrate all
-
-```
-nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--verify-fill]
-```
-
-Run ALL seven T2 store migrations in the RDR-152 ladder order (memory →
-plans → telemetry → taxonomy → aspects → catalog → aspects_queue —
-the last two trail so FK targets exist; the former `chash` leg was
-retired by RDR-187: the router table is dropped, and chash registration
-rides the chunk store itself) with one
-shared issue collector, and emit ONE RDR-153 migration report (default:
-`~/.config/nexus/migration-reports/migration-<id>.json` — a run always
-produces an artifact). Prints a per-store progress line as each store
-completes (`<store>: <written> written / <read> read`, RDR-176 Gap 5) so a
-long migration doesn't go silent between stores. Exits non-zero when
-`summary.total_failed > 0` ("migration is NOT clean") or when post-run
-count verification finds Postgres counts below the report's written
-totals. When psql/credentials cannot be resolved the verification is
-reported as **VERIFICATION INDETERMINATE** — a loud warning, never a
-silent skip (the RDR-152 prod-copy.sh harness bug). The verdict is
-recorded in the report artifact (`"verification"`). Verification queries
-the LOCAL nx-managed Postgres (from `pg_credentials`) — when migrating
-against a remote service it reports on the local cluster only.
-`--service-url` overrides the nexus-service base URL (config-first chain:
-`--service-url` > `NX_SERVICE_URL` env > `config.yml`; the auth token
-resolves the same chain, RDR-176 Gap 3). Every per-store command also
-accepts `--report PATH` for a single-store report (a default-path
-artifact is written even when the flag is omitted, including on a
-mid-run crash — partial data beats no data). Note: `aspects` has no
-standalone command; it runs only via `migrate all`.
-
-`--verify-fill` (RDR-178 wave-2): a re-run to patch a small hole no
-longer re-sends the whole run. Retention-swept tables (`relevance_log`, 90-day TTL) are verified only within the retention window: source rows older than the horizon are the sweep's legitimate deletion domain (re-importing them would resurrect expired data), so once every source row has aged out the table reports `expired_unverifiable` — by design, and never dressed as verified parity. Per store:
-
-- `catalog` — the outer count-diff decides parity (zero writes) vs.
-  divergent (send ONLY the rows genuinely missing from the target;
-  owners/collections/document_chunks independently). Catalog's
-  `documents`/`links` tables have no delta-fill surface yet — if either
-  diverges, the whole catalog store falls back to the full ETL (never a
-  partial/incoherent write).
-- `memory` / `plans` / `telemetry` / `taxonomy` — outer-verify only (no
-  delta-fill surface yet): a store already at parity is **skipped
-  entirely** (folded into `report["skipped_stores"]`, same signal as an
-  already-migrated pre-flight); a non-parity store falls back to the
-  unchanged full ETL.
-- `aspects` / `aspects_queue` — always the full ETL; unaffected by the flag.
-
-The report gains an additive `"verify_fill"` key (`{"outer": {...},
-"results": {...}, "total_filled": N}`) — absent on a normal run. A dedup
-relation (`nexus.plans`) that parities below its source count due to
-`ON CONFLICT DO UPDATE` convergence is surfaced as a
-`verification_convergence_notes` entry, never mistaken for a hole.
-
-### nx storage migration-report show
-
-```
-nx storage migration-report show <path>
-```
-
-Summarize an RDR-153 migration-report artifact: migration id and window,
-the recorded verification verdict (`(not recorded)` for artifacts that
-predate it), `max_severity` first, the by-action rollup
-(severity-descending), per-issue triage lines (severity-descending, with
-class/action/count/sample), and the gate verdict — **GATE: PASS** when
-`summary.total_failed == 0`, otherwise **GATE: FAIL** with a non-zero
-exit (scriptable; this is the RDR-152 Phase-4 SQLite-deletion gate
-predicate). The reader lives in `nexus.migration` and survives the
-`src/nexus/db/t2` deletion. When the artifact carries the additive
-`"verify_fill"` key (a `--verify-fill` run), also prints a
-`verify-fill: total_filled=N` line, one `<store>.<table>: filled=N
-status=...` line per table that was actually diffed, any convergence
-notes, and the list of stores skipped entirely (already at parity).
-
-Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
-
-### nx storage migrate
-
-```
-nx storage migrate memory|plans|telemetry|taxonomy|catalog [--db PATH] [--service-url URL] [--dry-run] [--verify-fill]
-```
-
-Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam. `--verify-fill` (RDR-178 wave-2) runs the delta path instead of the unconditional full re-send — see `nx storage migrate all` above for the per-store semantics (a single-store invocation applies the same store's rule in isolation). Every per-store command's report always carries a populated `"verification"` verdict now (not just `migrate all`'s), and `target.service_url` records the RESOLVED endpoint, never a `"(lease)"` placeholder.
-
-`nx storage migrate chash` is RETIRED (RDR-187): the `chash_index` router
-table is dropped — chash registration rides the chunk store itself, so
-migrating your content registers every chash. The subcommand still parses
-but fails loud with this explanation instead of silently "succeeding"
-against the deprecation-window no-op endpoint.
-
-### nx storage migrate vectors
-
-```
-nx storage migrate vectors [--local-path PATH | --cloud] [--collections A,B] [--service-url URL] [--dry-run | --rollback]
-```
-
-Migrate Chroma vector collections into pgvector (RDR-155 Phase 5). Two legs, run separately: the default local leg reads the on-disk store the retired T3 daemon served (`--local-path`; default resolves the product's local-Chroma default: `$NX_LOCAL_CHROMA_PATH` → `$XDG_DATA_HOME/nexus/chroma` → `~/.local/share/nexus/chroma`, with the pre-6.3.8 `~/.config/nexus/chroma` retained as a secondary probe); `--cloud` reads via the ChromaCloud REST/auth API using the configured `chroma_*` credentials. Chunk text, chash, and metadata transfer verbatim and the service re-embeds server-side; collection names are preserved verbatim so `topic_assignments.source_collection` references stay valid. `--rollback` deletes from pgvector exactly the chashes present in the source collections, leaving the source untouched. Exits non-zero when any collection failed or was skipped (non-conformant name with data present). Non-conformant collections with **zero** chunks receive status `skipped-empty` and do not redden the run — nothing can be lost by definition, so empty legacy collections (e.g. `tuples__*`) no longer force `--collections` hand-pinning.
-
-**`--cloud` server-side delegation (RDR-176 P4 / RDR-178 Gap 5, nexus-ekk4o).** Before falling back to the client-mediated copy (every chunk round-trips ChromaCloud → your machine → the engine, ~57 chunks/s over your uplink), `--cloud` probes whether the target engine-service supports the async `ingest-cloud` job contract (`GET /version`, `release_version >= 0.1.18`) and, when it does, triggers ONE batched server-side job that pulls ChromaCloud directly into pgvector at datacenter bandwidth (minutes instead of tens of minutes for a large corpus) — your uplink never sees a vector. Delegation applies only to same-name, dim-dispatchable collections (no `--collections` cross-model remap target); anything else, and any collection the delegated job could not complete, transparently falls back to the unchanged client-mediated path — no data is ever dropped, and no new flag is needed. Progress lines and the final summary table mark delegated collections `[delegated]`; a probe or trigger failure is logged and never aborts the run.
-
-Run the ETL with indexing paused (the post-write count verification assumes a quiescent window). Cutover validation sequence after both legs complete: run `manifest_backfill_sql()` then `manifest_orphan_sql(dim)` for each of 384/768/1024 (from `nexus.migration.vector_etl`) via psql as a superuser/admin role — zero orphan rows per dim is the pass condition. See the module docstring for the rationale (direct SQL, never the repository read API).
-
----
-
 ## nx tier-status
 
 ```
@@ -2809,6 +2544,28 @@ nx tier-status [--session SESSION_ID] [--last N] [--since ISO8601] [--json]
 Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp, `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
 
 In service mode the counts are read from the engine via `GET /v1/telemetry/tier_writes/query` (nexus-59wjj) — same filters, same row shape as the local SQLite path. Requires an engine that carries the route; against an older engine (or an unreachable service) the command degrades to an honest "service-backed; read unavailable" message rather than reporting a false zero. The doctor tier-discipline check reads through the same route.
+
+---
+
+## nx census
+
+```
+nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json]
+```
+
+Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
+
+Reads the transcript JSONL Claude Code already writes under `~/.claude/projects/<slug>/` — no hook, no daemon, no new log — so it is retroactive over every transcript on disk. `--project-dir` (or `NX_CENSUS_PROJECT_DIR`) overrides the directory; the default is derived from the current working directory.
+
+**Roll-up rule, stated because leaving it unstated is what made the prior hand-derived baseline irreproducible:** a subagent's calls attribute to its **parent session**. `<sid>/subagents/**/agent-*.jsonl` rolls up to `<sid>`; orchestrator-vs-subagent is a *dimension* of a session, not a session boundary. Call totals are scope-independent, session counts are not — so counting sidechain files as their own sessions moves Serena from 13 sessions to 31 while leaving its 464 lifetime calls untouched. Every session count in the output names its scope: `sess` is either-scope, `orch sess` and `sub sess` split it.
+
+The split is the point, not a detail: the same instruction delivered at SubagentStart draws far more use than at SessionStart (`plan_search`: 12 orchestrator calls against 282 subagent calls), and a census that summed the two would hide it.
+
+**Two denominators, always.** `ALL MEASURABLE SESSIONS` and `SUBSTANTIAL SESSIONS` (at least 50 calls). Downstream work pre-registers predictions against the substantial subset, so emitting only one would leave those unfalsifiable against this command's own output.
+
+**Exits non-zero when the run measured *nothing*.** An empty, unreadable, unparseable, or tool-call-free scope reports `UNMEASURABLE` with a reason rather than a clean zero; a zero row inside a measurable run is a real zero. Sessions that legitimately carry no tool call are the majority of transcripts — they are counted, listed by reason, and reported as a share, but they do not fail the run. The exit code answers "did this measure anything at all", **not** "is this corpus healthy"; a caller needing a health threshold must read `unmeasurable_share`, not `$?`.
+
+**It reports counts and refuses a verdict.** Non-use of a capability may be a forgotten affordance or a correct rejection, and nothing in the transcript distinguishes them; `--json` carries a `verdict: null` field and per-tool counts so narrower slices stay derivable. The refusal governs what this command renders — it is not, and cannot be, an enforcement boundary against verdicts computed downstream from these numbers.
 
 ---
 

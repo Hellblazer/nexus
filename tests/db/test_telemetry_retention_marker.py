@@ -16,8 +16,6 @@ from datetime import UTC, datetime, timedelta
 
 from nexus.db.t2 import T2Database
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
 
 def _db(tmp_path):
     return T2Database(tmp_path / "t2.db", run_migrations=True)
@@ -31,21 +29,11 @@ def test_expire_bumps_cumulative_marker(tmp_path):
     # expireRelevanceLog marker bump); the SQLite twin has no import
     # surface, so its leg seeds raw — that branch dies with the twin at
     # the RDR-155 P4b flip.
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(db.telemetry):
-        for i in range(3):
-            db.telemetry.conn.execute(
-                "INSERT INTO relevance_log (query, chunk_id, action, timestamp) "
-                "VALUES (?, ?, 'click', ?)", (f"q{i}", f"c{i}", old),
-            )
-        db.telemetry.conn.commit()
-    else:
-        for i in range(3):
-            db.telemetry.import_relevance_row(
-                query=f"q{i}", chunk_id=f"c{i}", collection="",
-                action="click", session_id="", timestamp=old,
-            )
+    for i in range(3):
+        db.telemetry.import_relevance_row(
+            query=f"q{i}", chunk_id=f"c{i}", collection="",
+            action="click", session_id="", timestamp=old,
+        )
     db.telemetry.log_relevance("fresh", "cf", "click")
 
     assert db.telemetry.expire_relevance_log(days=90) == 3
@@ -65,26 +53,3 @@ def test_never_swept_relation_is_absent(tmp_path):
         ["nexus.relevance_log", "nexus.search_telemetry"]
     ) == {}
     assert db.telemetry.get_retention_markers([]) == {}
-
-
-@pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="SQLite-twin write-path invariant; dies with the twin at the "
-    "RDR-155 P4b flip (dies-roster)",
-)
-def test_relevance_timestamp_format_invariant(tmp_path):
-    """Review 68509ac8 Low: the fresh-window fill compares timestamps
-    LEXICOGRAPHICALLY against a datetime.now(UTC).isoformat() cutoff — sound
-    only while every relevance_log write uses the same +00:00-suffixed
-    isoformat shape. Pin the write path's format so a future Z-suffixed or
-    naive writer fails here instead of silently mis-bucketing rows."""
-    import re
-
-    db = _db(tmp_path)
-    db.telemetry.log_relevance("fmt probe", "cfmt", "click")
-    ts = db.telemetry.conn.execute(
-        "SELECT timestamp FROM relevance_log WHERE chunk_id='cfmt'"
-    ).fetchone()[0]
-    assert re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+00:00", ts
-    ), f"relevance_log timestamp format drifted: {ts!r}"

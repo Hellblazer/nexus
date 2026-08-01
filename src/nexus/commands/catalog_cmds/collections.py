@@ -276,13 +276,30 @@ def rename_collection_cmd(
     # Source-exists check fires BEFORE collision check so an operator
     # who typoes the old name gets "old not found" rather than "new
     # already exists" (the latter is misleading when old never existed).
-    if not t3_db.collection_exists(old):
+    #
+    # Tombstone-vs-absent (RDR-156 P3, Decision 6; nexus-9n485): on the
+    # service path collection_exists() reads the tombstone-filtered stats
+    # view, so a collection whose every chunk belongs to a trashed document
+    # reads exactly like one that never existed. probe_collection_state
+    # tells the two apart via the RAW /v1/vectors/collections listing
+    # (never tombstone-filtered) for a real HttpVectorClient; every other
+    # backend (T3Database, test fakes) keeps the prior two-state behaviour.
+    from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — command-local import (nexus.db.collection_state)
+
+    old_state = probe_collection_state(t3_db, old)
+    if old_state is CollectionState.ABSENT:
         raise click.ClickException(f"old name {old!r} does not exist in T3.")
+    if old_state is CollectionState.TOMBSTONED:
+        raise click.ClickException(
+            f"old name {old!r} is tombstoned (every chunk belongs to a "
+            f"trashed document) — restore the trashed document(s) before renaming."
+        )
     if old == new:
         raise click.ClickException(
             f"old and new names are identical ({old!r}); rename is a no-op."
         )
-    if t3_db.collection_exists(new):
+    new_state = probe_collection_state(t3_db, new)
+    if new_state is not CollectionState.ABSENT:
         raise click.ClickException(
             f"new name {new!r} already exists in T3. "
             f"Refusing to rename {old!r} on top of an existing collection."
@@ -320,19 +337,26 @@ def rename_collection_cmd(
                 model_version=segments["model_version"],
             )
         else:
+            # nexus-cecqy: --allow-legacy documents that a non-conformant name
+            # "still gets a row in the projection but is flagged
+            # legacy_grandfathered=True". That flag is now DERIVED inside
+            # HttpCatalogClient.register_collection, so this bare call flags the
+            # row correctly. Deriving it *here* instead was the too-narrow fix:
+            # two sibling bare-else sites (indexer.py:784, :138 below) have the
+            # same shape and would have stayed defective.
             writer.register_collection(new)
-        writer.supersede_collection(old, new, reason="rename-collection")
+        superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:
         click.echo(
             f"WARN: T3 was renamed {old!r} -> {new!r} but the projection "
             f"update failed: {exc}. Recover by running:\n"
             f"  nx catalog backfill-collections --no-dry-run  "
             f"# registers {new!r}\n"
-            f"  python -c \"from nexus.catalog.catalog import Catalog; "
-            f"from nexus.config import catalog_path; "
-            f"p=catalog_path(); "
-            f"Catalog(p, p / '.catalog.db').supersede_collection("
-            f"{old!r}, {new!r})\"",
+            f"then re-run this rename to retry the supersede (idempotent), "
+            f"or supersede via the service API:\n"
+            f"  python -c \"from nexus.catalog.factory import make_catalog_writer; "
+            f"w = make_catalog_writer(); "
+            f"w.supersede_collection({old!r}, {new!r}); w.close()\"",
             err=True,
         )
         raise click.exceptions.Exit(2) from exc
@@ -350,7 +374,23 @@ def rename_collection_cmd(
         parts.append(f"{counts['catalog_docs']} catalog docs")
     suffix = f" ({'; '.join(parts)})" if parts else ""
     click.echo(f"Renamed: {old} -> {new}{suffix}")
-    click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
+    # nexus-cecqy: only claim the supersede when it actually marked a row.
+    # Against a CURRENT engine this always fires: renameCollectionTxn retires the
+    # old row as a superseded tombstone, and the follow-up supersede re-asserts
+    # the same target idempotently. The zero branch survives for the version-skew
+    # window — an engine still on the pre-2026-07-31 build DELETEs the old row, so
+    # the UPDATE matches nothing. Announcing the event regardless was a claim
+    # about something that had not happened.
+    if superseded_rows:
+        click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
+    else:
+        click.echo(
+            f"NOTE: no registry row was left to mark superseded, so this "
+            f"rename's history is not recorded in superseded_by/superseded_at. "
+            f"The rename itself succeeded. This means the engine still deletes "
+            f"the old row on rename — upgrade it to record rename history "
+            f"(nexus-cecqy)."
+        )
 
 
 @click.command("collection-gc")

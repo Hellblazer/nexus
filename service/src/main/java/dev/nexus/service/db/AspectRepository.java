@@ -167,12 +167,15 @@ public final class AspectRepository {
     }
 
     public long upsertAspect(String tenant, Map<String, Object> body) {
-        double confidence = body.containsKey("confidence")
-            ? ((Number) body.get("confidence")).doubleValue()
+        // nexus-j0nec: an explicit JSON "confidence": null must be DROPPED like
+        // absent/low confidence (Python _MIN_CONFIDENCE gate semantics), never
+        // NPE via ((Number) null).doubleValue() -> HTTP 500.
+        double confidence = body.get("confidence") instanceof Number n
+            ? n.doubleValue()
             : -1.0;
         if (confidence < MIN_CONFIDENCE) {
             log.warn("event=aspect_upsert_rejected_low_confidence collection={} source_path={} confidence={}",
-                body.get("collection"), body.get("source_path"), confidence);
+                body.get("collection"), body.get("source_path"), body.get("confidence"));
             return -1L;
         }
 

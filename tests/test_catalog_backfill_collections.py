@@ -9,12 +9,14 @@ catalog ``documents.physical_collection`` column, unions their
 collection-name sets, and emits a CollectionCreated event for each
 name not already in the projection.
 
-Conformance is decided by the projector via
-``is_conformant_collection_name``, not by the caller. The
-backfill writer supplies empty canonical fields, which the projector
-preserves verbatim; conformant names that callers want decomposed
-into segments should re-register with the parsed segments after
-backfill.
+Conformance is decided by the projection layer via
+``is_conformant_collection_name``, not by the caller.
+
+nexus-i711w terminal deletion: ported off the local SQLite ``Catalog``
+(pinned-tumbler raw INSERT seeding, ``_get_catalog`` patches,
+``_db.execute`` reads) onto ``ActiveCatalog`` — the verb survives and
+the CLI's own ``_get_catalog()`` resolves the same live catalog the
+tests now seed.
 """
 from __future__ import annotations
 
@@ -23,8 +25,8 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.cli import main
+from tests._catalog_fixture_ops import ActiveCatalog
 
 
 @pytest.fixture()
@@ -33,26 +35,22 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture()
-def catalog(tmp_path):
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
+def catalog() -> ActiveCatalog:
+    return ActiveCatalog()
 
 
-def _seed_document(catalog: Catalog, *, tumbler: str, collection: str) -> None:
-    catalog._db.execute(  # epsilon-allow: fixture seeds a documents row with caller-pinned tumbler; Catalog.register mints its own owner-prefixed tumbler
-        "INSERT INTO documents "
-        "(tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        "metadata, source_mtime, alias_of, source_uri) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            tumbler, f"doc-{tumbler}", "", 0, "text", f"/tmp/{tumbler}.md",
-            "", collection, 1, "", "", "{}", 0.0, "", "",
-        ),
+def _seed_document(catalog: ActiveCatalog, *, tumbler: str, collection: str) -> None:
+    # Was a raw pinned-tumbler INSERT; the verb only needs SOME documents
+    # row whose physical_collection is *collection*.
+    owner = catalog.register_owner("backfill-seed", "curator", repo_hash="")
+    catalog.register(
+        owner, f"doc-{tumbler}", content_type="text",
+        file_path=f"/tmp/{tumbler}.md", physical_collection=collection,
     )
-    catalog._db.commit()
+
+
+def _projection_names(catalog: ActiveCatalog) -> list[str]:
+    return sorted(r["name"] for r in catalog.list_collections())
 
 
 class _FakeT3:
@@ -82,14 +80,11 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
     )
     _seed_document(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
 
-    with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=fake_t3):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
-    rows = catalog.list_collections()
-    names = sorted(r["name"] for r in rows)
-    assert names == [
+    assert _projection_names(catalog) == [
         "code__1-1__voyage-code-3__v1",
         "docs__nexus-571b8edd",
         "knowledge__delos",
@@ -97,6 +92,10 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
     ]
 
 
+# nexus-cecqy item-16 family: xfail REMOVED — the derivation now lives in
+# HttpCatalogClient.register_collection, which is what this backfill loop's
+# bare non-conformant branch calls. Its engine-backed twin is item 16 in
+# tests/db/test_i711w_gap_xfails.py.
 def test_backfill_marks_legacy_via_projector(catalog, runner):
     """Non-conformant names land with legacy_grandfathered=True;
     conformant names land False.
@@ -108,8 +107,7 @@ def test_backfill_marks_legacy_via_projector(catalog, runner):
         ]
     )
 
-    with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=fake_t3):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
@@ -123,25 +121,22 @@ def test_backfill_idempotent(catalog, runner):
     """
     fake_t3 = _FakeT3(names=["knowledge__delos"])
 
-    with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=fake_t3):
         runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0
-    rows = catalog._db.execute(
-        "SELECT COUNT(*) FROM collections WHERE name = ?",
-        ("knowledge__delos",),
-    ).fetchone()
-    assert rows[0] == 1
+    rows = [r for r in catalog.list_collections()
+            if r["name"] == "knowledge__delos"]
+    assert len(rows) == 1
 
 
 def test_backfill_dry_run_no_writes(catalog, runner):
     """``--dry-run`` reports the candidates and writes nothing."""
     fake_t3 = _FakeT3(names=["knowledge__delos", "docs__nexus-571b8edd"])
+    before = _projection_names(catalog)
 
-    with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=fake_t3):
         result = runner.invoke(
             main, ["catalog", "backfill-collections", "--dry-run"],
         )
@@ -150,16 +145,14 @@ def test_backfill_dry_run_no_writes(catalog, runner):
     assert "knowledge__delos" in result.output
     assert "docs__nexus-571b8edd" in result.output
     assert "would register" in result.output
-    rows = catalog._db.execute("SELECT COUNT(*) FROM collections").fetchone()
-    assert rows[0] == 0
+    assert _projection_names(catalog) == before
 
 
 def test_backfill_empty_t3_and_catalog(catalog, runner):
     """Nothing to backfill produces a clean zero summary."""
     fake_t3 = _FakeT3(names=[])
 
-    with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=fake_t3):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0
@@ -172,14 +165,13 @@ def test_backfill_skips_already_registered(catalog, runner):
     catalog.register_collection("knowledge__delos")
     fake_t3 = _FakeT3(names=["knowledge__delos", "docs__nexus-571b8edd"])
 
-    with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=fake_t3):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
-    rows = catalog.list_collections()
-    names = sorted(r["name"] for r in rows)
-    assert names == ["docs__nexus-571b8edd", "knowledge__delos"]
+    assert _projection_names(catalog) == [
+        "docs__nexus-571b8edd", "knowledge__delos",
+    ]
     assert "Done: 1 new" in result.output
 
 
@@ -197,14 +189,13 @@ def test_backfill_aborts_on_t3_failure(catalog, runner):
             raise RuntimeError("t3 unreachable")
 
     _seed_document(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
+    before = _projection_names(catalog)
 
-    with patch("nexus.db.make_t3", return_value=_BrokenT3()), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=_BrokenT3()):
         result = runner.invoke(
             main, ["catalog", "backfill-collections", "--no-dry-run"],
         )
     assert result.exit_code != 0
     assert "Failed to list T3 collections" in result.output
-    # No partial backfill happened
-    rows = catalog._db.execute("SELECT COUNT(*) FROM collections").fetchone()
-    assert rows[0] == 0
+    # No partial backfill happened.
+    assert _projection_names(catalog) == before

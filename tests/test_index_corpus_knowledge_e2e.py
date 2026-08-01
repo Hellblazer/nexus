@@ -25,20 +25,24 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
+
 from nexus.commands.index import _CatalogBackedRegistry
 from nexus.repos import read_dual
 
 
 @pytest.fixture
-def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
     cfg = tmp_path / "config"
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
+    # through the factories, so a local-only handle left the service
+    # catalog empty. (The local Catalog.init that used to run here died
+    # with the local catalog in the terminal nexus-i711w deletion.)
+    return ActiveCatalog()
 
 
 @pytest.fixture
@@ -67,14 +71,12 @@ class TestCorpusKnowledgeWriteThenRead:
         )
 
         # Catalog now has the knowledge collection registered.
-        rows = cat._db.execute(
-            "SELECT name FROM collections "
-            "WHERE name LIKE 'knowledge__%'"
-        ).fetchall()
-        assert any(
-            r[0] == "knowledge__myrepo-1-1__voyage-context-3__v1"
-            for r in rows
-        ), [r[0] for r in rows]
+        # nexus-aqbrk: list_collections() is the public equivalent of the raw
+        # "SELECT name FROM collections" and is parity-registered on both
+        # substrates (tests/catalog/test_shape_parity_tripwire.py).
+        names = [c["name"] for c in cat.list_collections()]
+        knowledge = [n for n in names if n.startswith("knowledge__")]
+        assert "knowledge__myrepo-1-1__voyage-context-3__v1" in knowledge, knowledge
 
     def test_subsequent_read_returns_knowledge_in_docs_slot_oq5(
         self, cat: Catalog, repo: Path, tmp_path: Path,

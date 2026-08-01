@@ -128,6 +128,16 @@ class _FakeCat:
             # simulate a writer without the capability (legacy proxy)
             self.write_manifest_many = None  # type: ignore[assignment]
 
+    # nexus-kgos1: the sweep's two READS. Present and empty so the per-doc
+    # path's sweep is exercised and provably no-ops on an empty `before` —
+    # rather than dying on AttributeError and no-opping by accident, which is
+    # what this file did before `reader` became required.
+    def get_chunk_chashes(self, doc_id):
+        return []
+
+    def docs_for_chashes(self, chashes):
+        return {}
+
     def write_manifest_many(self, docs):  # type: ignore[no-redef]
         if self.many_404:
             err: Any = RuntimeError("HTTP 404")
@@ -154,14 +164,14 @@ def _by_doc(n_docs: int) -> dict:
 class TestManifestWriteLoopBatching:
     def test_multi_doc_uses_write_many_once(self) -> None:
         cat = _FakeCat()
-        _manifest_write_loop(cat, _by_doc(3))
+        _manifest_write_loop(cat, _by_doc(3), reader=cat)
         assert len(cat.many_calls) == 1
         assert len(cat.many_calls[0]) == 3
         assert cat.replace_calls == []
 
     def test_404_falls_back_to_per_doc_with_chunk_count_resync(self) -> None:
         cat = _FakeCat(many_404=True)
-        _manifest_write_loop(cat, _by_doc(2))
+        _manifest_write_loop(cat, _by_doc(2), reader=cat)
         assert sorted(cat.replace_calls) == ["1.9.0", "1.9.1"]
         # chunk_count parity (critique Critical): HTTP replace does not
         # sync documents.chunk_count — the fallback must resync per doc.
@@ -171,7 +181,7 @@ class TestManifestWriteLoopBatching:
         # critique Critical: len(by_doc)==1 must STILL use write_many —
         # it is the only HTTP path that folds chunk_count in.
         cat = _FakeCat()
-        _manifest_write_loop(cat, _by_doc(1))
+        _manifest_write_loop(cat, _by_doc(1), reader=cat)
         assert len(cat.many_calls) == 1
         assert [d for d, _ in cat.many_calls[0]] == ["1.9.0"]
         assert cat.replace_calls == []
@@ -187,7 +197,7 @@ class TestManifestWriteLoopBatching:
                          for i in range(2)]
             for d in range(2)
         }
-        _manifest_write_loop(cat, by_doc)
+        _manifest_write_loop(cat, by_doc, reader=cat)
         assert cat.many_calls == []
         assert sorted(cat.append_calls) == ["1.9.0", "1.9.1"]
         assert cat.replace_calls == []
@@ -206,7 +216,7 @@ class TestManifestWriteLoopBatching:
             (i, {"chunk_text_hash": "f" * 64, "chunk_index": 5 + i})
             for i in range(2)
         ]
-        _manifest_write_loop(cat, by_doc)
+        _manifest_write_loop(cat, by_doc, reader=cat)
         assert len(cat.many_calls) == 1
         assert [d for d, _ in cat.many_calls[0]] == ["1.9.0"]
         assert cat.replace_calls == []  # continuation NOT replaced
@@ -214,7 +224,7 @@ class TestManifestWriteLoopBatching:
 
     def test_writer_without_capability_uses_per_doc(self) -> None:
         cat = _FakeCat(many=False)
-        _manifest_write_loop(cat, _by_doc(2))
+        _manifest_write_loop(cat, _by_doc(2), reader=cat)
         assert sorted(cat.replace_calls) == ["1.9.0", "1.9.1"]
 
 
@@ -286,7 +296,7 @@ class TestManifestWriteFailureSurfacing:
     def test_transient_connect_error_recovers_without_recording_failure(self) -> None:
         cat = _FlakyThenOkCat(fail_times=2)
         with patch("nexus.retry.time.sleep"):
-            _manifest_write_loop(cat, _by_doc(1))
+            _manifest_write_loop(cat, _by_doc(1), reader=cat)
         assert cat.replace_calls == ["1.9.0"]
         assert get_manifest_write_failures() == []
 
@@ -294,13 +304,13 @@ class TestManifestWriteFailureSurfacing:
         cat = _AlwaysDownCat()
         with patch("nexus.retry.time.sleep"):
             # Contract: must never raise out of the hook.
-            _manifest_write_loop(cat, _by_doc(2))
+            _manifest_write_loop(cat, _by_doc(2), reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
 
     def test_persistent_write_many_failure_is_swallowed_and_recorded(self) -> None:
         cat = _AlwaysDownManyCat()
         with patch("nexus.retry.time.sleep"):
-            _manifest_write_loop(cat, _by_doc(2))
+            _manifest_write_loop(cat, _by_doc(2), reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
         # Not re-attempted per-doc after the batch path exhausted retries.
         assert cat.replace_calls == []
@@ -308,7 +318,7 @@ class TestManifestWriteFailureSurfacing:
     def test_reset_clears_prior_run_failures(self) -> None:
         cat = _AlwaysDownCat()
         with patch("nexus.retry.time.sleep"):
-            _manifest_write_loop(cat, _by_doc(1))
+            _manifest_write_loop(cat, _by_doc(1), reader=cat)
         assert get_manifest_write_failures() == ["1.9.0"]
         reset_manifest_write_failures()
         assert get_manifest_write_failures() == []

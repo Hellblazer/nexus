@@ -54,7 +54,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    create_tenant_token,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -333,15 +339,12 @@ def service(pg_instance):
     }
     env.pop("NX_STORAGE_BACKEND", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=30.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", token, proc
     finally:
         try:
@@ -727,7 +730,7 @@ class TestAnalyticalMethods:
 
     def test_j_detect_hubs(self, taxonomy_store) -> None:
         """j) detect_hubs returns HubRow instances for topics spanning >= 2 collections."""
-        from nexus.db.t2.catalog_taxonomy import HubRow
+        from nexus.db.t2.taxonomy_compute import HubRow
         hubs = taxonomy_store.detect_hubs(min_collections=1)
         assert isinstance(hubs, list), "detect_hubs must return a list"
         assert len(hubs) > 0, "Expected at least one hub row"
@@ -738,7 +741,7 @@ class TestAnalyticalMethods:
 
     def test_k_detect_hubs_stopword_flagging(self, taxonomy_store) -> None:
         """k) detect_hubs flags 'class-helper-inttest' label as matched_stopwords."""
-        from nexus.db.t2.catalog_taxonomy import HubRow
+        from nexus.db.t2.taxonomy_compute import HubRow
         hubs = taxonomy_store.detect_hubs(min_collections=1)
         stopword_hubs = [h for h in hubs if "class" in h.matched_stopwords]
         assert len(stopword_hubs) >= 1, (
@@ -747,7 +750,7 @@ class TestAnalyticalMethods:
 
     def test_l_audit_collection(self, taxonomy_store) -> None:
         """l) audit_collection returns AuditReport with correct fields."""
-        from nexus.db.t2.catalog_taxonomy import AuditHub, AuditReport
+        from nexus.db.t2.taxonomy_compute import AuditHub, AuditReport
         report = taxonomy_store.audit_collection(self._COLL_B)
         assert isinstance(report, AuditReport), "audit_collection must return AuditReport"
         assert report.collection == self._COLL_B
@@ -762,7 +765,7 @@ class TestAnalyticalMethods:
 
     def test_m_audit_collection_pattern_pollution(self, taxonomy_store) -> None:
         """m) audit_collection flags pattern_pollution for stopword labels."""
-        from nexus.db.t2.catalog_taxonomy import AuditReport
+        from nexus.db.t2.taxonomy_compute import AuditReport
         report = taxonomy_store.audit_collection(self._COLL_B)
         # 'class-helper-inttest' has projection from COLL_B and contains stopword 'class'
         polluted_labels = [h.label for h in report.pattern_pollution]

@@ -31,13 +31,10 @@ one. This module is the dedicated recurrence guard for that gap:
 """
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.indexer_utils import build_staleness_cache
 from tests.catalog.test_http_catalog_client import (
@@ -47,41 +44,11 @@ from tests.catalog.test_http_catalog_client import (
     start_fake_server,
 )
 
-# ── local Catalog fixture (mirrors tests/test_catalog_manifest_read_api.py) ─
-
-
-def _make_local_catalog(tmp_path: Path) -> Catalog:
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
-
-
-def _insert_doc(cat: Catalog, tumbler: str, collection: str) -> None:
-    cat._db.execute(  # epsilon-allow: test fixture seeds documents row
-        "INSERT OR IGNORE INTO documents "
-        "(tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        "metadata, source_mtime, alias_of, source_uri) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            tumbler, f"doc-{tumbler}", "", 0, "code", f"/tmp/{tumbler}.py",
-            "", collection, 0, "", "", "{}", 0.0, "", "",
-        ),
-    )
-    cat._db.commit()
-
-
-def _make_chunk(chash: str, position: int) -> dict[str, Any]:
-    return {"chash": chash, "position": position}
-
-
-@pytest.fixture
-def local_catalog(tmp_path: Path) -> Catalog:
-    cat = _make_local_catalog(tmp_path)
-    _insert_doc(cat, "1.1.1", "code__shape__voyage-code-3__v1")
-    cat.write_manifest("1.1.1", [_make_chunk(CHASH_A, 0)])
-    return cat
+# nexus-i711w terminal deletion: the local-Catalog arm of the parity suite
+# (``local_catalog`` fixture, ``test_local_returns_dict_of_lists``, and the
+# local halves of the paired tests) retired with the local SQLite catalog.
+# The HttpCatalogClient is the only ``docs_for_chashes`` implementation left,
+# so the return-shape contract is pinned directly on it below.
 
 
 # ── HttpCatalogClient fixture — real fake-server round trip ────────────────
@@ -108,40 +75,19 @@ def http_client(fake_server: str):
 
 
 class TestDocsForChashesReturnShapeParity:
-    def test_local_returns_dict_of_lists(self, local_catalog: Catalog) -> None:
-        result = local_catalog.docs_for_chashes([CHASH_A])
-        assert isinstance(result, dict)
-        assert result == {CHASH_A: ["1.1.1"]}
-
     def test_http_returns_dict_of_lists(self, http_client: HttpCatalogClient) -> None:
         result = http_client.docs_for_chashes([CHASH_A])
         assert isinstance(result, dict)
         assert result == {CHASH_A: ["1.1.1"]}
 
-    def test_both_implementations_agree_on_container_type(
-        self, local_catalog: Catalog, http_client: HttpCatalogClient,
+    def test_empty_input_returns_empty_dict(
+        self, http_client: HttpCatalogClient,
     ) -> None:
-        """Paired assertion: neither implementation returns a bare list.
-
-        This is the exact predicate the pre-fix code violated — local
-        returned dict, service returned list, and no test compared them
-        side by side.
-        """
-        local_result = local_catalog.docs_for_chashes([CHASH_A])
-        http_result = http_client.docs_for_chashes([CHASH_A])
-        assert type(local_result) is type(http_result) is dict
-        assert set(local_result.keys()) == set(http_result.keys())
-
-    def test_empty_input_returns_empty_dict_on_both(
-        self, local_catalog: Catalog, http_client: HttpCatalogClient,
-    ) -> None:
-        assert local_catalog.docs_for_chashes([]) == {}
         assert http_client.docs_for_chashes([]) == {}
 
-    def test_unknown_chash_omitted_on_both(
-        self, local_catalog: Catalog, http_client: HttpCatalogClient,
+    def test_unknown_chash_omitted(
+        self, http_client: HttpCatalogClient,
     ) -> None:
-        assert local_catalog.docs_for_chashes(["z" * 32]) == {}
         assert http_client.docs_for_chashes(["z" * 32]) == {}
 
 

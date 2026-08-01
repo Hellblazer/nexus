@@ -128,7 +128,8 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("relevance_log")).as("relevance_log (re-homed, no FK)").isEqualTo(2);
         assertThat(c.get("search_telemetry")).as("search_telemetry (re-homed, no FK)").isEqualTo(2);
         assertThat(c.get("hook_failures")).as("hook_failures (re-homed, no FK)").isEqualTo(1);
-        assertThat(c.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
+        assertThat(c.get("catalog_collections_superseded"))
+            .as("registry X retired as a superseded tombstone (nexus-cecqy)").isEqualTo(1);
     }
 
     @Test @Order(20)
@@ -148,8 +149,13 @@ class CatalogRenameCollectionTest {
                 + "' AND source_collection='" + OLD + "'")).as("assignment orphans").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
                 + "' AND physical_collection='" + OLD + "'")).as("catalog_documents orphans").isZero();
+            // nexus-cecqy: OLD is RETIRED, not deleted — a superseded tombstone that
+            // records where the collection went. It carries no children (every table
+            // above is asserted empty under OLD) and superseded_by != '' keeps it out of
+            // collectionForTuple's live-tuple resolution.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + OLD + "'")).as("old registry row gone").isZero();
+                + "' AND name='" + OLD + "' AND superseded_by='" + NEW + "' AND superseded_at IS NOT NULL"))
+                .as("old registry row retired as a tombstone").isEqualTo(1);
             // Present under NEW.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
                 + "' AND name='" + NEW + "'")).as("new registry row present").isEqualTo(1);
@@ -193,14 +199,22 @@ class CatalogRenameCollectionTest {
     void renameCollection_roundTrip_newBackToOld() throws Exception {
         // Y -> X: tenant A currently lives under NEW; rename it back and confirm the inverse.
         Map<String, Integer> c = repo.renameCollection(TENANT_A, NEW, OLD);
-        assertThat(c.get("catalog_collections_inserted")).as("registry X re-inserted").isEqualTo(1);
+        // nexus-cecqy: X is a TOMBSTONE at this point (the Order(10) rename retired it),
+        // so step 1 upserts onto it — the count is still 1, but via DO UPDATE. The revive
+        // is the whole point: renaming back onto a retired name brings it to life.
+        assertThat(c.get("catalog_collections_inserted")).as("registry X revived").isEqualTo(1);
         assertThat(c.get("chunks_384")).as("chunks_384 back").isEqualTo(2);
-        assertThat(c.get("catalog_collections_deleted")).as("registry Y deleted").isEqualTo(1);
+        assertThat(c.get("catalog_collections_superseded")).as("registry Y retired").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + NEW + "'")).as("NEW gone after round-trip").isZero();
+                + "' AND name='" + NEW + "' AND superseded_by='" + OLD + "'"))
+                .as("NEW retired after round-trip").isEqualTo(1);
+            // OLD must be REVIVED, not still carrying its own tombstone markers from the
+            // forward rename — otherwise the restored collection is invisible to
+            // collectionForTuple and the round trip only looks complete.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + OLD + "'")).as("OLD restored").isEqualTo(1);
+                + "' AND name='" + OLD + "' AND superseded_by='' AND superseded_at IS NULL"))
+                .as("OLD restored and revived").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + OLD + "'")).as("chunks restored under OLD").isEqualTo(2);
             // Back-direction must restore the derived tables too (not just chunks/registry).
@@ -210,6 +224,70 @@ class CatalogRenameCollectionTest {
                 + "' AND collection='" + OLD + "'")).as("document_highlights restored").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids_384 WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + OLD + "'")).as("centroids_384 restored").isEqualTo(1);
+        }
+    }
+
+    @Test @Order(45)
+    void renameCollection_identityBeltMatches_revivesNormally() throws Exception {
+        // nexus-2sovp: the ADDITIVE identity belt only ever NARROWS what already
+        // succeeds — passing the caller's own correct observation of the target's
+        // superseded_by must not change the outcome of a rename that would have
+        // succeeded anyway (the existing round-trip test above covers the 3-arg,
+        // belt-inert overload; this is the same shape through the 4-arg overload).
+        final String a = "knowledge__ren-belt-ok__minilm-l6-v2-384__v1";
+        final String b = "knowledge__ren-belt-ok__minilm-l6-v2-384__v2";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + a + "')");
+        }
+        repo.renameCollection(TENANT_A, a, b); // A -> B; A is now a tombstone, superseded_by=B.
+        // Rename back B -> A, threading the belt with the OBSERVED value at A: "b" — the
+        // same fact a real caller reading A's row would see.
+        Map<String, Integer> c = repo.renameCollection(TENANT_A, b, a, b);
+        assertThat(c.get("catalog_collections_inserted")).as("A revived").isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
+                + "' AND name='" + a + "' AND superseded_by=''")).as("A revived and live").isEqualTo(1);
+        }
+    }
+
+    @Test @Order(46)
+    void renameCollection_identityBeltMismatch_refusesEvenThoughEmptinessWouldAllowIt() throws Exception {
+        // nexus-2sovp: the belt exists for a caller that does NOT replicate
+        // CatalogHandler's own identity pre-check (a future CLI path, migration step, or
+        // scheduled repair calling this method directly). Force exactly that: rename
+        // A -> B leaves A as an EMPTY tombstone (superseded_by=B) — the pre-existing
+        // emptiness check has nothing to object to — then call renameCollection with a
+        // WRONG expected value for A's superseded_by. The belt must refuse BY NAME, and
+        // the refusal must be additive: it does not touch the emptiness check's own
+        // throw, it is a second, independent guard.
+        final String a  = "knowledge__ren-belt-bad__minilm-l6-v2-384__v1";
+        final String b  = "knowledge__ren-belt-bad__minilm-l6-v2-384__v2";
+        final String c2 = "knowledge__ren-belt-bad__minilm-l6-v2-384__v3";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + a + "')");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + c2 + "')");
+        }
+        repo.renameCollection(TENANT_A, a, b); // A -> B; A is now an EMPTY tombstone, superseded_by=B.
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, c2, a, "not-" + b))
+            .as("a stale/wrong observed superseded_by must refuse the revive by name, "
+                + "not silently proceed because emptiness alone would have allowed it")
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .hasMessageContaining(a)
+            .hasMessageContaining(b);
+
+        try (Connection su = pg.createConnection("")) {
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
+                + "' AND name='" + a + "' AND superseded_by='" + b + "'"))
+                .as("the tombstone must survive the refused revive unchanged").isEqualTo(1);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
+                + "' AND name='" + c2 + "'"))
+                .as("the source must be untouched: no half-done rename").isEqualTo(1);
         }
     }
 
@@ -298,6 +376,74 @@ class CatalogRenameCollectionTest {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.search_telemetry WHERE tenant_id='" + TENANT_C
                 + "' AND collection='" + old + "'")).as("OLD telemetry intact").isEqualTo(1);
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-34wrg option (c) — CollectionMergeRefused names WHICH table blocked
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(70)
+    void renameCollection_mergeRefusal_namesAuditOnlyTable_gcAudit() throws Exception {
+        // A retired target whose ONLY row anywhere is an audit breadcrumb (gc_audit) — the
+        // false-refusal shape nexus-34wrg exists to fix: no content, no merge hazard.
+        final String src = "knowledge__nrg-audit-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-audit-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            su.createStatement().execute("INSERT INTO nexus.gc_audit (tenant_id, operation, collection) VALUES ('"
+                + TENANT_A + "', 'purge', '" + tgt + "')");
+        }
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-audit-successor__minilm-l6-v2-384__v1", ""))
+            .as("precondition: target retired").isEqualTo(1);
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .as("must NAME gc_audit and identify it as an audit trail entry, not real data")
+            .hasMessageContaining("gc_audit")
+            .hasMessageContaining("audit trail entry")
+            .hasMessageContaining("no content");
+    }
+
+    @Test @Order(71)
+    void renameCollection_mergeRefusal_namesTheDataTable_whenRealDataExists() throws Exception {
+        // The other side of the same message: a retired target that holds REAL data (a
+        // document) must be named as such, distinctly from the audit-only case above.
+        final String src = "knowledge__nrg-data-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-data-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT_A + "', 'nrg-data-doc', 'Doc', '" + tgt + "')");
+        }
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-data-successor__minilm-l6-v2-384__v1", ""))
+            .as("precondition: target retired").isEqualTo(1);
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .as("must NAME catalog_documents as REAL data, not an audit breadcrumb")
+            .hasMessageContaining("real data in 'catalog_documents'");
+    }
+
+    @Test @Order(72)
+    void renameCollection_trulyEmptyRetiredTarget_revivesSuccessfully() throws Exception {
+        // A retired target with NOTHING in any scoped table — the legitimate undo-rename
+        // case nexus-34wrg protects: it must succeed, not be refused.
+        final String src = "knowledge__nrg-empty-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-empty-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+        }
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, src, ""))
+            .as("precondition: target retired").isEqualTo(1);
+
+        Map<String, Integer> counts = repo.renameCollection(TENANT_A, src, tgt);
+        assertThat(counts).as("truly-empty retired target revives without refusal").isNotNull();
     }
 
     // ── fixture ──────────────────────────────────────────────────────────────

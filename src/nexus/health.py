@@ -15,13 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import chromadb
 import structlog
 
 from nexus.config import default_db_path
 
 if TYPE_CHECKING:
-    from nexus.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
 
 _log = structlog.get_logger(__name__)
 
@@ -297,37 +296,12 @@ def local_embedder_advisory(
 
 
 def _check_t3_local() -> list[HealthResult]:
-    from nexus.config import _default_local_path  # noqa: PLC0415 — deferred to avoid circular import
-
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="local (no API keys needed)"))
     # RDR-155 P4a.2 (nexus-1k8s1): the nexus-service serves T3 in local mode
     # too — probe it unconditionally (critique finding 2: a pgvector-only
     # install with the service down must not doctor all-green).
     results.append(_check_vector_service())
-
-    local_path = _default_local_path()
-    path_exists = local_path.exists()
-    if path_exists:
-        try:
-            test_file = local_path / ".doctor_test"
-            test_file.touch()
-            test_file.unlink()
-            results.append(HealthResult(label="Local ChromaDB path", ok=True, detail=str(local_path)))
-        except OSError:
-            results.append(HealthResult(
-                label="Local ChromaDB path",
-                ok=False,
-                detail=f"{local_path} — not writable",
-                fix_suggestions=[f"Check permissions on {local_path}"],
-                fatal=True,
-            ))
-    else:
-        results.append(HealthResult(
-            label="Local ChromaDB path",
-            ok=True,
-            detail=f"{local_path} (will be created on first index)",
-        ))
 
     # Service mode (pg_credentials present) reshapes the Python local-embedder
     # surface below (nexus-ybw87): a --service install embeds T3 server-side in
@@ -366,13 +340,14 @@ def _check_t3_local() -> list[HealthResult]:
         if advisory is not None:
             results.append(advisory)
 
-    # Collection count + legacy-store disk usage.
+    # Collection count.
     #
     # RDR-155 P4a.2 (nexus-1k8s1): the T3-daemon probe is retired with the
     # Chroma serving path — T3 serving routes through the pgvector-backed
     # nexus-service, so the collection census queries it via ``make_t3()``.
-    # The on-disk Chroma directory is reported as the LEGACY store awaiting
-    # the Phase-5 ETL (its deletion is Phase 4b, gated on P5.G).
+    # (P4b: the legacy Chroma disk-usage report died with the migration
+    # machinery; Chroma-era salvage goes through the LAST_MIGRATION_CAPABLE
+    # release.)
     #
     # The GH-1061 E1 dimension-mismatch probe retired with the serving path
     # too: it dummy-queried raw Chroma collections to catch stored-vs-active
@@ -390,17 +365,9 @@ def _check_t3_local() -> list[HealthResult]:
         # separately and is the failure surface; this check is informational.
         cols = make_t3().list_collections()
         col_count = len(cols)
-        detail = f"{col_count} collections (pgvector service)"
-        if path_exists:
-            total_bytes = sum(f.stat().st_size for f in local_path.rglob("*") if f.is_file())
-            if total_bytes < 1024 * 1024:
-                size_str = f"{total_bytes / 1024:.1f} KB"
-            else:
-                size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
-            detail += f"; legacy Chroma store {size_str} on disk (awaiting P5 ETL)"
         results.append(HealthResult(
             label="T3 collections", ok=True,
-            detail=detail,
+            detail=f"{col_count} collections (pgvector service)",
         ))
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("doctor_t3_collections_failed", error=str(exc))
@@ -623,13 +590,56 @@ def _check_vector_service() -> HealthResult:
             label="Vector service (/v1/vectors)", ok=True, detail="reachable",
         )
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
+        # nexus-srt1m: discriminate on the HTTP status before calling anything
+        # "not reachable". ``VectorServiceError.code`` carries the status for an
+        # HTTP-error response and ``None`` for a transport failure — a service
+        # that answers 401 is RUNNING, so reporting unreachability (and
+        # prescribing "start the service") points at the wrong subsystem. The
+        # 2026-07-25 incident: a rotated bearer token printed
+        # "not reachable / Fix: Start the nexus-service" three lines above a
+        # green "✓ Managed/remote service — release_version 0.1.55", and in
+        # cloud mode there is no local service to start in the first place.
+        code = getattr(exc, "code", None)
+        if code in (401, 403):
+            _log.debug("vector_service_auth_failed", status=code, error=str(exc))
+            return HealthResult(
+                label="Vector service (/v1/vectors)",
+                ok=False,
+                detail=f"authentication failed (HTTP {code}) — the service is "
+                "reachable but rejected the token",
+                fix_suggestions=[
+                    "Refresh NX_SERVICE_TOKEN (a rotated/revoked token 401s "
+                    "while an unauthenticated probe like /version still 200s).",
+                    "Then restart any long-lived process holding the old token "
+                    "— MCP servers and editor sessions capture env at spawn, so "
+                    "they keep failing after a rotation while a freshly sourced "
+                    "shell succeeds, which misreads as intermittent.",
+                ],
+                fatal=True,
+            )
+        if code is not None:
+            # The service answered, just not successfully. Surface the status
+            # instead of laundering it into a reachability claim.
+            _log.debug("vector_service_http_error", status=code, error=str(exc))
+            return HealthResult(
+                label="Vector service (/v1/vectors)",
+                ok=False,
+                detail=f"service returned HTTP {code}",
+                fix_suggestions=[
+                    "Check the service logs for the failing request — the "
+                    "endpoint is reachable, so this is not a startup problem.",
+                ],
+                fatal=True,
+            )
         _log.debug("vector_service_not_reachable", error=str(exc))
         # nexus-4m6i0.7: the service can crash-loop before answering any
         # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
         # the root cause from the local service log when one is available,
         # instead of leaving the operator to spelunk storage_service_native.log
         # by hand. Strictly best-effort/soft: any failure here degrades
-        # silently back to the bare "not reachable" message.
+        # silently back to the bare "not reachable" message. Only reached for
+        # transport failures now, so a boot advisory can never be scraped from
+        # a stale log while the service is actually up and answering.
         detail = "not reachable"
         boot_advisory = _boot_failure_advisory()
         if boot_advisory:
@@ -718,145 +728,29 @@ def _check_t3_cloud() -> list[HealthResult]:
 
     # Credential lines are INFORMATIONAL, never fatal (nexus-nmw3i /
     # nexus-c7aj3): serving is the vector service in every mode (RDR-155
-    # P4a.2 — make_t3() is service-backed unconditionally), so these
-    # ChromaDB/Voyage client credentials are MIGRATION-SOURCE config.
-    # DELIBERATE TRADEOFF, disclosed: a pre-/mid-migration install with
-    # absent source creds doctors clean here and learns about the gap from
-    # the migration command itself (the ETL open_read_legs checks fail
-    # loud) — a wrong-exit-1 on every migrated install was the worse
-    # failure mode.
-    _absent_detail = (
-        "not set (migration-source only — needed by the legacy-store "
-        "migration ETL, not for serving)"
-    )
-
-    # CHROMA_API_KEY
-    chroma_key = get_credential("chroma_api_key")
-    results.append(HealthResult(
-        label="ChromaDB  (CHROMA_API_KEY)",
-        ok=True,
-        detail="set" if chroma_key else _absent_detail,
-    ))
-
-    # CHROMA_TENANT (optional)
-    chroma_tenant = get_credential("chroma_tenant")
-    results.append(HealthResult(
-        label="ChromaDB  (CHROMA_TENANT)",
-        ok=True,
-        detail=chroma_tenant if chroma_tenant
-        else "not set (auto-inferred from API key — set explicitly only for multi-workspace)",
-    ))
-
-    # CHROMA_DATABASE
-    chroma_database = get_credential("chroma_database")
-    results.append(HealthResult(
-        label="ChromaDB  (CHROMA_DATABASE)",
-        ok=True,
-        detail=chroma_database if chroma_database else _absent_detail,
-    ))
-
-    # Vector-serving reachability is probed UNCONDITIONALLY at the top of
-    # this function via _check_vector_service() (RDR-155 P4a.2): the direct
-    # ChromaDB Cloud probe retired with the serving path, and the service
-    # probe must not be gated on legacy ChromaCloud credential presence.
-    # The ChromaCloud credentials above still matter to ONE consumer: the
-    # Phase-5 migration ETL reads the legacy store through them. Their
-    # absence is deliberately non-fatal here (see the tradeoff note above).
+    # P4a.2 — make_t3() is service-backed unconditionally). The ChromaDB
+    # migration-source credential rows died with the migration machinery
+    # at P4b.
 
     # VOYAGE_API_KEY — server-side embedding on the service path; the
-    # client key is migration/enrichment + engine-bootstrap material only
-    # (RDR-188 moved reranking server-side — no client code path consumes
-    # this key for rerank), not a serving requirement.
+    # client key is enrichment + engine-bootstrap material only (RDR-188
+    # moved reranking server-side — no client code path consumes this key
+    # for rerank), not a serving requirement.
     voyage_key = get_credential("voyage_api_key")
     results.append(HealthResult(
         label="Voyage AI (VOYAGE_API_KEY)",
         ok=True,
-        detail="set" if voyage_key else _absent_detail,
+        detail="set" if voyage_key else "not set (enrichment/engine-bootstrap only, not for serving)",
     ))
 
-    # Pipeline version check. Without the legacy source creds the line
-    # must still appear — as "retired", not vanish (reviewer-c7aj3 Medium).
-    if not (chroma_key and chroma_database and voyage_key):
-        results.append(HealthResult(
-            label="pipeline versions",
-            ok=True,
-            detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
-        ))
-    elif chroma_key and chroma_database and voyage_key:
-        from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version  # noqa: PLC0415 — deferred to avoid circular import
-
-        # RDR-155 P4a.2 (nexus-1k8s1): the sweep reads Chroma COLLECTION
-        # metadata (the pipeline_version stamp), which has no pgvector
-        # equivalent — collection is a column, not an object with metadata.
-        # On the service-backed handle the sweep is retired, not "failed";
-        # pgvector-side staleness tracking is a P5 ETL concern.
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import
-
-        # nexus-b6qlf regression: make_t3() (via get_http_vector_client())
-        # now runs a cloud-mode engine-version probe -- every OTHER make_t3()
-        # call site in this module already degrades gracefully on failure
-        # (_check_t3_local's "T3 collections" census, _check_managed_service_
-        # probe); this was the one unguarded call, so a probe failure used to
-        # crash the entire `nx doctor` run instead of reporting a soft-fail
-        # line like its siblings.
-        try:
-            t3_handle = make_t3()
-        except Exception as exc:  # noqa: BLE001 — diagnostic: report unavailability, never crash doctor
-            _log.debug("doctor_pipeline_version_t3_unavailable", error=str(exc))
-            results.append(HealthResult(
-                label="pipeline versions", ok=False, warn=True,
-                detail=f"T3 unavailable ({exc}) — see the Managed/remote service check above.",
-            ))
-            return results
-        if is_service_backed(t3_handle):
-            results.append(HealthResult(
-                label="pipeline versions", ok=True,
-                detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
-            ))
-            return results
-
-        stale_count = 0
-        pipeline_results: list[HealthResult] = []
-        try:
-            client = t3_handle._client
-            cols = client.list_collections()
-            for col in cols:
-                # taxonomy__* collections are BERTopic aggregates (RDR-070),
-                # not indexer outputs — PIPELINE_VERSION does not apply.
-                if col.name.startswith("taxonomy__"):
-                    continue
-                stored = get_collection_pipeline_version(col)
-                if stored is None:
-                    pipeline_results.append(HealthResult(
-                        label=f"pipeline ({col.name})", ok=True,
-                        detail="no version stamp (next 'nx index repo' will stamp)",
-                    ))
-                elif stored != PIPELINE_VERSION:
-                    stale_count += 1
-                    pipeline_results.append(HealthResult(
-                        label=f"pipeline ({col.name})", ok=False,
-                        detail=f"v{stored} (current: v{PIPELINE_VERSION})",
-                    ))
-                else:
-                    pipeline_results.append(HealthResult(
-                        label=f"pipeline ({col.name})", ok=True, detail=f"v{stored}",
-                    ))
-        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
-            _log.debug("doctor_pipeline_check_failed", db=chroma_database, error=str(exc))
-            pipeline_results.append(HealthResult(
-                label=f"pipeline ({chroma_database})", ok=False, detail="check failed",
-            ))
-
-        # Add fix suggestions to the last pipeline result if stale
-        if stale_count and pipeline_results:
-            pipeline_results[-1].fix_suggestions = [
-                "nx index repo <path> --force-stale  (re-index outdated collections)",
-                "nx index repo <path> --force        (re-index all collections)",
-            ]
-            pipeline_results[-1].fatal = True
-
-        results.extend(pipeline_results)
+    # Pipeline version sweep read Chroma COLLECTION metadata, which has no
+    # pgvector equivalent — retired with the Chroma serving path, but the
+    # line must still appear, not vanish (reviewer-c7aj3 Medium).
+    results.append(HealthResult(
+        label="pipeline versions",
+        ok=True,
+        detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
+    ))
 
     return results
 
@@ -956,7 +850,6 @@ def _check_git_hooks() -> list[HealthResult]:
     from nexus import _git_hooks_meta as _ghm  # noqa: PLC0415 — deferred to avoid circular import
     from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END  # noqa: PLC0415 — deferred to avoid circular import
     _effective_hooks_dir = _ghm.effective_hooks_dir
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -1180,56 +1073,6 @@ def _check_orphan_t1() -> list[HealthResult]:
     return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
 
 
-def _check_t3_daemon_version() -> list[HealthResult]:
-    """Flag a CLI-vs-T3-daemon version mismatch (RDR-149, nexus-ymn76).
-
-    The supervised T3 daemon stamps its conexus version in its lease record
-    (RDR-149 P3). After a CLI upgrade the version-skew cycle restarts it (the
-    #1112 fix), but until that fires — or if it failed — the daemon keeps
-    serving the old binary. This is the operator-visible counterpart to that
-    structural fix: it surfaces the mismatch as a soft warning (the daemon
-    still works, it is merely stale). Local mode only; cloud T3 has no daemon.
-    """
-    from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
-
-    from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — deferred to avoid circular import
-
-    try:
-        cli_version = _pkg_version("conexus")
-    except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        return []  # installed version unknown — nothing to compare against
-
-    daemon = find_t3_daemon()
-    if daemon is None:
-        return [HealthResult(
-            label="T3 daemon version", ok=True, detail="no T3 daemon running"
-        )]
-    daemon_version = daemon.get("version")
-    if not daemon_version:
-        return [HealthResult(
-            label="T3 daemon version", ok=True,
-            detail="T3 daemon lease carries no version (pre-RDR-149 daemon?)",
-        )]
-    if daemon_version == cli_version:
-        return [HealthResult(
-            label="T3 daemon version", ok=True,
-            detail=f"{daemon_version} (matches CLI)",
-        )]
-    return [HealthResult(
-        label="T3 daemon version", ok=False, warn=True,
-        detail=(
-            f"T3 daemon is running {daemon_version} but the CLI is "
-            f"{cli_version} (stale daemon — serving the old binary)"
-        ),
-        fix_suggestions=[
-            "Restart the T3 daemon to pick up the new version: "
-            "nx daemon t3 stop && nx daemon t3 start",
-            "nx upgrade cycles supervised daemons automatically; a mismatch "
-            "here means the version-skew cycle has not run yet or failed.",
-        ],
-    )]
-
-
 def _check_orphan_checkpoints() -> list[HealthResult]:
     from nexus.checkpoint import CHECKPOINT_DIR, scan_orphaned_checkpoints  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -1362,9 +1205,11 @@ _INTEGRITY_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.25, 0.5)
 def _is_lock_error(exc: BaseException) -> bool:
     """True when *exc* is transient writer-slot contention, not corruption.
 
-    Mirrors the discriminator in ``nexus.db.t2._apply_pending_with_lock_retry``:
-    ``database is locked`` / ``database is busy`` (including the
-    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked").
+    Mirrors the discriminator the retired T2 bootstrap-migration retry used
+    (``database is locked`` / ``database is busy``, including the
+    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked");
+    the retry died with ``db/migrations.py`` (RDR-158 P4 Stage 4,
+    nexus-i711w) but the lock-vs-corruption distinction is still the point.
     """
     msg = str(exc).lower()
     return "locked" in msg or "busy" in msg
@@ -1378,7 +1223,7 @@ def _check_t2_integrity() -> list[HealthResult]:
         return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
 
     try:
-        conn = sqlite3.connect(str(db_path))  # epsilon-allow: health PRAGMA integrity_check diagnostic — must operate when daemon offline; read-only
+        conn = sqlite3.connect(str(db_path))  # frozen-source-integrity-write: NOT mode=ro — the FTS5 integrity-check pseudo-command below requires a writable connection (checking command, no content change); named in SQLITE_CONNECT_ALLOWLIST with the write-shaped exception documented
         try:
             conn.execute(f"PRAGMA busy_timeout = {_INTEGRITY_BUSY_TIMEOUT_MS}")
             rows = conn.execute("PRAGMA integrity_check").fetchall()
@@ -1478,99 +1323,15 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
     )]
 
 
-def _check_t2_daemon_singleton() -> list[HealthResult]:
-    """Fail loud when more than one T2 daemon serves the same db (RDR-129 A3,
-    nexus-exa2p). Exactly one daemon per ``memory.db`` is the single-writer
-    invariant; two daemons contend on the WAL and produce the ``FTS5: database
-    is locked`` flicker. This is the **hard** census error, complementary to
-    the soft live-contention signal in ``_check_t2_integrity``: A1/A2 enforce
-    single occupancy, A3 makes a residual violation observable instead of
-    silent. Names the offending pids so an operator can act without reading
-    code.
-    """
-    db_path = default_db_path()
-    if not db_path.exists():
-        return [HealthResult(
-            label="T2 daemon singleton", ok=True, detail="no T2 database yet",
-        )]
-    try:
-        from nexus.daemon.t2_daemon import _enumerate_t2_daemon_pids_for_db  # noqa: PLC0415 — deferred to avoid circular import
-
-        pids = sorted(set(_enumerate_t2_daemon_pids_for_db(db_path)))
-    except Exception as exc:  # pragma: no cover — defensive  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        # Absence of evidence is not evidence of multiplicity: a failed probe
-        # must not flip doctor red.
-        return [HealthResult(
-            label="T2 daemon singleton", ok=True, detail=f"probe unavailable: {exc}",
-        )]
-
-    if len(pids) <= 1:
-        detail = "1 daemon" if pids else "no daemon running"
-        return [HealthResult(label="T2 daemon singleton", ok=True, detail=detail)]
-
-    pid_list = ", ".join(str(p) for p in pids)
-    return [HealthResult(
-        label="T2 daemon singleton",
-        ok=False,
-        fatal=True,
-        detail=(
-            f"{len(pids)} daemons for {db_path.name} (pids: {pid_list}); "
-            f"single-writer invariant violated"
-        ),
-        fix_suggestions=[
-            "two T2 daemons are contending on the same memory.db (RDR-129 A3). "
-            "Stop the extras: `nx daemon t2 stop`, then "
-            "`nx daemon t2 ensure-running` to leave exactly one",
-        ],
-    )]
+# NO _check_t2_daemon_singleton: RDR-129 A3 made a residual two-daemon
+# violation observable, and its subject (the T2 daemon) is retired
+# (nexus-i711w Stage 2 sub-stage B). With no daemon the census can only ever
+# report zero, and its fix_suggestions named `nx daemon t2 stop` /
+# `ensure-running`, both gone. The single-writer invariant it guarded now
+# belongs to Postgres, not to a pid count.
 
 
-def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]:
-    try:
-        cols = client.list_collections()  # type: ignore[union-attr]
-    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        return [HealthResult(
-            label=f"ChromaDB pagination ({db_name})", ok=False, detail=f"list failed: {exc}",
-        )]
-
-    target_col = None
-    for col in cols:
-        try:
-            if col.count() > 0:
-                target_col = col
-                break
-        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-            continue
-
-    if target_col is None:
-        return [HealthResult(
-            label=f"ChromaDB pagination ({db_name})", ok=True,
-            detail="no non-empty collections to audit",
-        )]
-
-    try:
-        expected = target_col.count()
-        retrieved = 0
-        offset = 0
-        page_size = 300
-        while True:
-            batch = target_col.get(limit=page_size, offset=offset, include=[])
-            ids = batch.get("ids", [])
-            retrieved += len(ids)
-            if len(ids) < page_size:
-                break
-            offset += page_size
-
-        ok = retrieved == expected
-        detail = f"{target_col.name}: count={expected}, paginated={retrieved}"
-        return [HealthResult(label=f"ChromaDB pagination ({db_name})", ok=ok, detail=detail)]
-    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        return [HealthResult(
-            label=f"ChromaDB pagination ({db_name})", ok=False, detail=f"audit failed: {exc}",
-        )]
-
-
-def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult]:
+def _check_catalog(cat: "CatalogReader | None", cat_path: "Path") -> list[HealthResult]:
     try:
         if cat is not None:
             # nexus-qnp5s: use cat.stats() which works on both SQLite Catalog
@@ -1653,10 +1414,11 @@ def _check_credential_persistence() -> list[HealthResult]:
 
     GUI-spawned ``nx-mcp`` (Claude Desktop, Cowork SDK bridge) inherits
     launchd's environment, NOT the user's interactive shell. If
-    ``CHROMA_API_KEY`` / ``VOYAGE_API_KEY`` are in ``.zshrc`` exports
-    but never persisted via ``nx config set``, the GUI-spawned
-    subprocess sees them as absent, ``is_local_mode()`` flips to True,
-    and T3 dispatch goes to the daemon path that fails opaquely.
+    ``VOYAGE_API_KEY`` is in ``.zshrc`` exports but never persisted via
+    ``nx config set``, the GUI-spawned subprocess sees it as absent,
+    ``is_local_mode()`` flips to True, and T3 dispatch goes to the
+    daemon path that fails opaquely. (RDR-155 P4b: the CHROMA_* keys
+    died with the migration machinery.)
 
     This check runs on the CLI side (where shell env IS visible) and
     surfaces the gap before the GUI-spawn path hits it. Non-fatal: a
@@ -1667,12 +1429,9 @@ def _check_credential_persistence() -> list[HealthResult]:
     """
     from nexus.config import _global_config_path  # noqa: PLC0415 — deferred to avoid circular import
 
-    cloud_keys = ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
+    cloud_keys = ("voyage_api_key",)
     env_names = {
-        "chroma_api_key": "CHROMA_API_KEY",
         "voyage_api_key": "VOYAGE_API_KEY",
-        "chroma_tenant": "CHROMA_TENANT",
-        "chroma_database": "CHROMA_DATABASE",
     }
 
     # Read config.yml directly; we want to see file state independent of env.
@@ -1708,8 +1467,6 @@ def _check_credential_persistence() -> list[HealthResult]:
     if not env_only:
         return []
 
-    # Surface the most-load-bearing pair first; chroma_tenant /
-    # chroma_database are derived/configuration rather than identity.
     suggestions = [f"nx config set {key} \"${env_names[key]}\"" for key in env_only]
     suggestions.append(
         "Then quit and relaunch Claude Desktop so the next nx-mcp "
@@ -1766,6 +1523,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
+    "nexus.gc_audit",
     "nexus.hook_failures",
     "nexus.ladder_completions",
     "nexus.memory",
@@ -2089,17 +1847,21 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
     above. Framed as a soft warning (this is benign log noise, not data
     loss), never a hard failure.
 
-    Silent (``[]``) on the common cases: local mode (the T2 tier is the
-    live substrate there — nothing stray to report), or service mode with
-    no autostart unit installed. Any probe failure ALSO degrades
-    silently — best-effort, must never break ``nx doctor``.
+    NOT gated on storage mode (nexus-i711w Stage 2 sub-stage B). It used to
+    return ``[]`` outside service mode, on the reasoning that in local mode
+    "the T2 tier is the live substrate there — nothing stray to report".
+    That reasoning died with the daemon: no box of ANY mode can start a T2
+    daemon or reinstall the unit, so a surviving unit is stray EVERYWHERE.
+    Keeping the gate would have given a SQLite-mode box — the one most
+    likely to be carrying a unit — the silent auto-removal in
+    :func:`~nexus.upgrade_finish.unload_stale_t2_launchagent` (un-gated in
+    the same commit) and zero ``nx doctor`` visibility, which is the inverse
+    of the argument that un-gated the removal. The two must agree on scope.
+
+    Silent (``[]``) only when the probe itself fails — best-effort, must
+    never break ``nx doctor``.
     """
     try:
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
-
-        if storage_backend_for("memory") != StorageBackend.SERVICE:
-            return []
-
         from nexus.commands.daemon import _autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
 
         unit_path = _autostart_unit_installed()
@@ -2109,7 +1871,7 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
 
     if unit_path is None:
         return [HealthResult(
-            label="T2 autostart unit (service mode)",
+            label="T2 autostart unit",
             ok=True,
             detail="no stray T2 autostart unit installed",
         )]
@@ -2117,18 +1879,23 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
     from nexus.upgrade_finish import _T2_AUTOSTART_UNIT_KIND  # noqa: PLC0415 — deferred to avoid circular import
 
     return [HealthResult(
-        label="T2 autostart unit (service mode)",
+        label="T2 autostart unit",
         ok=False,
         warn=True,
         detail=(
             f"a T2 autostart unit ({_T2_AUTOSTART_UNIT_KIND}) is installed "
-            f"at {unit_path} but service mode never starts the T2 daemon — "
-            "its OS-level restart policy respawns an immediately-exiting "
-            "process indefinitely (log noise)"
+            f"at {unit_path} but the T2 daemon it starts no longer exists — "
+            "its OS-level restart policy respawns an immediately-failing "
+            "`nx daemon t2 start` indefinitely (log noise)"
         ),
+        # ONE suggestion, not two: `nx daemon t2 uninstall --autostart` was
+        # the direct removal verb and died with the daemon (sub-stage B), so
+        # naming it here sent the operator at a command that now exits
+        # "No such command 't2'" — on precisely the pre-retirement-upgrade
+        # box this check exists to help. Pinned by
+        # test_every_fix_suggestion_names_a_LIVE_verb.
         fix_suggestions=[
             "nx daemon restart-stale  # removes the stray unit (GH #1405)",
-            "nx daemon t2 uninstall --autostart  # removes it directly",
         ],
     )]
 
@@ -2574,9 +2341,10 @@ def _check_migration_state(
                 "this warning clears.",
                 "Do NOT drop the chash length constraints to 'unblock' "
                 "anything — that is what caused GH #1390.",
-                "Rollback (`nx storage migrate vectors --rollback`) is "
-                "for the will-not-boot class ONLY (service crash-looping "
-                "at startup on a pre-v0.1.48 engine) — see §8.1 of "
+                "The will-not-boot class ONLY (service crash-looping at "
+                "startup on a pre-v0.1.48 engine) recovers on the "
+                "LAST_MIGRATION_CAPABLE pinned release (this version no "
+                "longer ships the rollback tooling) — see §8.1 of "
                 "https://github.com/Hellblazer/nexus/blob/main/docs/"
                 "migration-runbook.md",
             ],
@@ -2840,45 +2608,6 @@ ORDER BY tbl.schema_name, tbl.table_name;
     )]
 
 
-# ── RDR-178 Pillar A: migration-report doctor checks ────────────────────────
-#
-# 2026-06-30 ``migrate all`` crashed 6/8 stores (report migration-9141ebaf,
-# summary.total_failed=120, verification=indeterminate). Nothing read the
-# report for a month; it was found only by manually opening the JSON
-# (nexus-aigpt). ``_check_migration_reports`` closes Gap 1 (fail loud on a
-# bad report); ``_check_migration_divergence`` closes Gap 2 (warn when local
-# SQLite kept accepting writes after its store "moved" to a cloud target).
-
-
-def _newest_migration_report_path(reports_dir: Path) -> Path | None:
-    """Most-recently-modified ``migration-*.json`` in *reports_dir*, or
-    ``None`` when the directory is absent or has no report files.
-
-    Migration IDs are random UUIDs (see ``build_report``), not time-ordered,
-    so filename sort cannot establish recency — mtime is the only signal
-    available without parsing every report on disk.
-    """
-    if not reports_dir.exists():
-        return None
-    candidates = sorted(
-        reports_dir.glob("migration-*.json"),
-        key=lambda p: p.stat().st_mtime,
-    )
-    return candidates[-1] if candidates else None
-
-
-def _is_local_service_url(url: str) -> bool:
-    """True when *url* is empty, the pre-lease placeholder, or points at
-    loopback — i.e. NOT a remote/cloud migration target."""
-    url = url.strip()
-    if not url or url == "(lease)":
-        return True
-    from urllib.parse import urlparse  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
-
-    host = urlparse(url).hostname or url
-    return host in ("localhost", "127.0.0.1", "::1")
-
-
 #: First conexus plugin release whose hooks.json carries the RDR-184
 #: orchestration hook registrations (subagent-start-stamp + subagent-stop
 #: landed ~78bb02b6/d613f2e7, ancestors of v6.14.0; nexus-3h0u6 then made
@@ -2959,6 +2688,88 @@ def _check_orchestration_hook_floor(registry_path: Path | None = None) -> list[H
     )]
 
 
+def _check_catalog_legacy_file(*, config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-aoqnb (GH #1419 Issue 4): name any legacy catalog SQLite file as
+    a FROZEN MIGRATION SOURCE, never a live mirror.
+
+    Steve Harris's backup held ``catalog.db`` with 532 docs / 13 links while
+    the authoritative PG catalog held 592 / 52, and nothing in the product
+    said which was real. The dangerous property is PLAUSIBILITY: a stale
+    catalog opens, parses, and answers queries, so a recovery procedure
+    reaches for it first. Copy-not-move migration leaves it behind
+    deliberately (orphan-by-design, the Hal two-hop contract), which makes
+    labelling it the product's job rather than the operator's.
+
+    Two shapes both need naming — populated-but-stale (Steve's) and
+    empty-but-present (observed on a dev box a month post-migration, 11
+    tables and zero rows). The second is arguably worse for a restore: it
+    succeeds and silently yields nothing.
+
+    Not fatal: an orphaned source is the EXPECTED post-migration state. The
+    failure being guarded is a human trusting it, so the row exists to be
+    read, and the fix suggestions carry the actual instruction.
+    """
+    if config_dir is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        config_dir = nexus_config_dir()
+
+    results: list[HealthResult] = []
+
+    # The stray: ~/.config/nexus/catalog.db, 0 bytes on real installs. Named
+    # separately so nobody chases a file with nothing in it.
+    stray = config_dir / "catalog.db"
+    if stray.is_file():
+        size = stray.stat().st_size
+        if size == 0:
+            results.append(HealthResult(
+                label="Legacy catalog file",
+                ok=False,
+                warn=True,
+                detail=(
+                    f"{stray} is an EMPTY 0-byte stray — not a catalog, not a "
+                    "migration source, no rows of any kind. Safe to ignore; "
+                    "named only so it is not mistaken for a restore candidate."
+                ),
+                fix_suggestions=[
+                    "Nothing to restore from this file — the catalog lives in "
+                    "Postgres. Delete it only if you want the directory tidy.",
+                ],
+            ))
+
+    legacy = config_dir / "catalog" / ".catalog.db"
+    if legacy.is_file():
+        from nexus.db import (  # noqa: PLC0415 — deferred to avoid circular import
+            read_legacy_catalog_counts,
+        )
+
+        docs, links = read_legacy_catalog_counts(legacy)
+
+        import datetime as _dt  # noqa: PLC0415 — deferred, formatting only
+
+        mtime = _dt.datetime.fromtimestamp(legacy.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        results.append(HealthResult(
+            label="Legacy catalog file",
+            ok=False,
+            warn=True,
+            detail=(
+                f"{legacy} is a FROZEN migration source, not a live mirror of "
+                f"the catalog. It holds {docs} document rows / {links} link "
+                f"rows, last written {mtime}. The authoritative catalog is in "
+                "Postgres and has moved on independently — these numbers will "
+                "drift further apart over time and that is expected."
+            ),
+            fix_suggestions=[
+                "Do NOT restore or recover from this file — it is a "
+                "pre-migration snapshot kept only as a rollback source. "
+                "Use `nx catalog stats` for the real counts.",
+            ],
+        ))
+
+    return results
+
+
 def _check_stranded_install() -> list[HealthResult]:
     """nexus-gynt2: stranded-install detector (N+1 P4b prerequisite).
 
@@ -2992,217 +2803,6 @@ def _check_stranded_install() -> list[HealthResult]:
             "Run: nx upgrade (the ladder converges the pre-PG data migration)",
             "Then upgrade back to this version",
         ],
-    )]
-
-
-def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResult]:
-    """RDR-178 Gap 1 (nexus-aigpt): read the newest migration report and
-    fail loud when it recorded failures or an unverified run.
-
-    ``verification`` present but anything other than ``"verified"``
-    (``"indeterminate"``, ``"mismatch"``) counts as failure — the
-    nexus-r0esi precedent: never SKIP-then-report-all-passed. The vocabulary
-    is the orchestrator's: ``verify_counts()`` emits exactly
-    ``"verified" | "mismatch" | "indeterminate"`` (never "passed").
-
-    ``verification`` KEY entirely absent + zero failures = a legacy report
-    from pre-6.2 tooling that never recorded verdicts → non-fatal WARN with
-    a one-time re-verify suggestion, never a fatal alarm (the false-positive
-    split, 2026-07-02). Absent + failures recorded stays fatal.
-    """
-    label = "Migration reports"
-    if reports_dir is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-        reports_dir = nexus_config_dir() / "migration-reports"
-
-    report_path = _newest_migration_report_path(reports_dir)
-    if report_path is None:
-        return [HealthResult(label=label, ok=True, detail="no migrations recorded")]
-
-    try:
-        from nexus.migration.migration_report import load_report  # noqa: PLC0415 — deferred to avoid circular import
-        report = load_report(report_path)
-    except (OSError, ValueError) as exc:
-        # A report that exists but cannot be read must never be silently
-        # treated as "no migrations recorded" — that recreates the
-        # month-of-silence class with a different failure mode.
-        _log.warning("doctor_migration_report_unreadable", path=str(report_path), error=str(exc))
-        return [HealthResult(
-            label=label,
-            ok=False,
-            fatal=True,
-            detail=f"{report_path}: could not read report ({exc})",
-            fix_suggestions=[f"Inspect: nx storage migration-report show {report_path}"],
-        )]
-
-    summary = report.get("summary") or {}
-    try:
-        total_failed = int(summary.get("total_failed", 0))
-    except (TypeError, ValueError):
-        total_failed = 1  # unparseable -- treat as a failure signal, never silence
-    verification = report.get("verification")
-
-    failed = total_failed > 0
-    unverified = verification != "verified"
-
-    if not failed and not unverified:
-        return [HealthResult(
-            label=label,
-            ok=True,
-            detail=f"clean ({report_path.name}): total_failed=0, verification=verified",
-        )]
-
-    # Legacy-artifact split (2026-07-02, Hal): a report with ZERO failures
-    # whose ``verification`` KEY is entirely absent was written by pre-6.2
-    # tooling that never recorded a verdict — a benign, knowable artifact
-    # (modern writers ALWAYS record one; see _emit_store_report). Reporting
-    # it FATAL is a crying-wolf alarm on day one of every upgrade — the
-    # false-positive class that trains operators to ignore doctor. It
-    # warns (non-fatal) with a one-time-actionable fix instead. A MODERN
-    # report saying mismatch/indeterminate, or any total_failed > 0, stays
-    # fatal — the nexus-r0esi never-silently-pass rule keeps its teeth
-    # where the signal is real. (A modern report can never hit this
-    # branch: its verification key is always present.)
-    if not failed and "verification" not in report:
-        return [HealthResult(
-            label=label,
-            ok=False,
-            warn=True,
-            fatal=False,
-            detail=(
-                f"{report_path.name}: clean (total_failed=0) but predates "
-                f"verification recording (pre-6.2 tooling) — unverified, not failed"
-            ),
-            fix_suggestions=[
-                "Re-verify once with the current tooling (near-no-op on an already-migrated system):",
-                "  nx storage migrate all --verify-fill",
-                "This writes a fresh report with a real verification verdict and clears this warning.",
-            ],
-        )]
-
-    per_store_failures: list[str] = []
-    for store in report.get("stores") or []:
-        store_name = str(store.get("store", "?"))
-        store_failed = sum(
-            int(table.get("failed") or 0) for table in (store.get("tables") or [])
-        )
-        if store_failed:
-            per_store_failures.append(f"{store_name}={store_failed}")
-
-    reasons = []
-    if failed:
-        reasons.append(f"total_failed={total_failed}")
-    if unverified:
-        reasons.append(f"verification={verification!r}")
-
-    detail = f"{report_path}: {', '.join(reasons)}"
-    if per_store_failures:
-        detail += f"; per-store failures: {', '.join(per_store_failures)}"
-
-    fix_suggestions = ["Re-run the failed store migrations:"]
-    if per_store_failures:
-        for entry in per_store_failures:
-            fix_suggestions.append(f"  nx storage migrate {entry.split('=')[0]}")
-    else:
-        fix_suggestions.append("  nx storage migrate all")
-    fix_suggestions.append(f"Inspect: nx storage migration-report show {report_path}")
-
-    return [HealthResult(
-        label=label,
-        ok=False,
-        fatal=True,
-        detail=detail,
-        fix_suggestions=fix_suggestions,
-    )]
-
-
-def _check_migration_divergence(
-    reports_dir: Path | None = None,
-    memory_db_path: Path | None = None,
-) -> list[HealthResult]:
-    """RDR-178 Gap 2 (nexus-14ndm): warn when local SQLite ``memory.db`` kept
-    accepting writes after the newest migration report recorded a cloud
-    target for the memory store.
-
-    Incident: after the 2026-06-30 cloud migration, ``memory.db`` kept
-    receiving writes from old-venv MCP daemons still resolving the local
-    backend — 68 rows accumulated with no warning anywhere. Non-fatal
-    (``warn=True``): a stale local copy is recoverable, not catastrophic.
-    """
-    label = "Migration divergence (memory)"
-    if reports_dir is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-        reports_dir = nexus_config_dir() / "migration-reports"
-    if memory_db_path is None:
-        memory_db_path = default_db_path()
-
-    report_path = _newest_migration_report_path(reports_dir)
-    if report_path is None:
-        return [HealthResult(label=label, ok=True, detail="no migrations recorded")]
-
-    try:
-        from nexus.migration.migration_report import load_report  # noqa: PLC0415 — deferred to avoid circular import
-        report = load_report(report_path)
-    except (OSError, ValueError) as exc:
-        # Gap 1's check already fails loud on an unreadable report; this
-        # check degrades quietly rather than double-reporting the same fault.
-        _log.warning("doctor_migration_divergence_report_unreadable", path=str(report_path), error=str(exc))
-        return [HealthResult(label=label, ok=True, detail=f"{report_path.name}: could not read report; skipping")]
-
-    target = report.get("target") or {}
-    service_url = str(target.get("service_url") or "")
-    if _is_local_service_url(service_url):
-        return [HealthResult(
-            label=label, ok=True,
-            detail=f"migration target is local ({service_url or '(none)'}); skipping",
-        )]
-
-    completed_at_raw = report.get("completed_at")
-    if not completed_at_raw:
-        return [HealthResult(label=label, ok=True, detail="report missing completed_at; skipping")]
-    try:
-        cutoff = datetime.fromisoformat(str(completed_at_raw).replace("Z", "+00:00"))
-    except ValueError:
-        return [HealthResult(
-            label=label, ok=True,
-            detail=f"report has unparseable completed_at {completed_at_raw!r}; skipping",
-        )]
-    # memory.db stores timestamps as "%Y-%m-%dT%H:%M:%SZ" (fixed-width UTC,
-    # no fractional seconds) — format the cutoff the same way so a plain SQL
-    # string comparison is valid.
-    cutoff_str = cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    if not memory_db_path.exists():
-        return [HealthResult(label=label, ok=True, detail="memory.db not present; skipping")]
-
-    try:
-        conn = sqlite3.connect(f"file:{memory_db_path}?mode=ro", uri=True)  # epsilon-allow: health divergence check — read-only, must not contend for the WAL writer slot
-        try:
-            divergent_count, max_ts = conn.execute(
-                "SELECT COUNT(*), MAX(timestamp) FROM memory WHERE timestamp > ?",
-                (cutoff_str,),
-            ).fetchone()
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        return [HealthResult(label=label, ok=True, detail=f"could not query memory.db: {exc}")]
-
-    if not divergent_count:
-        return [HealthResult(
-            label=label, ok=True,
-            detail=f"no local writes after migration to {service_url} ({report_path.name})",
-        )]
-
-    return [HealthResult(
-        label=label,
-        ok=False,
-        warn=True,
-        detail=(
-            f"{divergent_count} local memory write(s) landed after migration to "
-            f"{service_url} completed at {completed_at_raw} "
-            f"(latest local write {max_ts}); report={report_path}"
-        ),
-        fix_suggestions=["Re-run: nx storage migrate memory"],
     )]
 
 
@@ -3243,117 +2843,6 @@ def _check_pending_rungs() -> list[HealthResult]:
         warn=True,
         detail=f"{len(pending)} pending upgrade rung(s) — {names}",
         fix_suggestions=["Run: nx upgrade"],
-    )]
-
-
-def _check_legacy_id_census() -> list[HealthResult]:
-    """RDR-185 P1.2 (nexus-n7u38.9): legacy chunk-id era census (Gap-5).
-
-    Chroma-mode installs holding OUTSTANDING pre-RDR-108 (non-32-char)
-    chunk ids see the debt HERE — months before migration day (the
-    GH #1408 incident class: 18 legacy collections invisible until they
-    blocked the migration). Soft warning, and never a directive: the
-    substrate rung's wire re-id converges this in flight at migration,
-    and the upgrade-ladder row — not this one — is the authority on
-    pending work (Gap-4). Non-Chroma / fresh installs skip silently (the
-    census's cheap file-level gate never opens the store); a CONVERGED
-    install prints the clean row, because the debt is gone even though
-    the immutable RDR-176 source still holds its legacy ids and always
-    will (nexus-6or3m). Crash-proof.
-
-    Reads the census row ONLY. It pairs with ``_check_pending_rungs``:
-    count equality cannot see an unreflected remap cascade, so a clean
-    row here plus a pending ladder row is a coherent pair, not a
-    contradiction — the ladder row carries the half this cannot.
-    """
-    try:
-        from nexus.upgrade_ladder import census as _census  # noqa: PLC0415 — deferred to avoid module-load cost
-
-        result = _census.legacy_id_census()
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.warning("doctor_legacy_id_census_failed", error=str(exc))
-        return [HealthResult(
-            label="Chunk-id era (upgrade ladder)", ok=True,
-            detail="check failed (non-critical)",
-        )]
-    if result is None:
-        return []  # not applicable: no legacy Chroma footprint to census
-    if not result:
-        # NOT "all collections hold conformant ids" (nexus-6or3m): on a
-        # converged install the immutable RDR-176 source still holds its legacy
-        # ids forever, and always will. What is true in both worlds — never
-        # migrated + conformant, and migrated + converged — is that no debt is
-        # outstanding.
-        return [HealthResult(
-            label="Chunk-id era (upgrade ladder)",
-            ok=True,
-            detail="no outstanding legacy chunk-id debt",
-        )]
-    names = ", ".join(
-        f"{c.collection} ({c.source_count} chunks, {c.leg})" for c in result[:6]
-    )
-    more = f" (+{len(result) - 6} more)" if len(result) > 6 else ""
-    # A collection the upgrade CANNOT converge gets the remedy that actually
-    # works, named (bead nexus-mq42b). Without this the row's silence reads as
-    # "the upgrade will handle it", and for a keyless voyage collection it never
-    # will — the planner skips it and the ladder then reports converged. That is
-    # the impossible-remedy shape RDR-185 exists to end, so the one case that
-    # needs a user action is the one case this row must speak up about.
-    blocked = [c for c in result if c.blocked_reason]
-    blocked_more = f" (+{len(blocked) - 3} more)" if len(blocked) > 3 else ""
-    blocked_suggestions = (
-        [
-            f"{len(blocked)} of these cannot be converged by the upgrade: "
-            + "; ".join(f"{c.collection} — {c.blocked_reason}" for c in blocked[:3])
-            + blocked_more
-            + ". Configure the Voyage key and re-run `nx upgrade` to include "
-            "them, or re-index them from source against the current embedder."
-        ]
-        if blocked
-        else []
-    )
-    return [HealthResult(
-        label="Chunk-id era (upgrade ladder)",
-        ok=False,
-        warn=True,
-        detail=(
-            f"{len(result)} collection(s) hold pre-RDR-108 legacy chunk ids — "
-            f"pending upgrade-ladder debt: {names}{more}"
-        ),
-        # This row deliberately issues NO directive, and that is a contract, not
-        # an omission (RDR-185 Gap-4: the census must not become a THIRD
-        # mechanism answering "how far from current" — the upgrade-ladder row is
-        # the authority on pending work; this row is visibility).
-        #
-        # An earlier draft of this fix said "Run: nx upgrade" here. Both
-        # reviewers caught it and it was wrong twice over: the census's whole
-        # reason to exist is keeping visible the collections that CANNOT
-        # migrate, and for the sharpest of those — a voyage-named legacy
-        # collection with no key — `nx upgrade` provably no-ops (the planner
-        # skips it at the credential gate, the rung then reports converged, and
-        # this row fires again forever). Directing a user to a verb the product
-        # will not honour rebuilds the impossible-remedy shape RDR-185 exists to
-        # end. The credential gate's own silent skip is bead nexus-mq42b; this
-        # row's silence is the message-layer workaround, not the fix.
-        fix_suggestions=[
-            # Conditional, or the row contradicts itself: "No action needed
-            # here" cannot print directly above "N of these cannot be converged
-            # by the upgrade" (code review, 2026-07-17). When anything is
-            # blocked, the blocked line IS the message.
-            *(
-                []
-                if blocked
-                else [
-                    "No action needed here: the substrate migration (nx "
-                    "upgrade, wire re-id) converges legacy chunk ids in flight "
-                    "— no re-index, no re-embed. This row is visibility (the "
-                    "GH #1408 class: era debt that used to surface only ON "
-                    "migration day); the upgrade-ladder row is what reports "
-                    "pending work."
-                ]
-            ),
-            *blocked_suggestions,
-        ],
     )]
 
 
@@ -3413,12 +2902,224 @@ def _check_dimension_orphans() -> list[HealthResult]:
     )]
 
 
+def _check_dangling_manifests() -> list[HealthResult]:
+    """Name documents whose manifest references chashes that no longer exist
+    in T3 (nexus-5xn3k AC5).
+
+    THE UNDETECTABLE CLASS. A partial index commits chunks and a manifest
+    without a transaction spanning them, so an interrupted run can leave a
+    catalog row that LOOKS healthy: ``nx catalog show`` reports a chunk_count,
+    the manifest lists chashes, and every one of them hydrates to nothing.
+    Nothing in the product reports it. ``nx catalog reconcile`` covers the
+    adjacent shape — ``chunk_count > 0`` with an EMPTY manifest (GH #1397) —
+    but NOT a POPULATED manifest full of dead chashes, which is the state a
+    failed index actually leaves behind.
+
+    This is the exact INVERSE of the ``nx t3 gc`` orphan scan, and reuses the
+    same two reads so doctor and gc can never disagree about what is real:
+
+        gc:     present_in_T3 - referenced_by_manifest  -> orphan chunks
+        doctor: referenced_by_manifest - present_in_T3  -> dangling manifest
+
+    Reports per collection rather than per document: the alive-set read is
+    collection-scoped, and naming the collection plus a count is enough to act
+    on. Degrades to a skip — a doctor check must never crash the command it
+    is diagnosing, and never guess.
+    """
+    label = "dangling manifest chashes"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+        t3 = make_t3()
+        collections = [c.name for c in t3.list_collections()]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_dangling_manifest_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
+
+    dangling: list[tuple[str, int, int]] = []  # (collection, n_dangling, n_referenced)
+    checked = 0
+    for name in collections:
+        try:
+            referenced = cat.chashes_for_collection(name)
+            if not referenced:
+                continue
+            present = {
+                meta.get("chunk_text_hash", "")
+                for _cid, meta in t3.list_chunks_with_metadata(
+                    name, fields=("chunk_text_hash",),
+                )
+            }
+            checked += 1
+            missing = {c for c in referenced if c and c not in present}
+            if missing:
+                dangling.append((name, len(missing), len(referenced)))
+        except Exception as exc:  # noqa: BLE001 — one unreadable collection must not end the sweep
+            _log.debug(
+                "doctor_dangling_manifest_collection_skipped",
+                collection=name, error=str(exc),
+            )
+            continue
+
+    if checked == 0:
+        # NON-VACUITY: zero collections actually compared is not a clean bill
+        # of health, and must not render as one.
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (no collection had a readable manifest to compare)",
+        )]
+    if not dangling:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none ({checked} collection(s) checked)",
+        )]
+
+    names = "; ".join(
+        f"{name} ({n_missing} of {n_ref} manifest chash(es) missing from T3)"
+        for name, n_missing, n_ref in dangling
+    )
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(dangling)} collection(s) reference chunks that do not exist: "
+            f"{names}. A document in this state reports a chunk_count and "
+            "returns nothing; re-indexing may silently no-op (nexus-5xn3k)."
+        ),
+        fix_suggestions=[
+            "nx catalog reconcile          (rebuild manifests from T3)",
+            "nx index <path> --force       (discard the staleness decision and re-index)",
+        ],
+    )]
+
+
+def _check_next_seq_drift() -> list[HealthResult]:
+    """Name owners whose tumbler allocator has fallen BEHIND its own children
+    (nexus-0ehwe item 4).
+
+    THE WEDGE THIS SURFACES. ``registerDocument`` claims
+    ``catalog_owners.next_seq`` and inserts; the INSERT's only ON CONFLICT
+    arbiter is ``(tenant_id, source_uri)``, but the only unique key on
+    ``catalog_documents`` is ``(tenant_id, tumbler)`` — so a tumbler collision
+    has no arm and escapes as a bare 409. Pre-fix the counter's increment shared
+    the failing transaction and rolled back WITH it, making one drifted owner a
+    PERMANENT, TOTAL outage for that owner (nexus-pbawi, owner 1.12, fixed by
+    hand).
+
+    The engine now floors the claim past any drift, so a drifted owner
+    SELF-HEALS on its next registration rather than wedging. This check exists
+    because self-healing is silent: it reports which owners are ALREADY below
+    their high-water mark, so the blast radius is known rather than guessed, and
+    so an owner that never gets written to again does not sit drifted forever.
+
+    Counts TOMBSTONED children: the ``(tenant_id, tumbler)`` PK does not exclude
+    soft-deleted rows the way the partial ``source_uri`` index does, so a
+    deleted document's tumbler is still taken.
+
+    Read-only, per the RDR-185 rung shape. Degrades to a skip — a doctor check
+    must never crash the command it is diagnosing.
+    """
+    label = "tumbler allocator drift"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+        owners = cat.list_owners()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_next_seq_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
+    if not owners:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
+    if not any("next_seq" in o for o in owners):
+        # NON-VACUITY: an engine that predates nexus-0ehwe item 3 omits the
+        # field entirely, and every owner would then read as drift-free. Say so
+        # rather than render an all-clear this check cannot actually support.
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (engine does not report next_seq — needs the "
+                   "nexus-0ehwe engine change)",
+        )]
+
+    drifted: list[tuple[str, int, int]] = []
+    checked = 0
+    for owner in owners:
+        prefix = str(owner.get("tumbler_prefix", ""))
+        if not prefix or "next_seq" not in owner:
+            continue
+        try:
+            next_seq = int(owner.get("next_seq") or 0)
+            high = _highest_child_seq(cat, prefix)
+        except Exception as exc:  # noqa: BLE001 — one unreadable owner must not end the sweep
+            _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
+            continue
+        checked += 1
+        # STRICTLY less-than. ``next_seq`` holds the LAST CLAIMED sequence, not
+        # the next one to hand out: CatalogRepository.claimNextSeq computes
+        # ``claim = max(next_seq, high_water) + 1`` and stores ``claim``, so
+        # after every successful registration ``next_seq == highest child`` by
+        # construction. Equality is the healthy steady state of every owner
+        # that has ever been written to; only a counter that has fallen BELOW
+        # its own high-water mark is drift, which is what this docstring says
+        # and what the engine's own ``next_seq_drift_healed`` log keys on
+        # (it fires when ``claim != next_seq + 1``, i.e. high_water > next_seq).
+        #
+        # This was ``<=`` (nexus-k5sdi), which flagged every healthy owner. It
+        # went unnoticed because the check skipped entirely against engines that
+        # did not report next_seq, and no test covered the equality boundary.
+        if high and next_seq < high:
+            drifted.append((prefix, next_seq, high))
+
+    if checked == 0:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
+    if not drifted:
+        return [HealthResult(
+            label=label, ok=True, detail=f"none ({checked} owner(s) checked)",
+        )]
+
+    names = "; ".join(
+        f"{p} (next_seq={ns}, highest child={hi})" for p, ns, hi in drifted
+    )
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(drifted)} owner(s) whose allocator is at or below their "
+            f"highest existing tumbler: {names}. The engine floors past this on "
+            "the next registration, so these self-heal when next written to."
+        ),
+        fix_suggestions=[
+            "nx index <path>   (any registration into the owner floors it)",
+        ],
+    )]
+
+
+def _highest_child_seq(cat: Any, prefix: str) -> int:
+    """Highest numeric child sequence under *prefix*, tombstones INCLUDED."""
+    best = 0
+    for entry in cat.all_documents(limit=0):
+        tumbler = str(getattr(entry, "tumbler", "") or "")
+        if not tumbler.startswith(f"{prefix}."):
+            continue
+        tail = tumbler[len(prefix) + 1:]
+        if tail.isdigit():
+            best = max(best, int(tail))
+    return best
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
     Returns (results, is_local_mode).
     """
-    from nexus.config import is_local_mode, get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
 
@@ -3433,7 +3134,6 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         results.extend(_check_t3_local())
         results.extend(_check_service_bge_model())
         results.extend(_check_service_crossencoder_model())
-        results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
 
@@ -3441,6 +3141,14 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # point at `nx collection prune`. Applies in both modes; degrades
     # internally.
     results.extend(_check_dimension_orphans())
+    # nexus-5xn3k AC5: a POPULATED manifest whose chashes no longer
+    # resolve in T3 — the class `nx catalog reconcile` does not cover
+    # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
+    results.extend(_check_dangling_manifests())
+    # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
+    # their own children. Self-healing is silent, so the blast radius must
+    # be reportable rather than guessed.
+    results.extend(_check_next_seq_drift())
 
     results.extend(_check_tools())
     results.extend(_check_git_hooks())
@@ -3451,29 +3159,6 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_mineru_server())
     results.extend(_check_t2_integrity())
     results.extend(_check_t2_dropped_writes())
-    results.extend(_check_t2_daemon_singleton())
-
-    # ChromaDB pagination audit (cloud only)
-    if not _local:
-        chroma_key = get_credential("chroma_api_key")
-        chroma_database = get_credential("chroma_database")
-        chroma_tenant = get_credential("chroma_tenant")
-        if chroma_key and chroma_database:
-            try:
-                # RDR-120 P2: route through make_t3. Cloud-only branch
-                # (gated by ``not _local``); daemon does not apply.
-                from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
-                client = make_t3()._client
-                results.extend(_check_chroma_pagination(client, chroma_database))
-            except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
-                _log.debug(
-                    "doctor_pagination_check_client_failed",
-                    db=chroma_database, error=str(exc),
-                )
-                results.append(HealthResult(
-                    label=f"ChromaDB pagination ({chroma_database})", ok=True,
-                    detail="skipped (client unavailable)",
-                ))
 
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
@@ -3506,28 +3191,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_rls_present())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_check_pending_rungs())
-    # RDR-185 P1.2: legacy chunk-id era census, Gap-5 (degrades internally).
-    results.extend(_check_legacy_id_census())
 
-    # RDR-178 Pillar A (nexus-aigpt, nexus-14ndm): migration-report checks.
-    # Both degrade internally (missing dir / unreadable report / absent
-    # memory.db all resolve to an ok=True HealthResult), but every check in
-    # this function must be crash-proof for `nx doctor` as a whole (see the
-    # doctor_catalog_reader_unavailable precedent above) — guard anyway.
-    try:
-        results.extend(_check_migration_reports())
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.warning("doctor_migration_reports_check_failed", error=str(exc))
-        results.append(HealthResult(
-            label="Migration reports", ok=True, detail="check failed (non-critical)",
-        ))
-    try:
-        results.extend(_check_migration_divergence())
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.warning("doctor_migration_divergence_check_failed", error=str(exc))
-        results.append(HealthResult(
-            label="Migration divergence (memory)", ok=True, detail="check failed (non-critical)",
-        ))
+    # RDR-155 P4b: the legacy chunk-id census, migration-report, and
+    # migration-divergence doctor rows died with the migration machinery;
+    # reports on disk remain as inert artifacts.
 
     # nexus-gynt2: stranded-install detector (disarmed no-op until the N+1
     # cut stamps LAST_MIGRATION_CAPABLE). A crash here must not take down
@@ -3541,6 +3208,20 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         results.append(HealthResult(
             label="Stranded pre-PG install", ok=False, warn=True,
             detail=f"check failed ({exc}) — could not verify pre-PG data state",
+        ))
+
+    # nexus-aoqnb (GH #1419 Issue 4): label any orphaned catalog SQLite file
+    # as a frozen migration source. Same WARN-on-failure posture as the
+    # stranded check above and for the same reason — the guarded failure is
+    # a human restoring from a stale-but-plausible store, so "could not
+    # check" must never render as "nothing to see".
+    try:
+        results.extend(_check_catalog_legacy_file())
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        _log.warning("doctor_catalog_legacy_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Legacy catalog file", ok=False, warn=True,
+            detail=f"check failed ({exc}) — could not verify legacy catalog state",
         ))
 
     # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —

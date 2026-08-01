@@ -529,8 +529,10 @@ class TestImportEndpoint:
         longer possible post-adoption (the mixin's httpx.Client has no
         baked base_url, so a relative-path call from outside the store
         fails outright). ``import_rows()`` is the public wrapper this now
-        exercises, mirroring what ``chash_etl.py`` / ``migration/orchestrator.py``
-        call in production.
+        exercises, mirroring what the since-deleted ``chash_etl.py`` /
+        ``migration/orchestrator.py`` called in production. The method itself
+        retires with the 7.0.0 wave (``_ETL_DYING_WITH_THE_WAVE`` in
+        test_http_t2_store_parity.py); this test retires with it.
         """
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
         ts = "2024-01-15T10:30:00Z"
@@ -578,57 +580,3 @@ class TestRegisteredChashesForCollection:
         """registered_chashes_for_collection raises ValueError on empty collection."""
         with pytest.raises(ValueError, match="collection must not be empty"):
             store.registered_chashes_for_collection("")
-
-
-class TestEtl:
-    def test_migrate_chash_rows_copies_all(self, fake_server, tmp_path):
-        """ETL reads SQLite rows and posts them to /import."""
-        import sqlite3
-
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-
-        db = tmp_path / "t2.db"
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            "CREATE TABLE chash_index (chash TEXT, physical_collection TEXT, created_at TEXT)"
-        )
-        conn.execute("INSERT INTO chash_index VALUES ('sha001','col_a','2024-01-01T00:00:00Z')")
-        conn.execute("INSERT INTO chash_index VALUES ('sha002','col_b','2024-01-02T00:00:00Z')")
-        conn.commit()
-        conn.close()
-
-        s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
-        result = migrate_chash_rows(db, s)
-        s.close()
-
-        assert result["total"] == 2
-        assert result["imported"] == 2
-        assert result["errors"] == 0
-        with _STORE_LOCK:
-            assert ("sha001", "col_a") in _STORE
-            assert ("sha002", "col_b") in _STORE
-
-    def test_migrate_chash_rows_idempotent(self, fake_server, tmp_path):
-        """Running ETL twice yields same count (idempotent upsert)."""
-        import sqlite3
-
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-
-        db = tmp_path / "t2.db"
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            "CREATE TABLE chash_index (chash TEXT, physical_collection TEXT, created_at TEXT)"
-        )
-        conn.execute("INSERT INTO chash_index VALUES ('sha001','col_a','2024-01-01T00:00:00Z')")
-        conn.commit()
-        conn.close()
-
-        s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
-        r1 = migrate_chash_rows(db, s)
-        r2 = migrate_chash_rows(db, s)
-        s.close()
-
-        assert r1["imported"] == 1
-        assert r2["imported"] == 1
-        with _STORE_LOCK:
-            assert len(_STORE) == 1  # idempotent: no duplication

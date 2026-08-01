@@ -51,14 +51,15 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
-#: The pinned last migration-capable conexus release. ``None`` on every
-#: release that still ships ``nx guided-upgrade`` (all of 6.x) — detection
-#: is disarmed. STAMPED AT N+1 CUT TIME (the RDR-155 P4b release commit)
-#: to the last released version whose ``nx guided-upgrade`` can read the
-#: pre-PG stores; stamping it is what arms the detector. Tripwire:
-#: ``test_constant_is_none_on_every_migration_capable_release`` must be
-#: updated in the same commit that stamps this.
-LAST_MIGRATION_CAPABLE: str | None = None
+#: The pinned last migration-capable conexus release. Was ``None`` on every
+#: release that still shipped ``nx guided-upgrade`` (all of 6.x) — detection
+#: was disarmed. STAMPED at the 7.0.0 cut (2026-08-01, the N+1 release that
+#: ships the RDR-158 substrate retirements): 6.18.1 is the last released
+#: version whose ``nx guided-upgrade`` can read the pre-PG stores. The stamp
+#: arms detection at every wired entry point (``nx init``, CLI startup, MCP
+#: startup, ``nx doctor``) at once. Tripwire flipped in the same commit:
+#: ``test_constant_is_stamped_on_the_post_migration_release``.
+LAST_MIGRATION_CAPABLE: str | None = "6.18.1"
 
 #: Filename of the CLI version stamp inside the nexus config dir. Duplicates
 #: ``nexus.upgrade_finish.STAMP_FILENAME`` (this leaf cannot import it);
@@ -103,6 +104,29 @@ class StrandedInstall:
             f"(2) run `nx upgrade` there to migrate the data, "
             f"(3) upgrade back to this version."
         )
+
+
+def legacy_chroma_dir() -> Path:
+    """The FROZEN legacy local-Chroma store location (pre-PG era).
+
+    RDR-155 P4b: this stopped being a configurable serving path when the
+    chroma substrate retired; it survives only as the on-disk location the
+    stranded-install detector (and the P3-dying legacy index leg) probes.
+
+    Precedence (matching the retired ``config._default_local_path``):
+      1. ``NX_LOCAL_CHROMA_PATH`` env var (explicit override)
+      2. ``$XDG_DATA_HOME/nexus/chroma``
+      3. ``~/.local/share/nexus/chroma``
+    """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
+    override = os.environ.get("NX_LOCAL_CHROMA_PATH")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "nexus" / "chroma"
+    return Path.home() / ".local" / "share" / "nexus" / "chroma"
 
 
 def _pre_pg_artifacts(config_dir: Path, chroma_dir: Path, catalog_dir: Path) -> tuple[Path, ...]:

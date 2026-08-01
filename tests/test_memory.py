@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import backdate_memory, memory_row
 
 
 # ── T2 database layer ───────────────────────────────────────────────────────
@@ -16,10 +17,11 @@ from nexus.db.t2 import T2Database
 def test_memory_put_upsert(db: T2Database) -> None:
     db.put(project="proj", title="file.md", content="first")
     db.put(project="proj", title="file.md", content="updated")
-    row = db.memory.conn.execute(
-        "SELECT COUNT(*), MAX(content) FROM memory WHERE project='proj' AND title='file.md'"
-    ).fetchone()
-    assert row == (1, "updated")
+    rows = [r for r in db.memory.get_all("proj") if r["title"] == "file.md"]
+    assert len(rows) == 1, (
+        f"put must UPSERT on (project, title), not append; got {len(rows)} rows"
+    )
+    assert rows[0]["content"] == "updated"
 
 
 def test_memory_get_by_project_title(db: T2Database) -> None:
@@ -120,20 +122,18 @@ def test_memory_search_scoped_to_project(db: T2Database) -> None:
 
 def test_memory_expire_ttl(db: T2Database) -> None:
     db.put(project="proj", title="old.md", content="stale", ttl=1)
-    past = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title='old.md'", (past,))
-    db.memory.conn.commit()
+    backdate_memory(db, "proj", "old.md", days=2)
     assert db.expire() == 1
-    assert db.memory.conn.execute("SELECT COUNT(*) FROM memory WHERE title='old.md'").fetchone()[0] == 0
+    assert memory_row(db, "proj", "old.md") is None
 
 
 def test_memory_expire_permanent_not_deleted(db: T2Database) -> None:
     db.put(project="proj", title="perm.md", content="keep forever", ttl=None)
-    past = (datetime.now(UTC) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title='perm.md'", (past,))
-    db.memory.conn.commit()
+    backdate_memory(db, "proj", "perm.md", days=365)
     db.expire()
-    assert db.memory.conn.execute("SELECT COUNT(*) FROM memory WHERE title='perm.md'").fetchone()[0] == 1
+    assert memory_row(db, "proj", "perm.md") is not None, (
+        "ttl=None means permanent; expire() must not delete it at any age"
+    )
 
 
 def test_memory_list_by_project(db: T2Database) -> None:
@@ -143,30 +143,77 @@ def test_memory_list_by_project(db: T2Database) -> None:
     assert {e["title"] for e in db.list_entries(project="proj_a")} == {"x.md", "y.md"}
 
 
-# ── FTS5 safety ──────────────────────────────────────────────────────────────
+# ── query grammar: plain text, and the empty-tsquery gap ─────────────────────
 
 
-@pytest.mark.parametrize("method,args", [
-    ("search", ("AND",)),
-    ("search_glob", ("NOT", "*_rdr")),
-])
-def test_malformed_fts5_query_raises_valueerror(db: T2Database, method: str, args: tuple) -> None:
-    db.put(project="proj_rdr", title="doc.md", content="some content")
-    with pytest.raises(ValueError, match="Invalid search query"):
-        getattr(db, method)(*args)
+def test_stopword_only_query_is_indistinguishable_from_no_match(
+    db: T2Database,
+) -> None:
+    """A query of only stopwords returns [] even when the corpus CONTAINS it.
+
+    nexus-senub, re-scoped 2026-07-31. The bead was filed as "malformed query
+    silently returns 0 rows where SQLite raised". That mechanism died with
+    SQLite: FTS5 treated AND/NOT as OPERATORS (bare = syntax error), while the
+    engine uses PostgreSQL plainto_tsquery, whose whole purpose is accepting
+    arbitrary text WITHOUT a syntax error. There is no malformed-query class.
+
+    But re-measuring found a REAL and narrower silent false negative in the
+    same place. plainto_tsquery strips English stopwords, so a query made
+    ENTIRELY of them reduces to an EMPTY tsquery, which matches nothing — not
+    "nothing relevant", but nothing, unconditionally. This test proves it is
+    unconditional by seeding a row that literally contains the word and
+    showing it still does not match.
+
+    The caller cannot tell that from a genuine empty store, which is the
+    no-silent-fallbacks class: a human concludes the entry is absent, and an
+    agent treats it as evidence of absence and re-derives from scratch.
+
+    ASSERTED AT THE BROKEN VALUE so fixing nexus-senub fails here loudly. The
+    fix is to detect an empty effective tsquery and SAY so ("no searchable
+    terms — 'and' is a stopword") rather than returning []. When that lands,
+    replace the assertion below with the raise/report the fix introduces.
+    """
+    db.put(project="proj_rdr", title="operators.md", content="clause and clause")
+
+    assert db.search("and") == [], (
+        "nexus-senub looks FIXED: 'and' now matches a row that contains it, or "
+        "the call reported the empty-tsquery condition. Replace this "
+        "broken-value assertion with the real contract."
+    )
+
+    # NON-VACUITY: the search path itself works — a non-stopword term in the
+    # same row matches. So the [] above is the stopword reduction, not a
+    # broken fixture or a dead search.
+    hits = db.search("clause")
+    assert {row["title"] for row in hits} == {"operators.md"}, (
+        "the control term must match, or this test proves nothing about "
+        "stopwords"
+    )
 
 
 # ── T2 session delegation ───────────────────────────────────────────────────
 
 
 def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
-    # After RDR-063 Phase 1 step 2, memory-domain methods (including put())
-    # live in nexus.db.t2.memory_store, so the session-id import binding
-    # moved with them. Patch the new location to verify the wiring.
-    import nexus.db.t2.memory_store as mem_mod
-    import nexus.session as sess_mod
-    assert mem_mod._read_session_id is sess_mod.read_claude_session_id
-    with patch("nexus.db.t2.memory_store._read_session_id", return_value="test-sid-xyz"):
+    """``put`` resolves an unset session through the session module.
+
+    nexus-aqbrk: this used to patch a module-local alias
+    (``memory_store._read_session_id``) and assert its identity against
+    ``nexus.session.read_claude_session_id``. The fallback chain now has ONE
+    owner shared by both the SQLite and service stores
+    (``nexus.db.t2._attribution.resolve_attribution``), so that alias no
+    longer exists — and patching a name nothing calls is worse than not
+    patching at all: the test would have gone green against the REAL
+    resolver, which returns ``None`` under the suite's isolated config dir,
+    and the assertion would have been vacuous rather than failing.
+
+    Patching the canonical function is also strictly better than the alias
+    form it replaces: it no longer depends on an import-binding detail that
+    was itself a documented footgun (``from X import Y as Z`` captures the
+    object at import time, so patching the source module would NOT have
+    propagated).
+    """
+    with patch("nexus.session.read_claude_session_id", return_value="test-sid-xyz"):
         row_id = db.put(project="p", title="t.md", content="x")
     assert db.get(id=row_id)["session"] == "test-sid-xyz"
 

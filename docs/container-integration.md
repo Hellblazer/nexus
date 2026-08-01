@@ -11,12 +11,13 @@ This page assumes a 6.x install on the host.
 > Postgres 17 + pgvector): T3 vectors, the T2 domain stores
 > (notes/plans/taxonomy/telemetry/aspects/catalog), and T1 scratch. The
 > storage backend hard-defaults to `service`
-> (`src/nexus/db/storage_mode.py`); the old SQLite-T2-daemon-over-socket
-> model (RDR-120: `NX_T2_ADDR`, Unix-socket mounts, `nx daemon t2`
-> transport guidance) is an explicit opt-out kept only as a rollback
-> path — see [Legacy (SQLite backend)](#legacy-sqlite-backend) at the
-> end. If you followed the pre-6.x version of this page, the entire
-> T2-daemon plumbing is gone from the happy path.
+> (`src/nexus/db/storage_mode.py`). The old SQLite-T2-daemon-over-socket model
+> (RDR-120: `NX_T2_ADDR`, Unix-socket mounts, `nx daemon t2` transport
+> guidance) is **deleted**, not merely off the happy path — the daemon, its
+> client, its discovery file and those env vars no longer exist
+> (nexus-i711w). `NX_STORAGE_BACKEND=sqlite` is retired too: setting it is a
+> hard error (RDR-158 P3), and the SQLite read path is gone. See
+> [Legacy (SQLite backend)](#legacy-sqlite-backend--retired) at the end.
 
 ## TL;DR
 
@@ -356,55 +357,43 @@ FROM python:3.13-slim
 RUN pip install --no-cache-dir conexus==<host nx --version>
 ```
 
-## Legacy (SQLite backend)
+## Legacy (SQLite backend) — RETIRED
 
-> **Everything in this section applies only when
-> `NX_STORAGE_BACKEND=sqlite` is explicitly set** (globally or
-> per-store). That is the RDR-152 rollback opt-out, not the default —
-> the ETL copies data to Postgres and never deletes from SQLite until
-> the Phase-4 decommission, so the flag remains a pure routing switch.
-> New setups should not start here.
+> **`NX_STORAGE_BACKEND=sqlite` no longer selects anything.** RDR-158 P4
+> (nexus-i711w) deleted the SQLite T2 stores and the local catalog, and
+> P3 (nexus-7bomn) retired the opt-out itself: setting the variable —
+> globally or per-store — is now a **hard error** carrying the
+> stranded-install redirect. Pre-migration SQLite files on disk are
+> frozen migration sources; to migrate them, install the last
+> migration-capable 6.x release, run `nx upgrade` there, then upgrade
+> back. The subsections below are retained as history of what the flag
+> used to select.
 
-In SQLite mode the T2 domain stores (notes/plans/taxonomy/…) live in
-a SQLite + FTS5 database behind the single-writer **T2 daemon**
-(RDR-120/128), and containers must reach that daemon rather than the
-HTTP service. The transport still exists in the code
-(`src/nexus/daemon/t2_daemon.py` / `t2_client.py` /
-`discovery.py`):
+### The T2 daemon container transport is GONE
 
-- **Start / inspect on the host:** `nx daemon t2 start`,
-  `nx daemon t2 status` (prints `uds_path`, `tcp_host`,
-  `tcp_port` — the TCP port is dynamic), `nx daemon t2 install
-  --autostart` for a LaunchAgent / systemd unit. The conexus plugin's
-  SessionStart hook still runs `nx daemon t2 ensure-running --quiet`
-  on every Claude session start.
-- **Container env:** `NX_T2_SOCK` (UDS path) is checked first, then
-  `NX_T2_ADDR` (TCP `host:port`), then the discovery file
-  `~/.config/nexus/t2_addr.<uid>`. Set one or the other, not both,
-  **and** set `NX_STORAGE_BACKEND=sqlite` so the CLI routes through
-  `T2Client` instead of the HTTP stores.
-- **TCP path** (works everywhere): same host-reachability rules as
-  Path A/B/C above — `host.docker.internal:<port>` on Docker Desktop,
-  `--add-host=host.docker.internal:host-gateway` on Linux bridge,
-  `127.0.0.1:<port>` with `--network=host`.
-- **UDS mount** (native Linux Docker only):
-  `-v ~/.config/nexus/sockets:/host-nexus-sockets -e
-  NX_T2_SOCK=/host-nexus-sockets/t2.sock` plus
-  `--user $(id -u):$(id -g)` — the socket is mode `0o600`, so a UID
-  mismatch fails `EACCES` (errno 13). Docker Desktop on macOS /
-  Windows cannot pass `connect()` across the VM file-sharing boundary
-  (`ENOTSUP`, errno 95); use TCP there.
-- **Loopback only:** the daemon binds `127.0.0.1` exclusively and has
-  no network auth model (RDR-120 §Out of scope). Non-loopback access
-  goes through a host-side forwarder (socat / SSH tunnel), never a
-  daemon bind change.
-- **Version handshake:** the client handshakes on first connect;
-  `T2SchemaVersionMismatchError` means the container's `conexus`
-  version differs from the host daemon's — pin matching versions and
-  restart the daemon (`nx daemon t2 stop && nx daemon t2 start`).
-- **`T2DaemonNotReachableError`** from the CLI means the container
-  has no path to the daemon: verify `NX_T2_ADDR` / `NX_T2_SOCK` and
-  the daemon's current dynamic port.
+Earlier versions of this page documented how a container reached the host's
+**T2 daemon** (RDR-120/128) over a Unix socket or loopback TCP, via
+`NX_T2_SOCK` / `NX_T2_ADDR` and the `~/.config/nexus/t2_addr.<uid>` discovery
+file. **None of that exists any more.** nexus-i711w (RDR-158 P4) deleted
+`daemon/t2_daemon.py`, `daemon/t2_client.py`, `daemon/discovery.py` and the
+whole `nx daemon t2` verb group. `NX_T2_SOCK` and `NX_T2_ADDR` are read by
+nothing — setting them has no effect at all, silently.
+
+The consequence for containers is a simplification, not a gap: **there is one
+transport for every tier**, the nexus-service over HTTP. Use `NX_SERVICE_URL`
++ `NX_SERVICE_TOKEN` exactly as Paths A/B/C above describe, whatever
+`NX_STORAGE_BACKEND` says. The socket-mount UID matching, the dynamic-port
+lookup, the client/daemon version handshake
+(`T2SchemaVersionMismatchError`), and `T2DaemonNotReachableError` are all
+gone with the daemon.
+
+**If you have a host LaunchAgent / systemd unit** from a pre-retirement
+install, it will try to run `nx daemon t2 start` on every boot and fail;
+`nx upgrade` removes it on the next run.
+
+`NX_STORAGE_BACKEND=sqlite` no longer selects even the local SQLite
+*files*: the read path was deleted with the stores, and the flag
+hard-errors (RDR-158 P3).
 
 T3 never had a daemon transport in this mode either — the retired
 `NX_T3_ADDR` ChromaDB daemon address is dead; T3 has served through

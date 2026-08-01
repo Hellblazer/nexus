@@ -1,154 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""``nx collection merge-candidates`` — RDR-087 Phase 4.3.
+"""``nx collection merge-candidates`` — RDR-087 Phase 4.3, RETIRED SWEEP.
 
-Pair-wise cross-collection overlap via ``topic_assignments``. Ranks
+The pair-wise cross-collection overlap analysis ranked
 (source_collection, topics.collection) pairs by
-``shared_topics * mean_similarity``.
+``shared_topics * mean_similarity`` via raw SQL over the local SQLite
+``topic_assignments`` table. That store was deleted in the RDR-158 P4
+retirement, and the analysis has no service equivalent yet (the SQL —
+self-joins over topic_assignments with hub exclusion — is not exposed by
+the engine's taxonomy API), so the verb reports itself unavailable
+rather than fabricating an answer (see the nexus-9613q.4 asymmetry note:
+this raw read WAS the command's primary output, so an explicit
+"unavailable" beats a silent empty result). A service-side twin is a
+recorded GAP on nexus-i711w.1.
 
-Null ``source_collection`` rows are excluded (legacy pre-RDR-077
-rows). Self-pairs (``source_collection == topics.collection``) are
-excluded — those are same-collection assignments, not cross-collection
-merge candidates. ``--exclude-hubs`` subtracts the top-N hub topics
-(widest ``source_collection`` spread) from the shared-topic count to
-mitigate false positives from generic hubs like "API rate limiting"
-or "schema evolution".
-
-Catalog link creation (``--create-link``) is explicitly deferred per
-RDR §bridge-link workflow. This bead surfaces the candidates; the
-human / agent decides.
+The dead analysis implementation (``compute_merge_candidates``, hub
+exclusion, human/JSON renderers) is in git at 2e0f9eaf for whoever
+builds the engine twin.
 """
 from __future__ import annotations
-
-import json
-import sqlite3
-from dataclasses import asdict, dataclass, field
-
-
-@dataclass(frozen=True)
-class MergeCandidate:
-    a: str                       # source_collection
-    b: str                       # topic's collection
-    shared_topics: int
-    mean_sim: float
-    sample_chunks: list[str] = field(default_factory=list)
-
-    @property
-    def score(self) -> float:
-        return self.shared_topics * self.mean_sim
-
-
-# ── Core query ──────────────────────────────────────────────────────────────
-
-
-_DEFAULT_HUB_TOP_N = 10
-
-
-def _top_hub_topic_ids(
-    conn: sqlite3.Connection, hub_top_n: int,
-) -> tuple[int, ...]:
-    rows = conn.execute(
-        "SELECT ta.topic_id "
-        "FROM topic_assignments ta "
-        "GROUP BY ta.topic_id "
-        "ORDER BY COUNT(DISTINCT ta.source_collection) DESC, ta.topic_id ASC "
-        "LIMIT ?",
-        (hub_top_n,),
-    ).fetchall()
-    return tuple(int(r[0]) for r in rows)
-
-
-def compute_merge_candidates(
-    conn: sqlite3.Connection,
-    *,
-    min_shared: int = 3,
-    min_similarity: float = 0.5,
-    exclude_hubs: bool = False,
-    hub_top_n: int = _DEFAULT_HUB_TOP_N,
-    limit: int = 50,
-    sample_k: int = 3,
-) -> list[MergeCandidate]:
-    """Return ranked (a, b) cross-collection merge candidates."""
-    hub_filter = ""
-    hub_params: tuple[int, ...] = ()
-    if exclude_hubs:
-        hub_ids = _top_hub_topic_ids(conn, hub_top_n)
-        if hub_ids:
-            placeholders = ",".join("?" * len(hub_ids))
-            hub_filter = f" AND ta.topic_id NOT IN ({placeholders})"
-            hub_params = hub_ids
-
-    # Symmetric-pair normalisation (review I-3): without this guard a
-    # bidirectional projection (A→B and B→A both populated) would
-    # emit the same pair twice with different scores. Enforcing a
-    # lexicographic order on the projection side ensures exactly one
-    # row per symmetric pair and makes the output deterministic
-    # regardless of which direction was populated first.
-    #
-    # Semantic tradeoff (Reviewer C/S-4): ``AVG(ta.similarity)`` with the
-    # ``source_collection < t.collection`` predicate averages only the
-    # A-side similarities even when both directions were populated. This
-    # is acceptable for an advisory merge-candidate score — a slight
-    # directional bias vs the strict bidirectional mean — and the
-    # alternative (UNION ALL over both orderings, then AVG) doubles
-    # the query cost for a minor numerical refinement.
-    sql = f"""
-        SELECT ta.source_collection AS a,
-               t.collection AS b,
-               COUNT(DISTINCT ta.topic_id) AS shared,
-               AVG(ta.similarity) AS mean_sim
-        FROM topic_assignments ta
-        JOIN topics t ON ta.topic_id = t.id
-        WHERE ta.source_collection IS NOT NULL
-          AND ta.source_collection < t.collection
-          AND ta.similarity IS NOT NULL
-          {hub_filter}
-        GROUP BY ta.source_collection, t.collection
-        HAVING shared >= ? AND mean_sim >= ?
-        ORDER BY shared * mean_sim DESC
-        LIMIT ?
-    """
-    rows = conn.execute(sql, (*hub_params, min_shared, min_similarity, limit)).fetchall()
-    out: list[MergeCandidate] = []
-    for a, b, shared, mean_sim in rows:
-        samples = [
-            r[0] for r in conn.execute(
-                "SELECT ta.doc_id "
-                "FROM topic_assignments ta "
-                "JOIN topics t ON ta.topic_id = t.id "
-                "WHERE ta.source_collection = ? AND t.collection = ? "
-                "  AND ta.similarity IS NOT NULL "
-                f"  {hub_filter} "
-                "ORDER BY ta.similarity DESC "
-                "LIMIT ?",
-                (a, b, *hub_params, sample_k),
-            ).fetchall()
-        ]
-        out.append(
-            MergeCandidate(
-                a=a, b=b,
-                shared_topics=int(shared),
-                mean_sim=float(mean_sim),
-                sample_chunks=samples,
-            )
-        )
-    return out
-
-
-# ── Default production runners ──────────────────────────────────────────────
-
-
-def _open_t2():
-    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        return None
-    return T2Database(db_path)  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-
-
-# ── CLI entry point ─────────────────────────────────────────────────────────
 
 
 def run_merge_candidates(
@@ -160,67 +30,13 @@ def run_merge_candidates(
     limit: int,
     fmt: str,
 ) -> str:
-    from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    t2 = _open_t2()
-    if t2 is None:
-        return "T2 database not initialised."
-    if not has_raw_access(t2.taxonomy):
-        t2.close()
-        return (
-            "Merge-candidate analysis requires a SQLite-backed taxonomy store; "
-            "it is not available in service mode "
-            "(NX_STORAGE_BACKEND_TAXONOMY=service)."
-        )
-    try:
-        pairs = compute_merge_candidates(
-            t2.taxonomy.conn,  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
-            min_shared=min_shared,
-            min_similarity=min_similarity,
-            exclude_hubs=exclude_hubs,
-            hub_top_n=hub_top_n,
-            limit=limit,
-        )
-    finally:
-        t2.close()
-    if fmt == "json":
-        # Schema review I-3: omit hub_top_n entirely when exclude_hubs
-        # is False rather than emitting `null`. Agents parsing the
-        # schema no longer need to special-case a null sentinel.
-        filters: dict = {
-            "min_shared": min_shared,
-            "min_similarity": min_similarity,
-            "exclude_hubs": exclude_hubs,
-            "limit": limit,
-        }
-        if exclude_hubs:
-            filters["hub_top_n"] = hub_top_n
-        return json.dumps(
-            {
-                "candidates": [asdict(p) for p in pairs],
-                "filters": filters,
-            },
-            indent=2,
-        )
-    return _format_human(pairs, exclude_hubs=exclude_hubs)
+    """Report that merge-candidate analysis is unavailable.
 
-
-def _format_human(
-    pairs: list[MergeCandidate], *, exclude_hubs: bool,
-) -> str:
-    if not pairs:
-        return "No merge candidates above the configured thresholds."
-    lines = ["Merge candidates — pair-wise cross-collection overlap"]
-    if exclude_hubs:
-        lines.append("  (top-N hub topics excluded)")
-    lines.append("")
-    lines.append(
-        f"  {'a':<35}  {'b':<35}  {'shared':>7}  "
-        f"{'mean_sim':>9}  {'score':>7}  samples"
+    Parameters are retained for CLI signature stability; none is read.
+    """
+    return (
+        "Merge-candidate analysis is unavailable: it ran raw SQL over the "
+        "local SQLite taxonomy store, which was deleted in the RDR-158 P4 "
+        "retirement (service mode is the only backend, and the engine "
+        "does not expose this analysis yet). Track: nexus-i711w.1 GAP."
     )
-    for p in pairs:
-        samples_str = (",".join(p.sample_chunks[:3]))[:45]
-        lines.append(
-            f"  {p.a:<35}  {p.b:<35}  {p.shared_topics:>7}  "
-            f"{p.mean_sim:>9.3f}  {p.score:>7.2f}  {samples_str}"
-        )
-    return "\n".join(lines)

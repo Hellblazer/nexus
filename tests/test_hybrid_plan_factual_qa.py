@@ -207,12 +207,15 @@ async def _run_hybrid_plan(
     limit: int = 40,
 ) -> dict[str, Any]:
     """Run hybrid-factual-lookup via plan_run, bypassing nx_answer."""
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2.plan_library import PlanLibrary
+    # Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite PlanLibrary
+    # (opened at default_db_path()) is deleted; HttpPlanLibrary against the
+    # configured engine is the only plan library, and it is where
+    # `nx catalog setup` seeds hybrid-factual-lookup now.
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
     from nexus.plans.match import Match
     from nexus.plans.runner import plan_run
 
-    library = PlanLibrary(path=default_db_path())
+    library = HttpPlanLibrary()
     rows = library.search_plans("hybrid-factual-lookup", limit=5)
     plan_row = next(
         (r for r in rows if r.get("name") == "hybrid-factual-lookup"),

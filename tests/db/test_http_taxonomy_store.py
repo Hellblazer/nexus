@@ -27,7 +27,11 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pytest
 
-from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+# nexus-i711w Stage 2 Phase 0: the twin now imports the compute
+# statics from taxonomy_compute directly, so delegation spies must
+# patch the twin's OWN namespace — patching CatalogTaxonomy no
+# longer intercepts anything.
+import nexus.db.t2.http_taxonomy_store as _hts
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT, HttpTaxonomyStore
 from tests.conftest import make_vector_test_client
 
@@ -1046,7 +1050,7 @@ class TestLinks:
               "link_types": ["cooccurrence"]}])
         stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
         assert stored[(1, 2)]["link_count"] == 3  # overwritten, not GREATEST=10
-        assert client.get_topic_link_pairs([1, 2]) == [(1, 2, 3)]
+        assert client.get_topic_link_pairs([1, 2]) == {(1, 2): 3}
 
     def test_upsert_topic_links_does_not_clobber_other_pk(
         self, client: HttpTaxonomyStore,
@@ -1141,7 +1145,7 @@ class TestImportFidelity:
             link_count=99, link_types='["co-occurrence"]',
         )
         pairs = client.get_topic_link_pairs([1])
-        assert any(p[2] == 99 for p in pairs)
+        assert 99 in pairs.values()
 
     def test_import_taxonomy_meta_fidelity(self, client: HttpTaxonomyStore) -> None:
         client.import_taxonomy_meta(
@@ -1248,7 +1252,7 @@ class _FakeCentroidStore:
         return self._envelope([r for r in self._records if r["collection"] != collection])
 
     def nearest(self, embedding, collection, *, cross_collection=False):
-        from nexus.db.t2.catalog_taxonomy import AssignResult
+        from nexus.db.t2.taxonomy_compute import AssignResult
         import numpy as _np
         rows = ([r for r in self._records if r["collection"] != collection]
                 if cross_collection else
@@ -1270,28 +1274,10 @@ class _FakeCentroidStore:
         self.closed = True
 
 
-def _seed_oracle_chroma(records: list[dict]):
-    """Build an in-memory vector client with a taxonomy__centroids
-    collection seeded from the same records, for oracle-vs-http equality
-    checks. The pre-clear is a no-op safeguard on the per-instance
-    InMemoryVectorClient (the retired EphemeralClient shared in-process
-    backend state)."""
-    cl = make_vector_test_client()
-    try:
-        cl.delete_collection("taxonomy__centroids")
-    except Exception:
-        pass
-    coll = cl.create_collection(
-        "taxonomy__centroids", metadata={"hnsw:space": "cosine"}, embedding_function=None,
-    )
-    coll.add(
-        ids=[f"{r['collection']}:{r['topic_id']}" for r in records],
-        embeddings=[r["embedding"] for r in records],
-        metadatas=[{"topic_id": int(r["topic_id"]), "collection": r["collection"],
-                    "label": r.get("label", ""), "doc_count": r.get("doc_count", 0)}
-                   for r in records],
-    )
-    return cl
+# _seed_oracle_chroma stood here: it built an in-memory centroid collection
+# so the Http outputs could be compared against the SQLite CatalogTaxonomy
+# oracle. Both the oracle and its last caller are gone (nexus-i711w Stage 2
+# sub-stage C).
 
 
 class TestComputeAndAssign:
@@ -1311,16 +1297,33 @@ class TestComputeAndAssign:
         embeddings = [[0.9, 0.1, 0.0], [0.2, 0.95, 0.0]]
         http_out = store.compute_assignments("c", doc_ids, embeddings)
 
-        cl = _seed_oracle_chroma(self._CENTROIDS)
-        oracle_out = CatalogTaxonomy.compute_assignments("c", doc_ids, embeddings, cl)
-
-        # Shape + topic_id + assigned_by parity; similarity to float precision.
-        assert [a["topic_id"] for a in http_out] == [a["topic_id"] for a in oracle_out] == [1, 2]
+        # ORACLE RETIRED (nexus-i711w Stage 2 sub-stage C). This compared the
+        # Http output against CatalogTaxonomy.compute_assignments; the SQLite
+        # oracle is deleted, which is what Phase 0 (nexus-tdkg1.1) froze the
+        # supplemental contract for. The expected values were always literal,
+        # so the assertions keep their teeth without the second term.
+        assert [a["topic_id"] for a in http_out] == [1, 2]
         assert all(a["assigned_by"] == "centroid" for a in http_out)
         assert all(a["similarity"] is None and a["source_collection"] is None for a in http_out)
         assert [set(a) for a in http_out] == [
             {"doc_id", "topic_id", "assigned_by", "similarity", "source_collection"}
         ] * 2
+
+    def test_compute_assignments_empty_when_no_centroids(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        """No centroids for the collection -> empty (the old no-op-returns-0 case).
+
+        PORTED from tests/test_taxonomy.py, where it exercised
+        ``CatalogTaxonomy.compute_assignments`` — a category-(c) chroma-coupled
+        static deleted with its class (nexus-i711w Stage 2 sub-stage C). The
+        CONTRACT is not the class's: an unknown collection must come back empty
+        rather than raise or assign to a foreign centroid. The Http twin had no
+        coverage for it, so this moved rather than died.
+        """
+        store = self._store(client, records=[])
+        out = store.compute_assignments("never__discovered", ["x"], [[0.1, 0.0, 0.0]])
+        assert out == []
 
     def test_compute_assignments_projection_matches_oracle(self, client: HttpTaxonomyStore) -> None:
         store = self._store(client)
@@ -1328,15 +1331,13 @@ class TestComputeAndAssign:
         embeddings = [[0.05, 0.05, 0.99]]  # nearest the foreign 'other' centroid (topic 9)
         http_out = store.compute_assignments("c", doc_ids, embeddings, cross_collection=True)
 
-        cl = _seed_oracle_chroma(self._CENTROIDS)
-        oracle_out = CatalogTaxonomy.compute_assignments(
-            "c", doc_ids, embeddings, cl, cross_collection=True,
-        )
-        assert http_out[0]["topic_id"] == oracle_out[0]["topic_id"] == 9
+        # ORACLE RETIRED (see above). The projection target is literal; the
+        # similarity is pinned to the MEASURED value the oracle agreed on, so the
+        # contract survives the oracle rather than lapsing to "any float".
+        assert http_out[0]["topic_id"] == 9
         assert http_out[0]["assigned_by"] == "projection"
         assert http_out[0]["source_collection"] == "c"
-        # raw cosine similarity (1 - distance), matches oracle to float precision
-        assert http_out[0]["similarity"] == pytest.approx(oracle_out[0]["similarity"], abs=1e-5)
+        assert http_out[0]["similarity"] == pytest.approx(0.99745893, abs=1e-5)
 
     def test_compute_assignments_empty_when_no_centroids(self, client: HttpTaxonomyStore) -> None:
         store = self._store(client, records=[])
@@ -1368,12 +1369,8 @@ class TestComputeAndAssign:
         new_metas = [{"topic_id": 1}]
         pairs = store.compute_cross_links("c", new_centroids, new_metas)
 
-        cl = _seed_oracle_chroma(self._CENTROIDS)
-        # compute_cross_links takes the COLLECTION (not the client, unlike
-        # compute_assignments).
-        coll = cl.get_collection("taxonomy__centroids", embedding_function=None)
-        oracle_pairs = CatalogTaxonomy.compute_cross_links("c", new_centroids, new_metas, coll)
-        assert pairs == oracle_pairs == [(1, 9)]
+        # ORACLE RETIRED (see above).
+        assert pairs == [(1, 9)]
 
     def test_compute_discovered_topics_delegates(self, client, monkeypatch) -> None:
         called = {}
@@ -1382,23 +1379,23 @@ class TestComputeAndAssign:
             called["args"] = (collection_name, doc_ids, list(embeddings), texts)
             return [{"label": "sentinel"}]
 
-        monkeypatch.setattr(CatalogTaxonomy, "compute_discovered_topics", staticmethod(_fake))
+        monkeypatch.setattr(_hts, "compute_discovered_topics", _fake)
         out = client.compute_discovered_topics("c", ["d1"], np.array([[1.0]]), ["t"])
         assert out == [{"label": "sentinel"}]
         assert called["args"][0] == "c" and called["args"][1] == ["d1"]
 
     def test_compute_split_delegates(self, client, monkeypatch) -> None:
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_split",
-            staticmethod(lambda *a, **k: {"child_specs": ["S"], "topic_id": a[0]}),
+            _hts, "compute_split",
+            lambda *a, **k: {"child_specs": ["S"], "topic_id": a[0]},
         )
         out = client.compute_split(7, ["d"], ["t"], ["d"], np.array([[1.0]]), "c", 2)
         assert out == {"child_specs": ["S"], "topic_id": 7}
 
     def test_compute_rebuild_plan_delegates(self, client, monkeypatch) -> None:
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_rebuild_plan",
-            staticmethod(lambda *a, **k: {"specs": [], "manual_transfers": k.get("manual_assignments")}),
+            _hts, "compute_rebuild_plan",
+            lambda *a, **k: {"specs": [], "manual_transfers": k.get("manual_assignments")},
         )
         out = client.compute_rebuild_plan(
             "c", ["d"], np.array([[1.0]]), ["t"],
@@ -1660,7 +1657,7 @@ class TestOrchestrators:
         specs = [{"label": "a", "terms": "[]", "doc_count": 2, "doc_ids": ["x1", "x2"],
                   "centroid": [1.0, 0.0], "assigned_by": "hdbscan"}]
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: specs))
+            _hts, "compute_discovered_topics", lambda *a: specs)
         n = store.discover_topics("c", ["x1", "x2"], np.array([[1.0, 0.0], [0.9, 0.1]]), ["t1", "t2"])
         assert n == 1
         assert {t["label"] for t in client.get_all_topics(collection="c")} == {"a"}
@@ -1670,7 +1667,7 @@ class TestOrchestrators:
     def test_discover_topics_empty_specs_returns_zero(self, client, monkeypatch) -> None:
         store = self._store(client, [])
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: []))
+            _hts, "compute_discovered_topics", lambda *a: [])
         assert store.discover_topics("c", [], np.array([]), []) == 0
         assert store._centroid_store.calls == []
 
@@ -1695,7 +1692,7 @@ class TestOrchestrators:
                            "doc_ids": ["d1"], "centroid": [0.0, 1.0]}],
                 "manual_transfers": {}}
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_rebuild_plan", staticmethod(lambda *a, **k: plan))
+            _hts, "compute_rebuild_plan", lambda *a, **k: plan)
         n = store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
         assert n == 1
         calls = store._centroid_store.calls
@@ -1726,7 +1723,7 @@ class TestOrchestrators:
             captured.update(kwargs)
             return {"specs": [], "manual_transfers": {}}
 
-        monkeypatch.setattr(CatalogTaxonomy, "compute_rebuild_plan", staticmethod(_spy))
+        monkeypatch.setattr(_hts, "compute_rebuild_plan", _spy)
         store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
 
         # kwargs must match read_rebuild_old_state's reshaped output exactly.
@@ -1747,11 +1744,10 @@ class TestOrchestrators:
             {"collection": "c", "topic_id": 5, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 2},
         ])
 
-        class _EF:
-            def __init__(self, **k): pass
-            def __call__(self, texts): return [[1.0, 0.0]] * len(texts)
-
-        monkeypatch.setattr("nexus.db.local_ef.LocalEmbeddingFunction", _EF)
+        # No embedding function is patched in any more: split_topic reads the
+        # collection's STORED vectors on both branches now (nexus-9pqoj
+        # extended to the non-service handle), so a fake that only carries
+        # documents is no longer a valid stand-in for a real store.
         child_specs = [
             {"label": "c0", "terms_json": "[]", "doc_count": 1, "doc_ids": ["d1"],
              "centroid": [1.0, 0.0], "created_at": "2026-01-01T00:00:00Z"},
@@ -1759,10 +1755,13 @@ class TestOrchestrators:
              "centroid": [0.0, 1.0], "created_at": "2026-01-01T00:00:00Z"},
         ]
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_split",
-            staticmethod(lambda *a, **k: {"topic_id": 5, "collection_name": "c",
-                                          "child_specs": child_specs}))
-        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"d1": "t1", "d2": "t2"})})
+            _hts, "compute_split",
+            lambda *a, **k: {"topic_id": 5, "collection_name": "c",
+                             "child_specs": child_specs})
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(
+            documents={"d1": "t1", "d2": "t2"},
+            embeddings={"d1": [1.0, 0.0], "d2": [0.0, 1.0]},
+        )})
         n = store.split_topic(5, 2, fake_client)
         assert n == 2
         calls = store._centroid_store.calls
@@ -1770,6 +1769,62 @@ class TestOrchestrators:
         assert ("upsert", 2) in calls
         labels = {t["label"] for t in client.get_all_topics(collection="c")}
         assert {"c0", "c1"} <= labels
+
+    def test_split_refuses_when_store_has_no_vectors(self, client, monkeypatch) -> None:
+        """No stored vectors -> DECLINE the split; never re-embed to fill the gap.
+
+        The regression this pins is not a missing dependency, it is a wrong
+        vector space. split_topic used to re-embed the topic's documents with
+        MiniLM-384 whenever the handle was not service-backed. For a bge-768 or
+        voyage-1024 collection that produced 384-dim child centroids, which land
+        in taxonomy_centroids_384 while the collection's chunks live in the
+        768/1024 space — so the ANN assign that follows hits the dimension
+        -mismatch guard and returns [], and the split's children are silently
+        unassignable. The split reports success; the topics it created are dead.
+
+        NON-VACUITY, and this took two attempts to get right. THREE docs with
+        k=2, and only d3's vector is missing. That asymmetry is the whole
+        design: a simpler "no vectors at all" fixture cannot tell the correct
+        behaviour apart from the bugs, because every candidate returns 0 —
+        refusing returns 0, and silently dropping the vector-less rows also
+        returns 0 via the `len(texts) < k` short-circuit. Identical outcome,
+        opposite meaning. With 3 docs and k=2, dropping d3 leaves 2 usable
+        texts, which CLEARS `len(texts) < k` and produces a 2-child split; so
+        silent-skip returns 2, a restored MiniLM re-embed returns 2, and only
+        an actual refusal returns 0. Verified by mutation, not by inspection.
+        """
+        client.import_topic(
+            src_id=7, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=3, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("d1", 7, "hdbscan")
+        client.assign_topic("d2", 7, "hdbscan")
+        client.assign_topic("d3", 7, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 7, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 3},
+        ])
+        monkeypatch.setattr(
+            _hts, "compute_split",
+            lambda *a, **k: {"topic_id": 7, "collection_name": "c",
+                                          "child_specs": [
+                                              {"label": "c0", "terms_json": "[]", "doc_count": 1,
+                                               "doc_ids": ["d1"], "centroid": [1.0, 0.0],
+                                               "created_at": "2026-01-01T00:00:00Z"},
+                                              {"label": "c1", "terms_json": "[]", "doc_count": 1,
+                                               "doc_ids": ["d2"], "centroid": [0.0, 1.0],
+                                               "created_at": "2026-01-01T00:00:00Z"},
+                                          ]})
+        # d1 and d2 carry vectors; d3 does not. Dropping d3 would leave exactly
+        # k=2 usable docs and the split would proceed — which is the failure
+        # this pins.
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(
+            documents={"d1": "t1", "d2": "t2", "d3": "t3"},
+            embeddings={"d1": [1.0, 0.0], "d2": [0.0, 1.0]},
+        )})
+        assert store.split_topic(7, 2, fake_client) == 0
+        # And it refused BEFORE touching the centroid store: a split that
+        # cannot be computed must not delete the parent centroid on its way
+        # out, or a refusal leaves the taxonomy worse than it found it.
+        assert store._centroid_store.calls == []
 
     def test_split_topic_too_few_docs(self, client) -> None:
         client.import_topic(

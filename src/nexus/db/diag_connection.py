@@ -29,7 +29,7 @@ it is never laundered again):
 Credentials: ``NX_DB_DIAG_USER`` / ``NX_DB_DIAG_PASS`` in ``pg_credentials``
 are OPTIONAL keys — pre-P2.1 files lack them until the next ``provision()``
 run (the fast idempotency path backfills the role + keys on already-running
-clusters, so one re-run of ``nx init --service``/``guided-upgrade`` heals
+clusters, so one re-run of ``nx init --service``/``nx upgrade`` heals
 them) — so resolution returns ``None`` and callers degrade cleanly, same
 posture as the probe gates that consume this.
 

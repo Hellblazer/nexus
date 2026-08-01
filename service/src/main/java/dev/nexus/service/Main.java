@@ -96,8 +96,23 @@ public final class Main {
         // client X-Nexus-Tenant header never crosses tenants. Runs AFTER migration (table
         // exists) as the app role (nexus_svc has INSERT via grants-nexus-svc). Idempotent
         // (ON CONFLICT DO NOTHING). No-op when NX_SERVICE_TOKEN is unset.
-        new dev.nexus.service.db.TokenStore(ds, java.time.Clock.systemUTC())
-            .ensureBootstrapToken(token, dev.nexus.service.db.TenantConstants.DEFAULT_TENANT);
+        // nexus-kjjab: this call was NOT in a try, and main declares `throws Exception`, so
+        // any failure here left the JVM on a bare stack trace with HTTP never bound — the
+        // one startup step of the three whose failure was un-diagnosable. Report it the way
+        // the migration and pooler checks above report theirs.
+        try {
+            new dev.nexus.service.db.TokenStore(ds, java.time.Clock.systemUTC())
+                .ensureBootstrapToken(token, dev.nexus.service.db.TenantConstants.DEFAULT_TENANT);
+        } catch (dev.nexus.service.db.TokenStore.BootstrapTokenConflict e) {
+            // Deliberate refusal, with a remedy in the message. Exit non-zero rather than
+            // bind: a service whose root token does not authenticate is not a running
+            // service, and booting anyway would hide the cause behind 401s.
+            log.error("event=root_token_seed_refused error=\"{}\"", e.getMessage());
+            System.exit(1);
+        } catch (RuntimeException e) {
+            log.error("event=root_token_seed_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
 
         // Vector backend (RDR-155 P4a.2, bead nexus-1k8s1): pgvector serves every
         // vector route against the SAME Postgres the service already requires — no

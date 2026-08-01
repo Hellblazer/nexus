@@ -15,12 +15,10 @@ wrong, would silently weaken the conformance test:
 """
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 # The 19 audited service-mode divergences (RDR-168 Research Finding #1: 18 breaking +
 # link_if_absent silent). Every one MUST be in the Protocol, or the conformance test
@@ -70,90 +68,20 @@ def _protocol_methods(proto: type) -> dict[str, Callable]:
     return {n: m for n, m in vars(proto).items() if not n.startswith("_") and callable(m)}
 
 
-def _name_kinds(method: Callable) -> list[tuple[str, inspect._ParameterKind]]:
-    return [
-        (p.name, p.kind)
-        for p in inspect.signature(method).parameters.values()
-        if p.name != "self"
-    ]
-
-
 _READER = _protocol_methods(CatalogReader)
 _WRITER = _protocol_methods(CatalogWriter)
 _UNION = {**_READER, **_WRITER}
-_LOCAL = {
-    n: m for n, m in inspect.getmembers(Catalog, inspect.isfunction) if not n.startswith("_")
-}
-
-
-# Catalog return types that carry typed objects consumers do ATTRIBUTE access on. A
-# client method returning a raw dict/Any where local returns one of these is the
-# return-type parity bug class (RDR-168): the signature-only conformance test cannot see
-# it, and it crashes service-mode consumers with `'dict' object has no attribute ...`
-# (e.g. get_manifest→ManifestRow, links_from→CatalogLink). Guarded below.
-_TYPED_RETURNS = ("CatalogEntry", "CatalogLink", "ManifestRow", "CollectionName", "Tumbler")
 
 
 # ── fidelity ─────────────────────────────────────────────────────────────────────
-
-
-def _return_annotation(method) -> str:  # noqa: ANN001
-    try:
-        return str(inspect.signature(method).return_annotation)
-    except (ValueError, TypeError):
-        return ""
-
-
-def test_client_return_types_match_local_typed_returns() -> None:
-    """Client methods must NOT return raw dict/Any where local returns a typed object.
-
-    The conformance test (test_catalog_conformance.py) checks PARAMETER signatures only;
-    return-type divergence is a distinct bug class it cannot catch. This pins it: for
-    every caller-facing method whose local return is a typed catalog object, the client's
-    return annotation must not collapse to dict/Any.
-    """
-    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415
-
-    client = {
-        n: m for n, m in inspect.getmembers(HttpCatalogClient, inspect.isfunction)
-        if not n.startswith("_")
-    }
-    offenders: dict[str, dict[str, str]] = {}
-    for name in _UNION:
-        if name not in _LOCAL or name not in client:
-            continue
-        local_ret = _return_annotation(_LOCAL[name])
-        client_ret = _return_annotation(client[name])
-        local_typed = any(t in local_ret for t in _TYPED_RETURNS)
-        client_collapsed = ("dict" in client_ret or "Any" in client_ret) and not any(
-            t in client_ret for t in _TYPED_RETURNS
-        )
-        if local_typed and client_collapsed and local_ret != client_ret:
-            offenders[name] = {"local": local_ret, "client": client_ret}
-    assert offenders == {}, (
-        "HttpCatalogClient methods collapse a typed local return to dict/Any "
-        f"(return-type parity bug class): {offenders}"
-    )
-
-
-def test_every_protocol_method_exists_on_local_catalog() -> None:
-    """No Protocol method is a typo or a renamed/removed local method."""
-    unknown = sorted(name for name in _UNION if name not in _LOCAL)
-    assert unknown == [], f"Protocol declares methods absent from Catalog: {unknown}"
-
-
-def test_protocol_param_names_and_kinds_match_canonical() -> None:
-    """Each Protocol method mirrors Catalog's (name, kind) params exactly — no drift.
-
-    Annotations/defaults are intentionally not compared (the Protocol elides them; the
-    canonical signatures live on `Catalog`). Names + kinds are the conformance dimension.
-    """
-    mismatches = {
-        name: {"protocol": _name_kinds(method), "canonical": _name_kinds(_LOCAL[name])}
-        for name, method in _UNION.items()
-        if name in _LOCAL and _name_kinds(method) != _name_kinds(_LOCAL[name])
-    }
-    assert mismatches == {}, f"Protocol drifted from canonical Catalog signatures: {mismatches}"
+# The three fidelity tests anchored to the LOCAL ``Catalog`` class
+# (test_client_return_types_match_local_typed_returns,
+# test_every_protocol_method_exists_on_local_catalog,
+# test_protocol_param_names_and_kinds_match_canonical) RETIRED in the same
+# commit as the src (nexus-i711w terminal deletion), as this file always
+# planned. With the local class gone, ``HttpCatalogClient`` is the sole
+# implementation and the canonical signature source; the scope-honesty
+# guards below remain the load-bearing checks.
 
 
 def test_reader_and_writer_are_disjoint() -> None:

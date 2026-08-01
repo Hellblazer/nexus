@@ -477,7 +477,7 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
 def _sentinel_freeze() -> Callable[[], None]:
     """Enter the RDR-159 writer freeze, snapshotting whatever sentinel state
     exists so an already-migrated store's ``migrated`` fact survives."""
-    from nexus.migration import state as mig_state  # noqa: PLC0415 — deferred, keeps rung import light
+    import nexus.migration.state as mig_state  # noqa: PLC0415 — deferred, keeps rung import light
 
     prior = mig_state.read_state()
     mig_state.write_state(mig_state.MigrationState(

@@ -211,13 +211,11 @@ class TestLinkBoost:
     """apply_link_boost() scoring tests."""
 
     def _make_catalog(self, tmp_path):
-        from nexus.catalog.catalog import Catalog
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
+        # nexus-i711w terminal deletion: the local Catalog died; seed and
+        # read through the ACTIVE (service) catalog instead. The subject
+        # (apply_link_boost) takes any catalog exposing links_from_batch.
+        from tests._catalog_fixture_ops import ActiveCatalog
+        return ActiveCatalog()
 
     def _make_result(self, doc_id="", score=0.5, collection="code__test"):
         # nexus-1qed: link boost keys on doc_id (Phase 1: doc_id == str(tumbler)).

@@ -10,79 +10,48 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
+from tests._catalog_fixture_ops import ActiveCatalog
 
-from nexus.catalog.catalog import Catalog
-from nexus.catalog.catalog_links import (
-    _HEURISTIC_LINK_TYPES,
-    _filter_link_types,
-)
-from nexus.catalog.tumbler import Tumbler
-
-
-@pytest.fixture(autouse=True)
-def _git_identity(monkeypatch):
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+# nexus-i711w terminal deletion: TestFilterLinkTypesHelper (4 tests) and
+# TestHeuristicTokenSet retired WITH nexus.catalog.catalog_links — the
+# ``_filter_link_types`` pure helper died with the local BFS; the
+# default-exclude contract itself is server-side now (nexus-ybj1b) and
+# stays pinned end-to-end by TestGraphDefaultExcludesHeuristic below.
 
 
-def _make_catalog(tmp_path: Path) -> Catalog:
-    cat_dir = tmp_path / "catalog"
-    Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+def _make_catalog(tmp_path: Path) -> ActiveCatalog:
+    """Facade over the live (service) catalog; needs no local init.
 
-
-# ── _filter_link_types pure helper ────────────────────────────────────────
-
-
-class TestFilterLinkTypesHelper:
-    def test_explicit_link_types_pass_through(self) -> None:
-        """A caller's explicit list wins; the helper trusts the caller
-        knows whether they want heuristic edges in the result.
-        """
-        result = _filter_link_types(
-            ["cites", "implements-heuristic"], "",
-            include_heuristic=False,
-        )
-        assert result == ["cites", "implements-heuristic"]
-
-    def test_explicit_single_link_type_passes_through(self) -> None:
-        result = _filter_link_types(
-            None, "implements-heuristic",
-            include_heuristic=False,
-        )
-        assert result == ["implements-heuristic"]
-
-    def test_no_filter_default_excludes_heuristic(self) -> None:
-        """nexus-6ppk primary contract: when no explicit filter is
-        given AND ``include_heuristic`` is False, the result is the
-        full known set MINUS heuristic types.
-        """
-        result = _filter_link_types(
-            None, "", include_heuristic=False,
-        )
-        assert result is not None
-        assert "implements-heuristic" not in result
-        # Sanity: meaningful types are present.
-        for must_have in (
-            "cites", "implements", "relates", "supersedes",
-        ):
-            assert must_have in result, f"{must_have!r} missing"
-
-    def test_include_heuristic_true_returns_no_filter(self) -> None:
-        """``include_heuristic=True`` with no explicit types means
-        the caller wants EVERY type including heuristic. Returning
-        None signals the BFS to skip the link-type filter entirely.
-        """
-        result = _filter_link_types(
-            None, "", include_heuristic=True,
-        )
-        assert result is None
+    nexus-aqbrk: link-graph filtering is substrate-independent behaviour, so
+    this file seeds through the same factories the graph reader uses.
+    """
+    return ActiveCatalog()
 
 
 # ── End-to-end: Catalog.graph default-excludes heuristic ─────────────────
+
+
+def _assert_heuristic_excluded(node_tumblers: set[str], heuristic: object) -> None:
+    """Assert the default-exclude — now unconditional on both substrates.
+
+    nexus-ybj1b RESOLVED 2026-07-26. This used to branch: SQLite asserted the
+    real expectation while the SERVICE arm asserted the INVERSE, because the
+    flag never reached the query. http_catalog_client sent
+    ``include_heuristic`` with the comment "forwarded to service for future
+    support; currently informational", and CatalogHandler.handleTraverse read
+    only ``link_types`` — so the default did NOT exclude and the opt-in was a
+    no-op in both directions, putting the heuristic flood back on (66% of the
+    2026-05-08 production link graph).
+
+    The server honours it now, so the branch is gone. Asserting the inverse
+    rather than xfail is what made the fix fail loudly here instead of going
+    quietly green.
+    """
+    assert str(heuristic) not in node_tumblers, (
+        "implements-heuristic neighbor leaked into the default graph "
+        "traversal; reverting the nexus-6ppk default-exclude lets the "
+        "heuristic flood dominate the result"
+    )
 
 
 class TestGraphDefaultExcludesHeuristic:
@@ -123,11 +92,7 @@ class TestGraphDefaultExcludesHeuristic:
         # Cites neighbor present (default-allowed type).
         assert str(cited) in node_tumblers
         # Heuristic neighbor MUST be absent (default-excluded).
-        assert str(heuristic_target) not in node_tumblers, (
-            f"implements-heuristic neighbor leaked into the default "
-            f"graph traversal; reverting the nexus-6ppk default-"
-            f"exclude lets the heuristic flood dominate the result"
-        )
+        _assert_heuristic_excluded(node_tumblers, heuristic_target)
 
     def test_graph_include_heuristic_returns_heuristic_neighbor(
         self, tmp_path: Path,
@@ -215,8 +180,8 @@ class TestGraphDefaultExcludesHeuristic:
             str(n.tumbler) if hasattr(n, "tumbler") else str(n)
             for n in result["nodes"]
         }
-        assert str(heuristic_a) not in node_tumblers
-        assert str(heuristic_b) not in node_tumblers
+        _assert_heuristic_excluded(node_tumblers, heuristic_a)
+        _assert_heuristic_excluded(node_tumblers, heuristic_b)
 
         # Opt-in: both heuristic neighbors present.
         result_opt = cat.graph_many(
@@ -228,12 +193,3 @@ class TestGraphDefaultExcludesHeuristic:
         }
         assert str(heuristic_a) in node_tumblers_opt
         assert str(heuristic_b) in node_tumblers_opt
-
-
-class TestHeuristicTokenSet:
-    def test_heuristic_set_pinned(self) -> None:
-        """Lock the heuristic-link-type set so adding a new
-        heuristic link type to the catalog forces a deliberate
-        decision about whether it should be default-excluded.
-        """
-        assert _HEURISTIC_LINK_TYPES == frozenset({"implements-heuristic"})

@@ -142,7 +142,21 @@ def reidentify_collection(
         return result
 
     try:
-        col = t3._client_for(collection_name).get_collection(collection_name)
+        # nexus-at2ff sweep (2026-07-25): was ``t3._client_for(collection_name)
+        # .get_collection(...)``. `nx t3 reidentify` builds its handle via
+        # _make_t3_for_backfill() -> make_t3() -> HttpVectorClient, which has no
+        # ``_client_for`` — only the T3Database facade does, and that helper's
+        # own docstring says it is "patched in tests for isolation". So every
+        # collection errored with "'HttpVectorClient' object has no attribute
+        # '_client_for'" and the verb did nothing. Both handles expose
+        # get_collection directly.
+        #
+        # NOTE the structural blind spot this sat in: storage_boundary_lint's
+        # CLIENT_FOR_ALLOWLIST_PREFIXES allowlists ``._client_for`` by the FILE
+        # it appears in (src/nexus/db/), not by which handle arrives. A db/
+        # helper called from commands/ with a make_t3() handle is invisible to
+        # that lint by construction.
+        col = t3.get_collection(collection_name)
     except collection_not_found_errors():
         _log.info(
             "reidentify_collection_absent",

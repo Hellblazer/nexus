@@ -26,6 +26,7 @@ NX_STORAGE_BACKEND is NOT set — default SQLite path is unchanged.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import socket
@@ -34,7 +35,13 @@ import tempfile
 import time
 from pathlib import Path
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    create_tenant_token,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 import pytest
 from tests.conftest import make_vector_test_client
@@ -431,15 +438,12 @@ def service(pg_instance):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_STORAGE_BACKEND_CATALOG", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=40.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", token, proc
     finally:
         try:
@@ -517,7 +521,7 @@ class TestRegisterAndResolve:
     """
 
     def test_register_owner_returns_tumbler(self, cat) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         t = cat.register_owner(
             name="inttest-repo",
             owner_type="curator",
@@ -527,7 +531,7 @@ class TestRegisterAndResolve:
         assert str(t) == "1.1"
 
     def test_register_document_assigns_tumbler(self, cat) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         t = cat.register(
             "1.1",
             "Integration Test Paper",
@@ -559,7 +563,7 @@ class TestRegisterAndResolve:
         assert str(t1) == str(t2)
 
     def test_resolve_round_trip(self, cat) -> None:
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         t = cat.register(
             "1.1",
             "Resolve Round Trip",
@@ -971,7 +975,7 @@ class TestCrossTenantRLS:
             owner_type="curator",
             tumbler_prefix="2.1",
         )
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         assert isinstance(t, Tumbler)
 
     def test_tenant_a_cannot_see_tenant_b_doc(self, cat, cat_b) -> None:
@@ -1096,35 +1100,8 @@ class TestReaderPaths:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_reader_path_docs(self, cat, service):
-        """Register docs for reader-path probes and configure service-mode env."""
-        base_url, token, _ = service
-        # Extract port from base_url
-        import re
-        m = re.search(r':(\d+)$', base_url)
-        assert m, f"Cannot parse port from {base_url}"
-        port = m.group(1)
-
-        # Configure env vars so make_catalog_reader() → HttpCatalogClient.
-        # Save priors: this fixture's service dies at module teardown, and a
-        # leaked NX_SERVICE_HOST/PORT pointing at the dead port poisons every
-        # later module that resolves the service endpoint from env (the
-        # test_indexer_seam_b order-dependent failure class).
-        _saved_env = {
-            k: os.environ.get(k)
-            for k in (
-                "NX_STORAGE_BACKEND_CATALOG",
-                "NX_SERVICE_PORT",
-                "NX_SERVICE_TOKEN",
-                "NX_SERVICE_HOST",
-            )
-        }
-        os.environ["NX_STORAGE_BACKEND_CATALOG"] = "service"
-        os.environ["NX_SERVICE_PORT"] = port
-        os.environ["NX_SERVICE_TOKEN"] = token
-        os.environ["NX_SERVICE_HOST"] = "127.0.0.1"
-
-        # Register docs with distinct corpus/content_type for filter probes
+    def setup_reader_path_docs(self, cat):
+        """Register the docs the reader-path probes read back."""
         cat.register(
             "1.1",
             "Reader Path RDR Document",
@@ -1141,14 +1118,50 @@ class TestReaderPaths:
             file_path="docs/knowledge/reader-path.md",
             source_uri="file:///reader-path/knowledge.md",
         )
+
+    @pytest.fixture(autouse=True)
+    def _point_reader_at_this_modules_service(self, service, monkeypatch):
+        """Route ``make_catalog_reader()`` at the service ``cat`` writes to.
+
+        FUNCTION-scoped on purpose (nexus-12m77). This pin used to live in the
+        CLASS-scoped fixture above as bare ``os.environ`` assignments, and the
+        conftest autouse ``_pin_t2_substrate`` — function-scoped, so it runs
+        once per test AFTER any class-scoped setup — overwrote them every time
+        with the session engine-substrate's own endpoint. Every read therefore
+        went to a DIFFERENT service than every write, and that service answers
+        cleanly about its own empty tenant: ``[]`` and
+        ``{'owners': 0, 'documents': 0, ...}``. Structurally-valid zeros, no
+        exception, nothing in the logs — which is why the cluster read as an
+        RLS or data-visibility problem for weeks rather than as routing.
+
+        NX_SERVICE_URL is the load-bearing key: it OUTRANKS the host/port
+        halves in ``resolve_service_endpoint``'s order, so setting only those
+        two leaves the substrate fixture's URL winning. Same root as the l9hd8
+        cluster (nexus-qvs2h, cd9bc492); the tell there was a 401 hiding inside
+        an empty-looking result, here it is a clean zero.
+
+        The shared client is a process-lifetime singleton
+        (``catalog/factory.py``), so it is evicted on both sides of the yield:
+        before, so this test cannot inherit one bound to another service;
+        after, so this module's service — which dies at module teardown —
+        cannot be inherited by a later one.
+        """
+        from nexus.catalog.factory import (
+            reset_shared_service_catalog_client_for_tests,
+        )
+
+        base_url, token, _ = service
+        port = re.search(r":(\d+)$", base_url)
+        assert port, f"Cannot parse port from {base_url}"
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", port.group(1))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        reset_shared_service_catalog_client_for_tests()
         yield
-        # Restore ALL touched keys to their prior values (not just the backend
-        # selector) so no dead endpoint leaks into later modules.
-        for k, v in _saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        reset_shared_service_catalog_client_for_tests()
 
     def test_catalog_search_structured_filter_content_type(self, cat) -> None:
         """catalog_search structured-filter branch (content_type, no free text).
@@ -1305,7 +1318,7 @@ class TestLinkQueryDirectionTumbler:
         mcp/catalog.py dual-handle sites (`l if isinstance(l, dict) else l.to_dict()`)
         keep working because CatalogLink.to_dict() exists.
         """
-        from nexus.catalog.catalog import CatalogLink  # noqa: PLC0415
+        from nexus.catalog.types import CatalogLink  # noqa: PLC0415
 
         a, b = link_query_docs
         links = cat.link_query(direction="out", tumbler=str(a))
@@ -1555,7 +1568,7 @@ class TestServiceModeIndexMVV:
         import re  # noqa: PLC0415
         from unittest.mock import MagicMock, patch  # noqa: PLC0415
 
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction  # noqa: PLC0415
         from nexus.db.t3 import T3Database  # noqa: PLC0415
         from nexus.indexer import index_repository  # noqa: PLC0415
         from nexus.registry import RepoRegistry  # noqa: PLC0415

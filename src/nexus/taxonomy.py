@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Deprecation shim — taxonomy moved to nexus.db.t2.catalog_taxonomy.
+"""Deprecation shim — taxonomy lives on ``T2Database.taxonomy``
+(the HTTP taxonomy store; the SQLite ``catalog_taxonomy`` twin died in
+RDR-158 P4, nexus-i711w).
 
 Thin compatibility shim so existing import sites (tests, CLI commands)
 continue to work without modification. Each wrapper accepts a
@@ -31,7 +33,7 @@ def get_topics(
 
 def assign_topic(db: "T2Database", doc_id: str, topic_id: int) -> None:
     """Deprecated wrapper — use ``db.taxonomy.assign_topic(...)``."""
-    db.taxonomy.assign_topic(doc_id, topic_id)  # epsilon-allow: deprecated shim, no external callers; T2 write is db/-internal (only caller is db/migrations.py)
+    db.taxonomy.assign_topic(doc_id, topic_id)  # boundary-allow: deprecated shim, no external callers; T2 write is db/-internal (its last caller, db/migrations.py, died in RDR-158 P4 Stage 4)
 
 
 def get_topic_docs(

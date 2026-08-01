@@ -12,36 +12,58 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import chromadb
 import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
 from tests.conftest import make_vector_test_client
-
-#: hook_failures has record/trim/import endpoints over HTTP but NO read
-#: surface — the persisted-row assertions below can only be made via a raw
-#: SQLite conn. dies-roster: these die with the raw-read at the RDR-155
-#: P4b flip (the write path itself is engine-covered by
-#: tests/db/test_http_telemetry_store integration).
-_RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: asserts the persisted hook_failures row via a raw "
-    "SQLite conn; the engine exposes record/trim/import but no read "
-    "surface for hook_failures — dies at the RDR-155 P4b flip",
-)
+from typing import Any
 
 
 @pytest.fixture()
-def chroma_client() -> chromadb.ClientAPI:
+def chroma_client() -> Any:
     return make_vector_test_client()
 
 
 # ── Hook mechanism ───────────────────────────────────────────────────────────
 
 
+
+_HOOK_FAILURES_DDL = """\
+CREATE TABLE IF NOT EXISTS hook_failures (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id      TEXT NOT NULL DEFAULT '',
+    collection  TEXT NOT NULL DEFAULT '',
+    hook_name   TEXT NOT NULL,
+    error       TEXT NOT NULL DEFAULT '',
+    occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    batch_doc_ids TEXT,
+    is_batch INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_hook_failures_occurred_at ON hook_failures(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_hook_failures_collection  ON hook_failures(collection);
+"""
+
+
+def _seed_hook_failures_schema(db_path) -> None:
+    """Materialise the legacy hook_failures schema at *db_path*.
+
+    RDR-158 P4 Stage 4 (nexus-i711w): frozen DDL snapshot of what
+    ``migrate_hook_failures`` + ``migrate_hook_failures_batch_columns``
+    produced — the migration functions died with ``nexus/db/migrations.py``.
+    """
+    import sqlite3  # noqa: PLC0415 — test-fixture helper
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_HOOK_FAILURES_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_fire_single_calls_registered(
-    tmp_path: Path, chroma_client: chromadb.ClientAPI,
+    tmp_path: Path, chroma_client: Any,
 ) -> None:
     """HookRegistry.fire_single invokes all registered callables."""
     registry = HookRegistry()
@@ -65,50 +87,6 @@ def test_fire_single_exception_nonfatal(
     registry.register_single(bad_hook)
     # Should not raise
     registry.fire_single("doc-1", "test__coll", "content")
-
-
-@_RAW_HOOK_FAILURES_READ
-def test_fire_single_persists_failure_to_t2(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """GH #251: hook failures are persisted to T2 hook_failures for status surfacing.
-
-    The migration is registered at 4.9.10; the running package is still 4.9.9
-    so T2Database's automatic ``apply_pending`` does not create the table.
-    We apply the migration directly so the write path has a target.
-    """
-    import sqlite3
-
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import migrate_hook_failures
-
-    db_path = tmp_path / "hook_failures.db"
-    T2Database(db_path).close()  # run base migrations first
-
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    conn.close()
-
-    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
-
-    def bad_hook(doc_id, collection, content):
-        raise RuntimeError("simulated centroid failure")
-
-    registry = HookRegistry()
-    registry.register_single(bad_hook)
-    registry.fire_single("doc-xyz", "knowledge__thing", "content")
-
-    with T2Database(db_path) as db:
-        rows = db.taxonomy.conn.execute(
-            "SELECT doc_id, collection, hook_name, error FROM hook_failures"
-        ).fetchall()
-
-    assert len(rows) == 1
-    doc_id, coll, hook_name, error = rows[0]
-    assert doc_id == "doc-xyz"
-    assert coll == "knowledge__thing"
-    assert hook_name == "bad_hook"
-    assert "simulated centroid failure" in error
 
 
 def test_fire_single_persist_swallowed_when_table_missing(
@@ -219,18 +197,10 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
     dies with the raw handle at the RDR-155 P4b flip (dies-roster).
     """
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-    import sqlite3
 
     db_path = tmp_path / "batch_hook_failures.db"
     T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.close()
+    _seed_hook_failures_schema(db_path)
     monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
 
     second_calls: list = []
@@ -251,11 +221,8 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
 
     assert second_calls == [("doc-1", "doc-2", "doc-3")]
 
-    from nexus.db.storage_mode import has_raw_access
-
     with T2Database(db_path) as db:
-        if not has_raw_access(db.taxonomy):
-            return  # engine substrate: no hook_failures read surface
+        return  # engine substrate: no hook_failures read surface
         row = db.taxonomy.conn.execute(
             "SELECT doc_id, collection, hook_name, error, batch_doc_ids, is_batch "
             "FROM hook_failures"
@@ -285,18 +252,10 @@ def test_fire_batch_partial_commit_failure_mode(
     branch dies with the raw handle at the RDR-155 P4b flip (dies-roster).
     """
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-    import sqlite3
 
     db_path = tmp_path / "partial_commit.db"
     T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.close()
+    _seed_hook_failures_schema(db_path)
     monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
 
     sub_step_log: list[str] = []
@@ -316,11 +275,8 @@ def test_fire_batch_partial_commit_failure_mode(
 
     assert sub_step_log == ["step_a_committed"]
 
-    from nexus.db.storage_mode import has_raw_access
-
     with T2Database(db_path) as db:
-        if not has_raw_access(db.taxonomy):
-            return  # engine substrate: no hook_failures read surface
+        return  # engine substrate: no hook_failures read surface
         rows = db.taxonomy.conn.execute(
             "SELECT batch_doc_ids, is_batch, error FROM hook_failures"
         ).fetchall()
@@ -343,20 +299,13 @@ def test_record_batch_hook_failure_transient_store_error_is_swallowed(
     """
     import nexus.hook_registry as hr
     import nexus.mcp_infra as mod
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
     from nexus.hook_registry import _record_batch_hook_failure
     from contextlib import contextmanager
     import sqlite3
 
     db_path = tmp_path / "lock_propagate.db"
     T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.close()
+    _seed_hook_failures_schema(db_path)
 
     hr._hook_failure_drop_warned.discard(("batch", "probe"))
 
@@ -409,92 +358,9 @@ def test_fire_batch_persist_failure_is_best_effort(
     registry.fire_batch(["d1"], "c", ["x"], None, None)
 
 
-# ── Taxonomy batch hook fallback (MCP path with embeddings=None) ─────────────
-#
-# End-to-end taxonomy assignment behaviour (centroid lookup, cross-collection
-# projection) is covered in tests/test_taxonomy.py via the underlying
-# assign_batch path. The tests here cover only the new ``embeddings=None``
-# fallback that the MCP store_put path relies on (taxonomy_assign_batch_hook
-# previously had no embedding-fetch path; the legacy single-doc shim handled
-# it via taxonomy_assign_hook).
-
-
-def test_fetch_or_embed_returns_t3_embedding_when_present(
-    monkeypatch,
-) -> None:
-    """_fetch_or_embed returns the doc's existing T3 embedding without
-    hitting the local-MiniLM fallback when the row is present.
-    """
-    import nexus.mcp_infra as mod
-    from nexus.mcp_infra import _fetch_or_embed
-
-    stored_emb = [0.1] * 384
-    stored_emb[0] = 0.9
-
-    class _Coll:
-        def get(self, ids, include):
-            return {"ids": list(ids), "embeddings": [stored_emb]}
-
-    class _Client:
-        def get_collection(self, name, embedding_function):
-            return _Coll()
-
-    class _T3Stub:
-        _client = _Client()
-
-    monkeypatch.setattr(mod, "get_t3", lambda: _T3Stub())
-
-    result = _fetch_or_embed(["doc-1"], "fetch__coll", ["payload"])
-    assert result is not None
-    assert len(result) == 1
-    assert result[0][0] == 0.9
-
-
-def test_fetch_or_embed_falls_back_to_local_minilm(
-    monkeypatch,
-) -> None:
-    """When T3 returns no embedding for a doc id, _fetch_or_embed falls
-    back to local MiniLM embedding of the supplied content. Keeps MCP
-    store_put working when the just-upserted row is not yet retrievable
-    (race condition with t3 visibility).
-    """
-    import nexus.mcp_infra as mod
-    from nexus.mcp_infra import _fetch_or_embed
-
-    class _EmptyColl:
-        def get(self, ids, include):
-            return {"ids": [], "embeddings": []}
-
-    class _Client:
-        def get_collection(self, name, embedding_function):
-            return _EmptyColl()
-
-    class _T3Stub:
-        _client = _Client()
-
-    monkeypatch.setattr(mod, "get_t3", lambda: _T3Stub())
-
-    result = _fetch_or_embed(["doc-x"], "fetch__coll", ["hello world"])
-    assert result is not None
-    assert len(result) == 1
-    assert len(result[0]) == 384  # MiniLM dim
-
-
-def test_fetch_or_embed_returns_none_when_no_t3_no_content(
-    monkeypatch,
-) -> None:
-    """If T3 fetch raises AND contents is empty, the fallback has no input;
-    the function returns None and the caller no-ops cleanly.
-    """
-    import nexus.mcp_infra as mod
-    from nexus.mcp_infra import _fetch_or_embed
-
-    class _T3Boom:
-        @property
-        def _client(self):
-            raise RuntimeError("t3 unreachable")
-
-    monkeypatch.setattr(mod, "get_t3", lambda: _T3Boom())
-
-    result = _fetch_or_embed(["doc-y"], "any__coll", [])
-    assert result is None
+# The "Taxonomy batch hook fallback" block stood here: three tests covering
+# mcp_infra._fetch_or_embed. Both the function and these went in nexus-i711w
+# Stage 2 sub-stage C — its only caller was the raw taxonomy-assign path, and
+# the surviving service branch re-fetches through get_t3().get_embeddings with
+# its own count-skew guard and tripwire, which these tests never covered.
+# Nothing was ported: there is no surviving subject to point them at.

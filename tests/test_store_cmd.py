@@ -5,6 +5,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -18,6 +19,9 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RDR-155 P4b: the chroma-key mode inference is gone — pin cloud mode
+    # explicitly so the voyage collection-name promotion under test fires.
+    monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
     monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
     monkeypatch.setenv("CHROMA_TENANT", "test-tenant")
@@ -208,13 +212,6 @@ def test_collection_not_found(runner, mock_collection, subcmd, args):
     result = runner.invoke(main, ["collection", subcmd] + args)
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
-
-
-@pytest.mark.parametrize("flag", ["--yes", "--confirm"])
-def test_collection_delete_with_flag(runner, mock_collection, flag):
-    result = runner.invoke(main, ["collection", "delete", "knowledge__test", flag])
-    assert result.exit_code == 0, result.output
-    mock_collection.delete_collection.assert_called_once_with("knowledge__test")
 
 
 def test_collection_delete_without_yes_prompts(runner, mock_collection):

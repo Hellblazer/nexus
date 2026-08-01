@@ -36,9 +36,14 @@ def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(infra, "default_db_path", lambda: db)
     monkeypatch.delenv("NX_AGENT", raising=False)
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
-    import nexus.db.t2.memory_store as _ms
+    # nexus-aqbrk: patches the CANONICAL resolver. The old
+    # ``memory_store._read_session_id`` alias is gone — the agent/session
+    # fallback chain now has one owner shared by the SQLite and service
+    # stores (``nexus.db.t2._attribution.resolve_attribution``), which
+    # resolves the name at call time.
+    import nexus.session as _sess
 
-    monkeypatch.setattr(_ms, "_read_session_id", lambda: None)
+    monkeypatch.setattr(_sess, "read_claude_session_id", lambda: None)
     return db
 
 

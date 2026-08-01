@@ -1,62 +1,57 @@
 # `nexus.db` — AGENTS.md
 
-T1, T2, and T3 implementations. The interesting policy lives in T2's migration registry and the ChromaDB quota wall.
+T1, T2, and T3 implementations. The interesting policy lives in T2's migration registry and the vector-store routing.
+
+**ChromaDB is GONE (RDR-155 P4b, 2026-07-25).** The dependency is dropped, not
+merely unused: it is absent from `uv.lock` and not importable. Serving is the
+pgvector nexus-service in every mode. `chroma://` URI literals and
+`ChromaSchemeHandler.java` survive deliberately — they are a persisted data
+format (RDR-169 G3), not a dependency. Pinned by
+`tests/test_rdr155_p4b_deletion_gate.py`.
 
 ## Modules
 
 | File | Purpose |
 |---|---|
-| `t1.py` | `T1Database` — ephemeral or per-session HTTP `chromadb` client. Session-id lease discovery via `daemon/t1_lease.py` (RDR-149 P4); the MCP lifespan publishes the lease. |
+| `t1.py` | `T1Database` — session scratch. PG-backed `HttpScratchStore` by default (RDR-152); session-id lease discovery via `daemon/t1_lease.py` (RDR-149 P4), published by the MCP lifespan. |
 | `t2/` | Package: seven domain stores + `T2Database` facade. See **T2 domain stores** below. |
-| `t3.py` | `T3Database` — persistent local (`PersistentClient` + ONNX) or cloud (`CloudClient` + Voyage) routing keyed on `is_local_mode()`. |
-| `local_ef.py` | `LocalEmbeddingFunction` — bundled ONNX MiniLM. Used by T1 always and by T3 in local mode. |
-| `chroma_quotas.py` | **Single source of truth** for ChromaDB Cloud caps. Constants + `QuotaValidator`. Imported wherever a ChromaDB call is constructed. |
-| `migrations.py` | Centralised T2 migration registry. `Migration` dataclass, `apply_pending()`, `T3UpgradeStep`, version tracking (RDR-076). |
+| `t3.py` | `T3Database` — a facade retained for INJECTED clients (tests, `--dry-run`). Production `make_t3()` returns `HttpVectorClient` unconditionally and constructs no vector client of its own (RDR-155 P4a.2). |
+| `http_vector_client.py` | `HttpVectorClient` — the production T3: every vector op over `/v1/vectors`, pgvector storage, server-side embedding and rerank (RDR-188). |
+| `inmemory_vector_store.py` | `InMemoryVectorClient` — the in-process substitute for tests, the plan-match session cache, and `nx index --dry-run`. Chroma-parity semantics (cosine, `$eq`/`$in`/`$and` where-grammar, upsert/dedup, dimension pinning) are differentially verified, not assumed. |
+| `local_ef.py` | `LocalEmbeddingFunction` — client-side EF for local-Python paths only; T3 embeds server-side. Retirement is tracked on `nexus-sghyo` (the client does no embedding). |
+| `limits.py` | Load-bearing chunking/paging caps (`SAFE_CHUNK_BYTES`, `MAX_QUERY_RESULTS`), rehomed here from the deleted `chroma_quotas.py` at `nexus-rn3wo.2`. |
 
 ## T2 domain stores
 
 | Store | Purpose |
 |---|---|
-| `MemoryStore` | Persistent notes + FTS5 (`nx memory`). |
-| `PlanLibrary` | Plan templates with TTL auto-expiry. 12 builtin templates seeded at `nx catalog setup`. |
-| `CatalogTaxonomy` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). |
-| `Telemetry` | Relevance log. |
-| `ChashIndex` | Content-hash chunk index (RDR-086). Dual-write hook ensures rows exist before topic assignment. |
-| `DocumentAspects` | Structured aspect rows (RDR-089). |
-| `AspectExtractionQueue` | WAL queue drained by `aspect_worker.py` daemon thread. |
+| `HttpMemoryStore` | Persistent notes + full-text search (`nx memory`). |
+| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. 12 builtin templates seeded at `nx catalog setup`. |
+| `HttpTaxonomyStore` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). Pure-compute half lives in `taxonomy_compute.py`. |
+| `HttpTelemetryStore` | Relevance log + search/hook telemetry + tier writes. |
+| `HttpChashIndex` | Content-hash chunk index (RDR-086; table retired by RDR-187 — shim until the 410 flip). |
+| `HttpDocumentAspectsStore` | Structured aspect rows (RDR-089). |
+| `HttpAspectQueue` | Queue drained by the aspect-worker daemon (PG `FOR UPDATE SKIP LOCKED`). |
+
+All eight are HTTP clients over the engine's PG tables. The SQLite store
+classes are DELETED (RDR-158 P4, nexus-i711w), and the
+`NX_STORAGE_BACKEND[_<store>]=sqlite` opt-out that selected them
+hard-errors with the stranded-install redirect (P3, nexus-7bomn).
 
 `T2Database` is the only thing other modules should hold. Stores are accessed via `t2.memory`, `t2.plans`, etc.
 
-## Migration policy (RDR-076)
+## Migration policy — the client-side chain is DELETED (RDR-158 P4 Stage 4)
 
-Migrations are **version-gated** and live in `migrations.py` as a registry. Each `Migration` carries:
-
-- `version` — monotonic integer
-- `description` — human-readable
-- `apply_fn` — `(conn) -> None`, idempotent
-
-`apply_pending(conn)` reads `schema_version` from the meta table and runs every newer migration in order. New migrations land as **additional** rows; **never edit a migration that has shipped** — write a follow-up.
-
-**RDR-170 — migration application is gated by the registry, NOT the package version.** `apply_pending` runs every registered migration with `introduced > last_seen`; there is no upper bound on `introduced` vs the package version. The registry ships in the same wheel as the runner, so a client can never hold a migration newer than its own code — an upper bound could only ever mis-fire on a frozen / ahead-of-release branch (e.g. `develop` pinned below the next release), silently dropping a migration whose code is present. `introduced` orders steps and stamps the version row; it does **not** authorize them. The canonical schema version (`expected_t2_schema_version()`, used by the daemon stamp, the client↔daemon handshake, and the cold-start fast path) is `max(package_version, max(MIGRATIONS introduced))` for the same reason. The three pending-migration filters (`apply_pending`, `nx upgrade --dry-run`, `nx doctor --check-schema`) must stay in lock-step on the lower-bound-only rule — diverging reintroduces the RDR-142 reporting-lie class in whichever surface kept the upper bound.
-
-`T3UpgradeStep` is the parallel mechanism for T3-side upgrades that aren't SQL — collection re-creates, embedder swaps, etc. Same registry pattern, separate version counter.
-
-`nx doctor --check-schema` validates that the on-disk schema matches the version the registry claims. `nx upgrade --dry-run` shows what `apply_pending` would do.
-
-## ChromaDB quota wall
-
-Every code path that constructs a ChromaDB call **must** consult `chroma_quotas.py` constants. The quotas are not aspirational — exceeding them produces `ChromaError: Quota exceeded` at runtime. See the table in the project root [`AGENTS.md`](../../../AGENTS.md#external-service-limits--check-before-every-call).
-
-The chunk size cap is the load-bearing one: `MAX_DOCUMENT_BYTES = 16384`, but writers should target `SAFE_CHUNK_BYTES = 12288` to leave headroom for context-prefix padding.
-
-## Adding a new T2 migration
-
-1. Pick the next version number (current max + 1).
-2. Add a `Migration(version=N, description="...", apply_fn=_migrate_N)` entry to the registry list at the top of `migrations.py`.
-3. Implement `_migrate_N(conn)` below. **Idempotent** — re-running on an already-migrated DB is a no-op (use `IF NOT EXISTS` etc.).
-4. Add a test in `tests/test_db_migrations.py`. At minimum: blank-DB-runs-clean and replay-is-noop.
-5. Run `./tests/e2e/release-sandbox.sh smoke` — schema migrations are sandbox-required.
-6. Run `nx doctor --check-schema` against the editable install.
+`migrations.py` — the `Migration` registry, `apply_pending()`, `T3UpgradeStep`,
+`bootstrap_schema`, the RDR-170 registry gating and the RDR-142 dry-run step
+resolver — was deleted in nexus-i711w Stage 4. There are NO client-side T2
+migrations in any mode: schema is engine-owned via Liquibase, and the local
+`.db` files are a frozen migration source (RDR-176 Gap 2) that this version
+never writes. Do not add a migration here; a schema change is a Liquibase
+changeset in the engine, and a new DATA-convergence axis is an upgrade-ladder
+rung (`src/nexus/upgrade_ladder/rungs/`, registered in `registry.py`).
+Installs still carrying pre-PG local data migrate via the pinned last
+migration-capable 6.x release (the stranded-install two-hop redirect).
 
 ## Collection registration precedes chunk writes (RDR-156 P0.2)
 

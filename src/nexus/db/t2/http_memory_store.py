@@ -65,6 +65,7 @@ _ALL_PAIRS_MAX_ENTRIES = 1000
 # at construction time, which is what let a rotated bearer or a
 # supervisor-restart port change go silently stale for the life of the
 # instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
+from nexus.db.t2._attribution import resolve_attribution
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
@@ -106,7 +107,16 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         agent: str | None = None,
         session: str | None = None,
     ) -> int:
-        """Upsert a memory entry. Returns the row id."""
+        """Upsert a memory entry. Returns the row id.
+
+        The ``agent`` / ``session`` fallback chain is applied HERE, not left
+        to the engine: it resolves from the CLIENT's process env
+        (``NX_AGENT``) and the client's claude-session file, neither of which
+        the service can see. Omitting it silently returned both columns to
+        NULL in service mode, undoing nexus-9clx — see
+        :mod:`nexus.db.t2._attribution`.
+        """
+        agent, session = resolve_attribution(agent, session)
         payload: dict[str, Any] = {
             "project": project,
             "title": title,

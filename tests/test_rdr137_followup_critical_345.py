@@ -30,7 +30,7 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.commands.index import _CatalogBackedRegistry
 from nexus.repos import _read_repos_json
 
@@ -47,14 +47,14 @@ def _enable_debug_logging():
 
 
 @pytest.fixture
-def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
+    # nexus-i711w terminal deletion: seed/read through the ACTIVE (service)
+    # catalog; the local Catalog.init leg died and ActiveCatalog needs no
+    # local init. NEXUS_CONFIG_DIR still isolates repos.json paths.
     cfg = tmp_path / "config"
-    cat_dir = cfg / "catalog"
-    cat_dir.mkdir(parents=True)
+    cfg.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    return ActiveCatalog()
 
 
 @pytest.fixture
@@ -63,9 +63,11 @@ def repo(tmp_path: Path) -> Path:
     r.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=r, check=True)
     return r
-
-
 class TestCriticalThreeModelVersionV1:
+    """CRITICAL-3, against the ACTIVE catalog (nexus-i711w terminal
+    deletion ported the harness off the local Catalog; the adapter's
+    register_collection contract is substrate-neutral)."""
+
     def test_corpus_knowledge_register_uses_v1_form(
         self, cat: Catalog, repo: Path, tmp_path: Path,
     ) -> None:
@@ -82,13 +84,10 @@ class TestCriticalThreeModelVersionV1:
             docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
         )
 
-        row = cat._db.execute(
-            "SELECT model_version FROM collections "
-            "WHERE name = 'knowledge__myrepo-1-1__voyage-context-3__v1'"
-        ).fetchone()
+        row = cat.get_collection("knowledge__myrepo-1-1__voyage-context-3__v1")
         assert row is not None
-        assert row[0] == "v1", (
-            f"Expected conformant 'v1' form; saw {row[0]!r}. "
+        assert row["model_version"] == "v1", (
+            f"Expected conformant 'v1' form; saw {row['model_version']!r}. "
             "Indicates the model_version='1' bug regressed."
         )
 
@@ -115,12 +114,9 @@ class TestCriticalThreeModelVersionV1:
         adapter.update(repo, docs_collection=col_name)
 
         # model_version must still be 'v1'.
-        row = cat._db.execute(
-            "SELECT model_version FROM collections WHERE name = ?",
-            (col_name,),
-        ).fetchone()
+        row = cat.get_collection(col_name)
         assert row is not None
-        assert row[0] == "v1"
+        assert row["model_version"] == "v1"
 
 
 class TestCriticalFourMalformedReposJsonNotDeleted:
@@ -135,13 +131,9 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
 
         cfg = tmp_path / "config"
         cfg.mkdir()
-        cat_dir = cfg / "catalog"
-        cat_dir.mkdir()
-        Catalog.init(cat_dir)
 
         import os
         os.environ["NEXUS_CONFIG_DIR"] = str(cfg)
-        os.environ["NEXUS_CATALOG_PATH"] = str(cat_dir)
         try:
             # Truncated JSON — recoverable but malformed.
             reg_path = cfg / "repos.json"
@@ -161,7 +153,6 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
             ), f"Expected repos_json_malformed warning; saw events: {[e.get('event') for e in cap]}"
         finally:
             os.environ.pop("NEXUS_CONFIG_DIR", None)
-            os.environ.pop("NEXUS_CATALOG_PATH", None)
 
     def test_read_repos_json_returns_distinct_sentinel_for_malformed(
         self, tmp_path: Path,
@@ -193,9 +184,20 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
             except (json.JSONDecodeError, ValueError):
                 # Or raise — also acceptable.
                 pass
-
-
 class TestCriticalFiveTOCTOUOwnerRace:
+    """CRITICAL-5, now against the ACTIVE (engine) catalog.
+
+    nexus-i711w terminal deletion: the local pin died with the local
+    Catalog. The engine had its own version of this race — nexus-jq53b:
+    owner-ensure sites arbitrated ON CONFLICT on
+    ``(tenant_id, tumbler_prefix)`` while ``catalog_owners`` also carries
+    ``catalog_owners_unique_name_type``, so a concurrent register could
+    raise 23505 instead of converging (surfaced as a CI flake on
+    PR #1423). FIXED by 5c8c978e, shipped in engine-service-v0.1.60;
+    the former non-strict xfail below xpassed on the source-built JAR
+    and the marker was removed 2026-08-01 (pins flip at merge).
+    """
+
     def test_concurrent_ensure_owner_for_repo_no_duplicate_rows(
         self, cat: Catalog, repo: Path,
     ) -> None:
@@ -232,10 +234,9 @@ class TestCriticalFiveTOCTOUOwnerRace:
         # Catalog must have exactly ONE owner row for this repo_hash.
         from nexus.repo_identity import _repo_identity
         _, repo_hash = _repo_identity(repo)
-        rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?",
-            (repo_hash,),
-        ).fetchall()
+        # Was a raw SELECT on owners. list_owners() carries repo_hash and
+        # has the same shape on both backends (nexus-i711w C-store).
+        rows = [o for o in cat.list_owners() if o["repo_hash"] == repo_hash]
         assert len(rows) == 1, (
             f"Expected 1 owner row for repo_hash={repo_hash!r}; "
             f"saw {len(rows)}: {rows}. TOCTOU race created duplicates."
@@ -272,10 +273,9 @@ class TestCriticalFiveTOCTOUOwnerRace:
         )
         assert str(first) == str(second)
 
-        rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?",
-            (repo_hash,),
-        ).fetchall()
+        # Was a raw SELECT on owners. list_owners() carries repo_hash and
+        # has the same shape on both backends (nexus-i711w C-store).
+        rows = [o for o in cat.list_owners() if o["repo_hash"] == repo_hash]
         assert len(rows) == 1
 
     def test_curator_owners_exempt_from_repo_hash_recheck(

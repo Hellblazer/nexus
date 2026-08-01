@@ -508,13 +508,13 @@ class CatalogRepositoryTest {
             "corpus", "knowledge", "file_path", "owner7/b.pdf"));
 
         // Exact existing path under the owner: exactly one, the right one.
-        var hit = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/b.pdf");
+        var hit = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/b.pdf", 0, 0);
         assertThat(hit).hasSize(1);
         assertThat(hit.get(0).get("tumbler")).isEqualTo("7.2");
 
         // Brand-new path under a POPULATED owner: zero (this is what stops the
         // corruption — the client no longer receives docs[0] of the owner).
-        var miss = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/brand-new.pdf");
+        var miss = repo.documentsByOwnerAndFilePath(TENANT_A, "7", "owner7/brand-new.pdf", 0, 0);
         assertThat(miss).isEmpty();
     }
 
@@ -583,6 +583,23 @@ class CatalogRepositoryTest {
         assertThat(counts.get("nexus.catalog_documents")).isEqualTo(0L);
     }
 
+    @Test @Order(43)
+    void migration_relationCounts_droppedChashIndex_isIndeterminateNotException() {
+        // nexus-20agh: nexus.chash_index was dropped (RDR-187) and is no
+        // longer in VERIFY_RELATIONS. A caller (e.g. a stale relations list
+        // from before the drop) requesting it must get the same silent-omit
+        // treatment as any other unwhitelisted relation — an absent key the
+        // caller reads as INDETERMINATE — never an unhandled SQL exception
+        // from querying a table that no longer exists in this (post-drop,
+        // fully-migrated) integration schema.
+        var counts = repo.relationCounts(TENANT_A, List.of(
+            "nexus.chash_index",
+            "nexus.catalog_documents"
+        ));
+        assertThat(counts).doesNotContainKey("nexus.chash_index");
+        assertThat(counts).containsKey("nexus.catalog_documents");
+    }
+
     @Test @Order(16)
     void document_documentsByCollection() {
         repo.upsertDocument(TENANT_A, Map.of(
@@ -592,9 +609,72 @@ class CatalogRepositoryTest {
             "corpus", "knowledge",
             "physical_collection", "knowledge__unit_test_coll"
         ));
-        var docs = repo.documentsByCollection(TENANT_A, "knowledge__unit_test_coll");
+        var docs = repo.documentsByCollection(TENANT_A, "knowledge__unit_test_coll", 0, 0);
         assertThat(docs).hasSize(1);
         assertThat(docs.get(0).get("tumbler")).isEqualTo("4.1");
+    }
+
+    /**
+     * nexus-xoimv: repository-level signature check — {@code limit <= 0} is
+     * unbounded, an explicit positive {@code limit} is honored, and
+     * {@code limit}+{@code offset} together page without overlap or gap
+     * (ORDER BY tumbler gives a stable cursor). The HTTP-layer equivalent
+     * across all seven filter branches lives in
+     * {@code CatalogHandlerListPaginationTest}; this is the direct repo-level
+     * sanity check for the same new signature.
+     */
+    @Test @Order(17)
+    void documentsByCollection_limitAndOffset_pageWithoutOverlap() {
+        final String coll = "knowledge__xoimv_page_coll";
+        for (int i = 1; i <= 5; i++) {
+            repo.upsertDocument(TENANT_A, Map.of(
+                "tumbler", "4.20." + i, "title", "Page Doc " + i,
+                "content_type", "paper", "corpus", "knowledge",
+                "physical_collection", coll));
+        }
+        // limit <= 0: unbounded.
+        assertThat(repo.documentsByCollection(TENANT_A, coll, 0, 0)).hasSize(5);
+        // explicit limit: honored.
+        assertThat(repo.documentsByCollection(TENANT_A, coll, 2, 0)).hasSize(2);
+        // paging reconstructs the full ordered set with no overlap/gap.
+        var page1 = repo.documentsByCollection(TENANT_A, coll, 2, 0);
+        var page2 = repo.documentsByCollection(TENANT_A, coll, 2, 2);
+        var page3 = repo.documentsByCollection(TENANT_A, coll, 2, 4);
+        var reconstructed = new java.util.ArrayList<String>();
+        for (var page : List.of(page1, page2, page3)) {
+            for (var d : page) reconstructed.add((String) d.get("tumbler"));
+        }
+        assertThat(reconstructed).containsExactly(
+            "4.20.1", "4.20.2", "4.20.3", "4.20.4", "4.20.5");
+    }
+
+    /**
+     * nexus-xoimv: {@code documentsBySourceUri} pagination cannot be
+     * exercised through the HTTP handler ({@code catalog-016-source-uri-
+     * unique.xml} enforces a partial unique index on {@code (tenant_id,
+     * source_uri)} for any non-empty value, and a blank {@code source_uri}
+     * query param never routes into this branch in {@code handleList}) — so
+     * it is covered here, directly, using the empty-string {@code source_uri}
+     * every document without one carries by default (excluded from the
+     * unique index, so multiple live rows may share it).
+     */
+    @Test @Order(18)
+    void documentsBySourceUri_limitAndOffset_pageWithoutOverlap() {
+        final String tenant = "xoimv-source-uri-tenant";
+        for (int i = 1; i <= 4; i++) {
+            repo.upsertDocument(tenant, Map.of(
+                "tumbler", "8.30." + i, "title", "No-URI Doc " + i,
+                "content_type", "code", "corpus", "code"));
+        }
+        assertThat(repo.documentsBySourceUri(tenant, "", 0, 0)).hasSize(4);
+        assertThat(repo.documentsBySourceUri(tenant, "", 2, 0)).hasSize(2);
+        var page1 = repo.documentsBySourceUri(tenant, "", 2, 0);
+        var page2 = repo.documentsBySourceUri(tenant, "", 2, 2);
+        var reconstructed = new java.util.ArrayList<String>();
+        for (var page : List.of(page1, page2)) {
+            for (var d : page) reconstructed.add((String) d.get("tumbler"));
+        }
+        assertThat(reconstructed).containsExactly("8.30.1", "8.30.2", "8.30.3", "8.30.4");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -695,6 +775,70 @@ class CatalogRepositoryTest {
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("to_tumbler")).isEqualTo("lnk.2");
         assertThat(links.get(0).get("link_type")).isEqualTo("cites");
+    }
+
+    @Test @Order(95)
+    void orphanedLinks_findsDanglingEndpointsAndNamesTheSide() {
+        // nexus-ysrwi (GH #1419 issue 7): Steve's backup held 5 of 52 links
+        // pointing at tumblers with no document anywhere in the same pg_dump.
+        // catalog_links has a PK and a UNIQUE but NO foreign key to
+        // catalog_documents (catalog-001-baseline.xml), so nothing structurally
+        // prevents this — detection has to exist regardless of whether tk070
+        // later adds enforcement, because an FK does not retroactively clean
+        // rows that are already orphaned.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.live", "title", "Live",
+            "content_type", "paper", "corpus", "knowledge"));
+
+        // A fully-resolvable link: must NOT be reported. Uses its OWN tumblers —
+        // this class is @Order-ed and shares state, so borrowing lnk.1/lnk.2
+        // would change the link counts that link_linksTo/link_filterByType assert.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.src", "title", "Resolvable Src",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.src", "to_tumbler", "orph.live",
+            "link_type", "relates", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
+
+        // nexus-9ssih: upsertLink now REFUSES dangling endpoints by default, so
+        // seeding the damage this detector exists to find is exactly the
+        // allow_dangling case. The flag is on the SEED only — orphanedLinks
+        // itself is unchanged, and the three shapes below are still written
+        // into the table byte-for-byte as before.
+        // Dangling TARGET (the document-deletion shape Steve hit).
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.live", "to_tumbler", "orph.gone",
+            "link_type", "cites", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
+            "allow_dangling", true));
+        // Dangling SOURCE.
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.vanished", "to_tumbler", "orph.live",
+            "link_type", "cites", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
+            "allow_dangling", true));
+        // BOTH endpoints gone.
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.x", "to_tumbler", "orph.y",
+            "link_type", "cites", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
+            "allow_dangling", true));
+
+        var orphans = repo.orphanedLinks(TENANT_A);
+
+        var pairs = orphans.stream()
+            .map(m -> m.get("from_tumbler") + "->" + m.get("to_tumbler") + ":" + m.get("side"))
+            .toList();
+        assertThat(pairs).contains(
+            "orph.live->orph.gone:to",
+            "orph.vanished->orph.live:from",
+            "orph.x->orph.y:both");
+        // The resolvable link must never appear — a check that cries wolf gets
+        // ignored, which is how a real orphan gets missed.
+        assertThat(pairs).noneMatch(x -> x.startsWith("orph.src->orph.live"));
+    }
+
+    @Test @Order(96)
+    void orphanedLinks_isTenantScoped() {
+        // RLS safety: tenant B must not see tenant A's orphans.
+        var bOrphans = repo.orphanedLinks(TENANT_B);
+        assertThat(bOrphans).noneMatch(m ->
+            String.valueOf(m.get("from_tumbler")).startsWith("orph."));
     }
 
     @Test @Order(31)
@@ -802,6 +946,206 @@ class CatalogRepositoryTest {
         assertThat((List<?>) result.get("edges")).isEmpty();
     }
 
+    /**
+     * nexus-t7m8e leg (a)+(b): a tombstoned document must not act as a live
+     * relay. A(live) --cites--> D(tombstoned) --cites--> B(live): before the
+     * fix, D was added to the frontier with no liveness check, so B was
+     * reachable at depth 2 despite D being invisible. After the fix, every
+     * edge touching D is excluded from the traversal (both endpoints of an
+     * edge must be live), so D can never forward reachability to B.
+     */
+    @Test
+    void graphBFS_tombstonedRelay_unreachableAtDepth2() {
+        String tenant = "bfs-tomb-" + System.nanoTime();
+        String a = "tr.A", d = "tr.D", b = "tr.B";
+        for (String t : List.of(a, d, b)) {
+            repo.upsertDocument(tenant, Map.of("tumbler", t,
+                "title", "Relay " + t, "content_type", "paper", "corpus", "knowledge"));
+        }
+        repo.upsertLink(tenant, Map.of("from_tumbler", a, "to_tumbler", d,
+            "link_type", "cites", "created_by", "test"));
+        repo.upsertLink(tenant, Map.of("from_tumbler", d, "to_tumbler", b,
+            "link_type", "cites", "created_by", "test"));
+
+        assertThat(repo.deleteDocument(tenant, d))
+            .as("precondition: D must actually be tombstoned").isEqualTo(1);
+
+        var result = repo.graphBFS(tenant, List.of(a), List.of("cites"), "out", 2);
+        @SuppressWarnings("unchecked")
+        var nodes = (List<Map<String, Object>>) result.get("nodes");
+        @SuppressWarnings("unchecked")
+        var edges = (List<Map<String, Object>>) result.get("edges");
+        var nodeTumblers = tumblersOf(nodes);
+
+        assertThat(nodeTumblers)
+            .as("D is tombstoned — invisible as a node")
+            .doesNotContain(d);
+        assertThat(nodeTumblers)
+            .as("B is reachable ONLY via the tombstoned relay D — must be unreachable")
+            .doesNotContain(b);
+        for (var e : edges) {
+            assertThat(e.get("from_tumbler")).as("no edge may name the tombstoned relay").isNotEqualTo(d);
+            assertThat(e.get("to_tumbler")).as("no edge may name the tombstoned relay").isNotEqualTo(d);
+        }
+    }
+
+    /**
+     * nexus-t7m8e leg (a): structural invariant — every edge's endpoints must
+     * appear in the returned node set. A dangling reference (an edge naming a
+     * tumbler that was never registered at all, not merely tombstoned) is the
+     * other half of the same defect class the tombstone-relay test covers.
+     *
+     * <p>{@code upsertLink} itself now rejects a dangling endpoint at write
+     * time (nexus-9ssih) unless {@code allow_dangling=true} is passed — the
+     * import/ETL family and legacy pre-9ssih data are exactly the paths that
+     * can still leave one in the table, so graphBFS must defend independently
+     * rather than relying on the write-time guard alone. {@code allow_dangling}
+     * here exercises that defense-in-depth, not a live production write path.
+     */
+    @Test
+    void graphBFS_everyEdgeEndpoint_appearsInNodes() {
+        String tenant = "bfs-dangle-" + System.nanoTime();
+        String live = "dg.live";
+        repo.upsertDocument(tenant, Map.of("tumbler", live,
+            "title", "Live", "content_type", "paper", "corpus", "knowledge"));
+        // "dg.ghost" is never registered as a document — a dangling reference.
+        repo.upsertLink(tenant, Map.of("from_tumbler", live, "to_tumbler", "dg.ghost",
+            "link_type", "cites", "created_by", "test", "allow_dangling", true));
+
+        var result = repo.graphBFS(tenant, List.of(live), List.of("cites"), "out", 1);
+        @SuppressWarnings("unchecked")
+        var nodes = (List<Map<String, Object>>) result.get("nodes");
+        @SuppressWarnings("unchecked")
+        var edges = (List<Map<String, Object>>) result.get("edges");
+        var nodeTumblers = new java.util.HashSet<>(tumblersOf(nodes));
+
+        for (var e : edges) {
+            assertThat(nodeTumblers)
+                .as("edge from_tumbler %s must appear in nodes", e.get("from_tumbler"))
+                .contains((String) e.get("from_tumbler"));
+            assertThat(nodeTumblers)
+                .as("edge to_tumbler %s must appear in nodes", e.get("to_tumbler"))
+                .contains((String) e.get("to_tumbler"));
+        }
+        assertThat(edges)
+            .as("the dangling reference must not appear as an edge at all")
+            .noneMatch(e -> "dg.ghost".equals(e.get("to_tumbler")));
+    }
+
+    /**
+     * nexus-t7m8e leg (c): the ported 500-node cap. A 501-node star (1 seed +
+     * 500 direct children) truncates to EXACTLY 500 nodes, and the surviving
+     * set is IDENTICAL across two independent calls (deterministic ordering
+     * by (min_depth, tumbler), not database/HashSet iteration order).
+     */
+    @Test
+    void graphBFS_501NodeFixture_truncatesToExactly500Deterministically() {
+        String tenant = "bfs-cap-" + System.nanoTime();
+        String seed = "cap.seed";
+        repo.upsertDocument(tenant, Map.of("tumbler", seed,
+            "title", "Cap Seed", "content_type", "paper", "corpus", "knowledge"));
+        for (int i = 0; i < 500; i++) {
+            String child = String.format("cap.child.%04d", i);
+            repo.upsertDocument(tenant, Map.of("tumbler", child,
+                "title", "Cap Child " + i, "content_type", "paper", "corpus", "knowledge"));
+            repo.upsertLink(tenant, Map.of("from_tumbler", seed, "to_tumbler", child,
+                "link_type", "cites", "created_by", "test"));
+        }
+
+        var run1 = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+        var run2 = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+        @SuppressWarnings("unchecked")
+        var nodes1 = (List<Map<String, Object>>) run1.get("nodes");
+        @SuppressWarnings("unchecked")
+        var nodes2 = (List<Map<String, Object>>) run2.get("nodes");
+
+        assertThat(nodes1).as("501 reachable nodes truncate to exactly 500").hasSize(500);
+        assertThat(tumblersOf(nodes1))
+            .as("truncation is deterministic across repeated calls")
+            .containsExactlyInAnyOrderElementsOf(tumblersOf(nodes2));
+    }
+
+    /**
+     * nexus-t7m8e leg (c): depth cap applies BEFORE the node limit. A fixture
+     * with few depth-1 nodes but many depth-2 nodes (total > 500) must keep
+     * EVERY depth-1 node, truncating only the depth-2 layer.
+     */
+    @Test
+    void graphBFS_depth1Nodes_allSurvive_whenDepth2Truncated() {
+        String tenant = "bfs-cap-d2-" + System.nanoTime();
+        String seed = "cap2.seed";
+        repo.upsertDocument(tenant, Map.of("tumbler", seed,
+            "title", "Cap2 Seed", "content_type", "paper", "corpus", "knowledge"));
+        List<String> depth1 = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            String t = "cap2.d1." + i;
+            depth1.add(t);
+            repo.upsertDocument(tenant, Map.of("tumbler", t,
+                "title", "Cap2 D1 " + i, "content_type", "paper", "corpus", "knowledge"));
+            repo.upsertLink(tenant, Map.of("from_tumbler", seed, "to_tumbler", t,
+                "link_type", "cites", "created_by", "test"));
+        }
+        // 5 * 100 = 500 depth-2 nodes; total reachable = 1 + 5 + 500 = 506 > 500.
+        for (String d1 : depth1) {
+            for (int j = 0; j < 100; j++) {
+                String t = d1 + ".d2." + j;
+                repo.upsertDocument(tenant, Map.of("tumbler", t,
+                    "title", "Cap2 D2", "content_type", "paper", "corpus", "knowledge"));
+                repo.upsertLink(tenant, Map.of("from_tumbler", d1, "to_tumbler", t,
+                    "link_type", "cites", "created_by", "test"));
+            }
+        }
+
+        var result = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 2);
+        @SuppressWarnings("unchecked")
+        var nodes = (List<Map<String, Object>>) result.get("nodes");
+        var nodeTumblers = tumblersOf(nodes);
+
+        assertThat(nodeTumblers).as("total reachable set truncates to the 500 cap").hasSize(500);
+        assertThat(nodeTumblers)
+            .as("every depth-1 node survives truncation — only depth-2 is truncated")
+            .containsAll(depth1);
+    }
+
+    /**
+     * nexus-t7m8e leg (c): the graph_node_limit warning fires when the
+     * reachable set hits the cap.
+     */
+    @Test
+    void graphBFS_nodeCapWarning_fires() {
+        String tenant = "bfs-cap-warn-" + System.nanoTime();
+        String seed = "capw.seed";
+        repo.upsertDocument(tenant, Map.of("tumbler", seed,
+            "title", "Warn Seed", "content_type", "paper", "corpus", "knowledge"));
+        for (int i = 0; i < 500; i++) {
+            String child = String.format("capw.child.%04d", i);
+            repo.upsertDocument(tenant, Map.of("tumbler", child,
+                "title", "Warn Child " + i, "content_type", "paper", "corpus", "knowledge"));
+            repo.upsertLink(tenant, Map.of("from_tumbler", seed, "to_tumbler", child,
+                "link_type", "cites", "created_by", "test"));
+        }
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+            var warnings = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=graph_node_limit"))
+                .toList();
+            assertThat(warnings).as("graph_node_limit warning must fire at the cap threshold").hasSize(1);
+            assertThat(warnings.getFirst()).contains("tenant=" + tenant);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // MANIFEST
     // ══════════════════════════════════════════════════════════════════════════
@@ -857,6 +1201,48 @@ class CatalogRepositoryTest {
         assertThat(repo.getManifest(TENANT_A, "mfst.3")).isEmpty();
     }
 
+    @Test @Order(52)
+    void manifest_purge_zeroesChunkCountInSameTransaction() {
+        // nexus-b6enc F5: purgeManifest used to delete the manifest rows but
+        // leave documents.chunk_count stale — a ghost count with no rows
+        // behind it. The zero must land in the SAME transaction as the purge.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.purge2", "title", "Purge Count Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 2));
+        repo.writeManifest(TENANT_A, "mfst.purge2", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("pg0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("pg1"), "chunk_index", 1)
+        ));
+        repo.purgeManifest(TENANT_A, "mfst.purge2");
+        var doc = repo.getDocument(TENANT_A, "mfst.purge2");
+        assertThat(((Number) doc.get("chunk_count")).intValue())
+            .as("purgeManifest must zero chunk_count with the rows")
+            .isZero();
+    }
+
+    @Test @Order(52)
+    void manifest_write_foldsChunkCountLikeWriteManifestMany() {
+        // nexus-b6enc F5: the single-doc REPLACE must fold chunk_count the
+        // same way writeManifestMany / resyncChunkCount do — a stale count
+        // after a single-doc rewrite is the same ghost class as the purge.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.wcnt", "title", "Write Count Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.writeManifest(TENANT_A, "mfst.wcnt", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("wc0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("wc1"), "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", ch("wc2"), "chunk_index", 2)
+        ));
+        var doc = repo.getDocument(TENANT_A, "mfst.wcnt");
+        assertThat(((Number) doc.get("chunk_count")).intValue())
+            .as("writeManifest must fold chunk_count = rows.size()")
+            .isEqualTo(3);
+        // And the REPLACE shrink folds too.
+        repo.writeManifest(TENANT_A, "mfst.wcnt", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("wc9"), "chunk_index", 0)
+        ));
+        assertThat(((Number) repo.getDocument(TENANT_A, "mfst.wcnt").get("chunk_count")).intValue())
+            .isEqualTo(1);
+    }
+
     @Test @Order(53)
     void manifest_chashesForCollection() {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.4", "title", "Chash For Collection",
@@ -879,6 +1265,10 @@ class CatalogRepositoryTest {
             Map.<String, Object>of("position", 1, "chash", ch("rsync1"), "chunk_index", 1),
             Map.<String, Object>of("position", 2, "chash", ch("rsync2"), "chunk_index", 2)
         ));
+        // De-sync the count deliberately (writeManifest itself now folds it —
+        // nexus-b6enc F5 — so force a wrong value to prove resync repairs).
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 99));
         repo.resyncChunkCount(TENANT_A, "mfst.5");
         var doc = repo.getDocument(TENANT_A, "mfst.5");
         assertThat(doc.get("chunk_count")).isEqualTo(3);
@@ -1006,6 +1396,151 @@ class CatalogRepositoryTest {
         assertThat(coll.get("superseded_by")).isEqualTo("code__nexus__voyage-code-3__v1");
     }
 
+    @Test @Order(61)
+    void collection_supersede_refusesToChainToADifferentTargetInTheUPDATEitself() {
+        // nexus-cecqy review: guard 2 lives in the HANDLER and read-then-wrote as two
+        // statements, so two concurrent supersedes of the same name to DIFFERENT targets
+        // could both pass. The precondition now rides in supersedeCollection's own WHERE.
+        //
+        // This pin exists because 1232585d shipped that conjunct with NO test at any layer:
+        // both pre-existing callers supersede a LIVE row and return 1, so deleting the
+        // conjunct left the suite green. Repo-level is the correct layer here — the SUBJECT
+        // is the WHERE clause, not the route.
+        String name = "code__chainguard__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "chainguard", "embedding_model", "voyage-code-3"));
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+            .as("guard: the first supersession must land, or the rest proves nothing")
+            .isEqualTo(1);
+
+        // A DIFFERENT target must match zero rows — this is what the handler reports as 409.
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v3", ""))
+            .as("chaining to a different target must match no rows")
+            .isEqualTo(0);
+        assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
+            .as("the original supersession must survive the refused chain")
+            .isEqualTo("code__chainguard__voyage-code-3__v2");
+
+        // The SAME target stays idempotent (the .or() disjunct) — re-asserting a supersession
+        // must not start failing.
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+            .as("re-asserting the same target is idempotent, not a chain")
+            .isEqualTo(1);
+    }
+
+    @Test @Order(61)
+    void collection_supersede_sameTargetReassert_leavesSupersededAtByteIdentical() {
+        // nexus-0svvu (a): the WHERE's .or() disjunct above is deliberately permissive —
+        // a same-target re-assertion must MATCH (guard: the paired supersede call the
+        // canonical rename issues against its own tombstone must not 409). Matching is
+        // not the whole story: a bare SET would re-stamp superseded_at on every match,
+        // moving the recorded supersession instant on every retry — exactly what
+        // CatalogHandler's guard-2 comment says must never happen. The fix moves the
+        // guard into the SET clause (CASE WHEN superseded_by = '' THEN <new> ELSE
+        // superseded_at END), so a same-target re-assertion must be a true no-op on the
+        // timestamp, not merely idempotent on the pointer. This is the ONLY layer that
+        // proves it: the HTTP handler's OWN idempotence branch (guard 2's early return)
+        // never calls supersedeCollection a second time at all, so it cannot pin the
+        // SET clause — repo-level is the correct layer here, same lesson as the sibling
+        // pin above.
+        String name = "code__samestamp__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "samestamp", "embedding_model", "voyage-code-3"));
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+            .as("guard: the first supersession must land, or the rest proves nothing")
+            .isEqualTo(1);
+        String stamp = (String) repo.getCollection(TENANT_A, name).get("superseded_at");
+        assertThat(stamp).as("guard: the first supersede stamped an instant").isNotBlank();
+
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+            .as("same-target re-assertion still reports the row as marked")
+            .isEqualTo(1);
+        assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
+            .as("the SET clause must not move superseded_at on a same-target re-assertion")
+            .isEqualTo(stamp);
+    }
+
+    @Test @Order(61)
+    void collection_supersede_concurrentSameTarget_bothCallersSeeOneSurvivingStamp() throws Exception {
+        // nexus-0svvu (a), concurrency form. Two concurrent supersedes of the SAME
+        // old_name to the SAME target both call supersedeCollection directly here
+        // (bypassing the HTTP handler's guard-2 early return, which is the point — this
+        // pin is about the repo's OWN WHERE/SET, not the handler's short-circuit), and
+        // the WHERE's same-target disjunct lets BOTH match. Whichever runs second must
+        // take the CASE's ELSE branch and leave the instant exactly as the first left it.
+        String name = "code__concstamp__voyage-code-3__v1";
+        String target = "code__concstamp__voyage-code-3__v2";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "concstamp", "embedding_model", "voyage-code-3"));
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Callable<Integer> task = () -> repo.supersedeCollection(TENANT_A, name, target, "");
+            var f1 = pool.submit(task);
+            var f2 = pool.submit(task);
+            int r1 = f1.get();
+            int r2 = f2.get();
+            assertThat(r1 + r2).as("both concurrent callers must see the row as marked (matched)")
+                .isEqualTo(2);
+            var row = repo.getCollection(TENANT_A, name);
+            assertThat(row.get("superseded_by")).isEqualTo(target);
+            String stampAfterRace = (String) row.get("superseded_at");
+            assertThat(stampAfterRace).isNotBlank();
+
+            // Whichever caller's write landed second necessarily saw superseded_by
+            // already equal to the target (not '') and had to take the CASE's ELSE
+            // branch, or this third, purely sequential, same-target call would move
+            // the stamp — proving the loser's write did NOT re-stamp during the race.
+            assertThat(repo.supersedeCollection(TENANT_A, name, target, "")).isEqualTo(1);
+            assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
+                .as("the recorded supersession instant must survive both the race and a "
+                    + "further same-target re-assertion")
+                .isEqualTo(stampAfterRace);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test @Order(62)
+    void collection_upsert_revivesASupersededRow() {
+        // nexus-cecqy: a rename now RETIRES the old name as a tombstone instead of
+        // deleting it, so re-creating a collection under that name lands on a row that
+        // is still marked superseded. Superseded rows are excluded from
+        // collectionForTuple, so without this the revived collection would be
+        // unreachable as a write target — and silently so, since
+        // `nx catalog doctor --collections-drift` deliberately permits a superseded row
+        // to have no T3 collection. /collections/upsert is the caller asserting the
+        // collection is current.
+        String name = "code__revive__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "revive", "embedding_model", "voyage-code-3"));
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
+            .isEqualTo(1);
+        // NON-VACUITY: the row really is tombstoned before the re-registration.
+        assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
+            .as("guard: the row must be superseded before the revive is meaningful")
+            .isEqualTo("code__revive__voyage-code-3__v2");
+
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "revive", "embedding_model", "voyage-code-3"));
+
+        var revived = repo.getCollection(TENANT_A, name);
+        assertThat(revived.get("superseded_by")).as("tombstone pointer cleared").isEqualTo("");
+        // collRow renders every null column as "" (nne), and a non-null timestamptz would
+        // render as an ISO instant — so "" here means the column is genuinely NULL.
+        assertThat(revived.get("superseded_at")).as("tombstone timestamp cleared").isEqualTo("");
+        // And it is once again resolvable as the live collection for its tuple.
+        var forTuple = repo.collectionForTuple(TENANT_A, "code", "revive", "voyage-code-3");
+        assertThat(forTuple).as("a revived collection must be reachable as a write target")
+            .isNotNull();
+        assertThat(forTuple.get("name")).isEqualTo(name);
+    }
+
     @Test @Order(63)
     void importCollection_overwritesStubRow() {
         // A stub row (all three discriminator columns empty) must be fully upgraded
@@ -1084,7 +1619,8 @@ class CatalogRepositoryTest {
         var counts = repo.renameCollection(TENANT_A, "knowledge__old__v1", "knowledge__new__v1");
         assertThat(counts.get("catalog_documents")).as("1 document re-homed").isEqualTo(1);
         assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
-        assertThat(counts.get("catalog_collections_deleted")).as("registry X deleted").isEqualTo(1);
+        assertThat(counts.get("catalog_collections_superseded"))
+            .as("registry X retired as a superseded tombstone (nexus-cecqy)").isEqualTo(1);
         var doc = repo.getDocument(TENANT_A, "rn.1");
         assertThat(doc.get("physical_collection")).isEqualTo("knowledge__new__v1");
     }
@@ -1131,6 +1667,25 @@ class CatalogRepositoryTest {
         assertThat((Long) stats.get("owner_count")).isGreaterThan(0);
         assertThat((Long) stats.get("collection_count")).isGreaterThan(0);
         assertThat(stats.get("links_by_type")).isNotNull();
+    }
+
+    /**
+     * nexus-se9r3 closing assertion: stats().doc_count must equal
+     * countDocuments() — the two surfaces disagreeing (doc_count raw,
+     * countDocuments tombstone-filtered) was the bead's own repro.
+     */
+    @Test
+    void stats_docCount_matchesCountDocuments() {
+        String tenant = "stats-parity-" + System.nanoTime();
+        repo.upsertDocument(tenant, mapOf("tumbler", "sp.1", "title", "Live", "content_type", "paper"));
+        repo.upsertDocument(tenant, mapOf("tumbler", "sp.2", "title", "Dead", "content_type", "paper"));
+        assertThat(repo.deleteDocument(tenant, "sp.2")).isEqualTo(1);
+
+        var stats = repo.stats(tenant);
+        assertThat((Long) stats.get("doc_count"))
+            .as("stats().doc_count must equal countDocuments() post-tombstone")
+            .isEqualTo(repo.countDocuments(tenant))
+            .isEqualTo(1L);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2303,6 +2858,44 @@ class CatalogRepositoryTest {
         assertThat(((Number) yPaper.get("linked")).longValue()).isEqualTo(3L);
     }
 
+    /**
+     * nexus-l1nre meta-assertion: the view branch (empty ownerPrefix) and the
+     * owner-prefix hand-aggregation branch of coverageByContentType must
+     * AGREE on the same fixture, tombstone included. Before this fix the view
+     * branch was unfiltered while the hand-aggregation branch already
+     * filtered deleted_at IS NULL — the same method disagreeing with itself
+     * depending purely on whether a prefix argument was supplied.
+     */
+    @Test
+    void coverageByContentType_viewBranchAndOwnerPrefixBranch_agree_withTombstone() {
+        String tenant = "cov-agree-" + System.nanoTime();
+        repo.upsertDocument(tenant, mapOf("tumbler", "covagree.1", "title", "P1", "content_type", "paper"));
+        repo.upsertDocument(tenant, mapOf("tumbler", "covagree.2", "title", "P2", "content_type", "paper"));
+        repo.upsertDocument(tenant, mapOf("tumbler", "covagree.3", "title", "P3 (tombstoned)", "content_type", "paper"));
+        repo.upsertLink(tenant, mapOf(
+            "from_tumbler", "covagree.1", "to_tumbler", "covagree.2", "link_type", "cites", "created_by", "test"));
+
+        assertThat(repo.deleteDocument(tenant, "covagree.3")).isEqualTo(1);
+
+        var viewBranch = repo.coverageByContentType(tenant, "");
+        var prefixBranch = repo.coverageByContentType(tenant, "covagree");
+
+        assertThat(viewBranch).as("non-vacuity: exactly one content_type in this tenant").hasSize(1);
+        assertThat(prefixBranch).hasSize(1);
+
+        var v = viewBranch.get(0);
+        var p = prefixBranch.get(0);
+        assertThat(v.get("content_type")).isEqualTo(p.get("content_type"));
+        assertThat(((Number) v.get("total")).longValue())
+            .as("the two branches must AGREE on total, tombstone included")
+            .isEqualTo(((Number) p.get("total")).longValue())
+            .isEqualTo(2L);
+        assertThat(((Number) v.get("linked")).longValue())
+            .as("the two branches must AGREE on linked, tombstone included")
+            .isEqualTo(((Number) p.get("linked")).longValue())
+            .isEqualTo(2L);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // TENANT B ISOLATION CHECK
     // ══════════════════════════════════════════════════════════════════════════
@@ -2594,6 +3187,38 @@ class CatalogRepositoryTest {
         var result = repo.resolveChunk(TENANT_A, tumbler, 999);
         assertThat(result).isNotNull();
         assertThat(result.get("chunk_index")).isEqualTo(999);
+    }
+
+    @Test @Order(219)
+    void resolveChunk_writtenThroughNormalManifestPath_resolvesLastChunk() {
+        // nexus-ojazb pin: writeManifest (the normal production write path)
+        // folds documents.chunk_count = rows.size() in the SAME transaction
+        // (nexus-b6enc F5), so there is no staleness window for a manifest
+        // written through it — the last valid index (rows.size() - 1) must
+        // resolve, and rows.size() itself must be rejected as out of range.
+        // This does NOT cover the ETL importChunk/importChunksBatch legs,
+        // which do not fold chunk_count — see resolveChunk's javadoc.
+        final String tumbler = "9.9.103";
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", tumbler,
+            "title", "Normal Path Last Chunk Doc",
+            "content_type", "code",
+            "corpus", "code",
+            "physical_collection", "code__nexus__voyage-code-3__v1"
+        ));
+        repo.writeManifest(TENANT_A, tumbler, List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("np0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("np1"), "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", ch("np2"), "chunk_index", 2),
+            Map.<String, Object>of("position", 3, "chash", ch("np3"), "chunk_index", 3),
+            Map.<String, Object>of("position", 4, "chash", ch("np4"), "chunk_index", 4)
+        ));
+        var last = repo.resolveChunk(TENANT_A, tumbler, 4);
+        assertThat(last).as("last chunk (index rows.size()-1) must resolve").isNotNull();
+        assertThat(last.get("chunk_index")).isEqualTo(4);
+
+        var outOfRange = repo.resolveChunk(TENANT_A, tumbler, 5);
+        assertThat(outOfRange).as("index == rows.size() must be out of range").isNull();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -3076,5 +3701,279 @@ class CatalogRepositoryTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-23wlw — tombstone visibility parity contract
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * nexus-23wlw: a tombstoned document is invisible to EVERY read.
+     *
+     * <p>THE DEFECT. {@code delete_document} tombstones (sets
+     * {@code deleted_at}); it does not remove the row. The POINT lookups
+     * filtered correctly — {@code getDocument}, {@code resolveMany}, the
+     * {@code registerDocument} idempotency probes — but the LIST reads did
+     * not. So {@code audit-membership --purge-non-canonical} reported
+     * "Deleted 3 of 3" and {@code list_by_collection} still returned all 8:
+     * a delete that reports success and appears not to have happened, which
+     * reads as a broken delete rather than a broken list. Every count derived
+     * from these reads was inflated by exactly the tombstone population.
+     *
+     * <p>SQLite has no equivalent because it HARD-deletes, so the row is
+     * physically absent from {@code documents}. That is also why the fix is a
+     * blanket filter rather than an {@code include_deleted} parameter: each of
+     * these methods documents itself as replacing a {@code FROM documents}
+     * SQLite query, and that table never contains tombstones. Matching it is
+     * parity, not a new policy.
+     *
+     * <p>WHY NO CALLER LOSES ANYTHING, checked before filtering rather than
+     * assumed: {@code nx catalog undelete} restores from a BACKUP FILE
+     * (re-registering), not from live tombstones; {@code purge_trash} reads
+     * {@code deleted_at IS NOT NULL} directly in PL/pgSQL; the catalog-004
+     * manifest functions were already tombstone-aware in SQL. No surface in
+     * this class exists to LIST the trash, so nothing here needed to see it.
+     *
+     * <p>The bead named nine sites. An audit of every {@code CATALOG_DOCUMENTS}
+     * read found twenty-two unfiltered, including {@code countDocuments} (the
+     * inflated-counts symptom itself) and
+     * {@code lookupDocByCollectionAndPath}, which resolves a tumbler for
+     * WRITES — a tombstone match there hands a caller a deleted document to
+     * write into. Fixing the nine and leaving the rest is the recurring shape
+     * of this bug: catalog-015 fixed the catalog and left memory, j0nec was
+     * fixed in one file and left in twenty-three.
+     *
+     * <p>Exactly ONE read is deliberately unfiltered — {@code
+     * physicalCollectionOf}, which is a manifest WRITE helper, not a reader.
+     * Its exclusion is argued at its own declaration.
+     */
+    @Test
+    void tombstonedDocument_isInvisibleToEveryRead() {
+        String tenant = "tomb-tenant-" + System.nanoTime();
+        String live = "9.1";
+        String dead = "9.2";
+
+        for (String[] d : new String[][] {
+                {live, "Live Doc",  "live.py"},
+                {dead, "Dead Doc",  "dead.py"}}) {
+            repo.upsertDocument(tenant, Map.of(
+                "tumbler",             d[0],
+                "title",               d[1],
+                "content_type",        "code",
+                "corpus",              "tombcorpus",
+                "physical_collection", "tombcoll",
+                "file_path",           "/abs/" + d[2],
+                "source_uri",          "file:///abs/" + d[2]));
+        }
+        repo.upsertLink(tenant, Map.of(
+            "from_tumbler", live,
+            "to_tumbler",   dead,
+            "link_type",    "relates",
+            "created_by",   "nexus-23wlw-test"));
+
+        assertThat(repo.deleteDocument(tenant, dead))
+            .as("precondition: the delete must actually tombstone one row")
+            .isEqualTo(1);
+
+        // Every list/lookup surface, named so a failure says WHICH one leaked.
+        assertThat(tumblersOf(repo.listDocuments(tenant, 200, 0)))
+            .as("listDocuments").containsExactly(live);
+        assertThat(repo.countDocuments(tenant))
+            .as("countDocuments — the inflated-counts symptom").isEqualTo(1);
+        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll", 0, 0)))
+            .as("documentsByCollection — the bead's own repro").containsExactly(live);
+        assertThat(tumblersOf(repo.documentsByFilePath(tenant, "/abs/dead.py", 0, 0)))
+            .as("documentsByFilePath").isEmpty();
+        assertThat(tumblersOf(repo.documentsBySourceUri(tenant, "file:///abs/dead.py", 0, 0)))
+            .as("documentsBySourceUri").isEmpty();
+        assertThat(tumblersOf(repo.documentsByOwner(tenant, "9", 0, 0)))
+            .as("documentsByOwner").containsExactly(live);
+        assertThat(tumblersOf(repo.documentsByOwnerAndFilePath(tenant, "9", "/abs/dead.py", 0, 0)))
+            .as("documentsByOwnerAndFilePath").isEmpty();
+        assertThat(tumblersOf(repo.documentsByContentType(tenant, "code", 0, 0)))
+            .as("documentsByContentType").containsExactly(live);
+        assertThat(tumblersOf(repo.documentsByCorpus(tenant, "tombcorpus", 0, 0)))
+            .as("documentsByCorpus").containsExactly(live);
+        assertThat(tumblersOf(repo.descendants(tenant, "9")))
+            .as("descendants").containsExactly(live);
+        assertThat(repo.lookupDocByCollectionAndPath(tenant, "tombcoll", "/abs/dead.py"))
+            .as("lookupDocByCollectionAndPath — resolves a tumbler for WRITES, so a "
+                + "tombstone match hands the caller a deleted document")
+            .isNull();
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Dead", null, 50)))
+            .as("searchDocuments").isEmpty();
+        assertThat(repo.chunkCountsForDocs(tenant, List.of(live, dead)))
+            .as("chunkCountsForDocs").doesNotContainKey(dead);
+        assertThat(tumblersOf(repo.docsWithAbsolutePaths(tenant)))
+            .as("docsWithAbsolutePaths").containsExactly(live);
+        assertThat(tumblersOf(repo.orphanedDocs(tenant)))
+            .as("orphanedDocs — a tombstone must not be reported as an orphan")
+            .doesNotContain(dead);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> nodes =
+            (List<Map<String, Object>>) repo.graphBFS(
+                tenant, List.of(live), List.of(), "both", 1).get("nodes");
+        assertThat(tumblersOf(nodes))
+            .as("graphBFS nodes — a tombstoned neighbour must not surface as a node")
+            .doesNotContain(dead);
+
+        long codeCount = repo.coverageByContentType(tenant, "9").stream()
+            .filter(r -> "code".equals(r.get("content_type")))
+            .mapToLong(r -> ((Number) r.get("total")).longValue())
+            .sum();
+        assertThat(codeCount).as("coverageByContentType").isEqualTo(1);
+
+        // NON-VACUITY. Every assertion above is satisfied by a tenant that is
+        // simply empty, so without this the whole test passes against a
+        // seeding bug — and it would have passed against the ORIGINAL defect
+        // too if `live` were missing for an unrelated reason.
+        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll", 0, 0)))
+            .as("the LIVE doc is still returned — this test is not passing "
+                + "because the tenant is empty")
+            .containsExactly(live);
+        assertThat(repo.getDocument(tenant, live))
+            .as("and it is still individually resolvable").isNotNull();
+    }
+
+    /** Tumblers of a document-row list, in order, for the nexus-23wlw contract. */
+    private static List<String> tumblersOf(List<Map<String, Object>> rows) {
+        return rows.stream().map(r -> String.valueOf(r.get("tumbler"))).toList();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-ybj1b — include_heuristic parity contract
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * nexus-ybj1b: graph traversal excludes {@code implements-heuristic} by
+     * default and includes it on explicit opt-in.
+     *
+     * <p>THE DEFECT. {@code Catalog.graph}/{@code graph_many} have always
+     * excluded heuristic edges by default. The HTTP client sent
+     * {@code include_heuristic} with the comment "forwarded to service for
+     * future support; currently informational", and the server read only
+     * {@code link_types} — the string appeared NOWHERE in the Java module. So
+     * BOTH directions were broken, which is why this test asserts both: the
+     * default did not exclude, and the opt-in was indistinguishable from the
+     * default.
+     *
+     * <p>Not a subtle ranking shift. The 2026-05-08 production probe measured
+     * 15,490 heuristic edges out of 23,582 — 66% — with 500-660 inbound on a
+     * single high-traffic RDR. That is the flood the local default exists to
+     * suppress, silently reinstated for every user on the 6.0 default backend.
+     *
+     * <p>The third case is the one a deny-list implementation would get wrong:
+     * an explicit {@code link_types} naming the heuristic type must WIN, since
+     * the local contract trusts a caller who names types.
+     */
+    @Test
+    void graphBFS_excludesHeuristicByDefault_andHonoursOptIn() {
+        String tenant = "heur-tenant-" + System.nanoTime();
+        String seed = "8.1", curated = "8.2", heuristic = "8.3", custom = "8.4";
+
+        for (String t : List.of(seed, curated, heuristic, custom)) {
+            repo.upsertDocument(tenant, Map.of(
+                "tumbler", t, "title", "Doc " + t, "content_type", "code"));
+        }
+        for (String[] e : new String[][] {
+                {curated,   "cites"},
+                {heuristic, "implements-heuristic"},
+                {custom,    "invented-by-a-user"}}) {
+            repo.upsertLink(tenant, Map.of(
+                "from_tumbler", seed, "to_tumbler", e[0],
+                "link_type", e[1], "created_by", "nexus-ybj1b-test"));
+        }
+
+        assertThat(neighbours(repo.graphBFS(tenant, List.of(seed), List.of(), "both", 1, false)))
+            .as("DEFAULT: the curated edge survives, the heuristic flood does not — "
+                + "and a CUSTOM type is excluded too, because the contract is an "
+                + "allow-list, not a deny-list")
+            .contains(curated)
+            .doesNotContain(heuristic)
+            .doesNotContain(custom);
+
+        assertThat(neighbours(repo.graphBFS(tenant, List.of(seed), List.of(), "both", 1, true)))
+            .as("OPT-IN: include_heuristic reaches the query and lifts the filter "
+                + "entirely — previously indistinguishable from the default")
+            .contains(curated, heuristic, custom);
+
+        assertThat(neighbours(repo.graphBFS(
+                tenant, List.of(seed), List.of("implements-heuristic"), "both", 1, false)))
+            .as("EXPLICIT TYPES WIN: naming the heuristic type returns it even with "
+                + "includeHeuristic=false — the caller knows what they asked for")
+            .containsExactly(heuristic);
+
+        assertThat(neighbours(repo.graphBFS(tenant, List.of(seed), List.of(), "both", 1, false)))
+            .as("non-vacuity: the traversal finds SOMETHING by default, so the "
+                + "doesNotContain assertions above are not passing on an empty graph")
+            .isNotEmpty();
+    }
+
+    /**
+     * nexus-23wlw census: catalog document search folds diacritics, the half
+     * catalog-015 left behind.
+     *
+     * <p>catalog-015 fixed this table's SEPARATOR divergence in 2026-07-13 and
+     * stopped there, so {@code Godel} still did not find {@code Gödel} — the
+     * third falsification of catalog-001's "PG >= FTS5 superset" claim and the
+     * second on this table. Author is where it bites: academic names are where
+     * diacritics live.
+     *
+     * <p>Measured against the LIVE catalog rather than assumed. Of 51 sampled
+     * papers, five had non-ASCII authors but only ONE genuinely diverged
+     * ({@code Ángel Plaza} — searching {@code Angel} found it under FTS5 and
+     * returned nothing here). The other four — {@code Groß}, two
+     * {@code Křížek}s, and a Cyrillic name — are unfolded by BOTH substrates
+     * and already agreed. The boundary cases below pin exactly that, so the
+     * fold cannot later be "improved" into unaccent and start returning rows
+     * the baseline never would.
+     */
+    @Test
+    void searchDocuments_foldsDiacritics_withinTheFts5Range() {
+        String tenant = "dia-tenant-" + System.nanoTime();
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "7.1", "title", "On Formally Undecidable Propositions",
+            "author", "Kurt Gödel", "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "7.2", "title", "Numerical Methods",
+            "author", "Sven Groß", "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "7.3", "title", "Mesh Refinement",
+            "author", "Michal Křížek", "content_type", "paper", "corpus", "knowledge"));
+
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Godel", null, 20)))
+            .as("the measured divergence: an unaccented author query must hit")
+            .contains("7.1");
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Gödel", null, 20)))
+            .as("non-vacuity: the ACCENTED spelling still matches, so folding "
+                + "both sides is a superset rather than a swap")
+            .contains("7.1");
+
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Gross", null, 20)))
+            .as("ß is NOT expanded — FTS5 does not expand it either, so this "
+                + "MISS is parity, not a gap")
+            .doesNotContain("7.2");
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Krizek", null, 20)))
+            .as("Latin Extended-A is NOT folded — outside FTS5's default "
+                + "remove_diacritics=1 range; unaccent would fold it and "
+                + "overshoot the baseline")
+            .doesNotContain("7.3");
+
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Mesh", null, 20)))
+            .as("non-vacuity: plain ASCII search still works, so the MISSes "
+                + "above are not a dead search path")
+            .contains("7.3");
+    }
+
+    /**
+     * The non-seed nodes reached by a {@link CatalogRepository#graphBFS} result.
+     * Seeds are always present in {@code visited}, so comparing raw node sets
+     * would report a hit for a neighbour that was never actually traversed.
+     */
+    private static List<String> neighbours(Map<String, Object> graph) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> nodes = (List<Map<String, Object>>) graph.get("nodes");
+        return tumblersOf(nodes).stream().filter(t -> !"8.1".equals(t)).toList();
     }
 }

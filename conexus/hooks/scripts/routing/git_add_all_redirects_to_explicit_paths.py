@@ -14,12 +14,36 @@ Allowed:
 - ``git add <path> [<path> ...]`` with explicit path arguments.
 - Any ``git add`` invocation carrying a valid ``# routing-allow:``
   escape token.
+
+SECOND RULE, CONSOLIDATED HERE (nexus-vduer, Hal decision 2026-07-25): deny
+``git push`` whose EFFECTIVE target is ``main``.
+
+Why it lives in this file rather than its own: RDR-121 § Performance
+Expectations caps PreToolUse:Bash routing rules at FOUR (RDR-125 made the cap
+cross-plugin), to honour a <300ms p95 cumulative budget. A fifth rule requires
+consolidation or a budget revision in a successor RDR. Measured worst case for
+five hooks was ~147ms against that 300ms budget, so the budget is not binding —
+but the cap is on rule COUNT, and revising an RDR-owned constant on the strength
+of a floor estimate is not this change's business. Consolidation is the path the
+cap's own message names, so both checks share one script and therefore one
+subprocess spawn per Bash call.
+
+THE PUSH INCIDENT (2026-07-23, self-reported). The orchestrator pushed directly
+to main. Session restarts had left the working tree on main and
+verify-branch-before-commit was a MEMORY-ONLY control, so it failed the way
+memory-only controls fail. Nobody typed "main" — the checkout was already on it,
+so a bare ``git push`` inherited the target from the branch's upstream. A matcher
+looking for the literal token would have missed the exact event it prevents,
+which is why the EFFECTIVE target is resolved (explicit refspec, else upstream).
+
+Tag pushes stay allowed: they are the release publish step, not a branch update.
 """
 from __future__ import annotations
 
 import os
 import re
 import shlex
+import subprocess
 import sys
 from typing import Any
 
@@ -69,6 +93,143 @@ def _redirect_message() -> str:
     )
 
 
+#: Branch names treated as protected. ``master`` included so a repo that has
+#: not renamed is covered by the same rule rather than silently unguarded.
+_PROTECTED: frozenset[str] = frozenset({"main", "master"})
+
+#: ``git push`` flags that take a VALUE argument, which must be skipped when
+#: scanning positional args for a refspec.
+_VALUED_PUSH_FLAGS: frozenset[str] = frozenset({
+    "--repo", "--exec", "--receive-pack", "--push-option", "-o",
+})
+
+
+def _push_tokens(command: str) -> list[list[str]]:
+    """Every ``git push`` segment in *command*, tokenised."""
+    out: list[list[str]] = []
+    for segment in re.split(r"(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)", command):
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            continue
+        if len(tokens) >= 2 and tokens[0] == "git":
+            # Skip global flags (`git -C path push`) to find the subcommand.
+            i = 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 2 if tokens[i] in {"-C", "-c"} else 1
+            if i < len(tokens) and tokens[i] == "push":
+                out.append(tokens[i:])
+    return out
+
+
+def _current_branch(cwd: str) -> str | None:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001 — undeterminable: caller fails open
+        return None
+    if r.returncode != 0:
+        return None
+    name = r.stdout.strip()
+    return name or None
+
+
+def _upstream_branch(cwd: str) -> str | None:
+    """The remote branch the current branch tracks, e.g. ``main``."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001 — undeterminable: caller fails open
+        return None
+    if r.returncode != 0:
+        return None
+    ref = r.stdout.strip()          # "origin/main"
+    return ref.split("/", 1)[1] if "/" in ref else (ref or None)
+
+
+def _targets_protected(tokens: list[str], cwd: str) -> bool:
+    """True iff this ``git push`` would update a protected branch.
+
+    Resolution order mirrors git's own: an explicit refspec wins; otherwise the
+    push inherits the current branch's upstream. The second case is the one the
+    incident actually took.
+    """
+    positional: list[str] = []
+    skip_next = False
+    for tok in tokens[1:]:                       # drop "push"
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in _VALUED_PUSH_FLAGS:
+            skip_next = True
+            continue
+        if tok.startswith("-"):
+            continue
+        positional.append(tok)
+
+    # positional = [remote, refspec...]; refspecs may be "src:dst".
+    refspecs = positional[1:] if len(positional) > 1 else []
+
+    # TAG FLAGS DO NOT EXEMPT A BRANCH PUSH. The first cut of this returned
+    # False the instant `--tags` or `--follow-tags` appeared anywhere in the
+    # command, BEFORE refspecs were even computed. Verified against real git
+    # (dry-run, checkout on main with an upstream):
+    #
+    #   git push --follow-tags        ->  main -> main  AND the tags
+    #   git push --tags origin main   ->  main -> main  AND the tags
+    #   git push --tags               ->  tags only
+    #
+    # So two of the three exempted forms push the branch, and `--follow-tags`
+    # is BY DEFINITION a branch push that also carries tags -- it is the
+    # incident's own bare-push shape with a flag appended. Only a BARE `--tags`
+    # with no non-tag refspec is a pure tag push.
+    #
+    # Found by review, not by the tests: this hook shipped with zero
+    # `--follow-tags` coverage, so the guard for the 2026-07-23 direct-push
+    # incident exempted the exact case it exists to block.
+    if "--follow-tags" not in tokens and "--tags" in tokens and not refspecs:
+        return False
+    if refspecs:
+        for spec in refspecs:
+            if spec.startswith("refs/tags/") or re.fullmatch(r"v\d+\.\d+\.\d+", spec):
+                continue                          # tag push
+            dst = spec.split(":")[-1].lstrip("+")
+            dst = dst.rsplit("/", 1)[-1]          # refs/heads/main -> main
+            if dst in _PROTECTED:
+                return True
+        return False
+
+    # No refspec: the effective target is the upstream of the current branch.
+    # THIS is the incident's shape — a bare `git push` from a checkout that was
+    # already sitting on main.
+    upstream = _upstream_branch(cwd)
+    if upstream is not None:
+        return upstream in _PROTECTED
+    branch = _current_branch(cwd)
+    if branch is not None:
+        # No upstream configured; `push.default` would use the same name.
+        return branch in _PROTECTED
+    return False                                   # undeterminable -> fail open
+
+
+def _push_deny_message(target_hint: str) -> str:
+    return (
+        f"Direct push to {target_hint} is blocked (nexus-vduer). PRs only — "
+        f"`main` carries the plugin marketplace surface and the develop split "
+        f"protects it from in-flight churn.\n"
+        f"Open a PR against `develop` instead. Releases promote develop to main "
+        f"by MERGE; the single sanctioned direct commit is the release version "
+        f"bump (docs/contributing.md § Release Process).\n"
+        f"Tag pushes are unaffected — `git push origin vX.Y.Z` still works.\n"
+        f"If this IS the release flow, append `# routing-allow: <reason>` "
+        f"(>=8 chars) so the exception is auditable in the routing log."
+    )
+
+
 def body(payload: dict[str, Any]) -> None:
     command = _lib.get_bash_command(payload)
     if not command:
@@ -77,10 +238,20 @@ def body(payload: dict[str, Any]) -> None:
     # nexus-mzvwa.8: match FIRST, escape SECOND. Pre-fix the escape check ran
     # before the matcher, so ANY '# routing-allow:'-annotated Bash command
     # logged a phantom escape against this rule (6,130 over the RDR-121 soak
-    # window, zero of which contained a git-add wildcard) — destroying the
+    # window, zero of which contained a git-add wildcard) -- destroying the
     # esc% telemetry. An escape event now means exactly "this command WOULD
     # have been denied and the operator overrode it".
-    if not _scan_command(command):
+    wildcard_add = _scan_command(command)
+
+    push_to_main = False
+    if not wildcard_add:
+        # Only pay for the git subprocesses when the cheap check missed.
+        cwd = str(payload.get("cwd") or "") or os.getcwd()
+        push_to_main = any(
+            _targets_protected(tokens, cwd) for tokens in _push_tokens(command)
+        )
+
+    if not wildcard_add and not push_to_main:
         _lib.allow()
 
     if _lib.should_skip_for_reason(command):
@@ -95,11 +266,16 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
         command_fragment=command,
     )
-    # Explicit summary so the transcript banner stays a terse one-liner
-    # independent of _redirect_message's first line; full text reaches the model.
+    # Each half keeps its OWN message: consolidating the rules must not
+    # consolidate the diagnosis an operator sees.
+    if push_to_main:
+        _lib.deny(
+            _push_deny_message("main"),
+            summary="direct push to main blocked: open a PR against develop (nexus-vduer).",
+        )
     _lib.deny(
         _redirect_message(),
-        summary="git add wildcard (-A/./--all) blocked: stage by explicit path.",
+        summary="git add wildcard blocked: stage by explicit path (feedback_no_git_add_all).",
     )
 
 

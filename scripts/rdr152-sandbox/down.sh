@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # RDR-152 sandbox harness — down.sh
-# Gracefully stops the Java service, Postgres, and (if any) chroma child.
+# Gracefully stops the Java service and Postgres.
 # Pass --purge to delete SANDBOX_HOME entirely.
 set -euo pipefail
 
@@ -69,20 +69,6 @@ if [[ -f "${CREDS_FILE}" ]]; then
     fi
 else
     echo "[down] No pg_credentials found — skipping Postgres stop"
-fi
-
-# ── KILL ORPHANED CHROMA CHILD ────────────────────────────────────────────────
-# LocalChromaServer's 'chroma run' can double-fork; if the JVM was SIGKILLed its
-# shutdown hook did not run, leaving an orphan uvicorn on NX_CHROMA_HTTP_PORT.
-if [[ -f "${SANDBOX_ENV}" ]]; then
-    ORPHAN_CHROMA_PORT="$(grep 'NX_CHROMA_HTTP_PORT' "${SANDBOX_ENV}" 2>/dev/null | sed 's/.*=//' | tr -d '"' | tr -d "'" | head -1 || true)"
-    if [[ -n "${ORPHAN_CHROMA_PORT}" ]]; then
-        ORPHAN_PIDS="$(lsof -ti "tcp:${ORPHAN_CHROMA_PORT}" 2>/dev/null || true)"
-        if [[ -n "${ORPHAN_PIDS}" ]]; then
-            echo "[down] Killing orphaned chroma process(es) on port ${ORPHAN_CHROMA_PORT}: ${ORPHAN_PIDS}"
-            echo "${ORPHAN_PIDS}" | xargs kill -TERM 2>/dev/null || true
-        fi
-    fi
 fi
 
 # ── PURGE ─────────────────────────────────────────────────────────────────────

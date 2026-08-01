@@ -186,3 +186,95 @@ def test_catalog_unavailable_returns_error_key():
         result = traverse(seeds=["1.1"], link_types=["implements"])
 
     assert "error" in result
+
+
+# ── chunk-id resolution comes from the CATALOG MANIFEST (nexus-bm8dd) ─────────
+
+
+def _catalog_with_nodes(nodes, manifests):
+    """Fake catalog returning *nodes* from the graph and *manifests* by doc_id."""
+    cat = MagicMock()
+    cat.graph.return_value = {"nodes": nodes, "edges": []}
+    cat.graph_many.return_value = {"nodes": nodes, "edges": []}
+    cat.get_manifests.return_value = manifests
+    return cat
+
+
+def _node(tumbler: str, collection: str, file_path: str = "src/x.py"):
+    n = MagicMock()
+    n.tumbler = tumbler
+    n.physical_collection = collection
+    n.file_path = file_path
+    return n
+
+
+def _row(chash: str):
+    r = MagicMock()
+    r.chash = chash
+    return r
+
+
+def test_ids_come_from_the_manifest_not_from_a_source_path_lookup():
+    """nexus-bm8dd: traverse used to resolve chunk ids with
+    ``t3.ids_for_source(collection, file_path)``. Chunk metadata has carried no
+    ``source_path`` since RDR-102 D2 removed it from the schema, so that filter
+    matched nothing and every traverse returned ``ids: []`` — silently, because
+    the per-node except swallowed it and an empty list is a legitimate answer.
+
+    Ids now come from ``document_chunks``, the addressing RDR-108 replaced it
+    with. T3 must not be consulted at all.
+    """
+    from nexus.mcp.core import traverse
+
+    a, b = "1.1.1", "1.1.2"
+    cat = _catalog_with_nodes(
+        [_node(a, "code__x__v1"), _node(b, "code__x__v1")],
+        {a: [_row("aa" * 32), _row("bb" * 32)], b: [_row("cc" * 32)]},
+    )
+
+    def _t3_must_not_be_used():
+        raise AssertionError("traverse must not consult T3 for chunk ids")
+
+    with (
+        patch("nexus.mcp.core._get_catalog", return_value=cat),
+        patch("nexus.mcp.core._get_t3", side_effect=_t3_must_not_be_used),
+    ):
+        result = traverse(seeds=[a], link_types=["implements"], depth=1)
+
+    assert result["ids"] == ["aa" * 32, "bb" * 32, "cc" * 32]
+    cat.get_manifests.assert_called_once_with([a, b])
+
+
+def test_ids_are_deduped_across_documents_sharing_a_chunk():
+    """Identical chunk text in one collection collapses to ONE T3 row by design
+    (the manifest preserves position by pointing several docs at the same
+    chash), so a traverse spanning both must not report it twice."""
+    from nexus.mcp.core import traverse
+
+    a, b = "1.1.1", "1.1.2"
+    shared = "dd" * 32
+    cat = _catalog_with_nodes(
+        [_node(a, "code__x__v1"), _node(b, "code__x__v1")],
+        {a: [_row(shared)], b: [_row(shared), _row("ee" * 32)]},
+    )
+
+    with patch("nexus.mcp.core._get_catalog", return_value=cat):
+        result = traverse(seeds=[a], link_types=["implements"], depth=1)
+
+    assert result["ids"] == [shared, "ee" * 32]
+
+
+def test_manifest_failure_degrades_to_empty_ids_not_an_exception():
+    """The tumblers and collections a caller asked for must still come back if
+    the manifest lookup fails — ids are an enrichment, not the answer."""
+    from nexus.mcp.core import traverse
+
+    cat = _catalog_with_nodes([_node("1.1.1", "code__x__v1")], {})
+    cat.get_manifests.side_effect = RuntimeError("catalog down")
+
+    with patch("nexus.mcp.core._get_catalog", return_value=cat):
+        result = traverse(seeds=["1.1.1"], link_types=["implements"])
+
+    assert result["ids"] == []
+    assert result["tumblers"] == ["1.1.1"]
+    assert result["collections"] == ["code__x__v1"]

@@ -44,11 +44,13 @@ def _format_banner(state: MigrationState) -> str:
             f"⚠️  knowledge migrating: {done}/{total} collections done, "
             "results incomplete until the upgrade completes"
         )
-    # migrated-failed: keep the banner, point at the report + rollback.
+    # migrated-failed: keep the banner, point at the report + the pinned
+    # release (RDR-155 P4b: this version no longer ships the migration tool).
     return (
         f"⚠️  knowledge migration FAILED: {done}/{total} collections done, "
-        "results incomplete — see the migration report; roll back or re-run: "
-        "nx migrate-to-service"
+        "results incomplete — see the migration report; resume/roll back on "
+        "the LAST_MIGRATION_CAPABLE pinned release (this version no longer "
+        "ships the migration tool)"
     )
 
 

@@ -225,7 +225,7 @@ cat <<'PHASE_GATE'
 
 ## Phase Boundary Gate (mandatory)
 
-If your task closes a phase-review bead, run `/conexus:phase-review-gate <rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. Skipping the gate is the silent-scope-reduction failure mode that cost RDR-112 Phase 1 (nexus-52lb, 2026-05-15) 2-3 days of replanning when T3 daemon was silently dropped and discovered three phases later.
+If your task closes a phase-review bead, run `/conexus:phase-review-gate <rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. Skipping the gate is the silent-scope-reduction failure mode: RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced three phases later.
 PHASE_GATE
 fi
 

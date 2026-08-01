@@ -18,37 +18,66 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from tests._t2_fixture_ops import seed_tier_write
+
 
 def _seed_t2(db_path: Path, rows: list[tuple]) -> None:
-    """Insert tier_writes rows into a fresh tmp T2 DB.
+    """Insert tier_writes rows into whichever T2 store the CLI will read.
 
     Each row is (session_id, tool, tier, agent, project, target_title).
     Timestamps auto-stamp at row time.
+
+    nexus-aqbrk: was a raw ``sqlite3.connect`` + INSERT. ``nx tier-status`` is
+    SERVICE-AWARE — ``HttpTelemetryStore.query_tier_writes`` is the documented
+    twin of ``tier_status._query``, and this file's own
+    ``TestServiceModeReadParity`` covers that path — so under the engine
+    substrate the CLI read the service while the seed landed in a local file
+    it never opened, and every assertion got "(no writes)". Routed through
+    ``seed_tier_write`` (``import_tier_write`` — its SQLite arm died with the
+    =sqlite opt-out, RDR-158 P3 nexus-7bomn) so the seed reaches the store
+    the CLI actually reads.
+
+    ROWS ARE STAMPED ONE SECOND APART, deliberately. The service's import
+    path is ``onConflictDoNothing`` on an ETL dedup key that does NOT include
+    ``target_title``, so two writes sharing a timestamp and differing only in
+    which entry they targeted COLLAPSE into one row — while SQLite, which has
+    no such constraint, inserts both. A single shared ``ts`` (what this
+    seeder used to do, harmlessly, on SQLite) therefore made the two seeded
+    ``memory_put`` rows read back as ``total: 2`` instead of ``total: 3`` on
+    the engine. Distinct stamps are also what production produces: ``ts`` is
+    stamped per write, not per batch.
     """
-    from nexus.db.migrations import migrate_tier_writes
-    conn = sqlite3.connect(str(db_path))
-    try:
-        migrate_tier_writes(conn)
-        ts = datetime.now(timezone.utc).isoformat()
-        for sid, tool, tier, agent, project, title in rows:
-            conn.execute(
-                "INSERT INTO tier_writes "
-                "(session_id, ts, tool, tier, agent, project, target_title) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (sid, ts, tool, tier, agent, project, title),
+    from datetime import timedelta
+
+    from nexus.db.t2 import T2Database
+
+    base = datetime.now(timezone.utc)
+    with T2Database(db_path) as db:
+        for offset, (sid, tool, tier, agent, project, title) in enumerate(rows):
+            seed_tier_write(
+                db,
+                session_id=sid,
+                tool=tool,
+                tier=tier,
+                agent=agent,
+                project=project,
+                target_title=title,
+                ts=(base + timedelta(seconds=offset)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 @pytest.fixture
 def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect default_db_path to a tmp file."""
-    from nexus.commands import _helpers, tier_status as ts_mod
+    """Redirect default_db_path to a tmp file.
+
+    RDR-158 P3 (nexus-7bomn): the CLI itself no longer opens a local DB —
+    ``tier_status.default_db_path`` died with the =sqlite opt-out, so only
+    the ``nexus.config`` indirection is patched. The path still isolates
+    ``_seed_t2``'s ``T2Database`` handle and ``_seed_local_t2``'s
+    deliberately-local file from any real install.
+    """
     db = tmp_path / "t.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-    monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
     return db
 
 
@@ -80,9 +109,9 @@ class TestDefaultSession:
     ) -> None:
         from nexus.commands.tier_status import tier_status_cmd
 
-        # Pre-create the DB so the no-session-resolvable check fires
-        # before the missing-DB check.
-        sqlite3.connect(str(isolated_t2)).close()
+        # RDR-158 P3 (nexus-7bomn): no DB pre-create needed — the missing-DB
+        # check died with the local =sqlite arm; session resolution is now
+        # unconditionally the first gate.
 
         # Ensure no session resolvable.
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -173,31 +202,82 @@ class TestEmptyOrMissing:
         assert result.exit_code == 0, result.output
         assert "no writes" in result.output
 
-    def test_missing_table_treated_as_zero(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """If tier_writes table doesn't exist (no recorder writes ever),
-        CLI prints zero rather than erroring on missing table."""
-        from nexus.commands import _helpers, tier_status as ts_mod
-        from nexus.commands.tier_status import tier_status_cmd
+    # test_missing_table_treated_as_zero DELETED (RDR-158 P3, nexus-7bomn):
+    # its entire subject was the local SQLite reader's lazy-migration gap
+    # ("tier_writes table may not exist yet"), which died with the =sqlite
+    # opt-out. The service arm has no missing-table state; the zero-rows
+    # case is owned by test_empty_session_prints_no_writes above.
 
-        # Empty DB — no tier_writes table.
-        db = tmp_path / "empty.db"
-        sqlite3.connect(str(db)).close()
-        monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-        monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
 
-        result = CliRunner().invoke(
-            tier_status_cmd, ["--session", "any-sess"],
-        )
-        assert result.exit_code == 0, result.output
-        assert "no writes" in result.output
+def _seed_local_t2(db_path: Path, rows: list[tuple]) -> None:
+    """Seed the LOCAL sqlite tier_writes table, whatever the substrate.
+
+    The deliberate counterpart to :func:`_seed_t2`. Used only by
+    :class:`TestServiceModeReadParity`, whose subject is that service mode
+    must NOT read the local table — so the row has to exist locally and
+    ONLY locally, or the assertion proves nothing.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        # RDR-158 P4 Stage 4 (nexus-i711w): frozen DDL snapshot of what
+        # migrate_tier_writes produced — the chain died with
+        # nexus/db/migrations.py.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS tier_writes (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT    NOT NULL,
+                ts           TEXT    NOT NULL,
+                tool         TEXT    NOT NULL,
+                tier         TEXT    NOT NULL,
+                agent        TEXT,
+                project      TEXT,
+                target_title TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tier_writes_session ON tier_writes(session_id);
+            CREATE INDEX IF NOT EXISTS idx_tier_writes_ts      ON tier_writes(ts);
+            CREATE INDEX IF NOT EXISTS idx_tier_writes_tool    ON tier_writes(tool);
+        """)
+        ts = datetime.now(timezone.utc).isoformat()
+        for sid, tool, tier, agent, project, title in rows:
+            conn.execute(
+                "INSERT INTO tier_writes "
+                "(session_id, ts, tool, tier, agent, project, target_title) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (sid, ts, tool, tier, agent, project, title),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class TestServiceModeReadParity:
     """nexus-wyu1g: in service mode tier_writes live in Postgres, not local
     SQLite. The diagnostics must report that honestly instead of silently
     showing 0 (false wrong-result)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_reachable_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make service mode UNREACHABLE, which is this class's precondition.
+
+        nexus-aqbrk: these tests assert the honest BAIL-OUT — "service-backed,
+        counts unavailable" — which by definition is what the CLI prints when
+        it cannot reach an engine. They got that precondition for free on the
+        SQLite arm, where nothing sets an endpoint. Under the engine substrate
+        ``t2_service_env`` points at a LIVE test engine, so the CLI correctly
+        read real counts and the bail-out never fired: the tests were asserting
+        an unreachable-engine message in a world with a reachable engine.
+
+        Stripping the endpoint restores the state under test. The reachable
+        half is not lost — ``test_tier_status_service_mode_reads_real_counts``
+        below owns it, with a fake store standing in for a post-59wjj engine.
+
+        Same shape as tests/db/test_om64x_stale_port_recovery.py: a module
+        whose subject is a no-endpoint code path, handed an endpoint by the
+        substrate pin.
+        """
+        for var in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN",
+                    "NX_SERVICE_HOST", "NX_SERVICE_PORT"):
+            monkeypatch.delenv(var, raising=False)
 
     def test_tier_status_service_mode_reports_service_backed(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
@@ -206,7 +286,7 @@ class TestServiceModeReadParity:
 
         # Seed a local row — service mode must NOT read it (it would falsely
         # report counts; in real service mode the local table is empty/stale).
-        _seed_t2(isolated_t2, [("sess-A", "memory_put", "T2", None, "nexus", "x")])
+        _seed_local_t2(isolated_t2, [("sess-A", "memory_put", "T2", None, "nexus", "x")])
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 

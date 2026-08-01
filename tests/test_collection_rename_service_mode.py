@@ -59,7 +59,9 @@ _SERVER_COUNTS = {
     "relevance_log": 2,
     "search_telemetry": 2,
     "hook_failures": 1,
-    "catalog_collections_deleted": 1,
+    # nexus-cecqy: the rename retires the old registry row as a superseded
+    # tombstone rather than deleting it.
+    "catalog_collections_superseded": 1,
 }
 
 
@@ -165,21 +167,8 @@ def test_remap_service_mode_passes_cross_model_true(
     assert counts["catalog_docs"] == 7
 
 
-def test_remap_sqlite_mode_omits_cross_model_kwarg(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # nexus-gaou3: the local catalog writer's rename_collection has no cross_model
-    # parameter, so it must NOT be threaded in sqlite mode. (Overrides the autouse
-    # service pin.)
-    monkeypatch.setattr(
-        "nexus.db.storage_mode.storage_backend_for",
-        lambda store: StorageBackend.SQLITE,
-    )
-    _patch_t2_cascade(monkeypatch)
-    catalog = MagicMock()
-    catalog.rename_collection = MagicMock(return_value=4)
-
-    counts = remap_collection_references("code__old", "code__new", catalog=catalog)
-
-    catalog.rename_collection.assert_called_once_with("code__old", "code__new")
-    assert counts["catalog_docs"] == 4
+# test_remap_sqlite_mode_omits_cross_model_kwarg RETIRED (nexus-i711w terminal
+# deletion): the sqlite seam it pinned is gone — collection_rename.py now
+# threads cross_model=True unconditionally (the local catalog writer that
+# lacked the kwarg is deleted). The surviving contract is pinned by
+# test_remap_service_mode_passes_cross_model_true above.

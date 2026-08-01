@@ -1,32 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import json
 import os
 from pathlib import Path
 
-import chromadb
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import _inject_t3, _reset_singletons, query
 from tests.conftest import make_vector_test_client
-
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
-# These tests seed the rich SQLite Catalog (Catalog.init via the ``catalog``
-# fixture) and assert that catalog-filtered query() routing finds those rows.
-# On the engine substrate ``_get_catalog`` resolves the service catalog (a
-# freshly minted, empty tenant) instead, so the filters legitimately match
-# nothing ("No documents found matching catalog filters").
-_rich_catalog_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded "
-    "catalog-param query routing) dies at the RDR-155 P4b flip",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +25,7 @@ def _reset():
 @pytest.fixture()
 def t3():
     client = make_vector_test_client()
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
     return db
@@ -47,8 +33,11 @@ def t3():
 
 @pytest.fixture()
 def catalog(tmp_path, monkeypatch):
+    # nexus-i711w terminal deletion: seeds through ActiveCatalog (the live
+    # service catalog) — the local Catalog.init arm is gone.
+    from tests._catalog_fixture_ops import ActiveCatalog
     catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
+    cat = ActiveCatalog()
     repo_owner = cat.register_owner("nexus", "repo", repo_hash="aabb1122")
     paper_owner = cat.register_owner("papers", "curator")
     cat.register(repo_owner, "indexer.py", content_type="code",
@@ -81,17 +70,6 @@ def _seed_templates(tmp_path, monkeypatch):
 
 
 class TestPathRouting:
-    @_rich_catalog_dies_at_flip
-    @pytest.mark.parametrize("put_col,put_content,query_kw,assert_in", [
-        ("knowledge__delos", "chase procedure schema", {"author": "Fagin"}, "knowledge__delos"),
-        ("code__nexus", "def index_repo(): pipeline", {"content_type": "code"}, "code__nexus"),
-    ])
-    def test_catalog_param_routes_correctly(self, t3, catalog, put_col, put_content, query_kw, assert_in):
-        t3.put(collection=put_col, content=put_content, title="chunk")
-        result = query(question=put_content.split()[0], **query_kw)
-        assert not result.startswith("Error:")
-        assert assert_in in result
-
     def test_subtree_routes_to_descendants(self, t3, catalog):
         t3.put(collection="code__nexus", content="tree sitter chunking", title="ts-chunk")
         t3.put(collection="rdr__nexus", content="catalog first query routing", title="rdr-chunk")
@@ -130,13 +108,10 @@ class TestPathRouting:
 
 
 class TestReferenceQuestions:
+    # The "papers by Fagin" case is gone with nexus-i711w: it asserted that a
+    # rich Catalog.init-seeded LOCAL catalog surfaced knowledge__delos through
+    # an author filter, and the only remaining catalog is the service one.
     @pytest.mark.parametrize("question,kw,assert_check", [
-        pytest.param(
-            "papers by Fagin", {"author": "Fagin"},
-            lambda r: "knowledge__delos" in r,
-            marks=_rich_catalog_dies_at_flip,
-            id="papers by Fagin-kw0-<lambda>",
-        ),
         ("schema mappings", {"author": "Fagin"}, lambda r: not r.startswith("Error:")),
         ("RDR about streaming", {"content_type": "rdr"}, lambda r: not r.startswith("Error:")),
         ("what cites schema mappings", {"follow_links": "cites"}, lambda r: not r.startswith("Error:")),
@@ -210,26 +185,13 @@ class TestPlanTTLEnforcement:
     def _save_backdated(db, query: str, *, days_old: int, ttl: int | None):
         """Land a plan whose created_at is *days_old* days in the past.
 
-        SQLite leg: save + raw-conn backdate (the historical idiom).
-        Service leg: the store has no raw handle; use the fidelity-import
-        surface (``import_plan``) which persists ``created_at`` verbatim
-        (RDR-155 P4b P0a', idiom: has_raw_access branch).
+        The store has no raw handle; use the fidelity-import surface
+        (``import_plan``) which persists ``created_at`` verbatim
+        (RDR-155 P4b P0a'; the SQLite raw-conn backdate leg died with the
+        =sqlite opt-out).
         """
         from datetime import UTC, datetime, timedelta
 
-        from nexus.db.storage_mode import has_raw_access
-
-        if has_raw_access(db.plans):
-            row_id = db.save_plan(
-                query=query, plan_json='{}',
-                **({} if ttl is None else {"ttl": ttl}),
-            )
-            db.plans.conn.execute(
-                f"UPDATE plans SET created_at = datetime('now', '-{days_old} days') WHERE id = ?",
-                (row_id,),
-            )
-            db.plans.conn.commit()
-            return row_id
         created_at = (
             datetime.now(UTC) - timedelta(days=days_old)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -336,9 +298,10 @@ class TestTumblerHierarchy:
         assert result == (Tumbler.parse(expected) if expected else None)
 
     def test_resolve_chunk_ghost_element(self, tmp_path):
-        catalog_dir = tmp_path / "catalog"
-        catalog_dir.mkdir()
-        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        # nexus-i711w: runs against the live catalog (fresh per-test tenant),
+        # so the deterministic first-owner/first-doc tumblers still hold.
+        from tests._catalog_fixture_ops import ActiveCatalog
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="aabb")
         cat.register(owner, "a.py", content_type="code", physical_collection="code__nexus", chunk_count=5)
         result = cat.resolve_chunk(Tumbler.parse("1.1.1.3"))
@@ -348,9 +311,8 @@ class TestTumblerHierarchy:
         assert result["physical_collection"] == "code__nexus"
 
     def test_resolve_chunk_out_of_range(self, tmp_path):
-        catalog_dir = tmp_path / "catalog"
-        catalog_dir.mkdir()
-        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        from tests._catalog_fixture_ops import ActiveCatalog
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="aabb")
         cat.register(owner, "a.py", content_type="code", physical_collection="code__nexus", chunk_count=5)
         assert cat.resolve_chunk(Tumbler.parse("1.1.1.10")) is None
@@ -360,9 +322,8 @@ class TestTumblerHierarchy:
             Tumbler.parse("1.-1.42")
 
     def test_descendants_any_depth(self, tmp_path):
-        catalog_dir = tmp_path / "catalog"
-        catalog_dir.mkdir()
-        cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+        from tests._catalog_fixture_ops import ActiveCatalog
+        cat = ActiveCatalog()
         o1 = cat.register_owner("nexus", "repo", repo_hash="aabb")
         o2 = cat.register_owner("arcaneum", "repo", repo_hash="ccdd")
         cat.register(o1, "a.py", content_type="code", file_path="a.py")

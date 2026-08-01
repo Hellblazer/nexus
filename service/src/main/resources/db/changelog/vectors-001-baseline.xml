@@ -58,10 +58,28 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
         </sql>
-        <rollback>
-            DROP EXTENSION IF EXISTS pg_trgm;
-            DROP EXTENSION IF EXISTS vector;
-        </rollback>
+        <!--
+            INTENTIONALLY IRREVERSIBLE (nexus-a0m60), for the same reason
+            role-001-nexus-svc gives for the nexus_svc role: this is
+            DBA/cluster-level provisioning, not migration-owned schema.
+
+            vector and pg_trgm are UNTRUSTED extensions, so a NOSUPERUSER role
+            cannot CREATE them — the DBA does, out of band, and the CREATE above
+            is a no-op IF NOT EXISTS. The migration role therefore never owns
+            them, and the previous `DROP EXTENSION IF EXISTS pg_trgm` rollback
+            raised `must be owner of extension pg_trgm` and killed the whole
+            chain. It could never have succeeded in any real topology.
+
+            Nor should it: uninstalling the extensions the DBA installed is not
+            what a schema rollback ought to do, and other objects in the cluster
+            may depend on them. Declaring it irreversible states that, instead
+            of leaving a line that only appears to work.
+
+            Found by the first execution of SchemaRollbackRoundTripIntegrationTest,
+            whose floor assertion now pins that these two extensions SURVIVE a
+            rollback.
+        -->
+        <rollback/>
     </changeSet>
 
     <!-- ── Changeset 2: nexus.chunks_384 ─────────────────────────────────────── -->

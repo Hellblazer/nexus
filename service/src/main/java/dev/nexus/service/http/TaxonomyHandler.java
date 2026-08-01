@@ -47,6 +47,7 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/assignments/assign_many batch upsert assignments
  *   GET   /v1/taxonomy/assignments/docs    doc_ids for topic_id=
  *   POST  /v1/taxonomy/assignments/for_docs assignments for doc_ids list
+ *   POST  /v1/taxonomy/assignments/details full assignment rows incl. quality cols (nexus-onjvy)
  *   GET   /v1/taxonomy/assignments/by_label doc_ids for label=
  *   POST  /v1/taxonomy/assignments/purge_doc purge assignments for doc
  *   POST  /v1/taxonomy/purge_collection    purge all rows for collection=
@@ -138,6 +139,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/assignments/assign_many"   -> handleAssignMany(exchange, tenant, method);
                 case "/assignments/docs"          -> handleGetDocIds(exchange, tenant, method);
                 case "/assignments/for_docs"      -> handleGetAssignmentsForDocs(exchange, tenant, method);
+                case "/assignments/details"       -> handleGetAssignmentDetails(exchange, tenant, method);
                 case "/assignments/by_label"      -> handleGetDocsByLabel(exchange, tenant, method);
                 case "/assignments/purge_doc"     -> handlePurgeDoc(exchange, tenant, method);
                 // Collection ops
@@ -149,6 +151,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 // Links
                 case "/links/upsert"              -> handleUpsertLink(exchange, tenant, method);
                 case "/links/pairs"               -> handleGetLinkPairs(exchange, tenant, method);
+                case "/links/drift"               -> handleLinkDrift(exchange, tenant, method);
                 // ICF
                 case "/icf/source_count"          -> handleSourceCount(exchange, tenant, method);
                 case "/icf/rows"                  -> handleIcfRows(exchange, tenant, method);
@@ -190,12 +193,82 @@ public final class TaxonomyHandler implements HttpHandler {
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
-            if (!HttpUtil.sendTypedDbError(exchange, e, log, "taxonomy_handler",
+            if (HttpUtil.sendTypedDbError(exchange, e, log, "taxonomy_handler",
                     "tenant=" + tenant + " op=" + op)) {
-                log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
-                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+                return;
             }
+            // nexus-asaod: the /import/* verbs preserve CLIENT-SUPPLIED ids verbatim
+            // (fidelity ETL), and nexus.topics has a global BIGSERIAL PK. A second
+            // tenant supplying an id another tenant already holds is refused by the RLS
+            // policy — SQLSTATE 42501, which is NOT class 23, so the ladder above
+            // declines it and it used to become an opaque 500. It is a caller-resolvable
+            // conflict, so it is a 409.
+            //
+            // Scoped to /import/ deliberately: elsewhere a 42501 is far more likely to
+            // be a genuine grant/role fault, which must keep surfacing as 500 rather
+            // than being mislabelled as the caller's conflict.
+            //
+            // The body must NOT reveal that the id exists under another tenant — that
+            // would be cross-tenant information disclosure. "not available" is all the
+            // caller is entitled to, and all it needs (pick another id / re-key the
+            // import).
+            //
+            // ACCEPTED RISK, stated so it is not re-derived (review 2026-07-25, Hal
+            // decision): the 409-vs-200 STATUS ITSELF is a weaker signal of the same
+            // fact. nexus.topics has a GLOBAL BIGSERIAL primary key — RLS scopes rows,
+            // not the id space — so an authenticated tenant can probe whether an
+            // arbitrary id is claimed SOMEWHERE in the system without any read access
+            // to the holder's data. What leaks is existence only: not the holding
+            // tenant, not the label, not any row content (the body and the log line
+            // above are both id-free and tenant-B-free). Probed at scale it reveals
+            // roughly how densely the global id space is populated.
+            //
+            // Accepted because: the route requires Bearer auth + tenant, it is a
+            // fidelity-ETL/migration path rather than a hot API, and ids are normally
+            // each tenant's own prior sequential rowids — collisions happen by accident
+            // rather than by choosing. The enumeration surface is NOT closed: there is
+            // no rate limiting on this route (AuthFilter has none). Tracked separately.
+            //
+            // Removing the oracle at source would mean a composite (tenant_id, id) key
+            // so ids cannot collide across tenants — which deletes this whole class.
+            // That was already considered and REJECTED: topics_parent_fk is
+            // self-referential, so a composite key forces every parent_id to carry a
+            // tenant too. The global BIGSERIAL is deliberate, not an oversight.
+            if (isImportOp(op) && HttpUtil.isRlsRowRejection(e)) {
+                log.warn("event=taxonomy_import_id_unavailable tenant={} op={}", tenant, op);
+                HttpUtil.send(exchange, 409, json(Map.of(
+                    "error", "supplied id is not available in this tenant")));
+                return;
+            }
+            log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
+            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
         }
+    }
+
+    /**
+     * True for the fidelity-ETL routes that preserve CLIENT-SUPPLIED ids.
+     *
+     * <p>Both the per-kind routes ({@code /import/topic}, {@code /import/assignment},
+     * {@code /import/link}, {@code /import/meta}) and the BULK route
+     * ({@code /import_batch}) insert caller-chosen primary keys, so both can be
+     * refused by RLS with SQLSTATE 42501 when a second tenant contests an id that
+     * {@code nexus.topics}' global BIGSERIAL PK already holds.
+     *
+     * <p>Extracted because the original guard was {@code op.startsWith("/import/")},
+     * which silently EXCLUDED {@code /import_batch} — there is no slash after
+     * "import" in that route, so the bulk path kept returning the opaque 500 the fix
+     * was cut to remove. That is the heavier real-world path: {@code importTopicsBatch}
+     * is the 190k-row dogfood leg, and it shares the identical
+     * {@code insertInto(TOPICS, TOPICS.ID, ...).onConflict(TOPICS.ID)} shape as the
+     * single-row importer. Found in review, 2026-07-25.
+     *
+     * <p>Not qualified by {@code kind}: the assignment/link/meta batch importers key
+     * on tenant-scoped composite conflict targets, so a cross-tenant RLS refusal is
+     * structurally impossible for them and {@link HttpUtil#isRlsRowRejection} simply
+     * never fires.
+     */
+    private static boolean isImportOp(String op) {
+        return op != null && (op.startsWith("/import/") || op.equals("/import_batch"));
     }
 
     // ── Topics handlers ────────────────────────────────────────────────────────
@@ -400,6 +473,21 @@ public final class TaxonomyHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(repo.getAssignmentsForDocs(tenant, docIds)));
     }
 
+    /**
+     * Full assignment rows including similarity / assigned_at / source_collection
+     * (nexus-onjvy). Separate from {@code /assignments/for_docs}, which returns a
+     * {doc_id: topic_id} map that existing callers destructure as such.
+     */
+    private void handleGetAssignmentDetails(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> lst
+            ? lst.stream().map(Object::toString).toList()
+            : List.of();
+        HttpUtil.send(ex, 200, json(repo.getAssignmentDetails(tenant, docIds)));
+    }
+
     private void handleGetDocsByLabel(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         String label = requireQueryParam(ex, "label");
@@ -482,6 +570,15 @@ public final class TaxonomyHandler implements HttpHandler {
             ? lst.stream().map(v -> ((Number) v).longValue()).toList()
             : List.of();
         HttpUtil.send(ex, 200, json(repo.getTopicLinkPairs(tenant, ids)));
+    }
+
+    /** nexus-ypori: topic_links drift, computed where the data actually lives. */
+    private void handleLinkDrift(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object rawLimit = body.get("limit");
+        int limit = rawLimit instanceof Number n ? n.intValue() : 50;
+        HttpUtil.send(ex, 200, json(repo.linkDrift(tenant, limit)));
     }
 
     // ── ICF ────────────────────────────────────────────────────────────────────

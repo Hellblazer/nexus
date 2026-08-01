@@ -12,6 +12,25 @@ import time
 
 from nexus.config import default_db_path
 
+
+def _parse_version(ver: str) -> tuple[int, ...]:
+    """Parse a dotted version string into a comparable 3-component tuple.
+
+    Normalises to exactly 3 components so ``(3, 7)`` doesn't compare
+    less than ``(3, 7, 0)``.  Falls back to ``(0, 0, 0)`` for
+    pre-release tags or malformed input.
+
+    REHOMED from ``nexus.db.migrations`` in RDR-158 P4 Stage 4
+    (nexus-i711w): the migration registry is deleted; this module's
+    plugin↔CLI drift check is the surviving consumer.
+    """
+    try:
+        parts = tuple(int(x) for x in ver.split(".")[:3])
+        return parts + (0,) * (3 - len(parts))
+    except ValueError:
+        return (0, 0, 0)
+
+
 # ── T2 daemon-unreachable rate-limiter (GH #1048) ────────────────────────────
 # Emit the daemon-unreachable warning at most once per _WARN_RATE_LIMIT_SECS
 # rather than once per write. Under load (nx dt index, bulk indexing) the
@@ -286,95 +305,9 @@ def t2_ctx():
       service's /v1/telemetry/*/record endpoint), not a raw db.telemetry.conn.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
+    return T2Database(default_db_path())  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
-def _reassert_t2_daemon() -> bool:
-    """RDR-141: re-assert the T2 supervisor after a schema-version mismatch.
-
-    A version mismatch on ``hello()`` means a stale-version daemon is ALIVE,
-    holds the spawn lock, and is serving — so degrading straight to a direct
-    ``T2Database`` would open a SECOND writer on ``memory.db`` (the version-skew
-    double-writer this exists to close). Instead drive the supervisor to reap
-    the stale daemon and spawn a current one, so the caller can route the write
-    through a single current daemon.
-
-    Returns ``True`` iff a current daemon is now reachable. On any non-reachable
-    outcome it emits a DISTINCT, operator-visible WARNING (so the cycle-deferred
-    residual — where the stale daemon is still alive and the caller's direct
-    fallback is a temporary second writer — is never silent) and returns
-    ``False`` so the caller degrades to a bounded direct write.
-
-    Never raises. ``_t2_ensure_running_inner`` returns an outcome rather than
-    ``sys.exit``-ing (RDR-141 P0), but ``SystemExit`` is caught defensively
-    (CA-3) so a future regression in the supervisor cannot terminate the
-    calling MCP process.
-    """
-    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-    log = structlog.get_logger()
-    try:
-        from nexus.commands.daemon import (  # noqa: PLC0415 — deferred to avoid circular import (commands.daemon)
-            T2EnsureOutcome,
-            _t2_ensure_running_inner,
-        )
-
-        outcome = _t2_ensure_running_inner(
-            config_dir_str=None, timeout=15.0, quiet=True
-        )
-    except SystemExit as exc:
-        log.warning(
-            "t2_index_write_reassert_systemexit",
-            code=getattr(exc, "code", None),
-            hint="supervisor re-assert exited unexpectedly; degrading to a direct write",
-        )
-        return False
-
-    if outcome is T2EnsureOutcome.REACHABLE:
-        return True
-
-    # Distinct event per outcome — the cycle-deferred residuals (stale daemon
-    # still ALIVE) must be distinguishable from the safe down-arm (no live
-    # incumbent) for operators and for the §Validation acceptance signal.
-    events = {
-        T2EnsureOutcome.DEFERRED_WRITE_LOCK: (
-            "t2_index_write_version_skew_cycle_deferred_writelock",
-            "stale daemon still ALIVE (WAL write-lock held); cycle deferred — the "
-            "direct write below is a temporary second writer (RDR-128 residual, "
-            "WAL non-corrupting, errors loud)",
-        ),
-        T2EnsureOutcome.DEFERRED_SIGTERM: (
-            "t2_index_write_version_skew_cycle_deferred_sigterm",
-            "stale daemon still ALIVE (SIGTERM did not take in window); cycle "
-            "deferred — the direct write below is a temporary second writer "
-            "(RDR-128 residual, WAL non-corrupting, errors loud)",
-        ),
-        T2EnsureOutcome.CRASHLOOP_SUPPRESSED: (
-            "t2_index_write_version_skew_crashloop_down",
-            "no live daemon (crash-loop guard suppressed respawn); the direct "
-            "write below is safe (single-writer down-arm)",
-        ),
-        T2EnsureOutcome.SPAWN_FAILED: (
-            "t2_index_write_version_skew_spawn_failed",
-            "daemon spawn failed; the direct write below is safe (no live daemon)",
-        ),
-        T2EnsureOutcome.SERVICE_MODE_SKIP: (
-            "t2_index_write_version_skew_service_mode_skip",
-            "memory store is in SERVICE mode (RDR-176); the SQLite daemon has no "
-            "role here — this path should not normally be reached (t2_index_write "
-            "already short-circuits to the service-backed writer before ever "
-            "constructing a T2Client), but the direct write below is safe "
-            "regardless (no live SQLite daemon to double-write against)",
-        ),
-    }
-    event, hint = events.get(
-        outcome,
-        (
-            "t2_index_write_version_skew_reassert_unreachable",
-            "supervisor re-assert did not reach a current daemon",
-        ),
-    )
-    log.warning(event, outcome=outcome.value, hint=hint)
-    return False
 
 
 def _service_t2_write_locked(write_fn):
@@ -391,7 +324,7 @@ def _service_t2_write_locked(write_fn):
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
 
     if _service_t2_db is None:
-        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode, PG is the arbiter
+        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode, PG is the arbiter
     try:
         return write_fn(_service_t2_db)
     except Exception:
@@ -402,156 +335,28 @@ def _service_t2_write_locked(write_fn):
         # for the rest of the process's lifetime.
         stale_db = _service_t2_db
         _service_t2_db = None
-        stale_db.close()  # epsilon-allow: error-triggered eviction, not per-call teardown
+        stale_db.close()  # error-triggered eviction, not per-call teardown
         raise
 
 
 def t2_index_write(write_fn):
-    """Run one T2 write through the daemon (``T2Client``) if it is
-    reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj;
-    generalized to all routable writers in P3, nexus-sbxbe.3).
+    """Run one T2 write against the service-backed :class:`T2Database`.
 
-    Returns ``write_fn``'s result so callers that need the write's return
-    value (e.g. the aspect_worker's ``claim_batch`` rows, or
-    ``rename_collection_cascade``'s per-store row counts) can route too;
-    fire-and-forget callers simply ignore the return.
+    ``write_fn(db)`` receives the writer and its return value is passed back,
+    so callers that need it (the aspect_worker's ``claim_batch`` rows,
+    ``rename_collection_cascade``'s per-store counts) can route too;
+    fire-and-forget callers simply ignore it.
 
-    Routing keeps the ``nx index repo`` process from opening ``memory.db``
-    directly and holding its single WAL writer slot — the daemon becomes
-    the writer, so a dead/slow indexer can no longer strand the lock for
-    other processes. The direct-``T2Database`` fallback preserves
-    functionality when the daemon is down (at the cost of the old
-    direct-lock behavior), and is logged so the degraded path is visible.
-
-    ``write_fn(db)`` receives the writer (``T2Client`` or ``T2Database``;
-    both expose the same ``db.<store>.<method>(...)`` surface). Reachability
-    is decided by an explicit up-front probe (``database.hello()``) rather
-    than by catching an error *out of* ``write_fn`` — because some writers
-    (e.g. the best-effort ``dual_write_chash_index``) swallow their own
-    exceptions internally, which would otherwise hide the unreachable
-    signal and silently drop the write. ``write_fn`` is therefore invoked
-    against exactly one writer, never re-run, so there is no double-write
-    risk regardless of how it handles errors.
+    WAS A DAEMON ROUTER (RDR-128 P1/P3, nexus-kg8sj/sbxbe.3). The T2 daemon
+    existed to stop ``nx index repo`` from opening ``memory.db`` directly and
+    holding its single WAL writer slot — a SQLite-only problem. The engine owns
+    write serialization, so the daemon, its reachability probe and its
+    version-skew arm are gone (nexus-i711w Stage 2 sub-stage B), and the
+    direct-SQLite arm that outlived them went with the ``=sqlite`` opt-out
+    (RDR-158 P3, nexus-7bomn).
     """
-    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
-    # arbiter — the SQLite single-writer daemon is not in the picture, so route
-    # straight to a direct service-backed T2Database. Short-circuit BEFORE the
-    # daemon probe so service mode does not emit the misleading "start the T2
-    # daemon" degraded-fallback warning on every write (the probe + warning
-    # below are the SQLite-mode arbiter path only).
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
-
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        with _service_t2_lock:
-            return _service_t2_write_locked(write_fn)
-
-    from nexus.daemon.t2_client import (  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
-        T2DaemonNotReachableError,
-        T2SchemaVersionMismatchError,
-        make_t2_client,
-    )
-
-    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-
-    client = None
-    # True once a degraded arm has emitted its OWN distinct, accurate event,
-    # so the generic "start the daemon" banner below is suppressed (its hint is
-    # WRONG when a daemon is actually running — RDR-141 version-skew arm and the
-    # GH #1048 daemon-alive-but-unresponsive arm).
-    degraded_logged = False
-    try:
-        client = make_t2_client()
-        client.database.hello()  # force the lazy connect; raises if down
-    except T2DaemonNotReachableError:
-        # Degrading to a direct write is safe (RDR-128 documented-irreducible
-        # availability fallback). GH #1048: distinguish "daemon absent" from
-        # "daemon alive but unresponsive/timed-out under load" via a read-only
-        # discovery liveness probe (no spawn/reap — that's the supervisor's
-        # job), and rate-limit the warning so a bulk run does not spam it.
-        if client is not None:
-            client.close()
-        client = None
-        # The probe runs on every degraded write (not just emitting ones) so a
-        # state transition is classified accurately each time; the cost is one
-        # stat + os.kill(pid, 0), negligible against the direct DB write this
-        # path is already doing (review M-1/S-3 — accepted by design).
-        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred to avoid circular import (daemon.discovery)
-
-        if find_t2_daemon() is not None:
-            # A live daemon IS registered but did not answer hello() — likely
-            # load / timeout / contention (#1046), NOT a missing daemon.
-            # "start the daemon" would be wrong (it is running).
-            _emit_unreachable_warn(
-                "t2_index_write_daemon_unreachable_but_alive",
-                hint=(
-                    "T2 daemon is running but did not respond to hello(); likely "
-                    "load/timeout/contention — writes degraded to direct until it "
-                    "becomes responsive again"
-                ),
-            )
-        else:
-            _emit_unreachable_warn(
-                "t2_index_write_daemon_unreachable_fallback",
-                hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
-            )
-        degraded_logged = True
-    except T2SchemaVersionMismatchError:
-        # RDR-141: a stale-VERSION daemon is ALIVE, holds the spawn lock, and
-        # is actively serving. Opening a direct writer here would put a SECOND
-        # live writer on memory.db (the version-skew double-writer). Instead
-        # re-assert the supervisor (reap the stale daemon, spawn a current
-        # one) and re-probe ONCE through the fresh daemon. Single attempt, no
-        # retry loop: on a second mismatch/unreachable we fall through to the
-        # bounded direct write. Every degraded sub-path here emits its OWN
-        # distinct event (so the generic banner is suppressed via degraded_logged).
-        if client is not None:
-            client.close()
-        client = None
-        if _reassert_t2_daemon():  # emits a distinct event itself when it returns False
-            try:
-                client = make_t2_client()
-                client.database.hello()
-            except (T2DaemonNotReachableError, T2SchemaVersionMismatchError):
-                # Re-assert reported a current daemon but it is no longer
-                # reachable / still skewed on re-probe (single-attempt cap).
-                # _reassert returned True, so it logged nothing — emit the
-                # distinct event for this sub-path here.
-                if client is not None:
-                    client.close()
-                client = None
-                degraded_logged = True
-                structlog.get_logger().warning(
-                    "t2_index_write_version_skew_reprobe_failed",
-                    hint=(
-                        "re-assert reported a current daemon but the re-probe "
-                        "found it unreachable/still-skewed; a bounded direct "
-                        "write follows (single-attempt cap)"
-                    ),
-                )
-        else:
-            degraded_logged = True  # _reassert already emitted its distinct event
-
-    if client is not None:
-        try:
-            return write_fn(client)
-        finally:
-            client.close()
-
-    # Degraded path: this is the direct-lock behavior RDR-128 exists to
-    # eliminate. Every arm that reaches here with ``client is None`` now sets
-    # ``degraded_logged`` after emitting its own accurate, rate-limited event
-    # (GH #1048 absent/alive split + the RDR-141 version-skew events), so in
-    # practice this guard is always True here. Retained as a forward-compat
-    # backstop: any future arm that degrades WITHOUT logging still surfaces a
-    # warning rather than silently falling through to a direct write.
-    if not degraded_logged:
-        structlog.get_logger().warning(
-            "t2_index_write_daemon_unreachable_fallback",
-            hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
-        )
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    with T2Database(default_db_path()) as db:  # epsilon-allow: by-design daemon-unreachable fallback so writes degrade to direct rather than failing (RDR-128 P3 documented-irreducible)
-        return write_fn(db)
+    with _service_t2_lock:
+        return _service_t2_write_locked(write_fn)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
@@ -599,24 +404,14 @@ def reset_plan_cache_for_tests() -> None:
 
 
 def get_catalog():
-    """Return a fresh Catalog or None when not initialised.
+    """Return a catalog reader (HttpCatalogClient) or None when unavailable.
 
-    No process-level caching; each call constructs a Catalog at
-    ``catalog_path()``. ``Catalog.__init__`` runs ``_ensure_consistent``
-    so cross-process JSONL refreshes are picked up automatically.
-    Callers that issue many lookups in tight loops should construct
-    once and pass the result down (top-down DI) — see also
-    ``commands/catalog.py:_get_catalog`` for the established pattern.
-
-    Tests that need a specific Catalog instance under test set
-    ``NEXUS_CATALOG_PATH`` (which ``catalog_path()`` reads) so this
-    function constructs at the test's location; the autouse
-    ``_isolate_catalog`` fixture in ``tests/conftest.py`` provides
-    a per-test default.
+    RDR-146 P1.2: get_catalog() is the READ funnel. Writers must use
+    :func:`get_catalog_writer`; the boundary lint bans bare catalog
+    construction in consumer code. Since the local SQLite catalog's
+    deletion (RDR-158 P4, nexus-i711w) the factory is service-only —
+    this returns the shared ``HttpCatalogClient`` against the engine.
     """
-    # RDR-146 P1.2: get_catalog() is the READ funnel — it returns a
-    # read-only local Catalog (or None when uninitialised). Writers must
-    # use get_catalog_writer(); the boundary lint bans bare Catalog(...).
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
     return make_catalog_reader()
 
@@ -624,9 +419,10 @@ def get_catalog():
 def get_catalog_writer():
     """Return a write-only catalog proxy (RDR-146 P1.2).
 
-    Routes the whitelisted write ops through the T2 daemon (the single
-    .catalog.db writer) when reachable, else a direct in-process Catalog.
-    Always returns a CatalogWriter; callers ``.close()`` it when done.
+    Routes the whitelisted write ops (``CATALOG_WRITE_OPS``) to the
+    engine's HTTP catalog via ``_ServiceCatalogWriter`` (the T2-daemon
+    routing this originally described died in RDR-158 P4, nexus-i711w).
+    Always returns a writer proxy; callers ``.close()`` it when done.
 
     RDR-146 P2 (nexus-5p2ci.12): MCP tool invocations are user-initiated and
     latency-sensitive (``store_put`` / ``memory promote`` register through
@@ -647,8 +443,19 @@ def require_catalog():
     return cat, None
 
 
-def catalog_auto_link(doc_id: str) -> int:
+def catalog_auto_link(tumbler: str) -> int:
     """Create catalog links from T1 link-context to the just-stored document.
+
+    Takes the catalog TUMBLER, not a T3 chash (nexus-5axey class A3).
+    The predecessor took the chash and resolved it via ``by_doc_id``, which
+    asks a DIFFERENT question on each substrate — service mode tumbler-resolves
+    it, so a chash never matched and this returned 0 for every agent-stored
+    document on a service install, with a DEBUG line as the only signal. That
+    is the same silence nexus-a414 already had to fix once here. The caller
+    (mcp/core.py store_put) has the real tumbler in scope as
+    ``catalog_doc_id``; taking it directly removes both the wrong-key lookup
+    and a round trip. Tumbler is the only document identity (RDR-108, Hal
+    2026-07-26).
 
     Returns the number of links actually created (backward-compat int).
     Skip counts are surfaced via structlog: WARNING for invalid tumbler
@@ -675,9 +482,10 @@ def catalog_auto_link(doc_id: str) -> int:
         ]
         if not link_entries:
             return 0
-        entry = cat.by_doc_id(doc_id)
-        if entry is None:
-            _log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
+        if not tumbler:
+            # The catalog hook failed upstream, so there is no document to
+            # link to. Distinct from "no link contexts": worth a signal.
+            _log.debug("auto_link_skip_no_catalog_tumbler")
             return 0
     finally:
         try:
@@ -690,7 +498,7 @@ def catalog_auto_link(doc_id: str) -> int:
     # write-only daemon proxy, not the read-only get_catalog() handle.
     writer = get_catalog_writer()
     try:
-        result = auto_link(writer, entry.tumbler, contexts)
+        result = auto_link(writer, tumbler, contexts)
     finally:
         writer.close()
 
@@ -706,7 +514,7 @@ def catalog_auto_link(doc_id: str) -> int:
         log_method = _log.warning if recipe_compliant_zero else _log.info
         log_method(
             "auto_link_summary",
-            doc_id=doc_id,
+            tumbler=tumbler,
             created=result.created,
             skipped_invalid_tumbler=result.skipped_invalid_tumbler,
             skipped_missing_endpoint=result.skipped_missing_endpoint,
@@ -891,142 +699,33 @@ def taxonomy_assign_batch_hook(
             )
         return
 
-    if is_local_mode():
-        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-        if any(fnmatch(collection, pat) for pat in exclude):
-            return
-
-    if not embeddings:
-        embeddings = _fetch_or_embed(doc_ids, collection, contents)
-        if not embeddings:
-            return
-
-    try:
-        # RDR-128 P1 (nexus-fkq5q): compute assignments client-side (the
-        # ChromaDB client can't cross the RPC boundary), then persist the
-        # serializable result through the daemon so the indexer does not
-        # open memory.db directly.
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 — deferred to avoid circular import (db.t2.catalog_taxonomy)
-
-        chroma_client = get_t3()._client
-        same = CatalogTaxonomy.compute_assignments(
-            collection, doc_ids, embeddings, chroma_client,
-            cross_collection=False,
-        )
-        cross = CatalogTaxonomy.compute_assignments(
-            collection, doc_ids, embeddings, chroma_client,
-            cross_collection=True,
-        )
-        assignments = same + cross
-        if assignments:
-            t2_index_write(
-                lambda db: db.taxonomy.persist_assignments(assignments)
-            )
-        if cross:
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().debug(
-                "taxonomy_cross_collection_batch",
-                collection=collection,
-                cross_assigned=len(cross),
-            )
-    except Exception as exc:  # noqa: BLE001 — taxonomy assign best-effort; tripwire-recorded
-        _record_taxonomy_tripwire(
-            collection, doc_ids, f"local path: {type(exc).__name__}: {exc}",
-        )
+    # NO RAW PATH BELOW THIS POINT. A ~40-line twin stood here: it read
+    # ``get_t3()._client`` and called ``CatalogTaxonomy.compute_assignments``
+    # twice (same + cross), then persisted via ``t2_index_write``. It was
+    # already unreachable on every shipping install — the guard above returns
+    # unconditionally whenever T3 is service-backed, which is the default in
+    # BOTH local and cloud mode since RDR-152 — and its two entry points
+    # (``._client`` on an HttpVectorClient, and CatalogTaxonomy itself) are
+    # deleted in nexus-i711w Stage 2 sub-stage C. Reaching this line at all
+    # would now mean a non-service T3 handle, which no longer exists.
 
 
-def _fetch_or_embed(
-    doc_ids: list[str],
-    collection: str,
-    contents: list[str],
-) -> list[list[float]] | None:
-    """Fetch existing T3 embeddings for *doc_ids* in *collection*.
-
-    Falls back to local MiniLM embedding of *contents* when T3 is
-    unavailable or returns no embedding for a given id. Returns None
-    if no embeddings can be produced (callers no-op in that case).
-    Used by ``taxonomy_assign_batch_hook`` when called from MCP
-    ``store_put`` with ``embeddings=None``.
-
-    Returns None immediately in service mode (HttpVectorClient has no
-    ._client; taxonomy-via-chroma is not supported on the service path).
-    """
-    # RDR-152 Seam B guard — see taxonomy_assign_batch_hook for rationale.
-    # RDR-155 P4a.2: instance-based (env flag no longer tracks the handle type).
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
-    if is_service_backed(get_t3()):
-        return None
-
-    import numpy as np  # noqa: PLC0415 — numpy heavy dep deferred to function scope
-
-    fetched: list[list[float] | None] = [None] * len(doc_ids)
-    try:
-        chroma_client = get_t3()._client
-        coll = chroma_client.get_collection(collection, embedding_function=None)
-        result = coll.get(ids=doc_ids, include=["embeddings"])
-        result_ids = result.get("ids", [])
-        result_embs = result.get("embeddings")
-        if result_embs is not None:
-            id_index = {d: i for i, d in enumerate(doc_ids)}
-            for j, rid in enumerate(result_ids):
-                idx = id_index.get(rid)
-                if idx is None:
-                    continue
-                emb = result_embs[j]
-                if emb is not None and len(emb) > 0:
-                    fetched[idx] = list(emb)
-    except Exception:  # noqa: BLE001 — T3 embedding fetch best-effort; logged at debug, falls back
-        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug(
-            "taxonomy_t3_embedding_fetch_failed",
-            collection=collection,
-            exc_info=True,
-        )
-
-    missing = [i for i, e in enumerate(fetched) if e is None]
-    if missing and contents:
-        try:
-            from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid circular import (db.local_ef)
-            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-            local_inputs = [contents[i] for i in missing if i < len(contents)]
-            local_embs = ef(local_inputs)
-            for k, i in enumerate(missing):
-                if i < len(contents) and k < len(local_embs):
-                    fetched[i] = list(np.array(local_embs[k], dtype=np.float32))
-        except Exception:  # noqa: BLE001 — local-embed fallback best-effort; logged at debug
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().debug(
-                "taxonomy_local_embed_fallback_failed", exc_info=True,
-            )
-
-    if any(e is None for e in fetched):
-        return None
-    return [e for e in fetched if e is not None]
-
-
-# ── Chash dual-write (RDR-086 Phase 1.2; migrated to batch hook in RDR-095) ──
-
-
-# RDR-187 (nexus-piwya.4): chash_dual_write_batch_hook is RETIRED. The chunks
-# tables ARE the chash-keyed store (the /v1/chash/* reads are served from
-# them, nexus-piwya.3), so there is no derived copy left to dual-write —
-# and no dual-write means the orphan-leak class (292,656 dangling router
-# rows in production) structurally cannot recur. The engine's write
-# endpoints remain accept-and-no-op for one release (old clients in the
-# mixed-version window), and tests/test_hook_drift_guard.py pins that the
-# hook name never reappears in src.
-
-
-# nexus-duoak.7: file-agnostic consumers run once per upload flush in the
-# batched indexer (fire_batch(grain="flush")) instead of once per file —
-# their cost is round-trip-dominated, not row-dominated. Default-grain
-# callers (grain="all") still fire them exactly as before.
+# nexus-duoak: FLUSH grain, not per-file. The batched indexer fires this once
+# per flush so clustering sees a whole batch of embeddings rather than one
+# file's worth. This declaration sat at the tail of the raw arm deleted above
+# and went with it — a silent demotion to "file" grain that changed dispatch
+# frequency without changing any behaviour the deletion was about. Restored,
+# and pinned by tests/test_hook_grain.py.
 taxonomy_assign_batch_hook.batch_grain = "flush"
-# manifest joined the flush grain in nexus-u2kwq: the batched indexer's
-# aggregate call carries per-chunk doc_id + file-local chunk_index
-# (injected by _fire_flush_grain_hooks), so by_doc grouping and position
-# enumeration work unchanged; grain="all" callers (MCP store_put, legacy
-# inline paths) still fire it per document exactly as before.
+
+
+# _fetch_or_embed lived here. It fetched T3 embeddings for a batch and fell
+# back to a local MiniLM encode, and its ONLY caller was the raw taxonomy-assign
+# path deleted above (nexus-i711w Stage 2 sub-stage C). The service branch does
+# its own re-fetch via ``get_t3().get_embeddings`` with a count-skew guard and
+# tripwire (nexus-reskd / nexus-h8rf6.11), so nothing was left to call this —
+# one of its own tests asserted it returns None in service mode, i.e. a no-op on
+# the only surviving path.
 
 
 # ── Manifest-write failure surfacing (GH #1371) ──────────────────────────────
@@ -1186,30 +885,17 @@ def manifest_write_batch_hook(
             "manifest_write_hook_catalog_uninitialised", collection=collection,
         )
         return
-    # Close the read-only SQLite handle (local mode opens a WAL read lock per call).
-    # HttpCatalogClient (service mode) has NO such handle: its ``_db`` property RAISES
-    # RuntimeError, and ``getattr(_gate, "_db", None)`` does NOT swallow that (the
-    # default only applies to AttributeError) — the raise would abort the whole hook
-    # before the manifest write, leaving service-mode catalogs with an empty manifest
-    # (RDR-168 nexus-njrcn.6). Guard the access so the local-only cleanup is skipped.
-    try:
-        # getattr (not a direct ._db) keeps this off the storage-boundary lint, and the
-        # try/except absorbs the RuntimeError HttpCatalogClient._db raises in service mode
-        # (getattr's default only swallows AttributeError, not RuntimeError).
-        _read_handle = getattr(_gate, "_db", None)
-    except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
-        _read_handle = None
-    if _read_handle is not None:
-        try:
-            _read_handle.close()
-        except Exception:  # noqa: BLE001 — best-effort handle cleanup; close failure is non-critical and intentionally silent
-            pass
+    # (The local-mode read-handle cleanup that lived here — a lint-dodging
+    # ``getattr(_gate, "_db", None)`` — died with the local catalog,
+    # nexus-i711w: the reader is always an HttpCatalogClient now.)
     # RDR-146 P1.2: this hook fires per T3 batch in the long-lived MCP
     # server — close the writer in finally so socket / SQLite handles do
     # not accumulate across a session.
     cat = get_catalog_writer()
     try:
-        _manifest_write_loop(cat, by_doc)
+        # nexus-kgos1: `_gate` is the READER, already resolved above. The sweep's
+        # two reads must use it — `cat` is write-only and raises on both.
+        _manifest_write_loop(cat, by_doc, collection, reader=_gate)
     finally:
         # Production get_catalog_writer() returns a CatalogWriter (has close);
         # tests may patch it to a raw Catalog (no close). Guard so the hot
@@ -1234,7 +920,76 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
     ]
 
 
-def _manifest_write_loop(cat, by_doc) -> None:
+def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
+                              collection: str | None, *, reader) -> None:
+    """Delete T3 rows this document's manifest no longer references (nexus-39upx).
+
+    A re-index that changes the extracted text writes chunks under NEW chashes —
+    content addressing working as designed — and ``atomic_manifest_replace``
+    correctly repoints the manifest at them. Nothing removed the old vector
+    rows, so they persisted, unreferenced by any manifest and still returned by
+    vector search, which reads T3 directly. That is how a corruption fix could
+    leave the corrupted text searchable while every catalog-level check
+    reported the document clean.
+
+    UNION GUARD, and it is the whole reason this is not a two-line delete:
+    identical chunk text collapses to ONE T3 row shared by every document that
+    contains it (CLAUDE.md, catalog/T3 split). "Not in THIS document's
+    manifest" is therefore NOT "unreferenced" — deleting on that basis would
+    silently remove chunks other documents still depend on. Each candidate is
+    checked against ``docs_for_chashes`` and kept if ANY other document
+    references it.
+
+    Fail-open throughout: a sweep that cannot prove a row is orphaned leaves it
+    alone. Over-retention is recoverable; over-deletion is not.
+    """
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+
+    if not collection:
+        return
+    new = {c.get("chash") for c in chunks if c.get("chash")}
+    dropped = {h for h in before if h and h not in new}
+    if not dropped:
+        return
+    # nexus-kgos1: reads go to the READER. `cat` is a _ServiceCatalogWriter, a
+    # closed-whitelist write-only proxy that raises AttributeError for every
+    # read op — so routing this through it could never prove orphanhood and the
+    # sweep could never delete a row.
+    #
+    # `reader` is KEYWORD-ONLY AND REQUIRED, deliberately. It was briefly
+    # `reader=None` falling back to `cat`, to spare updating the older tests —
+    # and that default immediately re-created this very defect one call site
+    # over: tests/catalog/test_manifest_write_many.py drove the loop with a
+    # double carrying no read methods, so the sweep silently no-opped there and
+    # covered none of this. A missing wire-up must fail at the call, loudly,
+    # not degrade into the no-op we are here to remove.
+    try:
+        refs = reader.docs_for_chashes(sorted(dropped)) or {}
+    except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_no_reverse_lookup",
+            doc_id=doc_id, candidates=len(dropped))
+        return
+    orphaned = [h for h in sorted(dropped)
+                if not any(d != doc_id for d in (refs.get(h) or []))]
+    shared = len(dropped) - len(orphaned)
+    if not orphaned:
+        return
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
+
+        make_t3().get_collection(collection).delete(ids=orphaned)
+    except Exception as exc:  # noqa: BLE001 — the index must not fail on cleanup
+        structlog.get_logger().warning(
+            "superseded_sweep_failed", doc_id=doc_id, collection=collection,
+            orphans=len(orphaned), error=str(exc))
+        return
+    structlog.get_logger().info(
+        "superseded_vectors_swept", doc_id=doc_id, collection=collection,
+        deleted=len(orphaned), kept_shared=shared)
+
+
+def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader) -> None:
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc
@@ -1334,7 +1089,34 @@ def _manifest_write_loop(cat, by_doc) -> None:
             # than the first, so the atomic-replace path is safe for the
             # streaming PDF / doc_indexer paths.
             if any(c["position"] == 0 for c in chunks):
+                # nexus-39upx: capture what the manifest referenced BEFORE the
+                # replace, so the vector rows that fall out of it can be swept.
+                # atomic_manifest_replace already fixes the CATALOG side of a
+                # shrink-reindex (the comment above); the T3 side was never
+                # done. Because a re-extraction that CHANGES text produces new
+                # chashes, the old rows stay in T3 referenced by nothing — and
+                # vector search reads T3, not the manifest, so superseded text
+                # keeps being retrieved while `nx catalog show` looks clean.
+                # Measured on 1.14.19 after the nexus-gtltb fix: 17 such rows.
+                #
+                # nexus-kgos1: this read goes to the READER. It was routed
+                # through `cat` — a write-only proxy that raises AttributeError
+                # for every read op — into a bare `except` that logged NOTHING,
+                # so `_before` was always empty, `dropped` was always empty, and
+                # the sweep returned immediately. It had never deleted a row.
+                # The silence is what hid it: the OTHER guard in the sweep logs.
+                _before: set[str] = set()
+                try:
+                    _before = {h for h in (reader.get_chunk_chashes(doc_id) or []) if h}
+                except Exception as _exc:  # noqa: BLE001 — no sweep beats a wrong sweep
+                    import structlog  # noqa: PLC0415 — deferred: hot path
+                    structlog.get_logger().warning(
+                        "superseded_sweep_before_read_failed",
+                        doc_id=doc_id, collection=collection, error=str(_exc))
+                    _before = set()
                 _manifest_write_with_retry(cat.atomic_manifest_replace, doc_id, chunks)
+                _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
+                                          reader=reader)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does
@@ -1407,51 +1189,19 @@ def check_version_compatibility() -> None:
     log = structlog.get_logger()
     try:
         from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — stdlib importlib.metadata deferred to function scope
-        from nexus.db.migrations import _parse_version  # noqa: PLC0415 — deferred to avoid circular import (db.migrations)
 
         cli_ver = _pkg_version("conexus")
 
-        # ── (1) CLI ↔ T2 schema drift ────────────────────────────────────
-        # RDR-120 P4: routed through T2Client when the daemon is reachable;
-        # silently skipped when it isn't (best-effort drift warning, not a
-        # gate). The daemon's ``database.hello`` op surfaces its stored
-        # _nexus_version row.
-        db_path = default_db_path()
-        stored_ver: str | None = None
-        if db_path.exists():
-            try:
-                from nexus.daemon.t2_client import make_t2_client  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
+        # NO CLI ↔ T2 schema-drift check: RDR-120 P4 read the stored
+        # ``_nexus_version`` via the daemon's ``database.hello`` op, and the
+        # daemon is its ONLY transport. With the daemon retired (nexus-i711w
+        # Stage 2 sub-stage B) there is nothing left to ask, so the check is
+        # removed rather than left permanently reading ``None``. No service-mode
+        # equivalent is built here on purpose: the engine's schema is Liquibase-
+        # managed and its drift surface is the engine-version floor
+        # (``REQUIRED_ENGINE_VERSION``), not a per-boot version compare.
 
-                client = make_t2_client()
-                try:
-                    hello = client.database.hello()
-                    raw = (hello or {}).get("daemon_schema_version") or ""
-                    stored_ver = raw if raw and raw != "0.0.0" else None
-                finally:
-                    client.close()
-            except Exception:  # noqa: BLE001 — drift check best-effort; daemon-unreachable (incl. T2DaemonNotReachableError) / RPC-fail degrades stored_ver to None
-                # Daemon unreachable or RPC failed — drift check is
-                # best-effort. Operator can run `nx doctor` for the
-                # full diagnostic.
-                stored_ver = None
-        if stored_ver is not None:
-            cli_t = _parse_version(cli_ver)
-            stored_t = _parse_version(stored_ver)
-            # Warn on minor or major divergence, not patch.
-            # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
-            if cli_t[:2] != stored_t[:2]:
-                if cli_t > stored_t:
-                    hint = "run 'nx upgrade' to apply pending migrations"
-                else:
-                    hint = "DB was upgraded by a newer CLI version"
-                log.warning(
-                    "version_mismatch",
-                    cli_version=cli_ver,
-                    stored_version=stored_ver,
-                    hint=hint,
-                )
-
-        # ── (2) Plugin ↔ CLI version drift ──────────────────────────────
+        # ── Plugin ↔ CLI version drift ──────────────────────────────────
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
         if plugin_root:
             manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"

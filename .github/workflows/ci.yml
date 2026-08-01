@@ -63,28 +63,152 @@ jobs:
         # is read automatically.
         run: uvx ruff@0.15.18 check src/
 
+  service-jar:
+    # nexus-eqxxh: provision the shaded service JAR for the pytest matrix.
+    #
+    # WHY THIS EXISTS. The engine-substrate tests (t2_engine_substrate,
+    # memory_consolidation, taxonomy_review_auto, the b6enc engine smoke) SKIP
+    # on CI today, because tests/conftest.py::t2_service_env gates on
+    # GITHUB_ACTIONS + an absent jar. That skip is the last thing standing
+    # between the RDR-155 P4b autouse flip and a CI board that means something:
+    # flip the default with no jar and EVERY engine-substrate test skips, so a
+    # green board proves nothing.
+    #
+    # CI-COST SHAPE, per the standing directives:
+    #  - ONE build for the whole matrix. The jar is a DETERMINISTIC ARTIFACT of
+    #    service/pom.xml + service/src/main/**, so it is CACHED on exactly that
+    #    input and rebuilt only on a key miss — which is precisely when a fresh
+    #    build proves something.
+    #  - The build step is skipped outright on a cache hit; the job then costs
+    #    a checkout plus a cache restore.
+    #  - JVM package, NOT the native image. `engine-service-build` above already
+    #    owns the ~40min GraalVM trip-wire and is path-gated to service/**
+    #    changes; this job needs only a runnable jar, which is minutes.
+    #  - ubuntu-latest only. No premium runner: the artifact is
+    #    platform-neutral bytecode.
+    #
+    # A clean checkout runs the testcontainers jOOQ codegen (Docker) because
+    # the generated sources are NOT committed — which is exactly why the cache
+    # is load-bearing rather than a nicety.
+    name: service jar (pytest substrate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Cache service jar
+        id: jar-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: service/target/nexus-service-1.0-SNAPSHOT.jar
+          # Keyed on the EXACT inputs the jar is a function of. No restore-keys:
+          # a partial-match jar would be built from different sources, which is
+          # the stale-jar class tests/db/_service_fixture.py::
+          # jar_freshness_skip_reason exists to catch.
+          key: service-jar-${{ runner.os }}-${{ hashFiles('service/pom.xml', 'service/src/main/**') }}
+
+      - name: Set up GraalVM 25.0.3
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Build shaded jar (no tests, no native)
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        working-directory: service
+        run: ./mvnw -q -DskipTests package
+
+      - name: Upload jar for the pytest matrix
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: service-jar
+          path: service/target/nexus-service-1.0-SNAPSHOT.jar
+          retention-days: 1
+          if-no-files-found: error
+
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # 30m: the suite runs ~16m on the runners and the post-job cache-save
-    # step counts toward this budget. At 20m a v5.4.2 release run timed
-    # out DURING the cache upload (tests had already passed). Raised 25->30
-    # (nexus-cxsbs) to absorb the HF/docling model cache save (~hundreds of
-    # MB) and a cold-cache model fetch on the first run after a uv.lock bump.
-    timeout-minutes: 30
+    # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
+    # shared by every matrix leg (see the service-jar job's cost note).
+    needs: service-jar
+    env:
+      # NON-VACUITY BACKSTOP, armed in the SAME change that provisions — which
+      # is the whole point. tests/conftest.py::t2_service_env skips
+      # engine-substrate tests on CI only while this is unset; with it set, an
+      # ABSENT OR STALE JAR FAILS LOUDLY instead of silently reverting to the
+      # skip. Provisioning without arming would leave the skip able to become
+      # permanent the first time provisioning quietly broke.
+      NX_T2_SUBSTRATE_EXPECTED: "1"
+      # ENGINE EVERYWHERE since nexus-i711w (2026-07-28). No pin: the SQLite
+      # substrate is deleted, so there is only one arm left to run.
+      #
+      # WHAT THIS REPLACED, because it was a deliberate cost decision and its
+      # reversal should not read as drift. nexus-aqbrk ran ENGINE AT MERGE
+      # BOUNDARIES, SQLite on interior PRs: `pull_request` took the SQLite arm
+      # (~13m) and the develop PUSH after the merge took the engine default,
+      # because the flip moved both PR pytest jobs from ~20m to 25-30m and 3.12
+      # was CANCELLED at 30m18s against the cap below (PR #1428 run 1; 3.13
+      # scraped through at 24m43s). Hal took that trade on 2026-07-27 —
+      # an engine-only regression surfacing one merge later, absorbed by
+      # develop as the integration branch.
+      #
+      # i711w removes the cheaper arm, so the trade is no longer available:
+      # PR pytest now costs the engine arm's 25-30m on BOTH matrix versions.
+      # That is a real, roughly 2x increase in routine PR minutes, and it is a
+      # consequence of the substrate deletion rather than a fresh decision. The
+      # levers if it needs clawing back are the matrix breadth on PRs (3.12
+      # only, at the cost of the 3.13 required check) or path-gating the pytest
+      # job — both are CI-cost calls for Hal, not something to fold in here.
+      #
+      # Left UNSET rather than set to a value: `none` would mean "provision no
+      # T2 substrate", which is true of the CA-3 jobs below but emphatically
+      # not of the unit suite.
+    # 45m: the post-job cache-save step counts toward this budget. At 20m a
+    # v5.4.2 release run timed out DURING the cache upload (tests had already
+    # passed). Raised 25->30 (nexus-cxsbs) to absorb the HF/docling model cache
+    # save (~hundreds of MB) and a cold-cache model fetch on the first run
+    # after a uv.lock bump. Raised 30->45 (nexus-aqbrk) for the ENGINE arm,
+    # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
+    # arm and 25-30m on the runners — 3.12 was cancelled at 30m18s under the
+    # old cap. Since nexus-i711w EVERY leg is the engine arm, so 45m is now the
+    # ceiling for all of them rather than for the push leg alone. A timeout is
+    # a CEILING, not a reservation: GitHub bills actual runtime.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        # 2026-07-06 CI-cost pass: develop pushes run 3.12 only (~20 min of
-        # ubuntu saved per push — the single largest routine CI cost); PRs
-        # run the full matrix, so the 3.13 required checks on main/develop
-        # still gate every merge. 3.13-only regressions surface at the PR
-        # boundary instead of per push — accepted: 3.13 breakage has
+        # 3.13 RUNS ONLY AT THE MERGE BOUNDARY (Hal, 2026-07-28). i711w deleted
+        # the SQLite arm, so every pytest leg now costs the engine arm's ~33.5
+        # min; paying that twice on interior PRs bought little. `pytest (Python
+        # 3.13)` was removed from DEVELOP's required contexts to match — main
+        # still requires it, and release PRs target main, so the promotion that
+        # actually ships still runs the full matrix.
+        #
+        # Measured before choosing (see T2 nexus/ci-cost-structure): pytest is
+        # 92% of CI time, and the run mix is 31 push / 9 pull_request — so this
+        # reaches only ~22% of runs. It is the smaller half of the clawback;
+        # the larger half is push CADENCE (18 push-triggered runs in one day,
+        # seven inside 40 minutes), which is a habit, not a workflow knob.
+        #
+        # 3.12 remains the representative leg everywhere. 3.13-only regressions
+        # surface at the main boundary — accepted: 3.13 breakage has
         # historically been GHA-flake (nexus-9eaz family), not real drift.
-        python-version: ${{ github.event_name == 'push' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
+        python-version: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        # NO fetch-tags/fetch-depth here, deliberately (nexus-dhs30). The
+        # engine-tag reader is exercised HERMETICALLY by
+        # test_newest_published_engine_parses_the_tag_namespace, which builds its
+        # own repo with known tags — so the parse bug it guards is caught without
+        # this job paying for a tag or history fetch on every single push.
+        # `fetch-tags: true` was tried here first and does NOT work: the
+        # engine-service-v* tags point at commits outside a depth-1 history, so
+        # the refs never materialise and the test still saw an empty list.
+        # Tag visibility is needed only where the GATE runs — release.yml.
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
@@ -110,13 +234,19 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
-      - name: Cache ChromaDB ONNX model
+      - name: Cache MiniLM ONNX model
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/chroma
-          # nexus-8g79.33: include uv.lock hash so a chromadb bump that
-          # ships a new ONNX model invalidates the cache; pre-fix the
-          # bare runner-OS key reused stale models across upgrades.
+          # RDR-155 P4b P3: the ~/.cache/chroma PATH survives chromadb's removal
+          # by design — nexus.db.minilm_direct (the P0b tier-0 EF) keeps its
+          # artifact there and fetches it straight from chroma's S3, with no
+          # chromadb code involved. The cache KEY still says "chromadb-onnx" on
+          # purpose: renaming it would force a cold re-download on every runner
+          # for zero behaviour change (CI-cost discipline). The uv.lock hash no
+          # longer tracks a chromadb bump (it is not in the lock) but still
+          # invalidates on onnxruntime/tokenizers moves, which is the live
+          # coupling.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           # nexus-c7gnx: fall back to the last ONNX cache for this OS so a
           # routine uv.lock bump (which rarely changes the bundled ONNX model)
@@ -145,8 +275,69 @@ jobs:
           restore-keys: |
             huggingface-models-${{ runner.os }}-
 
+      - name: Fetch the service jar
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: service-jar
+          path: service/target
+
+      - name: Re-stamp the jar mtime
+        # tests/db/_service_fixture.py::jar_freshness_skip_reason compares the
+        # jar's mtime against the newest file under service/src — a good check
+        # locally, where a forgotten rebuild is the real risk.
+        #
+        # On CI it is MEANINGLESS: git stamps every checked-out file at
+        # checkout time, so a downloaded jar is always "older" than sources it
+        # was in fact built from, and the gate would skip the whole
+        # engine-substrate family for a reason that does not exist here.
+        #
+        # Touching is not a bypass. The service-jar cache key is
+        # hashFiles('service/pom.xml', 'service/src/main/**') with NO
+        # restore-keys, so a hit already proves the jar was built from exactly
+        # these sources — a strictly stronger guarantee than the mtime proxy it
+        # replaces.
+        run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
+
+      - name: Set up Java (to launch the service jar)
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Cache the pinned PG bundle
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          # tests/db/_service_fixture.py::_self_provision_pg_bundle downloads
+          # OUR pinned, sigstore-verified PG bundle into this per-tag dir. Cache
+          # it so the engine substrate does not re-download it on every run;
+          # keyed on the file that PINS the tag, so a floor bump re-fetches.
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # nexus-eqxxh: the engine substrate boots the SAME jar the write-seam
+        # gate does, so it has the SAME startup dependency — Main constructs
+        # Bge768Embedder before binding the port (RDR-160 local-mode embedder),
+        # and without the model it throws IllegalStateException and the service
+        # never listens. write-seam-gate already primes it for exactly this
+        # reason (nexus-h29w1); the pytest matrix did not, so once the pgvector
+        # fix let migration complete, all 206 changesets applied and the engine
+        # then died here instead:
+        #
+        #   event=schema_migration_complete applied_changesets=206
+        #   Exception in thread "main" java.lang.IllegalStateException:
+        #     Bge768Embedder: bge ONNX model not found at
+        #     ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx
+        #
+        # Same composite action, same self-hosted release asset (no HuggingFace
+        # 429 dependency), same target path the jar reads. Unconditional: this
+        # job's engine-substrate tests need it on every run, not behind a
+        # paths-filter, since NX_T2_SUBSTRATE_EXPECTED=1 makes the substrate
+        # REQUIRED and a missing model is 73 hard errors rather than a skip.
+        uses: ./.github/actions/prime-bge-onnx
 
       - name: Install project + dev deps
         run: uv sync --group dev
@@ -223,6 +414,25 @@ jobs:
           - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
           - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
     env:
+      # nexus-aqbrk: this job has NO service JAR and does not need one — its
+      # tests (tests/db/test_pg_provision_ca3_bundle.py) verify PG BINARY
+      # PROVISIONING: discovery, sharedir resolution, control files, pg_trgm.
+      # Zero T2 references in the entire file.
+      #
+      # The flip made the engine the DEFAULT substrate, so the autouse pin
+      # started trying to boot an engine here, found no JAR, and skipped all
+      # 14 tests. scripts/assert_ca3_ran.py then failed the job — correctly,
+      # that is its entire purpose: "core CREATE EXTENSION vector test did
+      # not pass — assemble path unproven". A non-vacuity gate catching a
+      # silent mass-skip the moment one appeared.
+      #
+      # `none` means PROVISION NOTHING, which is the accurate statement of
+      # what this job needs — verified, not assumed: the file has zero T2,
+      # T2Database, storage_backend or NX_STORAGE references. It said
+      # `sqlite` only because that was the way to spell "do not boot an
+      # engine" before nexus-i711w gave that intent its own value; =sqlite
+      # is now a hard error, so the rename is forced and also more truthful.
+      NX_TEST_T2_SUBSTRATE: none
       # Pinned for determinism. pgvector >= 0.8 is the RDR-155 iterative_scan floor
       # (a pgvector version, not a PG major). nexus is aligned on PG17 to match the
       # deployed conexus stack (nexus-41bso); PG16 was incidental.
@@ -255,6 +465,36 @@ jobs:
       # compromised to always emit ca3='false' would skip the PG build + tests
       # while the job still reports green — the exact vacuous gate the
       # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
+      #
+      # THE BASE, AND WHY IT IS LOAD-BEARING (nexus-4k91k, 2026-07-27).
+      # `base:` is deliberately unset. dorny/paths-filter then resolves PUSH
+      # events against the repository DEFAULT branch (main), NOT against the
+      # previous develop commit. develop diverges from main in
+      # .github/workflows/ci.yml and service/.../changelog/** — both ca3_core
+      # paths — so ca3_core is effectively ALWAYS true on a develop push, and
+      # CA-3 runs at EVERY merge boundary.
+      #
+      # That is not an accident to be tidied away; it is the safety net for the
+      # PR side. A PULL REQUEST touching no ca3_core path gets a CA-3 that
+      # reports success having proven nothing — by design, that is what
+      # path-gating an expensive build MEANS — and the develop push is what
+      # re-proves it, one merge later. Verified 2026-07-27: PR run 30213539574
+      # executed ZERO CA-3 tests and reported success, while develop runs
+      # 30187251639 / 30256819508 / 30272066728 each logged
+      # "CA-3 PASS: 12 passed, 0 bundle-skips".
+      #
+      # So do NOT pin `base:` to the previous commit as a cost saving without
+      # first replacing that net (a scheduled unconditional run). It would buy
+      # ~3 min of runner time per develop push, ~74s of it macOS, and sell the
+      # only thing that re-proves a gated-off PR.
+      #
+      # READING THIS GATE: do NOT infer whether it fired from the presence of
+      # build lines (initdb / "Build complete PG" / assemble). Those are
+      # FROM-SOURCE REBUILD lines, absent on a cache hit by design (see the
+      # build step's cache-hit condition below), so a run that executed every
+      # test scores zero on them. nexus-4k91k was filed on exactly that
+      # misreading. The direct signal is scripts/assert_ca3_ran.py's
+      # "CA-3 PASS: N passed" line, which exists so nobody has to infer it.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
@@ -440,6 +680,25 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     env:
+      # nexus-aqbrk: this job has NO service JAR and does not need one — its
+      # tests (tests/db/test_pg_provision_ca3_bundle.py) verify PG BINARY
+      # PROVISIONING: discovery, sharedir resolution, control files, pg_trgm.
+      # Zero T2 references in the entire file.
+      #
+      # The flip made the engine the DEFAULT substrate, so the autouse pin
+      # started trying to boot an engine here, found no JAR, and skipped all
+      # 14 tests. scripts/assert_ca3_ran.py then failed the job — correctly,
+      # that is its entire purpose: "core CREATE EXTENSION vector test did
+      # not pass — assemble path unproven". A non-vacuity gate catching a
+      # silent mass-skip the moment one appeared.
+      #
+      # `none` means PROVISION NOTHING, which is the accurate statement of
+      # what this job needs — verified, not assumed: the file has zero T2,
+      # T2Database, storage_backend or NX_STORAGE references. It said
+      # `sqlite` only because that was the way to spell "do not boot an
+      # engine" before nexus-i711w gave that intent its own value; =sqlite
+      # is now a hard error, so the rename is forced and also more truthful.
+      NX_TEST_T2_SUBSTRATE: none
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
       # The dyld analog of the glibc floor: build back-deployable to macOS 13
@@ -459,6 +718,13 @@ jobs:
       # compromised to always emit ca3='false' would skip the PG build + tests
       # while the job still reports green — the exact vacuous gate the
       # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
+      # `base:` is unset here for the same load-bearing reason as the linux
+      # CA-3 job — read that comment before changing it. Short version: push
+      # events resolve against main, not the previous develop commit, so this
+      # gate is effectively always true on a develop push, and that is what
+      # re-proves a PR whose CA-3 was gated off. This job is the macOS arch,
+      # so it is also the ~74s of premium runner that pinning `base:` would
+      # save and the reason the trade looks tempting (nexus-4k91k).
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
@@ -733,6 +999,11 @@ jobs:
               - 'tests/db/test_write_seam_gate_integration.py'
               - 'tests/db/test_http_combined_query_integration.py'
               - 'scripts/assert_write_seam_ran.py'
+              # nexus-ao29z: both modules are now gated by the needs_stamped_jar
+              # guard that lives in these two files, so a change there can skip
+              # or fail this job without touching a test.
+              - 'tests/db/conftest.py'
+              - 'tests/db/_service_fixture.py'
               - '.github/workflows/ci.yml'
               # Dep bump can change the Python env or service contract without
               # touching the above paths; gate on lockfile + manifest so such a
@@ -764,7 +1035,7 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-write-seam-3.12-
 
-      - name: Cache ChromaDB ONNX model
+      - name: Cache MiniLM ONNX model
         if: steps.changes.outputs.seam == 'true'
         uses: actions/cache@v5
         with:

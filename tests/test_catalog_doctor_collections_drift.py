@@ -23,10 +23,9 @@ import json
 from unittest.mock import patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
@@ -53,11 +52,12 @@ def t3_db():
 
 
 @pytest.fixture()
-def catalog(tmp_path):
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    db_path = tmp_path / "catalog.sqlite"
-    return Catalog(catalog_dir=catalog_dir, db_path=db_path)
+def catalog():
+    # nexus-i711w terminal deletion: seed the ACTIVE (service) catalog —
+    # the CLI's own ``_get_catalog()`` resolves the same live catalog, so
+    # the ``_get_catalog`` patches died with the local Catalog fixture.
+    from tests._catalog_fixture_ops import ActiveCatalog
+    return ActiveCatalog()
 
 
 def _seed_t3(t3_db: T3Database, name: str) -> None:
@@ -65,19 +65,15 @@ def _seed_t3(t3_db: T3Database, name: str) -> None:
     col.add(ids=["c1"], documents=["x"], metadatas=[{"placeholder": "1"}])
 
 
-def _seed_doc(catalog: Catalog, *, tumbler: str, collection: str) -> None:
-    catalog._db.execute(  # epsilon-allow: fixture seeds a documents row with caller-pinned tumbler; Catalog.register mints its own owner-prefixed tumbler
-        "INSERT INTO documents "
-        "(tumbler, title, author, year, content_type, file_path, "
-        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        "metadata, source_mtime, alias_of, source_uri) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            tumbler, f"doc-{tumbler}", "", 0, "text", f"/tmp/{tumbler}.md",
-            "", collection, 1, "", "", "{}", 0.0, "", "",
-        ),
+def _seed_doc(catalog, *, tumbler: str, collection: str) -> None:
+    # Was a raw pinned-tumbler INSERT; the drift check only needs SOME
+    # documents row whose physical_collection is *collection*, and
+    # register() is the path that exists on the live substrate.
+    owner = catalog.register_owner("drift-seed", "curator", repo_hash="")
+    catalog.register(
+        owner, f"doc-{tumbler}", content_type="text",
+        file_path=f"/tmp/{tumbler}.md", physical_collection=collection,
     )
-    catalog._db.commit()
 
 
 def test_doctor_collections_drift_passes_when_aligned(t3_db, catalog, runner):
@@ -86,8 +82,7 @@ def test_doctor_collections_drift_passes_when_aligned(t3_db, catalog, runner):
     _seed_t3(t3_db, "knowledge__delos")
     _seed_doc(catalog, tumbler="1.1.1", collection="knowledge__delos")
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -101,8 +96,7 @@ def test_doctor_collections_drift_fails_on_t3_not_in_projection(
     """A T3 collection without a projection row is drift → FAIL."""
     _seed_t3(t3_db, "knowledge__delos")  # no register_collection call
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -117,8 +111,7 @@ def test_doctor_collections_drift_fails_on_doc_collection_not_in_projection(
     """A documents.physical_collection without a projection row is drift."""
     _seed_doc(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -146,8 +139,7 @@ def test_doctor_collections_drift_orphan_warning_with_superseded_skip(
     # Note: knowledge__delos NOT in T3 (gone post-rename) but is
     # superseded_by, so should NOT count as drift.
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -164,8 +156,7 @@ def test_doctor_collections_drift_orphan_without_supersede_fails(
     catalog.register_collection("knowledge__delos")
     # knowledge__delos in projection but NOT in T3 and NOT superseded.
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -183,8 +174,7 @@ def test_doctor_collections_drift_handles_t3_failure(catalog, runner):
         def list_collections(self):
             raise RuntimeError("t3 unreachable")
 
-    with patch("nexus.db.make_t3", return_value=_BrokenT3()), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=_BrokenT3()):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -196,8 +186,7 @@ def test_doctor_collections_drift_json_payload(t3_db, catalog, runner):
     """``--json`` emits machine-readable shape."""
     _seed_t3(t3_db, "knowledge__delos")
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
+    with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift", "--json"],
         )

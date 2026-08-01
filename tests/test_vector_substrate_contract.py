@@ -4,12 +4,18 @@ THE DIFFERENTIAL HARNESS (8zpmf verification strengthening, 2026-07-23):
 every semantic the in-process vector consumers rely on — collection
 lifecycle, upsert dedup, the Mongo-style where subset, COSINE distance
 ordering, delete semantics, metadata round-trips — pinned as executable
-contracts and run against EVERY registered substrate. chromadb
-(EphemeralClient) is the oracle today; the InMemoryVectorStore joins the
-``SUBSTRATES`` list when born (P0a), and any divergence between them is a
-FINDING, not drift. The chroma entry deletes WITH the dependency at P3 —
-at which point this suite becomes the in-memory store's permanent
-conformance pin.
+contracts and run against EVERY registered substrate.
+
+P3 (2026-07-25): the chroma entry is GONE with the dependency, exactly as
+this docstring planned. chromadb (EphemeralClient) served as the oracle
+through P0a-P2 — the 74 contracts below were written against it FIRST and
+found 5 real divergences in the in-memory store before it was trusted
+(upsert merging metadata at key level, byte-identical embedding
+round-trips, modify/rename re-keying, dimension pinned at first write with
+"dimension" in the error text, and the $gt/$gte/$lt/$lte + peek + clamp
+surface). Those findings are why this suite is now the in-memory store's
+permanent conformance pin rather than a formality: every contract here
+encodes a semantic something actually depended on.
 
 Semantics sources: T3Database pins ``hnsw:space=cosine`` at collection
 creation (chroma's default is L2 — the exact trap the plan critique
@@ -28,15 +34,10 @@ from typing import Any
 import pytest
 
 # ── Substrate registry ───────────────────────────────────────────────────────
-# Each entry: (name, factory) — factory returns a chroma-shaped client.
-# The InMemoryVectorStore registers here at P0a implementation time; the
-# chromadb entry deletes with the dependency at P3.
-
-
-def _chroma_client():
-    import chromadb
-
-    return chromadb.EphemeralClient()
+# Each entry: (name, factory). The registry is kept parameterised rather than
+# collapsed to a single client: it is the seam a future substrate joins through,
+# and it is what made the chroma-vs-inmemory differential run possible at all.
+# The ("chromadb", _chroma_client) entry was removed at P3 with the dependency.
 
 
 def _inmemory_client():
@@ -46,7 +47,6 @@ def _inmemory_client():
 
 
 SUBSTRATES: list[tuple[str, Any]] = [
-    ("chromadb", _chroma_client),
     ("inmemory", _inmemory_client),
 ]
 

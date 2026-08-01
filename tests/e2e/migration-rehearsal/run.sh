@@ -19,6 +19,21 @@
 # inside the box by nx itself.
 set -euo pipefail
 
+# ── Machine-readable output, always (2026-07-24) ─────────────────────────────
+# This harness redirects CLI stdout into files that are later parsed by other
+# tools (requirements.txt -> `uv pip install -r` inside the image). An agent
+# shell exports FORCE_COLOR (Claude Code sets it for its own rendering), which
+# makes uv emit ANSI escapes EVEN WHEN stdout is a file — so byte 0 of
+# requirements.txt became ESC and the container build died with
+# "Unexpected '<ESC>', expected '-c', '-e', '-r' ..." at 1:1.
+#
+# The asymmetry is the dangerous part: this gate passes when Hal runs it by
+# hand and fails only when an agent runs it, which is precisely when nobody is
+# watching a terminal. Neutralize color for the whole script rather than per
+# call site, so a future redirect cannot reintroduce the class.
+export NO_COLOR=1
+unset FORCE_COLOR CLICOLOR_FORCE
+
 # Captured BEFORE the `cd` below so it is robust to the invocation cwd (RDR-184
 # P0.2, nexus-ccs9v.2): BASH_SOURCE is relative to wherever this script was
 # invoked FROM, not the repo root the next line cd's into.
@@ -36,6 +51,7 @@ STRESS=0
 FULLSTACK=0
 HOLE_PUNCH=0
 SHAKEOUT=0
+ACQUIRE=0
 PACKAGE_UPGRADE=0
 ERA_HOP=0
 CHASH_WINDOW=0
@@ -65,15 +81,21 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # stale default fail-closes the --cold MVV at the version gate. Kept literal (it
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.52}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.60}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
 # requires) engine-service-v0.1.42"). Kept literal (like COLD_TAG) but
 # bumped alongside REQUIRED_ENGINE_VERSION so the scenario never silently
 # stops being "stale" — the guard below fails loud if it does.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.16.0}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.51}"
+# Rotated 2026-07-25 with the (0,1,52)->(0,1,56) identity bump. This rotation
+# was ALREADY SCHEDULED: the 6.18.0 release record says "rotate rehearsal PREV
+# to 6.18.0/v0.1.52 on next floor bump", and that bump is the one that just
+# happened — so this was a missed trigger being caught up, not fresh debt.
+# Must stay ONE release behind the current identity or the --package-upgrade
+# convergence leg stops testing a realistic hop (nexus-cfgo9).
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.18.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.52}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product
@@ -115,6 +137,7 @@ for a in "$@"; do
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
+    --acquire)    ACQUIRE=1 ;;         # nexus-1ddsy: PUBLISHED-artifact gate — cold-acquire NEXUS_SERVICE_TAG on a bare box and drive it
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
     --package-upgrade) PACKAGE_UPGRADE=1 ;;  # standalone: nexus-cfgo9 ONE-engine convergence MVV — package-only upgrade from a real previous release, engine acquired for real by the product, never supplied by this harness
     --era-hop)    ERA_HOP=1 ;;           # standalone: RDR-185 nexus-n7u38.30 — ancient install (old release + old engine + pre-RDR-108 ids + Chroma substrate) -> current via `nx upgrade` ALONE, unattended
@@ -143,6 +166,23 @@ _guided_restore() {
 trap '_guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
+
+# nexus-1ddsy: --acquire is a standalone published-artifact gate.
+[ "$ACQUIRE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; } && { echo "--acquire is a standalone published-artifact gate (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# It validates a PUBLISHED tag, so the tag is mandatory and there is nothing to
+# infer: NEXUS_SERVICE_TAG is the artifact under test, never a default.
+[ "$ACQUIRE" = 1 ] && [ -z "${NEXUS_SERVICE_TAG:-}" ] && { echo "--acquire requires NEXUS_SERVICE_TAG=<published tag>, e.g. NEXUS_SERVICE_TAG=engine-service-v0.1.55 (it exercises the PUBLISHED artifact, not a local build)" >&2; exit 2; }
+
+# ── RETIRED journeys (RDR-155 P4b, 2026-07-24, nexus-8nlj4) ──────────────────
+# --guided / --cold / --hole-punch drive `nx guided-upgrade`, and the DEFAULT
+# rehearse.sh Phase B drives `nx migrate-to-service` — verbs DELETED in P4b P2.
+# The Chroma->PG guided-migration journey is replaced by the two-hop
+# stranded-install redirect; its acceptance rehearsal is tracked in nexus-8nlj4
+# (cut-time, gated on the LAST_MIGRATION_CAPABLE stamp). Refuse loud, pre-build.
+if [ "$GUIDED" = 1 ] || [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+  echo "RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade, deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). The surviving journeys are --era-hop, --package-upgrade, --shakeout, --fullstack, --chash-window, and the default rehearse.sh (Phases A/D/E; its migrate leg is skipped)." >&2
+  exit 2
+fi
 # nexus-gilf2: --guided seeds local-ONNX (bge-768) cross-model targets, while
 # --with-cloud boots a voyage-only service. The combination is incoherent: the
 # bge-768 targets have no embedder in voyage mode and the pebfx.2 guard 422s the
@@ -250,16 +290,30 @@ if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; then
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ]; then
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ]; then
   # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9 / nexus-n7u38.30: these boxes acquire every
   # engine binary at runtime (PUBLISHED release) — NO local native build, NO
   # stamping. Just the wheel.
   echo "[1/2] Building the conexus wheel (host)…"
-  uv build --wheel >/dev/null 2>&1
+  # Do NOT suppress this unconditionally: under `set -e` a failed build
+  # exits the harness with no diagnosis at all (2026-07-25 — the
+  # v0.1.55 acquire gate died here having logged only its own banner).
+  if ! uv build --wheel > "${TMPDIR:-/tmp}/nexus-wheel-build.log" 2>&1; then
+    echo "uv build --wheel FAILED:" >&2
+    sed 's/^/    /' "${TMPDIR:-/tmp}/nexus-wheel-build.log" >&2
+    exit 1
+  fi
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/" >&2; exit 1; }
 elif [ "$DO_BUILD" = 1 ]; then
   echo "[1/3] Building the conexus wheel (host)…"
-  uv build --wheel >/dev/null 2>&1
+  # Do NOT suppress this unconditionally: under `set -e` a failed build
+  # exits the harness with no diagnosis at all (2026-07-25 — the
+  # v0.1.55 acquire gate died here having logged only its own banner).
+  if ! uv build --wheel > "${TMPDIR:-/tmp}/nexus-wheel-build.log" 2>&1; then
+    echo "uv build --wheel FAILED:" >&2
+    sed 's/^/    /' "${TMPDIR:-/tmp}/nexus-wheel-build.log" >&2
+    exit 1
+  fi
   echo "[2/3] Building the LINUX native nexus-service binary (GraalVM container, ~2-3m)…"
   if [ ! -x service/target/nexus-service ]; then
     # Native build in a linux GraalVM container. The mounted Docker socket lets
@@ -344,7 +398,17 @@ cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PE
 # Runs unconditionally for every leg: era-hop/package-upgrade/chash-window
 # never COPY it (they install deps at runtime from real PyPI — that is those
 # scenarios' point), so for them it is a 1ms offline no-op in the context dir.
-uv export --locked --no-dev --no-emit-project --no-hashes -q > "$STAGE/requirements.txt"
+# --color never is belt-and-braces over the script-level NO_COLOR above:
+# this particular redirect is the one that is PARSED, so state the
+# requirement locally too rather than relying on ambient env hygiene.
+uv export --color never --locked --no-dev --no-emit-project --no-hashes -q > "$STAGE/requirements.txt"
+# Fail loud if it is still not machine-clean — a corrupt requirements.txt
+# otherwise surfaces as an opaque failure minutes later, deep in a
+# container build (2026-07-24).
+if LC_ALL=C grep -q '[^[:print:][:space:]]' "$STAGE/requirements.txt"; then
+  echo "FATAL: requirements.txt contains control bytes (ANSI colour leaked into a parsed file); check NO_COLOR/FORCE_COLOR" >&2
+  exit 2
+fi
 if [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: same posture as --package-upgrade (working-tree wheel in its
   # own subdirectory, real PEP 427 name preserved, no engine artifact staged at
@@ -381,6 +445,12 @@ elif [ "$PACKAGE_UPGRADE" = 1 ]; then
   cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
+elif [ "$ACQUIRE" = 1 ]; then
+  # nexus-1ddsy: same bare-box image as the retired cold leg — nothing the
+  # service needs is staged, because acquiring it from the PUBLISHED release IS
+  # the thing under test.
+  cp "$HERE/Dockerfile.cold" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_cold.sh" "$HERE/rehearse_hole_punch.sh" "$HERE/rehearse_acquire.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-4mm24: NOTHING the service needs is staged — the cold box acquires the
   # binary + PG bundle from the published release at runtime. Only the wheel +
@@ -437,7 +507,11 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+if [ "$ACQUIRE" = 1 ]; then
+  # nexus-1ddsy: the tag under test is supplied by the operator and is NOT
+  # defaulted — the whole point is to exercise a specific published artifact.
+  run_env+=(-e "NEXUS_SERVICE_TAG=$NEXUS_SERVICE_TAG")
+elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-4mm24 / nexus-s3dd4.7: tell the cold box which published release to
   # acquire from (--hole-punch needs v0.1.18+ for /v1/telemetry/ids/probe).
   run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
@@ -501,6 +575,10 @@ elif [ "$CHASH_WINDOW" = 1 ]; then
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$ACQUIRE" = 1 ]; then
+  # nexus-1ddsy: drive the PUBLISHED artifact acquired at runtime.
+  docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
+    /home/nexus/rehearse_acquire.sh
 elif [ "$SHAKEOUT" = 1 ]; then
   # nexus-h8rf6: candidate shakeout — verb matrix + incremental-index +
   # concurrent-load assertions against the locally-built candidate binary.

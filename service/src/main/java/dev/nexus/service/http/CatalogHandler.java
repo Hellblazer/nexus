@@ -145,6 +145,10 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
                 case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
+                // nexus-ysrwi: the third sibling. /manifest/orphans and
+                // /docs/orphaned already existed; links had no equivalent,
+                // which is why the client could not build a doctor check.
+                case "/links/orphaned"        -> handleLinksOrphaned(exchange, tenant, method);
 
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
@@ -200,12 +204,29 @@ public final class CatalogHandler implements HttpHandler {
                 case "/doc/register_many"     -> handleRegisterMany(exchange, tenant, method);
 
                 // ── Migration count verification (RDR-159 P-1a) ───────────────
+                // ── GC audit (nexus-jqvzk) ────────────────────────────────────
+                case "/gc_audit/record"       -> handleGcAuditRecord(exchange, tenant, method);
+                case "/gc_audit/list"         -> handleGcAuditList(exchange, tenant, method);
+
                 case "/verify/relation-counts" -> handleRelationCounts(exchange, tenant, method);
 
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
             }
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.CollectionMergeRefused e) {
+            // nexus-v6za0: the rename txn's own emptiness assertion. Reachable only when a
+            // concurrent write populates the target between the handler's pre-check and the
+            // transaction — the TOCTOU case that assertion exists for. It is a REFUSAL, so it
+            // gets the same 409 the pre-check gives, with the message that names the remedy.
+            // It fell into the generic catch below for one commit and surfaced as an opaque 500.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.TombstonedDocumentException e) {
+            // nexus-eldyi: a manifest write (write/append/purge) refused a
+            // tombstoned target — the non-resurrection rule extended beyond
+            // /update. Same 409 shape as CollectionMergeRefused above: a
+            // refusal, not a server error.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -244,46 +265,81 @@ public final class CatalogHandler implements HttpHandler {
         if (tumbler == null || tumbler.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"tumbler query param required\"}"); return;
         }
-        var doc = repo.getDocument(tenant, tumbler);
+        // nexus-ekaxn: follow_alias defaults FALSE — byte-identical to the
+        // pre-fix response for any client that does not send the param.
+        boolean followAlias = boolParam(exchange, "follow_alias", false);
+        var doc = repo.getDocument(tenant, tumbler, followAlias);
         if (doc == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return;
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(doc));
     }
 
-    /** GET /v1/catalog/list?limit=N&offset=N&content_type=X&collection=X&corpus=X&owner=X */
+    /**
+     * GET /v1/catalog/list?limit=N&offset=N&content_type=X&collection=X&corpus=X&owner=X
+     *
+     * <p>nexus-xoimv: {@code limit}/{@code offset} are now threaded through
+     * every filter branch below, not just the terminal (unfiltered) {@code
+     * listDocuments} call. THE SEMANTICS ARE DELIBERATELY ASYMMETRIC between
+     * "absent from the query string" and "explicit":
+     * <ul>
+     *   <li>{@code limit} ABSENT — the seven filter branches stay UNBOUNDED
+     *       (their pre-xoimv behaviour: {@code documentsByCollection} et al.
+     *       never took a limit at all). Naively defaulting the missing param
+     *       to 200 here — as the terminal branch always has — would silently
+     *       truncate every existing unbounded caller (the client's
+     *       {@code all_documents} treats {@code limit==0} as unbounded and
+     *       {@code list_by_collection} omits the param entirely when
+     *       {@code None}) from "return everything" to "return first page and
+     *       drop the rest", with no error to signal the shrinkage.</li>
+     *   <li>{@code limit} EXPLICIT — honored verbatim on every branch,
+     *       filtered or not.</li>
+     *   <li>The terminal (unfiltered) branch is UNCHANGED: it always applied
+     *       {@code limit=200} whether or not the caller sent one, and keeps
+     *       doing so here — only the seven filter branches gained the
+     *       absent/explicit distinction.</li>
+     *   <li>{@code offset} has no such asymmetry: absent defaults to 0 on
+     *       every branch, which is a no-op regardless of whether the branch
+     *       is bounded or unbounded, so it is passed straight through.</li>
+     * </ul>
+     */
     private void handleList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        int limit  = intParam(exchange, "limit",  200);
-        int offset = intParam(exchange, "offset", 0);
+        String rawLimit       = queryParam(exchange, "limit");
+        boolean limitExplicit = rawLimit != null && !rawLimit.isBlank();
+        int limit             = intParam(exchange, "limit",  200);
+        int offset            = intParam(exchange, "offset", 0);
+        // 0 signals "unbounded" to every documentsBy* filter method below —
+        // used ONLY when the caller did not send `limit` at all.
+        int filterLimit = limitExplicit ? limit : 0;
 
         // Optional filter dispatching
         String collection  = queryParam(exchange, "collection");
         String contentType = queryParam(exchange, "content_type");
-        String corpus      = queryParam(exchange, "corpus");
-        String owner       = queryParam(exchange, "owner");
-        String filePath    = queryParam(exchange, "file_path");
-        String sourceUri   = queryParam(exchange, "source_uri");
+        String corpus       = queryParam(exchange, "corpus");
+        String owner        = queryParam(exchange, "owner");
+        String filePath      = queryParam(exchange, "file_path");
+        String sourceUri     = queryParam(exchange, "source_uri");
 
         List<Map<String, Object>> docs;
         if (collection != null && !collection.isBlank()) {
-            docs = repo.documentsByCollection(tenant, collection);
+            docs = repo.documentsByCollection(tenant, collection, filterLimit, offset);
         } else if (contentType != null && !contentType.isBlank()) {
-            docs = repo.documentsByContentType(tenant, contentType);
+            docs = repo.documentsByContentType(tenant, contentType, filterLimit, offset);
         } else if (corpus != null && !corpus.isBlank()) {
-            docs = repo.documentsByCorpus(tenant, corpus);
+            docs = repo.documentsByCorpus(tenant, corpus, filterLimit, offset);
         } else if (owner != null && !owner.isBlank()
                    && filePath != null && !filePath.isBlank()) {
             // GH #1350 Fix B: owner+file_path must filter by BOTH. The owner-only
             // branch below ignored file_path and returned the full owner list,
             // driving the client's docs[0] mis-attribution (silent corruption).
-            docs = repo.documentsByOwnerAndFilePath(tenant, owner, filePath);
+            docs = repo.documentsByOwnerAndFilePath(tenant, owner, filePath, filterLimit, offset);
         } else if (owner != null && !owner.isBlank()) {
-            docs = repo.documentsByOwner(tenant, owner);
+            docs = repo.documentsByOwner(tenant, owner, filterLimit, offset);
         } else if (filePath != null && !filePath.isBlank()) {
-            docs = repo.documentsByFilePath(tenant, filePath);
+            docs = repo.documentsByFilePath(tenant, filePath, filterLimit, offset);
         } else if (sourceUri != null && !sourceUri.isBlank()) {
-            docs = repo.documentsBySourceUri(tenant, sourceUri);
+            docs = repo.documentsBySourceUri(tenant, sourceUri, filterLimit, offset);
         } else {
             docs = repo.listDocuments(tenant, limit, offset);
         }
@@ -429,9 +485,9 @@ public final class CatalogHandler implements HttpHandler {
             var doc = repo.getDocument(tenant, tumbler);
             docs = doc != null ? List.of(doc) : List.of();
         } else if (filePath != null && !filePath.isBlank()) {
-            docs = repo.documentsByFilePath(tenant, filePath);
+            docs = repo.documentsByFilePath(tenant, filePath, 0, 0);
         } else if (sourceUri != null && !sourceUri.isBlank()) {
-            docs = repo.documentsBySourceUri(tenant, sourceUri);
+            docs = repo.documentsBySourceUri(tenant, sourceUri, 0, 0);
         } else if (title != null && !title.isBlank()) {
             docs = repo.searchDocuments(tenant, title, null, 10);
         } else {
@@ -455,7 +511,20 @@ public final class CatalogHandler implements HttpHandler {
     private void handleLink(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        boolean created = repo.upsertLink(tenant, body);
+        boolean created;
+        try {
+            created = repo.upsertLink(tenant, body);
+        } catch (CatalogRepository.DanglingEndpointException e) {
+            // nexus-9ssih: a MACHINE-READABLE 400 — the auto-linker counts
+            // skipped_missing_endpoint off `code`, and must not confuse this
+            // with the generic malformed-body 400 the outer ladder produces.
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("error", e.getMessage());
+            payload.put("code", "dangling_endpoint");
+            payload.put("missing", e.missing());
+            HttpUtil.send(exchange, 400, MAPPER.writeValueAsString(payload));
+            return;
+        }
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"created\":" + created + "}");
     }
 
@@ -543,6 +612,13 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Request: {"seeds": [...], "link_types": [...], "direction": "both", "depth": 1}
      * Response: {"nodes": [...], "edges": [...]}
+     *
+     * <p>{@code seeds} capped at {@value #MAX_BATCH_DOC_IDS} (found during
+     * CatalogHandlerEnvelopeConformanceGateTest authorship): the BFS's first
+     * round uses the raw seeds list directly in a jOOQ {@code .in(...)} — the
+     * 500-node MAX_GRAPH_NODES cap in {@link CatalogRepository#graphBFS}
+     * bounds the REACHABLE set, not this initial IN-list, so an oversized
+     * seeds array reached the bind-parameter risk uncapped.
      */
     @SuppressWarnings("unchecked")
     private void handleTraverse(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -552,13 +628,30 @@ public final class CatalogHandler implements HttpHandler {
         List<String> seeds = rawSeeds instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        if (seeds.size() > MAX_BATCH_DOC_IDS) {
+            // NOTE for cap-sizing: the scoring callers of the batch reads
+            // (src/nexus/scoring.py chunk_counts_for_docs / links_from_batch)
+            // wrap these calls in a broad except and DEGRADE — they lose the
+            // scoring signal on a 400, they do not crash. That degrade-not-
+            // crash contract is load-bearing if a corpus="all" aggregation
+            // ever exceeds the cap; do not narrow their except arms without
+            // adding client-side paging first.
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many seeds (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         Object rawTypes = body.get("link_types");
         List<String> linkTypes = rawTypes instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
         String direction = (String) body.getOrDefault("direction", "both");
         int depth = body.get("depth") instanceof Number n ? n.intValue() : 1;
-        var result = repo.graphBFS(tenant, seeds, linkTypes, direction, depth);
+        // nexus-ybj1b: the client has always sent this; the server used to drop
+        // it on the floor, which broke the contract in BOTH directions — the
+        // default stopped excluding implements-heuristic (reinstating the 2:1
+        // flood for every service-mode user) and the opt-in became a no-op.
+        // ABSENT means false, which is the correct default: exclude.
+        boolean includeHeuristic = Boolean.TRUE.equals(body.get("include_heuristic"));
+        var result = repo.graphBFS(tenant, seeds, linkTypes, direction, depth, includeHeuristic);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
@@ -673,7 +766,16 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"collection query param required\"}"); return;
         }
         var chashes = repo.chashesForCollection(tenant, collection);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("chashes", new ArrayList<>(chashes))));
+        // nexus-ir6eh: the count is a TRUNCATION DEFENCE, not a convenience.
+        // The client classifies chunks absent from this list as orphans and the
+        // indexer GC deletes them, so a PARTIALLY-delivered list silently
+        // destroys live data. A fully-missing list is already guarded client-side
+        // (indexer manifest_empty_skipping_gc); a short one was not detectable at
+        // all. The client reconciles len(chashes) == count before any orphan
+        // classification and aborts on mismatch.
+        var list = new ArrayList<>(chashes);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("chashes", list, "count", list.size())));
     }
 
     /** POST /v1/catalog/manifest/docs_for_chashes */
@@ -685,8 +787,23 @@ public final class CatalogHandler implements HttpHandler {
         List<String> chashes = raw instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        // nexus-uu4b9: cap the IN-list well under PostgreSQL's 32767-parameter
+        // Bind limit (mirrors handleManifestGetMany's identical guard below) —
+        // this endpoint had NO cap, so an unbounded chash list went straight
+        // into a jOOQ IN toward that hard limit.
+        if (chashes.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many chashes (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var docs = repo.docsForChashes(tenant, chashes);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", docs)));
+        // nexus-ocf52: this list is the union guard for the superseded-vector
+        // sweep — a chash is hard-deleted from T3 iff no tumbler here
+        // references it, so a partially-delivered list silently destroys a
+        // live shared row. The client reconciles len(tumblers) == count before
+        // any delete decision (same contract as nexus-ir6eh's chashes/count
+        // in handleManifestChashes above).
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("tumblers", docs, "count", docs.size())));
     }
 
     /**
@@ -710,7 +827,7 @@ public final class CatalogHandler implements HttpHandler {
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
         if (docIds.isEmpty()) {
-            HttpUtil.send(exchange, 200, "{\"manifests\":{}}"); return;
+            HttpUtil.send(exchange, 200, "{\"manifests\":{},\"count\":0}"); return;
         }
         // nexus-7lm3q review (CR High-2 / critic Sig-1): cap the IN-list well
         // under PostgreSQL's 32767-parameter Bind limit. The sole production
@@ -722,7 +839,12 @@ public final class CatalogHandler implements HttpHandler {
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
         var manifests = repo.getManifestMany(tenant, docIds);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("manifests", manifests)));
+        // nexus-b9puj: same union-guard chain as nexus-ocf52 (handleDocsForChashes),
+        // one hop deeper — get_manifests fails loud on a page FAILURE (500) but
+        // cannot detect a silently truncated page. The count lets the client
+        // reconcile manifests.size() == count before trusting a page as complete.
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("manifests", manifests, "count", manifests.size())));
     }
 
     /**
@@ -964,7 +1086,116 @@ public final class CatalogHandler implements HttpHandler {
         if (name == null || supersededBy == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"name and superseded_by required\"}"); return;
         }
+        // nexus-g8z8n: the three preconditions the retired local implementation enforced
+        // and this route had none of. A bare UPDATE replies 200 {"updated":0} for every
+        // one of them, and the client discarded the count — so all three were SILENT.
+        // Guarded here rather than in the repo to match the sibling verb
+        // handleCollectionRename, which already carries its 404 (nexus-hz785) and 409
+        // (nexus-gaou3) the same way.
+        //
+        // Guard 0 — a collection cannot supersede itself. The result would be a row
+        // pointing at its own name: permanently excluded from collectionForTuple (which
+        // skips anything with superseded_by set) with nothing to redirect to. Its sibling
+        // handleCollectionRename refuses the identical old==new case for the same reason.
+        if (name.equals(supersededBy)) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "a collection cannot supersede itself: " + name) + "}"); return;
+        }
+        // Guard 1 — old_name must be registered. Superseding a name that does not exist
+        // is a typo on an explicit destructive-ish action; it must fail loud, not no-op.
+        Map<String, Object> oldRow = repo.getCollection(tenant, name);
+        if (oldRow == null) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        }
+        // Guard 3 — superseded_by must name a registered, LIVE collection. This used to
+        // be repo.collectionExists(tenant, supersededBy) — "a row exists, tombstone
+        // included" — but a RETIRED target is exactly a pointer nothing can usefully
+        // follow: supersede(X -> Y) where Y already has superseded_by = Z builds the
+        // two-hop unaudited chain guard 2 (below) refuses from the SOURCE side. Reading
+        // the row directly gives the same 404 for "unregistered" plus a distinct 409 for
+        // "registered but itself retired", naming the target's own superseded_by so the
+        // caller can follow the real chain instead (nexus-laa8j).
+        //
+        // nexus-v6za0's lesson applies here too: superseded_by alone cannot distinguish a
+        // RENAME tombstone (left empty, its children already re-homed by
+        // renameCollectionTxn step 3) from a SUPERSEDE tombstone (left fully populated —
+        // supersedeCollection is a pure UPDATE that never touches chunks). That
+        // distinction does not change the answer HERE: either shape is a target nothing
+        // should chain a fresh supersede onto, so both refuse identically with this same
+        // 409. (It matters only for handleCollectionRename's REVIVE decision above, which
+        // asks a different question — may an EMPTY tombstone be resurrected — not "may a
+        // new supersede point at this name".)
+        //
+        // Disposition of the handler's other collectionExists-family reads, so the next
+        // reader does not have to re-derive it (1232585d shipped this one silently, which
+        // is what produced this bead): the rename SOURCE guard a few lines below (nexus-
+        // c29vr) and the rename TARGET guard (nexus-cecqy/nexus-v6za0) already read
+        // getCollection()+superseded_by directly, not collectionExists; the cross_model
+        // converse guard (nexus-tnx48, keyed on !tgtLive) is the opposite polarity on
+        // purpose — it demands the target be LIVE — and is correct as written. This was
+        // the last remaining direct repo.collectionExists call in this handler.
+        Map<String, Object> targetRow = repo.getCollection(tenant, supersededBy);
+        if (targetRow == null) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "superseded_by names an unregistered collection: " + supersededBy) + "}"); return;
+        }
+        Object targetSupersededObj = targetRow.get("superseded_by");
+        String targetRetiredBy = targetSupersededObj instanceof String s ? s : "";
+        if (!targetRetiredBy.isEmpty()) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "superseded_by names a retired collection: " + supersededBy
+                    + " is itself superseded by " + targetRetiredBy
+                    + "; refusing to build an unaudited two-hop chain") + "}"); return;
+        }
+        // Guard 2 — refuse to CHAIN a second supersession. Re-asserting the SAME target
+        // is idempotent, not a chain: the canonical rename now tombstones X -> Y itself
+        // (nexus-cecqy) and its caller then issues supersede(X, Y), which must succeed.
+        // A DIFFERENT target would rewrite the supersession chain unaudited.
+        Object current = oldRow.get("superseded_by");
+        String currentBy = current instanceof String s ? s : "";
+        if (!currentBy.isEmpty()) {
+            if (!currentBy.equals(supersededBy)) {
+                HttpUtil.send(exchange, 409,
+                    "{\"error\":" + MAPPER.writeValueAsString(
+                        "collection " + name + " is already superseded by " + currentBy
+                        + "; refusing to chain a second supersede to " + supersededBy) + "}"); return;
+            }
+            // Same target: the desired state already holds. Reply as though one row was
+            // marked (the caller's contract is "is it superseded to Y", and its CLI gates
+            // its CollectionSuperseded message on a non-zero count) but do NOT re-run the
+            // UPDATE — re-stamping superseded_at would move the supersession's recorded
+            // instant every time the operation is retried.
+            HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
+        }
         int updated = repo.supersedeCollection(tenant, name, supersededBy, supersededAt != null ? supersededAt : "");
+        if (updated == 0) {
+            // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
+            // means the row we just read has already changed. That precondition rules out
+            // exactly ONE cause — a concurrent supersede to a DIFFERENT target — but it is
+            // not the only way to get zero. POST /collections/delete hard-deletes the
+            // registry row, and a concurrent delete between guard 1's read and this UPDATE
+            // also matches nothing, where the correct answer is 404 (the row is gone), not
+            // a 409 naming a supersession that never happened (nexus-0svvu). Asserting a
+            // specific cause the code did not observe is the same honesty failure these
+            // comments criticise elsewhere — so ask, rather than assert.
+            Map<String, Object> recheck = repo.getCollection(tenant, name);
+            if (recheck == null) {
+                HttpUtil.send(exchange, 404,
+                    "{\"error\":" + MAPPER.writeValueAsString(
+                        "collection not found: " + name) + "}"); return;
+            }
+            Object recheckSuperseded = recheck.get("superseded_by");
+            String actualSupersededBy = recheckSuperseded instanceof String s ? s : "";
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "collection " + name + " was superseded to " + actualSupersededBy
+                    + " concurrently; refusing to chain a second supersede to "
+                    + supersededBy) + "}"); return;
+        }
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }
 
@@ -977,25 +1208,150 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // Guard 0 (nexus-mxzxs) — old == new. Mirrors handleCollectionSupersede's guard 0,
+        // whose comment already claimed this verb refused the case. That was only ever
+        // INCIDENTALLY true: collectionExists(newName) was true when newName == oldName, so
+        // the collision guard caught it. Widening that guard to liveCollectionExists
+        // (nexus-u4e20) removed the cover for tombstones, and X->X onto a tombstoned X would
+        // revive it in step 1 and then have step 3 stamp superseded_by = X ON X — the
+        // self-superseded row guard 0 calls fatal.
+        if (oldName.equals(newName)) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "a collection cannot be renamed to itself: " + oldName) + "}"); return;
+        }
         // nexus-hz785: a rename of an unregistered collection used to return 200 with all-zero
         // counts (insert-select copies 0 rows, every child UPDATE touches 0) — a silent no-op on
         // a typo. Fail loud with a legible 404 instead.
-        if (!repo.collectionExists(tenant, oldName)) {
+        //
+        // ONE tri-state read per name (nexus-u4e20 review): absent / retired / live. The
+        // separate collectionExists + liveCollectionExists calls this replaces were two
+        // connections and two snapshots that could disagree under concurrency, and reading
+        // superseded_by directly is what makes the identity check below possible at all.
+        Map<String, Object> srcRow = repo.getCollection(tenant, oldName);
+        if (srcRow == null) {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + oldName) + "}"); return;
+        }
+        // nexus-c29vr — the SOURCE must be live. renameCollectionTxn step 1's INSERT copies
+        // superseded_by/at from the source row, so renaming a RETIRED X onto a free name Y
+        // gives Y superseded_by = X's target: born dead, permanently invisible to
+        // collectionForTuple, with all of X's data re-homed onto it. The repo-side select-list
+        // now clears those columns explicitly, but the request is still meaningless — refuse
+        // it here and name the remedy rather than silently reviving a retired collection under
+        // a new name. (The engine must not depend on which CLI verb the operator typed:
+        // rename_collection_cmd checks superseded_by, rename_collection_data_plane — the
+        // unattended indexer path — checks only T3 chunk presence.)
+        //
+        // Scoped to !crossModel (review of 351874c5): the rationale above is a CANONICAL-branch
+        // fact. The cross_model COPY branch returns after two UPDATEs — it never runs step 1,
+        // never inserts a registry row, never touches superseded_by — so a retired source is
+        // harmless there, and repointing a dead collection's documents onto its live successor
+        // is exactly the repair the RDR-162 flow exists for. Blocking it would degrade
+        // remap_collection_references to a warn-and-continue that leaves catalog_documents
+        // pointing at the dead source.
+        boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
+        String srcSuperseded = (String) srcRow.get("superseded_by");
+        if (!crossModel && srcSuperseded != null && !srcSuperseded.isEmpty()) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString("source collection " + oldName
+                    + " is retired (superseded by " + srcSuperseded + "); renaming it would carry the "
+                    + "supersession onto the new name. Rename " + srcSuperseded + " instead, or clear the "
+                    + "supersession first.") + "}"); return;
         }
         // nexus-gaou3: if new_name is ALREADY a registered collection, renameCollection silently
         // takes the RDR-162 cross-model COPY branch (repoints catalog_documents ONLY; chunks/
         // taxonomy/aspects are NOT moved). That is correct ONLY for the deliberate cross-model
         // migrate. A plain rename onto an existing collection is a collision: fail loud with 409
         // unless the caller opts into the COPY branch via cross_model:true.
-        boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
-        if (!crossModel && repo.collectionExists(tenant, newName)) {
+        Map<String, Object> tgtRow = repo.getCollection(tenant, newName);
+        String tgtSuperseded = tgtRow == null ? null : (String) tgtRow.get("superseded_by");
+        boolean tgtRetired = tgtRow != null && tgtSuperseded != null && !tgtSuperseded.isEmpty();
+        boolean tgtLive = tgtRow != null && !tgtRetired;
+        // nexus-cecqy: LIVE, not merely present. A rename now retires the old name as a
+        // superseded tombstone, so "a row exists at newName" stopped meaning "the name is
+        // taken". This guard used collectionExists (any row) while renameCollection selects
+        // its branch on a LIVE target, and the disagreement made undoing a rename
+        // impossible over HTTP: rename X->Y, then rename Y->X, and the tombstone left at X
+        // by the first call 409'd the second.
+        if (!crossModel && tgtLive) {
             HttpUtil.send(exchange, 409,
                 "{\"error\":" + MAPPER.writeValueAsString("target collection already exists: " + newName
                     + " (pass cross_model:true only for a deliberate cross-model repoint)") + "}"); return;
         }
-        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
+        // nexus-v6za0 — NOT every tombstone is empty, and only ONE kind may be revived.
+        // A tombstone has two provenances:
+        //   (a) renameCollectionTxn step 3 leaves an EMPTY one (children re-homed first).
+        //       superseded_by names the collection they moved to, so on the undo it equals
+        //       oldName. This is the round trip nexus-u4e20 exists to restore.
+        //   (b) POST /collections/supersede leaves a FULLY POPULATED one — supersedeCollection
+        //       is a pure UPDATE that never touches chunks, and a model migration keeps all
+        //       its data until an explicit later purge.
+        // Reviving (b) runs the canonical FULL-REHOME: step 1's upsert overwrites the target's
+        // embedding_model/owner/content_type with the source's and clears its superseded_by
+        // (erasing the chain unaudited), then step 2 re-homes the source's chunks ON TOP of the
+        // target's existing rows — two collections merged under one name, across two vector
+        // spaces. Gate the revive on the tombstone's IDENTITY, not merely its non-liveness.
+        if (!crossModel && tgtRetired) {
+            // TWO conditions, and the EMPTINESS one is the load-bearing half.
+            //
+            // Identity alone was the 351874c5 fix and it was WRONG: superseded_by is written
+            // identically by renameCollectionTxn step 3 and by supersedeCollection, so it
+            // discriminates DIRECTION, not PROVENANCE. supersede(X->Y) then rename(Y->X)
+            // identity-matches, and X is fully populated because supersede is a pure UPDATE —
+            // the canonical branch then merges two collections. Proven with a probe: expected
+            // 409, got 200. That is the same class as the liveness proxy it replaced.
+            //
+            // So ask the data. Emptiness is what the canonical branch actually requires, since
+            // step 1 revives the row and step 2 re-homes the source's children on top of
+            // whatever is there. Identity is kept as the second condition because reviving a
+            // tombstone that points somewhere ELSE would erase an audit pointer even when no
+            // data is at risk — the unaudited chain rewrite handleCollectionSupersede guard 2
+            // refuses. Both must hold; the message names which one failed.
+            boolean identityOk = oldName.equals(tgtSuperseded);
+            // nexus-34wrg option (c): name WHICH table blocked so an operator can tell an
+            // audit breadcrumb (relevance_log/search_telemetry/hook_failures/gc_audit) from
+            // real data, rather than being told to "purge" a collection that already holds
+            // nothing.
+            var blocker = repo.blockingTable(tenant, newName);
+            boolean empty = blocker.isEmpty();
+            if (!identityOk || !empty) {
+                HttpUtil.send(exchange, 409,
+                    "{\"error\":" + MAPPER.writeValueAsString("target collection " + newName
+                        + " is retired (superseded by " + tgtSuperseded + ") and cannot be revived by "
+                        + "this rename: "
+                        + (!empty
+                            ? "it still holds " + blocker.get().describe() + ", so renaming onto it "
+                              + "would merge two collections. Purge or restore it first."
+                            : "it was retired in favour of " + tgtSuperseded + ", not of " + oldName
+                              + ", so reviving it here would erase that supersession unaudited. "
+                              + "Unwind the rename chain one hop at a time.")) + "}"); return;
+            }
+        }
+        // The converse mismatch (nexus-tnx48). cross_model:true means the RDR-162 COPY branch,
+        // whose whole premise is that the target already exists AND IS LIVE (the ETL just
+        // populated it) so only catalog_documents needs repointing. Any NON-LIVE target —
+        // absent or retired — makes renameCollection take the canonical FULL-REHOME branch
+        // instead, moving chunks, taxonomy and aspects that the flag promises not to touch.
+        // Fail loud rather than silently do the more destructive thing under a flag that says
+        // otherwise. (Guarding on !tgtLive, not on "retired AND present": the absent case took
+        // the same destructive branch and was not covered.)
+        if (crossModel && !tgtLive) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString("target collection " + newName
+                    + (tgtRetired ? " is retired (superseded)" : " does not exist")
+                    + ", not a live cross-model target. cross_model:true repoints documents onto an "
+                    + "existing LIVE collection; it cannot revive a tombstone or create a collection. "
+                    + "Drop cross_model for a plain rename.") + "}"); return;
+        }
+        // nexus-2sovp: thread OUR observation of the target's superseded_by into the
+        // transaction's additive identity belt, rather than let the txn re-derive it —
+        // "the caller's observation is what's verified". tgtSuperseded is null when the
+        // target was absent at this read (nothing to verify) and the txn's belt is inert
+        // whenever the target turns out live or absent anyway; it only compares when the
+        // target is STILL a non-live tombstone at commit time, same as this handler's own
+        // identityOk/empty gate above.
+        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 
@@ -1261,6 +1617,21 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs)));
     }
 
+    /**
+     * GET /v1/catalog/links/orphaned — links with an endpoint that resolves to no
+     * live document (nexus-ysrwi, GH #1419 issue 7).
+     *
+     * <p>Mirrors {@link #handleDocsOrphaned} in shape. Each row carries {@code side}
+     * ("from" / "to" / "both") so the caller can distinguish a deleted target from
+     * a deleted source without a follow-up query.
+     */
+    private void handleLinksOrphaned(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var links = repo.orphanedLinks(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("links", links, "count", links.size())));
+    }
+
     /** GET /v1/catalog/docs/absolute-paths — documents whose file_path starts with '/'. */
     private void handleDocsAbsolutePaths(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1301,6 +1672,12 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Request: {"doc_ids": ["1.1.1", "1.1.2", ...]}
      * Response: {"1.1.1": 42, "1.1.2": 17}  (missing docs absent)
+     *
+     * <p>Capped at {@value #MAX_BATCH_DOC_IDS} (found during
+     * CatalogHandlerEnvelopeConformanceGateTest authorship: this batch
+     * endpoint's doc_ids flowed straight into a jOOQ {@code .in(...)} with no
+     * size guard, unlike every sibling batch endpoint — same bind-limit
+     * rationale as handleManifestGetMany/handleResolveMany).
      */
     @SuppressWarnings("unchecked")
     private void handleDocChunkCounts(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1310,6 +1687,10 @@ public final class CatalogHandler implements HttpHandler {
         List<String> docIds = rawIds instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var counts = repo.chunkCountsForDocs(tenant, docIds);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));
     }
@@ -1319,6 +1700,10 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Request: {"tumblers": ["1.1.1", "1.1.2", ...]}
      * Response: {"1.1.1": [{"from_tumbler": "1.1.1", "link_type": "cites"}], ...}
+     *
+     * <p>Capped at {@value #MAX_BATCH_DOC_IDS} (found during
+     * CatalogHandlerEnvelopeConformanceGateTest authorship: same missing-guard
+     * shape as handleDocChunkCounts above).
      */
     @SuppressWarnings("unchecked")
     private void handleLinksFromBatch(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1328,6 +1713,10 @@ public final class CatalogHandler implements HttpHandler {
         List<String> tumblers = rawT instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        if (tumblers.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many tumblers (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var links = repo.linksFromBatch(tenant, tumblers);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
     }
@@ -1417,6 +1806,38 @@ public final class CatalogHandler implements HttpHandler {
         }
     }
 
+    /**
+     * POST /v1/catalog/gc_audit/record — append ONE destructive-T3-op audit row
+     * (nexus-jqvzk).
+     *
+     * <p>Body: {@code {operation, collection?, actor?, dry_run?, chashes?[],
+     * details?{}}}. Response: {@code {"id": <bigint>}}. A missing/blank
+     * {@code operation} is a 400 (the outer IllegalArgumentException ladder).
+     */
+    private void handleGcAuditRecord(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        long id = repo.recordGcAudit(tenant, body);
+        HttpUtil.send(exchange, 200, "{\"id\":" + id + "}");
+    }
+
+    /**
+     * GET /v1/catalog/gc_audit/list?collection=&amp;operation=&amp;limit=&amp;offset=
+     * — the audit trail, newest first (nexus-jqvzk).
+     *
+     * <p>Response: {@code {"entries": [{id, operation, collection, actor,
+     * dry_run, chash_count, chashes, details, created_at}, ...]}}.
+     */
+    private void handleGcAuditList(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var entries = repo.listGcAudit(tenant,
+            queryParam(exchange, "collection"),
+            queryParam(exchange, "operation"),
+            intParam(exchange, "limit", 100),
+            intParam(exchange, "offset", 0));
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("entries", entries)));
+    }
+
     private String queryParam(HttpExchange exchange, String key) {
         String query = exchange.getRequestURI().getRawQuery();
         if (query == null) return null;
@@ -1433,6 +1854,17 @@ public final class CatalogHandler implements HttpHandler {
         String v = queryParam(exchange, key);
         if (v == null || v.isBlank()) return def;
         try { return Integer.parseInt(v); } catch (NumberFormatException e) { return def; }
+    }
+
+    /**
+     * Boolean query param. Absent/blank yields *def*, which every caller sets
+     * to the PRE-EXISTING behaviour so an older client that sends no param is
+     * unaffected (nexus-ekaxn: {@code follow_alias}).
+     */
+    private boolean boolParam(HttpExchange exchange, String key, boolean def) {
+        String v = queryParam(exchange, key);
+        if (v == null || v.isBlank()) return def;
+        return "1".equals(v) || "true".equalsIgnoreCase(v) || "yes".equalsIgnoreCase(v);
     }
 
     /**

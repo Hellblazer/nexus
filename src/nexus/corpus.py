@@ -410,6 +410,27 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         return promoted
     try:
         if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
+            # nexus-9n485 observability: collection_exists() alone can't
+            # tell "promoted never had any chunks" from "every chunk under
+            # promoted belongs to a trashed document" (HttpVectorClient
+            # reads the tombstone-filtered stats view). This resolver
+            # already WANTS live semantics here — falling through to a
+            # candidate with actual queryable content is correct, not a
+            # bug — but the fallthrough used to be silent. Name the
+            # skipped candidate so an operator can tell why.
+            from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415 — deferred to avoid a module-load-time import cycle (nexus.db.collection_state)
+
+            if probe_collection_state(t3, promoted) is CollectionState.TOMBSTONED:
+                _log.debug(
+                    "t3_collection_name_promoted_candidate_tombstoned",
+                    promoted=promoted, user_arg=user_arg,
+                    message=(
+                        "promoted target has physical chunk rows but every "
+                        "one belongs to a trashed document; falling through "
+                        "to the next candidate rather than treating it as "
+                        "queryable."
+                    ),
+                )
             if t3.collection_exists(user_arg):  # type: ignore[attr-defined]
                 return user_arg
             # Bare-prefix legacy fallback (#535 / nexus-6mr0): when the

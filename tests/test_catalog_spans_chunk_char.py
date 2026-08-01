@@ -15,11 +15,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
+
+# nexus-aqbrk: this pairs a LOCAL T3Database with the catalog's
+# document_chunks manifest — span resolution joins the two. Pointing the
+# catalog half at the service while the T3 half stays in-process is the
+# incoherent split that produced the empty-base_url failures in
+# test_catalog_e2e; both halves stay local together.
 
 
 @pytest.fixture()
@@ -42,10 +48,23 @@ def t3_db() -> T3Database:
 
 
 @pytest.fixture()
-def catalog(tmp_path: Path) -> Catalog:
+def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
+    """Seed through whichever catalog is live (nexus-i711w C-store).
+
+    Was ``Catalog(catalog_dir, ...)``, a direct local handle. In service mode
+    ``Catalog`` opens the local ``.catalog.db`` READ-ONLY on purpose — it is a
+    frozen migration source (RDR-176 P1 Gap 2) — so the seeding writes here
+    died on "attempt to write a readonly database". The subject of these tests
+    is span resolution through the manifest, not the substrate, so route the
+    seeding at the active writer and let the body stand.
+
+    nexus-i711w terminal deletion: the ``Catalog.init`` seeding died with the
+    local catalog; the factories are service-only, so the live per-test tenant
+    needs no init.
+    """
     catalog_dir = tmp_path / "catalog"
-    Catalog.init(catalog_dir)
-    return Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    return ActiveCatalog()
 
 
 def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:

@@ -580,8 +580,8 @@ def check_local_path_writable() -> None:
     Raises:
         CredentialsMissingError: When the local path cannot be written to.
     """
-    from nexus.config import _default_local_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    local_path = _default_local_path()
+    from nexus.stranded_install import legacy_chroma_dir  # noqa: PLC0415 — deferred import; legacy leg, dies at RDR-155 P3
+    local_path = legacy_chroma_dir()
     try:
         local_path.mkdir(parents=True, exist_ok=True)
         test_file = local_path / ".write_test"
@@ -684,12 +684,10 @@ def resolve_index_concurrency() -> int:
 
     def _backend_default() -> int:
         from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — deferred to avoid circular import (db.http_vector_client)
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
-        if (
-            is_vector_service_mode()
-            and storage_backend_for("catalog") == StorageBackend.SERVICE
-        ):
+        # nexus-i711w: the catalog conjunct collapsed — the catalog is
+        # service-backed in every mode.
+        if is_vector_service_mode():
             return 2
         return 1
 

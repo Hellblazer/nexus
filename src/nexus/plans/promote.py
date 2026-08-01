@@ -10,6 +10,15 @@ that surfaces the verdict to stdout and — when the gate passes and
 Shipped defaults:
   * ``use_count >= 3`` — three actual runs.
   * ``success_count / (success_count + failure_count) >= 0.80`` —
+    NOTE (nexus-yg49g, 2026-07-25): these counters used to be an EXCEPTION
+    counter, not an outcome counter — ``nx_answer`` recorded success on any run
+    that did not raise, including one whose retrieval steps returned zero
+    evidence. A plan could therefore sit at 100% success and 0% usefulness, and
+    this gate would happily promote it. Since that fix a zero-evidence run
+    increments ``failure_count``, so this ratio means what it reads as. Counters
+    recorded BEFORE that date still carry the old semantics — plan_etl copies
+    them verbatim through migration — so a high rate on an old plan is not
+    evidence of usefulness.
     eighty percent success rate.
   * description clarity — ``query`` is non-empty and ≥ 20 chars.
 
@@ -23,7 +32,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from nexus.db.t2.plan_library import PlanLibrary
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only (PEP 563 lazy): the runtime argument is whatever
+    # the caller passes — production passes HttpPlanLibrary, the only
+    # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
+    # the SQLite PlanLibrary.
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
 
 __all__ = ["GateVerdict", "evaluate_gates", "DEFAULT_MIN_USE_COUNT",
            "DEFAULT_MIN_SUCCESS_RATE", "DEFAULT_MIN_DESCRIPTION_CHARS"]
@@ -37,7 +53,7 @@ DEFAULT_MIN_DESCRIPTION_CHARS = 20
 class GateVerdict:
     """Result of evaluating promotion gates against a plan.
 
-    ``plan`` is the raw row dict (from :meth:`PlanLibrary.get_plan`)
+    ``plan`` is the raw row dict (from :meth:`HttpPlanLibrary.get_plan`)
     when the plan exists, ``None`` otherwise.
     """
     passed: bool
@@ -46,7 +62,7 @@ class GateVerdict:
 
 
 def evaluate_gates(
-    library: PlanLibrary,
+    library: HttpPlanLibrary,
     plan_id: int,
     *,
     min_use_count: int = DEFAULT_MIN_USE_COUNT,
@@ -96,6 +112,6 @@ def evaluate_gates(
         )
 
     # Copy the row dict so mutations on the verdict don't reach back
-    # into PlanLibrary's returned row (``frozen=True`` protects the
+    # into HttpPlanLibrary's returned row (``frozen=True`` protects the
     # reference, not the object it points to).
     return GateVerdict(passed=not reasons, reasons=reasons, plan=dict(plan))

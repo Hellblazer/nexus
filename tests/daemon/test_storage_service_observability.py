@@ -35,7 +35,6 @@ import structlog
 from click.testing import CliRunner
 
 import nexus.daemon.storage_service_daemon as ssd
-import nexus.daemon.t3_daemon as t3d
 from nexus.cli import main
 
 
@@ -206,60 +205,6 @@ class TestServiceExitCodeLogged:
         assert kw.get("pid") == 777
 
 
-class TestChromaExitCodeLogged:
-    def test_t3_heartbeat_logs_chroma_exit_with_returncode(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        rec = _RecordingLog()
-        monkeypatch.setattr(t3d, "_log", rec)
-        sup = t3d.T3Supervisor(
-            config_dir=config_dir, local_path=config_dir / "chroma",
-        )
-        sup._proc = _FakeProc(pid=888, returncode=9)
-        sup._supervisor = object()
-
-        assert sup.heartbeat_once() is False
-        kw = rec.kwargs_for("t3_chroma_exit_detected")
-        assert kw.get("returncode") == 9
-        assert kw.get("pid") == 888
-
-
-# ---------------------------------------------------------------------------
-# 2 (t3 mirror): chroma child stdout/stderr go to a log file
-# ---------------------------------------------------------------------------
-
-
-class TestChromaChildLogging:
-    def test_chroma_stdout_routed_to_log_file_not_devnull(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        captured: dict[str, Any] = {}
-
-        def _fake_popen(argv, **kwargs):
-            captured["argv"] = argv
-            captured.update(kwargs)
-            return _FakeProc()
-
-        monkeypatch.setattr(t3d.subprocess, "Popen", _fake_popen)
-        monkeypatch.setattr(t3d, "_find_chroma", lambda: "/usr/bin/true")
-        monkeypatch.setattr(t3d, "_wait_for_ready", lambda *a, **k: None)
-
-        sup = t3d.T3Supervisor(
-            config_dir=config_dir, local_path=config_dir / "chroma",
-        )
-        sup._spawn_chroma()
-
-        assert captured["stdout"] is not subprocess.DEVNULL
-        name = Path(getattr(captured["stdout"], "name"))
-        assert name == config_dir / "logs" / "t3_chroma.log"
-        assert captured["stderr"] is captured["stdout"]
-
-
-# ---------------------------------------------------------------------------
-# 1: supervisor entry points configure file logging + breadcrumbs
-# ---------------------------------------------------------------------------
-
-
 class _FakeStorageSupervisor:
     """Stands in for StorageServiceSupervisor inside run_storage_supervisor."""
 
@@ -361,51 +306,6 @@ class TestSupervisorLifecycleLog:
         text = (config_dir / "logs" / "storage_service.log").read_text()
         assert "storage_service_supervisor_crashed" in text
         assert "boom at startup" in text
-
-
-class _FakeT3Supervisor:
-    instances: list["_FakeT3Supervisor"] = []
-    owns_process = True  # models the real spawn path, not the lease short-circuit
-
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
-        type(self).instances.append(self)
-
-    def start(self) -> None:
-        pass
-
-    def heartbeat_once(self) -> bool:
-        return True
-
-    def stop(self) -> None:
-        pass
-
-
-class TestT3SupervisorLifecycleLog:
-    def test_run_t3_supervisor_writes_breadcrumbs(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _FakeT3Supervisor.instances = []
-        monkeypatch.setattr(t3d, "T3Supervisor", _FakeT3Supervisor)
-        monkeypatch.setattr(t3d, "DEFAULT_HEARTBEAT_INTERVAL", 0.01)
-        timer = _sigterm_after(0.15)
-        try:
-            code = t3d.run_t3_supervisor(
-                config_dir=config_dir, local_path=config_dir / "chroma",
-            )
-        finally:
-            timer.cancel()
-        assert code == 0
-        log_path = config_dir / "logs" / "t3_daemon.log"
-        assert log_path.exists()
-        text = log_path.read_text()
-        assert "t3_supervisor_started" in text
-        assert "t3_supervisor_exit" in text
-
-
-# ---------------------------------------------------------------------------
-# 4: the detached spawn captures pre-configure_logging crashes
-# ---------------------------------------------------------------------------
 
 
 class _FakeLeaseRecord:

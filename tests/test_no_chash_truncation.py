@@ -38,20 +38,13 @@ _ALLOWLIST: tuple[tuple[str, str], ...] = (
         "chunk_identity.py",
         "THE canonical width boundary — owns the legacy derivation and its history",
     ),
-    (
-        "catalog/synthesizer.py",
-        "deliberate dual-width cache tolerance: tries full width first, falls back "
-        "to the legacy 32-prefix for pre-rekey rows (read-only)",
-    ),
-    (
-        "db/t2/chash_index.py",
-        "SQLite-era migration-source debt (RDR-186): its consumers operate on "
-        "same-era truncated ids; frozen, never a destination",
-    ),
-    (
-        "db/migrations.py",
-        "SQLite-era migration-source debt (RDR-186): frozen legacy schema history",
-    ),
+    # catalog/synthesizer.py entry removed (nexus-i711w terminal deletion):
+    # the file died with the local catalog. DOWNWARD-only edit.
+    # db/t2/chash_index.py entry removed (nexus-i711w Stage 2 sub-stage A):
+    # the file died with the SQLite chash index. DOWNWARD-only edit.
+    # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
+    # the file is DELETED with its frozen legacy schema history.
+    # DOWNWARD-only edit.
 )
 
 _COMMENT_RE = re.compile(r"#[^\n]*")

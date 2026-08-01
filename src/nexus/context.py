@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 if TYPE_CHECKING:
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger(__name__)
 
@@ -100,7 +100,7 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
 
 
 def generate_context_l1(
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
     *,
     output_path: Path | None = None,
     repo_path: Path | None = None,
@@ -119,33 +119,21 @@ def generate_context_l1(
     output_path = output_path or _context_path_for_repo(repo_path)
     allowed = _repo_collections(repo_path)
 
-    # Query root topics only (excludes children from split).
-    # nexus-azss4: the raw-conn read only exists on a SQLite CatalogTaxonomy;
-    # an HttpTaxonomyStore (service mode — the default since migration) has
-    # no .conn/._lock, and the resulting AttributeError was swallowed as
-    # "non-fatal" at both refresh call sites — every service-mode box's
-    # SessionStart Knowledge Map went permanently stale. Service handles use
-    # the public root-topics API instead.
-    if hasattr(taxonomy, "_lock") and hasattr(taxonomy, "conn"):
-        with taxonomy._lock:
-            rows = taxonomy.conn.execute(
-                "SELECT collection, label, doc_count FROM topics "
-                "WHERE parent_id IS NULL "
-                "ORDER BY doc_count DESC"
-            ).fetchall()
-    else:
-        topics = taxonomy.get_topics(parent_id=None)
-        rows = [
-            (
-                str(t.get("collection") or ""),
-                str(t.get("label") or ""),
-                int(t.get("doc_count") or 0),
-            )
-            for t in topics
-        ]
-        # Top-N selection below depends on doc_count DESC — sort client-side
-        # rather than trusting wire ordering.
-        rows.sort(key=lambda r: r[2], reverse=True)
+    # Query root topics only (excludes children from split) via the public
+    # API (nexus-azss4 heritage; the raw-conn arm this branched to died with
+    # the SQLite taxonomy — RDR-158 P4 final-review sweep).
+    topics = taxonomy.get_topics(parent_id=None)
+    rows = [
+        (
+            str(t.get("collection") or ""),
+            str(t.get("label") or ""),
+            int(t.get("doc_count") or 0),
+        )
+        for t in topics
+    ]
+    # Top-N selection below depends on doc_count DESC — sort client-side
+    # rather than trusting wire ordering.
+    rows.sort(key=lambda r: r[2], reverse=True)
 
     if not rows:
         return None
@@ -224,7 +212,7 @@ def refresh_context_l1(
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     path = db_path or default_db_path()
-    with T2Database(path) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(path) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         return generate_context_l1(
             db.taxonomy, output_path=output_path, repo_path=repo_path,
         )

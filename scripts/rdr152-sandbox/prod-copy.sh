@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # RDR-152 sandbox harness — prod-copy.sh
 # Seeds the sandbox READ-ONLY from prod. Prod is NEVER written.
-# - Copies prod Chroma data directory (cp -R, no modification to source).
 # - ETL-imports all T2 SQLite stores into sandbox Postgres via nx storage migrate.
 # - Verifies sandbox counts == prod counts per store.
 # - Asserts prod file mtimes UNCHANGED after the copy.
@@ -38,7 +37,6 @@ source "${SANDBOX_ENV}"
 
 # ── RECORD PROD MTIMES BEFORE COPY (for proof-of-read-only) ──────────────────
 PROD_MEMORY_DB="${PROD_CONFIG}/memory.db"
-PROD_CHROMA_DIR="${PROD_CONFIG}/chroma"
 PROD_CATALOG_DIR="${PROD_CONFIG}/catalog"
 
 # Helper: portable mtime (macOS stat -f "%m", Linux stat -c "%Y").
@@ -53,16 +51,6 @@ if [[ -f "${PROD_MEMORY_DB}" ]]; then
     # WAL-mode sidecars: capture even if absent (empty string = no sidecar = OK).
     [[ -f "${PROD_MEMORY_DB}-shm" ]] && MTIME_BEFORE_MEMORY_SHM="$(_mtime "${PROD_MEMORY_DB}-shm")" || MTIME_BEFORE_MEMORY_SHM=""
     [[ -f "${PROD_MEMORY_DB}-wal" ]] && MTIME_BEFORE_MEMORY_WAL="$(_mtime "${PROD_MEMORY_DB}-wal")" || MTIME_BEFORE_MEMORY_WAL=""
-fi
-MTIME_BEFORE_CHROMA_SQLITE=""
-CHROMA_SQLITE=""
-if [[ -d "${PROD_CHROMA_DIR}" ]]; then
-    CHROMA_SQLITE="${PROD_CHROMA_DIR}/chroma.sqlite3"
-    if [[ -f "${CHROMA_SQLITE}" ]]; then
-        MTIME_BEFORE_CHROMA_SQLITE="$(_mtime "${CHROMA_SQLITE}")"
-    else
-        CHROMA_SQLITE=""
-    fi
 fi
 
 # ── COUNT PROD ROWS (read-only, --readonly flag prevents WAL -shm update) ──────
@@ -120,38 +108,6 @@ if [[ -f "${PROD_MEMORY_DB}" ]]; then
 else
     echo "[prod-copy] WARNING: ${PROD_MEMORY_DB} not found — skipping T2 ETL"
     PROD_MEMORY_DB=""
-fi
-
-# ── COUNT PROD CHROMA COLLECTIONS ─────────────────────────────────────────────
-if [[ -n "${CHROMA_SQLITE}" && -f "${CHROMA_SQLITE}" ]]; then
-    PROD_CHROMA_CHUNKS="$(sqlite3 --readonly "${CHROMA_SQLITE}" "SELECT COUNT(*) FROM embeddings;" 2>/dev/null || echo 0)"
-    PROD_CHROMA_COLLECTIONS="$(sqlite3 --readonly "${CHROMA_SQLITE}" "SELECT COUNT(*) FROM collections;" 2>/dev/null || echo 0)"
-    echo "[prod-copy] Prod Chroma: ${PROD_CHROMA_COLLECTIONS} collections, ${PROD_CHROMA_CHUNKS} embeddings"
-fi
-
-# ── COPY PROD CHROMA → SANDBOX (read-only) ────────────────────────────────────
-SANDBOX_CHROMA="${NX_CHROMA_PATH}"
-if [[ -d "${PROD_CHROMA_DIR}" ]]; then
-    echo "[prod-copy] Copying Chroma data: ${PROD_CHROMA_DIR} → ${SANDBOX_CHROMA}"
-    mkdir -p "$(dirname "${SANDBOX_CHROMA}")"
-    # Use cp -R which does not modify the source.
-    # If sandbox chroma dir exists, wipe it first for idempotency.
-    # SAFETY: compare realpath, not string, so a symlink pointing at prod Chroma
-    # fails the check rather than silently deleting prod Chroma via rm -rf.
-    if [[ -d "${SANDBOX_CHROMA}" ]]; then
-        SANDBOX_CHROMA_REAL="$(realpath -m "${SANDBOX_CHROMA}" 2>/dev/null || realpath "${SANDBOX_CHROMA}" 2>/dev/null || echo "${SANDBOX_CHROMA}")"
-        PROD_CHROMA_REAL="$(realpath -m "${PROD_CHROMA_DIR}" 2>/dev/null || realpath "${PROD_CHROMA_DIR}" 2>/dev/null || echo "${PROD_CHROMA_DIR}")"
-        if [[ "${SANDBOX_CHROMA_REAL}" == "${PROD_CHROMA_REAL}" || "${SANDBOX_CHROMA_REAL}" == "${PROD_CHROMA_REAL}/"* ]]; then
-            echo "[prod-copy] ABORT: sandbox Chroma '${SANDBOX_CHROMA_REAL}' resolves to prod Chroma '${PROD_CHROMA_REAL}'." >&2
-            echo "[prod-copy]        Refusing to rm -rf." >&2
-            exit 1
-        fi
-        rm -rf "${SANDBOX_CHROMA}"
-    fi
-    cp -R "${PROD_CHROMA_DIR}" "${SANDBOX_CHROMA}"
-    echo "[prod-copy] Chroma copy complete"
-else
-    echo "[prod-copy] WARNING: ${PROD_CHROMA_DIR} not found — skipping Chroma copy"
 fi
 
 # ── ETL: T2 STORES → SANDBOX POSTGRES ─────────────────────────────────────────
@@ -366,19 +322,6 @@ verify_pg_count_at_least "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEME
 # exact-timestamp dup would re-fail against raw). at_least tolerates live writes. nexus-tzosw.
 verify_pg_count_at_least "hook_failures"      "hook_failures"      "${PROD_TELEMETRY_HOOKS_DISTINCT:-0}"
 
-# Verify Chroma copy (sandbox copy should be bit-exact: same embedding count).
-if [[ -n "${CHROMA_SQLITE}" && -f "${CHROMA_SQLITE}" && -f "${SANDBOX_CHROMA}/chroma.sqlite3" ]]; then
-    SBX_CHROMA_CHUNKS="$(sqlite3 "${SANDBOX_CHROMA}/chroma.sqlite3" "SELECT COUNT(*) FROM embeddings;" 2>/dev/null || echo 0)"
-    SBX_CHROMA_COLS="$(sqlite3 "${SANDBOX_CHROMA}/chroma.sqlite3" "SELECT COUNT(*) FROM collections;" 2>/dev/null || echo 0)"
-    echo "[prod-copy] Chroma: prod=${PROD_CHROMA_COLLECTIONS:-?} collections / ${PROD_CHROMA_CHUNKS:-?} embeddings"
-    echo "[prod-copy] Chroma: sandbox=${SBX_CHROMA_COLS} collections / ${SBX_CHROMA_CHUNKS} embeddings"
-    if [[ "${SBX_CHROMA_CHUNKS}" == "${PROD_CHROMA_CHUNKS:-0}" ]]; then
-        echo "[prod-copy] PASS chroma_embeddings: ${PROD_CHROMA_CHUNKS}"
-    else
-        echo "[prod-copy] WARN chroma_embeddings: prod=${PROD_CHROMA_CHUNKS:-?} sandbox=${SBX_CHROMA_CHUNKS} (delta may be in-flight writes during live-prod snapshot)"
-    fi
-fi
-
 # ── ASSERT PROD FILE MTIMES UNCHANGED ─────────────────────────────────────────
 # All three: .db, -shm, -wal.  A change in any sidecar indicates sqlite3 opened
 # the prod db in writable mode — the CRITICAL C1 invariant.
@@ -437,9 +380,6 @@ if [[ -n "${PROD_MEMORY_DB}" ]]; then
     # -wal: always WARN — the prod MCP may append checkpoint records concurrently
     # even without an open file descriptor (the WAL writer can be transient).
     _assert_mtime_unchanged "${PROD_MEMORY_DB}-wal"   "${MTIME_BEFORE_MEMORY_WAL}" "prod memory.db-wal" 1
-fi
-if [[ -n "${CHROMA_SQLITE}" ]]; then
-    _assert_mtime_unchanged "${CHROMA_SQLITE}" "${MTIME_BEFORE_CHROMA_SQLITE}" "prod chroma.sqlite3" 0
 fi
 
 if [[ "${SKIPPED}" -ne 0 ]]; then

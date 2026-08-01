@@ -65,7 +65,14 @@ from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
 
 
-TIERS = ("t1", "t2", "t3", "storage_service", "aspect_worker")
+# "t2" removed (nexus-i711w Stage 2 sub-stage B): the T2 daemon is retired, so
+# its row proved lease semantics for a tier nothing publishes. This is a
+# DELIBERATE reduction of a cross-tier battery, not bookkeeping — see
+# nexus-pmag3, which asks the same question of "t3" (retired by RDR-155 P4b
+# yet still listed here). If that resolves toward "the harnesses are
+# tier-string-generic and the extra rows are cheap coverage of the primitive",
+# this removal should be revisited.
+TIERS = ("t1", "t3", "storage_service", "aspect_worker")
 
 # Synthetic owner pids, never real live processes; liveness is injected.
 _OWNER_PID = 970001
@@ -350,13 +357,6 @@ class _LeaseHarness(RecordHarness):
         return 1 if self.discover() is not None else 0
 
 
-class T2RecordHarness(_LeaseHarness):
-    """RDR-149 P2: T2 rides the leased registry."""
-
-    tier = "t2"
-    _REGISTRY_TIER = "t2"
-
-
 class T3RecordHarness(_LeaseHarness):
     """RDR-149 P3: T3 rides the same leased registry, heartbeated by the
     long-lived T3 supervisor. Identical lease semantics to T2 (one problem,
@@ -397,7 +397,6 @@ class AspectWorkerRecordHarness(_LeaseHarness):
 
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
     "t1": T1RecordHarness,
-    "t2": T2RecordHarness,
     "t3": T3RecordHarness,
     "storage_service": StorageServiceRecordHarness,
     "aspect_worker": AspectWorkerRecordHarness,
@@ -412,18 +411,16 @@ GAP = "gap"
 SPEC = "spec"
 
 EXPECTATIONS: dict[str, dict[str, Any]] = {
-    "roundtrip": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
-    "reap_ungraceful": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
+    "roundtrip": {"t1": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
+    "reap_ungraceful": {"t1": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
     "self_heal": {
         "t1": "pass",  # RDR-149 P4: publisher heartbeat self-heals (#1114)
-        "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor heartbeat self-heals
         "storage_service": "pass",  # RDR-149 P5.1: supervisor heartbeat self-heals
         "aspect_worker": "pass",  # RDR-173 P1: rides the same supervisor heartbeat
     },
     "concurrent_one_owner": {
         "t1": "pass",  # RDR-149 P4: session-id scope converges to one owner
-        "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # uid-scoped, same lease fencing as T2/T3
         "aspect_worker": "pass",  # per-tenant scope converges to one owner (RDR-173 P1)
@@ -434,7 +431,6 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         # in-process cycle. This is a documented N/A, not a #1114 blocker
         # (RDR-149 P4, CA / Approach item 5).
         "t1": (GAP, "T1 is MCP-lifespan-owned, not upgrade-cycled; RDR-149 P4 N/A"),
-        "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor owns cycle_to_current (#1112)
         "storage_service": "pass",  # RDR-149 P5.1: _cycle_storage_service_to_current
         # aspect-worker is spawn-if-absent from the enqueue hook; an upgrade
@@ -446,21 +442,18 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
     # properties pass.
     "pid_reuse_immunity": {
         "t1": "pass",  # RDR-149 P4: lease/generation kills pid-reuse
-        "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: lease/generation kills pid-reuse
         "aspect_worker": "pass",  # RDR-173 P1: lease/generation kills pid-reuse
     },
     "restart_higher_generation": {
         "t1": "pass",  # RDR-149 P4: generation fencing token
-        "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: generation fencing token
         "aspect_worker": "pass",  # RDR-173 P1: generation fencing token
     },
     "restart_race_fencing": {
         "t1": "pass",  # RDR-149 P4: CA-4 heartbeat-fencing arm
-        "t2": "pass",
         "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: CA-4 heartbeat-fencing arm
         "aspect_worker": "pass",  # RDR-173 P1: CA-4 heartbeat-fencing arm
@@ -493,7 +486,14 @@ def clock() -> _FakeClock:
 
 @pytest.fixture(autouse=True)
 def _inject_liveness(monkeypatch: pytest.MonkeyPatch, alive: _AliveSet) -> None:
-    monkeypatch.setattr("nexus.daemon.discovery.os.kill", alive.fake_os_kill)
+    # Only ONE seam now. There used to be a second
+    # (`nexus.daemon.discovery.os.kill`) because discovery.py ran its own
+    # os.kill liveness probes for the T2 tier; that module was deleted with the
+    # daemon (nexus-i711w Stage 2 sub-stage B). ServiceRegistry does NOT call
+    # os.kill directly — it goes through `nexus.session._is_pid_alive` — so
+    # re-pointing the old patch at the primitive would have been decorative
+    # (verified by deleting it: the suite stays green either way, which is the
+    # signal that it was doing nothing).
     monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
 
 
@@ -755,30 +755,26 @@ class TestMatrixIsNotVacuous:
         # now green. This guards against a regression silently re-opening it.
         assert EXPECTATIONS["version_cycle"]["t3"] == "pass"
 
-    def test_t2_passes_every_gap_t1_or_t3_fails(self) -> None:
-        # For any property where T1 or T3 has a GAP, T2 must pass it; a GAP
-        # T2 also failed would be mis-specified (CA-1).
+    def test_reference_tier_passes_every_gap_another_tier_fails(self) -> None:
+        # CA-1: a property that is a GAP everywhere would be mis-specified, so
+        # at least the REFERENCE tier must pass it. T2 was that reference until
+        # it retired (nexus-i711w Stage 2 sub-stage B); storage_service takes
+        # over, being the one supervised tier that is actually live.
+        reference = "storage_service"
         for prop, cells in EXPECTATIONS.items():
             t1_gap = isinstance(cells["t1"], tuple) and cells["t1"][0] == GAP
             t3_gap = isinstance(cells["t3"], tuple) and cells["t3"][0] == GAP
             if t1_gap or t3_gap:
-                assert cells["t2"] == "pass", (
-                    f"property {prop!r} is a GAP for T1/T3 but T2 does not pass "
-                    f"it; the property is mis-specified (CA-1)"
+                assert cells[reference] == "pass", (
+                    f"property {prop!r} is a GAP for T1/T3 but {reference} does "
+                    f"not pass it; the property is mis-specified (CA-1)"
                 )
 
-    def test_t2_migration_flipped_its_spec_cells(self) -> None:
-        # RDR-149 P2 ratchet: once T2 rides the primitive, every lease
-        # property must pass for T2 (no remaining xfail on the reference
-        # tier). A regression that re-broke one would surface here.
-        for prop in (
-            "pid_reuse_immunity",
-            "restart_higher_generation",
-            "restart_race_fencing",
-        ):
-            assert EXPECTATIONS[prop]["t2"] == "pass", (
-                f"T2 lease property {prop!r} regressed to non-pass after P2"
-            )
+    # NO test_t2_migration_flipped_its_spec_cells: the RDR-149 P2 ratchet
+    # asserted every lease property stayed "pass" for T2 once it rode the
+    # primitive. The tier is retired (nexus-i711w Stage 2 sub-stage B), so
+    # there is no cell left to ratchet. The equivalent T3 ratchet below and
+    # the storage_service cells carry the same guarantee for live tiers.
 
     def test_t3_migration_flipped_its_cells(self) -> None:
         # RDR-149 P3 ratchet: T3 now rides the primitive + the supervisor
@@ -891,120 +887,14 @@ class TestMatrixIsNotVacuous:
             assert set(cells) == set(TIERS), f"property {prop!r} missing a tier"
 
 
-# ---------------------------------------------------------------------------
-# Live-process behavioral proof (integration marker only): a REAL in-process
-# T2 daemon self-heals a deleted discovery file via its supervisor heartbeat.
-# port=0, shrunk interval, single event loop (RDR-140 convention).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestLiveT2SelfHeal:
-    def test_real_daemon_reasserts_deleted_discovery_file(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import shutil
-        import tempfile
-
-        from nexus.daemon import t2_daemon as _t2
-
-        monkeypatch.setattr(_t2, "_REASSERT_INTERVAL", 0.05)
-        cd = Path(tempfile.mkdtemp(prefix="nx149-", dir="/tmp"))
-        daemon = _t2.T2Daemon(config_dir=cd, db_path=cd / "memory.db")
-
-        async def _main() -> None:
-            await daemon.start()
-            try:
-                disc = daemon.discovery_path
-                assert disc.exists()
-                # RDR-149 P2: the record is a lease; the owner pid lives under
-                # endpoint and the generation is present.
-                payload = json.loads(disc.read_text())
-                assert payload["endpoint"]["pid"] == os.getpid()
-                assert payload["generation"] == 1
-                disc.unlink()
-                assert not disc.exists()
-                for _ in range(40):
-                    await asyncio.sleep(0.05)
-                    if disc.exists():
-                        break
-                assert disc.exists(), "live T2 daemon failed to self-heal discovery file"
-                healed = json.loads(disc.read_text())
-                assert healed["endpoint"]["pid"] == os.getpid()
-                # Self-heal preserves the generation (re-assert, not a restart).
-                assert healed["generation"] == 1
-            finally:
-                await daemon.stop()
-            assert not disc.exists()
-
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(_main())
-        finally:
-            loop.close()
-            shutil.rmtree(cd, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# Live-process behavioral proof (integration marker only): a REAL T3 supervisor
-# spawning REAL chroma self-heals a deleted discovery file via its heartbeat.
-# The symmetric counterpart to TestLiveT2SelfHeal (nexus-2nt0z). Unlike the
-# unit coverage in test_t3_supervisor.py (fake chroma + fake clock), this uses
-# a real chroma subprocess, a real wall clock, and the real TCP reachability
-# probe, so the self-heal is proven end to end.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestLiveT3SelfHeal:
-    def test_real_supervisor_reasserts_deleted_discovery_file(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import shutil
-        import tempfile
-        import time as _time
-
-        from nexus.daemon.t3_daemon import T3Supervisor, t3_discovery_path
-
-        # The T3 daemon is local-mode only; pin it so the test does not depend
-        # on ambient credentials (cloud mode has no daemon to self-heal).
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-
-        cd = Path(tempfile.mkdtemp(prefix="nx149-t3-", dir="/tmp"))
-        sup = T3Supervisor(
-            config_dir=cd, local_path=cd / "chroma", supervised=True
-        )
-        disc = t3_discovery_path(cd)
-        try:
-            sup.start()  # spawns REAL chroma, publishes the lease
-            assert disc.exists()
-            payload = json.loads(disc.read_text())
-            assert payload["generation"] == 1
-            assert payload["endpoint"]["pid"] > 0
-
-            disc.unlink()
-            assert not disc.exists()
-
-            # The supervisor heartbeat re-stamps the lost record (self-heal),
-            # preserving the generation (a re-assert, not a restart). Retry to
-            # absorb chroma-readiness jitter on the TCP reachability probe.
-            healed = False
-            for _ in range(40):
-                if sup.heartbeat_once() and disc.exists():
-                    healed = True
-                    break
-                _time.sleep(0.05)
-            assert healed and disc.exists(), (
-                "live T3 supervisor failed to self-heal the discovery file"
-            )
-            healed_payload = json.loads(disc.read_text())
-            assert healed_payload["generation"] == 1
-            assert healed_payload["endpoint"]["pid"] == payload["endpoint"]["pid"]
-        finally:
-            sup.stop()
-            shutil.rmtree(cd, ignore_errors=True)
-        # stop() relinquished the lease.
-        assert not disc.exists()
+# NO TestLiveT2SelfHeal: the integration-marked live-process proof drove a REAL
+# in-process T2Daemon and asserted it reasserted a deleted discovery file via
+# its supervisor heartbeat. Both the daemon and the discovery module it wrote
+# to are deleted (nexus-i711w Stage 2 sub-stage B). The self_heal PROPERTY is
+# still covered for every surviving tier by the EXPECTATIONS matrix above; what
+# is genuinely lost is the only live-process (rather than harness-injected)
+# proof of it, and no surviving tier has an equivalent in-process daemon to
+# stand in — storage_service is an external Java process.
 
 
 class TestDiscoverReapToctou:
@@ -1019,8 +909,13 @@ class TestDiscoverReapToctou:
     """
 
     def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
+        # Tier string is incidental here — this exercises the PRIMITIVE's
+        # reap/publish race, not a tier's behaviour. Moved off the retired "t2"
+        # (nexus-i711w Stage 2 sub-stage B) to a live tier so the fixture names
+        # something that still exists.
         return ServiceRegistry(
-            dir=config_dir, tier="t2", clock=clock, ttl=3.0, heartbeat_interval=1.0
+            dir=config_dir, tier="storage_service", clock=clock, ttl=3.0,
+            heartbeat_interval=1.0,
         )
 
     def test_reap_cannot_delete_concurrently_published_successor(
@@ -1243,89 +1138,6 @@ class TestSweepDeadT1Holders:
 
 
 # ---------------------------------------------------------------------------
-# GAP A: sweep_dead_t1_holders must be CALLED from the MCP startup sweep.
-# ---------------------------------------------------------------------------
-
-
-class TestSweepDeadT1HoldersWiredAtStartup:
-    """GAP A fix: sweep_dead_t1_holders must be invoked during the MCP
-    startup sweep block (core.py _t1_chroma_lifespan), not just defined.
-
-    The conformance test wires a spy, triggers the same import-path the
-    lifespan uses, and asserts the spy fired.  It does NOT spin up a real
-    MCP; it imports the startup-sweep helper directly and calls it via the
-    same best-effort trampoline pattern that core.py uses.
-    """
-
-    def test_startup_sweep_calls_sweep_dead_t1_holders(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The startup sweep must invoke sweep_dead_t1_holders.
-
-        Strategy: monkeypatch ``nexus.daemon.service_registry.sweep_dead_t1_holders``
-        with a spy, then call the exported ``_run_mcp_startup_sweep`` helper
-        (which core.py must expose or the test imports the trampoline directly).
-        """
-        calls: list[Path] = []
-
-        from nexus.daemon import service_registry as sr
-
-        original = sr.sweep_dead_t1_holders
-
-        def spy(*, config_dir: Path) -> int:
-            calls.append(config_dir)
-            return original(config_dir=config_dir)
-
-        monkeypatch.setattr(sr, "sweep_dead_t1_holders", spy)
-
-        # Import + call the startup-sweep helper that core.py exposes.
-        from nexus.mcp import core as _core
-        _core._run_mcp_startup_sweep(config_dir=tmp_path)
-
-        assert calls, (
-            "startup sweep (_run_mcp_startup_sweep) did not call "
-            "sweep_dead_t1_holders — GAP A is not fixed."
-        )
-        assert calls[0] == tmp_path
-
-    def test_startup_sweep_reaps_orphan_tmpdir_under_config_t1(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The startup sweep must pass config_dir to sweep_orphan_tmpdirs so
-        that orphan stores under <config>/t1/ are actually reaped.
-
-        Strategy: place an nx_t1_* dir under tmp_path/t1/ with an ancient
-        mtime, call _run_mcp_startup_sweep(config_dir=tmp_path), and assert
-        the orphan is gone.  This proves the config_dir=config_dir argument
-        is wired (not just that the function was called).
-        """
-        import time
-
-        # Create an orphan tmpdir under the config/t1/ location.
-        t1_dir = tmp_path / "t1"
-        t1_dir.mkdir()
-        orphan = t1_dir / "nx_t1_testreap123"
-        orphan.mkdir()
-
-        # Wind mtime back 48 hours so it exceeds the 24h sweep threshold.
-        ancient = time.time() - 48 * 3600
-        os.utime(orphan, (ancient, ancient))
-
-        assert orphan.exists(), "precondition: orphan dir must exist before sweep"
-
-        from nexus.mcp import core as _core
-        _core._run_mcp_startup_sweep(config_dir=tmp_path)
-
-        assert not orphan.exists(), (
-            "startup sweep did not reap orphan under <config>/t1/ — "
-            "sweep_orphan_tmpdirs was likely called without config_dir= "
-            "(the HIGH bug from the code review)"
-        )
-
-
-# ---------------------------------------------------------------------------
-# GAP B: elect-lock sweep — t1_elect.*.lock files for dead owners.
-# ---------------------------------------------------------------------------
 
 
 class TestSweepDeadT1ElectLocks:
@@ -1509,7 +1321,7 @@ class TestRelinquishCleansElectLock:
     t1_elect.*.lock orphan.
 
     The only clean-session-end hook seam that runs before the MCP process
-    exits is the lifespan's ``finally`` block (via ``_t1_chroma_shutdown`` ->
+    exits is the lifespan's ``finally`` block (via ``_t1_shutdown`` ->
     ``publisher.relinquish()``).  Wiring elect-lock cleanup into
     ``relinquish()`` is the correct place per the RDR-149 shared-primitive
     mandate: no per-tier lifecycle code outside service_registry.py.

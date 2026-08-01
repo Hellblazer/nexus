@@ -22,13 +22,12 @@ import pytest
 
 
 def test_check_credential_persistence_env_only_warns(monkeypatch, tmp_path):
-    """When both cloud credentials are in env but NOT in the config
-    file, the doctor emits a non-fatal warning naming the four
-    ``nx config set`` commands needed for GUI-spawned consumers."""
-    monkeypatch.setenv("CHROMA_API_KEY", "ck-test")
+    """When the voyage credential is in env but NOT in the config file,
+    the doctor emits a non-fatal warning naming the ``nx config set``
+    command needed for GUI-spawned consumers. (RDR-155 P4b: the CHROMA_*
+    keys died with the chroma credential map — voyage is the one
+    remaining cloud credential in scope.)"""
     monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
-    monkeypatch.setenv("CHROMA_TENANT", "tenant-uuid")
-    monkeypatch.setenv("CHROMA_DATABASE", "test-db")
     monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
 
     from nexus.health import _check_credential_persistence
@@ -39,8 +38,8 @@ def test_check_credential_persistence_env_only_warns(monkeypatch, tmp_path):
     assert warning.ok is False
     assert warning.fatal is False, "env-only is a warning, not a fatal error"
     msg = " ".join([warning.detail] + warning.fix_suggestions)
-    assert "nx config set chroma_api_key" in msg
     assert "nx config set voyage_api_key" in msg
+    assert "nx config set chroma_api_key" not in msg  # rows retired at P4b
     assert "Claude Desktop" in msg or "GUI" in msg
 
 

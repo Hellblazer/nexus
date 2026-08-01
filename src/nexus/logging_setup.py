@@ -30,7 +30,10 @@ def _config_dir() -> Path:
 #: tracebacks — without the removal it would accumulate an unbounded duplicate
 #: of the event stream. A tty stderr (--foreground in a terminal) keeps the
 #: handler for interactive debugging.
-_DAEMON_MODES: frozenset[str] = frozenset({"t2_daemon", "t3_daemon", "storage_service"})
+#: nexus-i711w Stage 2 sub-stage B removed "t2_daemon" — its only caller was
+#: t2_daemon.py. ("t3_daemon" is a P4b residual with no caller either; tracked
+#: on nexus-pmag3 with the other phantom tier strings that deletion left.)
+_DAEMON_MODES: frozenset[str] = frozenset({"t3_daemon", "storage_service"})
 
 
 def _resolve_level(mode: str, verbose: bool) -> int:
@@ -59,7 +62,7 @@ def _resolve_level(mode: str, verbose: bool) -> int:
 def configure_logging(
     mode: Literal[
         "cli", "console", "mcp", "hook", "watchdog",
-        "t2_daemon", "t3_daemon", "storage_service",
+        "t3_daemon", "storage_service",
     ],
     verbose: bool = False,
     config_dir: Path | None = None,
@@ -76,14 +79,14 @@ def configure_logging(
     Modes:
       * ``cli``: stderr only, WARNING default. Kept legacy-compatible so
         the human-facing CLI does not gain noise from this change.
-      * ``console`` / ``mcp`` / ``hook`` / ``watchdog`` / ``t2_daemon`` /
-        ``t3_daemon`` / ``storage_service``: stderr + RotatingFileHandler
+      * ``console`` / ``mcp`` / ``hook`` / ``watchdog`` / ``t3_daemon`` /
+        ``storage_service``: stderr + RotatingFileHandler
         at ``<config_dir>/logs/<mode>.log``, INFO default. Lifecycle
         events, tool dispatches, and structured warnings now land in the
         log file.
 
     *config_dir* overrides the log directory root (default:
-    ``NEXUS_CONFIG_DIR`` env or ``~/.config/nexus``). The T2 daemon
+    ``NEXUS_CONFIG_DIR`` env or ``~/.config/nexus``). A supervised daemon
     passes its own ``config_dir`` so a ``--config-dir`` override (or a
     tmp dir under test) logs to the right place rather than the global
     default.
@@ -434,8 +437,8 @@ def flush_logging() -> None:
     """Flush every handler on the root logger so buffered records are
     durable on disk before the process exits.
 
-    nexus-61539: under CI load the T2 daemon could exit after logging the
-    ``t2_daemon_stop_requested`` breadcrumb but before its
+    nexus-61539: under CI load the (now-retired) T2 daemon could exit after
+    logging its ``stop_requested`` breadcrumb but before its
     ``RotatingFileHandler`` flushed that line, so the diagnostic was lost
     both in the test and in production. Callers on a shutdown path invoke
     this immediately after writing a must-survive breadcrumb and before

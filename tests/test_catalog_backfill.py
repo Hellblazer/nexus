@@ -9,9 +9,28 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
+
+
+def _owner_type_of(cat, entry) -> str:
+    """The owner_type of the owner that minted ``entry``'s tumbler.
+
+    Replaces "JOIN owners o ON d.tumbler LIKE o.tumbler_prefix || '.%'".
+    list_owners() has the same shape on both backends, and a document tumbler
+    is its owner's prefix plus one segment, so the join is a prefix match
+    (nexus-i711w C-store).
+    """
+    by_prefix = {o["tumbler_prefix"]: o["owner_type"] for o in cat.list_owners()}
+    parts = str(entry.tumbler).split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        hit = by_prefix.get(".".join(parts[:cut]))
+        if hit is not None:
+            return hit
+    raise AssertionError(f"no owner matches tumbler {entry.tumbler}")
+
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+
 
 
 @pytest.fixture(autouse=True)
@@ -24,9 +43,10 @@ def git_identity(monkeypatch):
 
 @pytest.fixture
 def catalog_env(tmp_path, monkeypatch):
+    # nexus-i711w terminal deletion: the local Catalog.init seeding is gone —
+    # ActiveCatalog routes to the live service catalog, no init needed.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 
@@ -81,38 +101,38 @@ class TestBackfillRepos:
     def test_backfill_creates_owner_and_docs(self, catalog_env, tmp_path):
         from nexus.commands.catalog import _backfill_repos
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         registry = _mock_registry(tmp_path)
 
         count, claimed = _backfill_repos(cat, registry, dry_run=False)
         assert count >= 0
         assert len(claimed) >= 1  # Should claim at least one collection
         # Owner should exist
-        owner = cat.owner_for_repo(cat._db.execute(
-            "SELECT repo_hash FROM owners WHERE owner_type='repo'"
-        ).fetchone()[0])
+        repo_owners = cat.list_owners_by_type("repo")
+        assert repo_owners, "no repo owner registered"
+        owner = cat.owner_for_repo(repo_owners[0]["repo_hash"])
         assert owner is not None
 
     def test_backfill_repos_dry_run(self, catalog_env, tmp_path):
         from nexus.commands.catalog import _backfill_repos
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         registry = _mock_registry(tmp_path)
 
         _backfill_repos(cat, registry, dry_run=True)
         # No owners should be created
-        rows = cat._db.execute("SELECT count(*) FROM owners").fetchone()
+        rows = (len(cat.list_owners()),)
         assert rows[0] == 0
 
     def test_backfill_repos_idempotent(self, catalog_env, tmp_path):
         from nexus.commands.catalog import _backfill_repos
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         registry = _mock_registry(tmp_path)
 
         _backfill_repos(cat, registry, dry_run=False)
         _backfill_repos(cat, registry, dry_run=False)
-        rows = cat._db.execute("SELECT count(*) FROM owners WHERE owner_type='repo'").fetchone()
+        rows = (len(cat.list_owners_by_type("repo")),)
         assert rows[0] == 1
 
 
@@ -120,24 +140,22 @@ class TestBackfillKnowledge:
     def test_backfill_knowledge(self, catalog_env):
         from nexus.commands.catalog import _backfill_knowledge
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         t3 = _mock_t3([{"name": "knowledge__delos", "count": 20}])
 
         count = _backfill_knowledge(cat, t3, dry_run=False)
         assert count == 1
-        rows = cat._db.execute(
-            "SELECT title FROM documents WHERE content_type='knowledge'"
-        ).fetchone()
-        assert rows is not None
+        knowledge = [d for d in cat.all_documents() if d.content_type == "knowledge"]
+        assert knowledge, "no knowledge document registered"
 
     def test_backfill_knowledge_dry_run(self, catalog_env):
         from nexus.commands.catalog import _backfill_knowledge
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         t3 = _mock_t3([{"name": "knowledge__delos", "count": 20}])
 
         _backfill_knowledge(cat, t3, dry_run=True)
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (len(cat.all_documents()),)
         assert rows[0] == 0
 
 
@@ -164,11 +182,15 @@ class TestBackfillCommand:
         assert result.exit_code == 0
         assert "complete" in result.output.lower()
 
-    def test_backfill_not_initialized(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "backfill"])
-        assert result.exit_code != 0
+    # test_backfill_not_initialized REMOVED (nexus-i711w Stage 2 sub-stage
+    # C-store): it pointed NEXUS_CATALOG_PATH at an uninitialised dir and
+    # asserted `nx catalog backfill` exits non-zero. Service mode has no
+    # uninitialised state — make_catalog_reader() always returns a handle — so
+    # the premise is unreachable rather than the assertion wrong. Same class as
+    # test_mcp_store_put_doc_id's ..._when_no_catalog, removed for the same
+    # reason. The service-mode counterpart (a fresh box registers to the
+    # SERVICE and creates nothing local) is owned by
+    # tests/test_e9ru2_catalog_gate_sweep.py.
 
 
 class TestBackfillFromT3:
@@ -241,7 +263,7 @@ class TestBackfillFromT3:
 
         repo_root = tmp_path / "myrepo"
         repo_root.mkdir()
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "myrepo", "repo", repo_hash="abc12345",
             repo_root=str(repo_root),
@@ -263,12 +285,10 @@ class TestBackfillFromT3:
         )
         assert registered == 3
         # Verify each path got its own catalog row.
-        rows = cat._db.execute(
-            "SELECT file_path FROM documents "
-            "WHERE physical_collection = ? AND file_path != ''",
-            ("code__myrepo-abc12345",),
-        ).fetchall()
-        paths = {r[0] for r in rows}
+        paths = {
+            d.file_path for d in cat.list_by_collection("code__myrepo-abc12345")
+            if d.file_path
+        }
         assert "src/a.py" in paths
         assert "src/b.py" in paths
         assert "src/c.py" in paths
@@ -280,7 +300,7 @@ class TestBackfillFromT3:
 
         repo_root = tmp_path / "myrepo2"
         repo_root.mkdir()
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         cat.register_owner(
             "myrepo2", "repo", repo_hash="def67890",
             repo_root=str(repo_root),
@@ -308,7 +328,7 @@ class TestBackfillFromT3:
 
         repo_root = tmp_path / "myrepo3"
         repo_root.mkdir()
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         cat.register_owner(
             "myrepo3", "repo", repo_hash="11111111",
             repo_root=str(repo_root),
@@ -325,12 +345,11 @@ class TestBackfillFromT3:
         )
         assert would_register == 2
         # Nothing written.
-        rows = cat._db.execute(
-            "SELECT count(*) FROM documents "
-            "WHERE physical_collection = ? AND file_path != ''",
-            ("code__myrepo3-11111111",),
-        ).fetchone()
-        assert rows[0] == 0
+        written = [
+            d for d in cat.list_by_collection("code__myrepo3-11111111")
+            if d.file_path
+        ]
+        assert written == []
 
     def test_per_file_recovery_rejects_non_repo_collection(
         self, catalog_env,
@@ -339,7 +358,7 @@ class TestBackfillFromT3:
         this way (no owner to attribute under). Helper raises."""
         from nexus.commands.catalog import _backfill_per_file_from_t3
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         # No owner registered for this hash. t3 is never touched -- the
         # owner-lookup ClickException raises before any T3 call -- but
         # spec= it anyway to match the real unconditional make_t3()
@@ -382,7 +401,7 @@ class TestBackfillFromT3CLI:
         repo_root = tmp_path / "cli_repo"
         repo_root.mkdir()
         # Pre-register the owner so the recovery path can attribute.
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         cat.register_owner(
             "cli_repo", "repo", repo_hash="cafebabe",
             repo_root=str(repo_root),
@@ -424,12 +443,11 @@ class TestBackfillFromT3CLI:
         ])
         assert result.exit_code == 0, result.output
         # Three rows registered.
-        rows = cat._db.execute(
-            "SELECT count(*) FROM documents "
-            "WHERE physical_collection = ? AND file_path != ''",
-            ("code__cli_repo-cafebabe",),
-        ).fetchone()
-        assert rows[0] == 3
+        registered = [
+            d for d in cat.list_by_collection("code__cli_repo-cafebabe")
+            if d.file_path
+        ]
+        assert len(registered) == 3
 
 
 class TestBackfillRdrsRepoOwner:
@@ -474,7 +492,7 @@ class TestBackfillRdrsRepoOwner:
 
         from nexus.commands.catalog import _backfill_rdrs, _backfill_repos
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         repo_dir = tmp_path / "myrepo"
         repo_dir.mkdir()
         repo_hash = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:8]
@@ -495,7 +513,9 @@ class TestBackfillRdrsRepoOwner:
         # hash, so the function should pick up the existing repo owner.
         t3, col_name = self._mock_t3_with_rdr(repo_dir, repo_hash)
         with patch(
-            "nexus.catalog.catalog._default_registry_path",
+            # nexus-i711w: _default_registry_path moved to catalog.types
+            # when the local catalog module was deleted.
+            "nexus.catalog.types._default_registry_path",
             return_value=tmp_path / "repos.json",
         ):
             (tmp_path / "repos.json").write_text(json.dumps({
@@ -507,12 +527,11 @@ class TestBackfillRdrsRepoOwner:
 
         assert count == 1
         # Verify the doc landed under the repo owner (NOT a curator).
-        rows = cat._db.execute(
-            "SELECT d.tumbler, o.owner_type FROM documents d "
-            "JOIN owners o ON d.tumbler LIKE o.tumbler_prefix || '.%' "
-            "WHERE d.physical_collection = ? AND d.content_type = 'rdr'",
-            (col_name,),
-        ).fetchall()
+        rows = [
+            (str(d.tumbler), _owner_type_of(cat, d))
+            for d in cat.list_by_collection(col_name)
+            if d.content_type == "rdr"
+        ]
         assert rows, f"no RDR row in {col_name}"
         # The matching owner row must be a repo owner.
         repo_owner_match = [r for r in rows if r[1] == "repo"]
@@ -527,22 +546,22 @@ class TestBackfillRdrsRepoOwner:
     ):
         from nexus.commands.catalog import _backfill_rdrs
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         # No matching repo registered — curator fallback is correct.
         t3, col_name = self._mock_t3_with_rdr(tmp_path / "fake", "deadbeef")
         with patch(
-            "nexus.catalog.catalog._default_registry_path",
+            # nexus-i711w: _default_registry_path moved to catalog.types
+            # when the local catalog module was deleted.
+            "nexus.catalog.types._default_registry_path",
             return_value=tmp_path / "repos.json",
         ):
             (tmp_path / "repos.json").write_text(json.dumps({"repos": {}}))
             count = _backfill_rdrs(cat, t3, dry_run=False)
         assert count == 1
-        rows = cat._db.execute(
-            "SELECT o.owner_type FROM documents d "
-            "JOIN owners o ON d.tumbler LIKE o.tumbler_prefix || '.%' "
-            "WHERE d.physical_collection = ?",
-            (col_name,),
-        ).fetchall()
+        rows = [
+            (_owner_type_of(cat, d),)
+            for d in cat.list_by_collection(col_name)
+        ]
         assert any(r[0] == "curator" for r in rows)
 
     def test_backfill_rdrs_dedups_on_doc_id_when_present(
@@ -556,7 +575,7 @@ class TestBackfillRdrsRepoOwner:
         from unittest.mock import MagicMock
         from nexus.commands.catalog import _backfill_rdrs
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         col_name = "rdr__test-7b5n"
         # Two RDRs sharing the same source_path under different doc_ids
         # (e.g. two repos rendering the same canonical RDR).
@@ -577,7 +596,9 @@ class TestBackfillRdrsRepoOwner:
         mock.get_or_create_collection.return_value = mock_col
 
         with patch(
-            "nexus.catalog.catalog._default_registry_path",
+            # nexus-i711w: _default_registry_path moved to catalog.types
+            # when the local catalog module was deleted.
+            "nexus.catalog.types._default_registry_path",
             return_value=tmp_path / "repos.json",
         ):
             (tmp_path / "repos.json").write_text(json.dumps({"repos": {}}))
@@ -593,11 +614,9 @@ class TestBackfillRdrsRepoOwner:
         # chunk before reaching the dedup logic".
         assert count == 1
         # Verify the row landed (proves the loop completed and registered).
-        row = cat._db.execute(
-            "SELECT title FROM documents WHERE physical_collection = ?",
-            (col_name,),
-        ).fetchone()
-        assert row is not None
+        assert cat.list_by_collection(col_name), (
+            f"no document registered in {col_name}"
+        )
 
 
 class TestLocalRegisterManyParity:
@@ -605,7 +624,7 @@ class TestLocalRegisterManyParity:
     register() — same tumblers, same idempotency, aligned 1:1 with docs."""
 
     def test_register_many_matches_sequential_register(self, catalog_env, tmp_path):
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "rm-local", "repo", repo_hash="beef0001",
             repo_root=str(tmp_path / "rm-local"),
@@ -625,7 +644,7 @@ class TestLocalRegisterManyParity:
         assert [str(t) for t in again] == [str(t) for t in tumblers]
 
     def test_register_many_empty_returns_empty(self, catalog_env, tmp_path):
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "rm-empty", "repo", repo_hash="beef0002",
             repo_root=str(tmp_path / "rm-empty"),

@@ -37,8 +37,14 @@ from __future__ import annotations
 
 import json as _json
 import os
+import signal
+import socket
+import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -99,18 +105,98 @@ def pg_bin_dir() -> Path:
     ``NEXUS_PG_BIN`` re-raises at import/collection time (product
     policy: a misconfigured explicit override is a user error — fail
     loud, never mass-skip).
+
+    USABILITY, NOT MERE PRESENCE (nexus-eqxxh, PR #1426). Discovery is not
+    trusted on its own: a discovered PG that cannot load pgvector is rejected
+    and the self-provisioning leg runs instead. The paragraph above used to be
+    the whole story, and it made the self-provisioning leg conditional on
+    discovery FAILING — which is a property of the box, not of the substrate's
+    needs. On a dev box with no host PG that reads as correct; on a GitHub
+    runner, which ships PostgreSQL, discovery succeeded and handed back a
+    pgvector-less system PG, so every engine-substrate test died at boot and
+    the pinned bundle was never downloaded. See :func:`_has_pgvector`.
     """
     from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
+    # An EXPLICIT override is a user statement and is honoured verbatim, before
+    # any usability opinion is applied. The pgvector guard below deliberately
+    # does NOT gate it: callers point NEXUS_PG_BIN at synthetic trees that never
+    # launch PG (path-resolution tests do exactly this), and silently
+    # substituting the bundle would hand a developer debugging one PG the
+    # results of a different one. Making the guard raise here instead broke
+    # test_pg_bin_dir_honors_nexus_pg_bin_override and 5 sibling fixtures on the
+    # first attempt (PR #1426 run 2) — the override contract predates the guard
+    # and outranks it.
+    explicit = os.environ.get("NEXUS_PG_BIN", "").strip()
+
     try:
-        return discover_pg_binaries().initdb.parent
+        discovered = discover_pg_binaries().initdb.parent
     except PgBinaryNotFoundError:
-        if os.environ.get("NEXUS_PG_BIN", "").strip():
+        if explicit:
             raise
-        provisioned = _self_provision_pg_bundle()
-        if provisioned is not None:
-            return provisioned
-        return Path("/nexus-pg-binaries-not-found")
+        discovered = None
+
+    # nexus-eqxxh: an AMBIENT PG is only usable if it can load pgvector.
+    # Discovery answering first is what made this a CI-only defect: on a dev box
+    # with no host PG it raises and the self-provision leg runs, but GitHub
+    # runners ship PostgreSQL, so discovery succeeded, returned a pgvector-less
+    # system PG, and every engine-substrate test died at boot with
+    # `CREATE EXTENSION IF NOT EXISTS vector` -> "extension vector is not
+    # available" (PR #1426 run 1: 73 errors on BOTH python jobs, 0 test-logic
+    # failures). The pinned bundle was never even downloaded.
+    #
+    # Finding a PG is therefore not the question — finding one that can SERVE is.
+    # An engine substrate without pgvector cannot run at all, so an ambient PG
+    # missing it is not a usable answer and we fall through to our own bundle.
+    # This is the standing rule that functional gates are self-provisioning
+    # scripts, never ambient machine state; discovery-first quietly inverted it.
+    if explicit:
+        return discovered
+    if discovered is not None and _has_pgvector(discovered):
+        return discovered
+
+    provisioned = _self_provision_pg_bundle()
+    if provisioned is not None:
+        return provisioned
+    return Path("/nexus-pg-binaries-not-found")
+
+
+def _has_pgvector(bin_dir: Path) -> bool:
+    """Can the PG at *bin_dir* load the ``vector`` extension?
+
+    nexus-eqxxh. Presence of ``vector.control`` in the sharedir is the same
+    check ``scripts/build_pg_bundle.sh`` asserts after building the bundle, and
+    the same one that showed the shipped bundles carry exactly
+    ``pg_trgm``/``plpgsql``/``vector`` — so the two agree by construction on
+    what "has the extension" means.
+
+    Resolved via ``pg_config --sharedir`` when that binary exists, because
+    PostgreSQL reports paths relative to the executable and a RELOCATED bundle's
+    compiled-in sharedir is wrong. Falls back to the conventional
+    ``<prefix>/share/postgresql`` and ``<prefix>/share`` layouts for trees whose
+    ``pg_config`` was stripped (the zonky-style reduced builds RDR-157 rejected
+    for exactly this reason).
+
+    Returns False rather than raising on any probe failure: an unusable answer
+    and an unreadable one lead to the same decision — fall through to the
+    bundle.
+    """
+    candidates: list[Path] = []
+    pg_config = bin_dir / "pg_config"
+    if pg_config.exists():
+        try:
+            out = subprocess.run(
+                [str(pg_config), "--sharedir"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                candidates.append(Path(out.stdout.strip()))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    prefix = bin_dir.parent
+    candidates += [prefix / "share" / "postgresql", prefix / "share"]
+
+    return any((c / "extension" / "vector.control").exists() for c in candidates)
 
 
 def _self_provision_pg_bundle() -> Path | None:
@@ -153,6 +239,58 @@ def _self_provision_pg_bundle() -> Path | None:
             stacklevel=2,
         )
         return None
+
+
+def unstamped_jar_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
+    """Return a skip reason if the shaded jar reports no ``release_version``,
+    else ``None``.
+
+    nexus-ao29z. ``release.properties`` ships ``release_version`` BLANK — it is
+    stamped only at native-release time from an ``engine-service-vX.Y.Z`` tag —
+    so a plain ``mvn package`` yields a jar that reports ``release_version=null``
+    on ``/version``. Since the fail-loud cloud probe landed (3cb14f96,
+    2026-07-09) the ``HttpVectorClient`` connection path fail-closes on exactly
+    that, so every gate booting a locally built jar AND driving the vector client
+    died at SETUP with an error about the "managed nexus service" — a message
+    that sends the reader looking at the hosted service rather than at their own
+    build.
+
+    CI's seam job hit this the same day and fixed it by STAMPING the gate jar
+    (ci.yml, "Stamp release_version into the gate JAR"), explicitly not by
+    bypassing the probe: the gate then exercises a CONFORMANT engine and the
+    hardening stays intact. ``scripts/build-gate-jar.sh`` is that step for a
+    developer's machine. This turns the confusing probe error into that remedy.
+
+    Applies only to tests marked ``needs_stamped_jar`` — the catalog-only
+    integration suites never construct a vector client and must not be gated on
+    a stamp they do not need.
+    """
+    if not jar.exists():
+        return None  # the freshness gate already reports a missing jar
+    try:
+        with zipfile.ZipFile(jar) as zf:
+            raw = zf.read("META-INF/nexus/release.properties").decode("utf-8")
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        return (
+            f"could not read release.properties from {_rel(jar)}: {exc} "
+            "(rebuild with: scripts/build-gate-jar.sh)"
+        )
+    for line in raw.splitlines():
+        if line.startswith("release_version="):
+            value = line.split("=", 1)[1].strip()
+            # VersionHandler.normalizeReleaseVersion maps blank/SNAPSHOT/dev to
+            # null, so mirror that here rather than only checking for empty.
+            if value and "snapshot" not in value.lower() and "dev" not in value.lower():
+                return None
+    return (
+        f"service jar is UNSTAMPED ({_rel(jar)} reports no release_version), so "
+        "the client's cloud version probe fail-closes on it and this gate cannot "
+        "construct a vector client. Rebuild with:\n"
+        "    scripts/build-gate-jar.sh\n"
+        "which stamps release_version from REQUIRED_ENGINE_VERSION the same way "
+        "CI's seam job does, and restores the working tree afterwards "
+        "(nexus-ao29z)."
+    )
 
 
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
@@ -292,3 +430,98 @@ def mint_session(base_url: str, bearer: str, session_id: str,
     if not token:
         raise RuntimeError(f"/v1/sessions/start returned no session_token: {resp}")
     return token
+
+
+# ── service spawn: FILE-backed output, never a PIPE (nexus-lom9g / j0nec) ────
+
+
+def spawn_service(
+    cmd: list[str],
+    env: dict[str, str],
+    *,
+    log_dir: str | Path | None = None,
+) -> tuple[subprocess.Popen, Path]:
+    """Spawn the engine with its output going to a FILE, and return the log path.
+
+    THE PIPE IS THE BUG. ``stdout=subprocess.PIPE`` without a reader deadlocks
+    the service: the 64KB pipe buffer fills with Logback console output,
+    ``write(2)`` blocks while holding the PrintStream monitor, and every
+    logging thread pins behind it — the process wedges before it ever binds
+    its port, so the caller sees only a timeout. This is nexus-j0nec, already
+    diagnosed by jstack (pin in ``FileOutputStream.writeBytes`` from
+    ``TokenStore.issueToken``'s log.info; draining exactly the 65,702 buffered
+    bytes instantly unwedged it) and already fixed in
+    ``tests/_engine_substrate.py`` — but that fix landed in ONE copy while 22
+    per-file fixtures under tests/db/ kept the un-fixed form. Hoisted here so
+    there is a single owner, per the standing rule that lifecycle fixes live
+    in the shared primitive rather than one tier's copy.
+
+    No timeout value fixes a wedge, which is why raising the per-file 40s
+    waits would not have helped.
+
+    Returns ``(proc, log_path)``. Pair with :func:`wait_for_service`, which
+    surfaces the tail of *log_path* when the port never opens — the diagnostic
+    the PIPE form threw away.
+    """
+    d = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="nexus-svc-log-"))
+    d.mkdir(parents=True, exist_ok=True)
+    log_path = d / "engine.log"
+    # Deliberately not a context manager: the handle's lifetime is the
+    # service process's, and the caller owns termination.
+    fh = open(log_path, "wb")  # noqa: SIM115 — lifetime spans the spawned process
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=fh,
+        stderr=subprocess.STDOUT,
+        preexec_fn=os.setsid,
+    )
+    return proc, log_path
+
+
+def wait_for_service(
+    host: str,
+    port: int,
+    *,
+    proc: subprocess.Popen | None = None,
+    log_path: str | Path | None = None,
+    timeout: float = 60.0,
+) -> None:
+    """Block until *port* accepts a connection, or raise WITH the engine log.
+
+    The per-file ``_wait_tcp`` helpers this replaces raised a bare
+    ``TimeoutError: port N on H not reachable after 40.0s`` and discarded
+    everything the service had said — which is why nexus-lom9g sat for a day
+    with a guessed mechanism instead of a known one. On timeout this kills the
+    process group and includes the log tail, matching what
+    ``tests/_engine_substrate.py`` already does.
+
+    Default is 60s, the same budget the shared session engine uses; the copies
+    used 40s.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.3):
+                return
+        except OSError:
+            time.sleep(0.1)
+
+    detail = ""
+    if proc is not None:
+        rc = proc.poll()
+        detail += f"\nprocess exit code: {rc if rc is not None else 'still running (wedged?)'}"
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if log_path is not None:
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                tail = fh.read()[-2000:]
+            detail += f"\nTail of engine log ({log_path}):\n{tail}"
+        except OSError as exc:
+            detail += f"\n(engine log unreadable: {exc})"
+    raise TimeoutError(
+        f"port {port} on {host} not reachable after {timeout}s{detail}"
+    )

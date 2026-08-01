@@ -269,7 +269,22 @@ def test_record_deploy_writes_tracker_when_live_version_matches(monkeypatch, _fa
     assert "0.1.24" in put["content"]
     assert "b80b14d4" in put["content"]
     assert "PASSED" in put["content"]
-    assert put["ttl"] == 0  # permanent operational record
+    # PERMANENT IS None, NOT 0 — and this assertion used to say `== 0` with the
+    # comment "permanent operational record", pinning the data-loss bug in
+    # place: any attempt to fix the caller would have failed here.
+    #
+    # 0 reaches expire() as effective_ttl = 0 * (1 + log(access_count + 1)) = 0,
+    # so the row is deleted on the next sweep. Both implementations filter on
+    # `WHERE ttl IS NOT NULL`, so NULL is the only value that means "never".
+    # This tracker is the RDR-179 anti-rot record; a self-deleting one is worse
+    # than none, because its absence reads as "the deploy step was skipped"
+    # (which is exactly how nexus-6igii was diagnosed, and closed wrong).
+    assert put["ttl"] is None, (
+        f"record-deploy wrote ttl={put['ttl']!r}; the tracker must be permanent "
+        f"(ttl NULL). ttl=0 means EXPIRE IMMEDIATELY at the store layer — the "
+        f"MCP memory_put coercion that makes 0 look permanent does not apply "
+        f"here, because this calls handle.memory.put directly."
+    )
 
 
 def test_record_deploy_accepts_bare_version_forms(monkeypatch, _fake_t2) -> None:

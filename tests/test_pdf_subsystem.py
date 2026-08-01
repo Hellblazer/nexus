@@ -394,15 +394,26 @@ class TestFormulaPreservationOnRealPdf:
                                             # never separately counted.
     _EXPECTED_DOLLAR_DOLLAR_COUNT = 8       # 8 $$ markers = 4 paired blocks
     _EXPECTED_FRAC_COUNT = 12               # \frac{...} occurrences
-    _EXPECTED_TEXT_LENGTH = 60135           # full extracted text
+    # 60135 -> 59573 (nexus-gtltb). 60135 was the RAW pre-normalizer length:
+    # the desync meant prose was being stripped and formulas were not, and the
+    # two happened to cancel. Now 562 chars are removed, all from formula spans
+    # — the glued-prose metric (alphabetic runs >=21 chars) is 0, down from 78
+    # runs / 3576 chars. page_count 33, formula_count 44, $$ 8 and \frac 12 all
+    # still hold exactly, which is what identifies this as a normalizer change
+    # rather than an extraction change.
+    _EXPECTED_TEXT_LENGTH = 59573           # full extracted text
     _EXPECTED_PAGE_COUNT = 33               # PyMuPDF page count
 
     # The canonical false-positive-rate formula from the paper, in the exact
     # form MinerU emits. Pinned verbatim so any change to formula rendering
     # is caught loudly.
+    # NORMALIZED form. Was the spaced variant until nexus-gtltb — correct when
+    # locked 2026-05-05 (before _normalize_mineru_latex existed), and after
+    # #1049 added normalization on 2026-06-03 it kept passing ONLY because the
+    # delimiter desync skipped this exact span. The length assert above it
+    # failed first, so nobody ever saw this one's state.
     _EXPECTED_FORMULA_SNIPPET = (
-        r"\left( 1 - { \bigg ( } 1 - { \frac { 1 } { m } } "
-        r"{ \bigg ) } ^ { k n }"
+        r"\left(1-{\bigg(}1-{\frac{1}{m}}{\bigg)}^{kn}"
     )
 
     def test_fixture_quick_screen_detects_formulas(self) -> None:

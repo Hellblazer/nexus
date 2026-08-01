@@ -31,7 +31,7 @@ from nexus.catalog.tumbler import Tumbler
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from nexus.catalog.catalog import Catalog  # noqa: F401 — used in _heal_ghosts annotation (PEP 563 deferred)
+    from nexus.catalog.catalog_protocol import CatalogReader  # noqa: F401 — used in _heal_ghosts annotation (PEP 563 deferred)
 
 
 @click.command("audit-membership")
@@ -651,7 +651,7 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
 
 
 def _heal_ghosts(
-    cat: Catalog,
+    cat: "CatalogReader",
     ghosts_by_collection: dict[str, list[dict]],
     *,
     writer: object = None,

@@ -19,23 +19,9 @@ and starts the nexus-service that serves every tier in the default config, and
 offers to register the OS autostart unit (accept it, or use `--no-autostart`
 for a session-only supervisor).
 
-If you work with the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`) and
-want to hack on the T2 daemon itself, stop the autostart-managed instance and
-run it in the foreground:
-
-```bash
-launchctl bootout gui/$(id -u)/com.nexus.t2     # macOS
-# or
-systemctl --user stop nexus-t2.service          # Linux
-nx daemon t2 start                              # foreground, ^C to stop
-```
-
-After every conexus version bump (including local edits), restart the
-LaunchAgent-managed daemon so it picks up the new code:
-
-```bash
-launchctl kickstart -k gui/$(id -u)/com.nexus.t2
-```
+The SQLite T2 daemon is retired (nexus-i711w), so there is no daemon to hack
+on, restart after a version bump, or run in the foreground. T2 is served by
+the nexus-service; for that stack use `nx daemon service start|stop|status`.
 
 ## Running Tests
 
@@ -108,10 +94,13 @@ See [architecture.md](architecture.md) for the full module map.
 
 ## Adding a T2 Domain Feature
 
-T2 is split into eight domain stores under `src/nexus/db/t2/`:
-`memory_store.py`, `plan_library.py`, `catalog_taxonomy.py`,
-`telemetry.py`, `chash_index.py`, `document_aspects.py`,
-`aspect_extraction_queue.py`, and `document_highlights.py`. See
+T2 is split into domain stores under `src/nexus/db/t2/`, each an HTTP
+client against the engine's Postgres (the SQLite twins were deleted in
+RDR-158 P4, nexus-i711w): `http_memory_store.py`,
+`http_plan_library.py`, `http_taxonomy_store.py`,
+`http_telemetry_store.py`, `http_chash_index.py`,
+`http_document_aspects_store.py`, `http_aspect_queue.py`, and
+`http_document_highlights_store.py`. See
 [architecture.md § T2 Domain Stores](architecture.md#t2-domain-stores)
 for the map (note: `chash_index`, `taxonomy`, `document_aspects`, and
 `aspect_queue` are reached directly via their attributes, not through
@@ -120,20 +109,20 @@ facade delegates).
 **Adding a method to an existing store** (the common case):
 
 1. Add the method to the store's class in its own module — use the
-   store's own connection via its internal methods; do not reach out
-   to the facade.
-2. If the feature needs a new table or column, add a per-store
-   migration that runs the first time that store opens a database
-   path (the existing stores show the pattern — a module-level
-   `_migrated_paths: set[str]` guard + `_migrated_lock`, checked
-   in `__init__`).
-   - **Substrate boundary (RDR-120 §A8):** the migration body must
-     ship DDL only. Any work beyond DDL (per-row backfills, sweeps,
-     content seeding) belongs in a consumer verb under the matching
-     `nx <area>` command group, not in `migrations.py`. The narrow
-     set of exceptions lives in RDR-120 §Research Findings ("§A8-
-     exempt substrate-owned writes"); if your migration is not on
-     that list, it ships DDL-only and the data work moves to a
+   store's own HTTP session / engine routes via its internal methods;
+   do not reach out to the facade.
+2. If the feature needs a new table or column, that is a Liquibase
+   changeset in the engine — the client-side migration chain is
+   DELETED (RDR-158 P4 Stage 4; there are no per-store SQLite
+   migrations in any mode).
+   - **Substrate boundary (RDR-120 §A8, restated for the engine
+     era):** the changeset ships DDL only. Any work beyond DDL
+     (per-row backfills, sweeps, content seeding) belongs in a
+     consumer verb under the matching `nx <area>` command group or
+     an upgrade-ladder rung. The narrow set of exceptions lives in
+     RDR-120 §Research Findings ("§A8-exempt substrate-owned
+     writes"); if your change is not on that list, it ships
+     DDL-only and the data work moves to a
      consumer verb.
 3. If external callers should be able to use the method via the
    `T2Database` facade for backward compatibility, add a one-line
@@ -145,33 +134,27 @@ facade delegates).
 
 **Adding a whole new domain store** (rare):
 
-1. Create `src/nexus/db/t2/<your_domain>.py` with a store class that
-   takes a `Path` and opens its own `sqlite3.Connection` in WAL mode
-   with `PRAGMA busy_timeout = 30000` (the canonical serving value,
-   `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`, raised from 5000 in
-   RDR-129 B1).
-2. Add a `threading.Lock` on the store and guard every write with it.
-3. Add the store to `T2Database.__init__` in construction order
-   (stores created later may depend on earlier ones — `CatalogTaxonomy`
-   holds a reference to `MemoryStore`, for example).
-4. Make sure `T2Database.close()` tears your store down in reverse
-   construction order.
+1. Schema first: the store's tables are Liquibase changesets in the
+   engine (`service/`), DDL-only per the substrate boundary above.
+   There is no client-side DDL in any mode (NO-SQLITE directive,
+   2026-07-18).
+2. Add the engine routes (Java) and gate them with the engine's own
+   test suite.
+3. Create `src/nexus/db/t2/http_<your_domain>_store.py` following the
+   existing `Http*Store` twins (bearer auth, tenant header,
+   `_refreshable_client` session handling).
+4. Add the store to `T2Database.__init__` in construction order and
+   tear it down in `T2Database.close()`.
 5. If your store registers cross-domain expiry work, add it to
    `T2Database.expire()`.
-6. Add concurrency coverage to `tests/test_t2_concurrency.py`.
 
 **Concurrency rules**:
 
-- Never share a connection across threads outside of that store's own
-  lock — the whole point of Phase 2 is that each store owns its own
-  connection and coordinates with other domains at the SQLite WAL
-  layer, not through a shared Python mutex.
-- Do not add a global T2 lock. If two domains genuinely need to
-  coordinate (rare), prefer a targeted SQLite transaction at a single
-  store and document the constraint in that store's module.
-- Tests that exercise multi-store behaviour should use a temp file
-  path, not `":memory:"`. `:memory:` databases are per-connection, so
-  the four stores would each see their own empty database.
+- Concurrency is arbitered by Postgres in the engine — the client
+  stores are stateless HTTP clients and need no cross-store locking.
+- Do not add a global T2 lock client-side. If two domains genuinely
+  need to coordinate (rare), that coordination belongs in the engine
+  (one transaction, one route), not in Python.
 
 ## Adding an Agent or Skill
 
@@ -243,6 +226,11 @@ Every step below is **required**. Missing any one of them has caused problems in
    let releases ship against a stale, un-cloud-validated engine
    (nexus-i5c2u).
 
+   The reverse direction — an engine deploying ahead of the client commits
+   it requires — is a separate gate, `scripts/check_client_release_precondition.py`,
+   run from the `engine-release` skill before a new `engine-service-v*` tag
+   deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
+
 1. **Verify the full test suite passes (unit + integration)**
    ```bash
    uv run pytest tests/                    # unit tests (no API keys needed)
@@ -312,7 +300,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    ./tests/e2e/release-sandbox.sh smoke
    ```
    Required for any change touching `pyproject.toml`, `uv.lock`,
-   `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`,
+   `src/nexus/mcp/**`, `conexus/**`,
    `.claude-plugin/**`, or `src/nexus/commands/{doctor,upgrade}.py` — which
    a release always does (the version bumps alone qualify). The reinstall it
    drives is genuinely isolated and runs cleanly with live Claude Code
@@ -376,7 +364,8 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `docs/configuration.md` | new config keys or tuning parameters |
 | `docs/storage-tiers.md` | new storage capabilities |
 | `README.md` | high-level feature descriptions |
-| `src/nexus/db/migrations.py` | verify `PRE_REGISTRY_VERSION` matches previous release; new T2 migrations in `MIGRATIONS` list; new T3 steps in `T3_UPGRADES` |
+| `src/nexus/upgrade_ladder/` | new DATA-convergence axes land as rungs registered in `registry.py` (the client-side T2 migration chain is deleted — RDR-158 P4 Stage 4; schema is Liquibase in the engine) |
+| `conexus/PENDING_RELEASE.md` | empty the pending-drift list for every entry this release ships — advancing `source.ref` is what makes the declared plugin changes live; a stale entry fails `tests/test_plugin_release_drift_ledger.py` |
 
 ### Pre-push release checklist
 

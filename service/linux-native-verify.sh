@@ -33,7 +33,6 @@ sleep 2; echo "pg ready"
 docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
   -v "$REPO:$REPO" -w "$REPO/service" \
   -v "$HOME/.m2:/root/.m2" \
-  -v "$HOME/.cache/chroma:/root/.cache/chroma" \
   -v "$HOME/.cache/nexus/onnx_models:/root/.cache/nexus/onnx_models" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
@@ -46,7 +45,7 @@ docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
     ./mvnw -q -Pnative -DskipTests package
     echo "=== boot linux native binary + smoke ==="
     export NX_DB_URL="jdbc:postgresql://'"$PG"':5432/nexus" NX_DB_USER=nexus NX_DB_PASS=nexus
-    export NX_SERVICE_PORT=8080 NX_SERVICE_TOKEN=lintoken NX_EMBED_MODE=onnx
+    export NX_SERVICE_PORT=8080 NX_SERVICE_TOKEN=lintoken
     ./target/nexus-service > /tmp/lin-svc.log 2>&1 &
     PID=$!
     UP=0

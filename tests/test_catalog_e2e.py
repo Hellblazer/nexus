@@ -8,13 +8,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
-from tests.conftest import make_vector_test_client
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests.conftest import fake_credentials, make_vector_test_client
 
 _NEXUS_ROOT = Path(__file__).parent.parent
 _CODE_FILES = ["src/nexus/ttl.py", "src/nexus/corpus.py", "src/nexus/types.py"]
@@ -30,14 +30,35 @@ def _do_index(catalog_repo, registry, local_t3, monkeypatch, force=False):
     from nexus.indexer import index_repository
 
     monkeypatch.setenv("NX_LOCAL", "1")
+    # nexus-i711w: fake_credentials (not the blanket ``lambda k: "test-key"``
+    # stub) — the blanket form answers ``service_url`` too, poisoning the
+    # engine-catalog endpoint resolution with a non-URL. Same fix the indexer
+    # e2e suite took in 5cbd1f90 (nexus-aqbrk).
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         index_repository(catalog_repo, registry, force=force)
 
 
 def _write(repo, rel, content):
     (repo / rel).parent.mkdir(parents=True, exist_ok=True)
     (repo / rel).write_text(content, encoding="utf-8")
+
+
+# nexus-i711w C-store: the whole-module ``local_catalog_backend`` pin
+# (f4030fe5, "local by construction") is replaced by the per-test SUBJECT
+# split. The pinned failure mode this file carried — every service request
+# dying on a poisoned base_url — was the blanket credential stub in
+# ``_do_index``, not the journey's construction: the stub answered
+# ``service_url`` with "test-key" (see ``fake_credentials``' docstring for the
+# measured mechanism). With the stub fixed, the CATALOG half of the journey
+# rides the suite's engine substrate (per-test tenant via ``t2_service_env``)
+# while the VECTOR half stays on the test seam (``make_vector_test_client``
+# via the ``make_t3`` patch) — only the catalog substrate moves.
+#
+# Tests whose SUBJECT was the local machinery (JSONL rebuild/compact, the
+# local-only ``link_audit(t3=...)`` chash audit) retired WITH the local
+# catalog src (nexus-i711w terminal deletion) — see the fixture tombstone
+# below for the recorded GAP-CANDIDATEs.
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -104,45 +125,55 @@ def mock_voyage_client():
         yield mock_client
 
 
-@pytest.fixture
-def catalog_env(tmp_path: Path, monkeypatch) -> Path:
-    catalog_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
-    return catalog_dir
+# nexus-i711w terminal deletion: the DIE-set carrier fixtures
+# (catalog_env / indexed_catalog / injected_catalog) retired WITH
+# nexus.catalog.catalog and their 6 pinned tests (link-audit, JSONL
+# rebuild/compact, chash-span audit roundtrip, compact-leg tumbler
+# permanence). GAP-CANDIDATEs recorded here from the dead tests'
+# docstrings: the link-audit contract survives (the MCP tool ships in
+# service mode) but HttpCatalogClient.link_audit returns {} — nothing
+# pins it or the stale-chash audit on the surviving substrate; needs a
+# service-side implementation + test, not a conversion.
 
 
 @pytest.fixture
-def indexed_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch):
-    _do_index(catalog_repo, registry, local_t3, monkeypatch)
-    return Catalog(catalog_env, catalog_env / ".catalog.db"), local_t3
+def indexed_active(catalog_repo, registry, local_t3, monkeypatch):
+    """PORT-side journey state: index the repo, return the ACTIVE catalog.
 
-
-@pytest.fixture
-def injected_catalog(indexed_catalog):
-    """Return the indexed catalog. NEXUS_CATALOG_PATH is already set by the
-    ``catalog_env`` fixture (transitively required), so ``get_catalog()``
-    in production code will construct a fresh Catalog at the same path
-    and read the test's data — no explicit injection needed.
-
-    RDR-120 P6 (nexus-qg86h): direct-mode dispatch removed. The MCP
-    ``get_t3()`` singleton now routes through ``make_t3_client()``
-    which needs a running daemon. Tests don't have a daemon, so we
-    pre-seed ``_t3_instance`` with the fixture's local T3 so the
-    singleton skips ``make_t3()`` entirely.
+    The catalog hook writes to whichever catalog backend is live — under the
+    suite default that is the per-test engine tenant (``t2_service_env``); no
+    ``Catalog.init`` is needed because ``_catalog_hook``'s local
+    ``is_initialized`` gate does not apply in service mode (indexer.py:933).
+    The vector half stays on the test seam (``make_t3`` patched to
+    ``local_t3``) per the port contract: only the catalog substrate moves.
     """
+    _do_index(catalog_repo, registry, local_t3, monkeypatch)
+    return ActiveCatalog(), local_t3
+
+
+@pytest.fixture
+def injected_active(indexed_active):
+    """PORT-side sibling of ``injected_catalog``: same singleton seeding, but
+    the MCP tools resolve the ACTIVE catalog through the factory (service
+    handle under the suite default) instead of a local dir via env."""
     from nexus.mcp_server import _reset_singletons
     from nexus import mcp_infra
 
-    cat, local_t3 = indexed_catalog
+    cat, local_t3 = indexed_active
     _reset_singletons()
     mcp_infra._t3_instance = local_t3
     return cat, local_t3
 
 
 @pytest.fixture
-def linked_catalog(tmp_path):
-    cat = Catalog.init(tmp_path / "catalog")
+def linked_active():
+    """Three registered papers with bib metadata, on the active catalog.
+
+    PORT-VERIFY: ``meta`` carries a LIST value (``references``) — the link
+    generator reads it back via ``entry.meta``, so the engine's meta JSON
+    round-trip must preserve list-typed values verbatim.
+    """
+    cat = ActiveCatalog()
     owner = cat.register_owner("test", "repo", repo_hash="aabb1122")
     docs = [
         cat.register(owner, f"paper-{x}", content_type="paper",
@@ -156,33 +187,39 @@ def linked_catalog(tmp_path):
 # ── Indexer populates catalog ────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("query,min_count", [
-    ("SELECT count(*) FROM owners", 1),
-    ("SELECT count(*) FROM documents WHERE content_type = 'code'", len(_CODE_FILES)),
-    ("SELECT count(*) FROM documents WHERE content_type = 'rdr'", 1),
+@pytest.mark.parametrize("kind,min_count", [
+    ("owners", 1),
+    ("code", len(_CODE_FILES)),
+    ("rdr", 1),
 ])
-def test_index_populates_catalog(indexed_catalog, query, min_count):
-    cat, _ = indexed_catalog
-    assert cat._db.execute(query).fetchone()[0] >= min_count
+def test_index_populates_catalog(indexed_active, kind, min_count):
+    # nexus-i711w: raw ``SELECT count(*)`` parametrization converted by
+    # meaning — owner count via list_owners(), doc counts via
+    # by_content_type(), the public reads on both substrates.
+    cat, _ = indexed_active
+    if kind == "owners":
+        assert len(cat.list_owners()) >= min_count
+    else:
+        assert len(cat.by_content_type(kind)) >= min_count
 
 
 def test_reindex_preserves_tumblers(
-    catalog_repo, registry, local_t3, catalog_env, monkeypatch,
+    catalog_repo, registry, local_t3, monkeypatch,
 ):
     _do_index(catalog_repo, registry, local_t3, monkeypatch)
-    first = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
-             ._db.execute("SELECT tumbler FROM documents").fetchall()}
+    first = {str(d.tumbler) for d in active_reader().all_documents()}
     _do_index(catalog_repo, registry, local_t3, monkeypatch, force=True)
-    second = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
-              ._db.execute("SELECT tumbler FROM documents").fetchall()}
-    assert first.issubset(second)
+    second = {str(d.tumbler) for d in active_reader().all_documents()}
+    # nexus-i711w: ``first`` non-emptiness added — the original subset
+    # assertion was vacuously true on an empty first index.
+    assert first and first.issubset(second)
 
 
 # ── MCP tools + graph traversal (class saves blank-line overhead) ────────────
 
 
 class TestMCP:
-    def test_search_returns_indexed_files(self, injected_catalog):
+    def test_search_returns_indexed_files(self, injected_active):
         """nexus-3lswy: expects 2 matches (ttl.py + the RDR doc), not 3.
         Pre-fix, the RDR file was registered TWICE — once under the repo
         owner via the batched _catalog_hook pass, and again under a
@@ -191,36 +228,47 @@ class TestMCP:
         Document rows for one physical file, both matching "ttl" (one via
         file_path, one via frontmatter title). Routing RDR files through
         _index_prose_file removes the second, redundant registration."""
+        # PORT-VERIFY: exact-count 2 depends on the engine's free-text
+        # match over title + file_path agreeing with the local FTS shape.
         from nexus.mcp_server import catalog_search
         results = catalog_search(query="ttl")
         assert len(results) == 2
         assert any("ttl" in r.get("title", "").lower() or "ttl" in r.get("file_path", "").lower()
                     for r in results)
 
-    def test_search_structured_filter(self, injected_catalog):
+    def test_search_structured_filter(self, injected_active):
         from nexus.mcp_server import catalog_search
-        cat, _ = injected_catalog
-        owner = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
-        assert owner is not None
-        results = catalog_search(owner=owner[0])
+        cat, _ = injected_active
+        # nexus-i711w: the raw ``SELECT tumbler_prefix FROM owners LIMIT 1``
+        # took an ARBITRARY owner; the meaning is "the repo owner that the
+        # index run registered" — select it by type so the assertion cannot
+        # silently land on a curator owner.
+        owners = [o for o in cat.list_owners() if o.get("owner_type") == "repo"]
+        assert owners
+        # PORT-VERIFY: 5 == 3 code files + README + RDR under the repo owner.
+        results = catalog_search(owner=owners[0]["tumbler_prefix"])
         assert len(results) == 5 and "error" not in results[0]
 
-    def test_show_returns_full_entry(self, injected_catalog):
+    def test_show_returns_full_entry(self, injected_active):
         from nexus.mcp_server import catalog_show
-        cat, _ = injected_catalog
-        tumbler = cat._db.execute("SELECT tumbler FROM documents LIMIT 1").fetchone()[0]
+        cat, _ = injected_active
+        docs = list(cat.all_documents())
+        assert docs
+        tumbler = str(docs[0].tumbler)
         result = catalog_show(tumbler=tumbler)
         assert "error" not in result and result["tumbler"] == tumbler
         assert "links_from" in result and "links_to" in result
 
-    def test_resolve_returns_collections(self, injected_catalog):
+    def test_resolve_returns_collections(self, injected_active):
         from nexus.mcp_server import catalog_resolve
-        cat, _ = injected_catalog
-        owner = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
-        result = catalog_resolve(owner=owner[0])
+        cat, _ = injected_active
+        owners = [o for o in cat.list_owners() if o.get("owner_type") == "repo"]
+        assert owners
+        # PORT-VERIFY: 3 == code/docs/rdr collections registered by the hook.
+        result = catalog_resolve(owner=owners[0]["tumbler_prefix"])
         assert len(result) == 3 and any("__" in n for n in result)
 
-    def test_search_then_traverse_links(self, injected_catalog):
+    def test_search_then_traverse_links(self, injected_active):
         """nexus-3lswy: 2 matches, not 3 — see test_search_returns_indexed_files
         for why (removal of the RDR double-registration-under-two-owners bug)."""
         from nexus.mcp_server import catalog_links, catalog_search
@@ -231,7 +279,9 @@ class TestMCP:
         assert "nodes" in graph and "edges" in graph
         assert tumbler in {n["tumbler"] for n in graph["nodes"]}
 
-    def test_link_creation_via_title(self, injected_catalog):
+    def test_link_creation_via_title(self, injected_active):
+        # PORT-VERIFY: title -> tumbler resolution inside catalog_link must
+        # find "types.py"/"corpus.py" on the engine's metadata search.
         from nexus.mcp_server import catalog_link, catalog_link_query
         result = catalog_link(from_tumbler="types.py", to_tumbler="corpus.py",
                               link_type="relates", created_by="test")
@@ -239,38 +289,40 @@ class TestMCP:
         # nexus-8g79.23: we just created exactly one link.
         assert len(catalog_link_query(link_type="relates", created_by="test")) == 1
 
-    def test_link_audit_after_indexing(self, injected_catalog):
-        from nexus.mcp_server import catalog_link_audit
-        audit = catalog_link_audit()
-        assert "error" not in audit and audit["total"] == 2
-        assert audit["orphaned_count"] == 0
-
 
 # ── Link generation + lifecycle ──────────────────────────────────────────────
 
 
 class TestLinks:
-    def test_full_link_lifecycle(self, linked_catalog):
+    def test_full_link_lifecycle(self, linked_active):
         from nexus.catalog.link_generator import generate_citation_links
-        cat, doc_a, doc_b, doc_c = linked_catalog
+        cat, doc_a, doc_b, doc_c = linked_active
         assert generate_citation_links(cat) == 2
         assert len(cat.link_query(created_by="bib_enricher")) == 2
         assert cat.bulk_unlink(created_by="bib_enricher") == 2
         assert cat.link_query(created_by="bib_enricher") == []
         assert generate_citation_links(cat) == 2
-        audit = cat.link_audit()
-        assert audit["orphaned_count"] == 0 and audit["total"] == 2
+        # nexus-i711w: ``link_audit()`` is unimplemented on the service client
+        # (returns {}); the two facts the audit assertion pinned are asserted
+        # directly — no dangling link endpoints, and exactly the 2 cite links.
+        assert cat.orphaned_links() == []
+        assert len(cat.link_query(link_type="cites")) == 2
 
-    def test_delete_document_orphan_preserved(self, linked_catalog):
-        cat, doc_a, doc_b, _doc_c = linked_catalog
+    def test_delete_document_orphan_preserved(self, linked_active):
+        cat, doc_a, doc_b, _doc_c = linked_active
         cat.link(doc_a, doc_b, "cites", created_by="user")
         cat.delete_document(doc_a)
-        assert cat.link_audit()["orphaned_count"] == 1
+        # nexus-i711w: audit orphaned_count -> orphaned_links() (the reader
+        # that backs the same fact on both substrates). PORT-VERIFY: pins the
+        # engine's orphan-preservation semantics — catalog_links carries no FK
+        # to catalog_documents by design (see orphaned_links docstring), so a
+        # cascade-on-delete here is a product regression, not a test artifact.
+        assert len(cat.orphaned_links()) == 1
         assert cat.resolve(doc_a) is None and len(cat.links_to(doc_b)) == 1
 
-    def test_link_if_absent_idempotent(self, linked_catalog):
+    def test_link_if_absent_idempotent(self, linked_active):
         from nexus.catalog.link_generator import generate_citation_links
-        cat, *_ = linked_catalog
+        cat, *_ = linked_active
         assert generate_citation_links(cat) == 2
         assert generate_citation_links(cat) == 0
         assert len(cat.link_query(link_type="cites")) == 2
@@ -279,7 +331,15 @@ class TestLinks:
 # ── store_put → catalog ─────────────────────────────────────────────────────
 
 
-def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="nexus-tz1cx: by_doc_id asks a different question per substrate — "
+    "the service client does a tumbler resolve instead of the meta.doc_id "
+    "lookup, silently returning None for the store_put hook's chunk-id "
+    "identity. CONFIRMED LIVE by this port (2026-07-30). Flips with tz1cx.",
+)
+def test_store_put_registers_in_catalog():
     """RDR-101 Phase 3 PR δ Stage B.5 changed the timing so the catalog
     hook now runs BEFORE the T3 write (so the chunk can carry the
     catalog tumbler as ``doc_id``). The catalog's legacy
@@ -292,10 +352,9 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     import hashlib as _hl
     from nexus.mcp_server import _reset_singletons, store_put
 
-    catalog_dir = tmp_path / "catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    cat = Catalog.init(catalog_dir)
-    cat.register_owner("knowledge", "curator")
+    # nexus-i711w: no Catalog.init / NEXUS_CATALOG_PATH — in service mode the
+    # store_put hook writes to the active (engine) catalog directly.
+    ActiveCatalog().register_owner("knowledge", "curator")
     _reset_singletons()
     content = "# Research: Vector Indexing\n\nFindings about HNSW..."
     with patch("nexus.mcp.core._get_t3") as mock_t3:
@@ -310,28 +369,33 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     assert "Stored" in result
     # The catalog stores the deterministic chunk_chroma_id derived from
     # content (the natural ID per RDR-108 D1).
+    # PORT-VERIFY: by_doc_id must resolve the meta.doc_id lookup field on
+    # the engine substrate.
     expected_chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()
-    entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id(
-        expected_chunk_chroma_id,
-    )
+    entry = active_reader().by_doc_id(expected_chunk_chroma_id)
     assert entry is not None and entry.title == "research-vector-indexing"
 
 
 # ── Tumbler permanence ───────────────────────────────────────────────────────
 
 
-def test_tumblers_stable_across_delete_compact_reindex(
-    catalog_repo, registry, local_t3, catalog_env, monkeypatch,
+def test_tumblers_stable_across_delete_reindex(
+    catalog_repo, registry, local_t3, monkeypatch,
 ):
+    """Ported meaning of the compact-leg test (nexus-i711w): a deleted
+    document's tumbler is never reused when a force re-index re-registers
+    the still-present file. The JSONL-compact step has no service
+    equivalent by design; tumbler permanence is the surviving contract."""
+    # PORT-VERIFY: pins the engine's tumbler non-reuse across delete +
+    # re-register (server-side next_seq must not backfill freed tumblers).
     _do_index(catalog_repo, registry, local_t3, monkeypatch)
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    original = {r[0] for r in cat._db.execute("SELECT tumbler FROM documents").fetchall()}
+    cat = ActiveCatalog()
+    original = {str(d.tumbler) for d in cat.all_documents()}
+    assert original
     first_tumbler = sorted(original)[0]
     cat.delete_document(Tumbler.parse(first_tumbler))
-    cat.compact()
     _do_index(catalog_repo, registry, local_t3, monkeypatch, force=True)
-    new = {r[0] for r in Catalog(catalog_env, catalog_env / ".catalog.db")
-           ._db.execute("SELECT tumbler FROM documents").fetchall()}
+    new = {str(d.tumbler) for d in cat.all_documents()}
     assert first_tumbler not in new and len(new) >= len(original) - 1
 
 
@@ -339,7 +403,10 @@ def test_tumblers_stable_across_delete_compact_reindex(
 
 
 def test_link_with_line_span_resolves_text(tmp_path):
-    cat = Catalog.init(tmp_path / "catalog")
+    # PORT-VERIFY: line-range spans resolve CLIENT-side from
+    # ``entry.file_path`` (catalog_spans.resolve_span_text_for_entry), so the
+    # engine must store and echo the absolute path registered here verbatim.
+    cat = ActiveCatalog()
     owner = cat.register_owner("test", "repo", repo_hash="e2etest")
     src_file = tmp_path / "source.py"
     src_file.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
@@ -349,49 +416,16 @@ def test_link_with_line_span_resolves_text(tmp_path):
     assert cat.resolve_span_text(doc_a, "2-4") == "line2\nline3\nline4"
 
 
-# ── JSONL rebuild + compact ──────────────────────────────────────────────────
-
-
-class TestJSONLResilience:
-    def test_fresh_catalog_sees_indexed_data(self, indexed_catalog, catalog_env):
-        assert Catalog(catalog_env, catalog_env / ".catalog-fresh.db")._db.execute(
-            "SELECT count(*) FROM documents"
-        ).fetchone()[0] >= len(_CODE_FILES)
-
-    def test_compact_and_rebuild(self, indexed_catalog, catalog_env):
-        cat, _ = indexed_catalog
-        before = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-        cat.compact()
-        after = Catalog(catalog_env, catalog_env / ".catalog-compact.db")._db.execute(
-            "SELECT count(*) FROM documents"
-        ).fetchone()[0]
-        assert after == before
-
-
 # ── chash span pipeline (RDR-053) ────────────────────────────────────────────
 
 
-def _get_two_docs_and_chunk(cat, local_t3):
-    docs = cat._db.execute(
-        "SELECT tumbler, physical_collection FROM documents LIMIT 2"
-    ).fetchall()
-    # nexus-8g79.23: LIMIT 2 over a non-empty seeded fixture returns 2.
-    assert len(docs) == 2
-    col = local_t3._client.get_collection(docs[0][1])
-    chunk = col.get(limit=1, include=["documents", "metadatas"])
-    assert chunk["ids"]
-    return (Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]), docs[0][1],
-            chunk["metadatas"][0]["chunk_text_hash"], chunk["documents"][0])
-
-
 class TestChashSpan:
-    def test_index_produces_chunk_text_hash(self, indexed_catalog):
-        cat, local_t3 = indexed_catalog
-        row = cat._db.execute(
-            "SELECT physical_collection FROM documents WHERE content_type = 'code' LIMIT 1"
-        ).fetchone()
-        assert row
-        result = local_t3._client.get_collection(row[0]).get(
+    def test_index_produces_chunk_text_hash(self, indexed_active):
+        cat, local_t3 = indexed_active
+        # nexus-i711w: raw ``SELECT physical_collection`` -> public reader.
+        code_docs = [d for d in cat.by_content_type("code") if d.physical_collection]
+        assert code_docs
+        result = local_t3._client.get_collection(code_docs[0].physical_collection).get(
             limit=5, include=["documents", "metadatas"],
         )
         assert result["ids"]
@@ -404,28 +438,6 @@ class TestChashSpan:
             assert meta["chunk_text_hash"] != meta["content_hash"]
             # RDR-180 (nexus-jxizy.3): chunk natural ID is the FULL digest.
             assert chunk_id == expected
-
-    def test_audit_and_resolve_roundtrip(self, indexed_catalog):
-        cat, local_t3 = indexed_catalog
-        from_t, to_t, coll, real_hash, real_text = _get_two_docs_and_chunk(cat, local_t3)
-        assert cat.link(from_t, to_t, "quotes", "e2e-test", from_span=f"chash:{real_hash}") is True
-        assert cat.link_audit(t3=local_t3._client)["stale_chash_count"] == 0
-        resolved = cat.resolve_span(f"chash:{real_hash}", coll, local_t3._client)
-        assert resolved is not None
-        assert resolved["chunk_text"] == real_text and resolved["chunk_hash"] == real_hash
-
-    def test_audit_detects_bogus_hash(self, indexed_catalog):
-        cat, local_t3 = indexed_catalog
-        docs = cat._db.execute("SELECT tumbler FROM documents LIMIT 2").fetchall()
-        # nexus-8g79.23: seeded fixture has ≥2 docs; LIMIT 2 returns 2.
-        assert len(docs) == 2
-        bogus = "f" * 64
-        cat.link(Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]),
-                 "quotes", "e2e-test", from_span=f"chash:{bogus}")
-        audit = cat.link_audit(t3=local_t3._client)
-        # nexus-8g79.23: we created exactly one bogus link above.
-        assert audit["stale_chash_count"] == 1
-        assert f"chash:{bogus}" in [s["span"] for s in audit["stale_chash"]]
 
 
 # ── Tumbler ordering ─────────────────────────────────────────────────────────
@@ -453,15 +465,19 @@ def test_spans_overlap(s1, e1, s2, e2, expected):
 
 
 def test_catalog_plan_templates_exist(db):
-    rows = db.plans.conn.execute(
-        "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
-    ).fetchall()
-    # nexus-8g79.23: the assertion ``rows[0][0] >= 0`` was meaningless —
-    # SQLite COUNT(*) is always non-negative. The real intent of this
-    # test is "plan-template SQL is queryable without error"; tighten
-    # the assertion to that.
-    assert isinstance(rows, list) and len(rows) == 1
-    assert isinstance(rows[0][0], int)
+    # nexus-8g79.23: the original ``rows[0][0] >= 0`` was meaningless — a
+    # SQLite COUNT(*) is always non-negative — so it was tightened to "the
+    # plan-template SQL is queryable without error".
+    #
+    # nexus-aqbrk: that phrasing still reached for db.plans.conn, which the
+    # service-backed store does not have. list_plans() is the public read on
+    # both stores, and it makes the intent stronger rather than weaker: the
+    # library answers, and every row it returns is well-formed enough to be
+    # filtered on its tags.
+    plans = db.plans.list_plans(limit=300)
+    assert isinstance(plans, list)
+    catalog_tagged = [p for p in plans if "catalog" in (p.get("tags") or "")]
+    assert all(isinstance(p.get("id"), int) for p in catalog_tagged)
 
 
 # ── 'formalizes' link type (RDR-057 P1-1a, nexus-807l) ─────────────────────
@@ -470,8 +486,8 @@ def test_catalog_plan_templates_exist(db):
 class TestFormalizesLinkType:
     """Verify catalog accepts 'formalizes' as a link type — no schema changes needed."""
 
-    def test_formalizes_link_roundtrip(self, tmp_path):
-        cat = Catalog.init(tmp_path / "catalog")
+    def test_formalizes_link_roundtrip(self):
+        cat = ActiveCatalog()
         owner = cat.register_owner("test", "repo", repo_hash="abc123")
         doc_a = cat.register(owner, "scratch-note", content_type="knowledge")
         doc_b = cat.register(owner, "formal-entry", content_type="knowledge")
@@ -485,8 +501,8 @@ class TestFormalizesLinkType:
         assert str(links[0].to_tumbler) == str(doc_b)
         assert links[0].link_type == "formalizes"
 
-    def test_formalizes_link_if_absent_idempotent(self, tmp_path):
-        cat = Catalog.init(tmp_path / "catalog")
+    def test_formalizes_link_if_absent_idempotent(self):
+        cat = ActiveCatalog()
         owner = cat.register_owner("test", "repo", repo_hash="abc123")
         doc_a = cat.register(owner, "scratch-note", content_type="knowledge")
         doc_b = cat.register(owner, "formal-entry", content_type="knowledge")

@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CatalogIdentityConflictException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -109,7 +110,10 @@ class TaxonomyRepositoryTest {
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON " + schema + "." + table + " TO " + SVC_ROLE);
             }
             su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE " + schema + ".topics_id_seq TO " + SVC_ROLE);
+                // UPDATE mirrors taxonomy-005 (production grants nexus_svc UPDATE on
+                // this one sequence so the fidelity import can setval past imported
+                // ids — g37fr FINDING 2); SELECT for the GREATEST(last_value, ...).
+                "GRANT USAGE, SELECT, UPDATE ON SEQUENCE " + schema + ".topics_id_seq TO " + SVC_ROLE);
             // Grant SELECT on catalog_documents to the DML role for general catalog
             // query coverage in mixed tests. (nexus-sa14p: importAssignment no longer
             // reads catalog_documents — fk_ta_catalog_doc was removed — so this is not
@@ -394,6 +398,67 @@ class TaxonomyRepositoryTest {
 
     // ── Links ──────────────────────────────────────────────────────────────────
 
+    @Test @Order(191)
+    void linkDrift_mirrorsRefreshProjectionLinksPredicate() {
+        // nexus-ypori. The audit and the materializer must agree on what
+        // "linkable" means. They did not: the client-side check required the
+        // co-occurring partner to BE projection while refreshProjectionLinks
+        // requires it to be NON-projection, so it reported 50 unlinkable
+        // topics as drift and suppressed the 2 real ones. These three shapes
+        // are the whole contract.
+        long drifted   = repo.insertTopic(TENANT_A, "drift-proj", null, COL_A, 0, null, null);
+        long partner   = repo.insertTopic(TENANT_A, "drift-centroid", null, COL_A, 0, null, null);
+        long bothProj1 = repo.insertTopic(TENANT_A, "bothproj-1", null, COL_A, 0, null, null);
+        long bothProj2 = repo.insertTopic(TENANT_A, "bothproj-2", null, COL_A, 0, null, null);
+        long lonely    = repo.insertTopic(TENANT_A, "lonely-proj", null, COL_A, 0, null, null);
+
+        // (1) LINKABLE: projection + non-projection on one doc, no link row.
+        repo.assignTopic(TENANT_A, "doc-drift", drifted, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, "doc-drift", partner, "centroid",   0.8, COL_A, null);
+
+        // (2) NOT linkable: two projection assignments produce no link at all.
+        repo.assignTopic(TENANT_A, "doc-bothproj", bothProj1, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, "doc-bothproj", bothProj2, "projection", 0.8, COL_A, null);
+
+        // (3) NOT linkable: a lone assignment has nothing to pair with.
+        repo.assignTopic(TENANT_A, "doc-lonely", lonely, "projection", 0.7, COL_A, null);
+
+        var report = repo.linkDrift(TENANT_A, 50);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) report.get("rows");
+        List<Long> ids = rows.stream()
+            .map(m -> ((Number) m.get("topic_id")).longValue()).toList();
+
+        assertThat(ids).contains(drifted);
+        assertThat(ids).doesNotContain(bothProj1, bothProj2, lonely);
+
+        // and once the link exists, the drift clears
+        repo.upsertTopicLink(TENANT_A, drifted, partner, 1, "projection");
+        var after = repo.linkDrift(TENANT_A, 50);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> afterRows = (List<Map<String, Object>>) after.get("rows");
+        assertThat(afterRows.stream()
+            .map(m -> ((Number) m.get("topic_id")).longValue()).toList())
+            .doesNotContain(drifted);
+    }
+
+    @Test @Order(192)
+    void linkDrift_countIsExactWhileRowsAreCapped() {
+        // drift_count must not be len(rows): an operator who caps the payload
+        // still needs to know the true blast radius.
+        long partner = repo.insertTopic(TENANT_A, "cap-partner", null, COL_A, 0, null, null);
+        for (int i = 0; i < 4; i++) {
+            long t = repo.insertTopic(TENANT_A, "cap-" + i, null, COL_A, 0, null, null);
+            repo.assignTopic(TENANT_A, "doc-cap-" + i, t, "projection", 0.9, COL_A, null);
+            repo.assignTopic(TENANT_A, "doc-cap-" + i, partner, "centroid", 0.8, COL_A, null);
+        }
+        var report = repo.linkDrift(TENANT_A, 2);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) report.get("rows");
+        assertThat(rows).hasSize(2);
+        assertThat(((Number) report.get("drift_count")).intValue()).isGreaterThanOrEqualTo(4);
+    }
+
     @Test @Order(19)
     void upsertAndGetTopicLinks() {
         long t1 = repo.insertTopic(TENANT_A, "link-topic-1", null, COL_A, 0, null, null);
@@ -463,6 +528,116 @@ class TaxonomyRepositoryTest {
 
         // review_status STILL uses EXCLUDED (verbatim): last import wins.
         assertThat(row.get().get("review_status")).isEqualTo("pending");
+    }
+
+    @Test @Order(215)
+    void importTopic_advancesIdSequence_noCollisionOnNextSerialInsert() {
+        // g37fr FINDING 2 (RDR-155 P4b, engine v0.1.53): fidelity import
+        // preserves the source id verbatim but must ALSO advance the topics
+        // BIGSERIAL sequence past it — otherwise the next live serial INSERT
+        // (persist_rebuild) collides 409 on a shared store. Standard PG
+        // import discipline: setval(pg_get_serial_sequence, GREATEST(...))
+        // inside the import transaction.
+        long liveId = repo.insertTopic(TENANT_A, "seq-live-probe", null, COL_A, 0, null, null);
+        long importedId = liveId + 1; // exactly the sequence's next value pre-fix
+        repo.importTopic(TENANT_A, importedId, "seq-imported", null, COL_A,
+                         "centroid-seq", 0, PAST_TS, "pending", null);
+        long nextId = repo.insertTopic(TENANT_A, "seq-after-import", null, COL_A, 0, null, null);
+        assertThat(nextId)
+            .as("serial insert after fidelity import must not collide with the imported id")
+            .isGreaterThan(importedId);
+    }
+
+    @Test @Order(216)
+    void importBatch_topics_advancesIdSequence() {
+        // Batch twin of the sequence-advance discipline (same 409 class).
+        long liveId = repo.insertTopic(TENANT_A, "seq-batch-probe", null, COL_A, 0, null, null);
+        long importedId = liveId + 1;
+        repo.importBatch(TENANT_A, "topic", List.of(Map.of(
+            "id", importedId, "label", "seq-batch-imported", "collection", COL_A,
+            "created_at", PAST_TS, "doc_count", 0, "review_status", "pending")));
+        long nextId = repo.insertTopic(TENANT_A, "seq-batch-after", null, COL_A, 0, null, null);
+        assertThat(nextId)
+            .as("serial insert after batch fidelity import must not collide")
+            .isGreaterThan(importedId);
+    }
+
+    // ── nexus-q2ign: topics ON CONFLICT arbiter completeness ────────────────────
+
+    @Test @Order(217)
+    void importTopic_refusesRootLabelConflictAtDifferentId() {
+        // Sequential double-write repro of the unhandled 23505: two fidelity
+        // imports at DIFFERENT ids both claiming the same (collection, label)
+        // ROOT topic identity. ON CONFLICT (TOPICS.ID) cannot see this — it is
+        // a genuinely different key — so pre-fix this raised a raw PSQLException
+        // (23505 on idx_topics_root_tenant_collection_label) instead of the
+        // typed refusal.
+        final String col = "knowledge__q2ign_dup";
+        repo.importTopic(TENANT_A, 9910001L, "q2ign-dup-label", null, col,
+                         null, 0, PAST_TS, "pending", null);
+
+        assertThatThrownBy(() -> repo.importTopic(TENANT_A, 9910002L, "q2ign-dup-label", null, col,
+                                                   null, 0, PAST_TS, "pending", null))
+            .as("a second id claiming the same live root-topic identity must be REFUSED, "
+                + "not silently merged and not a raw 23505")
+            .isInstanceOf(CatalogIdentityConflictException.class)
+            .satisfies(e -> assertThat(((CatalogIdentityConflictException) e).constraint())
+                .isEqualTo("idx_topics_root_tenant_collection_label"));
+
+        // The refused write must not have landed — exactly one row for this identity.
+        assertThat(repo.getAllTopics(TENANT_A, col)).hasSize(1);
+        assertThat(repo.getTopicById(TENANT_A, 9910002L)).isEmpty();
+    }
+
+    @Test @Order(218)
+    void importTopic_sameIdReimport_sameLabelIsNotRefused() {
+        // The idempotent ETL re-run case (already covered functionally by
+        // importTopic_preservesId_docCountNotEtlMerged above) must stay
+        // unaffected by the new guard: re-importing the SAME id is a
+        // convergent no-op regardless of the root-label key.
+        final String col = "knowledge__q2ign_same_id";
+        repo.importTopic(TENANT_A, 9910010L, "q2ign-same-id", null, col,
+                         null, 0, PAST_TS, "pending", null);
+        assertThatCode(() -> repo.importTopic(TENANT_A, 9910010L, "q2ign-same-id", null, col,
+                                              "new-centroid", 0, PAST_TS, "accepted", null))
+            .doesNotThrowAnyException();
+        assertThat(repo.getTopicById(TENANT_A, 9910010L).get().get("centroid_hash"))
+            .isEqualTo("new-centroid");
+    }
+
+    @Test @Order(219)
+    void importTopic_childTopicNotGovernedByRootLabelKey() {
+        // parent_id NOT NULL is outside idx_topics_root_tenant_collection_label's
+        // predicate entirely — two children may legitimately share a label under
+        // the same parent (SQLite never enforced uniqueness there either).
+        final String col = "knowledge__q2ign_child";
+        long parent = repo.importTopic(TENANT_A, 9910020L, "q2ign-parent", null, col,
+                                       null, 0, PAST_TS, "pending", null);
+        repo.importTopic(TENANT_A, 9910021L, "q2ign-child-dup", parent, col,
+                         null, 0, PAST_TS, "pending", null);
+        assertThatCode(() -> repo.importTopic(TENANT_A, 9910022L, "q2ign-child-dup", parent, col,
+                                              null, 0, PAST_TS, "pending", null))
+            .as("child topics (parent_id NOT NULL) carry no root-label identity to guard")
+            .doesNotThrowAnyException();
+        assertThat(repo.getChildTopics(TENANT_A, parent)).hasSize(2);
+    }
+
+    @Test @Order(220)
+    void importTopicsBatch_refusesRootLabelConflictAtDifferentId() {
+        // Batch twin of Order(217) — the multi-row ON CONFLICT (TOPICS.ID)
+        // form is not exempt from the key its arbiter omits.
+        final String col = "knowledge__q2ign_batch_dup";
+        repo.importBatch(TENANT_A, "topic", List.of(m(
+            "id", 9910030L, "label", "q2ign-batch-dup", "collection", col,
+            "created_at", PAST_TS, "doc_count", 0, "review_status", "pending")));
+
+        assertThatThrownBy(() -> repo.importBatch(TENANT_A, "topic", List.of(m(
+                "id", 9910031L, "label", "q2ign-batch-dup", "collection", col,
+                "created_at", PAST_TS, "doc_count", 0, "review_status", "pending"))))
+            .as("batch import must refuse the same identity conflict as the single-row path")
+            .isInstanceOf(CatalogIdentityConflictException.class);
+
+        assertThat(repo.getAllTopics(TENANT_A, col)).hasSize(1);
     }
 
     @Test @Order(22)
@@ -1132,6 +1307,135 @@ class TaxonomyRepositoryTest {
     void assignMany_emptyList_noOp() {
         assertThat(repo.assignMany(TENANT_A, List.of())).isZero();
         assertThat(repo.assignMany(TENANT_A, null)).isZero();
+    }
+
+    // ── Hub staleness (nexus-onjvy) ────────────────────────────────────────────
+
+    /**
+     * Seed one hub: a topic with projection assignments from two source collections
+     * (DF=2), assigned at {@code assignedAt}. Returns the topic id.
+     */
+    private long seedHub(String tenant, String label, String assignedAt,
+                         String sourceA, String sourceB) {
+        long topicId = repo.insertTopic(tenant, label, null, COL_A, 0, null, null);
+        repo.assignTopic(tenant, label + "-doc-a", topicId, "projection", 0.5, sourceA, assignedAt);
+        repo.assignTopic(tenant, label + "-doc-b", topicId, "projection", 0.5, sourceB, assignedAt);
+        return topicId;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> hubRow(List<Map<String, Object>> hubs, long topicId) {
+        return hubs.stream()
+            .filter(h -> Long.valueOf(topicId).equals(((Number) h.get("topic_id")).longValue()))
+            .findFirst().orElseThrow(() ->
+                new AssertionError("topic " + topicId + " did not surface as a hub — the "
+                    + "staleness assertions below would be vacuous"));
+    }
+
+    @Test @Order(64)
+    void detectHubs_staleWhenAssignmentsNewerThanLatestDiscover() {
+        // nexus-onjvy gap 3: warn_stale was accepted and SILENTLY DROPPED over HTTP.
+        // RDR-077 C-2 semantics: compare against MAX(last_discover_at) across ALL
+        // contributing source collections, not a single row.
+        final String tenant = "tax-hub-stale-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-stale", "2026-04-10T13:04:00Z", srcA, srcB);
+        // Both collections discovered BEFORE the hub's latest assignment.
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-09T00:00:00Z");
+        repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("is_stale")).as("assignments postdate every discover").isEqualTo(true);
+        assertThat(hub.get("max_last_discover_at")).isEqualTo("2026-04-09T00:00:00Z");
+        assertThat(hub.get("never_discovered_count")).isEqualTo(0);
+    }
+
+    @Test @Order(65)
+    void detectHubs_notStaleWhenAnyContributingCollectionDiscoveredLater() {
+        // THE C-2 CORRECTNESS POINT: MAX aggregates over ALL contributing collections.
+        // Updating ONE of the two to postdate the hub's latest assignment clears
+        // staleness — a single-row lookup would have kept it stale.
+        final String tenant = "tax-hub-fresh-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-fresh", "2026-04-10T13:04:00Z", srcA, srcB);
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-11T00:00:00Z");
+        repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("is_stale")).as("the MAX postdates the assignments").isEqualTo(false);
+        assertThat(hub.get("max_last_discover_at"))
+            .as("MAX picks the later of the two, not the first row seen")
+            .isEqualTo("2026-04-11T00:00:00Z");
+        assertThat(hub.get("never_discovered_count")).isEqualTo(0);
+    }
+
+    @Test @Order(66)
+    void detectHubs_neverDiscoveredCollectionCountsAndForcesStale() {
+        // A contributing collection with NO taxonomy_meta row at all is "never
+        // discovered" and makes the hub stale regardless of the other's timestamp.
+        final String tenant = "tax-hub-never-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-never", "2026-04-10T13:04:00Z", srcA, srcB);
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-30T00:00:00Z");  // well after
+        // srcB deliberately never recorded.
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("never_discovered_count")).isEqualTo(1);
+        assertThat(hub.get("is_stale"))
+            .as("a never-discovered contributor is stale even though MAX postdates")
+            .isEqualTo(true);
+    }
+
+    // ── Assignment detail projection (nexus-onjvy) ─────────────────────────────
+
+    @Test @Order(67)
+    void getAssignmentDetails_returnsTheQualityColumnsForDocsCannotRead() {
+        // nexus-onjvy gap 1: similarity / assigned_at / source_collection were WRITTEN
+        // by assignTopic and projected by no route — getAssignmentsForDocs selects
+        // doc_id + topic_id only, which is asserted here so the two stay distinct.
+        final String tenant = "tax-detail-" + System.nanoTime();
+        long topicId = repo.insertTopic(tenant, "detail-topic", null, COL_A, 0, null, null);
+        repo.assignTopic(tenant, "detail-doc", topicId, "projection",
+            0.8712345, "code__detail_src", "2026-04-14T10:00:00Z");
+
+        var details = repo.getAssignmentDetails(tenant, List.of("detail-doc"));
+
+        assertThat(details).hasSize(1);
+        var row = details.get(0);
+        assertThat(row.get("doc_id")).isEqualTo("detail-doc");
+        assertThat(((Number) row.get("topic_id")).longValue()).isEqualTo(topicId);
+        assertThat(row.get("assigned_by")).isEqualTo("projection");
+        assertThat(((Number) row.get("similarity")).doubleValue()).isEqualTo(0.8712345);
+        assertThat(row.get("source_collection")).isEqualTo("code__detail_src");
+        assertThat(row.get("assigned_at")).isEqualTo("2026-04-14T10:00:00Z");
+
+        // The cheap map read is deliberately NOT widened: callers destructure it as
+        // {doc_id: topic_id}, so widening would change a return type they depend on.
+        var map = repo.getAssignmentsForDocs(tenant, List.of("detail-doc"));
+        assertThat(map).hasSize(1);
+        assertThat(map.get(0).keySet())
+            .as("for_docs stays a two-key projection")
+            .containsExactlyInAnyOrder("doc_id", "topic_id");
+    }
+
+    @Test @Order(68)
+    void getAssignmentDetails_isTenantScopedAndEmptyForUnknownDocs() {
+        final String tenant = "tax-detail-rls-" + System.nanoTime();
+        final String other  = "tax-detail-other-" + System.nanoTime();
+        long mine = repo.insertTopic(tenant, "mine-topic", null, COL_A, 0, null, null);
+        long theirs = repo.insertTopic(other, "their-topic", null, COL_A, 0, null, null);
+        repo.assignTopic(tenant, "shared-doc-id", mine, "projection", 0.1, "code__mine", null);
+        repo.assignTopic(other, "shared-doc-id", theirs, "projection", 0.9, "code__theirs", null);
+
+        var out = repo.getAssignmentDetails(tenant, List.of("shared-doc-id"));
+
+        assertThat(out).as("the other tenant's row for the same doc_id must not leak")
+            .hasSize(1);
+        assertThat(out.get(0).get("source_collection")).isEqualTo("code__mine");
+        assertThat(repo.getAssignmentDetails(tenant, List.of("no-such-doc"))).isEmpty();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

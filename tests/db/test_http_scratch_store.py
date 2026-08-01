@@ -532,32 +532,36 @@ class TestGetT1DatabaseFactory:
             f"NX_STORAGE_BACKEND_T1=service, got {type(result).__name__}"
         )
 
-    def test_get_t1_database_reaches_chroma_path_on_explicit_sqlite_opt_out(
+    def test_get_t1_database_hard_errors_on_explicit_sqlite_opt_out(
         self, monkeypatch
     ):
-        """nexus-rn3wo.1: the default flipped to SERVICE, but the explicit
-        sqlite opt-out (``NX_STORAGE_BACKEND=sqlite``) still reaches the
-        legacy Chroma-backed T1Database path — the escape hatch matches every
-        other store's opt-out semantics.
-        """
+        """RDR-158 P3 (nexus-7bomn): the =sqlite opt-out is retired. The
+        factory must fail LOUD with the stranded-install redirect — never
+        silently hand back the service store to a shell that explicitly
+        asked for the old baseline."""
         monkeypatch.delenv("NX_STORAGE_BACKEND_T1", raising=False)
         monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
-        from nexus.db.http_scratch_store import HttpScratchStore
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for
-        assert storage_backend_for("t1") == StorageBackend.SQLITE
-        # get_t1_database() on this path will raise T1ServerNotFoundError (no live chroma);
-        # the important thing is it does NOT produce an HttpScratchStore.
-        from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
-        try:
-            result = get_t1_database()
-            assert not isinstance(result, HttpScratchStore), (
-                "get_t1_database() must NOT return HttpScratchStore on the sqlite opt-out path"
-            )
-        except T1ServerNotFoundError:
-            pass  # Expected when no Chroma server is running in the test environment
+        import pytest as _pytest
 
+        from nexus.db.storage_mode import StorageModeFlagError
+        from nexus.db.t1 import get_t1_database
+
+        with _pytest.raises(StorageModeFlagError, match="retired SQLite storage backend"):
+            get_t1_database()
+
+    def test_get_t1_database_isolated_escape_hatch_still_works(self, monkeypatch):
+        """NX_T1_ISOLATED=1 (the documented in-process ephemeral scratch)
+        survives the opt-out removal and wins before env validation."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database
+
+        result = get_t1_database()
+        assert not isinstance(result, HttpScratchStore)
 
 # ── nexus-g5hzk: 401 -> lease-reread -> retry-once (borrower self-heal) ────────
 

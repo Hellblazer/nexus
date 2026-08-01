@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._catalog_fixture_ops import ActiveCatalog, only_document
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
@@ -121,12 +122,13 @@ def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
 # ── Missing credentials ─────────────────────────────────────────────────────
 
 def test_doctor_missing_credentials_informational(runner, mock_reg):
-    """nexus-nmw3i/c7aj3: absent legacy creds are migration-source status
-    lines, never a failing/fatal doctor result (the exit-1 false-positive
-    on migrated installs)."""
+    """nexus-nmw3i/c7aj3 → RDR-155 P4b: the CHROMA_* credential rows died
+    with the migration machinery; the Voyage row survives and stays
+    informational — absent creds are never a failing/fatal doctor result
+    (the exit-1 false-positive on migrated installs)."""
     result = _invoke(runner, mock_reg, cred=None)
-    assert "CHROMA_API_KEY" in result.output
-    assert "migration-source only" in result.output
+    assert "CHROMA_API_KEY" not in result.output  # row deleted at P4b
+    assert "VOYAGE_API_KEY" in result.output
     # Absent creds alone must not produce the fatal ✗ + exit 1 shape or
     # push credential setup on a serving-healthy install.
     assert "nx config init" not in result.output
@@ -134,15 +136,14 @@ def test_doctor_missing_credentials_informational(runner, mock_reg):
 
 
 def test_doctor_partial_credentials_informational(runner, mock_reg):
-    """Partially-set legacy creds: the set ones read 'set', the absent
-    ones read migration-source-only — no fatal line either way
-    (nexus-nmw3i/c7aj3)."""
+    """The Voyage row reads 'set' when present; no CHROMA rows remain
+    (RDR-155 P4b) — no fatal line either way (nexus-nmw3i/c7aj3)."""
     def cred_side_effect(key):
-        return "sk-key" if key in ("chroma_api_key", "voyage_api_key") else None
+        return "sk-key" if key == "voyage_api_key" else None
 
     result = _invoke(runner, mock_reg, cred=cred_side_effect)
-    assert "CHROMA_DATABASE" in result.output
-    assert "migration-source only" in result.output
+    assert "CHROMA_DATABASE" not in result.output  # row deleted at P4b
+    assert "VOYAGE_API_KEY" in result.output
     assert "nx config set chroma_database" not in result.output
 
 
@@ -374,7 +375,6 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     # code rather than passing for unrelated reasons.
     with (
         patch("nexus.config.is_local_mode", return_value=True),
-        patch("nexus.config._default_local_path", return_value=tmp_path / "chroma"),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch(
             "nexus.repos.list_repos_dual",
@@ -410,7 +410,6 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
-        patch("nexus.config._default_local_path", return_value=chroma_path),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch(
             "nexus.repos.list_repos_dual",
@@ -423,7 +422,9 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
     assert "1 collections" in result.output
-    assert "on disk" in result.output
+    # RDR-155 P4b: the legacy-Chroma "on disk" size report died with the
+    # migration machinery — the census is the pgvector service count only.
+    assert "on disk" not in result.output
 
 
 # ── doctor --fix-paths ─────────────────────────────────────────────────────
@@ -439,15 +440,40 @@ class TestFixPaths:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
+    @pytest.fixture(autouse=True)
+    def _point_catalog_path(self, tmp_path, monkeypatch):
+        """Aim ``catalog_path()`` at the dir these tests seed (nexus-aqbrk).
+
+        The tests patch ``nexus.config.catalog_path`` inside their ``with``
+        block, but :class:`ActiveCatalog` resolves through the same factories
+        the verb uses and those read the env on the SQLite arm, so the two
+        have to agree from fixture time.
+        """
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
     def _make_catalog_with_entries(self, tmp_path, entries):
-        """Create catalog with specified entries.
+        """Seed the ACTIVE catalog with the given entries (nexus-aqbrk).
+
+        CONVERTED, not pinned, because ``doctor --fix-paths`` genuinely runs
+        on both substrates: it reads ``reader.docs_with_absolute_paths()``,
+        which doctor.py:1856 documents as "uniform across SQLite and service
+        mode" (one of the endpoints nexus-xnz0o ported). The old form built a
+        LOCAL ``Catalog.init`` and the verb then read the SERVICE catalog, so
+        it found nothing.
+
+        That mismatch did not only fail two tests — it made two others pass
+        VACUOUSLY: ``test_fix_paths_skips_curator`` asserts
+        ``update_source_path.assert_not_called()`` and
+        ``test_fix_paths_idempotent`` asserts ``"No absolute" in output``,
+        both trivially true against an empty catalog. Seeding the active
+        catalog restores their subject.
 
         entries: list of (owner_type, repo_hash, repo_root, file_path, collection).
         """
-        from nexus.catalog.catalog import Catalog
-
-        cat_dir = tmp_path / "catalog"
-        cat = Catalog.init(cat_dir)
+        # nexus-i711w: the local Catalog.init that used to run here died with
+        # the local catalog; the factories are service-only, so seeding goes
+        # straight through the active (service) catalog.
+        cat = ActiveCatalog()
         for owner_type, repo_hash, repo_root, file_path, collection in entries:
             owner = cat.register_owner(
                 f"test-{repo_hash or 'curator'}",
@@ -462,7 +488,7 @@ class TestFixPaths:
                 file_path=file_path,
                 physical_collection=collection,
             )
-        return cat, cat_dir
+        return cat, tmp_path / "catalog"
 
     def test_fix_paths_dry_run(self, tmp_path, runner):
         cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
@@ -485,8 +511,7 @@ class TestFixPaths:
         assert "[dry-run]" in result.output
         assert "src/foo.py" in result.output
         # Verify nothing was actually changed
-        row = cat._db.execute("SELECT file_path FROM documents").fetchone()
-        assert row[0].startswith("/")  # still absolute
+        assert only_document().file_path.startswith("/"), "dry-run must not rewrite"
 
     def test_fix_paths_writes_relative(self, tmp_path, runner):
         repo_dir = tmp_path / "repo"
@@ -495,8 +520,13 @@ class TestFixPaths:
             ("repo", "abc12345", str(repo_dir),
              str(repo_dir / "src" / "foo.py"), "code__test"),
         ])
+        # nexus-bm8dd: fix-paths no longer touches T3 at all. It used to call
+        # update_source_path first and report the count as "(n chunks)"; chunk
+        # metadata has carried no source_path since RDR-102 D2, so that call
+        # rewrote nothing and n was always 0. This test asserted it was CALLED —
+        # a pin on the call, never on its effect, which is how the dead leg
+        # survived. The repair is entirely the catalog row.
         mock_t3 = MagicMock(spec=HttpVectorClient)
-        mock_t3.update_source_path.return_value = 5
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
             patch("nexus.db.make_t3", return_value=mock_t3),
@@ -504,9 +534,11 @@ class TestFixPaths:
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
         assert "Fixed 1" in result.output
-        row = cat._db.execute("SELECT file_path FROM documents").fetchone()
-        assert row[0] == "src/foo.py"
-        mock_t3.update_source_path.assert_called_once()
+        assert only_document().file_path == "src/foo.py"
+        # The path repair landed WITHOUT any T3 call — and the output must not
+        # advertise a chunk-level component the command does not have.
+        mock_t3.update_source_path.assert_not_called()
+        assert "chunks updated" not in result.output
 
     def test_fix_paths_skips_curator(self, tmp_path, runner):
         cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
@@ -519,6 +551,19 @@ class TestFixPaths:
         ):
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
+        # NON-VACUITY (nexus-aqbrk): assert_not_called() holds trivially when
+        # nothing was seeded, which is exactly how this passed before the
+        # conversion — against an empty service catalog. Prove the curator row
+        # with an absolute path IS present, so "not called" means "skipped by
+        # owner_type", not "found nothing".
+        seeded = only_document()
+        assert seeded.file_path == "/abs/path/paper.pdf", (
+            f"seed did not land; the skip assertion below would be vacuous "
+            f"(got {seeded.file_path!r})"
+        )
+        # nexus-bm8dd: T3 is not touched on ANY fix-paths path now, so this
+        # assertion no longer distinguishes "skipped the curator" by itself —
+        # the seed check above is what carries it.
         mock_t3.update_source_path.assert_not_called()
 
     def test_fix_paths_idempotent(self, tmp_path, runner):
@@ -534,6 +579,11 @@ class TestFixPaths:
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
         assert "No absolute" in result.output
+        # NON-VACUITY (nexus-aqbrk): "No absolute" is also what an EMPTY
+        # catalog reports, so pin that the already-relative row exists and was
+        # left alone — otherwise this asserts nothing about idempotence.
+        assert only_document().file_path == "src/foo.py"
+        mock_t3.update_source_path.assert_not_called()
 
 
 # ── --check-quotas (nexus-c590) ─────────────────────────────────────────────
@@ -670,294 +720,25 @@ class TestCheckQuotas:
             )
         assert result.exit_code == 0, result.output
         data = _json.loads(result.stdout)
+        # RDR-155 P4b: the section key is "vector_store", NOT "chromadb".
+        # It carried the dependency's name for machine-consumer stability
+        # ("until P4b renames it", doctor.py's own comment) and P4b is the
+        # wave that removed the dependency. Renamed in 7.0.0 because a MAJOR
+        # is the only defensible moment to break a JSON contract that
+        # cli-reference.md advertises for "dashboards / CI gates".
+        # The exact-set assertion below is what pins the rename: a stray
+        # "chromadb" key coming back fails it.
         assert set(data.keys()) == {
-            "chromadb", "voyage", "cross_encoder", "retry",
+            "vector_store", "voyage", "cross_encoder", "retry",
         }
-        assert data["chromadb"]["reachable"] is True
-        assert data["chromadb"]["limits"]["max_records_per_write"] == 300
+        assert "chromadb" not in data, (
+            "the retired dependency's name is back as a JSON section key"
+        )
+        assert data["vector_store"]["reachable"] is True
+        assert data["vector_store"]["limits"]["max_records_per_write"] == 300
         assert "voyage-code-3" in data["voyage"]["models"]
         assert data["voyage"]["api_key_set"] is True
         assert data["retry"]["total_count"] == 0
-
-class TestCheckPlanLibrary:
-    """RDR-092 Phase 0c.2: nx doctor --check-plan-library. Reports
-    authored vs backfilled vs non-dimensional plan row counts; exits
-    non-zero when the global-tier builtin count falls below the 9 shipped
-    by RDR-078 + RDR-092 (12 as of Phase 0a).
-    """
-
-    def test_check_plan_library_flags_missing_dimensions(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """When the plans table carries rows with NULL dimensions
-        (legacy seeds pre-RDR-078), the check reports them as
-        non-dimensional and exits non-zero.
-        """
-        import sqlite3
-
-        from nexus.db.migrations import apply_pending
-        from nexus.commands.upgrade import _current_version
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        # Insert one legacy-shape row (NULL dimensions) to trigger the flag.
-        conn.execute(
-            "INSERT INTO plans (query, plan_json, outcome, tags, created_at) "
-            "VALUES (?, ?, 'success', 'builtin-template,legacy', datetime('now'))",
-            ("legacy plan", '{"steps": []}'),
-        )
-        conn.commit()
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-plan-library"])
-
-        # Non-zero exit because global builtin count is 0 (no YAMLs seeded).
-        assert result.exit_code != 0, result.output
-        # Output distinguishes the row categories.
-        assert "non-dimensional" in result.output.lower() or "no dimensions" in result.output.lower()
-
-    def test_check_plan_library_flags_zero_global_builtins(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """With an empty plans table, the check exits non-zero and calls
-        out that global-tier YAML builtins never seeded.
-        """
-        import sqlite3
-
-        from nexus.db.migrations import apply_pending
-        from nexus.commands.upgrade import _current_version
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-plan-library"])
-
-        assert result.exit_code != 0, result.output
-        assert "global" in result.output.lower()
-
-    def test_check_plan_library_passes_on_healthy_seed(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        """Seeding the YAML builtins and re-running the check exits 0."""
-        import sqlite3
-
-        from nexus.db.migrations import apply_pending
-        from nexus.commands.upgrade import _current_version
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
-
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
-        from nexus.commands.catalog import _seed_plan_templates
-        _seed_plan_templates()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-plan-library"])
-
-        assert result.exit_code == 0, result.output
-        assert "global" in result.output.lower()
-
-    def test_check_plan_library_counts_backfilled_rows(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """Rows tagged 'backfill' are reported in a distinct bucket so
-        the operator can see day-2 heuristic rows without mistaking them
-        for freshly-authored dimensional seeds.
-        """
-        import sqlite3
-
-        from nexus.db.migrations import apply_pending
-        from nexus.commands.upgrade import _current_version
-
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.execute(
-            "INSERT INTO plans (query, plan_json, outcome, tags, verb, scope, dimensions, name, created_at) "
-            "VALUES (?, ?, 'success', 'builtin-template,backfill', 'research', 'global', ?, 'bf-one', datetime('now'))",
-            ("backfilled plan", '{"steps": []}', '{"scope":"global","verb":"research"}'),
-        )
-        conn.commit()
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-plan-library"])
-
-        # Non-zero because global builtin count < 9, but the backfill
-        # count should appear in the report regardless.
-        assert "backfill" in result.output.lower()
-
-
-
-# ── --check-tmpdirs (RDR-094 Phase 3) ───────────────────────────────────────
-
-
-class TestCheckTmpdirs:
-    """``nx doctor --check-tmpdirs`` surfaces orphan ``nx_t1_*``
-    tmpdirs (no session record reference, mtime > 24h). Read-only
-    by default; ``--reap-tmpdirs`` actually deletes."""
-
-    def test_no_candidates_exits_zero(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        # Empty tmproot => zero candidates.
-        empty_root = tmp_path / "empty"
-        empty_root.mkdir()
-        with patch(
-            "tempfile.gettempdir", return_value=str(empty_root),
-        ):
-            result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
-        assert result.exit_code == 0, result.output
-        assert "No orphan" in result.output
-
-    def test_lists_candidates_without_reap(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        import os as _os
-        import time as _time
-
-        tmproot = tmp_path / "tmp"
-        tmproot.mkdir()
-        sessions = tmp_path / "sessions"
-        sessions.mkdir()
-        old_orphan = tmproot / "nx_t1_old"
-        old_orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(old_orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(tmproot)):
-            result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
-        assert result.exit_code == 0, result.output
-        assert "nx_t1_old" in result.output
-        # Read-only mode: candidate still on disk.
-        assert old_orphan.exists()
-
-    def test_reap_actually_deletes(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        import os as _os
-        import time as _time
-
-        tmproot = tmp_path / "tmp"
-        tmproot.mkdir()
-        sessions = tmp_path / "sessions"
-        sessions.mkdir()
-        old_orphan = tmproot / "nx_t1_old"
-        old_orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(old_orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(tmproot)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
-            )
-        assert result.exit_code == 0, result.output
-        assert "Reaped: 1" in result.output
-        assert not old_orphan.exists()
-
-    def test_json_out_emits_machine_parseable(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        import json as _json
-        import os as _os
-        import time as _time
-
-        tmproot = tmp_path / "tmp"
-        tmproot.mkdir()
-        sessions = tmp_path / "sessions"
-        sessions.mkdir()
-        orphan = tmproot / "nx_t1_x"
-        orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(tmproot)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--json"],
-            )
-        assert result.exit_code == 0, result.output
-        payload = _json.loads(result.stdout)
-        assert payload["cutoff_hours"] == 24.0
-        assert len(payload["candidates"]) == 1
-        assert payload["candidates"][0]["path"].endswith("nx_t1_x")
-        assert payload["reaped"] == 0
-
-    def test_detects_orphan_under_config_t1_not_only_os_temp(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """After nexus-ycwec Fix #1, orphans live under <config>/t1/ not OS-temp.
-
-        ``nx doctor --check-tmpdirs`` must scan <config>/t1/ so operators
-        see the real candidates.  The autouse fixture already patches
-        nexus_config_dir -> tmp_path, so we only need to create the
-        orphan under tmp_path/t1/ and ensure no OS-temp orphan is present.
-        """
-        import json as _json
-        import os as _os
-        import time as _time
-
-        # Point OS-temp at an empty dir — no legacy orphans there.
-        empty_ostmp = tmp_path / "ostmp_empty"
-        empty_ostmp.mkdir()
-
-        # Create an orphan under the config/t1/ location (new store path).
-        config_t1 = tmp_path / "t1"
-        config_t1.mkdir()
-        orphan = config_t1 / "nx_t1_config_orphan"
-        orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(empty_ostmp)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--json"],
-            )
-        assert result.exit_code == 0, result.output
-        payload = _json.loads(result.stdout)
-        assert len(payload["candidates"]) == 1, (
-            "Expected 1 candidate from <config>/t1/ scan; "
-            "got zero — check-tmpdirs is not scanning config_dir/t1/"
-        )
-        assert "nx_t1_config_orphan" in payload["candidates"][0]["path"]
-        assert payload["reaped"] == 0
-
-    def test_reap_removes_orphan_under_config_t1(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """--reap-tmpdirs must delete orphans under <config>/t1/ via config_dir=."""
-        import os as _os
-        import time as _time
-
-        empty_ostmp = tmp_path / "ostmp_empty"
-        empty_ostmp.mkdir()
-
-        config_t1 = tmp_path / "t1"
-        config_t1.mkdir()
-        orphan = config_t1 / "nx_t1_reap_me"
-        orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(empty_ostmp)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
-            )
-        assert result.exit_code == 0, result.output
-        assert "Reaped: 1" in result.output, (
-            "reap-tmpdirs did not reap config/t1/ orphan — "
-            "sweep_orphan_tmpdirs was likely called without config_dir="
-        )
-        assert not orphan.exists(), "orphan dir must be deleted after --reap-tmpdirs"
-
 
 # ── --check-t1 (RDR-105 P5 / nexus-ssdg) ─────────────────────────────────────
 
@@ -1023,44 +804,3 @@ class TestCheckT1:
             result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
         assert "chroma reachable" in result.output
-
-# ── RDR-185 P4.2: the nexus-0rwwv bridge is retired from the health path ────
-#
-# A pending cutover is reported by the ladder's own read-only surface
-# (health's `_check_pending_rungs`, which renders the substrate rung's
-# detect() with `nx upgrade` as the remedy). The bridge's coarse count with
-# a `nx guided-upgrade` remedy was a second line for the same state naming a
-# demoted verb — Gap-2 scattered remediation, and a third DATA-rung
-# mechanism per Gap-4.
-
-
-def test_doctor_never_advertises_the_demoted_verb(runner, monkeypatch):
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with (
-        patch("nexus.health.run_health_checks", return_value=([], True)),
-        patch("nexus.health.format_health_for_cli", return_value=("all green", [])),
-        patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
-    ):
-        result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0
-    # Not merely absent from the output — never probed at all.
-    notice.assert_not_called()
-    assert "guided-upgrade" not in result.output
-
-
-def test_doctor_stays_silent_on_the_retired_bridge_when_checks_fail(runner, monkeypatch):
-    # The old notice printed before the failed-exit so a red doctor still
-    # pointed. Retired on BOTH paths — a red doctor must not resurrect it.
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with (
-        patch("nexus.health.run_health_checks", return_value=([], True)),
-        patch("nexus.health.format_health_for_cli",
-              return_value=("something failed", ["something"])),
-        patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
-    ):
-        result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 1
-    notice.assert_not_called()
-    assert "guided-upgrade" not in result.output

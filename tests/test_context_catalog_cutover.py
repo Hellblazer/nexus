@@ -24,9 +24,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 
-from nexus.catalog.catalog import Catalog
 from nexus.context import _repo_collections
 from nexus.registry import RepoRegistry
 
@@ -65,8 +66,10 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     cat_dir.mkdir(parents=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    # nexus-aqbrk: return the ACTIVE catalog — the code under test resolves
+    # through the factories. (The local Catalog.init that used to run here
+    # died with the local catalog in the terminal nexus-i711w deletion.)
+    return ActiveCatalog()
 
 
 def _register_owner_with_docs(cat: Catalog, repo: Path, docs_name: str) -> None:

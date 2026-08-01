@@ -22,7 +22,6 @@ from click.testing import CliRunner
 
 import pytest
 
-import nexus.db.migrations as migrations
 import nexus.upgrade_ladder.preconditions as pre_mod
 from nexus.cli import main
 from nexus.commands.upgrade import _converge_preconditions, upgrade
@@ -41,13 +40,9 @@ def _no_real_provisioning_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     does not inject those seams must never reach them (the same
     live-environment isolation the P3 review required for the process
     axis)."""
+    # RDR-155 P4b: the footprint/establish seams died with the census —
+    # provisioning is report-only now; only the provisioned probe remains.
     monkeypatch.setattr(pre_mod, "_default_provisioned", lambda _config_dir: True)
-    monkeypatch.setattr(pre_mod, "_default_footprint", lambda: False)
-    monkeypatch.setattr(
-        pre_mod,
-        "_default_establish",
-        lambda: pytest.fail("a test reached the real service-provisioning path"),
-    )
 
 
 @dataclass
@@ -77,7 +72,6 @@ def test_check_covers_every_precondition_axis(tmp_path: pathlib.Path) -> None:
         _lease_fn=lambda: None,
         _installed_version_fn=lambda: "6.12.0",
         _provisioned_fn=lambda: True,
-        _footprint_fn=lambda: False,
         _plugin_version_fn=lambda: "6.12.0",
         _lockstep_marker_fn=lambda: "6.12.0",
     )
@@ -294,12 +288,7 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
     """P3 validator gap 1: nothing verified upgrade() actually FORWARDS the
     click flags — a hardcoded skip_t3=False at the call site passed every
     test. Drive the CLI and unpack the call kwargs."""
-    migrations._upgrade_done.clear()
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")
     with (
-        patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-        patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        patch("nexus.commands.upgrade._quiesce_daemon"),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
         patch("nexus.commands.upgrade._converge_preconditions") as stage,
     ):
@@ -308,7 +297,6 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
         assert stage.call_args.kwargs == {"auto_mode": False, "skip_t3": True}
 
         stage.reset_mock()
-        migrations._upgrade_done.clear()
         result = CliRunner().invoke(main, ["upgrade", "--auto"])
         assert result.exit_code == 0, result.output
         assert stage.call_args.kwargs == {"auto_mode": True, "skip_t3": False}
@@ -456,8 +444,7 @@ class TestPluginLockstepPrecondition:
             _installed_version_fn=lambda: "6.12.0",
             _cycle_fn=lambda: None,
             _provisioned_fn=lambda: True,
-            _footprint_fn=lambda: False,
-            _plugin_version_fn=lambda: "6.13.0",
+                _plugin_version_fn=lambda: "6.13.0",
             _lockstep_marker_fn=lambda: "6.12.0",
         )
         by = {r.name: r for r in reports}

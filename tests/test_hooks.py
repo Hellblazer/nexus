@@ -10,14 +10,10 @@ import pytest
 from nexus.hooks import session_end, session_end_flush, session_start
 
 
-def _no_daemon(**_kwargs):
-    """Force ``t2_index_write``'s direct-fallback path (RDR-128 P3).
-
-    SessionEnd flush routes its T2 writes through the daemon; tests have
-    no daemon, so make the reachability probe fail and let the write land
-    on the autouse-isolated tmp ``memory.db``."""
-    from nexus.daemon.t2_client import T2DaemonNotReachableError
-    raise T2DaemonNotReachableError("no daemon in tests")
+# NO _no_daemon stub: it forced `t2_index_write`'s direct-fallback path by
+# making the daemon reachability probe fail (RDR-128 P3). That router — probe
+# and all — was removed in nexus-i711w Stage 2 sub-stage B, so the SessionEnd
+# flush already writes directly to the autouse-isolated tmp `memory.db`.
 
 
 # ── session_start ────────────────────────────────────────────────────────────
@@ -163,8 +159,7 @@ class TestSessionEndFlush:
         sessions.mkdir()
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        with patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
-            output = session_end_flush()
+        output = session_end_flush()
 
         assert "Flushed 0" in output
         assert "Expired 0" in output
@@ -190,9 +185,8 @@ def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
     sessions.mkdir()
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-    with patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
-        runner = CliRunner()
-        result = runner.invoke(hook_group, ["session-end-flush"])
+    runner = CliRunner()
+    result = runner.invoke(hook_group, ["session-end-flush"])
 
     assert result.exit_code == 0
     assert "Flushed 0" in result.output
@@ -223,41 +217,17 @@ def test_infer_repo_git_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert name == tmp_path.name
 
 
-# ── nexus-0rwwv: SessionStart surfaces a pending substrate migration ─────────
+# ── RDR-155 P4b: the nexus-0rwwv SessionStart migration notice is retired ───
 
 
-def test_session_start_appends_migration_notice_when_pending(monkeypatch, tmp_path):
+def test_session_start_carries_no_migration_notice(monkeypatch):
+    """The bridge died with the migration machinery: SessionStart is the
+    plain ready line — stranded pre-PG installs are redirected by the
+    stranded-install detector at CLI/MCP startup instead."""
     from unittest.mock import patch as _patch
 
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
-                return_value=True),          _patch("nexus.hooks.write_claude_session_id"):
+    with _patch("nexus.hooks.write_claude_session_id"):
         output = session_start(claude_session_id="s-0rwwv")
     assert "Nexus ready" in output
-    # RDR-185 P4.2: the SessionStart nudge survives the bridge retirement (it
-    # is a proactive notice, not a duplicate of a line shown beside it) but
-    # must name the single trigger — a verb demoted out of --help is a dead
-    # end to point an agent at.
-    assert "nx upgrade" in output
+    assert "storage migration" not in output
     assert "guided-upgrade" not in output
-
-
-def test_session_start_silent_without_pending(monkeypatch):
-    from unittest.mock import patch as _patch
-
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
-                return_value=False),          _patch("nexus.hooks.write_claude_session_id"):
-        output = session_start(claude_session_id="s-0rwwv")
-    assert "Nexus ready" in output
-    assert "ONE-TIME storage migration" not in output
-
-
-def test_session_start_notice_failure_never_breaks_hook(monkeypatch):
-    from unittest.mock import patch as _patch
-
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
-                side_effect=RuntimeError("boom")),          _patch("nexus.hooks.write_claude_session_id"):
-        output = session_start(claude_session_id="s-0rwwv")
-    assert "Nexus ready" in output

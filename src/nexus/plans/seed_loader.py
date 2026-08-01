@@ -4,7 +4,7 @@
 
 Scans a directory of YAML plan templates, validates each against the
 Phase 4a schema, dedups by canonical dimensions, and upserts into a
-:class:`~nexus.db.t2.plan_library.PlanLibrary`.
+:class:`~nexus.db.t2.http_plan_library.HttpPlanLibrary`.
 
 This is the glue that ships the five builtin scenario templates
 (``conexus/plans/builtin/*.yml``) as ``scope:global`` seeds. The same
@@ -13,8 +13,8 @@ loader powers the Phase 6 multi-tier loader (``.nexus/plans/*.yml``,
 
 Idempotency: a second run of the loader produces zero writes when
 nothing on disk has changed. Implementation uses
-:meth:`PlanLibrary.get_plan_by_dimensions` to short-circuit before
-:meth:`PlanLibrary.save_plan`.
+:meth:`HttpPlanLibrary.get_plan_by_dimensions` to short-circuit before
+:meth:`HttpPlanLibrary.save_plan`.
 
 SC-6, SC-14.
 """
@@ -28,7 +28,14 @@ from typing import Any
 
 import yaml
 
-from nexus.db.t2.plan_library import PlanLibrary
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only (PEP 563 lazy): the runtime argument is whatever
+    # the caller passes — production passes HttpPlanLibrary, the only
+    # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
+    # the SQLite PlanLibrary.
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.plans.schema import (
     PlanTemplateDuplicateError,
     PlanTemplateLoader,
@@ -72,7 +79,7 @@ def _default_project_for_scope(scope: str) -> str:
 def load_seed_directory(
     directory: Path,
     *,
-    library: PlanLibrary,
+    library: HttpPlanLibrary,
     registered_dimensions: set[str] | None = None,
     outcome: str = "success",
     file_filter: Any = None,

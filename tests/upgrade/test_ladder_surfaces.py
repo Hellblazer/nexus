@@ -16,14 +16,10 @@ from dataclasses import dataclass, field
 import click
 import pytest
 
-from unittest.mock import patch
-
 from click.testing import CliRunner
 
-import nexus.db.migrations as migrations
+
 import nexus.upgrade_ladder.registry as ladder_registry
-from nexus.cli import main
-from nexus.db.migrations import Migration, MigrationRetry
 from nexus.health import _check_pending_rungs, run_health_checks
 import nexus.commands.upgrade as upgrade_mod
 from nexus.commands.upgrade import _run_ladder, upgrade
@@ -78,13 +74,16 @@ def test_yes_flag_reaches_the_rungs_consent_channel(
     coverage of the only part a user touches. This arc already shipped a
     NameError in a production default no test executed; same class.
 
-    Observes at `_run_ladder`, the ONLY consumer, reading exactly what the rung's
-    `assume_yes()` would read."""
-    from nexus.upgrade_ladder.rungs.substrate_etl import assume_yes
+    Observes at `_run_ladder`, the ONLY consumer, reading the NX_ASSUME_YES
+    env channel a consent-gated rung would read (RDR-155 P4b: the
+    substrate-etl rung's `assume_yes()` reader died with the rung; the
+    channel itself survives in `_standing_consent`)."""
+    def _consent() -> bool:
+        import os
+        return os.environ.get("NX_ASSUME_YES", "").strip() == "1"
 
     seen: list[bool] = []
-    monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(assume_yes()))
-    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
+    monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(_consent()))
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_cycle_supervised_daemons_to_current", lambda **_kw: None)
@@ -120,7 +119,6 @@ def test_yes_flag_is_not_visible_to_the_daemons_the_upgrade_spawns(
     import os
 
     at_spawn: dict[str, str | None] = {}
-    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: None)
@@ -403,41 +401,13 @@ def test_deferred_walk_notices_but_exits_cleanly(
     assert ledger.verified_rungs() == frozenset()
 
 
-def test_upgrade_invocation_executes_each_migration_step_exactly_once(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """P1 critique Critical: nx upgrade runs _run_upgrade (legacy leg) then
-    the ladder walk in one invocation — in the DEFERRED case the rung must
-    REPORT the prior attempt, never re-execute apply_pending (which re-ran
-    every eligible step's body, incl. a 30s drain attempt, twice — also on
-    the SessionStart --auto hot path). Pinned end to end through the CLI."""
-    migrations._upgrade_done.clear()
-    calls = {"n": 0}
-
-    def _counting_defer(conn: object) -> None:
-        calls["n"] += 1
-        raise MigrationRetry("precondition blocked — retried next open")
-
-    monkeypatch.setattr(
-        migrations,
-        "MIGRATIONS",
-        [Migration(introduced="99.0.0", name="counting-defer", fn=_counting_defer)],
-    )
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")  # keep the bridge probe out
-    db = tmp_path / "memory.db"
-    with (
-        patch("nexus.commands.upgrade._db_path", return_value=db),
-        patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        patch("nexus.commands.upgrade._quiesce_daemon"),
-        patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
-    ):
-        result = CliRunner().invoke(main, ["upgrade"])
-    assert result.exit_code == 0, result.output  # deferral is NOT a failure
-    assert calls["n"] == 1, (
-        f"deferring step executed {calls['n']} times in one nx upgrade "
-        "invocation — the ladder must report, not re-run"
-    )
-    assert "deferred" in result.output.lower()
+# test_upgrade_invocation_executes_each_migration_step_exactly_once DELETED
+# (RDR-158 P4 Stage 4, nexus-i711w): it was already an unconditional skip
+# (nexus-aqbrk residue), and its subject — apply_pending re-execution across
+# the legacy leg + ladder walk in one invocation — died with the migration
+# machinery. The surviving property (the ladder reports a DEFERRED rung
+# rather than re-running it) is pinned by
+# test_deferred_walk_notices_but_exits_cleanly above.
 
 
 def test_upgrade_command_is_wired_to_the_ladder() -> None:

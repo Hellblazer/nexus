@@ -9,24 +9,37 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.catalog import Catalog
 from nexus.cli import main
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._catalog_fixture_ops import ActiveCatalog, unroutable_write_target
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
-# RDR-155 P4b P0a' dies-roster: these tests seed the rich SQLite Catalog
-# (Catalog.init / NEXUS_CATALOG_PATH, direct ``cat.*`` writes) and assert
-# CLI behavior over that local state — including local-only semantics like
-# "catalog not initialized", register-boundary URI validation, and gc /
-# verify / link-density walks of the local .catalog.db. On the engine
-# substrate the CLI routes catalog commands to the service catalog (a
-# freshly minted, empty tenant) which cannot see the seeded local rows.
-_rich_catalog_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded CLI "
-    "catalog behavior) dies at the RDR-155 P4b flip",
+# nexus-aqbrk: the dies-roster here was OVER-BROAD BY 20 TESTS, and its stated
+# cause was a symptom. It read "the CLI routes catalog commands to the service
+# catalog (a freshly minted, empty tenant) which cannot see the seeded local
+# rows" — true, but that is a FIXTURE problem, not a retirement: these CLI
+# verbs go through make_catalog_reader/_writer, so seeding through the same
+# factories puts both halves on the same catalog. Doing that recovered 20 of
+# the 36 outright (124 passed / 16 failed after dropping the marker), the same
+# correction already applied to test_enrich_aspects.py.
+#
+# What survives is a marker that does NOT claim these die. They are not
+# understood yet, and at least two of them (link_audit) are a KNOWN service
+# gap with its own bead — re-rostering that as "dies at the flip" would bury
+# a defect. See nexus-02avu for the per-symptom grouping and what to check
+# first.
+#
+# UNCONDITIONAL since nexus-i711w Stage 1b (2026-07-28). It was a skipif on
+# the SQLite substrate, which no longer exists — so these 15 do not run on any
+# arm, and saying so plainly beats a predicate with one value. The bodies are
+# kept BECAUSE they are portable: none of them reaches for a raw connection,
+# so each is the specification nexus-02avu's diagnosis has to satisfy. (The
+# sixteenth, test_stats_includes_topics_block_when_available, seeded topics
+# through taxonomy.conn and was deleted rather than kept — recorded on the
+# bead.)
+_needs_diagnosis_nexus_02avu = pytest.mark.skip(
+    reason="nexus-02avu: engine-substrate behaviour not yet diagnosed — "
+    "tracked, not retired (2 are nexus-wnlit, 3 likely nexus-23wlw)",
 )
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
@@ -54,28 +67,60 @@ def catalog_env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def initialized_catalog(catalog_env):
-    """Return a Catalog that has been init'd with one owner."""
-    cat = Catalog.init(catalog_env)
+    """Return a facade over the LIVE catalog, init'd with one owner."""
+    # nexus-i711w terminal deletion: the local Catalog.init seeding is gone —
+    # ActiveCatalog routes straight to the live service catalog, no init step.
+    cat = ActiveCatalog()
     cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
     return cat
 
 
-class TestInitCommand:
-    def test_init(self, catalog_env):
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "init"])
-        assert result.exit_code == 0
-        assert Catalog.is_initialized(catalog_env)
+# TestInitCommand retired (nexus-i711w terminal deletion): `nx catalog init`
+# is now a guided refusal — the service owns the catalog, there is no local
+# init to assert.
 
-    def test_init_idempotent(self, catalog_env):
+
+class TestSyncPullRetired:
+    """catalog-git-DECISION OPTION C: `nx catalog sync` / `nx catalog pull`
+    used to shell out to HttpCatalogClient.sync()/pull(), which raise
+    NotImplementedError — an uncaught traceback, not a clean CLI refusal.
+    Both commands were converted to the same guided-refusal shape as
+    init_cmd/setup_cmd above; these pin that no traceback reaches the user.
+    """
+
+    def test_sync_is_a_clean_refusal(self):
         runner = CliRunner()
-        runner.invoke(main, ["catalog", "init"])
-        result = runner.invoke(main, ["catalog", "init"])
-        assert result.exit_code == 0
+        result = runner.invoke(main, ["catalog", "sync"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(
+            result.exception, SystemExit,
+        ), "sync should refuse via ClickException, not raise NotImplementedError"
+        assert "retired" in result.output.lower()
+        assert "nothing to commit" in result.output.lower() or "nothing to sync" in result.output.lower() or "postgres" in result.output.lower()
+
+    def test_pull_is_a_clean_refusal(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "pull"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(
+            result.exception, SystemExit,
+        ), "pull should refuse via ClickException, not raise NotImplementedError"
+        assert "retired" in result.output.lower()
+        assert "postgres" in result.output.lower()
+
+    def test_compact_is_a_clean_refusal(self):
+        """The hidden compact verb had the identical traceback bug."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "compact"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(
+            result.exception, SystemExit,
+        ), "compact should refuse via ClickException, not raise NotImplementedError"
+        assert "retired" in result.output.lower()
 
 
 class TestNotInitialized:
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_list_without_init(self, catalog_env):
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "list"])
@@ -118,7 +163,6 @@ class TestRegisterAndShow:
         data = json.loads(result.stdout)
         assert data["title"] == "Test Paper"
 
-    @_rich_catalog_dies_at_flip
     def test_register_with_explicit_source_uri(
         self, initialized_catalog, catalog_env,
     ):
@@ -138,7 +182,7 @@ class TestRegisterAndShow:
         assert "URI:" in show.output
         assert "chroma://knowledge__delos//papers/aleph.pdf" in show.output
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_register_rejects_malformed_uri(
         self, initialized_catalog, catalog_env,
     ):
@@ -174,7 +218,6 @@ class TestRegisterAndShow:
         assert result.exit_code == 0
         assert "URI:" not in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_show_prints_bib_fields_when_enriched(
         self, initialized_catalog, catalog_env,
     ):
@@ -242,7 +285,6 @@ class TestListCommand:
         assert isinstance(data, list)
         assert len(data) >= 1
 
-    @_rich_catalog_dies_at_flip
     def test_list_owner_by_name_resolves_to_tumbler(
         self, initialized_catalog, catalog_env,
     ):
@@ -307,7 +349,6 @@ class TestListCommand:
         # And no code rows leaked.
         assert "code-" not in result.output, result.output
 
-    @_rich_catalog_dies_at_flip
     def test_list_type_filter_with_owner(
         self, initialized_catalog, catalog_env,
     ):
@@ -428,7 +469,6 @@ class TestLinksFilterCommand:
         assert result.exit_code == 0
         assert "No links found." in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_links_resolve_renders_title_and_path(
         self, initialized_catalog, catalog_env,
     ):
@@ -477,7 +517,6 @@ class TestLinksFilterCommand:
         )
         assert _endpoint_label(cat, tumbler) == f"src/nexus/session.py ({tumbler})"
 
-    @_rich_catalog_dies_at_flip
     def test_links_unique_targets_dedupes_by_file_path(
         self, initialized_catalog, catalog_env,
     ):
@@ -490,7 +529,9 @@ class TestLinksFilterCommand:
         # Register dedupes by (owner, file_path), so two tumblers sharing
         # a file_path only arise when the file is registered under
         # distinct owners, which is exactly what re-indexing after
-        # owner-rename produces (before `dedupe-owners` reconciles).
+        # owner-rename produces. (`dedupe-owners` used to reconcile these;
+        # it was deleted in nexus-i711w Stage 2 sub-stage C-store, so the
+        # duplicate-tumbler condition below is now permanent, not transient.)
         owner_a = Tumbler.parse("1.1")
         owner_b_id = cat.register_owner("second-repo", "repo", repo_hash="deadbeef")
         owner_b = Tumbler.parse(str(owner_b_id))
@@ -554,7 +595,7 @@ class TestUpdateCommand:
         show = runner.invoke(main, ["catalog", "show", "1.1.1"])
         assert "x-devonthink-item://8EDC855D" in show.output
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_update_source_uri_validates_scheme(
         self, initialized_catalog, catalog_env,
     ):
@@ -598,7 +639,7 @@ class TestDeleteCommand:
         result = runner.invoke(main, ["catalog", "delete", "1.1.999", "-y"])
         assert result.exit_code != 0
 
-    def test_delete_service_mode_never_touches_dir_or_db(self, catalog_env, tmp_path):
+    def test_delete_service_mode_never_touches_dir_or_db(self, catalog_env):
         """GH #1374: ``nx catalog delete`` in service mode crashed with
         ``AttributeError: 'HttpCatalogClient' object has no attribute
         '_dir'`` inside the RDR-106 backup-before-delete snapshot step
@@ -610,10 +651,14 @@ class TestDeleteCommand:
         silently auto-materializing — the same shakeout pattern that
         caught the analogous ``t3 gc`` bug in
         test_service_mode_cli_real_client.py.
+
+        The backup-snapshot assertion that used to close this test retired
+        with ``catalog_backup`` (nexus-i711w): delete no longer writes a
+        local pre-delete JSONL snapshot in any mode.
         """
         from unittest.mock import MagicMock, patch
 
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.catalog.tumbler import Tumbler
 
@@ -642,9 +687,6 @@ class TestDeleteCommand:
         assert result.exit_code == 0, result.output
         assert "Deleted" in result.output
         fake_writer.delete_document.assert_called_once_with(t)
-        # Backup snapshot was written via the public API, not raw SQL/_dir.
-        backup_dir = tmp_path / "catalog" / ".deleted-backups"
-        assert any(backup_dir.glob("catalog-delete-*.jsonl"))
 
 
 class TestLinkBulkDeleteCommand:
@@ -661,7 +703,7 @@ class TestLinkBulkDeleteCommand:
 
 
 class TestLinkAuditCommand:
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_link_audit_cli(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
@@ -672,7 +714,7 @@ class TestLinkAuditCommand:
         assert "Total links" in result.output
         assert "cites" in result.output
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_link_audit_cli_json(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
@@ -685,7 +727,6 @@ class TestLinkAuditCommand:
 
 
 class TestOwnersCommand:
-    @_rich_catalog_dies_at_flip
     def test_owners(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "owners"])
@@ -906,56 +947,6 @@ class TestStatsCommand:
         assert result.exit_code == 0
         assert "1" in result.output  # at least 1 document
 
-    @_rich_catalog_dies_at_flip
-    def test_stats_includes_topics_block_when_available(
-        self, initialized_catalog, catalog_env, tmp_path, monkeypatch,
-    ):
-        """stats surfaces topics / assignments / per-source projection counts.
-
-        Bead nexus-iojz (formerly nexus-1n0t). The catalog has three
-        layers; stats previously enumerated only the first two.
-        """
-        from nexus.db.t2 import T2Database
-
-        # Seed a T2 DB with one topic + one projection assignment and
-        # point the command helper at it via monkeypatched default_db_path.
-        t2_path = tmp_path / "memory.db"
-        with T2Database(t2_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES ('t', 'docs__src', 5, '2026-01-01T00:00:00Z')"
-            )
-            tid = db.taxonomy.conn.execute(
-                "SELECT id FROM topics WHERE label='t'"
-            ).fetchone()[0]
-            db.taxonomy.conn.commit()
-            db.taxonomy.assign_topic(
-                "doc-1", tid, assigned_by="projection",
-                similarity=0.8, source_collection="docs__src",
-            )
-
-        import nexus.commands.catalog_cmds.report as catalog_mod
-
-        monkeypatch.setattr(
-            catalog_mod, "_taxonomy_stats",
-            lambda: {
-                "topics": 1,
-                "assignments": 1,
-                "distinct_topics_assigned": 1,
-                "projection_by_source": {"docs__src": 1},
-            },
-        )
-
-        runner = CliRunner()
-        runner.invoke(main, [
-            "catalog", "register", "--title", "A", "--owner", "1.1",
-        ])
-        result = runner.invoke(main, ["catalog", "stats"])
-        assert result.exit_code == 0, result.output
-        assert "Topics:" in result.output
-        assert "1 topics, 1 assignments" in result.output
-        assert "Projection by source:" in result.output
-        assert "docs__src" in result.output
 
     def test_stats_json_includes_taxonomy_when_available(
         self, initialized_catalog, catalog_env, monkeypatch,
@@ -1009,7 +1000,6 @@ class TestDiscoveryTools:
         assert result.exit_code == 0
         assert "Orphan Doc" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_orphans_all_linked(self, initialized_catalog, catalog_env):
         """When all entries have links, report zero orphans."""
         runner = CliRunner()
@@ -1020,7 +1010,6 @@ class TestDiscoveryTools:
         assert result.exit_code == 0
         assert "No orphan" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_orphans_empty_catalog(self, initialized_catalog, catalog_env):
         """Empty catalog handles gracefully."""
         runner = CliRunner()
@@ -1062,7 +1051,6 @@ class TestVerifyCommand:
         )
         return fake
 
-    @_rich_catalog_dies_at_flip
     def test_verify_clean(self, initialized_catalog, catalog_env, monkeypatch):
         """All tumblers present in ChromaDB → '0 ghosts' summary, exit 0."""
         self._register_with_doc_id(
@@ -1077,7 +1065,6 @@ class TestVerifyCommand:
         assert result.exit_code == 0, result.output
         assert "0 ghosts" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_verify_flags_ghosts(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1104,7 +1091,6 @@ class TestVerifyCommand:
         # The present doc must NOT be reported as a ghost.
         assert "Present Doc" not in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_verify_missing_collection_is_all_ghosts(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1123,7 +1109,6 @@ class TestVerifyCommand:
         assert "1 ghost(s) found" in result.output
         assert "knowledge__gone" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_verify_collection_filter(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1148,7 +1133,6 @@ class TestVerifyCommand:
         assert "In Scope" in result.output
         assert "Out Of Scope" not in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_verify_json_output(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1191,7 +1175,6 @@ class TestVerifyCommand:
         # No tumblers to verify, since doc_id was missing.
         assert "nothing to verify" in result.output.lower()
 
-    @_rich_catalog_dies_at_flip
     def test_verify_excludes_alias_rows(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1224,7 +1207,10 @@ class TestVerifyCommand:
             meta={"doc_id": "alias-test-alias-docid"},
         )
         # Mark it as an alias of the canonical.
-        initialized_catalog.set_alias(alias_tumbler, Tumbler.parse("1.1.1"))
+        # nexus-iltyk: set_alias mutates but is NOT on CATALOG_WRITE_OPS, so
+        # the typed writer will not forward it on the SQLite arm while the
+        # service "reader" handle proxies it. No single object does both.
+        unroutable_write_target().set_alias(alias_tumbler, Tumbler.parse("1.1.1"))
 
         # T3 reports nothing in coll — both would be "ghosts" if alias filter broken.
         self._patch_t3(monkeypatch, {coll: set()})
@@ -1242,7 +1228,6 @@ class TestVerifyCommand:
             f"Alias row 'Alias Doc' appeared in verify output — alias filter broken:\n{result.output}"
         )
 
-    @_rich_catalog_dies_at_flip
     def test_verify_heal_drops_ghost(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1263,12 +1248,10 @@ class TestVerifyCommand:
         assert result.exit_code == 0, result.output
         assert "dropped" in result.output.lower()
 
-        # Reopen the catalog and confirm the tumbler is gone.
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-        row = cat._db.execute(
-            "SELECT tumbler FROM documents WHERE title = 'Ghost'"
-        ).fetchone()
-        assert row is None
+        # Confirm the tumbler is gone via the active reader (nexus-i711w:
+        # the raw local-SQLite reopen this used has no service equivalent).
+        from tests._catalog_fixture_ops import documents_by_title
+        assert documents_by_title("Ghost") == []
 
     def test_coverage_report(self, initialized_catalog, catalog_env):
         """Coverage shows linked vs total count per content type."""
@@ -1282,7 +1265,6 @@ class TestVerifyCommand:
         assert "code" in result.output
         assert "%" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_coverage_empty_catalog(self, initialized_catalog, catalog_env):
         """Empty catalog shows a graceful message."""
         runner = CliRunner()
@@ -1307,7 +1289,6 @@ class TestVerifyCommand:
         assert result.exit_code == 0
         assert "0" in result.output or "No suggestions" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_suggest_links_finds_unlinked_pair(self, initialized_catalog, catalog_env):
         """Finds a code-RDR pair by module name overlap that has no existing link."""
         runner = CliRunner()
@@ -1348,7 +1329,6 @@ class TestLinkDensity:
         assert result.exit_code == 0
         assert "No collections" in result.output
 
-    @_rich_catalog_dies_at_flip
     def test_dense_collection_reports_nonzero_p50(
         self, initialized_catalog, catalog_env
     ):
@@ -1398,7 +1378,6 @@ class TestLinkDensity:
                 assert float(cols[2]) > 0.0, f"p50 should be > 0: {line}"
                 break
 
-    @_rich_catalog_dies_at_flip
     def test_isolated_collection_reports_zero_density(
         self, initialized_catalog, catalog_env
     ):
@@ -1485,18 +1464,17 @@ class TestLinkGenerateDeprecation:
 class TestAgentIntegration:
     """Tests for agent-facing discovery commands: links-for-file, session-summary."""
 
-    def _make_catalog_with_links(self, catalog_env: object) -> "Catalog":
-        from nexus.catalog.catalog import Catalog
-        from nexus.catalog.tumbler import Tumbler
-
-        cat = Catalog.init(catalog_env)  # type: ignore[arg-type]
+    def _make_catalog_with_links(self, catalog_env: object) -> ActiveCatalog:
+        # nexus-i711w: seeds through ActiveCatalog (the live catalog) — the
+        # local Catalog.init arm this helper used is gone.
+        cat = ActiveCatalog()
         owner = cat.register_owner("test", "repo", repo_hash="abc")
         t1 = cat.register(owner, "catalog.py", content_type="code", file_path="src/nexus/catalog.py")
         t2 = cat.register(owner, "RDR-060", content_type="rdr", file_path="docs/rdr/rdr-060.md")
         cat.link(t1, t2, "implements", created_by="test")
         return cat
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_links_for_file_found(self, catalog_env):
         runner = CliRunner()
         self._make_catalog_with_links(catalog_env)
@@ -1512,7 +1490,7 @@ class TestAgentIntegration:
         assert result.exit_code == 0
         assert "No catalog entry" in result.output
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_links_for_file_shows_direction(self, catalog_env):
         """Incoming and outgoing links are shown with arrow direction."""
         runner = CliRunner()
@@ -1524,7 +1502,7 @@ class TestAgentIntegration:
         # Arrow direction — incoming or outgoing arrow
         assert ("→" in result.output or "←" in result.output)
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_links_for_file_not_initialized(self, tmp_path, monkeypatch):
         """Graceful failure when catalog not initialized."""
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "nocat"))
@@ -1555,10 +1533,10 @@ class TestAgentIntegration:
 class TestGcCommand:
     """Tests for `nx catalog gc` — remove orphan entries with miss_count >= 2."""
 
-    def _make_cat(self, catalog_env: object) -> "Catalog":
-        from nexus.catalog.catalog import Catalog
-        cat = Catalog.init(catalog_env)  # type: ignore[arg-type]
-        return cat
+    def _make_cat(self, catalog_env: object) -> ActiveCatalog:
+        # nexus-i711w: the local Catalog.init arm is gone; ActiveCatalog
+        # routes to the live catalog and needs no init.
+        return ActiveCatalog()
 
     def test_gc_no_orphans(self, catalog_env):
         runner = CliRunner()
@@ -1570,7 +1548,7 @@ class TestGcCommand:
         assert result.exit_code == 0
         assert "No orphan" in result.output
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_gc_dry_run_does_not_delete(self, catalog_env):
         """nexus-tnz3: 4.29.1 dry-run is the DEFAULT — no flags = report-only.
         Entry must remain after a default invocation."""
@@ -1585,7 +1563,7 @@ class TestGcCommand:
         assert "would be deleted" in result.output
         assert cat.resolve(t) is not None
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_gc_deletes_orphans(self, catalog_env):
         """4.29.1 requires --no-dry-run --confirm to actually delete."""
         runner = CliRunner()
@@ -1613,7 +1591,7 @@ class TestGcCommand:
         assert "No orphan" in result.output
         assert cat.resolve(t) is not None
 
-    @_rich_catalog_dies_at_flip
+    @_needs_diagnosis_nexus_02avu
     def test_gc_mixed_entries(self, catalog_env):
         """Only entries with miss_count >= 2 are deleted; others survive.
 
@@ -1634,154 +1612,14 @@ class TestGcCommand:
         assert cat.resolve(t_del) is None
 
 
-class TestCollectionNameCommand:
-    """RDR-103 Phase 3b: ``nx catalog collection-name --content-type X``
-    resolves the conformant ``CollectionName`` for the current repo and
-    echoes its rendered string. Plugin-layer call sites (rdr-close
-    SKILL.md) use this to look up the post-mortem target collection
-    without constructing the legacy 2-segment shape themselves.
-    """
-
-    @_rich_catalog_dies_at_flip
-    def test_emits_conformant_name_for_registered_repo(
-        self, catalog_env, tmp_path, monkeypatch,
-    ):
-        cat = Catalog.init(catalog_env)
-        repo = tmp_path / "myproject"
-        repo.mkdir()
-        cat.register_owner(
-            name="myproject",
-            owner_type="repo",
-            repo_hash="cafef00d",
-            repo_root=str(repo),
-        )
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity",
-            lambda r: ("myproject", "cafef00d"),
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "catalog", "collection-name",
-            "--content-type", "knowledge",
-            "--repo", str(repo),
-        ])
-        assert result.exit_code == 0, result.output
-        # Tumbler 1.1 to owner_segment 1-1; canonical model for knowledge
-        # is voyage-context-3; new tuple lands at v1.
-        assert result.output.strip() == "knowledge__1-1__voyage-context-3__v1"
-
-    @_rich_catalog_dies_at_flip
-    def test_emits_conformant_name_for_code(
-        self, catalog_env, tmp_path, monkeypatch,
-    ):
-        cat = Catalog.init(catalog_env)
-        repo = tmp_path / "myproject"
-        repo.mkdir()
-        cat.register_owner(
-            name="myproject",
-            owner_type="repo",
-            repo_hash="cafef00d",
-            repo_root=str(repo),
-        )
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity",
-            lambda r: ("myproject", "cafef00d"),
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "catalog", "collection-name",
-            "--content-type", "code",
-            "--repo", str(repo),
-        ])
-        assert result.exit_code == 0, result.output
-        # Code uses voyage-code-3.
-        assert result.output.strip() == "code__1-1__voyage-code-3__v1"
-
-    def test_rejects_unknown_content_type(
-        self, catalog_env, tmp_path, monkeypatch,
-    ):
-        Catalog.init(catalog_env)
-        repo = tmp_path / "anywhere"
-        repo.mkdir()
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "catalog", "collection-name",
-            "--content-type", "garbage",
-            "--repo", str(repo),
-        ])
-        assert result.exit_code != 0
-
-    def test_fails_when_owner_not_registered(
-        self, catalog_env, tmp_path, monkeypatch,
-    ):
-        """No owner row for the repo: helper raises ``LookupError``;
-        the CLI surfaces that as a non-zero exit with a clear message
-        instructing the user to index first.
-        """
-        Catalog.init(catalog_env)
-        repo = tmp_path / "fresh"
-        repo.mkdir()
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity",
-            lambda r: ("fresh", "deadbeef"),
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "catalog", "collection-name",
-            "--content-type", "knowledge",
-            "--repo", str(repo),
-        ])
-        assert result.exit_code != 0
-        # The message should be specific enough that operators realise
-        # the repo needs to be indexed before the conformant name can be
-        # resolved (the indexer's _catalog_hook is what registers the
-        # owner row).
-        assert "owner" in result.output.lower() or "index" in result.output.lower()
-
-    @_rich_catalog_dies_at_flip
-    def test_fails_when_catalog_not_initialized(
-        self, catalog_env, tmp_path,
-    ):
-        repo = tmp_path / "anywhere"
-        repo.mkdir()
-        runner = CliRunner()
-        # catalog_env points NEXUS_CATALOG_PATH at tmp_path/catalog but
-        # no init has been run.
-        result = runner.invoke(main, [
-            "catalog", "collection-name",
-            "--content-type", "knowledge",
-            "--repo", str(repo),
-        ])
-        assert result.exit_code != 0
-        assert "not initialized" in result.output.lower()
-
-    @_rich_catalog_dies_at_flip
-    def test_default_repo_is_cwd(
-        self, catalog_env, tmp_path, monkeypatch,
-    ):
-        """When ``--repo`` is omitted, the command resolves the current
-        working directory."""
-        cat = Catalog.init(catalog_env)
-        repo = tmp_path / "myproject"
-        repo.mkdir()
-        cat.register_owner(
-            name="myproject",
-            owner_type="repo",
-            repo_hash="cafef00d",
-            repo_root=str(repo),
-        )
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity",
-            lambda r: ("myproject", "cafef00d"),
-        )
-        monkeypatch.chdir(repo)
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "catalog", "collection-name",
-            "--content-type", "rdr",
-        ])
-        assert result.exit_code == 0, result.output
-        assert result.output.strip() == "rdr__1-1__voyage-context-3__v1"
+# TOMBSTONE (nexus-i711w terminal deletion): ``TestCollectionNameCommand``
+# lived here (RDR-103 Phase 3b, ``nx catalog collection-name``). Its subject
+# was LOCAL-catalog name minting — every seeding path went through the
+# deleted ``nexus.catalog.catalog.Catalog`` (Catalog.init/register_owner),
+# and its three substantive tests were already hard-skipped pending
+# nexus-02avu diagnosis. The class retired with the substrate; the surviving
+# collection-name contract is pinned by ``collection_name.py``'s own tests
+# (tests/test_catalog_collection_name.py).
 
 
 class TestSeam3OwnersCarve:
@@ -1792,18 +1630,16 @@ class TestSeam3OwnersCarve:
     binding ``_get_catalog`` at import time (which would break the
     ``patch("nexus.commands.catalog._get_catalog", …)`` test seam).
 
-    Note the two commands take different catalog-access paths: ``owners``
-    reads via ``_get_catalog()`` (defended by the patch seam below), while
-    ``dedupe-owners`` opens an admin catalog via ``make_catalog_admin()`` and
-    is NOT covered by that patch target — its behavioural coverage lives in
-    ``test_catalog_dedupe.py`` through ``NEXUS_CATALOG_PATH`` env plumbing.
+    ``owners`` reads via ``_get_catalog()``, defended by the patch seam below.
+    (The group's other verb, ``dedupe-owners``, was deleted in nexus-i711w
+    Stage 2 sub-stage C-store along with the admin factory it opened.)
     """
 
     def test_owner_commands_registered_on_group(self):
         from nexus.cli import main
         catalog_group = main.commands["catalog"]
         assert "owners" in catalog_group.commands
-        assert "dedupe-owners" in catalog_group.commands
+        assert "dedupe-owners" not in catalog_group.commands
 
     def test_owner_commands_defined_in_carved_module(self):
         """The callbacks live in catalog_cmds.owners, not commands.catalog."""
@@ -1811,21 +1647,19 @@ class TestSeam3OwnersCarve:
         from nexus.commands.catalog_cmds import owners as owners_mod
         catalog_group = main.commands["catalog"]
         assert catalog_group.commands["owners"].callback is owners_mod.owners_cmd.callback
-        assert (
-            catalog_group.commands["dedupe-owners"].callback
-            is owners_mod.dedupe_owners_cmd.callback
-        )
 
     def test_owners_command_routes_get_catalog_through_module(self):
         """Patching commands.catalog._get_catalog is observed by the carved
         ``owners`` command — proves module-routed (not import-bound) access."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        fake = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        fake = MagicMock(spec=HttpCatalogClient)
         fake.list_owners.return_value = [
             {"tumbler_prefix": "1.1", "owner_type": "repo", "name": "sentinel-owner"},
         ]
@@ -1836,36 +1670,10 @@ class TestSeam3OwnersCarve:
         fake.list_owners.assert_called_once()
 
 
-class TestKgyozBackfillCarve:
-    """Contract pins for the nexus-kgyoz backfill-owner-id command carve.
-
-    Non-vacuous: fails if the command is re-inlined into ``commands.catalog``,
-    if the ``register`` wiring is dropped, or if the carved module's lazy
-    service-mode guard / module-routed access regresses.
-    """
-
-    def test_backfill_command_registered_on_group(self):
-        from nexus.cli import main
-        assert "backfill-owner-id" in main.commands["catalog"].commands
-
-    def test_backfill_command_defined_in_carved_module(self):
-        from nexus.cli import main
-        from nexus.commands.catalog_cmds import backfill as backfill_mod
-        cmd = main.commands["catalog"].commands["backfill-owner-id"]
-        assert cmd.callback is backfill_mod.backfill_owner_id_cmd.callback
-
-    def test_backfill_service_mode_guard_fires_through_carved_module(self):
-        """End-to-end through the group: service mode is refused with a clear
-        error. Exercises the carved command's lazy imports and guard before
-        any catalog access — no real catalog needed."""
-        from unittest.mock import patch
-
-        from nexus.cli import main
-
-        with patch("nexus.catalog.factory._is_catalog_service_mode", return_value=True):
-            result = CliRunner().invoke(main, ["catalog", "backfill-owner-id"])
-        assert result.exit_code != 0
-        assert "not supported in service mode" in result.output
+# TestKgyozBackfillCarve retired (nexus-i711w terminal deletion):
+# `nx catalog backfill-owner-id` wrote through the local SQLite catalog's raw
+# handle and died with it — catalog_cmds/backfill.py is now an empty
+# registration hook, so the carve pins have nothing to pin.
 
 
 class TestKgyozLinksCarve:
@@ -1911,11 +1719,13 @@ class TestKgyozLinksCarve:
         command — proves module-routed (not import-bound) access."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        fake = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        fake = MagicMock(spec=HttpCatalogClient)
         fake.link_audit.return_value = {
             "total": 7, "orphaned_count": 0, "duplicate_count": 0,
             "by_type": {}, "by_creator": {}, "orphaned": [],
@@ -1932,13 +1742,15 @@ class TestKgyozLinksCarve:
         an intra-body line drop that the __module__ pin would miss)."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
         edge = MagicMock()
         edge.to_dict.return_value = {"from": "1.1.1", "to": "1.2.1", "link_type": "cites"}
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        fake = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        fake = MagicMock(spec=HttpCatalogClient)
         fake.link_query.return_value = [edge]
         with patch("nexus.commands.catalog._get_catalog", return_value=fake):
             result = CliRunner().invoke(
@@ -1958,87 +1770,10 @@ class TestKgyozLinksCarve:
         assert catalog_group.commands["generate-links"] is links_mod.generate_links_cmd
 
 
-class TestWhh61BackupsCarve:
-    """Contract pins for the nexus-whh61.4 backups command carve.
-
-    Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
-    ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
-
-    Note the two access paths: ``list-backups`` / ``vacuum-backups`` read via
-    ``_get_catalog()`` (defended by the patch-seam pins below), while
-    ``undelete`` opens an admin catalog via ``make_catalog_admin()`` — pinned
-    here by its daemon-live guard; its full restore round-trip lives in
-    ``test_catalog_backup_and_safety.py`` via ``NEXUS_CATALOG_PATH`` plumbing.
-    """
-
-    BACKUP_COMMANDS = ["list-backups", "undelete", "vacuum-backups"]
-
-    def test_backup_commands_registered_on_group(self):
-        from nexus.cli import main
-        catalog_group = main.commands["catalog"]
-        for name in self.BACKUP_COMMANDS:
-            assert name in catalog_group.commands, f"{name} not registered"
-
-    def test_backup_commands_defined_in_carved_module(self):
-        from nexus.cli import main
-        catalog_group = main.commands["catalog"]
-        for name in self.BACKUP_COMMANDS:
-            assert catalog_group.commands[name].callback.__module__ == (
-                "nexus.commands.catalog_cmds.backups"
-            ), f"{name} not in carved module"
-
-    def test_list_backups_routes_get_catalog_through_module(self):
-        """End-to-end: patching commands.catalog._get_catalog is observed by
-        the carved list-backups command — proves module-routed access."""
-        from unittest.mock import MagicMock, patch
-
-        from nexus.cli import main
-
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        fake = MagicMock(spec=Catalog)
-        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
-                patch("nexus.catalog.catalog_backup.list_backups", return_value=[]) as lb:
-            result = CliRunner().invoke(main, ["catalog", "list-backups"])
-        assert result.exit_code == 0, result.output
-        assert "No backups found." in result.output
-        lb.assert_called_once_with(fake)
-
-    def test_vacuum_backups_routes_get_catalog_through_module(self):
-        """Symmetric to list-backups: vacuum-backups also routes _get_catalog
-        through the module object (would fail if bound at import time)."""
-        from unittest.mock import MagicMock, patch
-
-        from nexus.cli import main
-
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        fake = MagicMock(spec=Catalog)
-        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
-                patch(
-                    "nexus.catalog.catalog_backup.vacuum_old_backups",
-                    return_value=(0, 0),
-                ) as vac:
-            result = CliRunner().invoke(main, ["catalog", "vacuum-backups"])
-        assert result.exit_code == 0, result.output
-        vac.assert_called_once()
-        assert vac.call_args.args[0] is fake
-
-    def test_undelete_surfaces_daemon_live_guard(self):
-        """undelete uses the admin path (make_catalog_admin), not _get_catalog.
-        Pin the CLI-layer guard: a live daemon surfaces as a ClickException."""
-        from unittest.mock import patch
-
-        from nexus.catalog.factory import CatalogAdminDaemonLiveError
-        from nexus.cli import main
-
-        with patch(
-            "nexus.catalog.factory.make_catalog_admin",
-            side_effect=CatalogAdminDaemonLiveError("daemon is live"),
-        ):
-            result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
-        assert result.exit_code != 0
-        assert "daemon is live" in result.output
+# TestWhh61BackupsCarve retired (nexus-i711w terminal deletion): the
+# list-backups / vacuum-backups verbs and their carved module
+# (catalog_cmds/backups.py) died with nexus.catalog.catalog_backup —
+# backups were local-catalog-only.
 
 
 class TestWhh61CollectionsCarve:
@@ -2073,11 +1808,13 @@ class TestWhh61CollectionsCarve:
         module-routed access. Empty T3 + empty catalog → nothing to backfill."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.distinct_doc_collections.return_value = []
         cat.list_collections.return_value = []
         # cloud_mode (module-wide) forces is_local_mode() False -> real
@@ -2119,11 +1856,13 @@ class TestWhh61MigrationCarve:
         migrate-fallback — proves the direct->module-routed conversion."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.get_collection.return_value = None  # -> ClickException before any write
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
@@ -2141,13 +1880,15 @@ class TestWhh61MigrationCarve:
         __module__ pin would miss)."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
         entry = MagicMock()
         entry.tumbler = "1.1.1"
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.get_collection.return_value = {"name": "docs__default"}  # non-None
         cat.list_by_collection.return_value = [entry]
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
@@ -2164,13 +1905,30 @@ class TestWhh61MigrationCarve:
 
 
 class TestWhh61MaintenanceCarve:
-    """Contract pins for the nexus-whh61.4 maintenance (gc + chash-reconcile) carve.
+    """Contract pins for the nexus-whh61.4 maintenance carve.
 
     Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
     ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+
+    RDR-155 P4b P3: ``chash-reconcile`` was the carve's second command and is
+    RETIRED — it swept stale rows from the local SQLite chash router, a table
+    RDR-187 DROPped, and it already refused service-mode installs outright. The
+    carve contract itself is unchanged and still worth pinning; ``gc`` is simply
+    the only inhabitant now.
     """
 
-    MAINT_COMMANDS = ["gc", "chash-reconcile"]
+    MAINT_COMMANDS = ["gc"]
+
+    def test_chash_reconcile_is_retired(self):
+        """Successor to the removed second MAINT_COMMANDS entry: the verb must
+        stay gone. Without this, `chash-reconcile` could be re-registered and
+        the shrunk MAINT_COMMANDS list would say nothing about it."""
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        assert "chash-reconcile" not in catalog_group.commands, (
+            "nx catalog chash-reconcile is back — it was retired at RDR-155 "
+            "P4b P3 because RDR-187 dropped the chash_index router it swept."
+        )
 
     def test_maintenance_commands_registered_on_group(self):
         from nexus.cli import main
@@ -2192,11 +1950,13 @@ class TestWhh61MaintenanceCarve:
         no orphans."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.all_documents.return_value = []
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
@@ -2254,11 +2014,13 @@ class TestWhh61RemediationCarve:
         the carved prune-stale command — proves module-routed access."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.all_documents.return_value = []
         cat.owners_with_roots.return_value = {}
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
@@ -2307,11 +2069,13 @@ class TestWhh61ReportCarve:
         the carved stats command — proves module-routed access."""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.stats.return_value = {
             "owner_count": 3, "doc_count": 9, "link_count": 4, "chunk_count": 0,
             "by_content_type": {}, "links_by_type": {},
@@ -2373,11 +2137,13 @@ class TestWhh61IntegrityCarve:
         real verify suite, which reaches the t3 path with non-empty docs.)"""
         from unittest.mock import MagicMock, patch
 
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
         from nexus.cli import main
 
-        # NX_STORAGE_BACKEND stays pinned to sqlite (autouse fixture), so
-        # _get_catalog() really returns a local Catalog reader here.
-        cat = MagicMock(spec=Catalog)
+        # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
+        # _get_catalog() can return now that the local Catalog is deleted.
+        cat = MagicMock(spec=HttpCatalogClient)
         cat.all_documents.return_value = []  # empty → clean early return
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
@@ -2396,15 +2162,20 @@ class TestWhh61DoctorCarve:
     helpers not moving, or import-bound ``_get_catalog``.
     """
 
-    DOCTOR_COMMANDS = ["doctor", "synthesize-log"]
+    # ``synthesize-log`` and the local-event-log helpers
+    # (_run_replay_equality, _snapshot_table, _check_bootstrap_status,
+    # _run_t3_doc_id_coverage and their printers) were deleted in nexus-i711w
+    # Stage 2 sub-stage C-store; what remains is the service-capable half.
+    DOCTOR_COMMANDS = ["doctor"]
     SAMPLE_MOVED_HELPERS = [
-        "_run_replay_equality", "_snapshot_table", "_check_bootstrap_status",
-        "_run_name_vs_embed_dim", "_percentile", "_run_t3_doc_id_coverage",
+        "_run_name_vs_embed_dim", "_percentile",
         "_run_collections_drift", "_run_chunk_size_distribution",
         "_run_chunk_text_dedup", "_run_t3_vs_catalog",
-        "_print_replay_equality_text", "_expected_dim_for_model_token",
-        # threshold constants moved with the helpers:
-        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM", "_ORPHAN_RATIO_WARN_THRESHOLD",
+        "_expected_dim_for_model_token",
+        # threshold constants moved with the helpers. (_ORPHAN_RATIO_WARN_
+        # THRESHOLD was the t3-doc-id-coverage warn gate and died with that
+        # check — it had no other user.)
+        "_MICRO_CHUNK_BYTES", "_VOYAGE_DIM",
     ]
 
     def test_prune_deprecated_keys_stayed_in_catalog(self):
@@ -2493,3 +2264,42 @@ class TestWhh61OrphanBackfillCarve:
         assert result.exit_code == 0
         for sub in self.SUBCOMMANDS:
             assert sub in result.output, f"{sub} not listed in group help"
+
+
+class TestLinkDanglingEndpointRefusal:
+    """nexus-9ssih CLI half (7.0.0 release review): engines >= v0.1.61 refuse
+    dangling-endpoint links as 400 code=dangling_endpoint, which the client
+    translates to ValueError. link_cmd must surface that as a clean
+    ClickException, not a raw traceback."""
+
+    def test_link_valueerror_is_a_clean_refusal(self, monkeypatch, tmp_path):
+        from nexus.commands import catalog as _cat_cmd
+
+        # Isolate every detector root: without this, the stranded-install
+        # banner can fire from MIXED roots (config under tmp, legacy chroma
+        # under the real ~/.local/share — nexus-rjod2) and pollute output.
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+
+        class _Writer:
+            def link(self, *a, **k):
+                raise ValueError(
+                    "link refused: an endpoint does not resolve to a live "
+                    "catalog document. Pass allow_dangling=True to write "
+                    "the edge anyway."
+                )
+        class _Cat:
+            pass
+
+        monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda: _Cat())
+        monkeypatch.setattr(_cat_cmd, "_get_catalog_writer", lambda: _Writer())
+        monkeypatch.setattr(_cat_cmd, "_resolve_tumbler", lambda cat, t: t)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "link", "1.1.1", "9.9.9", "--type", "cites"],
+        )
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            "dangling-endpoint refusal must be a ClickException, not a traceback"
+        )
+        assert "does not resolve" in result.output

@@ -6,7 +6,6 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
-import dev.nexus.service.db.MigrationJobRepository;
 import dev.nexus.service.db.PipelineRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.RemapRepository;
@@ -19,9 +18,9 @@ import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
-import dev.nexus.service.http.MigrationHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
+import dev.nexus.service.http.LivezHandler;
 import dev.nexus.service.http.VersionHandler;
 import dev.nexus.service.http.LadderHandler;
 import dev.nexus.service.http.MemoryHandler;
@@ -59,7 +58,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Route table:
  * <ul>
- *   <li>{@code GET /health} — no auth; liveness + DB probe via SELECT 1.</li>
+ *   <li>{@code GET /health} — no auth; READINESS: DB probe via SELECT 1.</li>
+ *   <li>{@code GET /livez} — no auth; LIVENESS only, zero dependencies.</li>
  *   <li>{@code GET /v1/_whoami} — auth filter + tenant extraction + GUC stamp.</li>
  *   <li>{@code /v1/t1/*} — T1 scratch: put/get/search/list/flag/session-close (bead nexus-gmiaf.13).</li>
  * </ul>
@@ -258,13 +258,17 @@ public final class NexusService {
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
-        var migrationJobRepo = new MigrationJobRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
 
-        // /health — unauthenticated
+        // /health — unauthenticated. READINESS: includes a DB probe.
         server.createContext("/health", new HealthHandler(dataSource));
+        // /livez — unauthenticated. LIVENESS: no dependency of any kind, so a
+        // saturated pool cannot make a live process look dead (nexus-hubc0 /
+        // nexus-7f7gb). This is the supervisor's restart authority; /health is
+        // not, because a 503 from it means "alive but not serving".
+        server.createContext("/livez", new LivezHandler());
 
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
@@ -338,16 +342,6 @@ public final class NexusService {
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
         catalogCtx.getFilters().addAll(authFilter);
-
-        // /v1/migration/* — cloud→cloud server-side ingest (RDR-176 P4, nexus-t9rmg.24;
-        // async job contract, RDR-178 Gap 5, nexus-melvx). Only wired when a
-        // PgVectorRepository is present (the serving substrate); absent = the route
-        // 404s rather than NPEs.
-        if (pgVectorRepository != null) {
-            var migrationCtx = server.createContext(
-                    "/v1/migration", new MigrationHandler(pgVectorRepository, migrationJobRepo));
-            migrationCtx.getFilters().addAll(authFilter);
-        }
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
         // Shares the live tokenStore + tokenCache so revoke invalidates the cache AuthFilter reads.

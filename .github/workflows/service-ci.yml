@@ -1,7 +1,26 @@
 name: Service CI
 
-# Triggers only when the Java service module changes.
 # Kept separate from ci.yml (Python suite) so neither blocks the other.
+#
+# WHY pull_request CARRIES NO `paths:` FILTER (Hal directive 2026-07-31).
+# This workflow's Java job is a REQUIRED check. A workflow-level `paths:` filter
+# means the workflow never TRIGGERS on a PR that misses the filter, so the check
+# never reports — and a required check that never reports leaves the PR pending
+# FOREVER, not passing. Every docs-only and Python-only PR would wedge.
+#
+# So the filter moves from the workflow to the JOB: `changes` always runs and
+# decides, and the expensive job is gated with `if:`. A job skipped via `if:`
+# reports as SKIPPED, which branch protection treats as SUCCESS. Same trade the
+# repo already makes for CA-3 in ci.yml, one level up (job-level skip rather
+# than always-run-with-gated-steps, because the always-run shape would add a
+# full-history checkout to every PR in the repo — CI cost discipline).
+#
+# WHY THIS BECAME REQUIRED. It was advisory, so 1541 engine tests gated nothing
+# at merge. Two separate P0 catalog defects (nexus-u4e20, nexus-v6za0) reached
+# develop behind that gap, each pinned ONLY in Java, each therefore unenforced.
+#
+# `push` KEEPS its paths filter: pushes gate nothing, so filtering there is pure
+# cost saving with no pending-check hazard.
 on:
   push:
     branches: [main, develop]
@@ -10,17 +29,57 @@ on:
       - '.github/workflows/service-ci.yml'
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'service/**'
-      - '.github/workflows/service-ci.yml'
 
 concurrency:
   group: service-ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    # MUST ITSELF BE A REQUIRED CHECK. If this job fails, the Java job below is
+    # skipped for want of its `needs`, and a skipped job reads as SUCCESS — so a
+    # broken detector would silently green-light every PR. Requiring this job too
+    # is what closes that fail-open path; do not require one without the other.
+    name: service change detection
+    runs-on: ubuntu-latest
+    outputs:
+      service: ${{ steps.filter.outputs.service }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # Full history so dorny/paths-filter resolves the merge-base without
+          # --deepen, whose shallow-fetch loop races ("fatal: shallow file has
+          # changed since we read it") and flaked the CA-3 gate twice in 2026-06.
+          fetch-depth: 0
+
+      # SHA-pinned (not @v3), for the same reason ci.yml pins it: this filter's
+      # output decides whether a REQUIRED check runs its tests at all. A floating
+      # tag compromised to always emit 'false' would skip the entire engine suite
+      # while the check still reported green. Pin copied from ci.yml so the two
+      # workflows cannot drift onto different versions of the same decider.
+      - id: filter
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        with:
+          filters: |
+            service:
+              - 'service/**'
+              - '.github/workflows/service-ci.yml'
+
+      - name: Report the decision
+        # State the skip out loud. A gate that silently declines to run reads
+        # identically to one that ran and passed.
+        run: |
+          if [ "${{ steps.filter.outputs.service }}" = "true" ]; then
+            echo "service/** changed — the Java suite WILL run."
+          else
+            echo "service/** unchanged — the Java suite is SKIPPED (reports success)."
+            echo "This PR is NOT evidence the engine suite passes."
+          fi
+
   java-test-and-drift-guard:
     name: Java tests + jOOQ codegen drift guard
+    needs: changes
+    if: needs.changes.outputs.service == 'true'
     runs-on: ubuntu-latest
     # Testcontainers pulls pgvector/pgvector:pg17 on first run (~180 MB);
     # subsequent runs use the Docker layer cache.  30m covers a cold
@@ -45,7 +104,7 @@ jobs:
           # Cache Maven local repo across runs; bust when pom.xml changes.
           cache: 'maven'
 
-      - name: Cache ChromaDB ONNX model
+      - name: Cache MiniLM ONNX model
         # EmbedParityTest constructs OnnxEmbedder, which loads the
         # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
         # cache key as ci.yml (the Python suite) so this Java-only runner

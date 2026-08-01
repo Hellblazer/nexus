@@ -16,7 +16,6 @@ Exit contract (RDR §Phase 5 Failure Modes):
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -61,18 +60,64 @@ def test_parse_json_payload_tolerates_surrounding_log_lines() -> None:
     assert _parse_json_payload(payload) == {"results": [1, 2, 3], "ok": True}
 
 
+# ── In-file fake chash index ─────────────────────────────────────────────────
+
+
+class _FakeChashIndex:
+    """In-file stand-in for the chash-index interface ``nx doc cite``
+    consumes: ``is_empty`` (the fresh-install short-circuit) and
+    ``lookup`` (via ``Catalog.resolve_chash`` for excerpts), plus
+    ``close``. The SQLite ChashIndex was deleted with the 7.0.0 wave
+    (nexus-i711w); the HTTP twin's wire contract is pinned in
+    tests/db/test_http_chash_index.py."""
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], str] = {}
+
+    def upsert(self, *, chash: str, collection: str) -> None:
+        self.rows[(chash, collection)] = "2026-01-01T00:00:00+00:00"
+
+    def lookup(self, chash: str) -> list[dict[str, str]]:
+        return [
+            {"collection": coll, "created_at": ts}
+            for (ch, coll), ts in self.rows.items()
+            if ch == chash
+        ]
+
+    def is_empty(self) -> bool:
+        return not self.rows
+
+    def close(self) -> None:
+        pass
+
+
+class _SpanResolvingCatalog:
+    """resolve_chash shim honouring the INJECTED t3 + chash_index.
+
+    nexus-i711w terminal deletion: the local ``Catalog.resolve_chash``
+    (a delegating shell over ``catalog_spans.resolve_chash_globally``)
+    died with the local Catalog; the cite command still calls
+    ``cat.resolve_chash(chash, t3, chash_index)`` on whatever
+    ``_phase4_catalog_t3_chash()`` hands back, and the service client
+    ignores the injected collaborators — so these seeded-resolver tests
+    keep the injected shape via the surviving resolution function.
+    """
+
+    def resolve_chash(self, chash, t3=None, chash_index=None, *,
+                      prefer_collection=None):
+        from nexus.catalog.catalog_spans import resolve_chash_globally
+        return resolve_chash_globally(
+            chash, t3, chash_index, prefer_collection=prefer_collection,
+        )
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def cite_env(tmp_path: Path):
-    """Catalog + T3 + ChashIndex with one resolvable chunk."""
-    from nexus.catalog.catalog import Catalog
-    from nexus.db.t2.chash_index import ChashIndex
-
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+def cite_env():
+    """Resolver shim + T3 + fake chash index with one resolvable chunk."""
+    cat = _SpanResolvingCatalog()
 
     t3 = make_vector_test_client()
     chash_hex = "c" * 64
@@ -83,7 +128,7 @@ def cite_env(tmp_path: Path):
         metadatas=[{"chunk_text_hash": chash_hex, "source_path": "p.pdf"}],
     )
 
-    chash_index = ChashIndex(tmp_path / "t2.db")
+    chash_index = _FakeChashIndex()
     chash_index.upsert(
         chash=chash_hex, collection="knowledge__cite",
     )
@@ -207,18 +252,13 @@ class TestCiteJsonSchema:
 
 
 class TestCiteEmptyIndexShortCircuit:
-    def test_empty_chash_index_exits_2_with_actionable_message(
-        self, tmp_path: Path,
-    ):
-        from nexus.catalog.catalog import Catalog
+    def test_empty_chash_index_exits_2_with_actionable_message(self):
         from nexus.commands.doc import cite_cmd
-        from nexus.db.t2.chash_index import ChashIndex
 
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-        # Empty chash_index (no rows).
-        chash_index = ChashIndex(tmp_path / "t2.db")
+        cat = _SpanResolvingCatalog()
+        # Empty chash index (no rows) — is_empty() True trips the exit-2
+        # fresh-install short-circuit.
+        chash_index = _FakeChashIndex()
         t3 = make_vector_test_client()
         try:
             with patch(

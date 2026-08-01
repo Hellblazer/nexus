@@ -54,7 +54,7 @@ from nexus.code_indexer import (  # noqa: F401
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.catalog.tumbler import Tumbler
     from nexus.hook_registry import HookRegistry
     from nexus.indexer_utils import StalenessCache
@@ -456,17 +456,13 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     no-catalog ad-hoc workflow (tests, single-shot CLI runs on a fresh
     repo) continues to satisfy ``T3Database``'s strict-naming guard.
     """
-    from nexus.catalog import Catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog)
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
-    from nexus.config import catalog_path  # noqa: PLC0415  — circular-dep avoidance (nexus.config)
 
     try:
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
-
-        catalog_service_mode = storage_backend_for("catalog") == StorageBackend.SERVICE
-        cat_path = catalog_path()
-        if catalog_service_mode or Catalog.is_initialized(cat_path):
-            cat = make_catalog_reader()
+        # Service-only since nexus-i711w: the catalog is the remote Postgres
+        # service in every mode — no local is_initialized gate remains.
+        cat = make_catalog_reader()
+        if cat is not None:
             try:
                 return cat.collection_for_repo(repo, content_type).render()
             except LookupError:
@@ -637,9 +633,6 @@ def _migrate_legacy_collections(
     collection name. Sidesteps unknown legacy models like ``voyage-3``
     that pre-date :data:`CANONICAL_EMBEDDING_MODELS`.
     """
-    from typing import cast  # noqa: PLC0415  — stdlib deferred to call site (typing)
-
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.catalog)
     # nexus-8g79.10 (V5): import from peer module instead of reaching
     # up into commands/. The CLI wrapper in commands/collection.py
     # adds the ``t3_db=_t3()`` default; we pass ``t3_db`` explicitly.
@@ -647,6 +640,7 @@ def _migrate_legacy_collections(
         rename_collection_data_plane,
     )
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — circular-dep avoidance (nexus.db.collection_state)
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     result: dict[str, str] = {}
@@ -657,7 +651,7 @@ def _migrate_legacy_collections(
     if cat is None:
         return result
 
-    cat_obj = cast(Catalog, cat)
+    cat_obj = cat
     # RDR-146 P1.2 strict split: reads via cat_obj, writes via w
     # (write-only proxy; defaults to cat_obj for single-object callers).
     w = writer if writer is not None else cat_obj
@@ -685,6 +679,15 @@ def _migrate_legacy_collections(
         # If both exist, prefer the legacy 2-segment (rename happens
         # first; the synth becomes the case-3 partial-state collision
         # message and is left for operator cleanup).
+        # nexus-9n485: collection_exists() alone can't tell "no chunks ever
+        # existed here" from "every chunk here belongs to a trashed
+        # document" (HttpVectorClient reads the tombstone-filtered stats
+        # view). Both currently fall through this loop identically —
+        # a tombstoned candidate is not treated as migratable, same as
+        # before this fix — but a tombstoned candidate is no longer
+        # silent: it used to vanish from the logs entirely, orphaning the
+        # collection with no trace ("trash-then-reindex would create a
+        # duplicate fresh collection beside the tombstoned one").
         legacy = None
         for candidate in _migration_source_candidates(repo, ct):
             if candidate == conformant:
@@ -692,7 +695,21 @@ def _migrate_legacy_collections(
                 # because the indexer is already writing to the right
                 # place.
                 continue
-            if t3_db.collection_exists(candidate):  # type: ignore[attr-defined]
+            candidate_state = probe_collection_state(t3_db, candidate)
+            if candidate_state is CollectionState.TOMBSTONED:
+                _log.warning(
+                    "phase4_migration_candidate_tombstoned",
+                    repo=str(repo), ct=ct, candidate=candidate,
+                    message=(
+                        "candidate has physical chunk rows but every one "
+                        "belongs to a trashed document; not treated as "
+                        "migratable (skipping to the next candidate / "
+                        "greenfield). Restore the trashed document(s) and "
+                        "rename manually if this data should not be orphaned."
+                    ),
+                )
+                continue
+            if candidate_state is CollectionState.PRESENT:
                 legacy = candidate
                 break
         if legacy is None:
@@ -700,7 +717,19 @@ def _migrate_legacy_collections(
             legacy_exists = False
         else:
             legacy_exists = True
-        conformant_exists = bool(t3_db.collection_exists(conformant))  # type: ignore[attr-defined]
+        conformant_state = probe_collection_state(t3_db, conformant)
+        if conformant_state is CollectionState.TOMBSTONED:
+            _log.warning(
+                "phase4_migration_conformant_tombstoned",
+                repo=str(repo), ct=ct, conformant=conformant,
+                message=(
+                    "target collection has physical chunk rows but every "
+                    "one belongs to a trashed document; treated as NOT "
+                    "present so a fresh write is not silently merged with "
+                    "trashed data under the same name."
+                ),
+            )
+        conformant_exists = conformant_state is CollectionState.PRESENT
 
         if legacy_exists and not conformant_exists:
             # Decision tree case 1: rename legacy → conformant.
@@ -881,22 +910,10 @@ def _catalog_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-        # The init-gate is a LOCAL-mode filesystem check (does the on-disk catalog
-        # exist). In SERVICE mode there is no local catalog — the catalog is the remote
-        # Postgres service — so this gate must NOT apply, or the hook silently skips all
-        # catalog registration and service-mode `nx index repo` leaves the catalog empty
-        # (RDR-168 P4 / CA-4 second cause: nexus-pwclh). In service mode we proceed; the
-        # service-backed writer below fails loud if the service is unreachable.
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
-
-        catalog_service_mode = storage_backend_for("catalog") == StorageBackend.SERVICE
-        cat_path = catalog_path()
-        if not catalog_service_mode and not Catalog.is_initialized(cat_path):
-            _log.debug("catalog_hook_skipped", reason="catalog not initialized")
-            return file_to_doc_id
+        # Service-only since nexus-i711w: the catalog is the remote Postgres
+        # service in every mode (the local is_initialized gate died with the
+        # local catalog; the service-backed writer below fails loud if the
+        # service is unreachable — RDR-168 P4 / nexus-pwclh lineage).
 
         # RDR-146 P1.2 strict split: reads via ``cat`` (read-only reader),
         # writes via ``writer`` (write-only daemon proxy).
@@ -1409,7 +1426,7 @@ def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:
 
 
 def _run_housekeeping(
-    cat: "Catalog",
+    cat: "CatalogReader",
     owner: "Tumbler",
     indexed_set: set[str],
     *,
@@ -1602,21 +1619,12 @@ def _build_frecency_doc_id_map(
     """
     file_to_doc_id: dict[Path, str] = {}
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        # Same service-mode caveat as _catalog_hook: the local is_initialized gate must
-        # NOT short-circuit in service mode, or this doc_id resolver returns empty and
-        # the manifest post-store hook has no catalog doc_ids to key chunks on → empty
-        # manifest (RDR-168 P4 / nexus-njrcn.6).
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
-
-        catalog_service_mode = storage_backend_for("catalog") == StorageBackend.SERVICE
-        cat_path = catalog_path()
-        if not catalog_service_mode and not Catalog.is_initialized(cat_path):
-            return file_to_doc_id
+        # Service-only since nexus-i711w: no local is_initialized gate (the
+        # gate must never short-circuit service mode — RDR-168 P4 /
+        # nexus-njrcn.6 lineage).
         cat = make_catalog_reader()
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
@@ -2578,7 +2586,27 @@ def _prune_deleted_files(
         (rdr_collection,) if rdr_collection else ()
     )
     for collection_name in _collections:
-        referenced = catalog.chashes_for_collection(collection_name)
+        # nexus-ir6eh: the alive-set read is count-reconciled client-side
+        # (HttpCatalogClient.chashes_for_collection raises on a truncated
+        # or count-stripped response). GC must never classify orphans off
+        # an unverifiable list — a truncated list reads live chunks as
+        # orphans and deletes real data — so a failed read skips THIS
+        # collection with a structured error (never a silent continue,
+        # never a sweep-wide abort; same per-collection isolation as the
+        # nexus-ou4tb degraded-read guard below).
+        try:
+            referenced = catalog.chashes_for_collection(collection_name)
+        except Exception:  # noqa: BLE001 — one collection's failed alive-set read must not end the sweep
+            # .error, not the .warning its sibling skip-guards below use:
+            # those absorb transient READ failures, whereas this fires on a
+            # count-reconciliation breach — a contract violation by the
+            # engine or an interposing hop, which is never routine.
+            _log.error(
+                "gc_manifest_read_failed_skipping_collection",
+                collection=collection_name,
+                exc_info=True,
+            )
+            continue
         try:
             col = db.get_collection(collection_name)
         except collection_not_found_errors():
@@ -3111,7 +3139,7 @@ def _run_index(
             import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
             code_model = index_model_for_collection(code_collection)
             docs_model = index_model_for_collection(docs_collection)
-            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
+            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
 
     _log.debug("connecting to ChromaDB")
     # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through

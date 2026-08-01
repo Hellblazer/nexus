@@ -41,7 +41,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
@@ -206,15 +211,12 @@ def java_service(pg_instance):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_STORAGE_BACKEND_CATALOG", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=40.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", _TOKEN, proc
     finally:
         try:
@@ -279,13 +281,22 @@ def seeded_catalog(cat):
         repo_root="/Users/hal/git/qnp5s-repo-2",
     )
 
-    # Register documents under the repo owner
+    # Register documents under the repo owner.
+    #
+    # source_uri MUST nest under the owner's repo_root
+    # (/Users/hal/git/qnp5s-repo) — the nexus-3e4s/nexus-e7cys engine-side
+    # containment guard (CatalogRepository.checkCrossProjectContainment)
+    # rejects a "repo"-type owner's explicit file:// source_uri that
+    # normalizes outside its repo_root with HTTP 400. These fixture docs
+    # are a synthetic scoring/repos-identity dataset with no filesystem
+    # counterpart — arbitrary but repo_root-coherent paths preserve that
+    # while satisfying the guard.
     doc_a = cat.register(
         str(repo_owner_t),
         "QNP5S Doc A",
         content_type="paper",
         corpus="knowledge",
-        source_uri="file:///qnp5s/doc-a.md",
+        source_uri="file:///Users/hal/git/qnp5s-repo/doc-a.md",
         chunk_count=15,
         physical_collection="knowledge__qnp5s-repo__voyage-context-3__v1",
     )
@@ -294,7 +305,7 @@ def seeded_catalog(cat):
         "QNP5S Doc B",
         content_type="paper",
         corpus="knowledge",
-        source_uri="file:///qnp5s/doc-b.md",
+        source_uri="file:///Users/hal/git/qnp5s-repo/doc-b.md",
         chunk_count=7,
         physical_collection="knowledge__qnp5s-repo__voyage-context-3__v1",
     )
@@ -303,7 +314,7 @@ def seeded_catalog(cat):
         "QNP5S Doc C (no chunks)",
         content_type="paper",
         corpus="knowledge",
-        source_uri="file:///qnp5s/doc-c.md",
+        source_uri="file:///Users/hal/git/qnp5s-repo/doc-c.md",
         # chunk_count omitted — stored as 0 by Java service
     )
 
@@ -343,13 +354,21 @@ class TestNoSQLiteAccess:
     def test_client_db_sentinel_raises(self, cat) -> None:
         """Accessing HttpCatalogClient._db must raise a clear service-mode error.
 
-        The sentinel property (nexus-xnz0o) converts the bare AttributeError
-        that un-migrated commands/ code would hit into an actionable message,
+        The sentinel property (nexus-xnz0o) replaces the bare AttributeError
+        that un-migrated commands/ code would hit with an actionable message,
         and proves the consumer is on the HTTP service backend — a real SQLite
         ._db handle (silent fallback) would NOT raise.
+
+        It stays an AttributeError, NOT a RuntimeError (nexus-xj744): the
+        message is what changes, never the type, because ``hasattr()`` only
+        swallows AttributeError and every service-mode branch depends on
+        ``hasattr(cat, "_db")`` returning False rather than exploding. The
+        ``match=`` is what keeps this honest — it distinguishes the guarded
+        AttributeError from the un-guarded one. Contract pinned suite-wide by
+        tests/db/test_raw_handle_guard_contract.py.
         """
         import pytest
-        with pytest.raises(RuntimeError, match="service mode"):
+        with pytest.raises(AttributeError, match="local SQLite catalog was deleted"):
             _ = cat._db
 
 

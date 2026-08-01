@@ -19,12 +19,15 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.tumbler import Tumbler
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 # Wave review (the h8rf6.3 -> 49523e16 lesson): fixture chashes must be
@@ -36,7 +39,7 @@ CHUNK_SHA_A = "2ccea837b4713a233eea0914ad7adda8bcbbbeccd9ac45e217cab14843229eb2"
 CHUNK_SHA_B = "6756d390c50dd95257ad481c8ab3669f93838ed7e8f3cf334a8bbf1281d8e3b2"  # sha256("fake-chunk-B")
 CHASH_A = CHUNK_SHA_A
 CHASH_B = CHUNK_SHA_B
-from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
+from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -105,12 +108,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: /link response shape: None omits the key (old-JAR skew), bool sets created (njrcn.3).
     link_created: "bool | None" = True
 
+    #: nexus-fguo5: single-hop alias_of map for /show's follow_alias arm,
+    #: mirroring CatalogRepository.resolveAliasTarget's chain-walk. Empty by
+    #: default so /show is an identity lookup unless a test seeds it.
+    show_alias_map: dict[str, str] = {}
+    #: last follow_alias value /show actually decoded (boolParam semantics:
+    #: "1"/"true"/"yes" case-insensitively true, everything else — including
+    #: absence — false). Lets tests assert the WIRE value the client sent,
+    #: not just the client-side kwarg.
+    last_show_follow_alias: "bool | None" = None
+
     @classmethod
     def reset_log(cls) -> None:
         cls.get_ops = []
         cls.post_ops = []
         cls.last_link_body = {}
         cls.list_content_type_count = 0
+        cls.show_alias_map = {}
+        cls.last_show_follow_alias = None
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -151,7 +166,27 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "by_content_type": {"code": 5, "prose": 2},
             })
         elif op == "/show":
-            self._send_json(_entry_dict())
+            # nexus-fguo5: mirror CatalogHandler.handleShow exactly —
+            # follow_alias defaults FALSE (boolParam semantics: "1"/"true"/
+            # "yes" case-insensitively true, anything else including
+            # absence false), and only when true does the fake walk
+            # show_alias_map to a target and return THAT tumbler, mirroring
+            # CatalogRepository.getDocument(tenant, tumbler, followAlias).
+            params = self._query_params()
+            tumbler = params.get("tumbler", _fake_tumbler())
+            raw = params.get("follow_alias", "")
+            follow_alias = raw.lower() in ("1", "true", "yes")
+            FakeCatalogHandler.last_show_follow_alias = follow_alias
+            target = tumbler
+            if follow_alias:
+                seen: set[str] = set()
+                while (
+                    target in FakeCatalogHandler.show_alias_map
+                    and target not in seen
+                ):
+                    seen.add(target)
+                    target = FakeCatalogHandler.show_alias_map[target]
+            self._send_json(_entry_dict(tumbler=target))
         elif op == "/list":
             params = self._query_params()
             if params.get("content_type") and FakeCatalogHandler.list_content_type_count:
@@ -203,6 +238,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "links_from": [out_row] if match else [],
                     "links_to": [in_row] if match else [],
                 })
+        elif op == "/links/orphaned":
+            # nexus-ysrwi review (2026-07-25): the route census EXCLUDED this
+            # route with the reason "no Python caller exists yet ... this
+            # exclusion must be removed" when one lands. HttpCatalogClient
+            # .orphaned_links() then landed one commit later and the exclusion
+            # was not removed -- the census cannot see its own trigger
+            # condition, since it only asks "is there a fake branch?", never
+            # "is there a caller?". This branch mirrors
+            # CatalogRepository.orphanedLinks(): id / from_tumbler / to_tumbler
+            # / link_type / created_by / side, under a {"links": [...]} envelope.
+            self._send_json({"links": [{
+                "id": 1,
+                "from_tumbler": "1.1.1",
+                "to_tumbler": "9.9.9",
+                "link_type": "cites",
+                "created_by": "user",
+                "side": "to",
+            }]})
         elif op == "/link_query":
             params = self._query_params()
             if params.get("from_tumbler") == FakeCatalogHandler.link_absent_from:
@@ -212,7 +265,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/manifest/get":
             self._send_json({"rows": [{"position": 0, "chash": CHASH_A}], "count": 1})
         elif op == "/manifest/chashes":
-            self._send_json({"chashes": [CHASH_A, CHASH_B]})
+            # nexus-ir6eh: the real CatalogHandler emits count alongside
+            # chashes (truncation defence, v0.1.55+); the client reconciles
+            # len(chashes) == count and fails loud on deviation.
+            self._send_json({"chashes": [CHASH_A, CHASH_B], "count": 2})
         elif op == "/manifest/orphans":
             params = self._query_params()
             dim = int(params.get("dim", "0"))
@@ -470,9 +526,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             if FakeCatalogHandler.rename_conflicts and body.get("cross_model") is not True:
                 self._send_json({"error": "target collection already exists"}, code=409)
             else:
+                # nexus-cecqy: the canonical branch RETIRES the old registry row
+                # as a superseded tombstone; it stopped DELETEing it, so the key
+                # is catalog_collections_superseded.
                 self._send_json({"renamed": {"catalog_documents": 3,
                                              "catalog_collections_inserted": 1,
-                                             "catalog_collections_deleted": 1}})
+                                             "catalog_collections_superseded": 1}})
         elif op == "/import/owner":
             self._send_json({"imported": 1})
         elif op == "/import/document":
@@ -589,7 +648,7 @@ class TestHttpCatalogClientRoundTrip:
         assert client.doc_count() == 7
 
     def test_register_returns_tumbler(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         # Positional owner+title as in Catalog.register signature
         t = client.register("1.1", "My Paper", content_type="paper")
         assert isinstance(t, Tumbler)
@@ -600,7 +659,7 @@ class TestHttpCatalogClientRoundTrip:
     ) -> None:
         # nexus-9dvqy: 2500 docs page at 1000 (1000+1000+500); tumblers come
         # back aligned 1:1 with docs in input order across the concatenation.
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(2500)]
         page_sizes: list[int] = []
 
@@ -628,7 +687,7 @@ class TestHttpCatalogClientRoundTrip:
         # nexus-9dvqy: a whole-page failure must not sink the run — it falls
         # back to per-doc register() (POST /doc/register), preserving per-file
         # isolation and still returning aligned tumblers.
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
         single_calls: list[str] = []
 
@@ -760,6 +819,77 @@ class TestHttpCatalogClientRoundTrip:
             c._get = _fake_get
             result = c.resolve("9.9.9")
             assert result is None
+
+    def test_resolve_sends_follow_alias_true_by_default(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """nexus-fguo5: resolve() declared follow_alias=True but never sent
+        it on the wire. The fake decodes the SAME boolParam semantics the
+        real engine's handleShow uses, so this fails red against the
+        pre-fix client (which sent no follow_alias param at all -> the
+        fake's raw="" -> decoded False, not True)."""
+        FakeCatalogHandler.last_show_follow_alias = None
+        try:
+            client.resolve("1.1.1")
+            assert FakeCatalogHandler.last_show_follow_alias is True
+        finally:
+            FakeCatalogHandler.last_show_follow_alias = None
+
+    def test_resolve_sends_follow_alias_false_when_requested(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        FakeCatalogHandler.last_show_follow_alias = None
+        try:
+            client.resolve("1.1.1", follow_alias=False)
+            assert FakeCatalogHandler.last_show_follow_alias is False
+        finally:
+            FakeCatalogHandler.last_show_follow_alias = None
+
+    def test_resolve_follows_alias_to_canonical_target(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """With follow_alias=True (the default) and a seeded alias chain,
+        the returned entry's tumbler is the RESOLVED target, mirroring
+        CatalogRepository.getDocument(..., followAlias=True)."""
+        FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
+        try:
+            entry = client.resolve("2.2.2")
+            assert entry is not None
+            assert str(entry.tumbler) == "3.3.3"
+        finally:
+            FakeCatalogHandler.show_alias_map = {}
+
+    def test_resolve_does_not_follow_alias_when_false(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """follow_alias=False is byte-identical to a pre-fix client: the
+        alias is never followed, even though one is registered."""
+        FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
+        try:
+            entry = client.resolve("2.2.2", follow_alias=False)
+            assert entry is not None
+            assert str(entry.tumbler) == "2.2.2"
+        finally:
+            FakeCatalogHandler.show_alias_map = {}
+
+    def test_resolve_alias_returns_canonical_target(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """resolve_alias() was an accidental identity function before
+        nexus-fguo5 (resolve() dropped follow_alias on the floor). With the
+        wire fixed, it returns the resolved target tumbler."""
+        FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
+        try:
+            target = client.resolve_alias("2.2.2")
+            assert str(target) == "3.3.3"
+        finally:
+            FakeCatalogHandler.show_alias_map = {}
+
+    def test_resolve_alias_returns_same_tumbler_when_no_alias(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        target = client.resolve_alias("1.1.1")
+        assert str(target) == "1.1.1"
 
     def test_find_returns_list(self, client: HttpCatalogClient) -> None:
         results = client.find("test query")
@@ -1117,12 +1247,134 @@ class TestHttpCatalogClientRoundTrip:
         colls = client.list_collections()
         assert len(colls) == 1
 
-    def test_supersede_collection(self, client: HttpCatalogClient) -> None:
-        # Canonical Catalog.supersede_collection() takes positional old_name, new_name.
-        # Migrated from old client-specific sig (new_name was keyword-only superseded_by).
-        # Returns None (canonical), not int.
-        result = client.supersede_collection("old__coll", "new__coll")
-        assert result is None
+    def test_supersede_collection_returns_the_rowcount(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """nexus-cecqy: the engine returns {"updated": N} and the client used to
+        DISCARD it, asserting only `result is None` — wire shape, not behaviour.
+
+        That discard is what let `nx catalog rename-collection` announce
+        "Emitted CollectionSuperseded(...)" after an UPDATE that touched ZERO
+        rows: service-mode rename DELETEs the old registry row, so the
+        follow-up `WHERE name = old` matches nothing. ZERO is the meaningful
+        value, and it was the one being thrown away.
+
+        (The fake has been returning {"updated": 5} the whole time — the count
+        was available and unused.)
+        """
+        assert client.supersede_collection("old__coll", "new__coll") == 5
+
+    @pytest.mark.parametrize(
+        ("status", "detail"),
+        [
+            (404, "collection not found: old__coll"),
+            (404, "superseded_by names an unregistered collection: new__coll"),
+            (409, "collection old__coll is already superseded by other__coll"),
+        ],
+    )
+    def test_supersede_refusal_raises_value_error_carrying_the_reason(
+        self, client: HttpCatalogClient, status: int, detail: str,
+    ) -> None:
+        """nexus-g8z8n: the engine's three precondition refusals must surface as
+        ValueError, not as a silent zero or a bare HTTPStatusError.
+
+        The reason has to travel with it — an operator who typoed a collection
+        name needs to be told WHICH endpoint did not resolve, and the engine
+        already says so in the response body.
+        """
+        request = httpx.Request("POST", "http://engine/collections/supersede")
+        response = httpx.Response(status, json={"error": detail}, request=request)
+
+        def _fake_post(path: str, body: dict) -> dict:
+            raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+        client._post = _fake_post  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError) as excinfo:
+            client.supersede_collection("old__coll", "new__coll")
+        # Non-vacuity: the message must name the operands AND carry the engine's
+        # own explanation, not just the status code.
+        assert "old__coll" in str(excinfo.value)
+        assert detail in str(excinfo.value)
+
+    def test_supersede_other_http_errors_are_not_swallowed_as_value_error(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """Only the two precondition statuses map. A 500 is an engine fault, not
+        a caller mistake, and must keep raising what it raises — otherwise an
+        outage reads to every caller as 'you passed a bad name'."""
+        request = httpx.Request("POST", "http://engine/collections/supersede")
+        response = httpx.Response(500, json={"error": "boom"}, request=request)
+
+        def _fake_post(path: str, body: dict) -> dict:
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        client._post = _fake_post  # type: ignore[method-assign]
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.supersede_collection("old__coll", "new__coll")
+
+    # ── nexus-cecqy: legacy_grandfathered is DERIVED, not defaulted False ────
+
+    def _upsert_body(self, client: HttpCatalogClient, *a: object, **kw: object) -> dict:
+        """Call register_collection and return the body it POSTed."""
+        sent: dict = {}
+
+        def _fake_post(path: str, body: dict) -> dict:
+            assert path == "/collections/upsert", path
+            sent.update(body)
+            return {}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        client.register_collection(*a, **kw)  # type: ignore[arg-type]
+        return sent
+
+    def test_bare_register_derives_legacy_true_for_nonconformant_name(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """The BARE ``register_collection(name)`` shape — by construction the
+        non-conformant branch of every call site's conformance fork — must send
+        ``legacy_grandfathered=True``. It used to send the kwarg's False
+        default, so non-conformant names landed un-flagged in service mode.
+
+        The engine infers nothing (``upsertCollection`` binds the caller's
+        value), so whatever this sends IS the stored flag.
+        """
+        from nexus.corpus import is_conformant_collection_name
+
+        name = "docs__cecqy-legacy"
+        # Non-vacuity: the fix is only observable on a non-conformant name.
+        assert not is_conformant_collection_name(name)
+
+        assert self._upsert_body(client, name)["legacy_grandfathered"] is True
+
+    def test_bare_register_derives_legacy_false_for_conformant_name(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """The other half of the derivation. Pins against a 'fix' that blanket-
+        flags every bare registration True — the conformant case was correct by
+        accident at the old False default, which is what hid the defect."""
+        from nexus.corpus import is_conformant_collection_name
+
+        name = "docs__cecqy-conf__stub-docs-1024__v1"
+        assert is_conformant_collection_name(name)
+
+        assert self._upsert_body(client, name)["legacy_grandfathered"] is False
+
+    def test_explicit_kwarg_overrides_the_derivation(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """Deriving must not take the override away: a caller that must force
+        the flag still can, in BOTH directions."""
+        forced_on = self._upsert_body(
+            client, "docs__cecqy-conf__stub-docs-1024__v1", legacy_grandfathered=True,
+        )
+        assert forced_on["legacy_grandfathered"] is True
+
+        forced_off = self._upsert_body(
+            client, "docs__cecqy-legacy", legacy_grandfathered=False,
+        )
+        assert forced_off["legacy_grandfathered"] is False
 
     def test_rename_collection(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)
@@ -1180,13 +1432,13 @@ class TestHttpCatalogClientRoundTrip:
         assert n == 2
 
     def test_register_owner(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         # Uses POST /owners/upsert
         t = client.register_owner(name="acme")
         assert isinstance(t, Tumbler)
 
     def test_ensure_owner_for_repo(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
         t = client.ensure_owner_for_repo(repo="/tmp/myrepo")
         assert isinstance(t, Tumbler)
 
@@ -1640,7 +1892,7 @@ class TestResolveChunk:
     def test_resolve_chunk_returns_full_dict(self) -> None:
         """Happy path: a real 4-segment chunk tumbler resolves to the
         document + chunk metadata dict."""
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         server, base_url = start_fake_server()
         try:
@@ -1671,7 +1923,7 @@ class TestResolveChunk:
         """A plain 3-segment document tumbler short-circuits to None locally
         with no wire round-trip — mirroring the local
         ``Catalog.resolve_chunk``'s ``if tumbler.chunk is None: return None``."""
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         server, base_url = start_fake_server()
         try:
@@ -1685,7 +1937,7 @@ class TestResolveChunk:
 
     def test_resolve_chunk_missing_document_returns_none(self) -> None:
         """A 404 from the server (document not found) maps to None."""
-        from nexus.catalog.catalog import Tumbler
+        from nexus.catalog.tumbler import Tumbler
 
         server, base_url = start_fake_server()
         try:
@@ -1738,3 +1990,178 @@ class TestByFilePathExactMatchGuard:
     def test_empty_owner_returns_none(self, fake_server: str) -> None:
         c = self._client_returning(fake_server, [])
         assert c.by_file_path("1.12", "any/path.pdf") is None
+
+
+# ── nexus-5i864: resolve_path owner cache ────────────────────────────────────
+
+
+class TestResolvePathOwnerCache:
+    """The owner lookup ``resolve_path`` added is CACHED — and the cache's
+    two contracts both carry correctness weight, so both are pinned here.
+
+    HITS are cached because the link generator drives ``resolve_path`` in
+    loops over tumblers that overwhelmingly share one owner. MISSES are
+    NOT, because ``HttpCatalogClient`` is a process-lifetime singleton
+    (catalog/factory.py, nexus-53x7s): a pinned miss would mean an owner
+    registered later by another process is never observed, and
+    ``resolve_path`` would keep answering None — silently zeroing the
+    auto-linker for that repo for the life of the process, which is the
+    exact failure shape nexus-5i864 exists to remove.
+    """
+
+    def _client(self, monkeypatch: pytest.MonkeyPatch, owners: dict):
+        from types import SimpleNamespace
+
+        c = object.__new__(HttpCatalogClient)
+        c._resolve_path_owner_cache = {}
+        calls: list[str] = []
+
+        def _fake_owner(prefix: str):
+            calls.append(prefix)
+            return owners.get(prefix)
+
+        monkeypatch.setattr(
+            c, "get_owner_by_prefix", _fake_owner, raising=False,
+        )
+        monkeypatch.setattr(
+            c, "resolve",
+            lambda t, **kw: SimpleNamespace(file_path="src/a.py", tumbler=t),
+            raising=False,
+        )
+        return c, calls
+
+    def test_hit_is_cached_across_calls_sharing_an_owner(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        owners = {"1.1": {"owner_type": "repo", "repo_root": "/repo"}}
+        c, calls = self._client(monkeypatch, owners)
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/repo/src/a.py")
+        assert c.resolve_path(Tumbler.parse("1.1.2")) == Path("/repo/src/a.py")
+
+        assert calls == ["1.1"], (
+            f"owner lookup should happen once for a shared owner; got {calls}"
+        )
+
+    def test_miss_is_never_cached_so_a_later_registration_is_observed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The correctness half: an owner that appears AFTER a miss (another
+        process registering it) must be picked up, not pinned to None."""
+        owners: dict = {}
+        c, calls = self._client(monkeypatch, owners)
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) is None
+        assert calls == ["1.1"]
+
+        # Another process registers the owner; this client never saw the write.
+        owners["1.1"] = {"owner_type": "repo", "repo_root": "/repo"}
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/repo/src/a.py"), (
+            "a cached miss pinned the owner as absent — the auto-linker would "
+            "stay silently zeroed for this repo for the life of the process"
+        )
+        assert calls == ["1.1", "1.1"], "the miss path must re-query, not serve a cached None"
+
+    def test_owner_upsert_invalidates_a_cached_hit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        owners = {"1.1": {"owner_type": "repo", "repo_root": "/old"}}
+        c, calls = self._client(monkeypatch, owners)
+        # The upsert echoes the assigned prefix, so register_owner returns
+        # without its /owners/by_name fallback read.
+        monkeypatch.setattr(
+            c, "_post", lambda *a, **kw: {"tumbler_prefix": "1.1"}, raising=False,
+        )
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/old/src/a.py")
+
+        owners["1.1"] = {"owner_type": "repo", "repo_root": "/new"}
+        c.register_owner("repo-name", "repo", repo_root="/new")
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) == Path("/new/src/a.py"), (
+            "register_owner must drop the cache so a changed repo_root is seen"
+        )
+
+    def test_curator_owner_is_cached_but_still_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A curator hit is a legitimate cache entry; the guard still fires."""
+        owners = {"1.1": {"owner_type": "curator", "repo_root": ""}}
+        c, calls = self._client(monkeypatch, owners)
+
+        assert c.resolve_path(Tumbler.parse("1.1.1")) is None
+        assert c.resolve_path(Tumbler.parse("1.1.2")) is None
+        assert calls == ["1.1"]
+
+
+# ── nexus-ai41v / nexus-9ssih: link audit + dangling-endpoint translation ─────
+
+
+class TestLinkAuditIsNoLongerAStub:
+    """nexus-ai41v: link_audit used to `return {}`.
+
+    Service mode is now EVERY mode and the verb ships on two surfaces, so an
+    empty dict was not graceful degradation — `--json` printed `{}`, which
+    reads as a CLEAN audit. Everything it reports is computed from reads the
+    engine already serves, so no engine change was needed.
+    """
+
+    def test_audit_reports_real_totals_not_an_empty_dict(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        audit = client.link_audit()
+        assert audit != {}, "an empty audit reads as CLEAN — the false-clean shape"
+        for key in (
+            "total", "by_type", "by_creator",
+            "duplicate_count", "duplicates", "orphaned_count", "orphaned",
+        ):
+            assert key in audit, f"CLI/MCP consumers read {key!r}; it must be present"
+        assert audit["total"] >= 1
+        assert audit["by_type"].get("cites", 0) >= 1
+
+    def test_audit_counts_orphans_from_the_engine_route(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        audit = client.link_audit()
+        assert audit["orphaned_count"] == len(audit["orphaned"])
+
+
+class TestDanglingEndpointBecomesValueError:
+    """nexus-9ssih CLIENT HALF, landed AHEAD of its engine half.
+
+    auto_linker counts skipped_missing_endpoint inside `except ValueError`, so
+    the engine's future 400 must arrive as ValueError or every install takes an
+    uncaught httpx.HTTPStatusError on its next index pass.
+    """
+
+    def _client_raising(self, monkeypatch: pytest.MonkeyPatch, status: int, body: dict):
+        c = object.__new__(HttpCatalogClient)
+
+        def _boom(path, payload):
+            request = httpx.Request("POST", "http://svc/v1/catalog/link")
+            response = httpx.Response(status, json=body, request=request)
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        monkeypatch.setattr(c, "_post", _boom, raising=False)
+        return c
+
+    def test_dangling_endpoint_code_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_raising(
+            monkeypatch, 400,
+            {"error": "dangling link endpoint", "code": "dangling_endpoint",
+             "missing": ["to_tumbler"]},
+        )
+        with pytest.raises(ValueError, match="dangling link endpoint"):
+            c.link("1.1.1", "1.9.9", "cites", "auto-linker")
+
+    def test_other_400s_are_not_swallowed_into_value_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Discriminate on `code`, never on the bare status — a malformed-body
+        400 must keep raising exactly what it raises today."""
+        c = self._client_raising(monkeypatch, 400, {"error": "malformed body"})
+        with pytest.raises(httpx.HTTPStatusError):
+            c.link("1.1.1", "1.1.2", "cites", "someone")

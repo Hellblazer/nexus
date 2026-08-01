@@ -160,12 +160,43 @@ ALTER TABLE nexus.catalog_document_chunks
 ALTER TABLE nexus.chash_index
     ADD CONSTRAINT chash_index_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
         </sql>
+        <!--
+            nexus-a0m60: the chash_index line MUST tolerate the table being
+            absent. rdr187-2-drop-chash-index DROPs nexus.chash_index later in
+            master order and declares its own rollback a deliberate no-op (the
+            pre-image is the orphan population this RDR retires and is not
+            recoverable). So on the way back DOWN the table is already gone by
+            the time this rollback runs, and `DROP CONSTRAINT IF EXISTS` does
+            NOT help — IF EXISTS guards the CONSTRAINT, not the TABLE, so
+            PostgreSQL raises `relation "nexus.chash_index" does not exist` and
+            the entire chain dies here.
+
+            Found by the first execution of SchemaRollbackRoundTripIntegrationTest.
+            This is precisely the class the shape lint cannot catch: the block
+            was well-formed, parsed cleanly, and was simply un-executable.
+
+            Guarded rather than deleted. Deleting the line would leave the
+            constraint behind on a PRE-rdr187 cluster rolled back with a HEAD
+            changelog — which is the supported operator path (the engine has no
+            rollback path of its own, so operators drive HEAD's changelog against
+            older clusters). to_regclass covers both eras in one statement.
+        -->
         <rollback>
-ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_octet_check;
+            <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF to_regclass('nexus.chash_index') IS NOT NULL THEN
+        ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_octet_check;
+    END IF;
+END
+$$;
+            </sql>
+            <sql splitStatements="true">
 ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS catalog_document_chunks_chash_octet_check;
 ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT IF EXISTS chunks_1024_chash_octet_check;
 ALTER TABLE nexus.chunks_768  DROP CONSTRAINT IF EXISTS chunks_768_chash_octet_check;
 ALTER TABLE nexus.chunks_384  DROP CONSTRAINT IF EXISTS chunks_384_chash_octet_check;
+            </sql>
         </rollback>
     </changeSet>
 

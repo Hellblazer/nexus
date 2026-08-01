@@ -200,42 +200,139 @@ def install_mtime_and_version() -> tuple[float, str]:
     return mtime, version
 
 
-def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
-    """``[(pid, age_s, command)]`` for every running conexus process.
+#: Where Linux exposes the process table without any userland tool.
+PROCFS_ROOT = Path("/proc")
+
+
+def _procfs_available() -> bool:
+    """True when this box exposes a Linux-shaped ``/proc``."""
+    return (PROCFS_ROOT / "uptime").exists()
+
+
+def _procfs_enumerate() -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for EVERY process, read from ``/proc``.
+
+    nexus-cfgo9 follow-up: the ``ps``-shaped path below is a userland
+    DEPENDENCY, and a minimal container (debian-slim without procps — the
+    package-upgrade rehearsal box, and a real deployment shape) has no such
+    binary. Skipping the leg for want of a tool is the silent-fallback class:
+    the one detection written for post-upgrade skew stops running exactly on
+    the boxes most likely to have it. Linux always mounts ``/proc``, so the
+    dependency is removable rather than merely tolerable.
+
+    Age is derived the same way ``ps etime`` derives it: system uptime minus
+    the process's ``starttime`` (field 22 of ``/proc/<pid>/stat``, in clock
+    ticks since boot). A process whose files vanish mid-scan (exited between
+    ``iterdir`` and ``read``) is skipped, never guessed at.
+    """
+    uptime_s = float((PROCFS_ROOT / "uptime").read_text().split()[0])
+    hz = os.sysconf("SC_CLK_TCK") or 100
+    out: list[tuple[int, int, str]] = []
+    for entry in PROCFS_ROOT.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            raw_cmdline = (entry / "cmdline").read_bytes()
+            stat = (entry / "stat").read_text()
+        except (OSError, ValueError):
+            continue  # exited mid-scan, or not ours to read
+        # Kernel threads have an empty cmdline — never a conexus process.
+        command = raw_cmdline.replace(b"\x00", b" ").decode(
+            "utf-8", "replace",
+        ).strip()
+        if not command:
+            continue
+        # Field 2 (comm) is parenthesised and may itself contain spaces or
+        # ')', so index from the LAST ')': the remainder starts at field 3,
+        # making starttime (field 22) index 19.
+        try:
+            after = stat[stat.rindex(")") + 1:].split()
+            start_ticks = float(after[19])
+        except (ValueError, IndexError):
+            continue
+        age = int(max(0.0, uptime_s - start_ticks / hz))
+        out.append((pid, age, command))
+    return out
+
+
+def _ps_enumerate() -> list[tuple[int, int, str]] | None:
+    """``[(pid, age_s, command)]`` from POSIX ``ps``, or ``None`` when this
+    box has no ``ps`` binary at all (the caller then tries ``/proc``).
 
     ``ps -eo pid,etime,command`` is POSIX-portable (etime, unlike lstart,
-    parses identically on macOS and Linux). Injectable for tests.
+    parses identically on macOS and Linux).
     """
-    if ps_output is None:
-        try:
-            proc = subprocess.run(
-                ["ps", "-wweo", "pid,etime,command"],
-                capture_output=True, text=True, timeout=15,
-            )
-        except FileNotFoundError as exc:
-            # nexus-cfgo9: a minimal-container deployment (no procps package)
-            # has no `ps` binary at all -- distinct from "ps ran and failed"
-            # below. Re-raised as a RuntimeError (not the bare
-            # FileNotFoundError) so this is still fail-loud and diagnosable,
-            # never a silent "zero processes" read (review 38b7db3d M5), but
-            # with an actionable message. Every caller (check_version_
-            # transition, nx doctor's _check_process_skew, nx daemon
-            # restart-stale) already degrades this ONE leg gracefully on any
-            # Exception and continues — this does not need its own recovery
-            # path, just a clear cause.
-            raise RuntimeError(
-                "the 'ps' command is not available on this system "
-                "(install procps, or run on a host that provides it) — "
-                "process-skew detection cannot run"
-            ) from exc
-        if proc.returncode != 0 or not proc.stdout.strip():
-            # Review 38b7db3d M5: a silent empty ps = zero processes
-            # detected = the fail-open class again. Fail loud instead.
-            raise RuntimeError(
-                f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
-            )
-        ps_output = proc.stdout
+    try:
+        proc = subprocess.run(
+            ["ps", "-wweo", "pid,etime,command"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        # Review 38b7db3d M5: a silent empty ps = zero processes
+        # detected = the fail-open class again. Fail loud instead.
+        raise RuntimeError(
+            f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+        )
+    return _parse_ps_table(proc.stdout)
+
+
+def _parse_ps_table(ps_output: str) -> list[tuple[int, int, str]]:
+    """Parse a ``pid etime command`` table into ``[(pid, age_s, command)]``."""
     out: list[tuple[int, int, str]] = []
+    for line in ps_output.splitlines()[1:]:
+        m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
+        if not m:
+            continue
+        try:
+            age = _parse_etime(m.group(2))
+        except ValueError:
+            continue
+        out.append((int(m.group(1)), age, m.group(3)))
+    return out
+
+
+def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
+
+    Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (nexus-cfgo9
+    follow-up — see :func:`_procfs_enumerate`). A box with NEITHER raises;
+    so does a box whose PRESENT ``ps`` fails or returns an empty table
+    (that is a signal worth surfacing — e.g. a hidepid-restricted or
+    corrupted procps — not a case to silently route around, review M1).
+    It raises rather than reporting an empty table: a silent "zero
+    processes" is the fail-open this module exists to eliminate
+    (review 38b7db3d M5). ``ps_output`` is injectable for tests.
+
+    The venv-marker-filtered view is :func:`enumerate_processes`; the
+    NATIVE engine binary does not carry the venv path in its argv, so
+    anything that needs to see the engine must read this table.
+    """
+    if ps_output is not None:
+        return _parse_ps_table(ps_output)
+    rows = _ps_enumerate()
+    if rows is None:
+        if not _procfs_available():
+            raise RuntimeError(
+                "this system has neither a 'ps' command nor a readable "
+                "/proc filesystem — process-skew detection cannot run "
+                "(install procps, or run on a host that provides one)"
+            )
+        rows = _procfs_enumerate()
+    return rows
+
+
+def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for every running conexus-VENV process.
+
+    Source resolution (ps, else /proc, else raise) lives in
+    :func:`all_process_rows`; this adds only the venv-marker filter that
+    :func:`detect_stale_processes` wants. ``ps_output`` is injectable for
+    tests.
+    """
+    rows = all_process_rows(ps_output)
     me = os.getpid()
     try:
         # site-packages -> lib/pythonX.Y -> lib -> THE VENV ROOT: the one
@@ -243,19 +340,35 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
         markers: tuple[str, ...] = (str(_install_root().parents[2]),)
     except Exception:  # noqa: BLE001 — metadata unavailable: fall back to the conventional layout
         markers = _PROC_MARKERS
-    for line in ps_output.splitlines()[1:]:
-        m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
-        if not m:
-            continue
-        pid, etime, command = int(m.group(1)), m.group(2), m.group(3)
-        if pid == me or not any(k in command for k in markers):
-            continue
+    return [
+        (pid, age, command)
+        for pid, age, command in rows
+        if pid != me and any(k in command for k in markers)
+    ]
+
+
+def process_command(pid: int) -> str:
+    """The full command line of *pid*, or ``""`` when it is gone.
+
+    The pid-recycle re-check in :func:`restart_stale` needs one process's
+    command, and used ``ps -p`` directly — the same userland dependency
+    :func:`enumerate_processes` just shed, on a path whose ``FileNotFoundError``
+    escaped the narrow ``except`` around it and aborted the whole leg.
+    """
+    if _procfs_available():
         try:
-            age = _parse_etime(etime)
-        except ValueError:
-            continue
-        out.append((pid, age, command))
-    return out
+            raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    try:
+        probe = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+    return probe.stdout.strip()
 
 
 def detect_stale_processes(
@@ -296,11 +409,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 # Review 38b7db3d High-3 (pid-recycle TOCTOU): re-verify the
                 # pid still runs OUR command immediately before signaling —
                 # the same convention as t2_daemon's pre-kill re-check.
-                probe = subprocess.run(
-                    ["ps", "-p", str(proc.pid), "-o", "command="],
-                    capture_output=True, text=True, timeout=10,
-                )
-                current = probe.stdout.strip()
+                current = process_command(proc.pid)
                 if "aspect-worker" not in current or not any(
                     k in current for k in _PROC_MARKERS
                 ):
@@ -639,18 +748,470 @@ def _poison_probe(config_dir: Path) -> PoisonProbe:
     return PoisonProbe()
 
 
-def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
+@dataclass(frozen=True)
+class RunningEngine:
+    """What the LIVE service reports — as opposed to what is on disk.
+
+    RDR-185 Gap-4 (closed, implemented) pins the property that "am I
+    converged?" is answered from the LIVE world every time, and names the
+    banned form: a freestanding remembered verdict — "a cache file, a second
+    table, a marker". :func:`detect_engine_convergence` answers from the
+    provenance sidecar, which is a cache file. That is the RIGHT answer to
+    "what is on DISK" (and it stays available when the service is down — the
+    crash-looping-engine case it was deliberately chosen for), but it is the
+    WRONG sole answer to "is the running system converged". This type is the
+    other half.
+
+    The Gap-4 pin never caught this because it AST-scans ladder RUNGS, and
+    restart-stale's engine leg is not a rung — it is the bespoke mechanism
+    outside the ladder (nexus-4yf4u, GH #1419 Issue 1).
+
+    - ``up`` — a storage-service lease is discoverable (the canonical
+      resolver, the same path every downstream consumer resolves through).
+    - ``version`` — the ``release_version`` the RUNNING service reports, or
+      ``None`` when the service is up but cannot be asked.
+    - ``reason`` — why ``version`` is ``None``, for the operator-facing line.
+    """
+
+    up: bool
+    version: tuple[int, int, int] | None
+    reason: str | None = None
+
+
+def _running_engine(config_dir: Path) -> RunningEngine:
+    """Observe the live engine: is a service discoverable, and at what version?
+
+    Never raises. Any probe defect degrades to ``up=False`` — the
+    CONSERVATIVE reading: it preserves the ordinary deferral for a box whose
+    service simply is not running, and never manufactures a NEEDS HUMAN out
+    of our own probe failing.
+    """
+    try:
+        from nexus.db import service_endpoint  # noqa: PLC0415 — deferred, heavy dep
+
+        base_url, _token = service_endpoint.discover_lease()
+    except Exception as exc:  # noqa: BLE001 — a probe defect is never a verdict
+        return RunningEngine(
+            up=False, version=None,
+            reason=f"lease discovery failed ({type(exc).__name__}: {exc})"[:200],
+        )
+    if not base_url:
+        return RunningEngine(
+            up=False, version=None,
+            reason="no discoverable storage-service lease",
+        )
+
+    # One probe, one parser: fetch_service_version returns the /version
+    # handshake dict, parse_engine_version is the SAME parser the ladder's
+    # verify_service_version pins on. (verify_service_version itself is a
+    # fail-closed >= BOOLEAN and does not surface the observed number; the
+    # operator-facing lines below need the actual running version, and
+    # text-parsing its reason string would be fragile.)
+    try:
+        from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib, deferred
+
+        from nexus.daemon.binary_lifecycle import fetch_service_version  # noqa: PLC0415 — deferred, CLI startup cost
+
+        parts = urlsplit(base_url)
+        payload = fetch_service_version(
+            parts.hostname or "127.0.0.1",
+            parts.port,
+            scheme=parts.scheme or "http",
+        )
+    except Exception as exc:  # noqa: BLE001 — up, but unaskable
+        return RunningEngine(
+            up=True, version=None,
+            reason=f"/version probe raised {type(exc).__name__}: {exc}"[:200],
+        )
+    if not payload:
+        return RunningEngine(
+            up=True, version=None,
+            reason=f"{base_url}/version did not answer",
+        )
+    raw = payload.get("release_version")
+    parsed = parse_engine_version(raw if isinstance(raw, str) else None)
+    if parsed is None:
+        return RunningEngine(
+            up=True, version=None,
+            reason=f"{base_url}/version reported no usable release_version ({raw!r})",
+        )
+    return RunningEngine(up=True, version=parsed)
+
+
+def _pid_alive(pid: int) -> bool:
+    """True when signalling 0 to *pid* succeeds."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
+    """``[(pid, command)]`` for the storage-service SUPERVISOR and ENGINE
+    processes belonging to *config_dir*, read from the OS process table.
+
+    nexus-cfgo9 follow-up. ``stop_storage_service`` decides what to signal
+    from the LEASE, and concludes "already stopped" when no live lease is
+    discoverable (``storage_service_daemon.py``, the ``no_live_lease``
+    arm). A lease is a DISCOVERY record on a TTL, not a liveness oracle: a
+    supervisor whose heartbeat has stalled past the 15s TTL is alive and
+    serving while being completely invisible to that check. The process
+    table is the ground truth, and it is now readable without ``ps``.
+
+    Identification is by argv, which is exact for both members of the
+    stack: the supervisor is spawned as ``nx daemon service start
+    --foreground --config-dir <config_dir>`` (``ensure_storage_supervisor``
+    always passes the flag), and the engine's argv[0] IS the well-known
+    binary path under *config_dir*. Never matches this process, and never
+    matches ``nx daemon restart-stale`` itself.
+
+    THE SUPERVISOR MATCH IS TOKEN-EXACT ON THE --config-dir ARGUMENT, not
+    a substring test (review Critical, 2026-08-01): ``--config-dir`` is
+    the documented multi-profile mechanism, and a bare
+    ``str(config_dir) in command`` matches ``.config/nexus`` against
+    ``.config/nexus-staging``'s command line — folding a HEALTHY sibling
+    profile's supervisor into the sweep's kill set. A wrong-kill of an
+    unrelated profile is precisely the failure class this function exists
+    to eliminate for the matching one. (The engine match has no such
+    exposure: the ``/service/nexus-service`` suffix forces a
+    path-structure match.)
+    """
+    engine_path = str(config_dir / "service" / "nexus-service")
+    target = str(config_dir)
+    me = os.getpid()
+    found: list[tuple[int, str]] = []
+    for pid, _age, command in all_process_rows():
+        if pid == me:
+            continue
+        # argv[0] EXACT for the engine (critique 21345): a substring test
+        # matched an operator's `tail .../service/nexus-service.log` or
+        # `cat <binary>` run in the stop->sweep window — an innocent
+        # diagnostic command must never enter a kill set.
+        is_engine = command.split()[:1] == [engine_path]
+        is_supervisor = False
+        if "daemon service start" in command:
+            tokens = command.split()
+            for i, tok in enumerate(tokens):
+                if tok == "--config-dir" and i + 1 < len(tokens):
+                    is_supervisor = tokens[i + 1] == target
+                    break
+                if tok.startswith("--config-dir="):
+                    is_supervisor = tok[len("--config-dir="):] == target
+                    break
+        if is_engine or is_supervisor:
+            found.append((pid, command))
+    return found
+
+
+def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
+    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still alive.
+
+    Supervisors are signalled before engines by the caller: the supervisor
+    arms ``PR_SET_PDEATHSIG=SIGKILL`` on its engine child, so killing the
+    supervisor usually takes the engine with it on Linux, and the explicit
+    engine pass is the portable backstop.
+    """
+    import signal as _signal  # noqa: PLC0415 — stdlib, deferred
+
+    live = [p for p in pids if _pid_alive(p)]
+    for pid in live:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        live = [p for p in live if _pid_alive(p)]
+        if not live:
+            return []
+        time.sleep(0.2)
+    for pid in live:
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    time.sleep(0.5)
+    return [p for p in live if _pid_alive(p)]
+
+
+def _sweep_surviving_stack(
+    config_dir: Path, before: list[tuple[int, str]],
+) -> str:
+    """Kill any pre-stop stack member that survived ``nx daemon service stop``.
+
+    THE FIX for the nexus-cfgo9 convergence defect. ``stop`` reports success
+    having signalled nothing whenever the old supervisor's lease has aged
+    out (a stalled heartbeat under container/host load), and ``start`` is
+    BY DESIGN a no-op whenever a live lease exists
+    (``ensure_storage_supervisor``'s ``return existing``; ``_start_locked``'s
+    short-circuit). Composing those two verbs therefore does not restart
+    anything reliably — whether the engine is cycled comes down to whether
+    the stalled supervisor re-stamps its lease in the window between the two
+    calls. Observed BOTH ways on the same scenario: race lost, the old
+    v0.1.52 engine kept serving and convergence reported a mystified NEEDS
+    HUMAN; race won, a SECOND supervisor+engine stack was spawned alongside
+    the surviving one, two engines against one Postgres.
+
+    Verifying the stop against the process table removes the race from the
+    convergence path: after this returns, nothing from the pre-stop stack is
+    running, so ``start`` cannot short-circuit onto it.
+    """
+    # Pid-recycle TOCTOU guard (the convention review 38b7db3d High-3 set for
+    # restart_stale): a pid that died in the stop and was immediately reused
+    # by an unrelated process must never be signalled. Re-read each survivor's
+    # CURRENT argv and require it to still be the process we recorded.
+    survivors: list[tuple[int, str]] = []
+    for pid, cmd in before:
+        if not _pid_alive(pid):
+            continue
+        current = process_command(pid)
+        # An unreadable argv (permissions, a zombie mid-reap) is not evidence
+        # of a recycle; fall back to the recorded command rather than skipping
+        # a genuine survivor.
+        if current and current.split() != cmd.split():
+            _log.info(
+                "restart_stop_sweep_pid_recycled", pid=pid,
+                recorded=cmd[:120], current=current[:120],
+            )
+            continue
+        survivors.append((pid, cmd))
+    if not survivors:
+        return ""
+    engine_path = str(config_dir / "service" / "nexus-service")
+    supervisors = [p for p, c in survivors if engine_path not in c]
+    engines = [p for p, c in survivors if engine_path in c]
+    stubborn = terminate_pids(supervisors)
+    stubborn += terminate_pids(engines)
+    listed = ", ".join(str(p) for p, _ in survivors)
+    if stubborn:
+        return (
+            f"[stop-sweep] `nx daemon service stop` left pid(s) {listed} "
+            f"running (its lease-based check saw no live lease); "
+            f"pid(s) {', '.join(str(p) for p in stubborn)} survived SIGKILL"
+        )
+    return (
+        f"[stop-sweep] `nx daemon service stop` left pid(s) {listed} running "
+        "(its lease-based check saw no live lease) — terminated them directly "
+        "so the restart cycles the engine instead of short-circuiting"
+    )
+
+
+def _restart_and_verify(
+    config_dir: Path,
+    actions: list[str],
+    req_s: str,
+    *,
+    settle_s: float = 20.0,
+    poll_s: float = 1.0,
+) -> list[str]:
+    """Cycle the storage service, then OBSERVE whether it came up converged.
+
+    nexus-4yf4u: the predecessor claimed "restarted the storage service to
+    pick up the converged engine" whenever ``stop`` and ``start`` both exited
+    0. A returncode proves the commands ran, not that the service came up on
+    the new engine — the same fail-quiet class as the deferral loop above,
+    one layer down. Convergence is now claimed only when the running service
+    reports the required version.
+
+    nexus-cfgo9 follow-up: the cycle no longer TRUSTS ``stop``. Both verbs
+    can legitimately no-op — ``stop`` when it cannot discover a live lease,
+    ``start`` when it can — so composing them restarts nothing whenever the
+    old supervisor's heartbeat has stalled past its lease TTL. The pre-stop
+    stack is now snapshotted from the process table and swept after the stop
+    (:func:`_sweep_surviving_stack`), which is what makes the subsequent
+    start a real spawn rather than a short-circuit.
+    """
+    try:
+        before = service_stack_pids(config_dir)
+    except Exception as exc:  # noqa: BLE001 — no process table: degrade to the old choreography
+        _log.warning("restart_stack_snapshot_failed", error=str(exc))
+        before = []
+    try:
+        stop = subprocess.run(
+            ["nx", "daemon", "service", "stop"],
+            capture_output=True, text=True, timeout=60,
+        )
+        try:
+            sweep_note = _sweep_surviving_stack(config_dir, before)
+        except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
+            _log.warning("restart_stack_sweep_failed", error=str(exc))
+            sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
+        start = subprocess.run(
+            ["nx", "daemon", "service", "start"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
+        actions.append(
+            f"NEEDS HUMAN: restarting the storage service raised {exc} — run "
+            "`nx daemon service stop && nx daemon service start` yourself, "
+            "then `nx doctor` to confirm the engine converged"
+        )
+        return actions
+    cycle_transcript = _cycle_transcript(stop, start)
+    if sweep_note:
+        cycle_transcript = f"{sweep_note} {cycle_transcript}"
+    if stop.returncode != 0 or start.returncode != 0:
+        actions.append(
+            "NEEDS HUMAN: the service restart did not report success — run "
+            "`nx daemon service stop && nx daemon service start` yourself, "
+            "then `nx doctor` to confirm the engine converged. "
+            + cycle_transcript
+        )
+        return actions
+
+    # A freshly started service does not publish its lease instantly, so an
+    # INSTANT verdict here would emit a NEEDS HUMAN on every healthy
+    # convergence that we merely probed too early. False alarms are how real
+    # alarms stop being read — bound the wait instead.
+    after = _running_engine(config_dir)
+    if after.version is None:
+        # Bounded by BOTH an attempt count and a wall-clock deadline. The
+        # attempt cap is what keeps this deterministic and instant under a
+        # patched `time.sleep` (a purely time-bounded loop busy-spins for the
+        # entire budget in tests, and its iteration count then varies with
+        # machine speed); the deadline is what still bounds it in production,
+        # where each probe carries its own timeout on top of the sleep.
+        deadline = time.time() + settle_s
+        for _ in range(max(1, int(settle_s / poll_s) + 1)):
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_s)
+            after = _running_engine(config_dir)
+            if after.version is not None:
+                break
+
+    if after.version is not None and after.version == REQUIRED_ENGINE_VERSION:
+        # The sweep note rides the SUCCESS line too: an incomplete `stop` is
+        # a real event even when the cycle then went on to converge, and
+        # silence here would hide the very condition that used to make this
+        # a coin flip.
+        actions.append(
+            f"restarted the storage service — verified running v{req_s}"
+            + (f" ({sweep_note})" if sweep_note else "")
+        )
+        return actions
+    if after.version is not None:
+        got_run = ".".join(str(p) for p in after.version)
+        actions.append(
+            "NEEDS HUMAN: the service restarted but is STILL running "
+            f"v{got_run}, not the required v{req_s}. The restart exited "
+            "cleanly, so something is holding the old engine (a supervisor "
+            "that re-execs a different binary, or a second service process). "
+            "Check `nx doctor` and `nx daemon service status`. "
+            + cycle_transcript + " " + _holder_evidence(config_dir)
+        )
+        return actions
+    actions.append(
+        "NEEDS HUMAN: the service restarted but its version could not be "
+        f"confirmed ({after.reason or 'no /version answer'}) — convergence to "
+        f"v{req_s} is UNVERIFIED. Check `nx doctor`. " + cycle_transcript
+    )
+    return actions
+
+
+def _cycle_transcript(
+    stop: subprocess.CompletedProcess[str],
+    start: subprocess.CompletedProcess[str],
+) -> str:
+    """One-line transcript of the stop/start cycle.
+
+    The predecessor captured both commands' output and DISCARDED it, so
+    every NEEDS-HUMAN line below described the outcome without a shred of
+    evidence about the cycle that produced it — "already stopped" (the
+    supervisor was never signalled) and "stopped (pid=N)" are opposite
+    diagnoses and the operator could not tell which had happened.
+    """
+    def _fold(p: subprocess.CompletedProcess[str]) -> str:
+        text = " ".join(
+            ((p.stdout or "") + " " + (p.stderr or "")).split()
+        )
+        return text[:300] or "(no output)"
+
+    return (
+        f"[cycle] stop rc={stop.returncode}: {_fold(stop)} | "
+        f"start rc={start.returncode}: {_fold(start)}"
+    )
+
+
+def _holder_evidence(config_dir: Path) -> str:
+    """Name what is actually holding the old engine, instead of guessing.
+
+    The NEEDS-HUMAN line above lists two candidate causes ("a supervisor
+    that re-execs a different binary, or a second service process") and
+    asks the operator to go look. The product can look: the lease says
+    which endpoint answered and which supervisor published it, and
+    :func:`enumerate_processes` (no longer ``ps``-dependent) says which
+    conexus processes are alive. Best-effort — evidence gathering must
+    never turn a diagnosis into a crash.
+    """
+    bits: list[str] = []
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, CLI startup cost
+
+        registry = ServiceRegistry(
+            dir=config_dir or nexus_config_dir(), tier="storage_service",
+        )
+        record = registry.discover(str(os.getuid()))
+        if record is None:
+            bits.append("lease=none")
+        else:
+            ep = record.endpoint
+            bits.append(
+                f"lease=host {ep.get('host')}:{ep.get('port')} "
+                f"service_pid={ep.get('pid')} "
+                f"supervisor_pid={record.payload.get('supervisor_pid')} "
+                f"generation={record.generation}"
+            )
+    except Exception as exc:  # noqa: BLE001 — evidence, never a verdict
+        bits.append(f"lease=unreadable ({type(exc).__name__})")
+    try:
+        procs = [
+            f"{pid}({age}s)" for pid, age, _cmd in enumerate_processes()
+        ]
+        bits.append(f"live conexus pids={', '.join(procs) or 'none'}")
+    except Exception as exc:  # noqa: BLE001 — evidence, never a verdict
+        bits.append(f"process table unavailable ({exc})")
+    return "[holder] " + "; ".join(bits)
+
+
+def converge_engine(
+    config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
+) -> list[str]:
     """Install the release-dependency engine and cycle the service on a
-    mismatch. Returns human-readable action lines (empty when not
-    applicable or already converged — the common case, mirroring
-    :func:`restart_stale`'s silence on the happy path).
+    mismatch. Returns human-readable action lines.
+
+    Empty means: not applicable, OR convergence was CONFIRMED (on-disk and
+    running versions both equal the release dependency), OR the service is
+    not running at all (the on-disk binary governs its next start, and a
+    stopped service is an ordinary state rather than an alarm). It no longer
+    means "already converged" unqualified — nexus-4yf4u: a correct on-disk
+    binary with a stale, unanswerable, or NEWER live process each return a
+    line now, because silence there asserted something about the running
+    engine that nothing had observed.
 
     Never raises: a poison-gate block or an install/restart failure is
     reported as a loud ``NEEDS HUMAN`` action line, never a silent skip and
     never a crash that could leave the box worse off.
+
+    ``unattended`` marks the caller as the automatic finish pass
+    (:func:`check_version_transition`, which fires on the first ``nx``
+    invocation after a version change) rather than a human running ``nx
+    daemon restart-stale``. It suppresses ONLY the C1b restart-a-stale-live-
+    process action: bouncing a storage service can sever a client mid-batch
+    (GH #1419 Issue 3b), so that disruption is reserved for a human who
+    explicitly asked for convergence. The unattended pass reports the same
+    facts and names the manual verb. Hal decision, 2026-07-24.
     """
     status = detect_engine_convergence(config_dir)
-    if not status.applicable or status.converged:
+    if not status.applicable:
         return []
 
     req_s = ".".join(str(p) for p in status.required_version)
@@ -658,6 +1219,65 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         ".".join(str(p) for p in status.installed_version)
         if status.installed_version else "unknown"
     )
+    if status.converged:
+        # nexus-4yf4u: the DISK is right — is the PROCESS? A correct on-disk
+        # binary with a stale live service needs a RESTART, not a reinstall,
+        # and the predecessor returned [] here ("already converged"), which
+        # `nx doctor` then echoed as green while the old engine kept serving.
+        running = _running_engine(config_dir)
+
+        if running.version is not None and running.version < status.required_version:
+            got_run = ".".join(str(p) for p in running.version)
+            if unattended:
+                return [
+                    f"NOTE: the on-disk engine is v{req_s} but the RUNNING "
+                    f"service is still v{got_run}. Not restarting it here — "
+                    "this is the automatic post-upgrade pass, and cycling the "
+                    "storage service can sever an in-flight client (GH #1419 "
+                    "Issue 3b). Run `nx daemon restart-stale` when it suits "
+                    "you and it will converge and verify."
+                ]
+            if dry_run:
+                return [
+                    f"would restart the storage service: the on-disk engine "
+                    f"is v{req_s} but the RUNNING service reports v{got_run}"
+                ]
+            return _restart_and_verify(
+                config_dir,
+                [
+                    f"on-disk engine is already v{req_s} but the RUNNING "
+                    f"service reports v{got_run} — restarting to pick it up"
+                ],
+                req_s,
+            )
+
+        # Review CRE-A finding 1 (High): every remaining sub-case used to fall
+        # into a bare `return []`, which the CLI renders as "converged". Three
+        # of the four had NOT observed the running engine at all, so that
+        # reassurance was unearned — the same silent-reassurance class this
+        # bead exists to close, one layer down. Only a CONFIRMED equal
+        # version, or a service that is not running at all (where the on-disk
+        # binary governs the next start, and a stopped service is an ordinary
+        # state rather than an alarm), may stay silent.
+        if running.version is not None and running.version > status.required_version:
+            got_run = ".".join(str(p) for p in running.version)
+            return [
+                f"NOTE: the RUNNING service reports v{got_run}, NEWER than the "
+                f"release dependency v{req_s} on disk. Not converged, and "
+                "deliberately not auto-fixed: restarting would silently "
+                "DOWNGRADE the running engine. Cycle it yourself if that is "
+                "what you want (`nx daemon service stop && nx daemon service "
+                "start`)."
+            ]
+        if running.up and running.version is None:
+            return [
+                f"NOTE: the on-disk engine is v{req_s}, but the RUNNING "
+                "service is not answering /version "
+                f"({running.reason or 'no answer'}), so convergence is "
+                "UNVERIFIED — this reports the disk, not the running system. "
+                "Check `nx doctor` and `nx daemon service status`."
+            ]
+        return []
 
     # nexus-cfgo9 code-review LOW: the poison gate is checked BEFORE the
     # dry-run early-return, never after — a dry-run preview must never
@@ -687,11 +1307,60 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         # NEEDS-HUMAN (nothing is broken) and NOT a hard block: the
         # explicit converge-now escape is install-binary, whose own gate
         # re-checks (and documents --force for the will-not-boot class).
+        # nexus-4yf4u (GH #1419 Issue 1): an unverifiable store means
+        # something DIFFERENT depending on whether the service is actually
+        # up, and the predecessor collapsed both into one unbounded,
+        # unescalating deferral. A DOWN service is the ordinary ordering this
+        # branch was written for. A service that is UP but cannot answer
+        # /version, while the store also cannot be verified, is a WEDGED box
+        # — Steve Harris's was pegged at 100-290% CPU — and deferring there
+        # loops forever: the line reads as no-error, `nx doctor` keeps
+        # reporting the same mismatch, and the remedy text ("once the service
+        # is up, re-run") names a condition that is already true. Say so
+        # loudly instead. Per Hal (2026-07-24) this does NOT auto-escalate to
+        # install-binary: the product does not install an engine under a
+        # store it cannot verify on its own initiative — it states the
+        # situation and names the escape.
+        # Probed HERE, not at the top of the function (review CRE-A finding
+        # 3): this arm and the converged arm above are mutually exclusive, so
+        # a single eager probe spent a lease discovery + /version GET on every
+        # ordinary install path that never reads the result.
+        running = _running_engine(config_dir)
+
+        if running.up and running.version is None:
+            from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, CLI startup cost
+
+            verb = "would be BLOCKED" if dry_run else "NEEDS HUMAN: engine"
+            return [
+                f"{verb} convergence ({got_s} -> {req_s}) — the storage "
+                "service is UP but is not answering /version "
+                f"({running.reason or 'no answer'}), and the store could not "
+                f"be verified either ({probe.unknown_reason}). This is NOT "
+                "the ordinary not-up-yet ordering: a service that is running "
+                "but unresponsive will not converge by re-running this "
+                "command. Investigate the service first (`nx doctor`, "
+                "`nx daemon service status`, and its log); if it is wedged, "
+                "`nx daemon service stop` then `nx daemon service start`. "
+                "Only once the store verifies will convergence proceed "
+                "automatically. The explicit converge-now escape, which "
+                "warns UNVERIFIED when it cannot probe the store: "
+                "nx daemon service install-binary "
+                f"{PINNED_SERVICE_TAG or '<engine-service-tag>'}"
+            ]
+
+        running_clause = ""
+        if running.up and running.version is not None:
+            got_run = ".".join(str(p) for p in running.version)
+            running_clause = (
+                f" The service IS up and running v{got_run}; convergence "
+                "resumes once the store verifies."
+            )
+
         if dry_run:
             return [
                 f"would DEFER engine convergence ({got_s} -> {req_s}): "
                 f"store chash conformance unverifiable "
-                f"({probe.unknown_reason})"
+                f"({probe.unknown_reason}){running_clause}"
             ]
         from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, CLI startup cost
 
@@ -701,12 +1370,18 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         # check_version_transition stamps seen unconditionally, so the
         # re-attempt is operator-driven. install-binary is named last,
         # strictly for the will-not-boot class.
+        ordering = (
+            "This is the ordinary ordering when the service/PG is not up yet "
+            "(GH #1414). Once the service is up, run"
+            if not running.up else
+            "The store is unverifiable for a reason other than the service "
+            "being down. Once it verifies, run"
+        )
         return [
             f"DEFERRED: engine convergence ({got_s} -> {req_s}) held back — "
             f"the chash-poison gate could not verify the store "
-            f"({probe.unknown_reason}). This is the ordinary ordering when "
-            "the service/PG is not up yet (GH #1414). Once the service is "
-            "up, run `nx doctor` (or `nx daemon restart-stale`) to "
+            f"({probe.unknown_reason}).{running_clause} {ordering} "
+            "`nx doctor` (or `nx daemon restart-stale`) to "
             "converge verified. Only if the service cannot come UP on the "
             "current engine (the will-not-boot class): nx daemon service "
             f"install-binary {PINNED_SERVICE_TAG or '<engine-service-tag>'} "
@@ -747,31 +1422,12 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         # not just the expected one.
         return [f"NEEDS HUMAN: engine convergence failed installing {tag}: {exc}"]
 
-    actions = [f"converged engine: installed {tag} (was {got_s})"]
-    try:
-        stop = subprocess.run(
-            ["nx", "daemon", "service", "stop"], capture_output=True, timeout=60,
-        )
-        start = subprocess.run(
-            ["nx", "daemon", "service", "start"], capture_output=True, timeout=120,
-        )
-        if stop.returncode == 0 and start.returncode == 0:
-            actions.append(
-                "restarted the storage service to pick up the converged engine"
-            )
-        else:
-            actions.append(
-                "NEEDS HUMAN: engine installed but the service restart did "
-                "not report success — run `nx daemon service stop && nx "
-                "daemon service start` yourself to pick it up"
-            )
-    except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
-        actions.append(
-            f"NEEDS HUMAN: engine installed but restarting the service "
-            f"raised {exc} — run `nx daemon service stop && nx daemon "
-            "service start` yourself to pick it up"
-        )
-    return actions
+    # nexus-4yf4u: the install is a fact (it either raised or it did not);
+    # the CONVERGENCE is a claim, and it is now observed rather than inferred
+    # from the restart's returncodes.
+    return _restart_and_verify(
+        config_dir, [f"converged engine: installed {tag} (was {got_s})"], req_s,
+    )
 
 
 def heal_diag_view(config_dir: Path) -> list[str]:
@@ -902,28 +1558,33 @@ def unload_stale_service_launchagent(config_dir: Path) -> list[str]:
 
 
 def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
-    """Remove a service-mode box's stray ``com.nexus.t2`` LaunchAgent.
+    """Remove a stray ``com.nexus.t2`` LaunchAgent left by an older install.
 
-    ``config_dir`` is accepted but not read: the storage-mode flag and the
-    autostart unit are both process/filesystem-global, not config-dir
-    scoped. Kept as a parameter purely so this leg's call signature
-    matches its siblings (:func:`converge_engine`, :func:`heal_diag_view`)
-    at every call site (the finish pass, ``nx daemon restart-stale``,
-    ``nx init --service``) without a special case.
+    ``config_dir`` is accepted but not read: the autostart unit is
+    filesystem-global, not config-dir scoped. Kept as a parameter purely so
+    this leg's call signature matches its siblings
+    (:func:`converge_engine`, :func:`heal_diag_view`) at every call site
+    (the finish pass, ``nx daemon restart-stale``, ``nx init --service``)
+    without a special case.
 
-    Gated on the SAME oracle ``t2_daemon.py`` itself checks
-    (:func:`nexus.db.storage_mode.storage_backend_for` — env-based, no
-    filesystem probe needed) — so this leg fires exactly when the T2
-    daemon would have declined to start anyway. Local-mode boxes (or any
-    box where the T2 tier is the live substrate) are untouched: a local
-    ``nx daemon t2 install --autostart`` round-trip must keep recreating
-    the agent (verified in the test suite), never fought by this leg.
+    NO LONGER GATED ON SERVICE MODE (nexus-i711w Stage 2 sub-stage B). The
+    gate used to read ``storage_backend_for("memory") == SERVICE``, mirroring
+    the oracle ``t2_daemon.py`` itself checked, so that a local-mode box could
+    keep its unit — on such a box the T2 daemon was the live substrate and a
+    local ``nx daemon t2 install --autostart`` round-trip legitimately
+    recreated the agent.
+
+    That reasoning died with the daemon. No box of any storage mode can start
+    a T2 daemon now, and no box can reinstall the unit, so a surviving unit is
+    stale EVERYWHERE — it fires ``nx daemon t2 start``, a command that no
+    longer exists, on every boot forever. Keeping the service-mode gate would
+    have left exactly the SQLite-mode boxes, the ones most likely to carry a
+    unit, unfixed.
 
     Delegates the actual removal to
-    :func:`nexus.daemon.installer.uninstall_autostart` (``tier="t2"``) —
-    the SAME launchctl-bootout + plist-removal primitive ``nx daemon t2
-    uninstall --autostart`` already uses; no hand-typed duplicate of the
-    launchd mechanics here.
+    :func:`nexus.daemon.installer.uninstall_autostart` (``tier="t2"``), whose
+    "t2" default survives the daemon for this caller's sake; no hand-typed
+    duplicate of the launchd mechanics here.
 
     Never raises. Mirrors :func:`heal_diag_view`'s two-tier discipline:
     a failure just DETERMINING applicability (can't read the storage-mode
@@ -935,14 +1596,6 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     line — there IS something a human needs to act on in that case.
     """
     try:
-        from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred, circular-dep avoidance
-            StorageBackend,
-            storage_backend_for,
-        )
-
-        if storage_backend_for("memory") != StorageBackend.SERVICE:
-            return []
-
         from nexus.commands.daemon import _autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
 
         if _autostart_unit_installed() is None:
@@ -961,9 +1614,10 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     except Exception as exc:  # noqa: BLE001 — a CONFIRMED-present agent failed to remove; loud, never a crash
         _log.warning("t2_launchagent_unload_failed", error=str(exc))
         return [
-            f"NEEDS HUMAN: service mode detected a stray T2 autostart unit "
+            f"NEEDS HUMAN: found a stray T2 autostart unit "
             f"({_T2_AUTOSTART_UNIT_KIND}) but could not remove it ({exc}) — "
-            "run `nx daemon t2 uninstall --autostart` yourself"
+            f"delete it yourself; it fires a `nx daemon t2 start` that no "
+            f"longer exists on every boot"
         ]
 
     if result.status != UninstallStatus.REMOVED:
@@ -971,8 +1625,8 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
 
     actions = [
         f"removed the stray T2 autostart unit ({_T2_AUTOSTART_UNIT_KIND}; "
-        "service mode — the T2 daemon is never started; storage is the "
-        f"engine service): {result.dest}"
+        "the T2 daemon is retired — storage is the engine service): "
+        f"{result.dest}"
     ]
     actions.extend(f"NOTE: {w}" for w in result.warnings)
     return actions
@@ -1087,7 +1741,7 @@ def check_version_transition(config_dir: Path) -> str | None:
     # one leg's failure never swallows the actions already computed by the
     # others.
     try:
-        actions = actions + converge_engine(config_dir)
+        actions = actions + converge_engine(config_dir, unattended=True)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("engine_convergence_failed", exc_info=True)
     try:

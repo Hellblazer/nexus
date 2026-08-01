@@ -11,11 +11,12 @@ read-write, migrated, or ``_nexus_version``-stamped. The bug surfaced in Hal's
 ``apply_pending`` and stamped ``_nexus_version`` forward, mutating the very DB
 the migration treats as immutable and silently breaking the rollback guarantee.
 
-This is the Phase-1 entry test (bead nexus-t9rmg.1), written failing-first.
-It FAILS against current code because ``T2Database.bootstrap_schema`` ignores
-service mode and re-stamps the version forward. It will PASS once the Phase-1
-guard makes ``bootstrap_schema`` a no-op in service mode (bead nexus-gq5f9,
-change #3).
+This was the Phase-1 entry test (bead nexus-t9rmg.1), written failing-first
+against ``T2Database.bootstrap_schema``. RDR-158 P4 Stage 4 (nexus-i711w)
+deleted ``bootstrap_schema`` with the migration chain; the surviving ACT is
+``T2Database(source_db, run_migrations=True)`` — the retained-and-ignored
+parameter is now the pinned surface: construction must never regrow mutation
+machinery against the frozen source, whatever the caller passes.
 
 Content invariant is hashed via a logical ``.dump`` (``iterdump``) over a
 read-only connection, which captures schema + row content while EXCLUDING the
@@ -33,6 +34,8 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database
+
+from tests._t2_fixture_ops import bootstrap_migration_source
 
 #: The legacy version we stamp the seeded source DB to. Strictly below the
 #: current ``expected_t2_schema_version()`` (5.10.7 at authoring time) so the
@@ -77,7 +80,12 @@ def _seed_legacy_source_db(build_path: Path, dest_path: Path) -> None:
     down to :data:`_LEGACY_VERSION`, then copies the self-contained ``.db`` to
     *dest_path* (a fresh path the migration machinery has never seen).
     """
-    T2Database.bootstrap_schema(build_path)
+    # nexus-aqbrk: NOT bootstrap_schema. This file's SUBJECT is the
+    # service-mode non-mutation guard, so it must RUN in service mode —
+    # where bootstrap_schema early-returns by design and the legacy source
+    # was therefore never built ('no such table: _nexus_version'). Pinning
+    # would disable the branch under test; build the source directly.
+    bootstrap_migration_source(build_path)
     conn = sqlite3.connect(str(build_path))
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -95,7 +103,9 @@ def _seed_legacy_source_db(build_path: Path, dest_path: Path) -> None:
 def test_service_mode_bootstrap_does_not_mutate_legacy_source_db(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """In service mode, ``bootstrap_schema`` must leave the legacy DB untouched.
+    """Constructing T2Database over the legacy DB must leave it untouched —
+    even with ``run_migrations=True`` (retained-and-ignored since RDR-158 P4
+    Stage 4 deleted the migration machinery behind it).
 
     Content digest AND the stored version string must both be exactly equal
     before and after — proving the migration source is immutable and a prior
@@ -114,8 +124,9 @@ def test_service_mode_bootstrap_does_not_mutate_legacy_source_db(
     # is a migration SOURCE and must stay immutable.
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
 
-    # ACT: the upgrade/open path that, under current code, migrates + stamps.
-    T2Database.bootstrap_schema(source_db)
+    # ACT: the open path that, before the Gap-2 guard (and before Stage 4
+    # deleted the machinery outright), migrated + stamped.
+    T2Database(source_db, run_migrations=True).close()
 
     # INVARIANT: source DB content and version are byte-for-content unchanged.
     assert _content_digest(source_db) == digest_before

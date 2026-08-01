@@ -122,31 +122,6 @@ def _bucketize(distances: list[float], source: str) -> DistanceHistogram:
     )
 
 
-def compute_distance_histogram(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, days: int = 30,
-) -> DistanceHistogram:
-    """Histogram of ``top_distance`` from search_telemetry for *collection*.
-
-    10 fixed bins over [0.0, 2.0]. Empty table or <1 in-window rows →
-    ``DistanceHistogram(source="empty", sample_size=0)``. Use
-    :func:`sample_live_distances` + :func:`compute_live_distance_histogram`
-    for a live-probe fallback when telemetry is cold.
-    """
-    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-    rows = taxonomy_conn.execute(
-        "SELECT top_distance FROM search_telemetry "
-        "WHERE collection = ? AND ts >= ? "
-        "AND raw_count > 0 AND top_distance IS NOT NULL",
-        (collection, cutoff),
-    ).fetchall()
-    distances = [float(r[0]) for r in rows]
-    if not distances:
-        return DistanceHistogram(
-            buckets=[0] * _HIST_BINS, source="empty", sample_size=0,
-        )
-    return _bucketize(distances, "telemetry")
-
-
 def sample_live_distances(
     collection: str, t3: Any, *, n: int = _LIVE_PROBE_DEFAULT_N,
 ) -> list[float]:
@@ -244,42 +219,6 @@ def compute_live_distance_histogram(
 # ── Section 2: top-N cross-projections ──────────────────────────────────────
 
 
-def compute_cross_projections(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, top_n: int = 5,
-) -> list[ProjectionPair]:
-    """Top-*top_n* collections this one projects INTO.
-
-    Ranked by ``shared_topics * avg_similarity``. Requires
-    ``assigned_by='projection'`` rows with non-NULL ``similarity`` and
-    ``source_collection``.
-    """
-    rows = taxonomy_conn.execute(
-        "SELECT t.collection AS other, "
-        "       COUNT(DISTINCT ta.topic_id) AS shared, "
-        "       AVG(ta.similarity) AS avg_sim "
-        "FROM topic_assignments ta "
-        "JOIN topics t ON ta.topic_id = t.id "
-        "WHERE ta.source_collection = ? "
-        "  AND t.collection != ? "
-        "  AND ta.similarity IS NOT NULL "
-        "GROUP BY t.collection "
-        "ORDER BY shared * AVG(ta.similarity) DESC "
-        "LIMIT ?",
-        (collection, collection, top_n),
-    ).fetchall()
-    return [
-        ProjectionPair(
-            other_collection=r[0],
-            shared_topics=int(r[1]),
-            avg_similarity=float(r[2]),
-        )
-        for r in rows
-    ]
-
-
-# ── Section 3: orphan chunks ────────────────────────────────────────────────
-
-
 def compute_orphan_chunks(
     catalog_conn: sqlite3.Connection,
     collection: str,
@@ -310,80 +249,17 @@ def compute_orphan_chunks(
 # ── Section 4: hub-topic assignments ────────────────────────────────────────
 
 
-def compute_hub_assignments(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, top_n: int = 10,
-) -> list[HubAssignment]:
-    """Top-*top_n* cross-collection hub topics and this collection's share."""
-    hubs = taxonomy_conn.execute(
-        "SELECT ta.topic_id, COUNT(DISTINCT ta.source_collection) AS src_count "
-        "FROM topic_assignments ta "
-        "GROUP BY ta.topic_id "
-        "ORDER BY src_count DESC, ta.topic_id ASC "
-        "LIMIT ?",
-        (top_n,),
-    ).fetchall()
-    if not hubs:
-        return []
-    out: list[HubAssignment] = []
-    for topic_id, src_count in hubs:
-        meta = taxonomy_conn.execute(
-            "SELECT label, collection FROM topics WHERE id = ?",
-            (topic_id,),
-        ).fetchone()
-        if meta is None:
-            continue
-        label, topic_collection = meta
-        chunk_count = taxonomy_conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE topic_id = ? AND source_collection = ?",
-            (topic_id, collection),
-        ).fetchone()[0]
-        out.append(
-            HubAssignment(
-                topic_id=int(topic_id),
-                topic_label=label or "",
-                topic_collection=topic_collection or "",
-                source_collection_count=int(src_count),
-                chunks_in_hub=int(chunk_count or 0),
-            )
-        )
-    return out
-
-
-# ── Default production runners (dep-injected) ───────────────────────────────
-
-
-def _open_t2():
-    from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        return None
-    return T2Database(db_path)  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-
-
 def _open_catalog_conn() -> sqlite3.Connection | None:
-    """Return a sqlite3 connection to the catalog cache DB.
+    """Return ``None`` — the local catalog cache DB no longer exists.
 
-    Tests monkeypatch this module-level function to point at a seeded
-    fixture; production reaches to ``~/.config/nexus`` by default.
+    nexus-e9ru2 / nexus-i711w: the catalog is service-owned; the audit's
+    catalog legs DEGRADE (orphans=[]) rather than read a local substrate,
+    and the degradation is REPORTED, not silent (the item-17 contract,
+    tests/test_i711w_gap_item17_orphan_audit.py). Tests monkeypatch this
+    module-level function to point at a seeded fixture — that seam is why
+    the function survives the local catalog's deletion.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    if storage_backend_for("catalog") == StorageBackend.SERVICE:
-        # nexus-e9ru2: in service mode the local .catalog.db is a FROZEN
-        # migration source — auditing against it reports stale orphans as
-        # live. Degrade the catalog legs (orphans=[]) instead, the same
-        # service-mode skip this module applies to taxonomy raw access
-        # (nexus-9613q.4). P5 catalog-collapse owns the service-side read.
-        return None
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        return None
-    return sqlite3.connect(str(path / ".catalog.db"))  # epsilon-allow: catalog substrate (.catalog.db); P5 catalog-collapse handles cutover
+    return None
 
 
 # ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
@@ -414,21 +290,13 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     (T2 file missing, T3 unavailable); calling code treats this
     the same as ratio=None (schema absent vs backfill needed).
     """
-    from nexus.config import default_db_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    # RDR-152 nexus-gmiaf.16 seam: route through HttpChashIndex when the
-    # chash_index backend is the service, avoiding SQLite direct-open.
-    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        idx = HttpChashIndex()
-    else:
-        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        db_path = default_db_path()
-        if not db_path.exists():
-            return None
-        idx = ChashIndex(db_path)
+    # RDR-152 nexus-gmiaf.16 seam, COLLAPSED (nexus-i711w Stage 2 sub-stage
+    # A): HttpChashIndex is the only chash index — the SQLite arm died with
+    # the store.
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    idx = HttpChashIndex()
 
     # Review remediation (Reviewer B/I-1, B/S-3, C/I-4): open ChashIndex
     # once for the whole coverage computation instead of opening + closing
@@ -526,26 +394,21 @@ def run_collection_audit(
     nexus-fx2d: when *live* is True and the telemetry histogram is
     ``source="empty"``, run :func:`compute_live_distance_histogram`
     against *t3* (resolved via :func:`nexus.db.make_t3` when ``None``).
-    The telemetry path is always tried first so warm collections
-    stay cheap. Budget: ~10 s for N=25 probes against cloud T3.
+    Budget: ~10 s for N=25 probes against cloud T3.
+
+    The telemetry-histogram / cross-projection / hub-assignment sections
+    are always their neutral empty values now: they were raw SQL over the
+    local SQLite taxonomy/telemetry tables, which were deleted in the
+    RDR-158 P4 retirement, and the engine does not expose those aggregates
+    yet (nexus-i711w.1 GAP; degrade-to-absent per nexus-9613q.4 — these
+    are diagnostic enrichment sections, and the live-probe fallback below
+    still produces a real histogram on request).
     """
-    from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    t2 = _open_t2()
     cat_conn = _open_catalog_conn()
     try:
-        # nexus-9613q.4: in service mode t2.taxonomy is an HttpTaxonomyStore
-        # with no raw .conn; these are diagnostic SELECTs not on the public
-        # API, so degrade to the empty-telemetry result (live-probe fallback
-        # below still runs) instead of crashing on the missing attribute.
-        if t2 is not None and has_raw_access(t2.taxonomy):
-            conn = t2.taxonomy.conn  # epsilon-allow: guarded by has_raw_access above (service-mode skip)
-            hist = compute_distance_histogram(conn, collection)
-            projections = compute_cross_projections(conn, collection)
-            hubs = compute_hub_assignments(conn, collection)
-        else:
-            hist = DistanceHistogram(buckets=[0] * _HIST_BINS, source="empty", sample_size=0)
-            projections = []
-            hubs = []
+        hist = DistanceHistogram(buckets=[0] * _HIST_BINS, source="empty", sample_size=0)
+        projections = []
+        hubs = []
         if cat_conn is not None:
             orphans = compute_orphan_chunks(cat_conn, collection)
             orphans_checked = True
@@ -553,8 +416,6 @@ def run_collection_audit(
             orphans = []
             orphans_checked = False
     finally:
-        if t2 is not None:
-            t2.close()
         if cat_conn is not None:
             cat_conn.close()
 

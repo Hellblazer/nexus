@@ -17,6 +17,31 @@ from __future__ import annotations
 
 import pytest
 from tests.conftest import make_vector_test_client
+@pytest.fixture(autouse=True)
+def _stub_managed_service_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise the RDR-002 engine-version pin (nexus-aqbrk).
+
+    These tests construct a real vector client against the session test
+    engine, whose jar is built by `mvn package` and therefore carries NO
+    stamped release_version — blank in source, stamped only at native-build
+    time from the tag. VersionHandler reports release_version=null and the
+    client's version pin FAIL-CLOSES by design:
+
+        ManagedServiceIncompatible: ... reported no usable release_version on
+        /version (got None) — a dev/unstamped or pre-release engine is older
+        than the minimum this client supports (v0.1.57)
+
+    That is an ENVIRONMENT artifact of testing against a dev build, not a
+    substrate semantic, and the pin is NOT the subject of this file — dispatch
+    is. Stubbed via the same seam tests/test_health.py already uses.
+
+    RELATED: nexus-12m77 category (a) is the same collision at integration
+    scope, where its recommended fix is to STAMP the test jar. If that lands,
+    this stub becomes unnecessary and should be deleted rather than kept.
+    """
+    import nexus.db.managed_endpoint as _me
+
+    monkeypatch.setattr(_me, "probe_managed_service", lambda **_kw: None)
 
 
 @pytest.fixture(autouse=True)
@@ -75,25 +100,21 @@ class TestServiceDispatch:
         assert isinstance(result, T3Database)
         assert result._client is ephemeral
 
-    def test_cloud_mode_returns_service_client_no_cloudclient(
-        self, monkeypatch
-    ) -> None:
-        """Cloud mode + no injected client → the service client too;
-        ``chromadb.CloudClient`` is never constructed (the direct
-        cloud serving leg is retired)."""
+    def test_cloud_mode_returns_service_client(self, monkeypatch) -> None:
+        """Cloud mode + no injected client → the service client.
+
+        P3: this carried a ``monkeypatch.setattr("chromadb.CloudClient", ...)``
+        tripwire counting constructions. chromadb is no longer installed, so
+        the tripwire could not be installed either — and the property it
+        guarded ("the direct cloud serving leg is retired") is now guaranteed
+        by the dependency's absence rather than by a counter. Module-absence is
+        asserted in test_rdr155_p4b_deletion_gate.py; what this test still owns
+        is the dispatch itself.
+        """
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-
-        constructed = {"count": 0}
-
-        class _TripwireCloudClient:
-            def __init__(self, *args, **kwargs) -> None:
-                constructed["count"] += 1
-
-        monkeypatch.setattr("chromadb.CloudClient", _TripwireCloudClient)
 
         from nexus.db import make_t3
         from nexus.db.http_vector_client import HttpVectorClient
 
         result = make_t3()
         assert isinstance(result, HttpVectorClient)
-        assert constructed["count"] == 0

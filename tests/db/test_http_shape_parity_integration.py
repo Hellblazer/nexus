@@ -18,7 +18,6 @@ from __future__ import annotations
 import pytest
 
 from nexus.db.t1 import T1Database
-from nexus.db.t2 import T2Database
 
 # Reused module-scoped fixtures: hermetic PG + shaded-jar service.
 from tests.db._service_fixture import mint_session
@@ -31,32 +30,52 @@ from tests.conftest import make_vector_test_client
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture(scope="module")
-def sqlite_db(tmp_path_factory):
-    """A GENUINELY-SQLite T2Database (the local half of the parity pair).
+#: THE FROZEN ORACLE (nexus-1hufi). These parity tests compared the HTTP
+#: store's row keys against the LOCAL SQLite store's. RDR-158 P4 deleted the
+#: SQLite side, so the comparison lost its reference implementation and the
+#: old ``sqlite_db`` fixture — which pinned ``NX_STORAGE_BACKEND=sqlite`` —
+#: now raises ``StorageModeFlagError`` and ERRORs three tests.
+#:
+#: The contract is preserved by materialising the oracle instead of running
+#: it. Each tuple below is the deleted store's own column list, recovered
+#: verbatim from git history, NOT a snapshot of what the service returns
+#: today — that distinction is the whole point. Freezing today's output
+#: would bless any shape regression already present; freezing the deleted
+#: reference keeps the original assertion ("the HTTP row has exactly the
+#: keys the local row had") enforceable with the local row gone.
+#:
+#: Provenance, re-derivable:
+#:   memory      _COLUMNS,       src/nexus/db/t2/memory_store.py     @ dbf67ed1^
+#:   consents    list_consents,  src/nexus/db/t2/telemetry.py        @ 514253aa^
+#:   relevance   get_relevance_log SELECT, same file/commit
+#:   topics      _TOPIC_COLUMNS, src/nexus/db/t2/catalog_taxonomy.py @ f24bdb85^
+#:
+#: A key added to the service without being added here FAILS, which is the
+#: behaviour the pair had before P4. Changing a tuple is a deliberate
+#: contract change and belongs in the commit that changes the shape.
+_ORACLE_MEMORY_ROW: frozenset[str] = frozenset({
+    "id", "project", "title", "session", "agent", "content",
+    "tags", "timestamp", "ttl", "access_count", "last_accessed",
+})
+_ORACLE_CONSENT_ROW: frozenset[str] = frozenset({"scope", "ts", "granted"})
+_ORACLE_RELEVANCE_ROW: frozenset[str] = frozenset({
+    "id", "query", "chunk_id", "collection", "action", "session_id", "timestamp",
+})
+_ORACLE_TOPIC_ROW: frozenset[str] = frozenset({
+    "id", "label", "parent_id", "collection", "centroid_hash",
+    "doc_count", "created_at", "review_status", "terms",
+})
 
-    T2Database's hard default is StorageBackend.SERVICE (RDR-152
-    nexus-fjwxh), so an unpinned construction here routes every domain
-    store to whatever service endpoint resolves — under the local-service
-    gate that was the GATE's service (wrong bearer -> 401 on every
-    parity op), and on a dev box it was the LIVE supervisor lease, i.e.
-    this test silently wrote its probe rows into the production T2 and
-    compared the service against itself. Pin the opt-out for the
-    construction window; the store objects keep their backend for life.
-    """
-    import os
 
-    old = os.environ.get("NX_STORAGE_BACKEND")
-    os.environ["NX_STORAGE_BACKEND"] = "sqlite"
-    try:
-        return T2Database(
-            tmp_path_factory.mktemp("shape") / "t2.db", run_migrations=True,
-        )
-    finally:
-        if old is None:
-            os.environ.pop("NX_STORAGE_BACKEND", None)
-        else:
-            os.environ["NX_STORAGE_BACKEND"] = old
+def _assert_shape(http_row: dict, oracle: frozenset[str], allow: frozenset[str], what: str):
+    """Assert an HTTP row carries exactly the deleted local store's keys."""
+    rk = _keys(http_row)
+    unexplained = (rk ^ oracle) - allow
+    assert unexplained == set(), (
+        f"{what} live-service shape divergence from the frozen pre-P4 oracle "
+        f"beyond the allowlist {sorted(allow)}: "
+        f"only-oracle={oracle - rk} only-http={rk - oracle}"
+    )
 
 
 @pytest.fixture()
@@ -83,23 +102,20 @@ def _assert_parity(local_row: dict, http_row: dict, allow: frozenset[str], what:
 _MEMORY_ALLOW: frozenset[str] = frozenset()
 
 
-def test_memory_get_and_search_shape_parity_live(service, sqlite_db, _token_env):
+def test_memory_get_and_search_shape_parity_live(service, _token_env):
     from nexus.db.t2.http_memory_store import HttpMemoryStore
 
     base_url, _token, _ = service
     http = HttpMemoryStore(base_url=base_url, tenant="default")
     try:
-        for s in (sqlite_db.memory, http):
-            s.put("shape-live", "e1", "live parity probe content", tags="a,b", ttl=30)
-        _assert_parity(
-            sqlite_db.memory.get(project="shape-live", title="e1"),
+        http.put("shape-live", "e1", "live parity probe content", tags="a,b", ttl=30)
+        _assert_shape(
             http.get(project="shape-live", title="e1"),
-            _MEMORY_ALLOW, "memory.get",
+            _ORACLE_MEMORY_ROW, _MEMORY_ALLOW, "memory.get",
         )
-        l_rows = sqlite_db.memory.search("parity", project="shape-live")
         r_rows = http.search("parity", project="shape-live")
-        assert l_rows and r_rows
-        _assert_parity(l_rows[0], r_rows[0], _MEMORY_ALLOW, "memory.search")
+        assert r_rows
+        _assert_shape(r_rows[0], _ORACLE_MEMORY_ROW, _MEMORY_ALLOW, "memory.search")
     finally:
         http.close()
 
@@ -139,34 +155,32 @@ def test_scratch_search_shape_parity_live(service, _token_env):
 _TELEMETRY_ALLOW: frozenset[str] = frozenset()
 
 
-def test_telemetry_consents_and_relevance_shape_parity_live(
-    service, sqlite_db, _token_env,
-):
+def test_telemetry_consents_and_relevance_shape_parity_live(service, _token_env):
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
     base_url, _token, _ = service
     http = HttpTelemetryStore(base_url=base_url, tenant="default")
     try:
-        for s in (sqlite_db.telemetry, http):
-            s.record_consent(
-                scope="remediate:chash-poison",
-                ts="2026-07-13T00:00:00Z", granted=True,
-            )
-        l_rows = sqlite_db.telemetry.list_consents()
+        http.record_consent(
+            scope="remediate:chash-poison",
+            ts="2026-07-13T00:00:00Z", granted=True,
+        )
         r_rows = http.list_consents()
-        assert l_rows and r_rows
-        _assert_parity(l_rows[0], r_rows[0], _TELEMETRY_ALLOW, "telemetry.list_consents")
+        assert r_rows
+        _assert_shape(
+            r_rows[0], _ORACLE_CONSENT_ROW, _TELEMETRY_ALLOW,
+            "telemetry.list_consents",
+        )
 
-        for s in (sqlite_db.telemetry, http):
-            s.log_relevance(
-                "shape probe", "chunk-d1", "click",
-                session_id="shape-live", collection="knowledge__shape",
-            )
-        l_rows = sqlite_db.telemetry.get_relevance_log(limit=1)
+        http.log_relevance(
+            "shape probe", "chunk-d1", "click",
+            session_id="shape-live", collection="knowledge__shape",
+        )
         r_rows = http.get_relevance_log(limit=1)
-        assert l_rows and r_rows
-        _assert_parity(
-            l_rows[0], r_rows[0], _TELEMETRY_ALLOW, "telemetry.get_relevance_log",
+        assert r_rows
+        _assert_shape(
+            r_rows[0], _ORACLE_RELEVANCE_ROW, _TELEMETRY_ALLOW,
+            "telemetry.get_relevance_log",
         )
     finally:
         http.close()
@@ -177,31 +191,29 @@ def test_telemetry_consents_and_relevance_shape_parity_live(
 _TAXONOMY_ALLOW: frozenset[str] = frozenset()
 
 
-def test_taxonomy_topics_shape_parity_live(service, sqlite_db, _token_env):
+def test_taxonomy_topics_shape_parity_live(service, _token_env):
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
     base_url, _token, _ = service
     http = HttpTaxonomyStore(base_url=base_url, tenant="default")
     try:
-        # Each side is seeded through its OWN real write path: the local
-        # CatalogTaxonomy has no import_topic (that verb exists only on the
-        # HTTP twin for cross-store migration) — the earlier version of this
-        # test called import_topic on "both" sides and passed only because
-        # the un-pinned sqlite_db was secretly service-backed too.
-        sqlite_db.taxonomy.persist_discovered_topics(
-            "knowledge__shape",
-            [{"label": "shape-parity-topic", "doc_count": 1,
-              "terms": "shape,parity", "doc_ids": []}],
-        )
+        # Seeded through the HTTP store's own real write path. The local
+        # CatalogTaxonomy had no import_topic (that verb exists only on the
+        # HTTP twin for cross-store migration), and an earlier version of
+        # this test called import_topic on "both" sides — passing only
+        # because the un-pinned sqlite_db was secretly service-backed too.
+        # That hazard is gone with the local side; the frozen oracle above
+        # is what keeps the assertion honest now.
         http.import_topic(
             src_id=1, label="shape-parity-topic", parent_id=None,
             collection="knowledge__shape", centroid_hash="abc",
             doc_count=1, created_at="2026-07-13T00:00:00Z",
             review_status="pending", terms="shape,parity",
         )
-        l_rows = sqlite_db.taxonomy.get_topics()
         r_rows = http.get_topics()
-        assert l_rows and r_rows
-        _assert_parity(l_rows[0], r_rows[0], _TAXONOMY_ALLOW, "taxonomy.get_topics")
+        assert r_rows
+        _assert_shape(
+            r_rows[0], _ORACLE_TOPIC_ROW, _TAXONOMY_ALLOW, "taxonomy.get_topics",
+        )
     finally:
         http.close()

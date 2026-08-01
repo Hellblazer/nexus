@@ -168,40 +168,6 @@ class DrainTimeoutError(RuntimeError):
         super().__init__(msg)
 
 
-class DrainBlockedByActiveWorker(RuntimeError):
-    """Raised by ``drain_worker`` when an active MCP-process worker is
-    detected via a lock file.
-
-    ``drain_worker`` is process-local: it only stops the worker running
-    inside the *current* process.  If an MCP server has its own worker
-    in a separate process, draining here leaves that process's queue
-    rows untouched — the PK migration would then race against live
-    ``in_progress`` rows it cannot see.
-
-    The operator must either:
-      1. Stop the MCP server before running the migration, **or**
-      2. Invoke the migration from within the MCP process (e.g., via
-         ``nx upgrade``).
-
-    SIG-5 (nexus-1091): lock-file path is
-    ``<nexus_config_dir>/locks/aspect_worker.<pid>`` — respects
-    ``NEXUS_CONFIG_DIR``; defaults to ``~/.config/nexus/locks``.
-    """
-
-    def __init__(self, blocking_pid: int, lock_file: Path) -> None:
-        self.blocking_pid = blocking_pid
-        self.lock_file = lock_file
-        super().__init__(
-            f"drain_worker blocked by active MCP worker in PID {blocking_pid} "
-            f"(lock file: {lock_file}). "
-            "Stop the MCP server before running the migration, or invoke the "
-            "migration from within the MCP process (e.g., via `nx upgrade`)."
-        )
-
-
-# ── Worker class ────────────────────────────────────────────────────────────
-
-
 class AspectExtractionWorker:
     """Background drain thread for ``aspect_extraction_queue``.
 
@@ -330,7 +296,7 @@ class AspectExtractionWorker:
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
         """
-        from nexus.db.t2.aspect_extraction_queue import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
+        from nexus.db.t2.records import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
         from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra <-> aspect_worker)
         from nexus.migration.state import is_migrating as _migration_in_progress  # noqa: PLC0415 — deferred to avoid circular import (migration.state)
         while not self._stop_event.is_set():
@@ -772,10 +738,11 @@ def ensure_worker_started(
     instance and only spawn one thread. Tuning parameters apply only
     to the first call (subsequent calls cannot retune).
 
-    Writes a process-scoped lock file (SIG-5) so that CLI-side
-    ``drain_worker`` calls in other processes can detect an active
-    MCP worker and raise ``DrainBlockedByActiveWorker`` with operator
-    guidance rather than silently missing queue rows.
+    Writes a process-scoped lock file (SIG-5 heritage). The drain-side
+    reader that used to consume it (``_check_mcp_worker_lock``, a
+    SQLite-queue concern) died with the =sqlite opt-out (RDR-158 P3,
+    nexus-7bomn); the lock remains as a pid marker for operators and
+    is swept/removed by this module's own lifecycle.
     """
     global _worker
     with _worker_lock:
@@ -817,88 +784,6 @@ def reset_worker_for_tests() -> None:
         _worker = None
 
 
-def live_foreign_worker_pids(locks_dir: Path) -> list[int]:
-    """Return the pids of live aspect workers in OTHER processes.
-
-    Scans ``locks_dir`` for ``aspect_worker.<pid>`` files. The current
-    process's own lock is skipped (not a cross-process conflict); a lock whose
-    pid is dead is swept (stale); a lock whose pid is alive in a different
-    process is collected. A pid we lack permission to signal is treated as
-    alive (conservative).
-
-    The shared SIG-5 (nexus-1091) lock-scan behind both ``_check_mcp_worker_lock``
-    (the CLI drain pre-check, which blocks on the first offender) and the
-    RDR-159 migration quiesce pre-gate (which needs the FULL offending-pid set).
-    Returns an empty list when ``locks_dir`` does not exist.
-    """
-    import os  # noqa: PLC0415 — stdlib os deferred to function scope
-
-    if not locks_dir.exists():
-        return []
-
-    own_pid = os.getpid()
-    pids: list[int] = []
-
-    for lock_file in sorted(locks_dir.glob("aspect_worker.*")):
-        try:
-            pid = int(lock_file.name.rsplit(".", 1)[-1])
-        except ValueError:
-            continue  # Not a PID-suffixed lock file — skip.
-
-        if pid == own_pid:
-            # The current process wrote this lock; it can stop its own worker
-            # directly. Not a cross-process conflict.
-            continue
-
-        # Probe whether the PID is alive. os.kill(pid, 0) returns without error
-        # if the process exists and we have permission to signal it.
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            # PID does not exist — stale lock; clean up and continue.
-            _log.info(
-                "drain_worker_stale_lock_removed",
-                lock_file=str(lock_file),
-                pid=pid,
-            )
-            lock_file.unlink(missing_ok=True)
-            continue
-        except PermissionError:
-            # PID exists but we cannot signal it (different user) — treat as
-            # alive and conservatively count it as a conflict.
-            pass
-
-        pids.append(pid)
-
-    return pids
-
-
-def _check_mcp_worker_lock(locks_dir: Path) -> None:
-    """Check for active MCP-process aspect workers via lock files.
-
-    Raises ``DrainBlockedByActiveWorker`` on the first live foreign worker;
-    sweeps stale locks; ignores the current process's own lock.
-
-    SIG-5 (nexus-1091): drain_worker is process-local.  An active MCP
-    server holds its own worker in a separate OS process.  Draining here
-    only stops the current process's worker; the MCP worker keeps running
-    and may continue to write queue rows that the PK migration would race
-    against.  The lock file check surfaces this cross-process conflict
-    before the migration begins rather than after.
-
-    Args:
-        locks_dir: Directory to scan for lock files.  If it does not
-            exist, the check is skipped (no MCP server ever registered).
-    """
-    pids = live_foreign_worker_pids(locks_dir)
-    if pids:
-        blocking_pid = pids[0]
-        raise DrainBlockedByActiveWorker(
-            blocking_pid=blocking_pid,
-            lock_file=locks_dir / f"aspect_worker.{blocking_pid}",
-        )
-
-
 def drain_worker(
     queue_path: Path | str,
     *,
@@ -913,27 +798,27 @@ def drain_worker(
     returns 0 — i.e., no rows are pending or in_progress.  Failed rows
     are terminal and do not block a PK migration.
 
-    Protocol (RDR-108 Phase 1 S1, nexus-he24):
+    Protocol (RDR-108 Phase 1 S1, nexus-he24; the SIG-5 lock-file
+    pre-check that used to lead it was a SQLite-queue concern and died
+    with the =sqlite opt-out — on the service queue PG's FOR UPDATE SKIP
+    LOCKED owns cross-process claim safety):
 
-      1. Check for active MCP-process workers via lock files (SIG-5).
-         If a live MCP worker is detected, raise ``DrainBlockedByActiveWorker``
-         immediately with operator guidance.
-      2. Set the stop signal on the singleton worker (if one exists) so
+      1. Set the stop signal on the singleton worker (if one exists) so
          it claims no new rows.  In-flight row processing continues.
-      3. Poll the queue at ``poll_interval`` (default 100 ms) until
+      2. Poll the queue at ``poll_interval`` (default 100 ms) until
          ``is_drained()`` returns True or ``timeout`` elapses.
-      4. On success: join the worker thread (it has already exited or will
+      3. On success: join the worker thread (it has already exited or will
          exit imminently after the last iteration).  If the thread does not
          exit within 2 seconds, log a warning (S-5) and continue — the
          thread is a daemon and will die with the process.
-      5. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
+      4. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
          to inspect stuck ``in_progress`` rows.
 
     Args:
-        queue_path: Path to the T2 SQLite database file.  Used to open a
-            short-lived read-only connection for the ``is_drained()`` poll
-            separate from the worker's own T2 context so this function does
-            not compete for locks.
+        queue_path: Legacy path parameter, retained for signature stability.
+            The queue is engine-side (``HttpAspectQueue``, nexus-i711w Stage 2
+            sub-stage A); the ``is_drained()`` poll goes over HTTP and no
+            local connection is opened from this path.
         timeout: Seconds to wait for the queue to drain.  Default 120s.
             RDR-089 P1.3 measured ~26.5s median extraction time with a
             tail to 90s for the scholarly-paper-v1 extractor.  120s
@@ -942,15 +827,11 @@ def drain_worker(
             Callers that know their workload is lighter may pass a smaller
             value.
         poll_interval: Seconds between is_drained() checks (default 0.1).
-        _locks_dir: Override the locks directory for testing.  Production
-            code should leave this as None (resolved to
-            ``nexus_config_dir() / "locks"`` — respects
-            ``NEXUS_CONFIG_DIR``).
+        _locks_dir: Retained-and-ignored for signature stability. The
+            lock-file pre-check this seam parameterised died with the
+            =sqlite opt-out (RDR-158 P3, nexus-7bomn).
 
     Raises:
-        DrainBlockedByActiveWorker: An active MCP-process worker was
-            detected via a lock file.  Stop the MCP server before running
-            the migration.
         DrainTimeoutError: Queue still has pending/in_progress rows after
             ``timeout`` seconds.
 
@@ -961,33 +842,23 @@ def drain_worker(
         for.  This handles the quiescent case (e.g., the caller's process
         never ran the worker, or the worker finished and was reset).
     """
-    # RDR-173 P4.1 (nexus-4st62): determine storage backend first so the
-    # lock-check and queue construction can both branch on it.
-    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
-        StorageBackend,
-        storage_backend_for,
-    )
-    _is_service_mode = storage_backend_for("aspect_queue") == StorageBackend.SERVICE
-
-    # SIG-5: detect active MCP-process workers before stopping the local
-    # singleton.  A live MCP worker in another process drains its own
-    # queue independently; the migration must not run while that worker is
-    # alive or it will race against in_progress rows it cannot see.
+    # SIG-5 history (nexus-1091 / RDR-173 P4.1 nexus-4st62): the local
+    # file-lock check that used to run here detected a live MCP worker in
+    # another process before stopping the local singleton — a SQLite-queue
+    # concern. On the service queue ALL workers share the same PG rows with
+    # FOR UPDATE SKIP LOCKED, so cross-process claim safety is handled by
+    # PG, not by the file lock; checking it would make drain always raise
+    # DrainBlockedByActiveWorker while the MCP server is running, defeating
+    # the primary use case (drain during migration while MCP is live). The
+    # check went with the =sqlite opt-out (RDR-158 P3, nexus-7bomn).
     #
-    # SERVICE mode: the MCP process writes a local aspect_worker lock via
-    # ensure_worker_started (the enqueue hook auto-spawns the singleton),
-    # but in SERVICE mode ALL workers share the same PG queue with
-    # FOR UPDATE SKIP LOCKED — cross-process claim safety is handled by PG,
-    # not by the file lock.  Checking the lock here would make drain always
-    # raise DrainBlockedByActiveWorker when the MCP server is running, which
-    # defeats the primary use case (drain during migration while MCP is live).
-    # Skip the local file-lock check in SERVICE mode.
-    locks_dir = _locks_dir if _locks_dir is not None else (
-        nexus_config_dir() / "locks"
-    )
-    if not _is_service_mode:
-        _check_mcp_worker_lock(locks_dir)
+    # Validation only: drain constructs HttpAspectQueue directly (bypassing
+    # T2Database's validation seam), so a stranded
+    # NX_STORAGE_BACKEND[_ASPECT_QUEUE]=sqlite export hard-errors here
+    # rather than being silently ignored on the drain path.
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
+    storage_backend_for("aspect_queue")
     worker = get_worker()
     if worker is not None:
         worker.stop_claiming()
@@ -1001,12 +872,10 @@ def drain_worker(
     # yields a spurious "drained" — leaving ``nx aspects drain`` and the
     # migration drain gate inert in service mode. Poll the SERVICE queue's
     # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
-    if _is_service_mode:
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
-        queue = HttpAspectQueue()
-    else:
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred to avoid circular import (db.t2 queue)
-        queue = AspectExtractionQueue(queue_path)
+    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpAspectQueue is
+    # the only queue — the SQLite AspectExtractionQueue died with the store.
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
+    queue = HttpAspectQueue()
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.
@@ -1045,42 +914,35 @@ def drain_worker(
                 return
 
         # Timeout: count stuck rows for the error message.
-        # SERVICE mode: HttpAspectQueue has no .conn; use pending_count() via
-        # HTTP.  pending_count() counts only 'pending' rows — NOT in_progress.
-        # A crashed worker leaves rows in in_progress with NO lock held (FOR
-        # UPDATE locks are transaction-scoped; they are released when the
-        # transaction ends, which happens when the worker process dies).  Those
-        # orphaned rows are recovered by reclaim_stale(), not by a held lock.
-        # Consequence: if the drain times out because rows are stuck
-        # in_progress (the common crashed-worker scenario), pending_count()
-        # returns 0 even though is_drained() is still False.  We detect this
-        # gap and include an honest operator hint in the error detail.
-        # LOCAL mode: keep the existing status != 'failed' count (pending +
-        # in_progress) via a direct SQLite query.
-        if _is_service_mode:
-            pending = queue.pending_count()
-            if pending == 0:
-                # is_drained() returned False at timeout, but pending_count()
-                # is 0 — rows are stuck in in_progress (crashed-worker case).
-                # pending_count() is a pending-only proxy and cannot see them.
-                detail = (
-                    "Note (service mode): pending_count is 0, but is_drained() "
-                    "is still False — rows may be stuck in in_progress from a "
-                    "crashed worker. A running aspect-worker's stale-reclaim "
-                    "loop resets them to pending automatically; ensure one is "
-                    "up ('nx daemon aspect-worker start', or it spawns on the "
-                    "next aspect enqueue), then retry the drain."
-                )
-                stuck_count = 0
-            else:
-                detail = None
-                stuck_count = pending
+        # The queue is HttpAspectQueue (the SQLite arm died in nexus-i711w
+        # Stage 2 sub-stage A, taking the raw `status != 'failed'` count
+        # with it). pending_count() counts only 'pending' rows — NOT
+        # in_progress. A crashed worker leaves rows in in_progress with NO
+        # lock held (FOR UPDATE locks are transaction-scoped; they are
+        # released when the transaction ends, which happens when the worker
+        # process dies). Those orphaned rows are recovered by
+        # reclaim_stale(), not by a held lock. Consequence: if the drain
+        # times out because rows are stuck in_progress (the common
+        # crashed-worker scenario), pending_count() returns 0 even though
+        # is_drained() is still False. We detect this gap and include an
+        # honest operator hint in the error detail.
+        pending = queue.pending_count()
+        if pending == 0:
+            # is_drained() returned False at timeout, but pending_count()
+            # is 0 — rows are stuck in in_progress (crashed-worker case).
+            # pending_count() is a pending-only proxy and cannot see them.
+            detail = (
+                "Note (service mode): pending_count is 0, but is_drained() "
+                "is still False — rows may be stuck in in_progress from a "
+                "crashed worker. A running aspect-worker's stale-reclaim "
+                "loop resets them to pending automatically; ensure one is "
+                "up ('nx daemon aspect-worker start', or it spawns on the "
+                "next aspect enqueue), then retry the drain."
+            )
+            stuck_count = 0
         else:
-            stuck = queue.conn.execute(
-                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
-            ).fetchone()
-            stuck_count = stuck[0] if stuck else 0
             detail = None
+            stuck_count = pending
         raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout, detail=detail)
     finally:
         queue.close()
@@ -1323,19 +1185,20 @@ def _ensure_aspect_worker() -> None:
     """RDR-173 P2 (bead nexus-gtdtc): ensure aspect extraction will run, without
     tying it to the storing process's lifetime.
 
-    Decision (gtdtc Open Question): SERVICE mode → ensure the leased aspect-worker
-    DAEMON is up (discover/spawn-if-absent), so extraction completes for every
-    store path including short-lived CLI / one-shot / batch. LOCAL mode → keep the
-    in-process worker thread: there is no cross-process service queue to host, the
-    storing process is the natural host, and the daemon's claude -p credential
-    inheritance buys nothing there. Spawn failure is best-effort (the row is
-    already enqueued; the daemon self-heals on the next enqueue or via discover).
+    Decision (gtdtc Open Question): ensure the leased aspect-worker DAEMON is
+    up (discover/spawn-if-absent), so extraction completes for every store
+    path including short-lived CLI / one-shot / batch. Spawn failure is
+    best-effort (the row is already enqueued; the daemon self-heals on the
+    next enqueue or via discover). The LOCAL-mode in-process worker-thread
+    leg died with the =sqlite opt-out (RDR-158 P3, nexus-7bomn); the worker
+    class itself survives — the daemon hosts it against the service queue.
+    The resolver call below is validation only: this path reaches the queue
+    without constructing T2Database, so a stranded =sqlite export must
+    hard-error rather than be silently ignored.
     """
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
-    if storage_backend_for("aspect_queue") != StorageBackend.SERVICE:
-        ensure_worker_started()
-        return
+    storage_backend_for("aspect_queue")
     # TODO(RDR-173 multi-tenant): v1 runs a single default tenant, so the leased
     # daemon's scope key is the literal _ENQUEUE_TENANT. When per-request tenant
     # routing lands, derive the tenant from the store's request/connection context

@@ -27,20 +27,20 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog import Catalog
 
 
 @pytest.fixture()
-def cat(tmp_path: Path) -> Catalog:
-    """Fresh catalog rooted at tmp_path.
+def cat():
+    """The live (service) catalog via the substrate-agnostic facade.
 
-    Uses ``Catalog.init`` (not just the constructor) because
-    ``_catalog_hook`` gates on ``Catalog.is_initialized`` which requires
-    both ``.git/`` and ``documents.jsonl`` to exist.
+    nexus-i711w: the local ``Catalog.init`` this used to run died with the
+    local catalog; the service ``ensure_owner_for_repo`` computes
+    ``repo_root`` from ``_repo_identity_with_main`` exactly like the local
+    one did, so the contamination contract still has a live subject.
     """
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    return Catalog.init(catalog_dir)
+    from tests._catalog_fixture_ops import ActiveCatalog  # noqa: PLC0415
+
+    return ActiveCatalog()
 
 
 def test_repo_identity_with_main_returns_three_tuple_with_main_repo_path(
@@ -97,11 +97,12 @@ def test_ensure_owner_for_repo_writes_main_repo_root_not_input_path(
     owner = cat.ensure_owner_for_repo(worktree)
     assert owner is not None
 
-    # owner_for_repo returns a Tumbler (just the id); _owner_repo_root
-    # returns the persisted ``repo_root`` string.
+    # owner_for_repo returns a Tumbler (just the id); owners_with_roots()
+    # is the public read of the persisted ``repo_root`` (the private
+    # ``_owner_repo_root`` died with the local catalog, nexus-i711w).
     owner_tumbler = cat.owner_for_repo("abcd1234")
     assert owner_tumbler is not None
-    repo_root = cat._owner_repo_root(owner_tumbler)
+    repo_root = cat.owners_with_roots().get(str(owner_tumbler))
     assert repo_root == str(main_repo), (
         f"repo_root contaminated by input path: got {repo_root!r}, "
         f"expected main repo {str(main_repo)!r}"
@@ -113,15 +114,16 @@ def test_ensure_owner_for_repo_writes_main_repo_root_not_input_path(
 def test_catalog_hook_passes_main_repo_path_to_register_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Parallel fix for _catalog_hook (indexer.py:~640). When the hook is
+    """Parallel fix for _catalog_hook (indexer.py). When the hook is
     the first registrar for a repo and the input path is a worktree,
     ``register_owner`` must receive the canonical main-repo path as
     ``repo_root``, NOT the worktree input path.
 
-    Verified by spying on ``Catalog.register_owner``: we capture the
+    Verified by spying on ``HttpCatalogClient.register_owner`` (the only
+    catalog since the terminal nexus-i711w deletion): we capture the
     ``repo_root`` kwarg the hook passes and assert it equals the
     mocked ``main_repo``, never the worktree input. This sidesteps
-    the catalog projection / DB-init complexity and pins the exact
+    the catalog projection complexity and pins the exact
     contract that nexus-zr2ie introduced.
     """
     from nexus.indexer import _catalog_hook
@@ -131,16 +133,10 @@ def test_catalog_hook_passes_main_repo_path_to_register_owner(
     worktree = tmp_path / "main_nexus" / ".claude" / "worktrees" / "qmrr"
     worktree.mkdir(parents=True)
 
-    # Initialize a real catalog so _catalog_hook's is_initialized gate passes.
-    catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    Catalog.init(catalog_dir)
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: catalog_dir)
-
     # Force the hook's owner-lookup to return None so the registration
     # branch fires.
     monkeypatch.setattr(
-        "nexus.catalog.catalog.Catalog.owner_for_repo",
+        "nexus.catalog.http_catalog_client.HttpCatalogClient.owner_for_repo",
         lambda self, repo_hash: None,
     )
 
@@ -162,7 +158,10 @@ def test_catalog_hook_passes_main_repo_path_to_register_owner(
                 return "1.1"
         return _FakeTumbler()
 
-    monkeypatch.setattr("nexus.catalog.catalog.Catalog.register_owner", _spy)
+    monkeypatch.setattr(
+        "nexus.catalog.http_catalog_client.HttpCatalogClient.register_owner",
+        _spy,
+    )
 
     _catalog_hook(
         repo=worktree,

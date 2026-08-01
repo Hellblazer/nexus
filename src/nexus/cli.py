@@ -37,6 +37,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from nexus.commands.catalog import catalog
+from nexus.commands.census import census_group
 from nexus.commands.collection import collection
 from nexus.commands.command_context import command_context
 from nexus.commands.console import console
@@ -53,9 +54,6 @@ from nexus.commands.hooks import hooks
 from nexus.commands.index import index
 from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
-from nexus.commands.guided_upgrade_cmd import guided_upgrade_cmd
-from nexus.commands.migrate_cmd import migrate_to_service_cmd
-from nexus.commands.migration_audit_cmd import migration_audit_cmd
 from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
@@ -64,7 +62,6 @@ from nexus.commands.remediation_cmd import forensics_cmd, remediate_cmd
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.service_cmd import service
-from nexus.commands.storage_cmd import storage_group
 from nexus.commands.store import store
 from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
@@ -73,7 +70,29 @@ from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.aspects import aspects_group
 from nexus.commands.upgrade import upgrade
 
-@click.group()
+class _StorageBackendGuardGroup(click.Group):
+    """Render the retired-=sqlite hard error as a clean CLI message.
+
+    RDR-158 P3 (nexus-7bomn): ``storage_backend_for`` raises
+    ``StorageModeFlagError`` — with the stranded-install redirect — from
+    deep inside whatever verb first touches storage. Without this catch the
+    redirect reaches the user as a raw Python traceback, defeating the
+    message's whole purpose. Caught here (once, at the group boundary)
+    rather than per-verb so every entry point renders it identically;
+    ``UsageError`` keeps Click's normal "Error: <msg>" + exit-code-2
+    contract and never swallows any other exception class.
+    """
+
+    def invoke(self, ctx: click.Context):
+        from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
+
+        try:
+            return super().invoke(ctx)
+        except StorageModeFlagError as exc:
+            raise click.UsageError(str(exc)) from exc
+
+
+@click.group(cls=_StorageBackendGuardGroup)
 @click.version_option(package_name="conexus", prog_name="nx")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable debug logging.")
 @click.pass_context
@@ -84,16 +103,6 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
-
-    # RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): TTY-gated upgrade
-    # prompt. When the catalog is in bootstrap-fallback mode, surface
-    # a one-time stderr warning to the operator so the silent split
-    # state does not linger unnoticed. Suppressed in non-TTY contexts
-    # (CI / cron / MCP / scripted runs) and via NEXUS_NO_PROMPTS=1.
-    # Hook is here, at the top-level Click group, so it fires once per
-    # CLI invocation rather than per Catalog construction.
-    from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    maybe_emit_bootstrap_prompt()
 
     # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
     # check, no filesystem access) on every migration-capable release; at
@@ -136,6 +145,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 
 main.add_command(catalog)
+main.add_command(census_group, name="census")
 main.add_command(collection)
 main.add_command(command_context, name="command-context")
 main.add_command(console)
@@ -150,11 +160,8 @@ hook_group.hidden = True
 main.add_command(hook_group, name="hook")
 main.add_command(hooks)
 main.add_command(index)
-main.add_command(guided_upgrade_cmd, name="guided-upgrade")
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
-main.add_command(migrate_to_service_cmd, name="migrate-to-service")
-main.add_command(migration_audit_cmd, name="migration-audit")
 main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")
@@ -164,7 +171,6 @@ main.add_command(remediate_cmd, name="remediate")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(service, name="service")
-main.add_command(storage_group, name="storage")
 main.add_command(store)
 main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)

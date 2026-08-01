@@ -21,6 +21,40 @@ from nexus.db import service_endpoint
 from nexus.db.service_endpoint import recover_endpoint_from_lease
 
 
+@pytest.fixture(autouse=True)
+def _unpin_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the pinned endpoint env so the LEASE path stays reachable
+    (nexus-aqbrk).
+
+    This module tests ``recover_endpoint_from_lease`` — the LEASE-DISCOVERED
+    recovery path, which is by definition the path taken when no explicit
+    endpoint is pinned. ``recover_endpoint_from_lease`` early-returns ``None``
+    whenever the ``service_url`` credential is set, and deliberately so: an
+    explicitly-pinned managed (https) URL must never be silently rebound to a
+    discovered supervisor lease, which is always local http (nexus-n3bwh
+    review H1).
+
+    Under the engine substrate ``t2_service_env`` sets ``NX_SERVICE_URL`` so
+    the T2 Http*Stores can find the test engine — and that IS the
+    ``service_url`` credential override. The early return then fires before
+    ``discover_lease`` is ever consulted, so every test here got ``None`` and
+    the whole mechanism became unreachable BY CONSTRUCTION. The conftest's
+    ``_isolate_service_endpoint_env`` already strips these vars, but
+    ``t2_service_env`` re-sets them afterwards; this fixture is module-level,
+    so it runs after the conftest autouse chain and wins.
+
+    NOT a substrate pin. Endpoint resolution is substrate-independent
+    machinery: every store in this file is built with an explicit
+    ``base_url`` and a stubbed client, so nothing here depends on where T2
+    rows live. The file is simply asserting the unpinned precondition its
+    subject requires, which it previously got by accident from the sqlite
+    arm having no ``service_url`` at all.
+    """
+    for var in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN",
+                "NX_SERVICE_HOST", "NX_SERVICE_PORT"):
+        monkeypatch.delenv(var, raising=False)
+
+
 # ── recover_endpoint_from_lease (the shared primitive) ───────────────────────
 
 

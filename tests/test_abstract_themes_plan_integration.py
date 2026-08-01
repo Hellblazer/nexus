@@ -363,21 +363,38 @@ async def _reset_singletons_between_tests():
 
 
 @pytest.fixture(scope="module")
-def builtin_plans_library(tmp_path_factory: pytest.TempPathFactory):
-    """Fresh PlanLibrary with every shipped builtin template loaded."""
-    from nexus.db.migrations import _add_plan_dimensional_identity
-    from nexus.db.t2.plan_library import PlanLibrary
+def builtin_plans_library():
+    """Fresh plan library with every shipped builtin template loaded.
+
+    Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite PlanLibrary is
+    deleted; HttpPlanLibrary is the only plan library. The store resolves
+    its endpoint + token ONCE at construction, so this module-scoped
+    instance pins the tenant of whichever test first requests it — every
+    later test in the module reads the same tenant's library, which is
+    exactly the module-shared-fixture semantics the old on-disk file had.
+    (``_add_plan_dimensional_identity`` went with the SQLite library — the
+    dimensional-identity schema ships in the engine's Liquibase changelog.)
+    """
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
     from nexus.plans.seed_loader import load_seed_directory
 
-    tmp = tmp_path_factory.mktemp("plan_lib")
-    lib = PlanLibrary(tmp / "plans.db")
-    _add_plan_dimensional_identity(lib.conn)
-    lib.conn.commit()
+    lib = HttpPlanLibrary()
 
     builtin_dir = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
     result = load_seed_directory(builtin_dir, library=lib)
     assert not result.errors, f"seed_loader errors: {result.errors}"
-    assert result.inserted, "no builtin templates loaded"
+    # PRESENCE, not insertion. load_seed_directory is idempotent: it reports
+    # templates it skipped because they were already in this tenant's library
+    # under skipped_existing, which is a SUCCESS state. Asserting on
+    # `inserted` demanded that THIS call mutate the library, so the fixture
+    # errored whenever the tenant already held the builtins — reproducibly,
+    # standalone, with skipped_existing listing all 12 files. What the tests
+    # below actually need is that the templates are THERE.
+    loaded = list(result.inserted) + list(result.skipped_existing)
+    assert loaded, (
+        "no builtin templates in the plan library: seed_loader neither "
+        f"inserted nor found any of {builtin_dir}"
+    )
     return lib
 
 

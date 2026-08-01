@@ -10,8 +10,12 @@ import click
 
 import structlog
 
-from nexus.catalog.catalog import Catalog
+from typing import TYPE_CHECKING
+
 from nexus.catalog.tumbler import Tumbler
+
+if TYPE_CHECKING:
+    from nexus.catalog.catalog_protocol import CatalogReader
 from nexus.db.http_vector_client import VectorServiceError
 
 _log = structlog.get_logger(__name__)
@@ -85,7 +89,7 @@ def _seed_plan_templates() -> int:
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     seeded = 0
-    with T2Database(default_db_path()) as db:  # epsilon-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
+    with T2Database(default_db_path()) as db:  # boundary-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
         from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         from nexus.plans.loader import load_all_tiers  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
@@ -153,7 +157,7 @@ def _seed_plan_templates() -> int:
     return seeded
 
 
-def _get_catalog() -> Catalog:
+def _get_catalog() -> "CatalogReader":
     """Read-only catalog reader for the admin CLI (RDR-146 P1.2).
 
     The ``nx catalog`` read commands (list / show / links / search / ...)
@@ -173,30 +177,16 @@ def _get_catalog() -> Catalog:
 def _get_catalog_writer():
     """Write-only catalog proxy for the admin CLI (RDR-146 P1.2).
 
-    Routes the whitelisted write ops through the T2 daemon (the single
-    .catalog.db writer) when reachable, else a direct in-process Catalog.
-    Callers ``.close()`` it when done.
+    Service-only since the terminal i711w deletion: forwards the
+    whitelisted write ops to the Java Postgres service. Callers
+    ``.close()`` it when done.
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-    # nexus-kmo9h: in service mode the Java service owns the catalog — no
-    # local state is required (a fresh box legitimately has none), and the
-    # old unconditional gate raised a FALSE "run 'nx catalog setup'"
-    # diagnostic on healthy installs. The local check applies only to the
-    # SQLite opt-out mode.
-    if (
-        storage_backend_for("catalog") != StorageBackend.SERVICE
-        and not Catalog.is_initialized(catalog_path())
-    ):
-        raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
-        )
     return make_catalog_writer()
 
 
-def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
+def _resolve_tumbler(cat: "CatalogReader", value: str) -> Tumbler:
     """Resolve a tumbler string OR title/filename. Raises ClickException on failure."""
     from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     t, err = resolve_tumbler(cat, value)
@@ -233,8 +223,8 @@ def catalog() -> None:
     knowledge base — search by metadata, browse by relationship, trace provenance.
 
     \b
-    First time? Run setup:
-      nx catalog setup              # one command: init + populate + link
+    No setup needed: the nexus service owns the catalog, and documents are
+    registered automatically at index/store time.
 
     \b
     Find documents:
@@ -263,7 +253,6 @@ def catalog() -> None:
 from nexus.commands.catalog_cmds import owners as _owners_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import backfill as _backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import links as _links_cmds  # noqa: E402 — must follow the `catalog` group definition above
-from nexus.commands.catalog_cmds import backups as _backups_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import collections as _collections_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import migration as _migration_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import maintenance as _maintenance_cmds  # noqa: E402 — must follow the `catalog` group definition above
@@ -276,7 +265,6 @@ from nexus.commands.catalog_cmds import orphan_backfill as _orphan_backfill_cmds
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
 _links_cmds.register(catalog)
-_backups_cmds.register(catalog)
 _collections_cmds.register(catalog)
 _migration_cmds.register(catalog)
 _maintenance_cmds.register(catalog)
@@ -288,125 +276,31 @@ _orphan_backfill_cmds.register(catalog)
 
 
 @catalog.command("init")
-@click.option("--remote", default="", help="Optional git remote URL")
+@click.option("--remote", default="", help="Retired option (kept so old invocations parse).")
 def init_cmd(remote: str) -> None:
-    """Initialize catalog git repository."""
-    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
-    path = catalog_path()
-    Catalog.init(path, remote=remote or None)
-    click.echo(f"Catalog initialized at {path}")
+    """Retired: the nexus service owns the catalog — there is nothing to init."""
+    # nexus-i711w terminal deletion: the local SQLite catalog no longer
+    # exists in any mode; kept as a guided refusal (reversible) rather
+    # than removed, per the manifest's default for the open Hal call.
+    raise click.ClickException(
+        "'nx catalog init' is retired: the nexus service owns the catalog "
+        "(the local catalog substrate was removed). 'nx catalog search' and "
+        "'nx catalog links' already work against the service — no init step "
+        "is needed."
+    )
 
 
 @catalog.command("setup")
-@click.option("--remote", default="", help="Optional git remote URL")
+@click.option("--remote", default="", help="Retired option (kept so old invocations parse).")
 def setup_cmd(remote: str) -> None:
-    """Get the catalog running in one step.
-
-    Creates the catalog, populates it from your existing T3 collections and
-    repos, then generates citation and code-RDR links from metadata. After
-    this, 'nx catalog search' and 'nx catalog links' work immediately.
-    """
-    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
-    # nexus-kmo9h: in service mode the nexus service owns the live catalog;
-    # creating a local one here builds a divergent SQLite substrate the
-    # service never reads (and flips other legacy local-presence checks
-    # into passing against empty data). Refuse rather than diverge.
-    if storage_backend_for("catalog") == StorageBackend.SERVICE:
-        raise click.ClickException(
-            "Service mode: the nexus service owns the catalog — there is no "
-            "local catalog to set up. 'nx catalog search' and 'nx catalog "
-            "links' already work against the service. (To operate on a "
-            "local catalog, opt out with NX_STORAGE_BACKEND_CATALOG=sqlite.)"
-        )
-
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        Catalog.init(path, remote=remote or None)
-        click.echo(f"Catalog initialized at {path}")
-    else:
-        click.echo(f"Catalog already initialized at {path}")
-
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    cat = make_catalog_reader()
-    writer = make_catalog_writer()
-
-    try:
-        registry = _make_registry()
-        t3 = _make_t3()
-
-        import signal  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
-        def _timeout_handler(signum, frame):
-            raise TimeoutError("T3 cloud call timed out — try again later or check connectivity")
-
-        repo_count = paper_count = knowledge_count = 0
-
-        click.echo("Populating from repos...")
-        repo_count, repo_collections = _backfill_repos(cat, registry, dry_run=False, writer=writer)
-        click.echo(f"  {repo_count} repo entries")
-
-        # Paper and knowledge backfill query T3 cloud — timeout after 60s each
-        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-        try:
-            click.echo("Populating from paper collections...")
-            signal.alarm(60)
-            paper_count = _backfill_papers(cat, t3, dry_run=False, repo_collections=repo_collections, writer=writer)
-            signal.alarm(0)
-            click.echo(f"  {paper_count} paper entries")
-
-            click.echo("Populating from knowledge collections...")
-            signal.alarm(30)
-            knowledge_count = _backfill_knowledge(cat, t3, dry_run=False, writer=writer)
-            signal.alarm(0)
-            click.echo(f"  {knowledge_count} knowledge entries")
-
-            click.echo("Populating from RDR collections...")
-            signal.alarm(30)
-            rdr_count = _backfill_rdrs(cat, t3, dry_run=False, writer=writer)
-            signal.alarm(0)
-            click.echo(f"  {rdr_count} RDR entries")
-        except TimeoutError as exc:
-            signal.alarm(0)
-            click.echo(f"  Timed out ({exc}). Partial results saved — rerun setup to continue.")
-        finally:
-            signal.signal(signal.SIGALRM, old_handler)
-    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
-        click.echo(f"  Backfill incomplete ({type(exc).__name__}: {exc})")
-
-    click.echo("Backfilling chunk_text_hash...")
-    hash_updated = 0
-    try:
-        hash_updated = _backfill_all_chunk_text_hashes(t3)
-    except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
-        click.echo(f"  Hash backfill partial ({type(exc).__name__}: {exc})")
-    click.echo(f"  {hash_updated} chunks updated")
-
-    click.echo("Generating links...")
-    from nexus.catalog.link_generator import generate_citation_links  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    cites = generate_citation_links(cat, writer=writer)
-    click.echo(f"  Citations: {cites}")
-    writer.close()
-
-    click.echo("Seeding plan templates...")
-    seeded = _seed_plan_templates()
-    click.echo(f"  {seeded} templates seeded")
-
-    # Check if a remote is configured for durability
-    import subprocess  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    result = subprocess.run(
-        ["git", "remote"], cwd=str(path), capture_output=True, text=True, timeout=5,
+    """Retired: the nexus service owns the catalog — there is nothing to set up."""
+    # nexus-i711w terminal deletion: see init_cmd above.
+    raise click.ClickException(
+        "'nx catalog setup' is retired: the nexus service owns the catalog "
+        "(the local catalog substrate was removed). 'nx catalog search' and "
+        "'nx catalog links' already work against the service — no setup step "
+        "is needed. Documents are registered at index/store time."
     )
-    if not result.stdout.strip():
-        click.echo(
-            "\nSetup complete. Catalog is local-only — add a git remote for durability:\n"
-            f"  cd {path} && git remote add origin <your-repo-url>\n"
-            "  nx catalog sync"
-        )
-    else:
-        click.echo("Setup complete.")
 
 
 @catalog.command("list")
@@ -601,7 +495,7 @@ def register_cmd(
     content_type: str, file_path: str, source_uri: str, corpus: str,
 ) -> None:
     """Register a document in the catalog."""
-    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -609,7 +503,7 @@ def register_cmd(
     # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed enumeration.
     fp = file_path
     if fp and Path(fp).is_absolute():
-        from nexus.catalog.catalog import _default_registry_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        from nexus.catalog.types import _default_registry_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         reg_path = _default_registry_path()
@@ -751,18 +645,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
             abort=True,
         )
 
-    # Backup snapshot before delete (RDR-106 Option A).
-    from nexus.catalog.catalog_backup import snapshot_documents  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    backup_path = snapshot_documents(
-        cat, [str(t)], verb="delete",
-        reason=f"single-document delete: {entry.title}",
-    )
-    if backup_path:
-        click.echo(
-            f"Backup snapshot: {backup_path.name}"
-            f"  (restore: nx catalog undelete {backup_path.name})"
-        )
-
+    # The pre-delete local backup snapshot (RDR-106 Option A) died with the
+    # local catalog (nexus-i711w): backups were local-catalog-only.
     deleted = writer.delete_document(t)
     if deleted:
         click.echo(f"Deleted: {t} ({entry.title}). Links preserved.")
@@ -771,43 +655,43 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
 
 
 @catalog.command("sync")
-@click.option("--message", "-m", default="catalog update")
+@click.option("--message", "-m", default="catalog update", help="Retired option (kept so old invocations parse).")
 def sync_cmd(message: str) -> None:
-    """Commit and push catalog changes."""
-    cat = _get_catalog_writer()
-    try:
-        cat.sync(message)
-    finally:
-        cat.close()
-    click.echo("Catalog synced.")
+    """Retired: the nexus service's Postgres is the sole catalog authority — nothing to sync."""
+    # catalog-git-DECISION OPTION C: git-backed JSONL durability was dropped
+    # with the local catalog substrate (RDR-158 P4). Guided refusal instead
+    # of letting HttpCatalogClient.sync() raise NotImplementedError as an
+    # uncaught traceback — same treatment as init_cmd/setup_cmd above.
+    raise click.ClickException(
+        "'nx catalog sync' is retired: the nexus service's Postgres is the sole "
+        "catalog authority (the local git/JSONL durability layer was removed). "
+        "Every write already lands in Postgres — there is nothing to commit or push."
+    )
 
 
 @catalog.command("pull")
 def pull_cmd() -> None:
-    """Pull catalog from remote and rebuild SQLite."""
-    cat = _get_catalog_writer()
-    try:
-        cat.pull()
-    finally:
-        cat.close()
-    click.echo("Catalog pulled and rebuilt.")
+    """Retired: the nexus service's Postgres is the sole catalog authority — nothing to pull."""
+    # catalog-git-DECISION OPTION C: see sync_cmd above.
+    raise click.ClickException(
+        "'nx catalog pull' is retired: the nexus service's Postgres is the sole "
+        "catalog authority (the local git/JSONL durability layer was removed). "
+        "'nx catalog search' and 'nx catalog links' already read live from the "
+        "service — no pull step is needed."
+    )
 
 
 @catalog.command("compact", hidden=True)
 def compact_cmd() -> None:
-    """Rewrite JSONL files to remove tombstones and duplicate overwrites."""
-    cat = _get_catalog_writer()
-    try:
-        removed = cat.compact()
-    finally:
-        cat.close()
-    total = 0
-    for filename, count in removed.items():
-        click.echo(f"  {filename}: {count} lines removed")
-        total += count
-    click.echo(f"Compaction complete ({total} lines removed).")
-    if total > 0:
-        click.echo("Run 'nx catalog sync' to commit the compacted files.")
+    """Retired: the JSONL files this compacted no longer exist."""
+    # catalog-git-DECISION OPTION C: see sync_cmd above. Same retirement,
+    # same refusal shape — this previously called through to a
+    # NotImplementedError and surfaced as an uncaught traceback.
+    raise click.ClickException(
+        "'nx catalog compact' is retired: the local JSONL/SQLite catalog it "
+        "compacted was removed — the nexus service's Postgres is the sole "
+        "catalog authority and needs no client-side compaction."
+    )
 
 
 @catalog.command("reconcile")
@@ -890,7 +774,7 @@ def reconcile_cmd(dry_run: bool) -> None:
 # ── Backfill helpers ──────────────────────────────────────────────────────────
 
 
-def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
+def _owner_by_name(cat: "CatalogReader", name: str) -> Tumbler | None:
     """Look up a CURATOR owner by name.
 
     Filters on ``owner_type = 'curator'`` so a same-named REPO owner
@@ -904,7 +788,7 @@ def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
     return Tumbler.parse(prefix) if prefix else None
 
 
-def _get_or_create_curator(cat: Catalog, name: str, *, writer: object = None) -> Tumbler:
+def _get_or_create_curator(cat: "CatalogReader", name: str, *, writer: object = None) -> Tumbler:
     """Get or create a curator owner by name (reads via cat, writes via writer)."""
     owner = _owner_by_name(cat, name)
     if owner is None:
@@ -913,7 +797,7 @@ def _get_or_create_curator(cat: Catalog, name: str, *, writer: object = None) ->
 
 
 def _backfill_repos(
-    cat: Catalog, registry: object, dry_run: bool, *, writer: object = None
+    cat: "CatalogReader", registry: object, dry_run: bool, *, writer: object = None
 ) -> tuple[int, set[str]]:
     """Create owner per repo from registry.
 
@@ -992,7 +876,7 @@ def _backfill_repos(
     return count, claimed
 
 
-def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool, *, writer: object = None) -> int:
+def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register knowledge__* collections in catalog."""
     w = writer if writer is not None else cat
     collections = t3.list_collections()
@@ -1023,7 +907,7 @@ def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool, *, writer: obje
     return count
 
 
-def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = None) -> int:
+def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register rdr__* collections in catalog with per-document titles from T3 metadata."""
     w = writer if writer is not None else cat
     collections = t3.list_collections()
@@ -1088,10 +972,10 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
             try:
                 import hashlib  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-                from nexus.catalog.catalog import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+                from nexus.catalog.types import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                     _default_registry_path,
-                    make_relative,
                 )
+                from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                 from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
                 # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed
@@ -1159,7 +1043,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
 
 
 def _backfill_papers(
-    cat: Catalog, t3: object, dry_run: bool, repo_collections: set[str] | None = None,
+    cat: "CatalogReader", t3: object, dry_run: bool, repo_collections: set[str] | None = None,
     *, writer: object = None,
 ) -> int:
     """Register docs__* paper collections, excluding repo-owned collections."""
@@ -1233,42 +1117,6 @@ def _backfill_papers(
     return count
 
 
-@catalog.command("consolidate", hidden=True)
-@click.argument("corpus")
-@click.option("--dry-run", is_flag=True, help="Show what would be merged without writing")
-def consolidate_cmd(corpus: str, dry_run: bool) -> None:
-    """Merge per-paper collections into a corpus-level collection."""
-    cat = _get_catalog()
-    from nexus.catalog.consolidation import merge_corpus  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
-    if dry_run:
-        result = merge_corpus(cat, None, corpus, dry_run=True)
-        entries = cat.by_corpus(corpus)
-        if not entries:
-            raise click.ClickException(f"No entries with corpus={corpus!r}")
-        # RDR-103 Phase 5: mirror the conformant target shape that
-        # ``merge_corpus`` will use when run for real so the dry-run
-        # message reports the same name.
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — command-local import (nexus.corpus)
-
-        owner_segment = corpus.replace("_", "-")
-        target = (
-            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
-        )
-        click.echo(f"[dry-run] Would merge {result['would_merge']} collections into {target}:")
-        for e in entries:
-            click.echo(f"  {e.physical_collection} ({e.chunk_count} chunks) → {target}")
-        return
-
-    t3 = _make_t3()
-    result = merge_corpus(cat, t3, corpus)
-
-    if result["errors"]:
-        for err in result["errors"]:
-            click.echo(f"  ERROR: {err}", err=True)
-    click.echo(f"Consolidation complete: {result['merged']} merged, {len(result['errors'])} errors")
-
-
 def _make_t3():
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     return make_t3()
@@ -1303,6 +1151,9 @@ def _backfill_all_chunk_text_hashes(t3) -> int:
 
     hash_updated = 0
     for col_info in t3.list_collections():
+        # NOT an at2ff site: the is_service_backed(t3) guard above already
+        # returned for HttpVectorClient, so this branch only ever sees the
+        # legacy chroma-backed T3Database, where ``._client`` is correct.
         col = t3._client.get_collection(col_info["name"])
         updated, _, _ = _backfill_chunk_text_hash(col)
         hash_updated += updated
@@ -1330,7 +1181,7 @@ def _make_registry():
 
 
 def _backfill_per_file_from_t3(
-    cat: Catalog,
+    cat: "CatalogReader",
     t3: object,
     collection: str,
     *,

@@ -17,9 +17,11 @@ Four seams, all locked here:
 - Success parity: chunk_count == manifest count == T3 chunks, even with
   every fire_* chain dead (the manifest leg is independent now).
 
-Tests use a real local Catalog (tmp ``NEXUS_CATALOG_PATH``) + a real
-in-memory T3; mocks appear only at the failure-injection points, per the
-integration-over-mocks rule.
+Tests use the live (service) catalog via the same factories the hooks use
++ a real in-memory T3; mocks appear only at the failure-injection points,
+per the integration-over-mocks rule. (nexus-i711w terminal deletion: the
+local-Catalog seeding/readback arm this file used is gone — seeding goes
+through ActiveCatalog and readback through the active reader.)
 """
 from __future__ import annotations
 
@@ -28,29 +30,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
-
-
-@pytest.fixture(autouse=True)
-def _pin_local_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the sqlite/local backend so these local-Catalog-seeded tests
-    stay deterministic under the ``NX_TEST_T2_SUBSTRATE=engine`` flip
-    (which sets ``NX_STORAGE_BACKEND=service`` globally and would
-    re-route the catalog hooks at the freshly minted engine tenant while
-    the assertions read the local tmp catalog)."""
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
 
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # nexus-i711w: no local init — the hooks and the assertions both resolve
+    # the live service catalog through the factories.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 
@@ -85,25 +78,26 @@ class _FailingT3:
 
 
 def _catalog_rows(catalog_env: Path, title: str) -> list:
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    try:
-        return cat._db.execute(
-            "SELECT tumbler, chunk_count FROM documents WHERE title = ?",
-            (title,),
-        ).fetchall()
-    finally:
-        cat._db.close()
+    """(tumbler, chunk_count) rows for *title*, via the active reader.
+
+    nexus-i711w: replaces the raw local-SQLite ``SELECT tumbler,
+    chunk_count FROM documents WHERE title = ?`` readback.
+    """
+    return [
+        (str(d.tumbler), d.chunk_count) for d in documents_by_title(title)
+    ]
 
 
 def _manifest_rows(catalog_env: Path, tumbler: str) -> list:
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    try:
-        return cat._db.execute(
-            "SELECT chash FROM document_chunks WHERE doc_id = ?",
-            (tumbler,),
-        ).fetchall()
-    finally:
-        cat._db.close()
+    """1-tuples of manifest chashes for *tumbler*, via the active reader.
+
+    nexus-i711w: replaces the raw local-SQLite ``SELECT chash FROM
+    document_chunks WHERE doc_id = ?`` readback; tuple shape kept so
+    call sites did not change.
+    """
+    from tests._catalog_fixture_ops import active_reader
+
+    return [(c,) for c in active_reader().get_chunk_chashes(tumbler)]
 
 
 def _no_op(*args, **kwargs):
@@ -144,14 +138,13 @@ class TestMcpGhostRegisterCompensation:
         this call and must NEVER be deleted by the compensation."""
         content = "dedup content survives"
         chash = hashlib.sha256(content.encode()).hexdigest()
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-mcp", content_type="knowledge",
             physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
-        cat._db.close()
 
         result = _mcp_store_put_with(_FailingT3(), content, "b6enc-dedup-mcp")
         assert result.startswith("Error"), result
@@ -248,22 +241,26 @@ class TestStorePutManifestDirectUnit:
         """The VERIFY leg: a write path that silently no-ops (the exact
         C3 damage shape) must RAISE, never return clean. Mutation
         target: deleting the 'did not land' raise makes this fail."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.catalog.store_hook import store_put_manifest_direct
 
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("knowledge", "curator")
         t = cat.register(
             owner, "verify-target", content_type="knowledge",
             physical_collection="knowledge__x",
             meta={"doc_id": "f" * 64},
         )
-        cat._db.close()
 
+        # nexus-i711w: the write path is the service client now — no-op the
+        # same two whitelisted write ops on it (was Catalog.*).
         monkeypatch.setattr(
-            Catalog, "atomic_manifest_replace", lambda self, d, c: None,
+            HttpCatalogClient, "atomic_manifest_replace",
+            lambda self, d, c: None,
         )
         monkeypatch.setattr(
-            Catalog, "resync_chunk_count_cache", lambda self, d: None,
+            HttpCatalogClient, "resync_chunk_count_cache",
+            lambda self, d: None,
         )
         with pytest.raises(RuntimeError, match="did not land"):
             store_put_manifest_direct(str(t), [{
@@ -395,14 +392,13 @@ class TestPromoteGhostRegisterCompensation:
     ) -> None:
         content = "promote dedup content survives"
         chash = hashlib.sha256(content.encode()).hexdigest()
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-promote", content_type="knowledge",
             physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
-        cat._db.close()
 
         result = self._invoke_promote(
             tmp_path, _FailingT3(), "b6enc-dedup-promote", content,
@@ -572,9 +568,13 @@ class TestStoreDeleteAsymmetry:
         assert del_result.startswith("Deleted:"), del_result
         assert "WARNING" not in del_result
 
-        assert _catalog_rows(catalog_env, "b6enc-del") == [], (
-            "store_delete must not leave a catalog row outliving its chunks"
-        )
+        # nexus-tz1cx FIXED by nexus-5axey: store_delete_catalog_cleanup now
+        # resolves the chash via resolve_knowledge_doc_for_chash
+        # (docs_for_chashes-backed) instead of by_doc_id (TUMBLER-only on
+        # the service client, which always mismatched a chash and made the
+        # compensation a silent no-op). The catalog row + its manifest are
+        # both gone.
+        assert _catalog_rows(catalog_env, "b6enc-del") == []
         assert _manifest_rows(catalog_env, tumbler) == []
 
     def test_delete_leaves_file_backed_docs_alone(
@@ -584,7 +584,7 @@ class TestStoreDeleteAsymmetry:
         id must survive — cleanup is scoped to the store_put signature."""
         content = "file backed content"
         chash = hashlib.sha256(content.encode()).hexdigest()
-        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
         cat.register(
             owner, "b6enc-filebacked", content_type="prose",
@@ -592,7 +592,6 @@ class TestStoreDeleteAsymmetry:
             physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
-        cat._db.close()
 
         col = "knowledge__knowledge__bge-base-en-v15-768__v1"
         local_t3.put(collection=col, content=content, title="b6enc-filebacked")

@@ -492,6 +492,92 @@ class TelemetryRepositoryTest {
         }
     }
 
+    @Test @Order(26)
+    @SuppressWarnings("unchecked")
+    void hookFailures_read_returnsRowsAndExactAggregates() {
+        // nexus-onjvy: hook_failures was WRITE-ONLY over HTTP — record + trim and no
+        // read route — so the only readers in the client were raw SQLite SELECTs that
+        // die with the SQLite stores in nexus-i711w.
+        final String tenant = "tel-read-hooks-" + System.nanoTime();
+        String nowTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        String midTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(2).toString();
+        repo.importHookFailureRow(tenant, "hr-1", "code__nexus", "hook_a",
+            "boom-a", PAST_TS, null, false, "single");
+        repo.importHookFailureRow(tenant, "hr-2", "code__nexus", "hook_b",
+            "boom-b", midTs, "d1,d2", true, "batch");
+        repo.importHookFailureRow(tenant, "hr-3", "code__nexus", "hook_a",
+            "boom-c", nowTs, null, false, "single");
+
+        var all = repo.getHookFailures(tenant, 0, List.of(), 100);
+        var rows = (List<Map<String, Object>>) all.get("rows");
+        assertThat(rows).as("unbounded read returns every row").hasSize(3);
+        assertThat(all.get("total")).isEqualTo(3);
+        assertThat(all.get("oldest_occurred_at"))
+            .as("oldest is the 2024 row, not the newest")
+            .isEqualTo(PAST_TS);
+
+        // Newest first, and the batch columns survive the round trip — the shape
+        // `nx taxonomy status` renders.
+        assertThat(rows.get(0).get("doc_id")).isEqualTo("hr-3");
+        var batchRow = rows.stream()
+            .filter(r -> "hr-2".equals(r.get("doc_id"))).findFirst().orElseThrow();
+        assertThat(batchRow.get("is_batch")).isEqualTo(true);
+        assertThat(batchRow.get("batch_doc_ids")).isEqualTo("d1,d2");
+        assertThat(batchRow.get("chain")).isEqualTo("batch");
+        assertThat(batchRow.get("hook_name")).isEqualTo("hook_b");
+        assertThat(batchRow.get("error")).isEqualTo("boom-b");
+
+        // hook_name filter — what `nx doctor` scopes its catalog-hook check with.
+        var filtered = repo.getHookFailures(tenant, 0, List.of("hook_a"), 100);
+        assertThat(filtered.get("total")).isEqualTo(2);
+        assertThat((List<Map<String, Object>>) filtered.get("rows")).hasSize(2);
+
+        // days window excludes the aged row.
+        var recent = repo.getHookFailures(tenant, 30, List.of(), 100);
+        assertThat(recent.get("total")).as("the 2024 row is outside 30 days").isEqualTo(2);
+    }
+
+    @Test @Order(27)
+    @SuppressWarnings("unchecked")
+    void hookFailures_read_aggregatesIgnoreThePageLimit() {
+        // THE REASON total/oldest are computed over the whole predicate rather than the
+        // returned page: `nx doctor` reports a count. Serving it from a limited page
+        // would under-report the moment failures exceeded the page size — the caller
+        // would see "1 failure" because it asked for 1.
+        final String tenant = "tel-hooks-cap-" + System.nanoTime();
+        for (int i = 0; i < 5; i++) {
+            repo.importHookFailureRow(tenant, "cap-" + i, "code__nexus", "hook_x",
+                "boom", OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(i).toString(),
+                null, false, "single");
+        }
+
+        var capped = repo.getHookFailures(tenant, 0, List.of(), 1);
+
+        assertThat((List<Map<String, Object>>) capped.get("rows"))
+            .as("the page honours limit").hasSize(1);
+        assertThat(capped.get("total"))
+            .as("total counts every matching row, not the page").isEqualTo(5);
+    }
+
+    @Test @Order(28)
+    @SuppressWarnings("unchecked")
+    void hookFailures_read_isTenantScoped() {
+        // RLS: one tenant's failures must never appear in another's read.
+        final String mine = "tel-hooks-mine-" + System.nanoTime();
+        final String theirs = "tel-hooks-theirs-" + System.nanoTime();
+        String ts = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.importHookFailureRow(mine, "m-1", "code__nexus", "hook_m", "boom",
+            ts, null, false, "single");
+        repo.importHookFailureRow(theirs, "t-1", "code__nexus", "hook_t", "boom",
+            ts, null, false, "single");
+
+        var out = repo.getHookFailures(mine, 0, List.of(), 100);
+
+        assertThat(out.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) out.get("rows"))
+            .extracting(r -> r.get("doc_id")).containsExactly("m-1");
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     @Test @Order(12)

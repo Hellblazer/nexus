@@ -1,0 +1,26 @@
+# BuildKit per-Dockerfile ignore (adjacent to Dockerfile.shard).
+# Allowlist style: the build context is the repo root, which carries multi-GB
+# trees (.venv 1.9G, .beads 1.7G, .git 419M, service/target 515M, output,
+# blog, dist, scripts/spikes 128M). Exclude everything, re-include exactly
+# what the Dockerfile COPYs, then re-exclude caches inside the allowed trees.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src
+!tests
+!scripts
+!docs
+!conexus
+!dt
+!sn
+!.claude-plugin
+!service/src
+!service/target/nexus-service-1.0-SNAPSHOT.jar
+# Re-excludes (must come after the ! lines):
+**/__pycache__
+**/.pytest_cache
+**/.DS_Store
+scripts/spikes
+tests/containers/out

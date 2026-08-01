@@ -325,26 +325,55 @@ class TestCheckServiceLaunchagentStray:
 
 class TestCheckT2LaunchagentStray:
     """nx doctor backstop for the automatic stray-com.nexus.t2-LaunchAgent
-    removal — surfaces the condition even outside a version transition."""
+    removal — surfaces the condition even outside a version transition.
 
-    def test_local_mode_yields_no_result(self):
-        from nexus.db.storage_mode import StorageBackend
+    CONTRACT FLIPPED at nexus-i711w Stage 2 sub-stage B, deliberately, and
+    for the same reason `unload_stale_t2_launchagent`'s service-mode gate
+    was removed: with the T2 daemon deleted, no box of any mode can start
+    one or reinstall the unit, so a surviving unit is stray EVERYWHERE.
+    The old `test_local_mode_yields_no_result` asserted the gate that left
+    SQLite-mode boxes — the ones most likely to carry a unit — with silent
+    auto-removal and no doctor visibility. Its replacement below pins the
+    NEW contract. Do not restore the storage-mode gate.
+    """
 
+    def test_sqlite_mode_ALSO_reports_after_the_daemon_retired(
+        self, tmp_path, monkeypatch
+    ):
+        """The flip. A SQLite-mode box with a unit must be TOLD, not skipped.
+
+        The env pin is load-bearing, not decoration: conftest's autouse
+        ``_pin_t2_substrate`` sets ``NX_STORAGE_BACKEND=service`` for the whole
+        suite, so without it this test runs in SERVICE mode — where the OLD
+        gate also fell through — and would stay green if someone restored the
+        gate. Verified by mutation (sub-stage B critic pass).
+        """
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        dest = tmp_path / "com.nexus.t2.plist"
         with patch(
-            "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SQLITE,
-        ), patch("nexus.commands.daemon._autostart_unit_installed") as probe:
+            "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
+        ):
             results = _check_t2_launchagent_stray()
-        assert results == []
-        probe.assert_not_called()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert str(dest) in r.detail
 
-    def test_service_mode_no_agent_returns_ok(self):
-        from nexus.db.storage_mode import StorageBackend
-
+    def test_storage_mode_is_not_consulted_at_all(self, tmp_path):
+        """Non-vacuity guard for the flip above: a re-introduced gate would
+        have to call `storage_backend_for`, so assert nothing does."""
         with patch(
             "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SERVICE,
-        ), patch(
+        ) as backend, patch(
+            "nexus.commands.daemon._autostart_unit_installed",
+            return_value=tmp_path / "com.nexus.t2.plist",
+        ):
+            _check_t2_launchagent_stray()
+        backend.assert_not_called()
+
+    def test_no_agent_returns_ok(self):
+        with patch(
             "nexus.commands.daemon._autostart_unit_installed", return_value=None,
         ):
             results = _check_t2_launchagent_stray()
@@ -352,14 +381,9 @@ class TestCheckT2LaunchagentStray:
         assert results[0].ok is True
         assert results[0].fatal is False
 
-    def test_service_mode_with_agent_returns_soft_warn(self, tmp_path):
-        from nexus.db.storage_mode import StorageBackend
-
+    def test_with_agent_returns_soft_warn(self, tmp_path):
         dest = tmp_path / "com.nexus.t2.plist"
         with patch(
-            "nexus.db.storage_mode.storage_backend_for",
-            return_value=StorageBackend.SERVICE,
-        ), patch(
             "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
         ):
             results = _check_t2_launchagent_stray()
@@ -372,9 +396,29 @@ class TestCheckT2LaunchagentStray:
         assert r.fix_suggestions
         assert any("restart-stale" in s for s in r.fix_suggestions)
 
+    def test_every_fix_suggestion_names_a_LIVE_verb(self, tmp_path):
+        """The defect this replaces: `nx daemon t2 uninstall --autostart` was
+        suggested here after the whole `t2` verb group was deleted."""
+        from click.testing import CliRunner
+
+        from nexus.cli import main as cli
+
+        dest = tmp_path / "com.nexus.t2.plist"
+        with patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
+        ):
+            results = _check_t2_launchagent_stray()
+        suggestions = results[0].fix_suggestions
+        assert suggestions, "a warn result with no fix is useless"
+        for s in suggestions:
+            argv = s.split("#", 1)[0].split()
+            assert argv[0] == "nx"
+            res = CliRunner().invoke(cli, [*argv[1:], "--help"])
+            assert res.exit_code == 0, f"dead verb in fix_suggestions: {s!r}\n{res.output}"
+
     def test_probe_failure_degrades_silently(self):
         with patch(
-            "nexus.db.storage_mode.storage_backend_for",
+            "nexus.commands.daemon._autostart_unit_installed",
             side_effect=RuntimeError("boom"),
         ):
             results = _check_t2_launchagent_stray()
@@ -535,8 +579,10 @@ class TestCheckMigrationState:
         assert any("nx upgrade" in s for s in chash.fix_suggestions)
         assert not any("Do NOT upgrade" in s for s in chash.fix_suggestions)
         assert any("§8.1" in s for s in chash.fix_suggestions)
-        rollback = [s for s in chash.fix_suggestions if "--rollback" in s]
-        assert rollback and all("will-not-boot" in s for s in rollback)
+        # RDR-155 P4b: the --rollback verb died with the migration machinery;
+        # the will-not-boot branch now names the pinned-release redirect.
+        pinned = [s for s in chash.fix_suggestions if "LAST_MIGRATION_CAPABLE" in s]
+        assert pinned and all("will-not-boot" in s for s in pinned)
         # the migration result itself is still healthy (box works now)
         assert any(r.label == "Schema migrations" and r.ok for r in results)
 
@@ -756,6 +802,7 @@ _ALL_TENANT_TABLES = [
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
+    "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
     "nexus.hook_failures",
     "nexus.ladder_completions",
     "nexus.memory",
@@ -1323,3 +1370,185 @@ class TestChashProbeViewFallback:
             "a DiagnosticSqlViolation must reach the outer handler without a "
             "single psql invocation - never a silent legacy retry"
         )
+
+
+# ── nexus-5xn3k AC5: dangling manifest chashes ───────────────────────────────
+
+
+class TestCheckDanglingManifests:
+    """A POPULATED manifest whose chashes no longer resolve in T3.
+
+    A partial index commits chunks and a manifest without a transaction
+    spanning them, so an interrupted run leaves a catalog row that LOOKS
+    healthy: a chunk_count, a manifest full of chashes, and nothing behind
+    them. `nx catalog reconcile` covers the adjacent shape (chunk_count>0 with
+    an EMPTY manifest, GH #1397) but not this one, so it was undetectable.
+    """
+
+    def _t3(self, per_collection: dict[str, list[str]]):
+        class _T3:
+            def list_collections(self):
+                return [type("C", (), {"name": n})() for n in per_collection]
+
+            def list_chunks_with_metadata(self, name, *, fields=()):
+                for i, ch in enumerate(per_collection.get(name, [])):
+                    yield f"{name}-{i}", {"chunk_text_hash": ch}
+        return _T3()
+
+    def _cat(self, referenced: dict[str, set[str]]):
+        class _Cat:
+            def chashes_for_collection(self, name):
+                return referenced.get(name, set())
+        return _Cat()
+
+    def _run(self, monkeypatch, referenced, present):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(referenced), raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3", lambda *a, **k: self._t3(present), raising=False,
+        )
+        return h._check_dangling_manifests()[0]
+
+    def test_dangling_chash_is_reported(self, monkeypatch) -> None:
+        live, dead = "a" * 64, "b" * 64
+        r = self._run(monkeypatch, {"code__x": {live, dead}}, {"code__x": [live]})
+        assert r.ok is False and r.warn is True
+        assert "code__x" in r.detail
+        assert "1 of 2" in r.detail, r.detail
+        assert any("reconcile" in f for f in r.fix_suggestions)
+
+    def test_fully_resolvable_manifest_is_clean(self, monkeypatch) -> None:
+        live = "a" * 64
+        r = self._run(monkeypatch, {"code__x": {live}}, {"code__x": [live]})
+        assert r.ok is True
+        assert "none" in r.detail
+
+    def test_nothing_to_compare_is_not_reported_as_clean(self, monkeypatch) -> None:
+        """NON-VACUITY: zero collections actually compared must read as SKIPPED,
+        never as a clean bill of health. A check whose silent-pass mode is
+        'found nothing to check' is the failure mode this whole class is about.
+        """
+        r = self._run(monkeypatch, {}, {})
+        assert r.ok is True
+        assert "skipped" in r.detail, r.detail
+        assert "none (" not in r.detail
+
+
+# ── nexus-0ehwe item 4: tumbler allocator drift ──────────────────────────────
+
+
+class TestCheckNextSeqDrift:
+    """Owners whose allocator has fallen behind their own children.
+
+    The engine now floors past drift, so a drifted owner SELF-HEALS on its next
+    registration. This check exists because that healing is SILENT: without it
+    the blast radius of the original wedge (nexus-pbawi) stays guessed, and an
+    owner never written to again sits drifted indefinitely.
+    """
+
+    def _cat(self, owners, tumblers):
+        cat = MagicMock()
+        cat.list_owners.return_value = owners
+        cat.all_documents.return_value = [
+            type("E", (), {"tumbler": t})() for t in tumblers
+        ]
+        return cat
+
+    def _run(self, monkeypatch, owners, tumblers):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(owners, tumblers), raising=False,
+        )
+        return h._check_next_seq_drift()[0]
+
+    def test_drifted_owner_is_named(self, monkeypatch) -> None:
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 3}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is False and r.warn is True
+        assert "1.12" in r.detail and "next_seq=3" in r.detail
+        assert "highest child=7" in r.detail
+
+    def test_healthy_owner_is_clean(self, monkeypatch) -> None:
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 9}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is True and "none" in r.detail
+
+    def test_equality_is_the_healthy_steady_state_not_drift(
+        self, monkeypatch,
+    ) -> None:
+        """next_seq == highest child is NORMAL, and this is the boundary the
+        original ``<=`` predicate got wrong (nexus-k5sdi).
+
+        ``next_seq`` holds the LAST CLAIMED sequence, not the next to hand out:
+        claimNextSeq computes ``max(next_seq, high_water) + 1`` and stores the
+        claim, so equality holds after EVERY successful registration. The old
+        predicate therefore flagged every owner that had ever been written to —
+        including both owners a virgin install creates, which is how a fresh
+        box failed its own MVV with a warning describing correct behaviour.
+        """
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 7}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is True, f"equality must not read as drift: {r.detail}"
+        assert "none" in r.detail
+
+    def test_one_below_high_water_is_still_drift(self, monkeypatch) -> None:
+        """The tightened predicate must not blunt the real detection.
+
+        next_seq one below the high-water mark is the nexus-pbawi wedge in its
+        smallest form; narrowing ``<=`` to ``<`` must keep catching it.
+        """
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 6}],
+            ["1.12.1", "1.12.7"],
+        )
+        assert r.ok is False and r.warn is True
+        assert "next_seq=6" in r.detail and "highest child=7" in r.detail
+
+    def test_fresh_owner_with_its_first_document_is_clean(
+        self, monkeypatch,
+    ) -> None:
+        """The exact virgin-install shape from the failing MVV: an owner whose
+        first registration claimed 1, leaving next_seq=1 and one child at 1."""
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.1", "next_seq": 1}],
+            ["1.1.1"],
+        )
+        assert r.ok is True, f"a brand-new owner must be clean: {r.detail}"
+
+    def test_engine_without_next_seq_reads_as_skipped_not_clean(
+        self, monkeypatch,
+    ) -> None:
+        """NON-VACUITY: an engine predating the nexus-0ehwe change omits the
+        field, and every owner would then look drift-free. That must render as
+        SKIPPED — a check whose silent-pass mode is 'the data was absent' is
+        the failure this whole class is about."""
+        r = self._run(monkeypatch, [{"tumbler_prefix": "1.12"}], ["1.12.7"])
+        assert r.ok is True
+        assert "skipped" in r.detail and "next_seq" in r.detail
+        assert "none (" not in r.detail
+
+    def test_deeper_addresses_are_not_mistaken_for_children(
+        self, monkeypatch,
+    ) -> None:
+        """'1.12.3.4' is a chunk address, not a child sequence of 1.12."""
+        r = self._run(
+            monkeypatch,
+            [{"tumbler_prefix": "1.12", "next_seq": 2}],
+            ["1.12.1", "1.12.3.4"],
+        )
+        assert r.ok is True, f"deeper address counted as a child: {r.detail}"

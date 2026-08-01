@@ -41,6 +41,8 @@ fine").
 from __future__ import annotations
 
 import argparse
+import pathlib
+import subprocess
 import sys
 
 from nexus.db.managed_endpoint import (
@@ -58,7 +60,101 @@ _REMEDY = (
 )
 
 
-def check_floor(url: str | None = None) -> int:
+_UNPINNED_REMEDY = (
+    "Remedy: bump REQUIRED_ENGINE_VERSION (src/nexus/engine_version.py) to that "
+    "tag. That single edit also moves PINNED_SERVICE_TAG, which is DERIVED from "
+    "it. If the tag is not deployed to the managed service yet, get conexus to "
+    "deploy it FIRST -- bumping ahead of the deploy makes cloud clients refuse "
+    "the managed service as below-identity (GH #1402 inverted)."
+)
+
+#: Sentinel for "the tag list could not be read". Distinct from "no tags", which
+#: is itself a failure -- a repo with zero engine tags cannot be release-gated.
+_TAGS_UNAVAILABLE = object()
+
+
+def newest_published_engine(repo_root: pathlib.Path | None = None) -> object:
+    """Highest published ``engine-service-v*`` tag, as a version tuple.
+
+    Returns :data:`_TAGS_UNAVAILABLE` when git cannot be consulted at all. An
+    EMPTY tag list is returned as ``None`` and treated as a gate FAILURE by the
+    caller, not a pass: in CI ``actions/checkout`` fetches no tags by default,
+    and a check that silently passes because it saw nothing is the exact
+    vacuous-green failure mode this gate exists to prevent.
+    """
+    root = repo_root or pathlib.Path(__file__).resolve().parent.parent
+    try:
+        out = subprocess.run(
+            ["git", "tag", "-l", "engine-service-v*"],
+            cwd=root, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _TAGS_UNAVAILABLE
+    if out.returncode != 0:
+        return _TAGS_UNAVAILABLE
+    # parse_engine_version takes a VERSION string ("v0.1.56" / "0.1.56"), not the
+    # tag form -- strip the namespace prefix first. Getting this wrong makes every
+    # tag unparseable, which the empty-list branch below catches as a FAILURE
+    # rather than a vacuous pass (it did, on the first run of this code).
+    prefix = "engine-service-"
+    versions = [
+        v for v in (
+            parse_engine_version(line.strip()[len(prefix):])
+            for line in out.stdout.splitlines()
+            if line.strip().startswith(prefix)
+        )
+        if v is not None
+    ]
+    return max(versions) if versions else None
+
+
+def check_pin_currency(newest: object) -> int:
+    """Fail when a gated engine tag exists that this release does not pin.
+
+    The OTHER direction of the freshness gate, and the one that had no check at
+    all until 2026-07-25. Cloud users get whatever conexus deployed regardless
+    of this constant; LOCAL-mode installs get ONLY what REQUIRED_ENGINE_VERSION
+    names. So an engine tag that is cut, validated, published -- and never
+    pinned -- reaches nobody, while the pre-existing cloud-vs-pin check reports
+    "current" and exits 0. That is precisely how the pin sat at v0.1.52 through
+    engine tags .53 .54 .55 .56 (found 2026-07-25).
+
+    Hal directive 2026-07-15: ONE engine identity per release, on EVERY install
+    path. Not a compatibility minimum, no "only if the release needs the
+    features" carve-out -- that carve-out IS the 2026-07-14 v0.1.42 incident.
+    """
+    floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    if newest is _TAGS_UNAVAILABLE:
+        print(
+            "ENGINE PIN CHECK FAILED: could not read engine-service tags from git. "
+            "Cannot verify that every gated engine tag is pinned -- treat as a "
+            "failed gate, not a pass. In CI, actions/checkout needs `fetch-tags: true`.",
+            file=sys.stderr,
+        )
+        return 2
+    if newest is None:
+        print(
+            "ENGINE PIN CHECK FAILED: zero engine-service-v* tags visible. Either "
+            "the checkout has no tags (CI: set `fetch-tags: true`) or the tag "
+            "namespace changed. A gate that sees nothing must not report success.",
+            file=sys.stderr,
+        )
+        return 2
+    if newest > REQUIRED_ENGINE_VERSION:
+        newest_s = ".".join(str(p) for p in newest)
+        print(
+            f"ENGINE PIN CHECK FAILED: engine-service-v{newest_s} is published but this "
+            f"release pins v{floor}. Local-mode installs receive ONLY the pinned "
+            f"identity, so every engine fix between v{floor} and v{newest_s} reaches "
+            f"nobody.\n{_UNPINNED_REMEDY}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"engine pin is current: REQUIRED_ENGINE_VERSION v{floor} == newest published tag")
+    return 0
+
+
+def check_floor(url: str | None = None, newest: object | None = None) -> int:
     """Probe the live managed service and compare against the version floor.
 
     Returns an exit code (0 = current, non-zero = stale or unverifiable).
@@ -68,6 +164,14 @@ def check_floor(url: str | None = None) -> int:
     an unrelated network blip must fail the gate loudly, not crash with an
     unhandled traceback and definitely not report success.
     """
+    # Pin-currency FIRST: local, no network, and a failure here is actionable
+    # without contacting anything. The cloud probe follows.
+    pin_rc = check_pin_currency(
+        newest_published_engine() if newest is None else newest
+    )
+    if pin_rc != 0:
+        return pin_rc
+
     base = url or resolve_managed_endpoint(require_token=False)[0]
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
 

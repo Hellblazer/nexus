@@ -4,7 +4,7 @@
 
 Walks the canonical plan tiers in order, validates each YAML template
 via :func:`nexus.plans.schema.validate_plan_template`, and upserts
-into a :class:`~nexus.db.t2.plan_library.PlanLibrary` with the tier's
+into a :class:`~nexus.db.t2.http_plan_library.HttpPlanLibrary` with the tier's
 scope stamped on the ``project`` column.
 
 Tiers:
@@ -40,7 +40,14 @@ from typing import Any
 
 import yaml
 
-from nexus.db.t2.plan_library import PlanLibrary
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only (PEP 563 lazy): the runtime argument is whatever
+    # the caller passes — production passes HttpPlanLibrary, the only
+    # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
+    # the SQLite PlanLibrary.
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.plans.schema import (
     PlanTemplateSchemaError,
     canonical_dimensions_json,
@@ -69,7 +76,7 @@ def _load_tier(
     directory: Path,
     scope: str,
     project_label: str,
-    library: PlanLibrary,
+    library: HttpPlanLibrary,
     file_filter: Any = None,
 ) -> SeedLoadResult:
     """Load one scope tier, normalising mismatched scope declarations.
@@ -152,7 +159,7 @@ def load_all_tiers(
     *,
     plugin_root: Path,
     repo_root: Path,
-    library: PlanLibrary,
+    library: HttpPlanLibrary,
 ) -> dict[str, SeedLoadResult]:
     """Walk the four tiers in order and return ``{scope: result}``.
 

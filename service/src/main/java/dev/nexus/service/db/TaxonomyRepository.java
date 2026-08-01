@@ -585,6 +585,63 @@ public final class TaxonomyRepository {
                    "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID))));
     }
 
+    /**
+     * Render a timestamp for the wire as UTC ISO-8601 with explicit seconds.
+     *
+     * <p>NOT {@code OffsetDateTime.toString()} (nexus-onjvy). That renders in whatever
+     * offset the value carries — on a developer box the same instant comes back as
+     * "2026-04-08T17:00-07:00" rather than "2026-04-09T00:00:00Z" — and it ELIDES ZERO
+     * SECONDS. Both properties break the client, which compares and displays these as
+     * strings: a lexicographic comparison across mixed offsets is simply wrong, and
+     * "T00:00Z" sorts differently from "T00:00:00Z". This class already
+     * declares {@code UTC_SECOND} for exactly this shape; it just was not being used
+     * on these reads.
+     */
+    private static String utcIso(Object ts) {
+        if (!(ts instanceof OffsetDateTime odt)) return null;
+        return UTC_SECOND.format(odt.withOffsetSameInstant(ZoneOffset.UTC));
+    }
+
+    /**
+     * Full assignment rows for the given doc_ids, quality columns included (nexus-onjvy).
+     *
+     * <p>{@link #getAssignmentsForDocs} projects DOC_ID and TOPIC_ID only, and no other
+     * route returned the rest — so {@code similarity}, {@code assigned_at} and
+     * {@code source_collection} were WRITTEN by the assign path and readable by nobody.
+     * In service mode an operator could not ask how confident an assignment was, when it
+     * was made, or which collection it came from.
+     *
+     * <p>A SEPARATE ROUTE rather than a widened projection, deliberately:
+     * {@code getAssignmentsForDocs} is consumed as a {@code {doc_id: topic_id}} map on
+     * the client, so widening it would change a return TYPE that existing callers
+     * destructure. Additive is the non-breaking shape, and the two reads have genuinely
+     * different costs — the map read stays cheap for the hot path.
+     */
+    public List<Map<String, Object>> getAssignmentDetails(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                       TOPIC_ASSIGNMENTS.SIMILARITY,
+                       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+               .from(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .orderBy(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> m = new LinkedHashMap<>();
+                   m.put("doc_id",            r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                   m.put("topic_id",          r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
+                   m.put("assigned_by",       r.get(TOPIC_ASSIGNMENTS.ASSIGNED_BY));
+                   m.put("similarity",        r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
+                   m.put("source_collection", r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
+                   m.put("assigned_at",       utcIso(r.get(TOPIC_ASSIGNMENTS.ASSIGNED_AT)));
+                   return m;
+               }));
+    }
+
     /** Return doc_ids labeled with a given topic label. */
     public List<String> getDocIdsForLabel(String tenant, String label) {
         return tenantScope.withTenant(tenant, ctx ->
@@ -851,7 +908,120 @@ public final class TaxonomyRepository {
                    "count",             r.get("cnt", Integer.class))));
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // UNIQUE-KEY COMPLETENESS (nexus-q2ign — nexus-0ehwe arbiter class, 4th instance)
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // nexus.topics carries TWO caller-determined unique keys:
+    //   topics_pk                              PRIMARY KEY (id)                     taxonomy-001-baseline.xml:58
+    //   idx_topics_root_tenant_collection_label UNIQUE (tenant_id, collection, label)
+    //                                           WHERE parent_id IS NULL             taxonomy-004-dedup-root-topics.xml:87
+    //
+    // id is BIGSERIAL, but the fidelity ETL import (importTopic / importTopicsBatch
+    // below) supplies it explicitly to preserve topic_assignments/topic_links FK
+    // references across a migration — so for THIS write path id is caller-determined,
+    // not server-generated, and the "server-generated keys are exempt" rule
+    // (5c8c978e / catalog_links, memory, *_etl_dedup) does not apply to it. Those two
+    // sites arbitrate ON CONFLICT (TOPICS.ID) and never name the root-label key, so an
+    // imported row whose (tenant, collection, label) already lives at a DIFFERENT id
+    // (root-topic re-parented/relabeled between snapshots, or two partial imports of
+    // overlapping history) raises a raw, undiagnosable 23505 on
+    // idx_topics_root_tenant_collection_label.
+    //
+    // PER-TABLE DECISION (Hal, matching 5c8c978e's catalog_documents shape): id is the
+    // ADDRESS, (tenant, collection, label WHERE parent_id IS NULL) is the IDENTITY.
+    // REFUSE, do not converge — converging onto the pre-existing id would silently
+    // renumber the row the caller is fidelity-importing, breaking the very
+    // topic_assignments/topic_links FK references (which point at the SOURCE id) this
+    // import exists to preserve. Same reasoning as guardDocumentIdentity's source_uri
+    // guard in CatalogRepository (silent convergence there would misroute a write;
+    // here it would corrupt referential fidelity).
+    //
+    // persistRebuildTopics / persistDiscoveredTopics (the LIVE discovery write paths,
+    // not ETL) are NOT in scope: they never supply an explicit id (server-generated,
+    // exempt), and they already arbitrate the ONLY key they can hit
+    // (TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL) WHERE PARENT_ID IS NULL) —
+    // plus lockTaxonomyCollection serializes per-collection writers, a stronger belt
+    // than the retry this class's import siblings use. Non-root topics (parent_id NOT
+    // NULL) are outside the partial index's predicate entirely — no identity key to
+    // guard.
+    //
+    // No UniqueRaceRetry here, unlike upsertOwner/upsertDocument (the LIVE write
+    // paths in CatalogRepository): importOwner/importOwnersBatch/importDocument/
+    // importDocumentsBatch — this method's direct siblings — carry the same guard
+    // WITHOUT a retry wrapper, because fidelity ETL import is a migration/seeding
+    // path, never concurrent with live writes for the same tenant (see
+    // advanceTopicsIdSequence's javadoc immediately below, which accepts the same
+    // non-concurrency assumption for the sequence advance).
+
+    /** Address key of {@code nexus.topics} (taxonomy-001-baseline.xml:58). */
+    static final String TOPICS_PK = "topics_pk";
+    /** Root-topic identity key of {@code nexus.topics}, partial (taxonomy-004-dedup-root-topics.xml:87). */
+    static final String TOPICS_ROOT_LABEL = "idx_topics_root_tenant_collection_label";
+
+    /**
+     * The id of the LIVE root topic already holding {@code (tenant, collection,
+     * label)}, or {@code null}. Only root topics (parent_id IS NULL) are governed
+     * by this identity key — mirrors the partial index's own predicate exactly.
+     */
+    private static Long resolveRootTopicId(DSLContext ctx, String tenant,
+                                           String collection, String label) {
+        return ctx.select(TOPICS.ID).from(TOPICS)
+                  .where(TOPICS.TENANT_ID.eq(tenant)
+                         .and(TOPICS.COLLECTION.eq(collection))
+                         .and(TOPICS.LABEL.eq(label))
+                         .and(TOPICS.PARENT_ID.isNull()))
+                  .limit(1)
+                  .fetchOne(TOPICS.ID);
+    }
+
+    /**
+     * Refuse a fidelity-import write that would give a root-topic label identity
+     * to a second id (nexus-q2ign). {@code parentId != null} (a non-root topic)
+     * is never governed by this key and returns quietly.
+     */
+    private static void guardTopicIdentity(DSLContext ctx, String tenant, long attemptedId,
+                                           Long parentId, String collection, String label) {
+        if (parentId != null) return;
+        Long existing = resolveRootTopicId(ctx, tenant, collection, label);
+        if (existing != null && existing != attemptedId) {
+            throw new CatalogIdentityConflictException(
+                TOPICS_ROOT_LABEL,
+                "collection=" + collection + " label=" + label,
+                String.valueOf(existing), String.valueOf(attemptedId));
+        }
+    }
+
     // ── Fidelity ETL import ────────────────────────────────────────────────────
+
+    /**
+     * g37fr FINDING 2 (RDR-155 P4b, engine v0.1.53): fidelity import
+     * preserves source ids verbatim, which leaves the topics BIGSERIAL
+     * sequence BEHIND the imported ids — the next live serial INSERT
+     * (persist_rebuild) then collides 409 on a shared store. Standard PG
+     * import discipline: advance the sequence past the imported id inside
+     * the import transaction. The GREATEST against the sequence's own
+     * last_value means setval never moves the sequence backward. Requires
+     * UPDATE on the sequence (granted to nexus_svc by taxonomy-005).
+     *
+     * NOT atomic against a concurrent nextval() on the same sequence: the
+     * last_value read and the setval are two steps, so a live serial
+     * INSERT racing this import could claim an id above the value setval
+     * then writes. Accepted: fidelity import is a migration/seeding path,
+     * never concurrent with live topic writes for the same tenant; if an
+     * import-during-serving path ever appears, revisit with a lock on the
+     * sequence or an advisory lock keyed on the table.
+     */
+    // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
+    // sequence last_value are sequence-state functions with no generated
+    // jOOQ form (codegen models tables, not sequences); one statement,
+    // import-path only, never serving-path.
+    private static void advanceTopicsIdSequence(DSLContext ctx, long maxImportedId) {
+        ctx.execute(
+            "SELECT setval(pg_get_serial_sequence('nexus.topics', 'id'), "
+            + "GREATEST((SELECT last_value FROM nexus.topics_id_seq), ?))",
+            maxImportedId);
+    }
 
     /**
      * Fidelity-preserving import for a topics row.
@@ -867,6 +1037,11 @@ public final class TaxonomyRepository {
         OffsetDateTime createdAtTs = parseTsStrict(createdAt);
         tenantScope.withTenant(tenant, ctx -> {
             ensureCollectionRegistered(ctx, tenant, collection);
+            // nexus-q2ign: this INSERT arbitrates TOPICS.ID only, so a root topic
+            // (parent_id null) whose (collection, label) already lives at a
+            // DIFFERENT id must be refused before the write, not left to raise a
+            // raw 23505 on idx_topics_root_tenant_collection_label.
+            guardTopicIdentity(ctx, tenant, srcId, parentId, collection, label);
             ctx.insertInto(TOPICS,
                     TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
@@ -883,6 +1058,7 @@ public final class TaxonomyRepository {
                .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
                .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
                .execute();
+            advanceTopicsIdSequence(ctx, srcId);
             return null;
         });
         return srcId;
@@ -1067,6 +1243,11 @@ public final class TaxonomyRepository {
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
                     TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS);
             for (var r : batch) {
+                // nexus-q2ign: same guard as the single-row importTopic — the
+                // batch form is not exempt from the key its ON CONFLICT (TOPICS.ID)
+                // omits.
+                guardTopicIdentity(ctx, tenant, reqL(r, "id"), optL(r, "parent_id"),
+                                    optS(r, "collection"), optS(r, "label"));
                 insert = insert.values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
                         optS(r, "collection"), optS(r, "centroid_hash"), optI(r, "doc_count", 0),
                         parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
@@ -1078,6 +1259,8 @@ public final class TaxonomyRepository {
                   .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
                   .execute();
         }
+        // Deduped list is id-sorted — the last element carries the max id.
+        advanceTopicsIdSequence(ctx, reqL(deduped.get(deduped.size() - 1), "id"));
         return rows.size();
     }
 
@@ -1281,8 +1464,33 @@ public final class TaxonomyRepository {
     }
 
     /**
-     * Hub detection data: returns per-topic DF + total_chunks + label + collection + source set.
+     * Hub detection data: returns per-topic DF + total_chunks + label + collection + source set,
+     * plus the staleness aggregates behind {@code --warn-stale} (nexus-onjvy).
      * Python-side computes ICF, stopword matching, and score.
+     *
+     * <p>STALENESS (RDR-077 C-2 semantics, previously SQLite-only). Per hub, over the
+     * source collections actually contributing to it:
+     * <ul>
+     *   <li>{@code max_last_discover_at} — MAX(taxonomy_meta.last_discover_at), NULLs
+     *       excluded by MAX, exactly as the retired SQLite oracle did.</li>
+     *   <li>{@code never_discovered_count} — contributing collections with a NULL
+     *       last_discover_at PLUS those with no taxonomy_meta row at all. Both are
+     *       "never discovered" from the command's point of view.</li>
+     *   <li>{@code is_stale} — the hub has assignments newer than the latest discover,
+     *       or any contributing collection was never discovered.</li>
+     * </ul>
+     *
+     * <p>{@code is_stale} IS COMPUTED HERE rather than client-side, deliberately, even
+     * though ICF and score are computed client-side. The oracle compared ISO-8601
+     * strings lexicographically, which was sound on SQLite's TEXT timestamps. Over HTTP
+     * the values cross as {@code OffsetDateTime.toString()}, which ELIDES ZERO SECONDS
+     * ("2026-04-09T00:00Z", not "...T00:00:00Z") — so the same lexicographic comparison
+     * would silently misorder timestamps that differ only in whether seconds were zero.
+     * Comparing real TIMESTAMPTZ values server-side avoids reintroducing that trap; the
+     * client passes the verdict through.
+     *
+     * <p>One extra query, not N+1: taxonomy_meta is fetched once for every collection
+     * referenced by any hub, then folded per topic in memory.
      *
      * @param minCollections minimum distinct source_collections (DF threshold)
      */
@@ -1320,6 +1528,25 @@ public final class TaxonomyRepository {
                 sourcesMap.computeIfAbsent(tid, k -> new ArrayList<>()).add(sc);
             }
 
+            // taxonomy_meta for every collection any hub draws from, in one query.
+            // Only non-null last_discover_at values are kept: a collection with a NULL
+            // timestamp and one with no taxonomy_meta row at all are both "never
+            // discovered" here, and the oracle counted them together too (its
+            // never_count summed the NULLs and the missing rows). So a single
+            // "absent from this map" test covers both states.
+            var contributing = sourcesMap.values().stream()
+                .flatMap(List::stream).distinct().toList();
+            java.util.Map<String, OffsetDateTime> discoverAt = new java.util.HashMap<>();
+            if (!contributing.isEmpty()) {
+                for (var r : ctx.select(TAXONOMY_META.COLLECTION, TAXONOMY_META.LAST_DISCOVER_AT)
+                        .from(TAXONOMY_META)
+                        .where(TAXONOMY_META.COLLECTION.in(contributing))
+                        .fetch()) {
+                    OffsetDateTime at = r.get(TAXONOMY_META.LAST_DISCOVER_AT);
+                    if (at != null) discoverAt.put(r.get(TAXONOMY_META.COLLECTION), at);
+                }
+            }
+
             List<Map<String, Object>> result = new ArrayList<>();
             for (var r : rows) {
                 long tid = r.get("topic_id", Long.class);
@@ -1330,8 +1557,30 @@ public final class TaxonomyRepository {
                 m.put("df", r.get("df", Integer.class));
                 m.put("total_chunks", r.get("total_chunks", Integer.class));
                 Object lastAt = r.get("last_assigned_at");
-                m.put("last_assigned_at", lastAt != null ? lastAt.toString() : null);
-                m.put("source_collections", sourcesMap.getOrDefault(tid, List.of()));
+                m.put("last_assigned_at", utcIso(lastAt));
+                List<String> sources = sourcesMap.getOrDefault(tid, List.of());
+                m.put("source_collections", sources);
+
+                OffsetDateTime maxDiscover = null;
+                int neverCount = 0;
+                for (String coll : new java.util.LinkedHashSet<>(sources)) {
+                    OffsetDateTime at = discoverAt.get(coll);
+                    if (at == null) {
+                        // NULL last_discover_at, or no taxonomy_meta row at all.
+                        neverCount++;
+                        continue;
+                    }
+                    if (maxDiscover == null || at.isAfter(maxDiscover)) maxDiscover = at;
+                }
+
+                boolean isStale = neverCount > 0;
+                if (!isStale && maxDiscover != null
+                        && lastAt instanceof OffsetDateTime assignedAt) {
+                    isStale = assignedAt.isAfter(maxDiscover);
+                }
+                m.put("max_last_discover_at", utcIso(maxDiscover));
+                m.put("never_discovered_count", neverCount);
+                m.put("is_stale", isStale);
                 result.add(m);
             }
             return result;
@@ -1383,6 +1632,77 @@ public final class TaxonomyRepository {
             result.put("collection", collection);
             result.put("similarities", sims);
             result.put("hub_rows", hubs);
+            return result;
+        });
+    }
+
+    /**
+     * Topics carrying projection assignments that have no {@code topic_links}
+     * row, restricted to those a link is structurally POSSIBLE for.
+     *
+     * <p>The predicate mirrors {@link #refreshProjectionLinks} exactly, and that
+     * is the whole point: a drift audit whose notion of "linkable" differs from
+     * the materializer's reports fiction. {@code refreshProjectionLinks} pairs a
+     * projection TARGET with a NON-projection SOURCE, so a topic is only drifted
+     * if some doc gives it a non-projection partner. Two projection assignments
+     * on one doc produce no link and are not drift; a lone assignment cannot
+     * pair at all.
+     *
+     * <p>This route exists because the client-side check could not ask the
+     * engine and audited the frozen SQLite migration source instead
+     * (nexus-ypori) — reporting stale relic rows as live faults while the real
+     * store went unexamined. Computing it here is also the only affordable
+     * shape: reconstructing it client-side costs one round trip per topic plus
+     * a bulk assignment read.
+     *
+     * @param limit max drift rows returned; the total count is exact regardless
+     * @return {@code {projection_total, drift_count, rows:[{topic_id,label,collection}]}}
+     */
+    public Map<String, Object> linkDrift(String tenant, int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var tgt = TOPIC_ASSIGNMENTS.as("ta");
+            var src = TOPIC_ASSIGNMENTS.as("ta2");
+
+            var linkable = tgt.ASSIGNED_BY.eq("projection")
+                .and(notExists(
+                    ctx.selectOne().from(TOPIC_LINKS)
+                       .where(TOPIC_LINKS.FROM_TOPIC_ID.eq(tgt.TOPIC_ID)
+                           .or(TOPIC_LINKS.TO_TOPIC_ID.eq(tgt.TOPIC_ID)))))
+                .and(exists(
+                    ctx.selectOne().from(src)
+                       .where(src.DOC_ID.eq(tgt.DOC_ID)
+                           .and(src.TOPIC_ID.ne(tgt.TOPIC_ID))
+                           .and(src.ASSIGNED_BY.ne("projection")))));
+
+            int projectionTotal = ctx.select(countDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID))
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection"))
+                .fetchOne(0, int.class);
+
+            int driftCount = ctx.select(countDistinct(tgt.TOPIC_ID))
+                .from(tgt).where(linkable)
+                .fetchOne(0, int.class);
+
+            var rows = ctx.selectDistinct(tgt.TOPIC_ID, TOPICS.LABEL, tgt.SOURCE_COLLECTION)
+                .from(tgt)
+                .leftJoin(TOPICS).on(TOPICS.ID.eq(tgt.TOPIC_ID))
+                .where(linkable)
+                .orderBy(tgt.TOPIC_ID)
+                .limit(Math.max(0, limit))
+                .fetch();
+
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : rows) {
+                var m = new LinkedHashMap<String, Object>();
+                m.put("topic_id", r.get(tgt.TOPIC_ID));
+                m.put("label", r.get(TOPICS.LABEL));
+                m.put("collection", r.get(tgt.SOURCE_COLLECTION));
+                out.add(m);
+            }
+            var result = new LinkedHashMap<String, Object>();
+            result.put("projection_total", projectionTotal);
+            result.put("drift_count", driftCount);
+            result.put("rows", out);
             return result;
         });
     }

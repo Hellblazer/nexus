@@ -5,7 +5,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click import BadParameter
 from click.testing import CliRunner
 
@@ -651,7 +651,15 @@ def _format_results(results: list) -> str:
     lines = []
     for r in results:
         path = r.metadata.get("source_path", "?")
-        score = f"{r.hybrid_score:.4f}" if r.hybrid_score else f"d={r.distance:.4f}"
+        # Compare at DISPLAY precision, not raw truthiness (RDR-155 P4b P3).
+        # apply_hybrid_scoring min-max normalises, so the lowest-ranked item
+        # lands on ~0. Which side of exact-zero it lands on is embedding-float
+        # noise: chroma's ONNX EF produced exactly 0.0 (falsy -> the d= branch),
+        # nexus's MiniLMDirect produces 1.5e-09 (truthy -> "0.0000"). Same rank,
+        # same document, same 4dp score everywhere else. Rounding first keeps
+        # this snapshot pinned to the ranking it exists to pin, instead of to
+        # the ninth decimal of a denormal.
+        score = f"{r.hybrid_score:.4f}" if round(r.hybrid_score or 0.0, 4) else f"d={r.distance:.4f}"
         lines.append(f"{score}  {r.collection}  {path}")
     return "\n".join(lines)
 
@@ -857,7 +865,7 @@ def test_silent_zero_end_to_end_real_engine(
     Do not split to ``mix_stderr=False`` without switching the
     assertions to ``result.stderr`` simultaneously.
     """
-    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
     coll_name = "knowledge__e2e_silentzero"
     ef = DefaultEmbeddingFunction()

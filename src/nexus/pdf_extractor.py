@@ -341,19 +341,71 @@ def _normalize_mineru_latex(md: str) -> str:
     stored offsets are consistent with the normalized text.  Existing
     indexed chunks need a re-index to pick up clean LaTeX.
     """
-    # Display math first (greedy match would eat $...$).
-    md = re.sub(
-        r"\$\$(.*?)\$\$",
-        lambda m: f"$${normalize_latex_spacing(m.group(1))}$$",
-        md,
-        flags=re.DOTALL,
-    )
-    # Inline math \u2014 [^$] avoids matching across $$ boundaries.
+    # Display math first, REPLACED BY A PLACEHOLDER rather than left in place.
+    #
+    # nexus-gtltb: the previous version substituted the display blocks but kept
+    # their `$$` delimiters in the string, then ran the inline pass over the
+    # result. `\$([^$]+?)\$` cannot match the empty string between a `$$` pair,
+    # so it began matching ONE `$` INTO each pair — consuming a delimiter and
+    # desyncing every subsequent open/close on the page. From the first display
+    # block onward the spans treated as "math" were the PROSE BETWEEN formulas,
+    # and math spans get `re.sub(r"\s+", "", s)` applied. The comment claiming
+    # "[^$] avoids matching across $$ boundaries" was the exact inverse of what
+    # the expression does.
+    #
+    # Measured on tests/fixtures/bft-to-smr.pdf: 918 chars removed, 592 of them
+    # word-spaces deleted from running prose, plus \n\n breaks and `##`
+    # headings — so the chunker lost its boundary signals too. The inversion ran
+    # both ways: eight real inline spans kept the spurious spaces #1049 exists
+    # to remove, while the prose around them lost its real ones.
+    #
+    # Placeholders are the same discipline `normalize_latex_spacing` already
+    # uses for `\text{...}`, one level down.
+    #
+    # nexus-cfy5k: escaped dollars must be withdrawn from the string BEFORE
+    # either delimiter pass, for the same reason. MinerU writes literal currency
+    # as `\$`, and neither pass honours the backslash, so a PAIR of them bracketed
+    # the prose between as if it were an inline formula — `contracts above
+    # \$1M.Iftheenvironmentisarelationaldatabase...`. A lone `\$` has no partner
+    # and is inert, which is why this hid behind documents that mention money
+    # exactly once and survived the gtltb fix.
+    #
+    # The match keeps backslash parity: `\\$x$` is an escaped backslash followed
+    # by a REAL delimiter, so `(?:\\\\)*` consumes complete pairs first and the
+    # lookbehind stops the scan from starting mid-pair. Protecting a genuine
+    # delimiter would resurrect the desync this is here to prevent.
+    _escaped: list[str] = []
+
+    def _save_escaped(m: re.Match) -> str:
+        _escaped.append(m.group(0))
+        return f"\x00E{len(_escaped) - 1}\x00"
+
+    md = re.sub(r"(?<!\\)(?:\\\\)*\\\$", _save_escaped, md)
+
+    _display: list[str] = []
+
+    def _save_display(m: re.Match) -> str:
+        _display.append(f"$${normalize_latex_spacing(m.group(1))}$$")
+        return f"\x00D{len(_display) - 1}\x00"
+
+    md = re.sub(r"\$\$(.*?)\$\$", _save_display, md, flags=re.DOTALL)
+
+    # Inline math. NOW `[^$]` genuinely cannot cross a display boundary, because
+    # no display delimiter remains in the string to be re-entered.
     md = re.sub(
         r"\$([^$]+?)\$",
         lambda m: f"${normalize_latex_spacing(m.group(1))}$",
         md,
     )
+
+    # Restore display blocks, already normalized above.
+    for i, block in enumerate(_display):
+        md = md.replace(f"\x00D{i}\x00", block)
+
+    # Restore escaped dollars verbatim — they were never math, so unlike the
+    # display blocks there is nothing to normalize on the way back.
+    for i, esc in enumerate(_escaped):
+        md = md.replace(f"\x00E{i}\x00", esc)
     return md
 
 

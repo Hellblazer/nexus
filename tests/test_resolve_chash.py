@@ -1,35 +1,85 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-086 Phase 2: ``Catalog.resolve_chash`` — global chash → ChunkRef.
+"""RDR-086 Phase 2: ``resolve_chash_globally`` — global chash → ChunkRef.
 
-Exercises the T2-backed happy path, multi-match tie-break, self-healing
-read (stale T2 row when the target collection has been deleted), and
-the ChromaDB parallel-fallback deadline contract.
+nexus-i711w terminal deletion: was driven through the local
+``Catalog.resolve_chash`` method, a delegating shell over
+``nexus.catalog.catalog_spans.resolve_chash_globally``; the shell died
+with the local Catalog, so the tests now call the surviving function
+directly. No assertion changed.
+
+Exercises the index-backed happy path, multi-match tie-break, the
+retired-self-heal contract (stale row when the target collection has
+been deleted), and the parallel-fallback scan.
+
+The chash substrate is an in-file fake implementing the read interface
+the resolver consumes (``lookup``/``is_empty``/``close``) — the SQLite
+ChashIndex was deleted with the 7.0.0 wave (nexus-i711w); the HTTP
+twin's wire contract is pinned in tests/db/test_http_chash_index.py.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from tests.conftest import make_vector_test_client
+
+from nexus.catalog.catalog_spans import resolve_chash_globally
+
+
+# ── In-file fake chash index ─────────────────────────────────────────────────
+
+
+class _FakeChashIndex:
+    """Dict-backed stand-in for the chash-index interface the resolver
+    calls: ``lookup(chash) -> [{"collection", "created_at"}]`` plus the
+    lifecycle pair ``is_empty``/``close``. ``delete_stale`` is fatal —
+    RDR-187 (nexus-piwya.4) retired the resolver's self-heal, and a
+    resurrected call must fail loudly here."""
+
+    def __init__(self) -> None:
+        # (chash, collection) -> created_at ISO string
+        self.rows: dict[tuple[str, str], str] = {}
+        self._seq = 0
+
+    def upsert(
+        self, *, chash: str, collection: str, created_at: str | None = None,
+    ) -> None:
+        if created_at is None:
+            # Monotonic default so insertion order is a deterministic
+            # tie-break, mirroring the old store's datetime.now() intent.
+            self._seq += 1
+            created_at = f"2026-01-01T00:00:{self._seq % 60:02d}+00:00"
+        self.rows[(chash, collection)] = created_at
+
+    def lookup(self, chash: str) -> list[dict[str, str]]:
+        return [
+            {"collection": coll, "created_at": ts}
+            for (ch, coll), ts in self.rows.items()
+            if ch == chash
+        ]
+
+    def is_empty(self) -> bool:
+        return not self.rows
+
+    def delete_stale(self, **kwargs) -> int:
+        raise AssertionError(
+            "resolve_chash must NOT self-heal: the delete_stale leg was "
+            "retired by RDR-187 (nexus-piwya.4)"
+        )
+
+    def close(self) -> None:
+        pass
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def resolve_env(tmp_path: Path):
-    """Catalog + EphemeralClient T3 + real T2 ChashIndex on disk."""
-    from nexus.catalog.catalog import Catalog
-    from nexus.db.t2.chash_index import ChashIndex
-
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+def resolve_env():
+    """EphemeralClient T3 + in-file fake chash index."""
     t3 = make_vector_test_client()
-    chash_index = ChashIndex(tmp_path / "t2.db")
+    chash_index = _FakeChashIndex()
 
-    yield cat, t3, chash_index
+    yield t3, chash_index
 
     chash_index.close()
 
@@ -60,11 +110,11 @@ class TestChunkRefType:
 
 class TestResolveChashT2Hit:
     def test_single_match_returns_chunkref(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "a" * 64
         _seed_chunk(t3, chash_index, "code__only", "chunk-0", "hello", h)
 
-        ref = cat.resolve_chash(h, t3, chash_index)
+        ref = resolve_chash_globally(h, t3, chash_index)
 
         assert ref is not None
         assert ref["chash"] == h
@@ -79,13 +129,13 @@ class TestResolveChashT2Hit:
         assert ref["metadata"]["source_path"] == "s.py"
 
     def test_prefer_collection_wins_multi_match(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "b" * 64
         # Same chash in two collections — caller prefers one of them.
         _seed_chunk(t3, chash_index, "code__a", "c-a", "text-a", h)
         _seed_chunk(t3, chash_index, "code__b", "c-b", "text-b", h)
 
-        ref = cat.resolve_chash(h, t3, chash_index, prefer_collection="code__b")
+        ref = resolve_chash_globally(h, t3, chash_index, prefer_collection="code__b")
 
         assert ref is not None
         assert ref["physical_collection"] == "code__b"
@@ -99,7 +149,7 @@ class TestResolveChashT2Hit:
         relied on a 10 ms sleep to force distinct ISO stamps, which the
         code-review called out as flaky.
         """
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "c" * 64
 
         # Seed both chunks into T3; then overwrite the two T2 rows with
@@ -116,37 +166,32 @@ class TestResolveChashT2Hit:
             metadatas=[{"chunk_text_hash": h, "source_path": "s.py"}],
         )
 
-        # Direct SQL with explicit timestamps -- the default upsert uses
-        # datetime.now() which can collide at microsecond resolution.
-        with chash_index._lock:
-            chash_index.conn.execute(
-                "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, created_at) "
-                "VALUES (?, ?, ?)",
-                (h, "code__old", "2025-01-01T00:00:00+00:00"),
-            )
-            chash_index.conn.execute(
-                "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, created_at) "
-                "VALUES (?, ?, ?)",
-                (h, "code__new", "2026-04-18T00:00:00+00:00"),
-            )
-            chash_index.conn.commit()
+        # Explicit timestamps so the tie-break has a deterministic
+        # "newer" to pick (the old store's default upsert stamped
+        # datetime.now(), which could collide at microsecond resolution).
+        chash_index.upsert(
+            chash=h, collection="code__old",
+            created_at="2025-01-01T00:00:00+00:00",
+        )
+        chash_index.upsert(
+            chash=h, collection="code__new",
+            created_at="2026-04-18T00:00:00+00:00",
+        )
 
-        ref = cat.resolve_chash(h, t3, chash_index)
+        ref = resolve_chash_globally(h, t3, chash_index)
 
         assert ref is not None
         assert ref["physical_collection"] == "code__new"
         assert ref["chunk_text"] == "fresh"
 
     def test_char_range_delegates_to_resolve_span(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "d" * 64
         _seed_chunk(
             t3, chash_index, "code__slice", "c0", "def hello(): pass", h,
         )
 
-        ref = cat.resolve_chash(f"chash:{h}:4-9", t3, chash_index)
+        ref = resolve_chash_globally(f"chash:{h}:4-9", t3, chash_index)
 
         assert ref is not None
         assert ref["chunk_text"] == "hello"
@@ -162,32 +207,29 @@ class TestResolveChashSelfHeal:
         the resolver no longer holds delete authority over the store. A row
         pointing at a vanished collection simply fails per-candidate
         resolution and the resolver falls through to a live candidate; the
-        row itself is left untouched (on the frozen SQLite path it is
-        migration-source data, RDR-158; in service mode staleness cannot
+        row itself is left untouched (in service mode staleness cannot
         occur — lookup is chunk-backed). Inverts the pre-.4 removal
-        assertion; the resurrection direction is additionally pinned by
-        tests/catalog/test_chash_citation_resolution.py with a fatal fake.
+        assertion; the fake's ``delete_stale`` is fatal, so a resurrected
+        self-heal fails loudly (same pin direction as
+        tests/catalog/test_chash_citation_resolution.py).
         """
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "e" * 64
         # Register a chash pointing at a collection that does not exist in T3.
         chash_index.upsert(chash=h, collection="code__deleted")
         # And a live one.
         _seed_chunk(t3, chash_index, "code__live", "real-id", "real text", h)
 
-        ref = cat.resolve_chash(h, t3, chash_index)
+        ref = resolve_chash_globally(h, t3, chash_index)
 
         # Falls through to the live collection exactly as before...
         assert ref is not None
         assert ref["physical_collection"] == "code__live"
         assert ref["chunk_text"] == "real text"
 
-        # ...but the stale row is NOT deleted (no self-heal).
-        remaining = chash_index.conn.execute(
-            "SELECT physical_collection FROM chash_index WHERE chash = ?",
-            (h,),
-        ).fetchall()
-        cols = {r[0] for r in remaining}
+        # ...but the stale row is NOT deleted (no self-heal; delete_stale
+        # would have raised AssertionError inside the fake).
+        cols = {coll for (ch, coll) in chash_index.rows if ch == h}
         assert "code__deleted" in cols
         assert "code__live" in cols
 
@@ -198,7 +240,7 @@ class TestResolveChashSelfHeal:
 class TestResolveChashFallback:
     def test_t3_fallback_scans_collections_on_t2_miss(self, resolve_env):
         """Chunk exists in T3 but T2 has no row — scan all collections."""
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "f" * 64
         # Add chunk directly to T3 without registering in T2.
         col = t3.get_or_create_collection("code__unindexed")
@@ -207,31 +249,31 @@ class TestResolveChashFallback:
             metadatas=[{"chunk_text_hash": h}],
         )
 
-        ref = cat.resolve_chash(h, t3, chash_index)
+        ref = resolve_chash_globally(h, t3, chash_index)
 
         assert ref is not None
         assert ref["physical_collection"] == "code__unindexed"
         assert ref["chunk_text"] == "recovered"
 
     def test_fallback_returns_none_when_chash_nowhere(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         # Create a collection so the scan has something to iterate.
         t3.get_or_create_collection("code__empty")
         h = "0" * 64
 
-        ref = cat.resolve_chash(h, t3, chash_index)
+        ref = resolve_chash_globally(h, t3, chash_index)
         assert ref is None
 
     def test_fallback_logs_warning_once_per_process(self, resolve_env, caplog):
         import logging
 
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         t3.get_or_create_collection("code__scan")
         h = "1" * 64
 
         with caplog.at_level(logging.WARNING):
-            cat.resolve_chash(h, t3, chash_index)
-            cat.resolve_chash(h, t3, chash_index)
+            resolve_chash_globally(h, t3, chash_index)
+            resolve_chash_globally(h, t3, chash_index)
 
         fallback_warnings = [
             r for r in caplog.records
@@ -248,25 +290,25 @@ class TestResolveChashFallback:
 
 class TestResolveChashInputForms:
     def test_accepts_bare_hex(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "2" * 64
         _seed_chunk(t3, chash_index, "code__bare", "b1", "x", h)
 
-        ref = cat.resolve_chash(h, t3, chash_index)
+        ref = resolve_chash_globally(h, t3, chash_index)
         assert ref is not None
 
     def test_accepts_chash_prefix(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         h = "3" * 64
         _seed_chunk(t3, chash_index, "code__pre", "p1", "y", h)
 
-        ref = cat.resolve_chash(f"chash:{h}", t3, chash_index)
+        ref = resolve_chash_globally(f"chash:{h}", t3, chash_index)
         assert ref is not None
 
     def test_rejects_malformed_chash(self, resolve_env):
-        cat, t3, chash_index = resolve_env
+        t3, chash_index = resolve_env
         with pytest.raises(ValueError):
-            cat.resolve_chash("not-a-hash", t3, chash_index)
+            resolve_chash_globally("not-a-hash", t3, chash_index)
 
 
 # ── _negate_iso helper (tie-break invariant) ─────────────────────────────────

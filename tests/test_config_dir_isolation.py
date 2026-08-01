@@ -27,22 +27,20 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(sandbox))
 
     # Reload modules that resolve their path constants at import time so
-    # the new env var takes effect within the test scope. Also reload
-    # nexus.db.t2.memory_store because it imports
-    # ``read_claude_session_id`` from nexus.session by name — a bare
-    # reload of nexus.session would leave memory_store pointing at the
-    # old function object and break the identity-check assertion in
-    # tests/test_memory.py.
+    # the new env var takes effect within the test scope.
+    # nexus.db.t2.memory_store used to be reloaded here too (it imported
+    # ``read_claude_session_id`` from nexus.session by name); the SQLite
+    # store was deleted in nexus-i711w Stage 2 sub-stage A3, and
+    # HttpMemoryStore resolves the session file at call time, so no
+    # store reload is needed anymore.
     import nexus.session
     import nexus.context
     import nexus.checkpoint
     import nexus.commands.search_cmd
-    import nexus.db.t2.memory_store
     importlib.reload(nexus.session)
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
     importlib.reload(nexus.commands.search_cmd)
-    importlib.reload(nexus.db.t2.memory_store)
 
     yield sandbox
 
@@ -53,7 +51,6 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
     importlib.reload(nexus.commands.search_cmd)
-    importlib.reload(nexus.db.t2.memory_store)
 
 
 class TestCanonicalHelper:
@@ -189,7 +186,7 @@ class TestCatalogIsolatedUnderOverride:
         assert catalog_path() == sandbox_dir / "catalog"
 
     def test_default_registry_path_redirects(self, sandbox_dir: Path):
-        from nexus.catalog.catalog import _default_registry_path
+        from nexus.catalog.types import _default_registry_path
 
         assert _default_registry_path() == sandbox_dir / "repos.json"
 
@@ -211,7 +208,6 @@ class TestSessionIsolatedUnderOverride:
         from nexus.session import CLAUDE_SESSION_FILE
 
         assert CLAUDE_SESSION_FILE == sandbox_dir / "current_session"
-
 
 
 class TestCheckpointAndBufferRedirects:
@@ -270,43 +266,10 @@ class TestLocalChromaPathUnaffected:
     NEXUS_CONFIG_DIR override only controls the ``.config/nexus`` surface."""
 
     def test_local_chroma_path_uses_xdg_data_home(self, sandbox_dir: Path, monkeypatch):
-        from nexus.config import _default_local_path
+        from nexus.stranded_install import legacy_chroma_dir as _default_local_path
 
         # Not redirected by NEXUS_CONFIG_DIR.
         monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         p = _default_local_path()
         assert p == Path.home() / ".local" / "share" / "nexus" / "chroma"
-
-
-class TestNoProductionT2Writes:
-    """End-to-end assurance: a sandbox-scoped ``T2Database(default_db_path())``
-    writes ONLY under the override, never under the user's home."""
-
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: the on-disk sandbox memory.db placement assertion "
-        "(SQLite T2 file substrate) dies at the RDR-155 P4b flip — service-"
-        "backed T2 writes produce no local file to assert on",
-    )
-    def test_t2_writes_land_in_sandbox(self, sandbox_dir: Path):
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
-
-        path = default_db_path()
-        assert path.parent == sandbox_dir
-
-        with T2Database(path) as db:
-            db.memory.put(
-                project="sandbox-test", title="hello",
-                content="isolation check",
-            )
-
-        # T2 file lives under the sandbox, not under ~/.config/nexus
-        assert path.exists()
-        assert path.is_relative_to(sandbox_dir)
-        # No file created under the user's production config dir by this test.
-        production = Path.home() / ".config" / "nexus" / "memory.db"
-        # Can't assert absence (user may have a real one), but assert that
-        # the one we just wrote is not that one.
-        assert path != production

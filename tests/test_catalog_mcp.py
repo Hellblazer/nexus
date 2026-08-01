@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.mcp_server import (
     _reset_singletons,
@@ -40,22 +40,20 @@ def clean_singletons():
 
 
 @pytest.fixture
-def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
-    catalog_dir = tmp_path / "catalog"
-    c = Catalog.init(catalog_dir)
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ActiveCatalog:
+    """Seed through the ACTIVE catalog, the one the MCP tools read.
+
+    nexus-aqbrk: this used to return the local ``Catalog`` and seed it
+    directly, so under the engine substrate the owner landed in
+    ``.catalog.db`` while the MCP tools resolved the SERVICE catalog and saw
+    an empty tenant — hence "list index out of range" and "no document with
+    tumbler 1.1.1". nexus-i711w terminal deletion: the local ``Catalog.init``
+    arm is gone entirely; ActiveCatalog needs no local init.
+    """
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+    c = ActiveCatalog()
     c.register_owner("test-repo", "repo", repo_hash="abcd1234")
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return c
-
-
-@pytest.mark.parametrize("fn,kwargs", [
-    (catalog_search, dict(query="anything")),
-    (catalog_list, {}),
-])
-def test_without_catalog_returns_error(fn, kwargs, monkeypatch) -> None:
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", "/tmp/nonexistent-catalog-test")
-    _reset_singletons()
-    assert "error" in fn(**kwargs)[0]
 
 
 def test_show_without_catalog(monkeypatch) -> None:
@@ -387,7 +385,17 @@ def test_link_audit(cat, monkeypatch) -> None:
     _setup_two_docs(cat)
     catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
     result = catalog_link_audit()
-    assert result["total"] == 1 and result["by_type"]["cites"] == 1
+    # nexus-wnlit / nexus-ai41v FIXED 2026-07-31: link_audit is no longer a
+    # stub returning {}. It was asserted AT the broken value so the fix would
+    # fail loudly here — it did, and this is the promised restoration of the
+    # unconditional assertion. An empty dict is the shape that matters: the
+    # tool reported success-shaped emptiness, indistinguishable from "audited,
+    # found nothing".
+    assert result["total"] == 1, (
+        f"one link was created above; audit reported {result!r}"
+    )
+    assert result["by_type"]["cites"] == 1
+    assert result["orphaned_count"] == len(result["orphaned"])
 
 
 @pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])

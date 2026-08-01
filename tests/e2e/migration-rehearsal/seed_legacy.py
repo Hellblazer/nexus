@@ -50,14 +50,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 
-# Build the legacy T2 + catalog stores as raw SQLite, never the service backend
-# — these ARE the migration source a pre-cutover (pre-5.10) nx left on disk.
-# Set before importing nexus.db so storage_backend_for() resolves to SQLITE.
-# Isolated to this process; the migrate command runs separately in service mode.
-os.environ["NX_STORAGE_BACKEND"] = "sqlite"
+# Build the legacy T2 + catalog stores as RAW SQLITE, never through nexus
+# store classes — these ARE the migration source a pre-cutover nx left on
+# disk, and the store classes that once wrote them are deleted (RDR-158 P4;
+# the =sqlite selector this file used to pin hard-errors since P3). Raw SQL
+# against the frozen schemas below is wheel-version-independent, so the same
+# file seeds correctly under the working-tree wheel AND the era wheels.
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import chromadb
@@ -180,6 +183,590 @@ _BGE_MODEL = "bge-base-en-v15-768"
 _VOYAGE_CTX_MODEL = "voyage-context-3"  # knowledge content-type → voyage-context-3
 
 
+#: Frozen legacy T2 schema — the exact ``sqlite_master`` DDL the deleted
+#: client migration chain (``nexus/db/migrations.py``, removed in RDR-158
+#: P4 Stage 4) produced at HEAD e3c00252, FTS shadow tables excluded.
+#: Byte-identical to ``tests/_t2_fixture_ops._FROZEN_LEGACY_T2_SCHEMA``
+#: (kept in lockstep; the reviewer verified the capture against the live
+#: chain by running it out-of-band). Seeding raw against this schema
+#: replaces the old ``T2Database(run_migrations=True)`` construction,
+#: which cannot run on this wheel.
+_FROZEN_LEGACY_T2_SCHEMA: str = """\
+CREATE TABLE memory (
+    id            INTEGER PRIMARY KEY,
+    project       TEXT    NOT NULL,
+    title         TEXT    NOT NULL,
+    session       TEXT,
+    agent         TEXT,
+    content       TEXT    NOT NULL,
+    tags          TEXT,
+    timestamp     TEXT    NOT NULL,
+    ttl           INTEGER,
+    access_count  INTEGER DEFAULT 0 NOT NULL,
+    last_accessed TEXT    DEFAULT ''
+);
+
+CREATE UNIQUE INDEX idx_memory_project_title ON memory(project, title);
+
+CREATE INDEX idx_memory_project       ON memory(project);
+
+CREATE INDEX idx_memory_agent         ON memory(agent);
+
+CREATE INDEX idx_memory_timestamp     ON memory(timestamp);
+
+CREATE INDEX idx_memory_ttl_timestamp ON memory(ttl, timestamp);
+
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+    title,
+    content,
+    tags,
+    content='memory',
+    content_rowid='id'
+);
+
+CREATE TRIGGER memory_ai AFTER INSERT ON memory BEGIN
+    INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
+
+END;
+
+CREATE TRIGGER memory_ad AFTER DELETE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+
+END;
+
+CREATE TRIGGER memory_au AFTER UPDATE ON memory BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+
+INSERT INTO memory_fts(rowid, title, content, tags) VALUES (new.id, new.title, new.content, new.tags);
+
+END;
+
+CREATE TABLE plans (
+    id              INTEGER PRIMARY KEY,
+    project         TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL,
+    plan_json       TEXT NOT NULL,
+    outcome         TEXT DEFAULT 'success',
+    tags            TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    ttl             INTEGER,
+    -- RDR-078 dimensional identity, currying, metrics columns. Present on
+    -- fresh installs; the ``_add_plan_dimensional_identity`` migration
+    -- (4.4.0) covers upgrade-in-place.
+    name            TEXT,
+    verb            TEXT,
+    scope           TEXT,
+    dimensions      TEXT,
+    default_bindings TEXT,
+    parent_dims     TEXT,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    last_used       TEXT,
+    match_count     INTEGER NOT NULL DEFAULT 0,
+    match_conf_sum  REAL NOT NULL DEFAULT 0.0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    -- RDR-091 Phase 2a: scope_tags captures which corpora/collections a
+    -- plan actually touched. Comma-separated, sorted, deduplicated,
+    -- hash-suffix-normalized. DEFAULT '' is load-bearing — Phase 2b
+    -- treats '' as the scope-agnostic marker. Upgrade-in-place via the
+    -- 4.8.0 ``_add_plan_scope_tags`` migration.
+    scope_tags      TEXT NOT NULL DEFAULT '',
+    -- RDR-092 Phase 3: hybrid match_text. Fresh installs get this
+    -- column in the create; existing DBs pick it up via the 4.9.13
+    -- ``_add_plan_match_text_column`` migration (which also rebuilds
+    -- ``plans_fts`` so the FTS lane indexes match_text instead of
+    -- query).
+    match_text      TEXT NOT NULL DEFAULT ''
+, disabled_at TEXT);
+
+CREATE VIRTUAL TABLE plans_fts USING fts5(
+    match_text,
+    tags,
+    project,
+    content=plans,
+    content_rowid='id'
+);
+
+CREATE TRIGGER plans_ai AFTER INSERT ON plans BEGIN
+    INSERT INTO plans_fts(rowid, match_text, tags, project)
+        VALUES (new.id, new.match_text, new.tags, new.project);
+
+END;
+
+CREATE TRIGGER plans_ad AFTER DELETE ON plans BEGIN
+    INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+        VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+
+END;
+
+CREATE TRIGGER plans_au AFTER UPDATE ON plans BEGIN
+    INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+        VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+
+INSERT INTO plans_fts(rowid, match_text, tags, project)
+        VALUES (new.id, new.match_text, new.tags, new.project);
+
+END;
+
+CREATE TABLE topics (
+    id            INTEGER PRIMARY KEY,
+    label         TEXT NOT NULL,
+    parent_id     INTEGER REFERENCES topics(id),
+    collection    TEXT NOT NULL,
+    centroid_hash TEXT,
+    doc_count     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    terms         TEXT
+);
+
+CREATE TABLE taxonomy_meta (
+    collection              TEXT PRIMARY KEY,
+    last_discover_doc_count INTEGER NOT NULL DEFAULT 0,
+    last_discover_at        TEXT
+);
+
+CREATE TABLE topic_assignments (
+    doc_id      TEXT NOT NULL,
+    topic_id    INTEGER NOT NULL REFERENCES topics(id),
+    assigned_by TEXT NOT NULL DEFAULT 'hdbscan', similarity REAL, assigned_at TEXT, source_collection TEXT,
+    PRIMARY KEY (doc_id, topic_id)
+);
+
+CREATE TABLE topic_links (
+    from_topic_id INTEGER NOT NULL REFERENCES topics(id),
+    to_topic_id   INTEGER NOT NULL REFERENCES topics(id),
+    link_count    INTEGER NOT NULL DEFAULT 0,
+    link_types    TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (from_topic_id, to_topic_id)
+);
+
+CREATE TABLE relevance_log (
+    id         INTEGER PRIMARY KEY,
+    query      TEXT NOT NULL,
+    chunk_id   TEXT NOT NULL,
+    collection TEXT,
+    action     TEXT NOT NULL,
+    session_id TEXT,
+    timestamp  TEXT NOT NULL
+);
+
+CREATE INDEX idx_relevance_log_query
+    ON relevance_log(query);
+
+CREATE INDEX idx_relevance_log_chunk
+    ON relevance_log(chunk_id);
+
+CREATE INDEX idx_relevance_log_session
+    ON relevance_log(session_id);
+
+CREATE TABLE retention_markers (
+    relation      TEXT    PRIMARY KEY,
+    total_deleted INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT    NOT NULL
+);
+
+CREATE TABLE search_telemetry (
+    ts             TEXT    NOT NULL,
+    query_hash     TEXT    NOT NULL,
+    collection     TEXT    NOT NULL,
+    raw_count      INTEGER NOT NULL,
+    kept_count     INTEGER NOT NULL,
+    top_distance   REAL,
+    threshold      REAL,
+    PRIMARY KEY (ts, query_hash, collection)
+);
+
+CREATE INDEX idx_search_tel_collection
+    ON search_telemetry(collection);
+
+CREATE INDEX idx_search_tel_ts
+    ON search_telemetry(ts);
+
+CREATE TABLE _nexus_version (    key   TEXT PRIMARY KEY,    value TEXT NOT NULL);
+
+CREATE INDEX idx_topic_assignments_source ON topic_assignments(source_collection, assigned_by);
+
+CREATE INDEX idx_plans_verb ON plans(verb);
+
+CREATE INDEX idx_plans_scope ON plans(scope);
+
+CREATE INDEX idx_plans_verb_scope ON plans(verb, scope);
+
+CREATE UNIQUE INDEX idx_plans_project_dimensions ON plans(project, dimensions) WHERE dimensions IS NOT NULL;
+
+CREATE TABLE nx_answer_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            question    TEXT    NOT NULL,
+            plan_id     INTEGER,
+            matched_confidence REAL,
+            step_count  INTEGER NOT NULL DEFAULT 0,
+            final_text  TEXT    NOT NULL DEFAULT '',
+            cost_usd    REAL    NOT NULL DEFAULT 0.0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+CREATE TABLE chash_index (
+            chash                TEXT NOT NULL,
+            physical_collection  TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            PRIMARY KEY (chash, physical_collection)
+        );
+
+CREATE INDEX idx_chash_index_collection
+            ON chash_index(physical_collection);
+
+CREATE TABLE hook_failures (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id      TEXT NOT NULL DEFAULT '',
+            collection  TEXT NOT NULL DEFAULT '',
+            hook_name   TEXT NOT NULL,
+            error       TEXT NOT NULL DEFAULT '',
+            occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        , batch_doc_ids TEXT, is_batch INTEGER NOT NULL DEFAULT 0, chain TEXT NOT NULL DEFAULT 'single');
+
+CREATE INDEX idx_hook_failures_occurred_at
+            ON hook_failures(occurred_at);
+
+CREATE INDEX idx_hook_failures_collection
+            ON hook_failures(collection);
+
+CREATE TABLE document_aspects (
+            collection             TEXT NOT NULL,
+            source_path            TEXT NOT NULL,
+            problem_formulation    TEXT,
+            proposed_method        TEXT,
+            experimental_datasets  TEXT,
+            experimental_baselines TEXT,
+            experimental_results   TEXT,
+            extras                 TEXT,
+            confidence             REAL,
+            extracted_at           TEXT NOT NULL,
+            model_version          TEXT NOT NULL,
+            extractor_name         TEXT NOT NULL, source_uri TEXT, salient_sentences TEXT,
+            PRIMARY KEY (collection, source_path)
+        );
+
+CREATE INDEX idx_document_aspects_extractor
+            ON document_aspects(extractor_name, model_version);
+
+CREATE TABLE aspect_extraction_queue (
+            collection      TEXT NOT NULL,
+            source_path     TEXT NOT NULL,
+            content_hash    TEXT NOT NULL DEFAULT '',
+            content         TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            retry_count     INTEGER NOT NULL DEFAULT 0,
+            enqueued_at     TEXT NOT NULL,
+            last_attempt_at TEXT,
+            last_error      TEXT,
+            PRIMARY KEY (collection, source_path)
+        );
+
+CREATE INDEX idx_aspect_queue_status
+            ON aspect_extraction_queue(status);
+
+CREATE TABLE aspect_promotion_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            field_name      TEXT NOT NULL,
+            sql_type        TEXT NOT NULL,
+            column_added    INTEGER NOT NULL,
+            rows_backfilled INTEGER NOT NULL DEFAULT 0,
+            rows_pruned     INTEGER NOT NULL DEFAULT 0,
+            pruned          INTEGER NOT NULL DEFAULT 0,
+            promoted_at     TEXT NOT NULL
+        );
+
+CREATE INDEX idx_aspect_promotion_log_field
+            ON aspect_promotion_log(field_name);
+
+CREATE TABLE frecency (
+            chunk_id        TEXT PRIMARY KEY,
+            embedded_at     TEXT NOT NULL DEFAULT '',
+            ttl_days        INTEGER NOT NULL DEFAULT 0,
+            frecency_score  REAL NOT NULL DEFAULT 0,
+            miss_count      INTEGER NOT NULL DEFAULT 0,
+            last_hit_at     TEXT NOT NULL DEFAULT ''
+        );
+
+CREATE TABLE tier_writes (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT    NOT NULL,
+            ts           TEXT    NOT NULL,
+            tool         TEXT    NOT NULL,
+            tier         TEXT    NOT NULL,
+            agent        TEXT,
+            project      TEXT,
+            target_title TEXT
+        );
+
+CREATE INDEX idx_tier_writes_session ON tier_writes(session_id);
+
+CREATE INDEX idx_tier_writes_ts      ON tier_writes(ts);
+
+CREATE INDEX idx_tier_writes_tool    ON tier_writes(tool);
+
+CREATE TABLE document_highlights (
+            doc_id        TEXT PRIMARY KEY,
+            source_uri    TEXT,
+            collection    TEXT,
+            highlights_md TEXT,
+            mentions_md   TEXT,
+            ingested_at   TEXT NOT NULL
+        );
+
+CREATE INDEX idx_document_highlights_source_uri
+            ON document_highlights(source_uri);
+
+CREATE UNIQUE INDEX idx_topics_root_collection_label ON topics(collection, label) WHERE parent_id IS NULL;
+
+CREATE TABLE claude_assisted_remediation_consents (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope   TEXT    NOT NULL,
+            ts      TEXT    NOT NULL,
+            granted INTEGER NOT NULL
+        );
+
+CREATE INDEX idx_consents_scope ON claude_assisted_remediation_consents(scope);;
+"""
+
+
+# ── Frozen legacy catalog schema (raw-SQLite seeding) ────────────────────────
+# The local Catalog implementation (nexus.catalog.catalog / nexus.db.t2.catalog)
+# was DELETED by the RDR-158/RDR-155 substrate retirement (i711w): the on-disk
+# ``.catalog.db`` is now a frozen MIGRATION SOURCE that the ETL and the
+# rehearsal assertions read via raw sqlite3. This seeder produces that LEGACY
+# artifact, so raw SQLite is the correct tool here (same class as
+# migrations.py's rehomed schemas; tests/e2e is outside the NO-SQLITE DDL
+# census, which scans src/ only).
+#
+# Frozen migration-SOURCE schema, copied VERBATIM from the deleted
+# ``src/nexus/db/t2/catalog.py`` ``_SCHEMA_SQL`` at df0c9c25 (the last
+# pre-deletion commit). Do not evolve it — a legacy artifact's schema is
+# immutable by definition; the upgrade ladder owns forward conversion.
+_LEGACY_CATALOG_SCHEMA_SQL = """\
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS owners (
+    tumbler_prefix TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_type TEXT NOT NULL,
+    repo_hash TEXT,
+    description TEXT,
+    repo_root TEXT DEFAULT '',
+    -- RDR-137 Phase 1.5b (nexus-tts0d.2): per-repo git HEAD identity,
+    -- previously held by ~/.config/nexus/repos.json. The indexer's
+    -- staleness skip compares the running repo's git HEAD against this
+    -- column; A1 verdict rejected documents.source_mtime as equivalent
+    -- because a repo HEAD can advance without any tracked file's mtime
+    -- changing (remote-only merge, ff-only pull of tag-only commits).
+    -- NULL on pre-migration rows AND on owners without a tracked HEAD
+    -- (e.g. ``curator`` owners minted by ``nx index pdf --corpus name``).
+    head_hash TEXT,
+    -- nexus-7vuw: name UNIQUE was a too-strict invariant. A repo and a
+    -- curator are different namespaces, so a repo named "nexus" should
+    -- coexist with a curator named "nexus" (e.g. ``nx index pdf
+    -- --corpus nexus`` after ``nx index repo .``). Pre-fix, the second
+    -- INSERT OR REPLACE silently obliterated the first row via the
+    -- name UNIQUE conflict, leaving owner_for_repo(repo_hash) returning
+    -- None and the indexer falling through to path-derived collection
+    -- naming. Composite UNIQUE keeps name-collision detection where it
+    -- belongs (within an owner_type).
+    UNIQUE(name, owner_type)
+);
+
+-- RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial unique index
+-- on repo_hash so the TOCTOU race in ensure_owner_for_repo (lookup-
+-- then-register) cannot create duplicate owner rows for the same
+-- repository. Excludes empty / NULL repo_hash so curator owners
+-- (which never carry a repo_hash) coexist without conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_repo_hash
+    ON owners(repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != '';
+
+CREATE TABLE IF NOT EXISTS documents (
+    tumbler TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    author TEXT,
+    year INTEGER,
+    content_type TEXT,
+    file_path TEXT,
+    corpus TEXT,
+    physical_collection TEXT,
+    chunk_count INTEGER,
+    head_hash TEXT,
+    indexed_at TEXT,
+    metadata JSON,
+    source_mtime REAL NOT NULL DEFAULT 0,
+    -- nexus-s8yz: permanent tumbler aliasing. When a document is
+    -- consolidated into a canonical owner (dedupe-owners, nexus-tmbh),
+    -- its row is kept and alias_of is set to the canonical tumbler.
+    -- External references (plan templates, prose citations, links
+    -- written by other systems) continue to resolve via alias_of —
+    -- that is the stability promise tumblers were chosen for.
+    -- '' (empty) means "this is the canonical document".
+    alias_of TEXT NOT NULL DEFAULT '',
+    -- RDR-096 P2.1: persistent URI identity. ``''`` (empty) on
+    -- legacy rows; populated for new registers after P2.1 ships.
+    -- Backfill derives URIs from ``file_path + physical_collection``.
+    source_uri TEXT NOT NULL DEFAULT '',
+    -- RDR-101 Phase 1 PR D (nexus-knn3): bibliographic enrichment
+    -- columns from the bib disposition deliverable
+    -- (docs/rdr/post-mortem/rdr-101-bib-disposition.md, Option A).
+    -- The bib_* fields move OFF T3 chunk metadata and live exactly once
+    -- on the Document projection. Phase 1 ships the empty columns;
+    -- Phase 3 wires DocumentEnriched v: 1 events to populate them
+    -- through the projector. The two indexed ID columns are the
+    -- "this title was enriched on backend X" cardinality marker that
+    -- nx enrich bib's skip query will read against (Phase 4); the
+    -- partial indexes (created below) make that query a sub-millisecond
+    -- presence test instead of a 300-row Chroma pagination.
+    bib_year INTEGER NOT NULL DEFAULT 0,
+    bib_authors TEXT NOT NULL DEFAULT '',
+    bib_venue TEXT NOT NULL DEFAULT '',
+    bib_citation_count INTEGER NOT NULL DEFAULT 0,
+    bib_semantic_scholar_id TEXT NOT NULL DEFAULT '',
+    bib_openalex_id TEXT NOT NULL DEFAULT '',
+    bib_doi TEXT NOT NULL DEFAULT '',
+    bib_enriched_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    title, author, corpus, file_path,
+    content=documents, content_rowid=rowid
+);
+
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, title, author, corpus, file_path)
+        VALUES (new.rowid, new.title, new.author, new.corpus, new.file_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, title, author, corpus, file_path)
+        VALUES ('delete', old.rowid, old.title, old.author, old.corpus, old.file_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, title, author, corpus, file_path)
+        VALUES ('delete', old.rowid, old.title, old.author, old.corpus, old.file_path);
+    INSERT INTO documents_fts(rowid, title, author, corpus, file_path)
+        VALUES (new.rowid, new.title, new.author, new.corpus, new.file_path);
+END;
+
+CREATE TABLE IF NOT EXISTS links (
+    id INTEGER PRIMARY KEY,
+    from_tumbler TEXT NOT NULL,
+    to_tumbler TEXT NOT NULL,
+    link_type TEXT NOT NULL,
+    from_span TEXT,
+    to_span TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT,
+    metadata JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_tumbler);
+CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_tumbler);
+CREATE INDEX IF NOT EXISTS idx_links_type ON links(link_type);
+CREATE INDEX IF NOT EXISTS idx_links_created_by ON links(created_by);
+CREATE INDEX IF NOT EXISTS idx_links_from_type ON links(from_tumbler, link_type);
+CREATE INDEX IF NOT EXISTS idx_links_to_type ON links(to_tumbler, link_type);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique
+    ON links(from_tumbler, to_tumbler, link_type);
+
+CREATE INDEX IF NOT EXISTS idx_links_created_by_type
+    ON links(created_by, link_type);
+
+CREATE INDEX IF NOT EXISTS idx_documents_tumbler
+    ON documents(tumbler);
+
+-- RDR-101 Phase 6 (nexus-o6aa.14): first-class Collections projection.
+-- One row per ChromaDB collection name. Materialized from
+-- CollectionCreated events; legacy_grandfathered is projection-derived
+-- from corpus.is_conformant_collection_name (no event-payload extension
+-- required, v: 0 stays stable). Read paths consult this table to
+-- distinguish post-Phase-6 canonical names from grandfathered legacy
+-- names; write paths consult it to short-circuit re-registration.
+CREATE TABLE IF NOT EXISTS collections (
+    name TEXT PRIMARY KEY,
+    content_type TEXT NOT NULL DEFAULT '',
+    owner_id TEXT NOT NULL DEFAULT '',
+    embedding_model TEXT NOT NULL DEFAULT '',
+    model_version TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    -- 1 = name does NOT match is_conformant_collection_name; the row
+    -- exists only because the collection predates RDR-101 Phase 6 or
+    -- was manually registered by the operator. Read paths accept it.
+    legacy_grandfathered INTEGER NOT NULL DEFAULT 0,
+    superseded_by TEXT NOT NULL DEFAULT '',
+    superseded_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_collections_legacy
+    ON collections(legacy_grandfathered);
+CREATE INDEX IF NOT EXISTS idx_collections_owner
+    ON collections(owner_id);
+
+-- nexus-wehp: cross-process consistency-marker table. Stores the
+-- highest canonical-source mtime that was successfully projected into
+-- this SQLite cache. Catalog._ensure_consistent reads it on
+-- construction to skip the DELETE+replay rebuild when the projection
+-- is already up to date, eliminating the 'database is locked'
+-- contention that surfaced when CLI write-side verbs raced an
+-- nx-mcp-held connection in v4.23.0. A fresh SQLite cache has no
+-- row, returns 0.0, and the rebuild fires (the e2e test invariant
+-- 'fresh cache against existing catalog dir sees the data').
+CREATE TABLE IF NOT EXISTS _meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- RDR-103 Phase 2: ``Catalog.collection_for`` resolves a
+-- ``(content_type, owner_id, embedding_model)`` triple to the
+-- highest-versioned conformant collection. Without this index the
+-- lookup is a full scan over the projection.
+CREATE INDEX IF NOT EXISTS idx_collections_tuple
+    ON collections(content_type, owner_id, embedding_model);
+
+-- RDR-101 Phase 1 PR D (nexus-knn3) partial indexes on bib backend IDs
+-- live in the post-migration block in __init__: the legacy-DB upgrade
+-- path has to ALTER TABLE the bib columns into existence before the
+-- partial-index CREATE can reference them.
+
+-- RDR-108 D2 (nexus-mydi): document_chunks manifest. The catalog is
+-- the authoritative source of truth for doc->chunk ordering (the
+-- "tree" layer of the git/IPFS-style blob+tree split). T3 chunks are
+-- content-addressed blobs keyed on chunk_text_hash[:32]; this table
+-- records the ordered (doc_id, position) -> chash references that
+-- compose each Document. The same chash can appear at multiple
+-- (doc_id, position) rows: the manifest preserves position; T3
+-- stores content once. Optional positional columns (line_start /
+-- line_end / char_start / char_end) carry display-friendly span
+-- coordinates so retrieval doesn't have to re-derive them from the
+-- source file. chunk_index is the chunker-assigned ordinal at index
+-- time, retained for reference; position is the canonical ordering
+-- key from this RDR onward.
+CREATE TABLE IF NOT EXISTS document_chunks (
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    PRIMARY KEY (doc_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_chash
+    ON document_chunks(chash);
+"""
+
+
 def _remap_model(source: str, model: str) -> str:
     """Swap the model segment of a conformant 4-segment collection name."""
     seg = source.split("__")
@@ -255,15 +842,35 @@ def _seed_t2_and_catalog(
     cascade would be vacuously green (nothing legacy-keyed to converge).
     """
     from nexus.config import nexus_config_dir
-    from nexus.db.t2 import T2Database
 
     cfg = nexus_config_dir()
     cfg.mkdir(parents=True, exist_ok=True)
-    db = T2Database(cfg / "memory.db", run_migrations=True)
-    db.memory.put(
-        project="rehearsal", title="legacy-note",
-        content="pre-cutover note", tags="rehearsal", ttl=0,
+    # Raw-SQLite seeding of the frozen legacy T2 (see the
+    # _FROZEN_LEGACY_T2_SCHEMA provenance comment): the deleted
+    # ``T2Database(run_migrations=True)`` + ``MemoryStore.put`` calls are
+    # replicated as the exact rows they produced; the schema's FTS triggers
+    # keep memory_fts in sync. The version stamp mirrors what
+    # ``run_migrations=True`` used to write (the installed wheel version).
+    t2_conn = sqlite3.connect(str(cfg / "memory.db"))
+    t2_conn.executescript(_FROZEN_LEGACY_T2_SCHEMA)
+    try:
+        from importlib.metadata import version as _dist_version
+        _stamp = _dist_version("conexus")
+    except Exception:
+        _stamp = "0.0.0"
+    t2_conn.execute(
+        "INSERT OR REPLACE INTO _nexus_version (key, value) "
+        "VALUES ('cli_version', ?)",
+        (_stamp,),
     )
+    _now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    t2_conn.execute(
+        "INSERT INTO memory (project, title, content, tags, timestamp, ttl) "
+        "VALUES ('rehearsal', 'legacy-note', 'pre-cutover note', "
+        "'rehearsal', ?, 0)",
+        (_now,),
+    )
+    t2_conn.commit()
 
     # RDR-162 P2: a SOURCELESS note assignment — a topic + a topic_assignment
     # whose ``source_collection`` is the note collection, with NO catalog file
@@ -277,23 +884,22 @@ def _seed_t2_and_catalog(
     # audit re-found — seeding it with a legacy key is what makes that leg of
     # the cascade falsifiable here.
     for note_coll in sorted(_SOURCELESS & set(collections)):
-        tax = db.taxonomy
         label = f"{note_coll.split('__')[1]}-topic"
-        tax.conn.execute(
+        t2_conn.execute(
             "INSERT INTO topics (label, collection, doc_count, created_at) "
             "VALUES (?, ?, ?, ?)",
             (label, note_coll, 1, "2026-06-18T00:00:00Z"),
         )
-        topic_id = tax.conn.execute(
+        topic_id = t2_conn.execute(
             "SELECT id FROM topics WHERE collection = ?", (note_coll,)
         ).fetchone()[0]
-        tax.conn.execute(
+        t2_conn.execute(
             "INSERT INTO topic_assignments "
             "(doc_id, topic_id, assigned_by, source_collection) "
             "VALUES (?, ?, 'manual', ?)",
             (collections[note_coll][0], topic_id, note_coll),
         )
-        tax.conn.commit()
+        t2_conn.commit()
 
     # RDR-180 pointer stores keyed by the 16-char era (nexus-jxizy.10.10).
     # Timestamps ISO-8601 (validate_timestamp_fields pre-land guard);
@@ -301,7 +907,7 @@ def _seed_t2_and_catalog(
     # every row (the collapse pair's two refs converge to ONE frecency /
     # chash_index row but TWO relevance rows — exact numbers in main()).
     if rdr180_pointer_ids:
-        conn = db.taxonomy.conn
+        conn = t2_conn
         iso = "2026-06-18T00:00:00Z"
         for ch in rdr180_pointer_ids:
             conn.execute(
@@ -323,17 +929,51 @@ def _seed_t2_and_catalog(
             )
         conn.commit()
 
-    from nexus.catalog.catalog import Catalog
+    t2_conn.close()
 
+    # Raw-SQLite seeding of the frozen legacy catalog (see the
+    # _LEGACY_CATALOG_SCHEMA_SQL provenance comment). The deleted
+    # ``Catalog.init`` / ``register_owner`` / ``register_collection`` /
+    # ``register`` / ``write_manifest`` calls are replicated below as the
+    # exact SQLite rows they produced (event-sourced projector SQL at
+    # df0c9c25 — schema triggers keep documents_fts in sync). Only the
+    # ``.catalog.db`` artifact is seeded: the JSONL/git sidecars the old
+    # Catalog also wrote are not consumed by any rehearsal leg or by the
+    # ETL (both read the SQLite file raw), and OMITTING documents.jsonl
+    # is load-bearing for the era-hop leg — a legacy Catalog construction
+    # only fires its DELETE+replay rebuild when documents.jsonl exists.
     cat_dir = cfg / "catalog"
     cat_dir.mkdir(parents=True, exist_ok=True)
-    cat = Catalog.init(cat_dir) if not (cat_dir / ".catalog.db").exists() \
-        else Catalog(cat_dir, cat_dir / ".catalog.db")
+    cat_conn = sqlite3.connect(str(cat_dir / ".catalog.db"))
+    cat_conn.executescript(_LEGACY_CATALOG_SCHEMA_SQL)
 
     repo_root = "/tmp/rehearsal-src"
     Path(repo_root).mkdir(parents=True, exist_ok=True)
-    owner = cat.register_owner(
-        "rehearsal", "project", repo_hash="rehearsal01", repo_root=repo_root,
+    # register_owner("rehearsal", "project", repo_hash="rehearsal01",
+    # repo_root=repo_root): mint the next ``1.<n>`` prefix (fresh DB -> 1.1)
+    # unless the (name, owner_type) row already exists — the UNIQUE key the
+    # deleted projector's INSERT OR REPLACE conflicted on.
+    row = cat_conn.execute(
+        "SELECT tumbler_prefix FROM owners WHERE name = ? AND owner_type = ?",
+        ("rehearsal", "project"),
+    ).fetchone()
+    if row:
+        owner_prefix = row[0]
+    else:
+        row = cat_conn.execute(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler_prefix, "
+            "INSTR(tumbler_prefix, '.') + 1) AS INTEGER)), 0) "
+            "FROM owners WHERE tumbler_prefix LIKE '1.%'"
+        ).fetchone()
+        owner_prefix = f"1.{(row[0] or 0) + 1}"
+    cat_conn.execute(
+        "INSERT OR REPLACE INTO owners "
+        "(tumbler_prefix, name, owner_type, repo_hash, description, "
+        "repo_root, head_hash) VALUES (?, ?, ?, ?, ?, ?, "
+        "COALESCE((SELECT head_hash FROM owners "
+        "WHERE name = ? AND owner_type = ?), ''))",
+        (owner_prefix, "rehearsal", "project", "rehearsal01", "",
+         repo_root, "rehearsal", "project"),
     )
 
     # nexus-qeoxf: register EVERY seeded collection in catalog_collections
@@ -347,16 +987,37 @@ def _seed_t2_and_catalog(
     # occur in production. Includes _NOTE: sourceless as a DOCUMENT, but still a
     # registered COLLECTION. Names are conformant 4-segment
     # (<content_type>__<owner>__<model>__v<n>); supply the segments so they
-    # round-trip exactly.
+    # round-trip exactly. legacy_grandfathered is hardwired 0: every seeded
+    # name is conformant 4-segment, which is exactly what the deleted
+    # register_collection's is_conformant_collection_name check computed.
+    coll_ts = datetime.now(UTC).isoformat()
     for coll in collections:
         seg = coll.split("__")
-        cat.register_collection(
-            coll,
-            content_type=seg[0],
-            owner_id=seg[1],
-            embedding_model=seg[2],
-            model_version=seg[3],
+        cat_conn.execute(
+            "INSERT OR REPLACE INTO collections "
+            "(name, content_type, owner_id, embedding_model, model_version, "
+            "display_name, legacy_grandfathered, superseded_by, "
+            "superseded_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, "
+            "COALESCE((SELECT superseded_by FROM collections WHERE name = ?), ''), "
+            "COALESCE((SELECT superseded_at FROM collections WHERE name = ?), ''), "
+            "COALESCE((SELECT created_at FROM collections WHERE name = ?), ?))",
+            (coll, seg[0], seg[1], seg[2], seg[3], coll,
+             coll, coll, coll, coll_ts),
         )
+
+    # Sequential doc tumblers under the owner prefix, exactly as the deleted
+    # ``register`` minted them (fresh owner next_seq=1 -> 1.1.1, 1.1.2, ...).
+    # Resume from the high-water mark so a re-run against an existing DB
+    # never re-mints an occupied tumbler.
+    depth = len(owner_prefix.split("."))
+    row = cat_conn.execute(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler, LENGTH(?) + 2) AS INTEGER)), 0) "
+        "FROM documents WHERE tumbler LIKE ? "
+        "AND (LENGTH(tumbler) - LENGTH(REPLACE(tumbler, '.', ''))) = ?",
+        (owner_prefix, owner_prefix + ".%", depth),
+    ).fetchone()
+    next_doc_num = (row[0] or 0) + 1
 
     docs = 0
     for coll, chashes in collections.items():
@@ -366,19 +1027,49 @@ def _seed_t2_and_catalog(
             continue
         fp = f"{repo_root}/{coll}.md"
         Path(fp).write_text("rehearsal legacy doc\n")
-        doc = cat.register(
-            owner, coll, content_type="knowledge", file_path=fp,
-            physical_collection=coll, chunk_count=len(chashes),
+        now = datetime.now(UTC).isoformat()
+        # register(): idempotent by file_path within the owner prefix;
+        # otherwise INSERT the row the deleted projector wrote for a
+        # DocumentRegistered event (source_uri = file://<abspath>, empty
+        # author/corpus/head_hash/alias_of, metadata '{}', bib_* defaults).
+        row = cat_conn.execute(
+            "SELECT tumbler FROM documents WHERE file_path = ? "
+            "AND tumbler LIKE ? "
+            "AND (LENGTH(tumbler) - LENGTH(REPLACE(tumbler, '.', ''))) = ?",
+            (fp, owner_prefix + ".%", depth),
+        ).fetchone()
+        if row:
+            doc = row[0]
+        else:
+            doc = f"{owner_prefix}.{next_doc_num}"
+            next_doc_num += 1
+            cat_conn.execute(
+                "INSERT INTO documents "
+                "(tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, "
+                "indexed_at, metadata, source_mtime, alias_of, source_uri) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (doc, coll, "", 0, "knowledge", fp, "", coll, len(chashes),
+                 "", now, json.dumps({}), 0.0, "", "file://" + fp),
+            )
+        # write_manifest(): DELETE-then-INSERT (idempotent), positions
+        # 0..n-1, chunk_index/span columns NULL, then the nexus-p5qk8
+        # indexed_at refresh a manifest write performed.
+        cat_conn.execute("DELETE FROM document_chunks WHERE doc_id = ?", (doc,))
+        cat_conn.executemany(
+            "INSERT INTO document_chunks "
+            "(doc_id, position, chash, chunk_index, "
+            " line_start, line_end, char_start, char_end) "
+            "VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL)",
+            [(doc, i, c) for i, c in enumerate(chashes)],
         )
-        cat.write_manifest(
-            str(doc),
-            [
-                {"chash": c, "position": i, "line_start": None,
-                 "line_end": None, "char_start": None, "char_end": None}
-                for i, c in enumerate(chashes)
-            ],
+        cat_conn.execute(
+            "UPDATE documents SET indexed_at = ? WHERE tumbler = ?",
+            (datetime.now(UTC).isoformat(), doc),
         )
         docs += 1
+    cat_conn.commit()
+    cat_conn.close()
     return {"t2_notes": 1, "catalog_docs": docs}
 
 

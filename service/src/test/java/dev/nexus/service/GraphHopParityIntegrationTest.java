@@ -47,7 +47,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link GraphHopParityTest} parity group uses an in-SQL oracle; this closes it against
  * the real Java graphBFS).
  *
- * <p>Built as a focused sibling (not a DualRunHarness extension) for the same reason as
+ * <p>Built as a focused sibling (not an extension of the Chroma-era DualRunHarness,
+ * deleted at RDR-155 P4b) for the same reason as
  * {@link CombinedQueryParityIntegrationTest}: the harness's Chroma baseline leg is
  * unrelated to combined-query parity and can't embed the minilm token in a minilm-only
  * router (nexus-i055u). Graph-hop parity is pgvector-only: function vs app-stitch on the
@@ -165,7 +166,7 @@ class GraphHopParityIntegrationTest {
             int len = 8 + rnd.nextInt(5);
             Set<String> words = new LinkedHashSet<>();
             while (words.size() < len) words.add(WORD_BANK.get(rnd.nextInt(WORD_BANK.size())));
-            docs.add(new GhDoc("gh-doc-" + d, sha256Hex32("gh-chash-" + d),
+            docs.add(new GhDoc("gh-doc-" + d, sha256Hex("gh-chash-" + d),
                 String.join(" ", words) + " ghdoc" + d, false));
         }
         // Probes drawn from the FIRST THREE docs' words (the depth-2 reachable set), so
@@ -176,10 +177,10 @@ class GraphHopParityIntegrationTest {
         }
         // Unreachable doc: text == queries.get(0) → vector top match, but NO edges, so
         // graphBFS never reaches it. Both stitch and function must exclude it.
-        docs.add(new GhDoc(UNREACH_TUMBLER, sha256Hex32("gh-unreach"), queries.get(0), false));
+        docs.add(new GhDoc(UNREACH_TUMBLER, sha256Hex("gh-unreach"), queries.get(0), false));
         // Tombstoned reachable doc: linked into the chain (so graph-reachable) but
         // deleted_at set; text == queries.get(0) so it would top-rank if the guard missed.
-        docs.add(new GhDoc(TOMB_TUMBLER, sha256Hex32("gh-tomb"), queries.get(0), true));
+        docs.add(new GhDoc(TOMB_TUMBLER, sha256Hex("gh-tomb"), queries.get(0), true));
 
         pgRepo.upsertChunks(TENANT, COLL,
             docs.stream().map(GhDoc::chash).toList(),
@@ -195,11 +196,12 @@ class GraphHopParityIntegrationTest {
                     + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 'Doc', 'ada', 'paper', '"
                     + COLL + "', " + (c.tombstoned() ? "now()" : "NULL") + ") "
                     + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                // RDR-180: chash is bytea (32 octets) — decode the 64-hex string.
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, '" + c.chash()
-                    + "', '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, decode('" + c.chash()
+                    + "', 'hex'), '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
             }
             // cites chain gh-doc-0 → 1 → 2 → 3 … across the whole numbered range.
             for (int d = 0; d < GH_SIZE - 1; d++) {
@@ -242,7 +244,7 @@ class GraphHopParityIntegrationTest {
         List<String> texts = new ArrayList<>();
         for (String n : names) {
             branchTumblers.add(n);
-            chashes.add(sha256Hex32("bchash-" + n));
+            chashes.add(sha256Hex("bchash-" + n));
             texts.add(B_PROBE + " " + n.replace("-", ""));
         }
         pgRepo.upsertChunks(TENANT, COLL2, chashes, texts,
@@ -255,11 +257,12 @@ class GraphHopParityIntegrationTest {
                     + "(tenant_id, tumbler, title, author, content_type, physical_collection) "
                     + "VALUES ('" + TENANT + "', '" + names[i] + "', 'Doc', 'ada', 'paper', '"
                     + COLL2 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                // RDR-180: chash is bytea (32 octets) — decode the 64-hex string.
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT + "', '" + names[i] + "', 0, '" + chashes.get(i)
-                    + "', '" + COLL2 + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                    + "VALUES ('" + TENANT + "', '" + names[i] + "', 0, decode('" + chashes.get(i)
+                    + "', 'hex'), '" + COLL2 + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
             }
             String[][] edges = {
                 {"b-x", "b-a", "cites"}, {"b-a", "b-b", "cites"}, {"b-a", "b-c", "cites"},
@@ -439,7 +442,7 @@ class GraphHopParityIntegrationTest {
 
     private static String sha256HexUnchecked(String seed) {
         try {
-            return sha256Hex32(seed);
+            return sha256Hex(seed);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -449,11 +452,13 @@ class GraphHopParityIntegrationTest {
         return rows.stream().map(r -> (String) r.get("id")).toList();
     }
 
-    private static String sha256Hex32(String seed) throws Exception {
+    private static String sha256Hex(String seed) throws Exception {
         byte[] h = java.security.MessageDigest.getInstance("SHA-256")
             .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         StringBuilder sb = new StringBuilder(64);
         for (byte b : h) sb.append(String.format("%02x", b));
-        return sb.substring(0, 32);
+        // RDR-180: the FULL 64-hex digest is the canonical chash — the old
+        // [:32] truncation now violates chunks_<dim>_chash_octet_check.
+        return sb.toString();
     }
 }

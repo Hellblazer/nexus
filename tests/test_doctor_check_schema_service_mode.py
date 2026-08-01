@@ -25,15 +25,3 @@ def test_check_schema_reports_na_in_service_mode(monkeypatch, capsys):
     assert "T2 database not found" not in out
 
 
-def test_check_schema_sqlite_mode_unaffected(monkeypatch, tmp_path, capsys):
-    """In SQLite mode with no DB, the existing not-found path still applies."""
-    monkeypatch.setattr(
-        "nexus.db.storage_mode.storage_backend_for",
-        lambda store: StorageBackend.SQLITE,
-    )
-    monkeypatch.setattr(
-        "nexus.commands._helpers.default_db_path", lambda: tmp_path / "absent.db"
-    )
-    _run_check_schema()
-    out = capsys.readouterr().out
-    assert "T2 database not found" in out

@@ -4,6 +4,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests._catalog_fixture_ops import active_reader
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -18,6 +20,9 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RDR-155 P4b: the chroma-key mode inference is gone — pin cloud mode
+    # explicitly so the voyage collection-name promotion under test fires.
+    monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
     monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
     monkeypatch.setenv("CHROMA_TENANT", "test-tenant")
@@ -116,14 +121,6 @@ def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db) -> No
 
 
 # ── delete ──────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("flag", ["--yes", "--confirm"])
-def test_delete_with_confirmation_flag(runner, env_creds, mock_db, flag) -> None:
-    result = _invoke(runner, mock_db, ["delete", "old", flag])
-    assert result.exit_code == 0
-    assert "Deleted" in result.output
-    mock_db.delete_collection.assert_called_once()
 
 
 def test_delete_aborts_without_confirmation(runner, env_creds, mock_db) -> None:
@@ -493,15 +490,12 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     mock_db.get_or_create_collection.side_effect = [mock_col, after_col]
     vr = VerifyResult(status="healthy", doc_count=1, probe_doc_id="x", distance=0.05, metric="l2")
 
-    # Stub Catalog.docs_for_chashes to return the manifest mapping.
-    # Catalog is lazy-imported inside reindex_cmd (`from nexus.catalog
-    # import Catalog`); patch the source module's attribute so the
-    # lazy import resolves to our stub. The autouse
-    # _pin_storage_backend_sqlite fixture pins the catalog to SQLite
-    # mode by default, so make_catalog_reader() really returns a local
-    # Catalog here (not HttpCatalogClient).
-    from nexus.catalog.catalog import Catalog
-    fake_cat = MagicMock(spec=Catalog)
+    # Stub docs_for_chashes to return the manifest mapping. nexus-i711w:
+    # the catalog is service-only, so the reader seam yields an
+    # HttpCatalogClient; spec against it so a missing-method bug can't
+    # hide behind an unspec'd stub.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    fake_cat = MagicMock(spec=HttpCatalogClient)
     fake_cat.docs_for_chashes.return_value = {chash: ["ART-PHASE3"]}
 
     # RDR-146 P1.2: reindex reaches the catalog via make_catalog_reader().
@@ -832,15 +826,15 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
 
     import subprocess
     from click.testing import CliRunner
-    from nexus.catalog.catalog import Catalog
     from nexus.commands.index import index_repo_cmd
 
-    # Sandbox config + catalog dirs.
+    # Sandbox config + catalog dirs. (nexus-i711w: the local Catalog.init
+    # that used to run here died with the local catalog; registration goes
+    # through the service-only factories.)
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -869,13 +863,14 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
         "RDR-137: --corpus knowledge must not write the legacy registry"
     )
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT name FROM collections WHERE name LIKE 'knowledge__%'"
-    ).fetchall()
-    assert any(r[0].startswith("knowledge__") for r in rows), (
+    # nexus-aqbrk: read through the ACTIVE catalog — index_repo_cmd registers
+    # via the factory, so the raw local .catalog.db was empty on the engine
+    # arm. list_collections() is the public equivalent of the raw
+    # "SELECT name FROM collections" and is parity-registered.
+    names = [c["name"] for c in active_reader().list_collections()]
+    assert any(n.startswith("knowledge__") for n in names), (
         f"--corpus knowledge did not register a knowledge__ collection "
-        f"on the catalog; saw: {[r[0] for r in rows]}"
+        f"on the catalog; saw: {names}"
     )
     # Output mentions the routing decision.
     assert "knowledge__" in result.output
@@ -895,14 +890,12 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     from unittest.mock import patch
 
     from click.testing import CliRunner
-    from nexus.catalog.catalog import Catalog
     from nexus.commands.index import index_repo_cmd
 
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
-    Catalog.init(cat_dir)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -918,13 +911,17 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     # repos.json is not created either way.
     assert not (tmp_path / "repos.json").exists()
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    knowledge_rows = cat._db.execute(
-        "SELECT name FROM collections WHERE name LIKE 'knowledge__%'"
-    ).fetchall()
+    # nexus-i711w: read through the ACTIVE catalog (the raw local
+    # .catalog.db SELECT died with the local catalog). list_collections()
+    # is the parity-registered public equivalent.
+    knowledge_rows = [
+        c["name"]
+        for c in active_reader().list_collections()
+        if c["name"].startswith("knowledge__")
+    ]
     assert not knowledge_rows, (
         f"default routing planted a knowledge__ collection; saw: "
-        f"{[r[0] for r in knowledge_rows]}"
+        f"{knowledge_rows}"
     )
 
 

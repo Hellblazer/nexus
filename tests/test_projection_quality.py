@@ -10,31 +10,14 @@ UPSERT, 3-tuple tuple shape across all five call sites.
 from __future__ import annotations
 
 import os
-import sqlite3
 from pathlib import Path
 
-import chromadb
 import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
 from tests.conftest import make_vector_test_client
-
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
-#: topic_assignments quality columns (similarity / assigned_at /
-#: source_collection) have NO read surface over the engine HTTP API — the
-#: assertions below can only be made via a raw SQLite conn. dies-roster:
-#: these die with the raw handle at the RDR-155 P4b flip (the engine's
-#: GREATEST/CASE projection upsert parity is pinned by the engine-side
-#: integration suite).
-_RAW_QUALITY_READ = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: asserts topic_assignments quality columns via a "
-    "raw SQLite conn; the engine exposes no assignment read surface with "
-    "similarity/assigned_at/source_collection — dies at the RDR-155 P4b "
-    "flip",
-)
+from typing import Any
 
 
 @pytest.fixture(autouse=True)
@@ -62,22 +45,12 @@ def _insert_topic(
     explicit id (RDR-155 P4b P0a' — raw-conn seeding routed through the
     import surface instead of psql).
     """
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(db.taxonomy):
-        db.taxonomy.conn.execute(
-            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (topic_id, label, collection, created_at),
-        )
-        db.taxonomy.conn.commit()
-    else:
-        db.taxonomy.import_topic(
-            src_id=topic_id, label=label, parent_id=None,
-            collection=collection, centroid_hash=None, doc_count=0,
-            created_at=_full_iso(created_at), review_status="pending",
-            terms=None,
-        )
+    db.taxonomy.import_topic(
+        src_id=topic_id, label=label, parent_id=None,
+        collection=collection, centroid_hash=None, doc_count=0,
+        created_at=_full_iso(created_at), review_status="pending",
+        terms=None,
+    )
 
 
 def _unique_topic_base() -> int:
@@ -107,164 +80,18 @@ def _full_iso(ts: str) -> str:
     return ts
 
 
-def _make_taxonomy_db() -> sqlite3.Connection:
-    """Return an in-memory DB with the pre-4.3.0 taxonomy schema.
-
-    Matches the schema that existed before the RDR-077 migration:
-    legacy ``topic_assignments`` with only ``doc_id``, ``topic_id``,
-    ``assigned_by``.
-    """
-    conn = sqlite3.connect(":memory:")
-    conn.executescript(
-        """
-        CREATE TABLE topics (
-            id            INTEGER PRIMARY KEY,
-            label         TEXT NOT NULL,
-            parent_id     INTEGER REFERENCES topics(id),
-            collection    TEXT NOT NULL,
-            centroid_hash TEXT,
-            doc_count     INTEGER NOT NULL DEFAULT 0,
-            created_at    TEXT NOT NULL,
-            review_status TEXT NOT NULL DEFAULT 'pending',
-            terms         TEXT
-        );
-        CREATE TABLE topic_assignments (
-            doc_id      TEXT NOT NULL,
-            topic_id    INTEGER NOT NULL REFERENCES topics(id),
-            assigned_by TEXT NOT NULL DEFAULT 'hdbscan',
-            PRIMARY KEY (doc_id, topic_id)
-        );
-        """
-    )
-    return conn
-
-
-class TestAddProjectionQualityColumns:
-    """RDR-077 Phase 1 migration: three new columns + one new index."""
-
-    def test_migration_adds_columns(self) -> None:
-        from nexus.db.migrations import _add_projection_quality_columns
-
-        conn = _make_taxonomy_db()
-        _add_projection_quality_columns(conn)
-
-        cols = {
-            r[1]: r[2]
-            for r in conn.execute("PRAGMA table_info(topic_assignments)").fetchall()
-        }
-        assert "similarity" in cols
-        assert cols["similarity"] == "REAL"
-        assert "assigned_at" in cols
-        assert cols["assigned_at"] == "TEXT"
-        assert "source_collection" in cols
-        assert cols["source_collection"] == "TEXT"
-
-    def test_migration_adds_index(self) -> None:
-        from nexus.db.migrations import _add_projection_quality_columns
-
-        conn = _make_taxonomy_db()
-        _add_projection_quality_columns(conn)
-
-        indexes = {
-            r[1] for r in conn.execute(
-                "PRAGMA index_list(topic_assignments)"
-            ).fetchall()
-        }
-        assert "idx_topic_assignments_source" in indexes
-
-        # Verify the index covers (source_collection, assigned_by)
-        index_cols = [
-            r[2] for r in conn.execute(
-                "PRAGMA index_info(idx_topic_assignments_source)"
-            ).fetchall()
-        ]
-        assert index_cols == ["source_collection", "assigned_by"]
-
-    def test_migration_idempotent(self) -> None:
-        from nexus.db.migrations import _add_projection_quality_columns
-
-        conn = _make_taxonomy_db()
-        _add_projection_quality_columns(conn)
-        # Second call must be a no-op, not raise.
-        _add_projection_quality_columns(conn)
-
-        cols = {
-            r[1] for r in conn.execute("PRAGMA table_info(topic_assignments)").fetchall()
-        }
-        assert {"similarity", "assigned_at", "source_collection"}.issubset(cols)
-
-    def test_migration_noop_when_columns_present(self) -> None:
-        """If columns already exist (fresh install), migration is no-op."""
-        from nexus.db.migrations import _add_projection_quality_columns
-
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(
-            """
-            CREATE TABLE topics (id INTEGER PRIMARY KEY, label TEXT NOT NULL,
-                collection TEXT NOT NULL, created_at TEXT NOT NULL);
-            CREATE TABLE topic_assignments (
-                doc_id            TEXT NOT NULL,
-                topic_id          INTEGER NOT NULL REFERENCES topics(id),
-                assigned_by       TEXT NOT NULL DEFAULT 'hdbscan',
-                similarity        REAL,
-                assigned_at       TEXT,
-                source_collection TEXT,
-                PRIMARY KEY (doc_id, topic_id)
-            );
-            CREATE INDEX idx_topic_assignments_source
-                ON topic_assignments(source_collection, assigned_by);
-            """
-        )
-        _add_projection_quality_columns(conn)  # must not raise
-
-    def test_migration_noop_when_table_missing(self) -> None:
-        """If ``topic_assignments`` doesn't exist yet, migration is a no-op."""
-        from nexus.db.migrations import _add_projection_quality_columns
-
-        conn = sqlite3.connect(":memory:")
-        _add_projection_quality_columns(conn)  # must not raise
-
-    def test_registered_in_migrations_list(self) -> None:
-        """The new migration must be in MIGRATIONS at version 4.3.0."""
-        from nexus.db.migrations import MIGRATIONS
-
-        hits = [
-            m for m in MIGRATIONS
-            if m.fn.__name__ == "_add_projection_quality_columns"
-        ]
-        assert len(hits) == 1
-        assert hits[0].introduced == "4.3.0"
-
-    def test_preserves_existing_rows(self) -> None:
-        """Legacy rows keep NULLs for new columns (no backfill)."""
-        from nexus.db.migrations import _add_projection_quality_columns
-
-        conn = _make_taxonomy_db()
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, created_at) "
-            "VALUES (1, 'foo', 'code__repo', '2026-01-01')"
-        )
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES ('docA', 1, 'hdbscan')"
-        )
-        conn.commit()
-
-        _add_projection_quality_columns(conn)
-
-        row = conn.execute(
-            "SELECT doc_id, topic_id, assigned_by, "
-            "similarity, assigned_at, source_collection "
-            "FROM topic_assignments"
-        ).fetchone()
-        assert row == ("docA", 1, "hdbscan", None, None, None)
+# _make_taxonomy_db + TestAddProjectionQualityColumns DELETED (RDR-158 P4
+# Stage 4, nexus-i711w): their subject was the 4.3.0
+# _add_projection_quality_columns migration, which died with
+# nexus/db/migrations.py. The live write-path/ICF behaviour these columns
+# feed is pinned by the remaining classes below.
 
 
 # ── Phase 2 (nexus-uti) — write-path atomic commit ──────────────────────────
 
 
 @pytest.fixture()
-def chroma_client() -> chromadb.ClientAPI:
+def chroma_client() -> Any:
     """Ephemeral ChromaDB client per test.
 
     nexus-alnpa: ``make_vector_test_client()`` instances share a
@@ -313,90 +140,9 @@ def _read_assignment(db: T2Database, doc_id: str, topic_id: int) -> dict | None:
     }
 
 
-@_RAW_QUALITY_READ
-class TestUpsertPreferHigher:
-    """SC-2 prefer-higher UPSERT for projection rows."""
-
-    def test_upsert_prefer_higher_descending(self, db: T2Database) -> None:
-        """Insert 0.9 then 0.7 — stored remains 0.9, source/at NOT refreshed."""
-        _seed_topic(db)
-        db.taxonomy.assign_topic(
-            "docA", 1, assigned_by="projection",
-            similarity=0.9, source_collection="code__src_a",
-            assigned_at="2026-04-14T10:00:00",
-        )
-        db.taxonomy.assign_topic(
-            "docA", 1, assigned_by="projection",
-            similarity=0.7, source_collection="code__src_b",
-            assigned_at="2026-04-14T11:00:00",
-        )
-        row = _read_assignment(db, "docA", 1)
-        assert row["similarity"] == pytest.approx(0.9)
-        assert row["source_collection"] == "code__src_a"
-        assert row["assigned_at"] == "2026-04-14T10:00:00"
-
-    def test_upsert_prefer_higher_ascending(self, db: T2Database) -> None:
-        """Insert 0.7 then 0.9 — stored becomes 0.9, source/at refreshed."""
-        _seed_topic(db)
-        db.taxonomy.assign_topic(
-            "docA", 1, assigned_by="projection",
-            similarity=0.7, source_collection="code__src_b",
-            assigned_at="2026-04-14T11:00:00",
-        )
-        db.taxonomy.assign_topic(
-            "docA", 1, assigned_by="projection",
-            similarity=0.9, source_collection="code__src_a",
-            assigned_at="2026-04-14T10:00:00",
-        )
-        row = _read_assignment(db, "docA", 1)
-        assert row["similarity"] == pytest.approx(0.9)
-        assert row["source_collection"] == "code__src_a"
-        assert row["assigned_at"] == "2026-04-14T10:00:00"
-
-    def test_upsert_promotes_null_legacy_row(self, db: T2Database) -> None:
-        """Pre-migration NULL row is promoted on re-projection (COALESCE(-1.0))."""
-        _seed_topic(db)
-        # Simulate a legacy row: assigned_by='projection' but NULL quality.
-        db.taxonomy.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES ('docLegacy', 1, 'projection')"
-        )
-        db.taxonomy.conn.commit()
-
-        db.taxonomy.assign_topic(
-            "docLegacy", 1, assigned_by="projection",
-            similarity=0.6, source_collection="code__promote",
-            assigned_at="2026-04-14T12:00:00",
-        )
-        row = _read_assignment(db, "docLegacy", 1)
-        assert row["similarity"] == pytest.approx(0.6)
-        assert row["source_collection"] == "code__promote"
-        assert row["assigned_at"] == "2026-04-14T12:00:00"
-
-
-@_RAW_QUALITY_READ
-class TestHdbscanPathPreserved:
-    def test_hdbscan_keeps_insert_or_ignore(self, db: T2Database) -> None:
-        """HDBSCAN assignments stay idempotent, NULL similarity/source."""
-        _seed_topic(db)
-        db.taxonomy.assign_topic("docH", 1)  # default assigned_by='hdbscan'
-        db.taxonomy.assign_topic("docH", 1)  # second call is a no-op
-        row = _read_assignment(db, "docH", 1)
-        assert row["assigned_by"] == "hdbscan"
-        assert row["similarity"] is None
-        assert row["assigned_at"] is None
-        assert row["source_collection"] is None
-
-    def test_manual_assigned_by_also_ignores(self, db: T2Database) -> None:
-        _seed_topic(db)
-        db.taxonomy.assign_topic("docM", 1, assigned_by="manual")
-        row = _read_assignment(db, "docM", 1)
-        assert row["assigned_by"] == "manual"
-        assert row["similarity"] is None
-
 
 def _build_two_clusters_in_chroma(
-    client: chromadb.ClientAPI, collection_name: str = "coll_A",
+    client: Any, collection_name: str = "coll_A",
 ) -> list[dict]:
     """Seed ``collection_name`` centroids for two well-separated clusters."""
     rng = np.random.default_rng(42)
@@ -410,9 +156,9 @@ class TestAssignSingleReturnsNamedTuple:
     """SC-2 case 4: AssignResult shape + distance→similarity inversion."""
 
     def test_assign_single_returns_namedtuple(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
-        from nexus.db.t2.catalog_taxonomy import AssignResult
+        from nexus.db.t2.taxonomy_compute import AssignResult
 
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
@@ -436,105 +182,11 @@ class TestAssignSingleReturnsNamedTuple:
         assert -1.0 <= result.similarity <= 1.0
 
 
-@_RAW_QUALITY_READ
-class TestAssignBatchCrossCollectionSimilarity:
-    """C-1 (auditor): cross-collection batch must propagate per-row similarity."""
-
-    def test_assign_batch_cross_collection_populates_similarity(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
-    ) -> None:
-        rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
-        embeddings[:30, 0] += 3.0
-        embeddings[30:, 1] += 3.0
-        doc_ids = [f"d-{i}" for i in range(60)]
-        texts = [f"text {i}" for i in range(60)]
-        # Collection A owns the centroids.
-        db.taxonomy.discover_topics(
-            "coll_A_c1", doc_ids, embeddings, texts, chroma_client,
-        )
-
-        # Collection B sends a batch with cross_collection=True.
-        b_ids = [f"b-{i}" for i in range(5)]
-        b_embs = (rng.standard_normal((5, 384)).astype(np.float32) * 0.1)
-        b_embs[:, 0] += 3.0
-        assigned = db.taxonomy.assign_batch(
-            "coll_B_c1", b_ids, b_embs.tolist(), chroma_client,
-            cross_collection=True,
-        )
-        assert assigned > 0
-
-        rows = db.taxonomy.conn.execute(
-            "SELECT doc_id, assigned_by, similarity, source_collection "
-            "FROM topic_assignments WHERE doc_id LIKE 'b-%'"
-        ).fetchall()
-        assert rows, "batch must write at least one assignment"
-        for doc_id, by, sim, src in rows:
-            assert by == "projection"
-            assert sim is not None, f"similarity not populated for {doc_id}"
-            assert -1.0 <= sim <= 1.0
-            assert src == "coll_B_c1"
-
-
-@pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: backfill_projection is a nexus.db.migrations "
-    "consumer (SQLite migration path) and the assertion is a raw-conn "
-    "read of quality columns — dies with the SQLite migrations at the "
-    "RDR-155 P4b flip",
-)
-class TestBackfillProjectionRegression:
-    """SC-8: ``backfill_projection`` consumes 3-tuples without crashing."""
-
-    def test_backfill_projection_3tuple(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
-    ) -> None:
-        from nexus.db.migrations import backfill_projection
-
-        class _StubT3:
-            def __init__(self, client: chromadb.ClientAPI) -> None:
-                self._client = client
-
-        # Seed two collections with distinct clusters so projection has targets.
-        # Upload source docs to the T3 collection too — project_against fetches
-        # source embeddings from the source collection, not the centroid store.
-        rng = np.random.default_rng(42)
-        for name in ("code__cA", "code__cB"):
-            embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
-            embs[:30, 0] += 3.0
-            embs[30:, 1] += 3.0
-            doc_ids = [f"{name}-d{i}" for i in range(60)]
-            texts = [f"text for {name} {i}" for i in range(60)]
-            db.taxonomy.discover_topics(
-                name, doc_ids, embs, texts, chroma_client,
-            )
-            src_coll = chroma_client.get_or_create_collection(
-                name, embedding_function=None,
-            )
-            src_coll.add(
-                ids=doc_ids,
-                embeddings=embs.tolist(),
-                documents=texts,
-            )
-
-        # Must not raise — previously would ValueError on tuple unpack.
-        backfill_projection(_StubT3(chroma_client), db.taxonomy)
-
-        rows = db.taxonomy.conn.execute(
-            "SELECT similarity, source_collection FROM topic_assignments "
-            "WHERE assigned_by = 'projection'"
-        ).fetchall()
-        assert rows, "backfill should persist projection rows"
-        for sim, src in rows:
-            assert sim is not None
-            assert src in ("code__cA", "code__cB")
-
-
 class TestProjectAgainst3Tuple:
     """``project_against`` emits 3-tuples with raw cosine similarity."""
 
     def test_chunk_assignments_carry_similarity(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__pA", "code__pB"):
@@ -639,21 +291,11 @@ class TestICF:
         # Insert a legacy NULL row directly (simulate pre-migration state).
         # SQLite: raw INSERT. Engine: the fidelity import surface writes the
         # NULL similarity/source_collection verbatim — same legacy shape.
-        from nexus.db.storage_mode import has_raw_access
-
         _insert_topic(db, topic_id=B + 99, collection="code__any", label="legacy")
-        if has_raw_access(db.taxonomy):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "VALUES ('docLegacy', ?, 'projection')",
-                (B + 99,),
-            )
-            db.taxonomy.conn.commit()
-        else:
-            db.taxonomy.import_assignment(
-                doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
-                similarity=None, assigned_at=None, source_collection=None,
-            )
+        db.taxonomy.import_assignment(
+            doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
+            similarity=None, assigned_at=None, source_collection=None,
+        )
         db.taxonomy.clear_icf_cache()
 
         icf = db.taxonomy.compute_icf_map()
@@ -677,48 +319,6 @@ class TestICF:
         """Empty taxonomy → empty map, no SQL error."""
         icf = db.taxonomy.compute_icf_map()
         assert icf == {}
-
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: pins the SQLite store's in-process ICF cache "
-        "object identity; the HTTP store is deliberately cache-free (one "
-        "atomic /icf/map round-trip) — dies with the SQLite store at the "
-        "RDR-155 P4b flip",
-    )
-    def test_icf_cache_lifecycle(self, db: T2Database) -> None:
-        """Cache populated once, survives multiple calls, cleared on demand."""
-        _seed_projection_rows(db, [
-            ("docA", 1, "code__c1"),
-            ("docB", 1, "code__c2"),
-            ("docC", 2, "code__c1"),
-        ])
-
-        first = db.taxonomy.compute_icf_map(use_cache=True)
-        assert first, "expected populated ICF map"
-        second = db.taxonomy.compute_icf_map(use_cache=True)
-        assert second is first, "cached object identity preserved"
-
-        # Mutating the DB does not invalidate the cache until we ask it to.
-        _seed_projection_rows(db, [("docX", 1, "code__c3")])
-        # _seed_projection_rows already calls clear_icf_cache — verify that.
-        third = db.taxonomy.compute_icf_map(use_cache=True)
-        assert third is not first, "cache must refresh after clear_icf_cache"
-
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: pins the SQLite-only log2 scalar registration "
-        "on the raw conn (PG has native log(2, x)) — dies with the raw "
-        "handle at the RDR-155 P4b flip",
-    )
-    def test_icf_log2_scalar_registered(self, db: T2Database) -> None:
-        """``log2`` is available to arbitrary SQL on CatalogTaxonomy.conn."""
-        row = db.taxonomy.conn.execute("SELECT log2(8.0)").fetchone()
-        assert row[0] == pytest.approx(3.0)
-        # Null-safe: non-positive input → NULL (prevents ValueError).
-        row_zero = db.taxonomy.conn.execute("SELECT log2(0)").fetchone()
-        assert row_zero[0] is None
-        row_neg = db.taxonomy.conn.execute("SELECT log2(-1.0)").fetchone()
-        assert row_neg[0] is None
 
 
 # ── Phase 4a (nexus-jt1) — ICF-weighted projection + CLI defaults ───────────
@@ -748,7 +348,7 @@ class TestDefaultProjectionThreshold:
 
 @pytest.fixture()
 def fixture_icf_ranking(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> T2Database:
     """≥10 collections — calibration spread for ICF ranking tests (SC-3, S-3).
 
@@ -827,7 +427,7 @@ class TestIcfRankingFixture:
         assert len(counts) == 12
 
     def test_icf_weighted_ranking_differs_from_raw(
-        self, fixture_icf_ranking: T2Database, chroma_client: chromadb.ClientAPI,
+        self, fixture_icf_ranking: T2Database, chroma_client: Any,
     ) -> None:
         """SC-3 calibration spread: icf_map reorders the top-K topics for
         a source vs. the unweighted baseline. Uses a generous threshold so
@@ -862,7 +462,7 @@ class TestProjectAgainstIcf:
     """``project_against(icf_map=...)`` — weighting at filter time only."""
 
     def _seed_two_corpora(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__icfA", "code__icfB"):
@@ -884,7 +484,7 @@ class TestProjectAgainstIcf:
             )
 
     def test_icf_suppresses_hub_topics_below_threshold(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """A topic with ICF=0 must fail threshold regardless of raw cosine."""
         self._seed_two_corpora(db, chroma_client)
@@ -909,7 +509,7 @@ class TestProjectAgainstIcf:
         assert len(result["novel_chunks"]) == result["total_chunks"]
 
     def test_stored_similarity_is_raw_cosine_even_with_icf(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """Raw cosine stored; ICF only affects what gets through the filter."""
         self._seed_two_corpora(db, chroma_client)
@@ -932,7 +532,7 @@ class TestProjectAgainstIcf:
                 )
 
     def test_missing_topic_in_icf_map_defaults_to_one(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """ICF map lookup missing entries → weight 1.0 (no suppression)."""
         self._seed_two_corpora(db, chroma_client)
@@ -993,29 +593,17 @@ def _seed_projection_assignments(db: T2Database, rows: list[dict]) -> None:
     hundreds of sequential per-row round-trips (the RDR-155 P4b P0a'
     read-timeout / engine-wedge mechanism).
     """
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(db.taxonomy):
-        for r in rows:
-            db.taxonomy.assign_topic(
-                r["doc_id"], r["topic_id"],
-                assigned_by="projection",
-                similarity=r["similarity"],
-                source_collection=r["source_collection"],
-                assigned_at=r["assigned_at"],
-            )
-    else:
-        db.taxonomy.import_rows_batch(
-            "assignment",
-            [
-                {
-                    **r,
-                    "assigned_by": "projection",
-                    "assigned_at": _full_iso(r["assigned_at"]),
-                }
-                for r in rows
-            ],
-        )
+    db.taxonomy.import_rows_batch(
+        "assignment",
+        [
+            {
+                **r,
+                "assigned_by": "projection",
+                "assigned_at": _full_iso(r["assigned_at"]),
+            }
+            for r in rows
+        ],
+    )
 
 
 @pytest.fixture()
@@ -1123,87 +711,6 @@ class TestHubs:
         hubs = db.taxonomy.detect_hubs(min_collections=6)
         assert hubs == []
 
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: warn_stale is not implemented over HTTP "
-        "(HttpTaxonomyStore.detect_hubs hardcodes "
-        "max_last_discover_at=None) and the fixture writes taxonomy_meta "
-        "via raw conn — dies with the SQLite store at the RDR-155 P4b "
-        "flip",
-    )
-    def test_hubs_warn_stale_compares_to_last_discover(
-        self, fixture_hub_synthetic: tuple[T2Database, int],
-    ) -> None:
-        """MAX(last_discover_at) across source collections, not single row."""
-        db, _B = fixture_hub_synthetic
-        # Mark each source collection as discovered BEFORE the hub's latest
-        # assignment → stale should fire.
-        for col_idx in range(5):
-            db.taxonomy.conn.execute(
-                "INSERT INTO taxonomy_meta "
-                "(collection, last_discover_doc_count, last_discover_at) "
-                "VALUES (?, 100, ?)",
-                (f"code__c{col_idx}", "2026-04-09T00:00:00"),
-            )
-        db.taxonomy.conn.commit()
-
-        hubs = db.taxonomy.detect_hubs(
-            min_collections=2, warn_stale=True,
-        )
-        assert hubs[0].is_stale is True
-        # The MAX across all 5 rows is the largest of the identical values.
-        assert hubs[0].max_last_discover_at == "2026-04-09T00:00:00"
-
-        # Now update ONE collection to post-date the hub's latest
-        # assigned_at. MAX() aggregation must pick that up across ALL
-        # contributing collections (C-2 correctness), not stay stuck on a
-        # single-row lookup.
-        db.taxonomy.conn.execute(
-            "UPDATE taxonomy_meta SET last_discover_at = ? "
-            "WHERE collection = 'code__c0'",
-            ("2026-04-11T00:00:00",),
-        )
-        db.taxonomy.conn.commit()
-
-        hubs2 = db.taxonomy.detect_hubs(
-            min_collections=2, warn_stale=True,
-        )
-        # Hub's latest assigned_at is 2026-04-10T13:04:00 (<
-        # 2026-04-11T00:00:00 after the update). Not stale anymore.
-        assert hubs2[0].is_stale is False
-        assert hubs2[0].max_last_discover_at == "2026-04-11T00:00:00"
-
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: warn_stale is not implemented over HTTP "
-        "(HttpTaxonomyStore.detect_hubs hardcodes "
-        "max_last_discover_at=None) and the fixture writes taxonomy_meta "
-        "via raw conn — dies with the SQLite store at the RDR-155 P4b "
-        "flip",
-    )
-    def test_hubs_warn_stale_null_handling(
-        self, fixture_hub_synthetic: tuple[T2Database, int],
-    ) -> None:
-        """Never-discovered collections count as stale via never_discovered_count."""
-        db, _B = fixture_hub_synthetic
-        # Insert NULL rows for some collections; leave others absent entirely.
-        for col_idx in range(3):
-            db.taxonomy.conn.execute(
-                "INSERT INTO taxonomy_meta "
-                "(collection, last_discover_doc_count, last_discover_at) "
-                "VALUES (?, 100, NULL)",
-                (f"code__c{col_idx}",),
-            )
-        db.taxonomy.conn.commit()
-
-        hubs = db.taxonomy.detect_hubs(
-            min_collections=2, warn_stale=True,
-        )
-        # 3 explicit NULL rows + 2 collections with no taxonomy_meta row at
-        # all = 5 never-discovered source collections.
-        assert hubs[0].never_discovered_count == 5
-        assert hubs[0].max_last_discover_at is None
-        assert hubs[0].is_stale is True
 
     def test_hubs_warn_stale_without_flag_leaves_fields_default(
         self, fixture_hub_synthetic: tuple[T2Database, int],

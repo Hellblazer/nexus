@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""T2 SQLite memory bank — seven domain stores behind a composing facade.
+"""T2 memory bank — seven domain stores behind a composing facade.
 
-The T2 tier is split into seven domain stores, each owning its own
-set of tables in a shared SQLite file:
+The T2 tier is split into seven domain stores, all HTTP clients over the
+engine's PG tables (their SQLite predecessors died across nexus-i711w
+Stage 2; the local CatalogStore and the facade's ``catalog`` property died
+with the terminal i711w deletion — the catalog is served by
+``nexus.catalog.http_catalog_client`` / ``nexus.catalog.factory``):
 
 =========================  ==========================  =================================================================
 Attribute                  Class                       Responsibility
 =========================  ==========================  =================================================================
-``db.memory``              ``MemoryStore``             Persistent notes, FTS5 search, access tracking, heat-weighted TTL
-``db.plans``               ``PlanLibrary``             Plan templates, plan search, plan TTL
-``db.taxonomy``            ``CatalogTaxonomy``         Topic clustering, topic assignment
-``db.telemetry``           ``Telemetry``               Relevance log (query/chunk/action), retention-based expiry
-``db.chash_index``         ``ChashIndex``              chash → (collection, doc_id) global lookup (RDR-086)
-``db.document_aspects``    ``DocumentAspects``         Per-document structured aspects table (RDR-089)
-``db.aspect_queue``        ``AspectExtractionQueue``   Async queue feeding the aspect-extraction worker (nexus-qeo8)
+``db.memory``              ``HttpMemoryStore``         Persistent notes, FTS search, access tracking, heat-weighted TTL
+``db.plans``               ``HttpPlanLibrary``         Plan templates, plan search, plan TTL
+``db.taxonomy``            ``HttpTaxonomyStore``       Topic clustering, topic assignment
+``db.telemetry``           ``HttpTelemetryStore``      Relevance log (query/chunk/action), retention-based expiry
+``db.chash_index``         ``HttpChashIndex``          chash → (collection, doc_id) global lookup (RDR-086)
+``db.document_aspects``    ``HttpDocumentAspectsStore``  Per-document structured aspects table (RDR-089)
+``db.aspect_queue``        ``HttpAspectQueue``         Async queue feeding the aspect-extraction worker (nexus-qeo8)
 =========================  ==========================  =================================================================
 
 ``T2Database`` is a facade: it constructs the six stores and re-exposes
@@ -33,24 +36,16 @@ New code should prefer the domain methods over the facade:
     db.memory.search("fts query", project="myproj")   # preferred
     db.search("fts query", project="myproj")          # facade delegate
 
-Concurrency model (RDR-063 Phase 2):
+Concurrency model: every store is an HTTP client; write serialization
+is the engine's (Postgres MVCC + per-endpoint transactions). The
+RDR-063 Phase 2 SQLite WAL/per-store-lock model this docstring used to
+describe died with the SQLite stores (RDR-158 P4) — the surviving
+in-process lock is ``RENAME_LOCK`` (RDR-138), which serializes the
+rename cascade against queue/aspect mutators.
 
-* Each store opens its own ``sqlite3.Connection`` against the shared
-  file and guards it with its own ``threading.Lock``. Reads in one
-  domain are never blocked by writes in another domain (the Phase 1
-  global Python mutex is gone). Concurrent writes across domains
-  still serialize at SQLite's single-writer WAL lock — ``busy_timeout``
-  absorbs brief contention without raising ``OperationalError``.
-* All connections run in WAL mode with a 5-second ``busy_timeout``,
-  so cross-domain write coordination happens in SQLite rather than
-  Python.
-* Telemetry writes from MCP hooks no longer block ``memory.search``.
-* ``taxonomy.discover_topics`` holds only ``taxonomy._lock`` for
-  INSERTs — never acquires ``memory._lock``.
-
-Schema migrations are per-domain and idempotent: each store runs its
-own migration guard the first time it sees a given database path, so
-independent stores can initialize concurrently.
+Schema is engine-owned (Liquibase) since RDR-158 P4 Stage 4
+(nexus-i711w): the client-side SQLite migration chain is deleted, and the
+local ``.db`` files are a frozen migration source (RDR-176 Gap 2).
 
 See ``docs/architecture.md`` § T2 Domain Stores for the full picture
 and ``docs/contributing.md`` § Adding a T2 Domain Feature for how to
@@ -67,281 +62,44 @@ import sqlite3
 
 import structlog
 
-from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-
-# Cheap import only: ``_sanitize_fts5`` is needed by
-# ``nexus.catalog.catalog_db`` at module import time, and the
-# memory_store module's top-level imports are stdlib + structlog only
-# (no sklearn/scipy/numpy). Heavy submodule imports are deferred via
-# the module __getattr__ at the bottom of this file.
-from nexus.db.t2.memory_store import _sanitize_fts5
+# Cheap import only: ``_sanitize_fts5`` was rehomed to ``records``
+# (pure helpers, no substrate) when memory_store died (nexus-i711w
+# Stage 2 sub-stage A3). Re-exported here for historical consumers
+# (tests import it from ``nexus.db.t2``).
+from nexus.db.t2.records import _sanitize_fts5
 
 if TYPE_CHECKING:
-    # Type-only: re-exposed for static type checking. The runtime
-    # bindings come from ``__getattr__`` below, which lazy-loads each
-    # submodule on first attribute access. The CLI cold-start path
-    # (nexus.cli -> nexus.commands.catalog -> nexus.catalog.catalog ->
-    # nexus.catalog.catalog_db -> from nexus.db.t2 import _sanitize_fts5)
-    # therefore stops here without pulling sklearn -> scipy -> numpy
-    # via CatalogTaxonomy.
-    from nexus.db.t2.catalog import CatalogStore
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-    from nexus.db.t2.chash_index import ChashIndex
-    from nexus.db.t2.memory_store import AccessPolicy, MemoryStore
-    from nexus.db.t2.plan_library import PlanLibrary
-    from nexus.db.t2.telemetry import Telemetry
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger()
 
 
-# RDR-128 P0a (RF-3): the daemon's startup migration must tolerate another
-# process holding memory.db's single WAL writer lock (typically ``nx index
-# repo``). ``busy_timeout`` governs how long each statement waits for the
-# lock before raising ``database is locked``; the old 5s was tight enough
-# that a concurrent indexer could trip a migration step and crash the
-# freshly-spawned daemon. 30s matches the intra-host contention window
-# already used by aspect_extraction_queue (nexus-v4m7y) and costs nothing
-# on a quiet database.
-_BOOTSTRAP_BUSY_TIMEOUT_MS: int = 30000
-
-# Bounded Python-level retry around ``apply_pending``, layered on top of the
-# busy_timeout. Mirrors aspect_extraction_queue.reclaim_stale: three attempts
-# with two inter-attempt sleeps. ``apply_pending`` is idempotent (per-migration
-# existence guards) and only records the path as done on success, so a retry
-# after a mid-run ``database is locked`` safely re-runs from bootstrap_version.
-# Worst case if every attempt blocks the full busy_timeout: 30 + 0.5 + 30 +
-# 1.0 + 30 = ~91.5s, after which the final attempt re-raises so a genuinely
-# stuck lock still surfaces rather than hanging the daemon forever.
-_BOOTSTRAP_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.5, 1.0)
-
-
-def _rename_dedup_col(conn: "sqlite3.Connection", table: str) -> str:
-    """Return the column the rename-cascade collision-defense should dedup on
-    for ``table``: the live PRIMARY KEY, which depends on migration state.
-
-    RDR-108 Phase 1c migrates the aspect tables' PK
-    ``(collection, source_path) -> (doc_id)`` (and RDR-096 P5.2 then drops
-    ``source_path`` from ``document_aspects``), but both steps are deferred
-    until a catalog exists — so a DB can be in either shape. We prefer
-    ``doc_id`` (the migrated PK) when the column is present, else fall back to
-    ``source_path`` (the pre-migration PK). The result is interpolated into a
-    DELETE, so it must come from the schema (PRAGMA), never from user input.
-    Issue #1057.
-    """
-    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if "doc_id" in cols:
-        return "doc_id"
-    if "source_path" in cols:
-        return "source_path"
-    raise RuntimeError(
-        f"rename cascade: {table} has neither doc_id nor source_path to dedup on"
-    )
-
-
-def _apply_pending_with_lock_retry(
-    conn: sqlite3.Connection, current_version: str
-) -> None:
-    """Run the startup migration (``PRAGMA journal_mode=WAL`` + ``apply_pending``)
-    with a bounded retry on ``database is locked`` / ``database is busy``.
-
-    ``journal_mode=WAL`` is inside the retry because it is itself a write
-    that takes the writer lock when the file is not already in WAL mode —
-    leaving it outside would let a held lock crash the daemon before
-    ``apply_pending`` ever runs (code-review finding, RDR-128 P0a). Only
-    writer-slot contention is retried; any other ``OperationalError``
-    (schema corruption, FK violation, ...) propagates on the first attempt.
-    The final attempt re-raises so the failure is never silently swallowed.
-    """
-    import time  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-    from nexus.db.migrations import apply_pending  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-    sleeps_between = _BOOTSTRAP_RETRY_SLEEPS_BETWEEN
-    max_attempts = len(sleeps_between) + 1
-    for attempt in range(1, max_attempts + 1):
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            apply_pending(conn, current_version)
-            if attempt > 1:
-                _log.info(
-                    "t2_bootstrap_migration_recovered",
-                    attempt=attempt,
-                )
-            return
-        except sqlite3.OperationalError as exc:
-            msg = str(exc).lower()
-            if "locked" not in msg and "busy" not in msg:
-                raise
-            # Clear any partial transaction left by the failed step so the
-            # retry re-runs from a clean connection state.
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            if attempt == max_attempts:
-                raise
-            sleep_seconds = sleeps_between[attempt - 1]
-            _log.warning(
-                "t2_bootstrap_migration_lock_retry",
-                attempt=attempt,
-                next_sleep_seconds=sleep_seconds,
-                exc=str(exc),
-            )
-            time.sleep(sleep_seconds)
-
-
-def _cold_start_is_current_and_wal(path: Path) -> bool:
-    """Return True iff *path* is already at ``current_version`` AND already in
-    WAL journal mode, using only lock-free reads (RDR-140 P1.2 Gap 4, A3).
-
-    Both probes succeed under a held EXCLUSIVE writer lock, so this never
-    contends with a concurrent writer. Any read error, a missing/``0.0.0``
-    version row, a non-WAL journal, or a ``"0.0.0"`` current version (the
-    importlib fallback) returns False so the caller takes the full
-    flock+migration path — a genuine pending migration must always run.
-    """
-    # A non-existent path is a fresh DB: there is nothing to fast-path, and we
-    # must NOT create the file here (this probe is read-only by contract — a
-    # plain ``sqlite3.connect`` would materialise a 0-byte DB). Fall through to
-    # the full bootstrap, which creates and migrates it. We use a plain
-    # read-write connection rather than ``mode=ro`` because read-only mode
-    # cannot create the ``-shm`` file a WAL DB needs when no other connection
-    # is open (the exact cold-start steady state we optimise), which would
-    # defeat the fast path. Reads on a plain connection are lock-free (A3),
-    # mirroring ``stored_schema_version``.
-    if not path.exists():
-        return False
-    try:
-        # RDR-170: compare against the canonical (registry-aware) schema version
-        # — the value apply_pending stamps — NOT the raw package version. On a
-        # frozen/ahead branch the daemon stamps the registry max (e.g. 5.10.7)
-        # while the package is 5.10.6; reading _pkg_version here would make the
-        # row compare unequal and break the fast path on every cold start.
-        from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-        current_version = expected_t2_schema_version()
-        if current_version == "0.0.0":
-            return False
-
-        conn = sqlite3.connect(str(path), check_same_thread=False)
-        try:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
-                ).fetchone()
-            except sqlite3.OperationalError:
-                return False  # _nexus_version absent — uninitialised DB.
-            if not row or row[0] != current_version:
-                return False
-            mode = conn.execute("PRAGMA journal_mode").fetchone()
-            if not mode or str(mode[0]).lower() != "wal":
-                return False
-            return True
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return False
-
-
-# Re-export surface for backward compatibility. Resolution happens
-# lazily through the module-level ``__getattr__`` below; the eager
-# imports were pulling sklearn/scipy/numpy through CatalogTaxonomy on
-# every CLI invocation that touched any nexus.db.t2 symbol.
+# Re-export surface for backward compatibility. The PEP 562
+# ``__getattr__`` lazy resolver that used to live here served only the
+# ``CatalogStore`` re-export; it died with the local catalog
+# (nexus-i711w terminal deletion).
 __all__ = [
-    "AccessPolicy",
-    "AspectExtractionQueue",
-    "CatalogStore",
-    "CatalogTaxonomy",
-    "ChashIndex",
-    "DocumentAspects",
-    "MemoryStore",
-    "PlanLibrary",
     "T2Database",
-    "Telemetry",
     "_sanitize_fts5",
 ]
-
-
-def __getattr__(name: str) -> Any:  # PEP 562
-    """Lazy resolver for heavy re-exports.
-
-    Map each public name to its owning submodule and import on demand.
-    Only fires the first time a name is accessed (Python caches the
-    attribute on the module after a successful resolve).
-    """
-    _MAP = {
-        "AccessPolicy":          "nexus.db.t2.memory_store",
-        "AspectExtractionQueue": "nexus.db.t2.aspect_extraction_queue",
-        "CatalogStore":          "nexus.db.t2.catalog",
-        "MemoryStore":           "nexus.db.t2.memory_store",
-        "CatalogTaxonomy":       "nexus.db.t2.catalog_taxonomy",
-        "ChashIndex":            "nexus.db.t2.chash_index",
-        "DocumentAspects":       "nexus.db.t2.document_aspects",
-        "PlanLibrary":           "nexus.db.t2.plan_library",
-        "Telemetry":             "nexus.db.t2.telemetry",
-    }
-    if name in _MAP:
-        import importlib  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        mod = importlib.import_module(_MAP[name])
-        value = getattr(mod, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-#: RDR-120 P3b: process-wide default for ``T2Database(run_migrations=...)``
-#: when the caller leaves the parameter unspecified. Production code keeps
-#: this False (daemon owns migrations). The test conftest flips it to True
-#: so existing direct-open fixtures keep migrating their fresh tmp DBs.
-_DEFAULT_RUN_MIGRATIONS: bool = False
-
-#: Env-var override for :data:`_DEFAULT_RUN_MIGRATIONS`. Set to ``"1"`` to
-#: opt every direct-open ``T2Database`` construction into running
-#: ``apply_pending`` even when the in-process module global is False.
-#: Used by the test conftest to propagate auto-migrate semantics into
-#: subprocess children (``subprocess.run`` / ``claude -p`` dispatches /
-#: MCP children) which inherit ``os.environ`` but not Python module state.
-_RUN_MIGRATIONS_ENV: str = "NX_T2_AUTO_MIGRATE"
-
-
-def _resolve_default_run_migrations() -> bool:
-    """Read the effective default from the env var first, the module
-    global second. The env-var path is what propagates into spawned
-    subprocesses (RDR-120 P3b review item 1).
-    """
-    import os as _os  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-    raw = _os.environ.get(_RUN_MIGRATIONS_ENV, "").strip()
-    if raw:
-        return raw not in ("0", "false", "False", "no", "")
-    return _DEFAULT_RUN_MIGRATIONS
 
 
 # ── Database facade ───────────────────────────────────────────────────────────
 
 
 class T2Database:
-    """T2 SQLite memory bank with FTS5 full-text search.
+    """T2 memory bank facade.
 
-    Composition over eight domain stores (``memory``, ``plans``,
+    Composition over seven domain stores (``memory``, ``plans``,
     ``taxonomy``, ``telemetry``, ``chash_index``, ``document_aspects``,
-    ``aspect_queue``, ``catalog``). Each store owns its own connection,
-    lock, schema init, and migration guard; the facade forwards legacy
-    public methods to the appropriate store and owns only the
-    cross-domain ``expire()`` composition and the context manager.
+    ``aspect_queue``), all HTTP clients over the engine's PG tables.
+    The facade forwards legacy public methods to the appropriate store
+    and owns only the cross-domain ``expire()`` composition and the
+    context manager.
 
-    The seven domain stores share the single ``nexus.db`` SQLite file
-    passed at construction. The eighth — ``catalog`` — is unique in
-    that it opens a separate ``.catalog.db`` file under
-    ``catalog_path()``. The path split is preserved through P5.A.1 by
-    the Hal-approved thin-shim design; collapsing the files is
-    explicitly out of scope.
-
-    The ``catalog`` store is constructed lazily on first attribute
-    access (RDR-120 P5.A.1) so tests that never touch the catalog do
-    not eagerly open ``.catalog.db`` and contend with separately-
-    constructed ``CatalogDB`` instances during the P5.A.1 to P5.A.2
-    cutover window.
+    The eighth domain store the facade used to carry — the local SQLite
+    ``catalog`` (RDR-120 P5.A.1) — died with the terminal i711w
+    deletion; the catalog is reached via ``nexus.catalog.factory``.
     """
 
     def __init__(
@@ -349,41 +107,21 @@ class T2Database:
         path: Path,
         *,
         run_migrations: bool | None = None,
-        catalog_db_path: Path | None = None,
     ) -> None:
-        # Lazy-load the seven store classes here rather than at module
-        # import time so the CLI cold-start path (which only needs
-        # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
-        # CatalogTaxonomy.
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.memory_store import MemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
         path.parent.mkdir(parents=True, exist_ok=True)
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
         self._path: Path = path
 
-        # RDR-120 P3b: migration ownership transferred to the T2 daemon.
-        # ``T2Database.__init__`` no longer auto-runs ``apply_pending``.
-        # Callers that need to materialise the schema (daemon startup,
-        # ``nx upgrade``, conftest bootstrap) must either pass
-        # ``run_migrations=True`` here or call
-        # :meth:`T2Database.bootstrap_schema` explicitly. The default is
-        # the module-level :data:`_DEFAULT_RUN_MIGRATIONS` (False in
-        # production; conftest flips it to True so the test suite stays
-        # green without touching 300+ direct-open call sites).
-        effective = (
-            _resolve_default_run_migrations()
-            if run_migrations is None
-            else run_migrations
-        )
-        if effective:
-            T2Database.bootstrap_schema(path)
+        # ``run_migrations`` is RETAINED-AND-IGNORED for signature stability
+        # (RDR-158 P4 Stage 4, nexus-i711w): the machinery it used to gate —
+        # ``bootstrap_schema`` / ``apply_pending`` / the ``NX_T2_AUTO_MIGRATE``
+        # conftest default — is deleted with ``nexus/db/migrations.py``. The
+        # engine owns its (Postgres) schema via Liquibase in every mode, and
+        # the local ``.db`` is a frozen migration source that must never be
+        # re-stamped (RDR-176 Gap 2). Callers passing ``run_migrations=True``
+        # get exactly the same non-mutating construction as everyone else —
+        # pinned by tests/db/test_rdr176_non_mutation.py.
+        del run_migrations
 
         # ── RDR-138 T1.1 (nexus-tgzvt): process-wide rename coordination lock ──
         #
@@ -393,24 +131,20 @@ class T2Database:
         # (Gaps 1-3 per the RDR).
         #
         # Lock type: ``threading.RLock`` (reentrant), NOT ``threading.Lock``.
-        # Rationale: T1.2 will guard ``claim_batch`` AND the inner
+        # Rationale: T1.2 guarded ``claim_batch`` AND the inner
         # ``claim_next`` it calls in a loop. A plain Lock would self-deadlock
         # when the outer claim_batch acquire re-enters for each claim_next
         # call. RLock allows the same thread to acquire again without blocking.
-        # An alternative shape (unlocked ``_claim_next_locked`` helper) is
-        # documented in ``AspectExtractionQueue`` but the RLock approach is
-        # chosen for its simplicity.
         #
-        # Lock ordering (forward constraint for T1.2 authors):
+        # Lock ordering (forward constraint):
         #   RENAME_LOCK -> per-store self._lock   (RENAME_LOCK acquired FIRST)
         #   NEVER acquire RENAME_LOCK while already inside a self._lock region.
         #
-        # The daemon runs exactly ONE T2Database instance (verified by
-        # t2_daemon.py's ``_build_dispatch_table`` receiving a single
-        # ``self._t2db``). The lock is instance-held: tests that construct
-        # T2Database directly each get their own lock, isolating them from each
-        # other. Stand-alone AspectExtractionQueue construction (outside
-        # T2Database) falls back to its own RLock via the default parameter.
+        # The lock is instance-held: tests that construct T2Database directly
+        # each get their own lock, isolating them from each other. (The T2
+        # daemon and the SQLite ``AspectExtractionQueue`` this block was
+        # written for died in RDR-158 P4, nexus-i711w; the lock survives for
+        # the in-process cascade-vs-mutator ordering.)
         #
         # The cascade (rename_collection_cascade) bypasses all per-store
         # self._lock regions by design — it uses its own dedicated connection.
@@ -418,275 +152,118 @@ class T2Database:
         self.RENAME_LOCK: threading.RLock = threading.RLock()
 
         # ── Construct domain stores ───────────────────────────────────
-        # RDR-152 nexus-gmiaf.4: routing seam.  storage_backend_for("memory")
-        # returns StorageBackend.SQLITE by default (env NX_STORAGE_BACKEND_MEMORY
-        # or NX_STORAGE_BACKEND unset).  nexus-gmiaf.7 replaces the
-        # NotImplementedError branch with HttpMemoryStore(...).
-        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        # RDR-158 P3 (nexus-7bomn): the facade is the T2 entry seam, so it
+        # is where the retired =sqlite opt-out fails LOUD. The per-site
+        # selectors are collapsed (service is the only backend), which
+        # would leave a stranded shell's NX_STORAGE_BACKEND[_<STORE>]=sqlite
+        # silently ignored — the resolver raises the stranded-install
+        # redirect instead. Validates the facade's own stores only; the
+        # ``catalog`` / ``t1`` vars are validated where those tiers route
+        # (see storage_mode.T2_FACADE_STORES).
+        from nexus.db.storage_mode import T2_FACADE_STORES, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
-        if storage_backend_for("memory") == StorageBackend.SERVICE:
-            # RDR-152 nexus-gmiaf.7: thin Python HTTP client over the Java service.
-            # Reads NX_SERVICE_HOST / NX_SERVICE_PORT / NX_SERVICE_TOKEN from env.
-            from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.memory: MemoryStore = HttpMemoryStore()  # type: ignore[assignment]
-        else:
-            self.memory: MemoryStore = MemoryStore(path)
+        for _store in T2_FACADE_STORES:
+            storage_backend_for(_store)
 
-        # RDR-152 nexus-gmiaf.11: plans service seam.
-        # NX_STORAGE_BACKEND_PLANS=service routes to the Java HTTP plans endpoint.
-        if storage_backend_for("plans") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.plans: PlanLibrary = HttpPlanLibrary()  # type: ignore[assignment]
-        else:
-            self.plans: PlanLibrary = PlanLibrary(path)
-        # RDR-152 nexus-gmiaf.14: taxonomy service seam.
-        # NX_STORAGE_BACKEND_TAXONOMY=service routes to HttpTaxonomyStore.
-        # CatalogTaxonomy takes a MemoryStore reference for the
-        # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
-        if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.taxonomy: CatalogTaxonomy = HttpTaxonomyStore()  # type: ignore[assignment]
-        else:
-            self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
+        # RDR-152 nexus-gmiaf.4 routing seam, COLLAPSED in nexus-i711w
+        # Stage 2 sub-stage A3: HttpMemoryStore is the only memory store —
+        # the SQLite MemoryStore it used to select is deleted. Reads
+        # NX_SERVICE_HOST / NX_SERVICE_PORT / NX_SERVICE_TOKEN from env.
+        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore as _HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
-        # RDR-152 nexus-gmiaf.12: telemetry service seam.
-        # NX_STORAGE_BACKEND_TELEMETRY=service routes to HttpTelemetryStore.
-        if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.telemetry: Telemetry = HttpTelemetryStore()  # type: ignore[assignment]
-        else:
-            self.telemetry: Telemetry = Telemetry(path)
+        self.memory: HttpMemoryStore = HttpMemoryStore()
+
+        # RDR-152 nexus-gmiaf.11 seam, COLLAPSED (A3): HttpPlanLibrary is
+        # the only plan library — the SQLite PlanLibrary is deleted.
+        from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.plans: HttpPlanLibrary = HttpPlanLibrary()
+        # RDR-152 nexus-gmiaf.14 seam, COLLAPSED in nexus-i711w Stage 2
+        # sub-stage C (store) and Stage 3 (selector, nexus-7bomn):
+        # HttpTaxonomyStore is the only taxonomy store, constructed eagerly
+        # and unconditionally — the =sqlite arm that used to defer it is
+        # gone with the opt-out. Eager matters: making it lazy changed WHEN
+        # the service endpoint is first resolved and broke an unrelated
+        # catalog store-hook path in test_memory (see the sub-stage C
+        # history in git for the full account).
+        self._taxonomy: Any = _HttpTaxonomyStore()
+
+        # RDR-152 nexus-gmiaf.12 seam, COLLAPSED in nexus-i711w Stage 2
+        # sub-stage A: HttpTelemetryStore is the only telemetry store — the
+        # SQLite Telemetry it used to select is deleted.
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.telemetry: HttpTelemetryStore = HttpTelemetryStore()
         # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
         # populated by the six indexing write sites via best-effort
         # dual-write after each T3 upsert.
-        # RDR-152 nexus-gmiaf.16: chash_index service seam.
-        # NX_STORAGE_BACKEND_CHASH_INDEX=service routes to HttpChashIndex.
-        if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.chash_index: ChashIndex = HttpChashIndex()  # type: ignore[assignment]
-        else:
-            self.chash_index: ChashIndex = ChashIndex(path)
+        # RDR-152 nexus-gmiaf.16 seam, COLLAPSED in nexus-i711w Stage 2
+        # sub-stage A: HttpChashIndex is the only chash index — the SQLite
+        # ChashIndex it used to select is deleted.
+        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.chash_index: HttpChashIndex = HttpChashIndex()
         # RDR-089 Phase 1: per-document structured aspect table
         # populated by the document-grain hook chain at every CLI
         # ingest site (knowledge__* only in Phase 1).
-        # RDR-152 nexus-gmiaf.15: document_aspects service seam.
-        if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.document_aspects: DocumentAspects = HttpDocumentAspectsStore()  # type: ignore[assignment]
-        else:
-            self.document_aspects: DocumentAspects = DocumentAspects(path)
+        # RDR-152 nexus-gmiaf.15 seam, COLLAPSED (nexus-i711w Stage 2
+        # sub-stage A3): HttpDocumentAspectsStore is the only aspects store —
+        # the SQLite DocumentAspects it used to select is deleted.
+        from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.document_aspects: HttpDocumentAspectsStore = HttpDocumentAspectsStore()
         # RDR-089 follow-up (nexus-qeo8): durable queue feeding the
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
         # RDR-138 T1.1: inject RENAME_LOCK so the queue shares the same
         # lock instance as the cascade. T1.2 will wrap mutator bodies.
-        # RDR-152 nexus-gmiaf.15: aspect_queue service seam.
-        if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.aspect_queue: AspectExtractionQueue = HttpAspectQueue(  # type: ignore[assignment]
-                rename_lock=self.RENAME_LOCK
-            )
-        else:
-            self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
-                path, rename_lock=self.RENAME_LOCK
-            )
+        # RDR-152 nexus-gmiaf.15 seam, COLLAPSED in nexus-i711w Stage 2
+        # sub-stage A: HttpAspectQueue is the only queue — the SQLite
+        # AspectExtractionQueue it used to select is deleted.
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.aspect_queue: HttpAspectQueue = HttpAspectQueue(
+            rename_lock=self.RENAME_LOCK
+        )
         # RDR-139 Layer E: per-document DEVONthink highlight/mention notes,
         # keyed by tumbler. Dedicated table (NOT document_aspects) so
         # free-text highlights never contend with the aspect worker's
         # whole-row overwrite or its confidence gate.
-        # RDR-152 nexus-gmiaf.15: document_highlights service seam.
-        if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
-            from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            self.document_highlights: DocumentHighlights = HttpDocumentHighlightsStore()  # type: ignore[assignment]
-        else:
-            self.document_highlights: DocumentHighlights = DocumentHighlights(path)
-
-        # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
-        # store. Constructed lazily via the ``catalog`` property so
-        # the ``.catalog.db`` file is not opened on every T2Database
-        # construction (tests that never touch the catalog stay
-        # isolated). Caller may pin ``catalog_db_path`` explicitly to
-        # avoid the default resolution through ``nexus.config``.
-        self._catalog_db_path_override: Path | None = catalog_db_path
-        self._catalog: Any = None
+        # RDR-152 nexus-gmiaf.15 seam, COLLAPSED in nexus-i711w Stage 2
+        # sub-stage A: HttpDocumentHighlightsStore is the only highlights
+        # store — the SQLite DocumentHighlights it used to select is deleted.
+        from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.document_highlights: HttpDocumentHighlightsStore = HttpDocumentHighlightsStore()
 
     @property
-    def catalog(self) -> "CatalogStore":
-        """Lazy-construct the eighth domain store on first access.
+    def taxonomy(self) -> "HttpTaxonomyStore":
+        """The service-backed taxonomy store (constructed in ``__init__``).
 
-        Resolution order for the catalog file path:
-
-        1. Explicit ``catalog_db_path`` argument passed to
-           :meth:`T2Database.__init__`.
-        2. ``nexus.config.catalog_path()/.catalog.db`` (production default).
+        Service-only since nexus-i711w Stage 2 sub-stage C; the =sqlite
+        lazy/raise arm this property used to carry died with the opt-out
+        (RDR-158 P3, nexus-7bomn — the facade constructor now validates
+        the env instead). The property survives for the setter below.
         """
-        if self._catalog is None:
-            from nexus.db.t2.catalog import CatalogStore as _CatalogStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        return self._taxonomy
 
-            if self._catalog_db_path_override is not None:
-                db_path = self._catalog_db_path_override
-            else:
-                from nexus.config import catalog_path as _catalog_path  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-                db_path = _catalog_path() / ".catalog.db"
-            self._catalog = _CatalogStore(db_path)
-        return self._catalog
+    @taxonomy.setter
+    def taxonomy(self, store: Any) -> None:
+        """Allow injection, which the plain attribute this replaced supported.
 
-    def stored_schema_version(self) -> str:
-        """Return the ``_nexus_version`` row's ``cli_version`` value.
-
-        RDR-120 P3b: surfaced via the daemon's ``database.hello`` op so
-        clients can validate version compatibility on first connect.
-        Returns ``"0.0.0"`` when the row is missing (uninitialised DB).
+        Every other domain store is a plain assignable attribute, and callers
+        (notably the cascade's service-mode spies) swap them to observe routing.
+        Making taxonomy lazy must not quietly remove that seam — a read-only
+        property would force those callers to reach into ``_taxonomy``, which is
+        strictly worse than keeping the public spelling they already use.
         """
-        conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        try:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
-                ).fetchone()
-            except sqlite3.OperationalError:
-                return "0.0.0"
-            return row[0] if row else "0.0.0"
-        finally:
-            conn.close()
+        self._taxonomy = store
 
-    def hello(self, client_schema_version: str | None = None) -> dict[str, str]:
-        """Connection handshake: report the daemon's stored schema version.
+    # NO stored_schema_version()/hello(): deleted in the yrm0i/nrxs9 final
+    # reviews (RDR-158 P4 Stage 5). They were the T2 daemon's RDR-120 P3b
+    # version-handshake RPC surface; the daemon and its T2Client caller died
+    # in Stage 2 sub-stage B, leaving a callerless raw sqlite3.connect —
+    # the last one in the facade.
 
-        RDR-120 P3b (nexus-e9x4l): T2Client invokes ``database.hello``
-        on first connect with its built-against schema version. The
-        daemon echoes the daemon-side version; the client compares and
-        raises ``T2SchemaVersionMismatchError`` on disagreement. The
-        ``client_schema_version`` argument is accepted but not validated
-        daemon-side — the comparison happens on the client because the
-        client is the layer that knows what wire shape it expects.
-        """
-        return {
-            "daemon_schema_version": self.stored_schema_version(),
-            "client_schema_version": client_schema_version or "",
-        }
-
-    @staticmethod
-    def bootstrap_schema(path: Path, store: str = "memory") -> None:
-        """Run ``apply_pending`` against *path*.
-
-        RDR-120 P3b: lifted out of ``__init__`` so the T2 daemon is the
-        sole substrate-owner that runs migrations in steady state.
-        ``nx upgrade`` and the test conftest also call this directly.
-
-        Idempotent: subsequent calls against the same resolved path
-        short-circuit via the ``_upgrade_done`` set in
-        :mod:`nexus.db.migrations`.
-
-        RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local
-        ``.db`` is a migration SOURCE only and must stay byte-for-content
-        immutable so a downgrade is just "reinstall the prior CLI". Running
-        ``apply_pending`` here would re-stamp ``_nexus_version`` forward and
-        break the rollback guarantee, so skip entirely when *store* is
-        service-backed. *store* defaults to ``"memory"`` (the sole production
-        caller bootstraps ``memory.db``); a per-store caller passes its own name
-        so the routing decision matches the DB it is actually bootstrapping
-        rather than a global proxy. The Java service owns its own (Postgres)
-        schema; nothing on the SQLite side needs migrating. Enforced by
-        ``tests/db/test_rdr176_non_mutation.py``.
-        """
-        from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep bootstrap_schema import-cheap on the steady-state path
-            StorageBackend,
-            storage_backend_for,
-        )
-
-        if storage_backend_for(store) == StorageBackend.SERVICE:
-            return
-
-        from nexus.db.migrations import (  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            _upgrade_done,
-            _upgrade_lock,
-            t2_migration_flock,
-        )
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path_key = str(path.resolve())
-        except OSError:
-            path_key = str(path)
-
-        # Fast path: already migrated in this process. Cheap check under the
-        # in-process lock only — no cross-process flock needed.
-        with _upgrade_lock:
-            if path_key in _upgrade_done:
-                return
-
-        # RDR-140 P1.2 (nexus-2p52a) Gap 4: cold-start (cross-process) fast
-        # path. When a fresh process meets a DB that is already at
-        # current_version AND already in WAL, the existing flock-wait +
-        # connection-open + no-op apply_pending below is pure overhead that
-        # still takes SQLite's writer lock (PRAGMA journal_mode=WAL is a write
-        # when the file is not WAL, and bootstrap_version writes the version
-        # table). A3 (T2 rdr/140-research-A3, verified) proved both probes are
-        # lock-free: SELECT value FROM _nexus_version (mirrors
-        # ``stored_schema_version``) and PRAGMA journal_mode read succeed even
-        # under a held EXCLUSIVE writer lock. Short-circuit ONLY when BOTH
-        # conditions hold; anything else (missing/0.0.0 row, non-WAL journal,
-        # or any read error) falls through to the unchanged flock+migration
-        # path so a genuine pending migration always runs (no silent fallback
-        # for correctness, mem:feedback_no_silent_fallbacks_for_correctness).
-        if _cold_start_is_current_and_wal(path):
-            with _upgrade_lock:
-                # Double-check (mirrors the full-migration path below): another
-                # thread may have finished a migration for this path while we
-                # ran the lock-free probe.
-                if path_key in _upgrade_done:
-                    return
-                _upgrade_done.add(path_key)
-            return
-
-        # RDR-128 P2: acquire the cross-process migration flock BEFORE the
-        # in-process ``_upgrade_lock`` so the lock order matches ``nx upgrade``
-        # (flock -> _upgrade_lock, via apply_pending). Consistent ordering
-        # means the daemon-startup and upgrade migration paths cannot deadlock
-        # even if ever run concurrently in one process (code-review finding).
-        # The flock also serializes the two paths cross-process, replacing the
-        # old WAL free-for-all.
-        with t2_migration_flock(path.parent):
-            with _upgrade_lock:
-                # Double-check: another thread may have completed the migration
-                # while we blocked on the flock.
-                if path_key in _upgrade_done:
-                    return
-                # RDR-170: stamp the canonical (registry-aware) schema version
-                # — max(package, registry_max) — so a frozen/ahead branch records
-                # the highest migration that actually ran (5.10.7), not the frozen
-                # package version (5.10.6) which would leave it reported pending.
-                from nexus.db.migrations import expected_t2_schema_version  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-
-                current_version = expected_t2_schema_version()
-
-                import sys as _sys  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-                if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():
-                    print(  # noqa: T201 — interactive-only (isatty-gated) migration banner to stderr
-                        f"Migrating database {path.name!r} to schema "
-                        f"version {current_version} ...",
-                        file=_sys.stderr,
-                    )
-
-                conn = sqlite3.connect(str(path), check_same_thread=False)
-                try:
-                    # RDR-128 P0a (RF-3): tolerate a concurrent writer (e.g.
-                    # `nx index repo`) holding the WAL writer lock — wait it
-                    # out via a 30s busy_timeout plus a bounded retry, rather
-                    # than crashing on `database is locked`. busy_timeout is a
-                    # connection-local pragma that never blocks; journal_mode
-                    # =WAL + apply_pending run inside the retry helper since
-                    # both can take the writer lock.
-                    conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
-                    _apply_pending_with_lock_retry(conn, current_version)
-                finally:
-                    conn.close()
-                # Mirror the T2Database-form path_key into _upgrade_done so
-                # a second construction with the same Path argument
-                # short-circuits without re-opening the connection
-                # (nexus-avwe — CI path-resolution edge cases).
-                _upgrade_done.add(path_key)
+    # NO bootstrap_schema: deleted in RDR-158 P4 Stage 4 (nexus-i711w) with
+    # ``nexus/db/migrations.py``. The engine owns schema via Liquibase; the
+    # local ``.db`` is a frozen migration source that must never be migrated
+    # or re-stamped (RDR-176 Gap 2, tests/db/test_rdr176_non_mutation.py).
 
     def __enter__(self) -> "T2Database":
         return self
@@ -699,17 +276,8 @@ class T2Database:
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so the most recently
-        opened connection is released first. The ``catalog`` store
-        is only closed when it was actually constructed (lazy
-        property — never opened means never to close).
+        opened connection is released first.
         """
-        # RDR-120 P5.A.1: close catalog only if it was materialised.
-        if self._catalog is not None:
-            try:
-                self._catalog.close()
-            except Exception:  # noqa: BLE001  — best-effort; catalog-close silence acceptable during teardown, handle nulled regardless
-                pass
-            self._catalog = None
         # Reverse-construction order: document_highlights was built after
         # aspect_queue (RDR-139 Layer E), so it closes first.
         self.document_highlights.close()
@@ -717,7 +285,13 @@ class T2Database:
         self.document_aspects.close()
         self.chash_index.close()
         self.telemetry.close()
-        self.taxonomy.close()
+        # Lazy since sub-stage C: close what was BUILT, never force
+        # construction. Going through the property here would build (and for a
+        # =sqlite caller, raise from) a store this T2Database never used —
+        # turning close() into the one call that cannot fail cleanly.
+        if self._taxonomy is not None:
+            self._taxonomy.close()
+            self._taxonomy = None
         self.plans.close()
         self.memory.close()
 
@@ -732,12 +306,12 @@ class T2Database:
     ) -> dict[str, int]:
         """Rename a collection atomically across all T2 collection tables.
 
-        nexus-nhyh / K4: runs all UPDATEs inside a single SQLite
-        transaction on a dedicated shared connection, so no partial-update
-        window exists. If any UPDATE raises, the entire transaction is
-        rolled back before the exception propagates.
+        nexus-nhyh / K4 originally ran all UPDATEs inside a single SQLite
+        transaction; every leg is now an engine HTTP call (nexus-i711w
+        Stage 2), so atomicity is PER STORE, not cross-store — see the
+        inner method's docstring.
 
-        Tables updated atomically:
+        Tables updated:
           - ``chash_index.physical_collection``
           - ``document_aspects.collection`` (with collision-defense DELETE)
           - ``aspect_extraction_queue.collection`` (with collision-defense DELETE)
@@ -746,24 +320,20 @@ class T2Database:
           - ``search_telemetry.collection``
           - ``hook_failures.collection`` (if table exists)
 
-        Returns a dict with counts per table. Raises on any failure --
-        the SQLite transaction is rolled back automatically.
+        Returns a dict with counts per table. Raises on any failure.
 
         Callers (``rename_collection_data_plane``) catch and re-raise as
         ClickException with a non-zero exit code.
 
-        ``_conn`` is a private test-seam parameter. Production callers
-        omit it; the method opens a fresh dedicated connection. Tests
-        pass a wrapper object to inject mid-cascade failures.
+        ``_conn`` was the SQLite test-seam parameter; it is retained for
+        signature stability and ignored (the scaffolding it fed died with
+        the SQLite stores).
 
         RDR-138 T1.1 (nexus-tgzvt): acquires ``self.RENAME_LOCK`` for the
-        ENTIRE method body — including the connection open, BEGIN, all
-        UPDATEs, COMMIT, and connection close. This serializes the cascade
-        against every queue/aspect mutator that T1.2 will also guard with
-        the same lock. Lock is held across the full SQLite transaction to
-        close Gaps 1-3 (aspect-worker observes a consistent view).
-        Lock ordering: RENAME_LOCK is the outermost lock. The cascade
-        bypasses all per-store ``self._lock`` regions by design (own conn).
+        ENTIRE method body, serializing the cascade against every
+        queue/aspect mutator guarded by the same lock (Gaps 1-3:
+        aspect-worker observes a consistent view). Lock ordering:
+        RENAME_LOCK is the outermost lock.
         """
         with self.RENAME_LOCK:
             return self._rename_collection_cascade_locked(old=old, new=new, _conn=_conn)
@@ -775,7 +345,18 @@ class T2Database:
         new: str,
         _conn: "sqlite3.Connection | None" = None,
     ) -> dict[str, int]:
-        """Inner implementation — called only while RENAME_LOCK is held."""
+        """Inner implementation — called only while RENAME_LOCK is held.
+
+        Every leg is an HTTP call to the engine (nexus-i711w Stage 2
+        sub-stages A/A3 collapsed all seven store seams), so the old
+        dedicated-SQLite-connection BEGIN/COMMIT scaffolding is gone: there
+        is no client-side transaction left to wrap. Cross-store atomicity on
+        this fan-out path is therefore per-store — a mid-cascade failure
+        raises with earlier legs already applied (recorded as a GAP
+        candidate on nexus-i711w.1; the engine-side rename endpoint is the
+        atomic alternative). ``_conn`` is retained for signature stability
+        and ignored.
+        """
         counts: dict[str, int] = {
             "chash": 0,
             "aspects": 0,
@@ -788,190 +369,26 @@ class T2Database:
             "hook_failures": 0,
         }
 
-        # Open a dedicated connection to the shared database file. All
-        # UPDATEs run in one BEGIN...COMMIT -- SQLite rolls back the
-        # entire transaction automatically if we close without committing.
-        owned = _conn is None
-        conn: sqlite3.Connection
-        if owned:
-            conn = sqlite3.connect(str(self._path), check_same_thread=False)
-            conn.execute(f"PRAGMA busy_timeout={SERVING_BUSY_TIMEOUT_MS}")
-            conn.execute("PRAGMA journal_mode=WAL")
-        else:
-            conn = _conn  # type: ignore[assignment]
+        counts["chash"] = self.chash_index.rename_collection(old=old, new=new)
 
-        try:
-            conn.execute("BEGIN")
+        # document_aspects: collision defense (#1057 dedup-on-live-PK) is
+        # engine-side now, with the rest of the leg.
+        counts["aspects"] = self.document_aspects.rename_collection(old=old, new=new)
 
-            # chash_index (with collision defense).
-            # In service mode, self.chash_index is an HttpChashIndex whose
-            # rename_collection() calls the remote service endpoint. The raw
-            # SQL UPDATE on the shared SQLite file would diverge from the
-            # service's Postgres tables, so we route through the domain-store
-            # API when the seam is active (same pattern as taxonomy below).
-            from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-            if storage_backend_for("chash_index") == StorageBackend.SERVICE:
-                counts["chash"] = self.chash_index.rename_collection(old=old, new=new)
-            else:
-                conn.execute(
-                    "DELETE FROM chash_index "
-                    "WHERE physical_collection = ? "
-                    "  AND chash IN ("
-                    "    SELECT chash FROM chash_index WHERE physical_collection = ?"
-                    "  )",
-                    (new, old),
-                )
-                cur = conn.execute(
-                    "UPDATE chash_index SET physical_collection = ? "
-                    "WHERE physical_collection = ?",
-                    (new, old),
-                )
-                counts["chash"] = cur.rowcount
+        counts["aspect_queue"] = self.aspect_queue.rename_collection(old=old, new=new)
 
-            # document_aspects (with collision defense). #1057: dedup on the
-            # live PRIMARY KEY, which differs by migration state. RDR-108
-            # Phase 1c migrates the PK (collection, source_path) -> (doc_id)
-            # and [4.31.0] RDR-096 P5.2 then DROPS source_path — but both are
-            # deferred until a catalog exists, so unmigrated DBs still carry
-            # source_path as the PK with no doc_id column. The old hardcoded
-            # source_path dedup raised "no such column: source_path" on
-            # migrated DBs and blocked ALL renames; a hardcoded doc_id would
-            # symmetrically break unmigrated DBs. Resolve the column from the
-            # live schema so both shapes work and dedup matches the real PK.
-            # RDR-152 nexus-gmiaf.16: in service mode, self.document_aspects is
-            # an HttpDocumentAspectsStore whose rename_collection() calls the
-            # remote service endpoint.  Route through domain-store API to avoid
-            # SQLite/Postgres divergence.
-            if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-                counts["aspects"] = self.document_aspects.rename_collection(old=old, new=new)
-            else:
-                aspects_key = _rename_dedup_col(conn, "document_aspects")
-                conn.execute(
-                    f"DELETE FROM document_aspects "
-                    f"WHERE collection = ? "
-                    f"  AND {aspects_key} IN ("
-                    f"    SELECT {aspects_key} FROM document_aspects WHERE collection = ?"
-                    f"  )",
-                    (new, old),
-                )
-                cur = conn.execute(
-                    "UPDATE document_aspects SET collection = ? WHERE collection = ?",
-                    (new, old),
-                )
-                counts["aspects"] = cur.rowcount
+        counts["highlights"] = self.document_highlights.rename_collection(old=old, new=new)
 
-            # aspect_extraction_queue (with collision defense). Same PK
-            # migration (RDR-108 Phase 1c) applies; its source_path column is
-            # NOT dropped, so the old source_path dedup did not error — but it
-            # shared the latent bug of deduping on a non-PK column once the PK
-            # moved to doc_id (a same-doc_id/different-source_path pair would
-            # hit a PK collision on the UPDATE). Resolve the live PK column.
-            # RDR-152 nexus-gmiaf.16: in service mode, route through
-            # self.aspect_queue.rename_collection() (HttpAspectQueue calls the
-            # remote /queue/rename_collection endpoint).
-            if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
-                counts["aspect_queue"] = self.aspect_queue.rename_collection(old=old, new=new)
-            else:
-                queue_key = _rename_dedup_col(conn, "aspect_extraction_queue")
-                conn.execute(
-                    f"DELETE FROM aspect_extraction_queue "
-                    f"WHERE collection = ? "
-                    f"  AND {queue_key} IN ("
-                    f"    SELECT {queue_key} FROM aspect_extraction_queue"
-                    f"    WHERE collection = ?"
-                    f"  )",
-                    (new, old),
-                )
-                cur = conn.execute(
-                    "UPDATE aspect_extraction_queue "
-                    "SET collection = ? WHERE collection = ?",
-                    (new, old),
-                )
-                counts["aspect_queue"] = cur.rowcount
+        # taxonomy (three sub-tables)
+        tax_counts = self.taxonomy.rename_collection(old, new)
+        counts["tax_topics"] = tax_counts.get("topics", 0)
+        counts["tax_assignments"] = tax_counts.get("assignments", 0)
+        counts["tax_meta"] = tax_counts.get("meta", 0)
 
-            # document_highlights (RDR-139 Layer E). PK is doc_id (tumbler),
-            # so the denorm collection column cannot collide on rename — a
-            # plain UPDATE suffices (no collision-defense DELETE needed).
-            # RDR-152 nexus-gmiaf.16: in service mode, route through
-            # self.document_highlights.rename_collection() (calls the remote
-            # /highlights/rename_collection endpoint).
-            if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
-                counts["highlights"] = self.document_highlights.rename_collection(old=old, new=new)
-            else:
-                cur = conn.execute(
-                    "UPDATE document_highlights SET collection = ? WHERE collection = ?",
-                    (new, old),
-                )
-                counts["highlights"] = cur.rowcount
-
-            # taxonomy (three sub-tables)
-            # In service mode, self.taxonomy is an HttpTaxonomyStore whose
-            # rename_collection() calls the remote service endpoint.  The
-            # raw SQL UPDATE on the shared SQLite file would diverge from
-            # the service's Postgres tables, so we route through the
-            # domain-store API when the seam is active.
-            if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
-                tax_counts = self.taxonomy.rename_collection(old, new)
-                counts["tax_topics"] = tax_counts.get("topics", 0)
-                counts["tax_assignments"] = tax_counts.get("assignments", 0)
-                counts["tax_meta"] = tax_counts.get("meta", 0)
-            else:
-                cur = conn.execute(
-                    "UPDATE topics SET collection = ? WHERE collection = ?",
-                    (new, old),
-                )
-                counts["tax_topics"] = cur.rowcount
-                cur = conn.execute(
-                    "UPDATE topic_assignments SET source_collection = ? "
-                    "WHERE source_collection = ?",
-                    (new, old),
-                )
-                counts["tax_assignments"] = cur.rowcount
-                cur = conn.execute(
-                    "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
-                    (new, old),
-                )
-                counts["tax_meta"] = cur.rowcount
-
-            # search_telemetry + hook_failures
-            # RDR-152 nexus-gmiaf.16: in service mode, self.telemetry is an
-            # HttpTelemetryStore whose rename_collection() calls the remote
-            # /v1/telemetry/rename_collection endpoint and returns
-            # {"search_telemetry": N, "hook_failures": N}.
-            if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-                tel_counts = self.telemetry.rename_collection(old=old, new=new)
-                counts["search_telemetry"] = tel_counts.get("search_telemetry", 0)
-                counts["hook_failures"] = tel_counts.get("hook_failures", 0)
-            else:
-                cur = conn.execute(
-                    "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
-                    (new, old),
-                )
-                counts["search_telemetry"] = cur.rowcount
-
-                # hook_failures (optional table -- created by migration)
-                table_exists = conn.execute(
-                    "SELECT COUNT(*) FROM sqlite_master "
-                    "WHERE type='table' AND name='hook_failures'"
-                ).fetchone()[0]
-                if table_exists:
-                    cur = conn.execute(
-                        "UPDATE hook_failures SET collection = ? WHERE collection = ?",
-                        (new, old),
-                    )
-                    counts["hook_failures"] = cur.rowcount
-
-            conn.commit()
-
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001 — best-effort rollback cleanup before re-raise; original error preserved
-                pass
-            raise
-        finally:
-            if owned:
-                conn.close()
+        # search_telemetry + hook_failures — one call, two counts.
+        tel_counts = self.telemetry.rename_collection(old=old, new=new)
+        counts["search_telemetry"] = tel_counts.get("search_telemetry", 0)
+        counts["hook_failures"] = tel_counts.get("hook_failures", 0)
 
         return counts
 
@@ -1117,17 +534,23 @@ class T2Database:
         convention established here. No current caller violates this
         rule; the docstring is a contract for future edits.
         """
-        # Resolve (project, title) for cascade scoping. Cheap indexed
-        # lookup via the memory connection directly to avoid the
-        # access_count side-effect of ``memory.get(id=...)`` on a row
-        # we're about to delete. Only executes when the caller used --id.
+        # Resolve (project, title) for cascade scoping. Only executes when
+        # the caller used --id.
+        #
+        # nexus-aqbrk: this was an unconditional ``self.memory._lock`` +
+        # ``self.memory.conn.execute``, which raises AttributeError against
+        # HttpMemoryStore — the id-only path was unreachable in service mode.
+        # Latent rather than live (the sole production caller,
+        # mcp/core.py::memory_delete, always passes project+title), but the
+        # facade is public API and the cascade below is the load-bearing
+        # part: without this resolution, ``purge_assignments_for_doc`` never
+        # runs and topic_assignments leak silently, which no FK covers.
+        # (The raw-SQLite lookup arm died with the stores; the public read's
+        # access_count increment is immaterial on a row about to be deleted.)
         if id is not None and (project is None or title is None):
-            with self.memory._lock:
-                row = self.memory.conn.execute(
-                    "SELECT project, title FROM memory WHERE id = ?", (id,)
-                ).fetchone()
-            if row is not None:
-                project, title = row[0], row[1]
+            entry = self.memory.get(id=id)
+            if entry is not None:
+                project, title = entry["project"], entry["title"]
         deleted = self.memory.delete(project=project, title=title, id=id)
         if deleted and project and title:
             self.taxonomy.purge_assignments_for_doc(project=project, title=title)
@@ -1297,7 +720,7 @@ class T2Database:
         instance-attribute monkeypatch still injects faults correctly.
         """
         if relevance_log_days is None:
-            from nexus.db.t2.telemetry import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
+            from nexus.db.t2.records import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
             relevance_log_days = RELEVANCE_LOG_RETENTION_DAYS
         # Purge relevance_log (RDR-061 E2 telemetry retention).
         log_deleted = 0
@@ -1351,7 +774,7 @@ class T2Database:
         re-acquires RENAME_LOCK via the now-guarded mutator; the RLock
         makes the re-entrant acquisition safe.
         """
-        from nexus.db.t2.document_aspects import AspectRecord  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        from nexus.db.t2.records import AspectRecord  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         record = AspectRecord(**record_fields)
         with self.RENAME_LOCK:
             upserted = self.document_aspects.upsert(record)

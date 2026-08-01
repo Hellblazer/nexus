@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from nexus.catalog.catalog import Catalog
+from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.catalog.link_generator import (
     generate_citation_links,
     generate_pdf_corpus_links,
@@ -18,13 +17,10 @@ from nexus.catalog.link_generator import (
 class TestRdrFilepathLinks:
     """generate_rdr_filepath_links uses resolve_path for relative file_path."""
 
-    def _make_catalog(self, tmp_path: Path) -> Catalog:
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
+    def _make_catalog(self, tmp_path: Path) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: the raw local Catalog this helper
+        # built is gone; ActiveCatalog routes to the live catalog, no init.
+        return ActiveCatalog()
 
     def test_filepath_linker_with_relative_paths(self, tmp_path: Path) -> None:
         """RDR with relative file_path resolves via resolve_path and generates links."""
@@ -106,13 +102,10 @@ class TestRdrFilepathLinks:
 class TestIncrementalRdrFilepathLinking:
     """Incremental mode for generate_rdr_filepath_links via new_tumblers parameter."""
 
-    def _make_catalog(self, tmp_path: Path) -> Catalog:
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
+    def _make_catalog(self, tmp_path: Path) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: the raw local Catalog this helper
+        # built is gone; ActiveCatalog routes to the live catalog, no init.
+        return ActiveCatalog()
 
     def _make_rdr_file(self, repo: Path, name: str, content: str) -> Path:
         rdr_dir = repo / "docs" / "rdr"
@@ -170,19 +163,16 @@ class TestIncrementalRdrFilepathLinking:
 class TestCitationLinksNoneMeta:
     """generate_citation_links must tolerate entries with meta=None (nexus-8d6e)."""
 
-    def _make_catalog(self, tmp_path: Path) -> Catalog:
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
+    def _make_catalog(self, tmp_path: Path) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: the raw local Catalog this helper
+        # built is gone; ActiveCatalog routes to the live catalog, no init.
+        return ActiveCatalog()
 
     def test_meta_none_does_not_crash(self, tmp_path: Path) -> None:
         """Entries with meta=None (legacy rows) are skipped without crashing."""
         from unittest.mock import patch
 
-        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.types import CatalogEntry
         from nexus.catalog.tumbler import Tumbler
 
         cat = self._make_catalog(tmp_path)
@@ -219,13 +209,10 @@ class TestProseFilepathLinks:
     anchor; ``docs/`` and ``conexus/`` paths match).
     """
 
-    def _make_catalog(self, tmp_path: Path) -> Catalog:
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
+    def _make_catalog(self, tmp_path: Path) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: the raw local Catalog this helper
+        # built is gone; ActiveCatalog routes to the live catalog, no init.
+        return ActiveCatalog()
 
     def test_prose_doc_in_docs_dir_links_to_code(self, tmp_path: Path) -> None:
         repo = tmp_path / "myrepo"
@@ -369,13 +356,10 @@ class TestPdfCorpusLinks:
     group (stable across runs).
     """
 
-    def _make_catalog(self, tmp_path: Path) -> Catalog:
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
-        return Catalog(cat_dir, cat_dir / ".catalog.db")
+    def _make_catalog(self, tmp_path: Path) -> ActiveCatalog:
+        # nexus-i711w terminal deletion: the raw local Catalog this helper
+        # built is gone; ActiveCatalog routes to the live catalog, no init.
+        return ActiveCatalog()
 
     def test_two_pdfs_with_same_hash_get_linked(self, tmp_path: Path) -> None:
         cat = self._make_catalog(tmp_path)
@@ -463,12 +447,24 @@ class TestPdfCorpusLinks:
 #    is mixed read+write — reads all_documents via cat, writes link_if_absent
 #    via writer. Lock the split so it can't regress to a single-object call.
 class TestCitationLinksReaderWriterSplit:
-    def _seed_citing_pair(self, tmp_path: Path) -> Path:
-        import sqlite3 as _sqlite  # noqa: F401
-        cat_dir = tmp_path / "catalog"
-        cat = Catalog.init(cat_dir)
+    def test_reads_via_cat_writes_via_writer(self, tmp_path: Path) -> None:
+        """The read-only reader supplies all_documents; the writer takes the
+        link_if_absent. A 'cites' edge is created.
+
+        Was pinned to the local catalog (nexus-aqbrk) because it built the
+        reader/writer pair as raw ``Catalog(..., read_only=True)`` handles,
+        which the RDR-176 frozen-source guard refuses to write in service mode.
+        The CONTRACT under test — reads via one handle, writes via a separate
+        write-capable one — is not local: it is exactly what
+        make_catalog_reader / make_catalog_writer supply, and what production
+        actually passes to generate_citation_links. Going through the factories
+        tests the same split on whichever catalog is live, which is strictly
+        more faithful than the raw pair it replaces.
+        """
+        # Seed through the ACTIVE catalog (nexus-i711w: the local Catalog.init
+        # arm is gone; ActiveCatalog needs no init).
+        cat = ActiveCatalog()
         owner = cat.register_owner("papers", "curator")
-        # Two papers; paper A's references include paper B's S2 id.
         cat.register(
             owner, "Paper B", content_type="paper", file_path="b.pdf",
             meta={"bib_semantic_scholar_id": "S2_B"},
@@ -477,38 +473,19 @@ class TestCitationLinksReaderWriterSplit:
             owner, "Paper A", content_type="paper", file_path="a.pdf",
             meta={"bib_semantic_scholar_id": "S2_A", "references": ["S2_B"]},
         )
-        cat._db.close()
-        return cat_dir
-
-    def test_reads_via_cat_writes_via_writer(self, tmp_path: Path) -> None:
-        """The read-only reader supplies all_documents; the writer takes the
-        link_if_absent. A 'cites' edge is created."""
-        cat_dir = self._seed_citing_pair(tmp_path)
-        reader = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
-        writer = Catalog(cat_dir, cat_dir / ".catalog.db")  # full, write-capable
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
         try:
             count = generate_citation_links(reader, writer=writer)
             assert count == 1
         finally:
-            reader._db.close()
-            writer._db.close()
+            writer.close()
         # Edge is durable: a fresh read sees it.
-        check = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
-        try:
-            from nexus.catalog.tumbler import Tumbler
-            a = [e for e in check.all_documents() if e.title == "Paper A"][0]
-            assert any(l.link_type == "cites" for l in check.links_from(a.tumbler))
-        finally:
-            check._db.close()
+        check = make_catalog_reader()
+        a = [e for e in check.all_documents() if e.title == "Paper A"][0]
+        assert any(l.link_type == "cites" for l in check.links_from(a.tumbler))
 
-    def test_write_on_reader_without_writer_fails_loud(self, tmp_path: Path) -> None:
-        """Passing only a read-only reader (no writer) must fail at the write,
-        not silently no-op — the regression that the split prevents."""
-        import sqlite3
-        cat_dir = self._seed_citing_pair(tmp_path)
-        reader = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
-        try:
-            with pytest.raises(sqlite3.OperationalError):
-                generate_citation_links(reader)  # writer defaults to reader
-        finally:
-            reader._db.close()
+    # test_write_on_reader_without_writer_fails_loud retired (nexus-i711w
+    # terminal deletion): its subject was the raw read-only local SQLite
+    # Catalog handle (sqlite3.OperationalError on write), which died with
+    # the local catalog.

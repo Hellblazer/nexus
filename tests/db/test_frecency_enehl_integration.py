@@ -16,7 +16,8 @@ Prerequisite:
   - No VOYAGE_API_KEY or NX_VOYAGE_API_KEY needed (ONNX mode).
 
 Run:
-    cd service && mvn package -DskipTests && cd ..
+    scripts/build-gate-jar.sh          # NOT `mvn package`: this suite needs a
+                                       # release_version-stamped jar (nexus-ao29z)
     uv run pytest tests/db/test_frecency_enehl_integration.py -m integration -v -s
 """
 from __future__ import annotations
@@ -35,7 +36,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisite detection ──────────────────────────────────────────────────
 
@@ -66,6 +72,10 @@ _ALL_PREREQS = (
 
 pytestmark = [
     pytest.mark.integration,
+    # nexus-ao29z: this suite constructs a vector client, whose cloud version
+    # probe fail-closes on a jar with no release_version — which is every jar a
+    # plain `mvn package` produces. Build with scripts/build-gate-jar.sh.
+    pytest.mark.needs_stamped_jar,
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
@@ -204,15 +214,12 @@ def local_service(pg_instance: dict):
     env.pop("VOYAGE_API_KEY", None)
     env.pop("NX_STORAGE_BACKEND", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=60.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", token
     finally:
         _stop_service(proc)

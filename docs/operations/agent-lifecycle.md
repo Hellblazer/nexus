@@ -93,9 +93,12 @@ re-embedded into the target model (RDR-162); same-model voyage collections are
 copied verbatim, skipping the billed re-embed (RDR-166). Legacy (pre-RDR-108)
 chunk ids are recomputed on the wire from the chunk text — no re-index, no
 source files needed (RDR-185). The engine below it is RDR-159's, inherited; the
-`nx guided-upgrade` / `nx migrate-to-service` verbs that used to front it are
-demoted internal primitives. See [migration-runbook.md](../migration-runbook.md)
-for the operator's manual order of operations.
+`nx guided-upgrade` / `nx migrate-to-service` verbs that used to front it were
+demoted internal primitives and then deleted outright by RDR-155 P4b — not
+present in this release. A pre-PG install is redirected to the pinned last
+migration-capable release instead. See
+[migration-runbook.md](../migration-runbook.md) for the operator's manual
+order of operations.
 
 When to upgrade: whenever you update the code — `nx upgrade` converges whatever
 that install actually needs, whether that is one schema migration or a five-year

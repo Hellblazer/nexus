@@ -400,6 +400,104 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Render a timestamp for the wire as UTC ISO-8601 with explicit seconds.
+     *
+     * <p>NOT {@code OffsetDateTime.toString()} (nexus-onjvy): that renders in whatever
+     * offset the value carries and elides zero seconds, so the same instant crosses as
+     * "2026-04-08T17:00-07:00" on one box and "2026-04-09T00:00:00Z" on another.
+     * This class already declares {@code UTC_SECOND} for exactly this shape.
+     */
+    private static String utcIso(OffsetDateTime ts) {
+        return ts == null ? "" : UTC_SECOND.format(
+            ts.withOffsetSameInstant(ZoneOffset.UTC));
+    }
+
+    /**
+     * Read hook_failures rows, newest first (nexus-onjvy).
+     *
+     * <p>WHY THIS EXISTS. Until now hook_failures was WRITE-ONLY over HTTP:
+     * {@code /hook_failures/record} and {@code /hook_failures/trim} and no read
+     * route at all. The only readers anywhere in the client were raw SQLite
+     * SELECTs in {@code nx taxonomy status} and {@code nx doctor}, and those die
+     * with the SQLite T2 stores in nexus-i711w. Without this method, the failure
+     * log that exists to surface SILENT hook failures becomes permanently
+     * uninspectable — an observability hole on exactly the path where silence is
+     * the failure mode.
+     *
+     * <p>RETURNS A PAGE PLUS EXACT AGGREGATES, deliberately. The two consumers
+     * want different things: {@code nx taxonomy status} lists recent failures,
+     * while {@code nx doctor} reports a total count and the oldest timestamp
+     * across the WHOLE filtered set. Serving doctor from a limited page would
+     * silently under-report the moment failures exceeded the page size — the
+     * caller would see "12 failures" because it asked for 12. So {@code total}
+     * and {@code oldest_occurred_at} are computed over the full predicate,
+     * independent of {@code limit}.
+     *
+     * @param tenant    RLS tenant
+     * @param days      only rows within the last N days; {@code <= 0} means no
+     *                  time bound
+     * @param hookNames restrict to these hook names; empty means all
+     * @param limit     max rows in the returned page (aggregates ignore it)
+     */
+    public Map<String, Object> getHookFailures(String tenant,
+                                               int days,
+                                               List<String> hookNames,
+                                               int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (days > 0) {
+                OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+                cond = cond.and(HOOK_FAILURES.OCCURRED_AT.ge(cutoff));
+            }
+            if (hookNames != null && !hookNames.isEmpty()) {
+                cond = cond.and(HOOK_FAILURES.HOOK_NAME.in(hookNames));
+            }
+
+            var agg = ctx.select(count(), min(HOOK_FAILURES.OCCURRED_AT))
+                .from(HOOK_FAILURES)
+                .where(cond)
+                .fetchOne();
+            int total = agg != null && agg.value1() != null ? agg.value1() : 0;
+            OffsetDateTime oldest = agg != null ? agg.value2() : null;
+
+            List<Map<String, Object>> rows = ctx.select(
+                HOOK_FAILURES.ID,
+                HOOK_FAILURES.DOC_ID,
+                HOOK_FAILURES.COLLECTION,
+                HOOK_FAILURES.HOOK_NAME,
+                HOOK_FAILURES.ERROR,
+                HOOK_FAILURES.OCCURRED_AT,
+                HOOK_FAILURES.BATCH_DOC_IDS,
+                HOOK_FAILURES.IS_BATCH,
+                HOOK_FAILURES.CHAIN)
+                .from(HOOK_FAILURES)
+                .where(cond)
+                .orderBy(HOOK_FAILURES.OCCURRED_AT.desc(), HOOK_FAILURES.ID.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",            r.value1());
+                    m.put("doc_id",        str(r.value2()));
+                    m.put("collection",    str(r.value3()));
+                    m.put("hook_name",     r.value4());
+                    m.put("error",         str(r.value5()));
+                    m.put("occurred_at",   utcIso(r.value6()));
+                    m.put("batch_doc_ids", str(r.value7()));
+                    m.put("is_batch",      r.value8() != null && r.value8() != 0);
+                    m.put("chain",         str(r.value9()));
+                    return m;
+                });
+
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", rows);
+            out.put("total", total);
+            out.put("oldest_occurred_at", oldest != null ? utcIso(oldest) : "");
+            return out;
+        });
+    }
+
+    /**
      * Rename collection in search_telemetry (and hook_failures).
      * Returns a map of {tableName -> rowCount}.
      */

@@ -6,12 +6,12 @@ import itertools
 import os
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
-import chromadb
 import numpy as np
 import pytest
 
-from nexus.db.storage_mode import has_raw_access
+from nexus.db.inmemory_vector_store import InMemoryVectorClient
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.taxonomy import (
@@ -23,7 +23,7 @@ from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
-def chroma_client() -> chromadb.ClientAPI:
+def chroma_client() -> Any:
     """Ephemeral ChromaDB client for taxonomy centroid tests."""
     return make_vector_test_client()
 
@@ -55,16 +55,6 @@ def _seed_topic(
     created_at: str = "2026-01-01T00:00:00Z",
 ) -> int:
     """Insert one topics row on either substrate; return its id."""
-    if has_raw_access(taxonomy):
-        cur = taxonomy.conn.execute(
-            "INSERT INTO topics "
-            "(label, parent_id, collection, doc_count, created_at, "
-            "review_status, terms) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (label, parent_id, collection, doc_count, created_at,
-             review_status, terms),
-        )
-        taxonomy.conn.commit()
-        return cur.lastrowid
     return taxonomy.import_topic(
         src_id=next_import_seed_id(),
         label=label,
@@ -89,16 +79,6 @@ def _seed_assignment(
     source_collection: str | None = None,
 ) -> None:
     """Insert one topic_assignments row on either substrate."""
-    if has_raw_access(taxonomy):
-        taxonomy.conn.execute(
-            "INSERT OR REPLACE INTO topic_assignments "
-            "(doc_id, topic_id, assigned_by, similarity, assigned_at, "
-            "source_collection) VALUES (?, ?, ?, ?, ?, ?)",
-            (doc_id, topic_id, assigned_by, similarity, assigned_at,
-             source_collection),
-        )
-        taxonomy.conn.commit()
-        return
     taxonomy.import_assignment(
         doc_id=doc_id,
         topic_id=topic_id,
@@ -110,15 +90,13 @@ def _seed_assignment(
 
 
 def _link_pairs(taxonomy: Any, topic_ids: list[int]) -> dict[tuple[int, int], int]:
-    """Normalized {(from_id, to_id): link_count} read.
+    """{(from_id, to_id): link_count} read.
 
-    get_topic_link_pairs returns a dict on the SQLite twin and a list of
-    (from, to, count) triples on the Http twin — normalize both shapes.
+    Both twins return the mapping since nexus-ekn9n (the Http twin returned
+    (from, to, count) triples until then; the shape is pinned substrate-neutrally
+    by tests/test_ekn9n_topic_link_pairs_contract.py).
     """
-    raw = taxonomy.get_topic_link_pairs(list(topic_ids))
-    if isinstance(raw, dict):
-        return dict(raw)
-    return {(f, t): c for f, t, c in raw}
+    return dict(taxonomy.get_topic_link_pairs(list(topic_ids)))
 
 
 def _centroid_state(taxonomy: Any, collection: str, chroma_client: Any) -> dict[str, Any]:
@@ -145,24 +123,6 @@ def _collection_assignment_count(taxonomy: Any, collection: str) -> int:
     )
 
 
-# ── schema ──────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw sqlite_master schema introspection dies at the RDR-155 P4b flip",
-)
-def test_topics_table_created(db: T2Database) -> None:
-    """topics and topic_assignments tables exist after T2Database init."""
-    tables = {
-        r[0] for r in db.taxonomy.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    assert "topics" in tables
-    assert "topic_assignments" in tables
-
-
 # ── topic CRUD ──────────────────────────────────────────────────────────────
 
 
@@ -172,7 +132,7 @@ def test_get_topics_empty(db: T2Database) -> None:
 
 
 def test_discover_topics_creates_topics_and_centroids(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """discover_topics persists topics to T2 and upserts centroids to ChromaDB."""
     rng = np.random.default_rng(42)
@@ -230,7 +190,7 @@ def _seed_centroids(db: T2Database, chroma_client) -> list[str]:
 
 
 def test_compute_assignments_returns_json_serializable_dicts(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """The COMPUTE half returns plain dicts (no chroma objects) that survive
     JSON — i.e. they can cross the daemon RPC boundary, which is the whole
@@ -260,7 +220,7 @@ def test_compute_assignments_returns_json_serializable_dicts(
 
 
 def test_persist_assignments_writes_rows(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """The PERSIST half writes the computed dicts to topic_assignments."""
     _seed_centroids(db, chroma_client)
@@ -278,7 +238,7 @@ def test_persist_assignments_writes_rows(
 
 
 def test_assign_batch_still_composes_compute_and_persist(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """Back-compat: assign_batch == compute_assignments + persist_assignments,
     same return + same persisted rows (direct callers unchanged)."""
@@ -300,23 +260,13 @@ def test_assign_batch_still_composes_compute_and_persist(
     # silently computed something different).
     mapping = db.taxonomy.get_assignments_for_docs(["batch-doc"])
     assert mapping.get("batch-doc") == expected[0]["topic_id"]
-    if has_raw_access(db.taxonomy):
-        row = db.taxonomy.conn.execute(
-            "SELECT assigned_by FROM topic_assignments WHERE doc_id='batch-doc'"
-        ).fetchone()
-        assert row[0] == expected[0]["assigned_by"]
 
 
-def test_compute_assignments_empty_when_no_centroids(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
-) -> None:
-    """No centroids for the collection → empty (the old no-op-returns-0 case)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-
-    out = CatalogTaxonomy.compute_assignments(
-        "never__discovered", ["x"], [[0.1] * 384], chroma_client,
-    )
-    assert out == []
+# test_compute_assignments_empty_when_no_centroids moved to
+# tests/db/test_http_taxonomy_store.py (nexus-i711w Stage 2 sub-stage C).
+# It drove CatalogTaxonomy.compute_assignments, a category-(c) static that
+# died with its class; the no-centroids contract lives on in the Http twin,
+# which had no coverage for it until the port.
 
 
 # ── RDR-151 Phase 3 (uzay8): discover_topics compute/persist split ───────────
@@ -349,10 +299,10 @@ def test_compute_discovered_topics_returns_serializable_specs() -> None:
     can cross the daemon RPC)."""
     import json
 
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
-    specs = CatalogTaxonomy.compute_discovered_topics(
+    specs = _tc.compute_discovered_topics(
         "split__disc", doc_ids, embeddings, texts,
     )
     assert len(specs) >= 2, "expected >=2 clusters from two separated blobs"
@@ -372,9 +322,9 @@ def test_compute_discovered_topics_returns_serializable_specs() -> None:
 
 def test_compute_discovered_topics_empty_short_circuits() -> None:
     """<5 docs returns [] (the old discover_topics no-op-returns-0 case)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
-    out = CatalogTaxonomy.compute_discovered_topics(
+    out = _tc.compute_discovered_topics(
         "tiny__disc", ["a", "b"], np.zeros((2, 384), dtype=np.float32), ["x", "y"],
     )
     assert out == []
@@ -383,10 +333,10 @@ def test_compute_discovered_topics_empty_short_circuits() -> None:
 def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> None:
     """The PERSIST half writes topic rows + assignments and returns the
     generated topic_ids aligned to the input spec order — no chroma needed."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
-    specs = CatalogTaxonomy.compute_discovered_topics(
+    specs = _tc.compute_discovered_topics(
         "persist__disc", doc_ids, embeddings, texts,
     )
     topic_ids = db.taxonomy.persist_discovered_topics("persist__disc", specs)
@@ -406,10 +356,10 @@ def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> Non
 def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
     """Existing-topics guard preserved: a second persist for the same
     collection is a no-op returning [] (matches discover_topics' guard)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
-    specs = CatalogTaxonomy.compute_discovered_topics(
+    specs = _tc.compute_discovered_topics(
         "guard__disc", doc_ids, embeddings, texts,
     )
     first = db.taxonomy.persist_discovered_topics("guard__disc", specs)
@@ -419,7 +369,7 @@ def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
 
 
 def test_discover_topics_still_composes(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """Back-compat: discover_topics == compute + persist + centroid upsert.
     Same end state (topic rows in T2 AND centroids in chroma) so direct
@@ -449,29 +399,33 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     through (test-validator finding, fkq5q gate).
     """
     import nexus.mcp_infra as mi
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 
     computed = [{
         "doc_id": "d1", "topic_id": 7, "assigned_by": "centroid",
         "similarity": None, "source_collection": None,
     }]
 
-    # Bypass chroma: same-collection returns the known list, cross returns [].
-    monkeypatch.setattr(
-        CatalogTaxonomy, "compute_assignments",
-        staticmethod(lambda *a, **k: [] if k.get("cross_collection") else computed),
-    )
     # The hook does `from nexus.config import is_local_mode` at call time,
     # so patch the source module (not mcp_infra).
     import nexus.config as _cfg
     monkeypatch.setattr(_cfg, "is_local_mode", lambda: False)  # skip exclude gate
+    monkeypatch.setattr(mi, "get_t3", lambda: MagicMock())
+    # nexus-i711w sub-stage C: the raw arm this test used to drive (patching
+    # CatalogTaxonomy.compute_assignments and handing the hook a ._client
+    # handle) is deleted. The ROUTING contract it guards is unchanged — the
+    # surviving service arm still computes and persists inside ONE
+    # t2_index_write lambda — so the driver moves to that arm and compute is
+    # stubbed on the store the lambda receives.
     monkeypatch.setattr(
-        mi, "get_t3", lambda: type("T", (), {"_client": object()})(),
+        "nexus.db.http_vector_client.is_service_backed", lambda _t3: True
     )
 
     captured: dict = {}
 
     class _FakeTaxonomy:
+        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection):  # noqa: ANN001, ANN201
+            return [] if cross_collection else computed
+
         def persist_assignments(self, assignments):  # noqa: ANN001
             captured["assignments"] = assignments
             return len(assignments)
@@ -565,47 +519,8 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
     assert cached == derived == 3, f"cached={cached} derived={derived}"
 
 
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: CatalogTaxonomy's assign-time topic_links resync (nexus-zq79 F5; the engine maintains links via refresh/cooccurrence passes, not per-assign) dies at the RDR-155 P4b flip",
-)
-def test_assign_topic_resyncs_topic_links_link_count(db: T2Database) -> None:
-    """nexus-zq79 F5: topic_links.link_count must track co-occurrence
-    count after every assign_topic, not stay stale until the next full
-    refresh_projection_links / generate_cooccurrence_links rebuild.
-    """
-    # Two topics in different collections so co-occurrence is meaningful.
-    a_id = _seed_topic(db.taxonomy, "topic-a", collection="proj-a")
-    b_id = _seed_topic(db.taxonomy, "topic-b", collection="proj-b")
-    pair = (min(a_id, b_id), max(a_id, b_id))
-
-    # Doc X in topic A, then X in topic B — co-occurrence 1.
-    db.taxonomy.assign_topic("doc-x", a_id, assigned_by="hdbscan")
-    db.taxonomy.assign_topic("doc-x", b_id, assigned_by="hdbscan")
-    link = _link_pairs(db.taxonomy, [a_id, b_id]).get(pair)
-    assert link == 1, (
-        f"expected link_count=1 after first co-occurrence, got {link}"
-    )
-
-    # Doc Y also in both topics — co-occurrence 2.
-    db.taxonomy.assign_topic("doc-y", a_id, assigned_by="hdbscan")
-    db.taxonomy.assign_topic("doc-y", b_id, assigned_by="hdbscan")
-    link = _link_pairs(db.taxonomy, [a_id, b_id]).get(pair)
-    assert link == 2, (
-        f"expected link_count=2 after second co-occurrence, got {link}"
-    )
-
-    # Re-assigning the same (doc, topic) must not inflate.
-    db.taxonomy.assign_topic("doc-y", a_id, assigned_by="hdbscan")
-    link = _link_pairs(db.taxonomy, [a_id, b_id]).get(pair)
-    assert link == 2, (
-        f"INSERT OR IGNORE on duplicate must not increment link_count; "
-        f"got {link}"
-    )
-
-
 def test_rebuild_taxonomy_clears_and_rediscovers(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """rebuild_taxonomy deletes old topics, then re-discovers fresh ones."""
     rng = np.random.default_rng(42)
@@ -644,7 +559,7 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
 
 
 def test_rebuild_taxonomy_preserves_manual_assignment(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """RDR-151 Phase 3 regression: rebuild must carry a manually-assigned doc
     onto the rebuilt topic (Route 1 — old topic matched to new via _merge_labels).
@@ -672,16 +587,16 @@ def test_rebuild_taxonomy_preserves_manual_assignment(
 
 
 def test_compute_rebuild_plan_is_pure_and_serializable(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """The rebuild COMPUTE half returns a JSON-serializable plan (specs +
     manual-transfer decisions keyed to spec index) and touches no T2 write."""
     import json
 
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs(seed=23)
-    plan = CatalogTaxonomy.compute_rebuild_plan(
+    plan = _tc.compute_rebuild_plan(
         "rb__coll", doc_ids, embeddings, texts,
         old_centroids=np.empty((0, 0), dtype=np.float32),
         old_labels=[], old_review_statuses=[], old_centroid_topic_ids=[],
@@ -745,7 +660,7 @@ def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
 
 
 def test_discover_topics_all_noise_returns_zero(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """When HDBSCAN assigns all docs to noise (-1), return 0 and skip centroids."""
     rng = np.random.default_rng(42)
@@ -762,7 +677,7 @@ def test_discover_topics_all_noise_returns_zero(
 
 
 def test_assign_single_returns_nearest_topic(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns the nearest topic_id via centroid ANN lookup."""
     rng = np.random.default_rng(42)
@@ -794,7 +709,7 @@ def test_assign_single_returns_nearest_topic(
 
 
 def test_assign_single_no_centroids_returns_none(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None when no centroids exist for the collection."""
     emb = np.random.default_rng(42).standard_normal(384).astype(np.float32)
@@ -805,7 +720,7 @@ def test_assign_single_no_centroids_returns_none(
 
 
 def test_assign_single_cross_collection_isolation(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None for collection B when centroids only exist for A."""
     rng = np.random.default_rng(42)
@@ -829,7 +744,7 @@ def test_assign_single_cross_collection_isolation(
 
 
 def test_assign_single_cross_collection_finds_foreign_topic(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single with cross_collection=True returns topics from other collections."""
     rng = np.random.default_rng(42)
@@ -857,7 +772,7 @@ def test_assign_single_cross_collection_finds_foreign_topic(
 
 
 def test_assign_batch_cross_collection(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch with cross_collection=True assigns from foreign centroids."""
     rng = np.random.default_rng(42)
@@ -892,7 +807,7 @@ def test_assign_batch_cross_collection(
 
 
 def test_assign_batch_assigns_multiple_docs(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch assigns multiple new docs to nearest topics."""
     rng = np.random.default_rng(42)
@@ -921,15 +836,10 @@ def test_assign_batch_assigns_multiple_docs(
     # Verify assignments exist in T2
     mapping = db.taxonomy.get_assignments_for_docs(new_ids)
     assert set(mapping) == set(new_ids)
-    if has_raw_access(db.taxonomy):
-        rows = db.taxonomy.conn.execute(
-            "SELECT assigned_by FROM topic_assignments WHERE doc_id LIKE 'new-doc-%'"
-        ).fetchall()
-        assert all(r[0] == "centroid" for r in rows)
 
 
 def test_assign_batch_no_centroids_returns_zero(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch returns 0 when no centroids exist."""
     embs = np.random.default_rng(42).standard_normal((3, 384)).astype(np.float32)
@@ -940,7 +850,7 @@ def test_assign_batch_no_centroids_returns_zero(
 
 
 def test_assign_single_dimension_mismatch(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None with warning on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -959,7 +869,7 @@ def test_assign_single_dimension_mismatch(
 
 
 def test_assign_batch_dimension_mismatch(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch returns 0 on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -980,7 +890,7 @@ def test_assign_batch_dimension_mismatch(
 
 
 def test_project_against_basic(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """project_against returns matched topics and novel chunks."""
     rng = np.random.default_rng(42)
@@ -1023,7 +933,7 @@ def test_project_against_basic(
 
 
 def test_project_against_empty_target(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """project_against with no target centroids returns all chunks as novel."""
     rng = np.random.default_rng(42)
@@ -1045,7 +955,7 @@ def test_project_against_empty_target(
 
 
 def test_project_against_dimension_mismatch(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """project_against raises ValueError on dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -1072,7 +982,7 @@ def test_project_against_dimension_mismatch(
 
 
 def test_assigned_by_column_populated(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """discover_topics sets assigned_by='hdbscan' on topic_assignment rows."""
     rng = np.random.default_rng(42)
@@ -1089,18 +999,11 @@ def test_assigned_by_column_populated(
 
     # Assignments landed for the discovered docs on both substrates.
     assert db.taxonomy.get_assignments_for_docs(doc_ids)
-    if has_raw_access(db.taxonomy):
-        rows = db.taxonomy.conn.execute(
-            "SELECT DISTINCT assigned_by FROM topic_assignments"
-        ).fetchall()
-        assert len(rows) == 1
-        assert rows[0][0] == "hdbscan"
-    else:
-        # No public assigned_by read on the Http twin; manual_assignments
-        # (the assigned_by='manual' slice) being empty pins the provenance
-        # is not 'manual'.
-        state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
-        assert state["manual_assignments"] == {}
+    # No public assigned_by read on the Http twin; manual_assignments
+    # (the assigned_by='manual' slice) being empty pins the provenance
+    # is not 'manual'.
+    state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
+    assert state["manual_assignments"] == {}
 
 
 def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
@@ -1115,60 +1018,6 @@ def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     assert len(docs) == 1
     assert docs[0]["doc_id"] == "my-research-note"
     assert docs[0]["title"] == "my-research-note"
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: SQLite memory-title JOIN known-defect documentation (RDR-063) dies at the RDR-155 P4b flip",
-)
-def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database) -> None:
-    """RDR-063 Known Defect: get_topic_docs() JOIN conflates T3 collection with T2 project.
-
-    This test DOCUMENTS the defect: when a topic's ``collection`` is a T3
-    collection name (e.g. ``code__myrepo``) and the memory entry's ``project``
-    is the T2 project name (e.g. ``myrepo``), the JOIN fails because the
-    project ≠ collection comparison is false.
-
-    The assertion uses a doc_id that does NOT match any memory.title, so
-    the JOIN can't short-circuit. When the defect is fixed (JOIN semantics
-    changed), this test will fail and must be rewritten.
-    """
-    # Memory entry with a DIFFERENT title from the topic's doc_id — so even
-    # if the project/collection match, the title JOIN cannot find a hit.
-    # This ensures we're testing the project-vs-collection mismatch, not
-    # accidentally matching via title == doc_id.
-    db.put(project="myrepo", title="unrelated-memory-title", content="some notes")
-
-    # Topic associated with a T3 collection name (NOT the T2 project name)
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("code topic", "code__myrepo", 1, "2026-01-01T00:00:00Z"),
-    )
-    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    # doc_id = "t3-chunk-id" — does NOT match any memory.title in the DB
-    db.taxonomy.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        ("t3-chunk-id", topic_id),
-    )
-    db.taxonomy.conn.commit()
-
-    docs = get_topic_docs(db, topic_id)
-    assert len(docs) == 1
-    assert docs[0]["doc_id"] == "t3-chunk-id"
-    # Because the JOIN fails (project != collection AND title != doc_id),
-    # title falls back to doc_id and project falls back to empty string.
-    # When the defect is fixed, both fields should carry resolved values
-    # that differ from these fallbacks — the test will fail and must be
-    # rewritten alongside removing the Known Defect section from RDR-063.
-    assert docs[0]["title"] == "t3-chunk-id", (
-        "Known defect regression: get_topic_docs() now resolves T3-origin "
-        "titles. Update this test to assert the new resolved title value "
-        "and remove the Known Defect section from RDR-063."
-    )
-    assert docs[0]["project"] == "", (
-        "Known defect regression: get_topic_docs() now resolves T3-origin "
-        "project. Update this test alongside the title assertion."
-    )
 
 
 # ── Cascade on memory delete (v3.8.1) ─────────────────────────────────────
@@ -1245,21 +1094,6 @@ def test_memory_delete_cascade_scoped_to_project(db: T2Database) -> None:
     # topic-a's assignment removed, topic-b's assignment untouched
     assert db.taxonomy.get_all_topic_doc_ids(topic_a_id) == []
     assert db.taxonomy.get_all_topic_doc_ids(topic_b_id) == ["shared-title"]
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: T2Database.delete(id=...) resolves the row under the raw memory._lock (SQLite-only facade branch) and dies at the RDR-155 P4b flip",
-)
-def test_memory_delete_by_id_cascades(db: T2Database) -> None:
-    """Facade resolves project/title from --id before cascading."""
-    row_id = db.put(project="proj", title="by-id", content="delete via numeric id")
-    topic_id = _seed_topic(db.taxonomy, "id-topic", collection="proj", doc_count=1)
-    _seed_assignment(db.taxonomy, "by-id", topic_id)
-
-    assert db.delete(id=row_id) is True
-
-    assert db.taxonomy.get_all_topic_doc_ids(topic_id) == []
 
 
 def test_cli_taxonomy_list(tmp_path: Path) -> None:
@@ -1360,219 +1194,6 @@ def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
     )
 
 
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
-)
-def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> None:
-    """GH #251: status emits an Action line when hook_failures has recent rows.
-
-    The persist path is dormant until 4.9.10, but the read path is live
-    today — the table may exist in DBs upgraded by the migration test
-    harness, or once the next release ships.
-    """
-    from unittest.mock import patch
-
-    from click.testing import CliRunner
-
-    import sqlite3
-
-    from nexus.commands.taxonomy_cmd import taxonomy
-    from nexus.db.migrations import migrate_hook_failures
-
-    db_path = tmp_path / "memory.db"
-    with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
-        )
-        tid = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='t1'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
-        db.taxonomy.assign_topic(
-            "doc-1", tid, assigned_by="projection",
-            similarity=0.9, source_collection="docs__alpha",
-        )
-
-    # Apply the dormant 4.9.10 migration manually, then seed recent failures.
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    conn.execute(
-        "INSERT INTO hook_failures (hook_name, collection, error) "
-        "VALUES (?, ?, ?)",
-        ("taxonomy_assign_hook", "docs__alpha", "centroids missing"),
-    )
-    conn.execute(
-        "INSERT INTO hook_failures (hook_name, collection, error) "
-        "VALUES (?, ?, ?)",
-        ("taxonomy_assign_hook", "docs__alpha", "chroma timeout"),
-    )
-    # An old failure (35 days ago) must NOT count toward the 24h window.
-    conn.execute(
-        "INSERT INTO hook_failures (hook_name, occurred_at) VALUES (?, ?)",
-        ("some_old_hook", "2026-03-01T00:00:00"),
-    )
-    conn.commit()
-    conn.close()
-
-    runner = CliRunner()
-    with patch(
-        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
-    ):
-        result = runner.invoke(taxonomy, ["status"])
-
-    assert result.exit_code == 0, result.output
-    assert "Action:" in result.output
-    assert "2 post-store hook failure(s) in the last 24h" in result.output, result.output
-    assert "taxonomy_assign_hook=2" in result.output
-    # The 35-day-old failure is outside the window, so its hook name must not
-    # appear in the Action line.
-    assert "some_old_hook" not in result.output
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
-)
-def test_cli_taxonomy_status_surfaces_batch_doc_count(tmp_path: Path) -> None:
-    """RDR-095: batch-shape hook_failures rows surface their full
-    doc-affected count (one row representing N documents) in the
-    Action line. Per-hook breakdown still counts rows, but the
-    parenthetical 'affecting M document(s)' shows the blast radius
-    when M > N.
-    """
-    from unittest.mock import patch
-
-    from click.testing import CliRunner
-
-    import json
-    import sqlite3
-
-    from nexus.commands.taxonomy_cmd import taxonomy
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-
-    db_path = tmp_path / "memory.db"
-    with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
-        )
-        tid = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='t1'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
-        db.taxonomy.assign_topic(
-            "doc-1", tid, assigned_by="projection",
-            similarity=0.9, source_collection="docs__alpha",
-        )
-
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    # One scalar row + one batch row covering 50 docs + one batch row
-    # covering 25 docs. Total rows = 3, total docs affected = 76.
-    conn.execute(
-        "INSERT INTO hook_failures (hook_name, collection, error) "
-        "VALUES (?, ?, ?)",
-        ("taxonomy_assign_hook", "docs__alpha", "scalar fail"),
-    )
-    conn.execute(
-        "INSERT INTO hook_failures "
-        "(hook_name, collection, error, batch_doc_ids, is_batch) "
-        "VALUES (?, ?, ?, ?, 1)",
-        ("chash_dual_write_batch_hook", "docs__alpha", "batch fail",
-         json.dumps([f"doc-{i}" for i in range(50)])),
-    )
-    conn.execute(
-        "INSERT INTO hook_failures "
-        "(hook_name, collection, error, batch_doc_ids, is_batch) "
-        "VALUES (?, ?, ?, ?, 1)",
-        ("taxonomy_assign_batch_hook", "docs__alpha", "batch fail 2",
-         json.dumps([f"doc-{i}" for i in range(25)])),
-    )
-    conn.commit()
-    conn.close()
-
-    runner = CliRunner()
-    with patch(
-        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
-    ):
-        result = runner.invoke(taxonomy, ["status"])
-
-    assert result.exit_code == 0, result.output
-    assert "3 post-store hook failure(s) affecting 76 document(s)" in result.output
-    assert "chash_dual_write_batch_hook=1" in result.output
-    assert "taxonomy_assign_batch_hook=1" in result.output
-    assert "taxonomy_assign_hook=1" in result.output
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
-)
-def test_cli_taxonomy_status_handles_malformed_batch_doc_ids(
-    tmp_path: Path,
-) -> None:
-    """RDR-095: a batch row with malformed JSON in batch_doc_ids must
-    not crash the reader. The malformed row falls back to counting as
-    one document affected.
-    """
-    from unittest.mock import patch
-
-    from click.testing import CliRunner
-
-    import sqlite3
-
-    from nexus.commands.taxonomy_cmd import taxonomy
-    from nexus.db.migrations import (
-        migrate_hook_failures,
-        migrate_hook_failures_batch_columns,
-    )
-
-    db_path = tmp_path / "memory.db"
-    with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('t1', 'docs__alpha', 5, '2026-01-01T00:00:00Z')"
-        )
-        tid = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='t1'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
-        db.taxonomy.assign_topic(
-            "doc-1", tid, assigned_by="projection",
-            similarity=0.9, source_collection="docs__alpha",
-        )
-
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    migrate_hook_failures_batch_columns(conn)
-    conn.execute(
-        "INSERT INTO hook_failures "
-        "(hook_name, collection, error, batch_doc_ids, is_batch) "
-        "VALUES (?, ?, ?, ?, 1)",
-        ("chash_dual_write_batch_hook", "docs__alpha", "garbage payload",
-         "not valid json"),
-    )
-    conn.commit()
-    conn.close()
-
-    runner = CliRunner()
-    with patch(
-        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
-    ):
-        result = runner.invoke(taxonomy, ["status"])
-
-    assert result.exit_code == 0, result.output
-    # Row count = 1, fallback doc count = 1, so no "affecting M" branch.
-    assert "1 post-store hook failure(s) in the last 24h" in result.output
-    assert "chash_dual_write_batch_hook=1" in result.output
-
-
 def test_cli_taxonomy_status_silent_when_hook_failures_table_missing(
     tmp_path: Path,
 ) -> None:
@@ -1666,113 +1287,6 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
 
 
 # ── discover_for_collection + CLI (RDR-070, nexus-2dq) ──────────────────────
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
-)
-def test_discover_for_collection(
-    db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
-) -> None:
-    """discover_for_collection fetches texts, embeds with MiniLM, runs discover_topics.
-
-    RDR-151 Phase 3 routing proof: the SPY asserts t2_index_write is called at
-    least twice (persist_discovered_topics + record_discover_count), proving the
-    wiring rather than just confirming rows land.
-    """
-    from nexus.commands.taxonomy_cmd import discover_for_collection
-    from nexus.db.local_ef import LocalEmbeddingFunction
-
-    # RDR-151 Phase 3: spy on t2_index_write to count routed calls.
-    # Pin to the test fixture db (no-daemon fallback opens default_db_path).
-    import nexus.mcp_infra as _mi
-    t2_write_call_count = 0
-
-    def _spy(fn):
-        nonlocal t2_write_call_count
-        t2_write_call_count += 1
-        return fn(db)
-
-    monkeypatch.setattr(_mi, "t2_index_write", _spy)
-
-    # Seed a ChromaDB collection with documents
-    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    texts_a = [f"machine learning neural network gradient {i}" for i in range(30)]
-    texts_b = [f"database query indexing sql schema {i}" for i in range(30)]
-    texts = texts_a + texts_b
-    doc_ids = [f"doc-{i}" for i in range(60)]
-
-    coll = chroma_client.get_or_create_collection(
-        "test__discover", embedding_function=None,
-    )
-    embeddings = ef(texts)
-    coll.add(ids=doc_ids, documents=texts, embeddings=embeddings)
-
-    count = discover_for_collection(
-        "test__discover", db.taxonomy, chroma_client, force=False,
-    )
-    assert count >= 2
-    topics = db.taxonomy.get_topics()
-    assert len(topics) >= 2
-
-    # Routing proof: at minimum persist_discovered_topics + record_discover_count
-    # (+ persist_cross_links if cross-links are computed = 3+). Must be >= 2.
-    assert t2_write_call_count >= 2, (
-        f"expected >= 2 t2_index_write calls (persist_discovered_topics + "
-        f"record_discover_count), got {t2_write_call_count}"
-    )
-
-
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
-)
-def test_discover_for_collection_force(
-    db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
-) -> None:
-    """force=True clears existing topics before re-discovering fresh ones."""
-    from nexus.commands.taxonomy_cmd import discover_for_collection
-    from nexus.db.local_ef import LocalEmbeddingFunction
-
-    import nexus.mcp_infra as _mi
-    monkeypatch.setattr(_mi, "t2_index_write", lambda fn: fn(db))
-
-    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    texts = (
-        [f"machine learning neural {i}" for i in range(30)]
-        + [f"database query sql {i}" for i in range(30)]
-    )
-    doc_ids = [f"doc-{i}" for i in range(60)]
-
-    coll = chroma_client.get_or_create_collection(
-        "test__force", embedding_function=None,
-    )
-    coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
-
-    count1 = discover_for_collection(
-        "test__force", db.taxonomy, chroma_client, force=False,
-    )
-    ids_after_first = {
-        t["id"] for t in db.taxonomy.get_topics()
-        if t.get("collection") == "test__force"
-    }
-
-    count2 = discover_for_collection(
-        "test__force", db.taxonomy, chroma_client, force=True,
-    )
-    ids_after_second = {
-        t["id"] for t in db.taxonomy.get_topics()
-        if t.get("collection") == "test__force"
-    }
-
-    assert count1 >= 2
-    assert count2 >= 2
-    # force=True should replace topics, not accumulate
-    assert len(ids_after_second) == count2
-    # Assignments should be consistent — not doubled
-    total_assignments = _collection_assignment_count(db.taxonomy, "test__force")
-    assert total_assignments <= 60, "force rebuild should replace, not accumulate"
 
 
 def test_discover_cli_invocation() -> None:
@@ -2069,43 +1583,6 @@ class TestSklearnHdbscanSmoke:
 # ── Review infrastructure (RDR-070, nexus-lbu) ────────────────────────────────
 
 
-@pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: raw PRAGMA/schema-default introspection of the SQLite twin dies at the RDR-155 P4b flip",
-)
-class TestReviewSchema:
-    """Schema migrations for review_status and terms columns."""
-
-    def test_review_status_column_exists(self, db: T2Database) -> None:
-        """review_status column added to topics table via migration."""
-        cols = {
-            row[1]
-            for row in db.taxonomy.conn.execute("PRAGMA table_info(topics)").fetchall()
-        }
-        assert "review_status" in cols
-
-    def test_terms_column_exists(self, db: T2Database) -> None:
-        """terms column added to topics table via migration."""
-        cols = {
-            row[1]
-            for row in db.taxonomy.conn.execute("PRAGMA table_info(topics)").fetchall()
-        }
-        assert "terms" in cols
-
-    def test_review_status_default_pending(self, db: T2Database) -> None:
-        """New topics default to review_status='pending'."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("test", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
-        row = db.taxonomy.conn.execute(
-            "SELECT review_status FROM topics LIMIT 1"
-        ).fetchone()
-        assert row[0] == "pending"
-
-
 class TestReviewMethods:
     """CatalogTaxonomy methods for review workflow."""
 
@@ -2256,11 +1733,11 @@ class TestDiscoverStoresTerms:
     """discover_topics stores c-TF-IDF terms in the terms column."""
 
     @pytest.fixture()
-    def chroma_client(self) -> chromadb.ClientAPI:
+    def chroma_client(self) -> Any:
         return make_vector_test_client()
 
     def test_terms_stored_as_json(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """discover_topics persists top c-TF-IDF terms as JSON."""
         import json
@@ -2527,11 +2004,11 @@ class TestSplitTopic:
     """split_topic creates child topics via KMeans sub-clustering."""
 
     @pytest.fixture()
-    def chroma(self) -> chromadb.ClientAPI:
+    def chroma(self) -> Any:
         return make_vector_test_client()
 
     def test_split_creates_children(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """Split a parent topic into k children via KMeans."""
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -2558,29 +2035,10 @@ class TestSplitTopic:
         emb_list = ef(texts)
         coll.add(ids=doc_ids, documents=texts, embeddings=emb_list)
 
-        # Seed a parent centroid in taxonomy__centroids (raw chroma leg
-        # only — on the engine substrate centroids route through the
-        # centroid port and split does not need the parent centroid to
-        # pre-exist).
-        import numpy as _np
-        if has_raw_access(db.taxonomy):
-            centroid_coll = chroma.get_or_create_collection(
-                "taxonomy__centroids",
-                embedding_function=None,
-                metadata={"hnsw:space": "cosine"},
-            )
-            parent_centroid = _np.array(emb_list).mean(axis=0).tolist()
-            centroid_coll.add(
-                ids=[f"test__split:{parent_id}"],
-                embeddings=[parent_centroid],
-                metadatas=[{
-                    "topic_id": parent_id,
-                    "label": "mixed-topic",
-                    "collection": "test__split",
-                    "doc_count": 30,
-                }],
-            )
-
+        # No parent-centroid pre-seed needed: on the engine substrate
+        # centroids route through the centroid port and split does not
+        # need the parent centroid to pre-exist (the raw-chroma seeding
+        # leg died with the =sqlite opt-out).
         child_count = db.taxonomy.split_topic(
             parent_id, k=2, chroma_client=chroma,
         )
@@ -2723,13 +2181,6 @@ class TestSplitTopic:
         pair = (min(src_id, tgt_id), max(src_id, tgt_id))
         count = _link_pairs(db.taxonomy, [src_id, tgt_id]).get(pair)
         assert count == 3  # three per-chunk projection rows
-        if has_raw_access(db.taxonomy):
-            row = db.taxonomy.conn.execute(
-                "SELECT link_types FROM topic_links "
-                "WHERE from_topic_id = ? AND to_topic_id = ?",
-                pair,
-            ).fetchone()
-            assert "projection" in row[0]
 
     def test_refresh_projection_links_merges_existing_types(
         self, db: T2Database,
@@ -2759,14 +2210,6 @@ class TestSplitTopic:
 
         # The pair still exists after the refresh on both substrates.
         assert (from_id, to_id) in _link_pairs(db.taxonomy, [from_id, to_id])
-        if has_raw_access(db.taxonomy):
-            row = db.taxonomy.conn.execute(
-                "SELECT link_types FROM topic_links "
-                "WHERE from_topic_id = ? AND to_topic_id = ?",
-                (from_id, to_id),
-            ).fetchone()
-            types = _json.loads(row[0])
-            assert set(types) == {"cites", "projection"}
 
     def test_refresh_projection_links_no_op_when_no_projections(
         self, db: T2Database,
@@ -2787,12 +2230,12 @@ class TestSplitTopic:
         assert result == 0
 
     def test_compute_split_returns_child_specs(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """compute_split returns serializable child specs (no T2 writes)."""
         import numpy as _np
         from nexus.db.local_ef import LocalEmbeddingFunction
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         texts_a = [f"machine learning neural {i}" for i in range(15)]
@@ -2801,7 +2244,7 @@ class TestSplitTopic:
         doc_ids = [f"doc-{i}" for i in range(30)]
         embeddings = _np.array(ef(texts), dtype=_np.float32)
 
-        result = CatalogTaxonomy.compute_split(
+        result = _tc.compute_split(
             topic_id=99,
             doc_ids=doc_ids,
             texts=texts,
@@ -2831,7 +2274,7 @@ class TestSplitTopic:
     ) -> None:
         """persist_split writes children to T2 and returns child IDs (no chroma)."""
         import json as _json
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         # Seed parent with assignments
         parent_id = _seed_topic(
@@ -2873,76 +2316,6 @@ class TestSplitTopic:
         # Parent doc_count is 0
         parent = db.taxonomy.get_topic_by_id(parent_id)
         assert parent["doc_count"] == 0
-
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: raw-SQLite split_cmd t2_index_write routing (service branch persists via the engine, not t2_index_write) dies at the RDR-155 P4b flip",
-    )
-    def test_split_cmd_routes_persist_via_t2_index_write(
-        self, db: T2Database, chroma: chromadb.ClientAPI, monkeypatch,
-    ) -> None:
-        """split_cmd (Phase C) must route the T2 persist through t2_index_write.
-
-        RDR-151 Phase 3 (nexus-uzay8): the taxonomy CLI 'split' command
-        calls compute_split (local, chroma-coupled) then routes persist_split
-        through t2_index_write (daemon path).  This test is a RED test until
-        the routing is in place.
-        """
-        import nexus.mcp_infra as _mi
-        from nexus.commands.taxonomy_cmd import taxonomy as taxonomy_grp
-        from nexus.db.local_ef import LocalEmbeddingFunction
-        from click.testing import CliRunner
-        from unittest.mock import MagicMock, patch
-
-        routed = {"calls": 0}
-
-        def _spy_t2_index_write(fn):
-            routed["calls"] += 1
-            return fn(db)
-
-        monkeypatch.setattr(_mi, "t2_index_write", _spy_t2_index_write)
-
-        db_path = db._path
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        texts_a = [f"machine learning {i}" for i in range(15)]
-        texts_b = [f"database query {i}" for i in range(15)]
-        texts = texts_a + texts_b
-        doc_ids = [f"doc-{i}" for i in range(30)]
-
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('to-split', 'test__split_route', 30, '2026-01-01T00:00:00Z')",
-        )
-        parent_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        for did in doc_ids:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (did, parent_id),
-            )
-        db.taxonomy.conn.commit()
-
-        # Seed T3 collection
-        embs = ef(texts)
-        coll = chroma.get_or_create_collection("test__split_route", embedding_function=None)
-        coll.add(ids=doc_ids, documents=texts, embeddings=embs)
-
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
-        ), patch("nexus.db.make_t3") as mock_t3:
-            # Raw-path exception (see test_split_cli): db.taxonomy here is
-            # real raw SQLite, so t3 must stay raw-backed or
-            # _require_supported_taxonomy_backend refuses.
-            mock_t3.return_value = MagicMock(spec=T3Database)
-            mock_t3.return_value._client = chroma
-            result = CliRunner().invoke(
-                taxonomy_grp,
-                ["split", "to-split", "--k", "2", "--collection", "test__split_route"],
-            )
-
-        assert result.exit_code == 0, result.output
-        assert routed["calls"] >= 1, (
-            "split_cmd must call t2_index_write at least once (persist_split routed)"
-        )
 
 
 class TestManualOpsCLI:
@@ -2989,15 +2362,8 @@ class TestManualOpsCLI:
             assert db.taxonomy.get_assignments_for_docs(["my-doc-id"]) == {
                 "my-doc-id": topic_id,
             }
-            if has_raw_access(db.taxonomy):
-                row = db.taxonomy.conn.execute(
-                    "SELECT assigned_by FROM topic_assignments "
-                    "WHERE doc_id = 'my-doc-id'"
-                ).fetchone()
-                assert row[0] == "manual"
-            else:
-                state = db.taxonomy.read_rebuild_old_state("proj")
-                assert state["manual_assignments"].get("my-doc-id") == topic_id
+            state = db.taxonomy.read_rebuild_old_state("proj")
+            assert state["manual_assignments"].get("my-doc-id") == topic_id
 
     def test_assign_cli_unknown_label(self, tmp_path: Path) -> None:
         """nx taxonomy assign with unknown label prints error."""
@@ -3131,280 +2497,6 @@ class TestManualOpsCLI:
             docs = db.taxonomy.get_all_topic_doc_ids(target_id)
             assert set(docs) == {"doc-a", "doc-b"}
 
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
-    )
-    def test_split_cli(self, tmp_path: Path) -> None:
-        """nx taxonomy split invokes compute_split+persist_split via t2_index_write."""
-        import nexus.mcp_infra as _mi
-        from unittest.mock import MagicMock, patch
-
-        from click.testing import CliRunner
-
-        from nexus.commands.taxonomy_cmd import taxonomy
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("big-topic", "test__split_cli", 30, "2026-01-01T00:00:00Z"),
-            )
-            parent_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
-            for i in range(30):
-                db.taxonomy.conn.execute(
-                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                    (f"doc-{i}", parent_id),
-                )
-            db.taxonomy.conn.commit()
-
-        # Stub compute_split to return 2 child specs (no numpy/KMeans needed)
-        fake_split_result = {
-            "topic_id": parent_id,
-            "collection_name": "test__split_cli",
-            "child_specs": [
-                {
-                    "label": "child-0",
-                    "terms_json": "[]",
-                    "doc_count": 15,
-                    "doc_ids": [f"doc-{i}" for i in range(15)],
-                    "centroid": [0.1] * 384,
-                    "created_at": "2026-01-01T00:00:00Z",
-                },
-                {
-                    "label": "child-1",
-                    "terms_json": "[]",
-                    "doc_count": 15,
-                    "doc_ids": [f"doc-{i}" for i in range(15, 30)],
-                    "centroid": [0.9] * 384,
-                    "created_at": "2026-01-01T00:00:00Z",
-                },
-            ],
-        }
-
-        # nx taxonomy split's raw path (taxonomy_cmd.py:1081-1083,
-        # `chroma_client = t3._client`) only runs when db.taxonomy has
-        # raw access (_has_raw_access) -- true here since this test uses
-        # a real T2Database/SQLite taxonomy store. spec=T3Database (not
-        # HttpVectorClient) is deliberate: is_service_backed(t3) must be
-        # False or _require_supported_taxonomy_backend raises "not
-        # supported" against the real raw-SQLite taxonomy.
-        mock_t3 = MagicMock(spec=T3Database)
-        mock_coll = MagicMock()
-        mock_coll.get.return_value = {
-            "ids": [f"doc-{i}" for i in range(30)],
-            "documents": [f"text {i}" for i in range(30)],
-        }
-        # _client is an instance-only attribute of T3Database (assigned in
-        # __init__), so it is invisible to dir(T3Database) and thus to
-        # MagicMock's spec introspection. Set it explicitly (a plain
-        # attribute set, unrestricted even under spec=) before chaining
-        # into it, so the subsequent GET resolves against the mock's own
-        # __dict__ rather than the spec-restricted __getattr__. spec= the
-        # child too (chromadb.api.ClientAPI) so a method that real Chroma
-        # clients don't have can't hide behind a bare MagicMock.
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
-        mock_t3._client.get_collection.return_value = mock_coll
-        mock_t3._client.get_or_create_collection.return_value = MagicMock()
-
-        # persist_split returns list of 2 new child IDs
-        fake_persist = MagicMock(return_value=[101, 102])
-        import numpy as _np
-
-        runner = CliRunner()
-        with (
-            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
-            patch("nexus.db.make_t3", return_value=mock_t3),
-            patch(
-                "nexus.db.local_ef.LocalEmbeddingFunction.__call__",
-                return_value=_np.zeros((30, 384), dtype=_np.float32).tolist(),
-            ),
-            patch(
-                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
-                return_value=fake_split_result,
-            ),
-            patch.object(_mi, "t2_index_write", lambda fn: fake_persist(fn)),
-        ):
-            result = runner.invoke(
-                taxonomy,
-                ["split", "big-topic", "--k", "2", "--collection", "test__split_cli"],
-            )
-
-        assert result.exit_code == 0, result.output
-        assert "2 sub-topics" in result.output
-        # GH #250: split echoes a next-step hint pointing at `label`.
-        assert "Action:" in result.output
-        assert "nx taxonomy label" in result.output
-        assert "-c test__split_cli" in result.output
-
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
-    )
-    def test_split_cli_action_hint_without_collection_flag(self, tmp_path: Path) -> None:
-        """GH #250: split without --collection still emits a scoped hint.
-
-        The collection scope comes from the parent topic row, so the hint
-        reads `nx taxonomy label -c <parent-collection>` even when the
-        user did not pass --collection.
-        """
-        import nexus.mcp_infra as _mi
-        from unittest.mock import MagicMock, patch
-
-        from click.testing import CliRunner
-
-        from nexus.commands.taxonomy_cmd import taxonomy
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("lonely-topic", "test__parent_scope", 10, "2026-01-01T00:00:00Z"),
-            )
-            parent_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
-            for i in range(10):
-                db.taxonomy.conn.execute(
-                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                    (f"doc-{i}", parent_id),
-                )
-            db.taxonomy.conn.commit()
-
-        fake_split_result = {
-            "topic_id": parent_id,
-            "collection_name": "test__parent_scope",
-            "child_specs": [
-                {
-                    "label": "c0",
-                    "terms_json": "[]",
-                    "doc_count": 5,
-                    "doc_ids": [f"doc-{i}" for i in range(5)],
-                    "centroid": [0.1] * 384,
-                    "created_at": "2026-01-01T00:00:00Z",
-                },
-                {
-                    "label": "c1",
-                    "terms_json": "[]",
-                    "doc_count": 5,
-                    "doc_ids": [f"doc-{i}" for i in range(5, 10)],
-                    "centroid": [0.9] * 384,
-                    "created_at": "2026-01-01T00:00:00Z",
-                },
-                {
-                    "label": "c2",
-                    "terms_json": "[]",
-                    "doc_count": 0,
-                    "doc_ids": [],
-                    "centroid": [0.5] * 384,
-                    "created_at": "2026-01-01T00:00:00Z",
-                },
-            ],
-        }
-        # Same raw-path rationale as test_split_cli above: this test's
-        # T2Database taxonomy store is real raw SQLite, so t3 must stay
-        # raw-backed (spec=T3Database) or _require_supported_taxonomy_backend
-        # raises against is_service_backed(t3)=True + _has_raw_access=True.
-        mock_t3 = MagicMock(spec=T3Database)
-        mock_coll = MagicMock()
-        mock_coll.get.return_value = {
-            "ids": [f"doc-{i}" for i in range(10)],
-            "documents": [f"text {i}" for i in range(10)],
-        }
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
-        mock_t3._client.get_collection.return_value = mock_coll
-        mock_t3._client.get_or_create_collection.return_value = MagicMock()
-        fake_persist = MagicMock(return_value=[201, 202, 203])
-        import numpy as _np
-
-        runner = CliRunner()
-        with (
-            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
-            patch("nexus.db.make_t3", return_value=mock_t3),
-            patch(
-                "nexus.db.local_ef.LocalEmbeddingFunction.__call__",
-                return_value=_np.zeros((10, 384), dtype=_np.float32).tolist(),
-            ),
-            patch(
-                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
-                return_value=fake_split_result,
-            ),
-            patch.object(_mi, "t2_index_write", lambda fn: fake_persist(fn)),
-        ):
-            result = runner.invoke(taxonomy, ["split", "lonely-topic", "--k", "3"])
-
-        assert result.exit_code == 0, result.output
-        assert "Action:" in result.output
-        assert "-c test__parent_scope" in result.output
-
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
-    )
-    def test_split_cli_no_hint_when_child_count_zero(self, tmp_path: Path) -> None:
-        """GH #250: no-op split (child_count=0) must NOT print the action hint."""
-        from unittest.mock import MagicMock, patch
-
-        from click.testing import CliRunner
-
-        from nexus.commands.taxonomy_cmd import taxonomy
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("noop-topic", "test__noop", 5, "2026-01-01T00:00:00Z"),
-            )
-            parent_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
-            for i in range(5):
-                db.taxonomy.conn.execute(
-                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                    (f"doc-{i}", parent_id),
-                )
-            db.taxonomy.conn.commit()
-
-        # compute_split returns no child specs -> early return, no Action hint
-        fake_split_result = {
-            "topic_id": parent_id,
-            "collection_name": "test__noop",
-            "child_specs": [],
-        }
-        # Same raw-path rationale as test_split_cli above.
-        mock_t3 = MagicMock(spec=T3Database)
-        mock_coll = MagicMock()
-        mock_coll.get.return_value = {
-            "ids": [f"doc-{i}" for i in range(5)],
-            "documents": [f"text {i}" for i in range(5)],
-        }
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
-        mock_t3._client.get_collection.return_value = mock_coll
-        import numpy as _np
-
-        runner = CliRunner()
-        with (
-            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
-            patch("nexus.db.make_t3", return_value=mock_t3),
-            patch(
-                "nexus.db.local_ef.LocalEmbeddingFunction.__call__",
-                return_value=_np.zeros((5, 384), dtype=_np.float32).tolist(),
-            ),
-            patch(
-                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
-                return_value=fake_split_result,
-            ),
-        ):
-            result = runner.invoke(taxonomy, ["split", "noop-topic"])
-
-        assert result.exit_code == 0, result.output
-        assert "Action:" not in result.output
-
 
 # ── Rebalance trigger + merge strategy (RDR-070, nexus-1im) ───────────────
 
@@ -3416,14 +2508,6 @@ class TestRebalanceTrigger:
         """First discover always proceeds (no prior count)."""
         assert db.taxonomy.needs_rebalance("test__coll", current_count=100) is True
 
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: CatalogTaxonomy's 2x rebalance threshold semantics (engine twin uses 5% growth) dies at the RDR-155 P4b flip",
-    )
-    def test_below_threshold_no_rebalance(self, db: T2Database) -> None:
-        """Under 2x growth does not trigger rebalance."""
-        db.taxonomy.record_discover_count("test__coll", 100)
-        assert db.taxonomy.needs_rebalance("test__coll", current_count=150) is False
 
     def test_at_2x_triggers_rebalance(self, db: T2Database) -> None:
         """At 2x growth triggers rebalance."""
@@ -3455,7 +2539,7 @@ class TestMergeStrategy:
 
     def test_high_similarity_transfers_label(self, db: T2Database) -> None:
         """Old label transferred when cosine similarity > 0.8."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         # Near-identical centroids (high cosine similarity)
         old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
@@ -3463,7 +2547,7 @@ class TestMergeStrategy:
         old_review_statuses = ["accepted"]
         new_centroids = np.array([[0.99, 0.1, 0.0]], dtype=np.float32)
 
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids,
         )
         assert len(merged) == 1
@@ -3472,7 +2556,7 @@ class TestMergeStrategy:
 
     def test_low_similarity_uses_new_label(self, db: T2Database) -> None:
         """New c-TF-IDF label used when cosine similarity <= 0.8."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
         old_labels = ["old-label"]
@@ -3480,7 +2564,7 @@ class TestMergeStrategy:
         # Orthogonal -> cosine similarity ~0
         new_centroids = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
 
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids,
         )
         assert len(merged) == 1
@@ -3489,7 +2573,7 @@ class TestMergeStrategy:
 
     def test_n1_dedup_highest_wins(self, db: T2Database) -> None:
         """When two new centroids match the same old centroid, highest similarity wins."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         old_centroids = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
         old_labels = ["shared-label"]
@@ -3500,7 +2584,7 @@ class TestMergeStrategy:
             [0.85, 0.5, 0.0],  # similarity ~0.86
         ], dtype=np.float32)
 
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             old_centroids, old_labels, old_review_statuses, new_centroids,
         )
         assert len(merged) == 2
@@ -3511,10 +2595,10 @@ class TestMergeStrategy:
 
     def test_no_old_centroids(self, db: T2Database) -> None:
         """With no old centroids, all new centroids get None labels."""
-        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2 import taxonomy_compute as _tc
 
         new_centroids = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-        merged = CatalogTaxonomy._merge_labels(
+        merged = _tc._merge_labels(
             np.empty((0, 2), dtype=np.float32), [], [], new_centroids,
         )
         assert len(merged) == 2
@@ -3525,11 +2609,11 @@ class TestManualPreservation:
     """Manual assignments preserved across re-discovery."""
 
     @pytest.fixture()
-    def chroma(self) -> chromadb.ClientAPI:
+    def chroma(self) -> Any:
         return make_vector_test_client()
 
     def test_manual_assignments_survive_rebuild(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """Rebuild with merge strategy preserves manual assignments."""
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -3579,11 +2663,11 @@ class TestRediscoveryCentroidLifecycle:
     """Centroid lifecycle: clear before re-upsert on --force."""
 
     @pytest.fixture()
-    def chroma(self) -> chromadb.ClientAPI:
+    def chroma(self) -> Any:
         return make_vector_test_client()
 
     def test_force_clears_old_centroids(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """rebuild_taxonomy clears old centroids before upserting new."""
         rng = np.random.default_rng(42)
@@ -4001,19 +3085,6 @@ class TestEdgeCases:
 class TestTopicLinksTable:
     """topic_links T2 table for search-time linked-topic boost."""
 
-    @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: raw sqlite_master schema introspection dies at the RDR-155 P4b flip",
-    )
-    def test_topic_links_table_created(self, db: T2Database) -> None:
-        """topic_links table exists after init."""
-        tables = {
-            r[0]
-            for r in db.taxonomy.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        assert "topic_links" in tables
 
     def test_upsert_and_read_topic_links(self, db: T2Database) -> None:
         """upsert_topic_links persists, get_topic_link_pairs reads."""
@@ -4102,7 +3173,7 @@ class TestProjectCmd:
     """Tests for nx taxonomy project CLI command."""
 
     def test_project_cmd_output(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path,
     ) -> None:
         """project command shows matched topics and novel chunks."""
         from unittest.mock import MagicMock, patch
@@ -4152,7 +3223,7 @@ class TestProjectCmd:
         assert "matched topics" in result.output.lower() or "novel chunks" in result.output.lower()
 
     def test_project_cmd_persist(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path,
     ) -> None:
         """--persist writes assignments with assigned_by='projection'."""
         from unittest.mock import MagicMock, patch
@@ -4201,7 +3272,7 @@ class TestProjectCmd:
         assert "persisted" in result.output.lower()
 
     def test_project_single_source_default_matches_backfill_target_set(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path,
     ) -> None:
         """project <src> default targets every collection with topics minus src.
 
@@ -4265,7 +3336,7 @@ class TestProjectCmd:
 class TestListSiblingCollections:
     """Tests for list_sibling_collections (RDR-075 SC-8)."""
 
-    def test_finds_siblings_by_hash8(self, chroma_client: chromadb.ClientAPI) -> None:
+    def test_finds_siblings_by_hash8(self, chroma_client: Any) -> None:
         from nexus.registry import list_sibling_collections
 
         # Create collections with shared hash suffix
@@ -4280,7 +3351,7 @@ class TestListSiblingCollections:
         assert "code__myrepo-abc12345" not in siblings  # excludes self
         assert "code__other-def67890" not in siblings  # different hash
 
-    def test_excludes_taxonomy_collections(self, chroma_client: chromadb.ClientAPI) -> None:
+    def test_excludes_taxonomy_collections(self, chroma_client: Any) -> None:
         from nexus.registry import list_sibling_collections
 
         chroma_client.get_or_create_collection("code__repo-aaa11111")
@@ -4289,7 +3360,7 @@ class TestListSiblingCollections:
         siblings = list_sibling_collections("code__repo-aaa11111", chroma_client)
         assert not any(s.startswith("taxonomy__") for s in siblings)
 
-    def test_no_hash_suffix_returns_empty(self, chroma_client: chromadb.ClientAPI) -> None:
+    def test_no_hash_suffix_returns_empty(self, chroma_client: Any) -> None:
         from nexus.registry import list_sibling_collections
 
         siblings = list_sibling_collections("knowledge__art", chroma_client)

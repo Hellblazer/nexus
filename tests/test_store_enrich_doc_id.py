@@ -22,9 +22,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import documents_by_title
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
+
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
@@ -39,9 +40,11 @@ def local_t3() -> T3Database:
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding is
+    # gone with the local catalog; the store hook registers via the
+    # service-only factory into the live per-test tenant, so no init is needed.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 
@@ -115,12 +118,11 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     stored_col_name = stored_line.split("→")[-1].strip()
 
     # Catalog should now have an entry for the stored doc.
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE title = 'finding-doc-id-pin'"
-    ).fetchall()
+    # nexus-aqbrk: read through the ACTIVE catalog — the store hook registers
+    # via the factory, so the raw local .catalog.db was empty on the engine arm.
+    rows = documents_by_title("finding-doc-id-pin")
     assert rows, "expected catalog entry for the stored doc"
-    expected_doc_id = rows[0][0]
+    expected_doc_id = str(rows[0].tumbler)
 
     stored_col = local_t3._client.get_collection(stored_col_name)
     chunk_result = stored_col.get(include=["metadatas"])

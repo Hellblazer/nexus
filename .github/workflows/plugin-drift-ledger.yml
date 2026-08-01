@@ -1,0 +1,104 @@
+# Plugin drift ledger (nexus-ut7ek).
+#
+# marketplace.json pins plugins[].source.ref to an immutable release tag, so
+# Claude Code loads hooks / commands / skills / agents from THAT TAG, never from
+# the working tree. Guard changes on develop are therefore INERT in every live
+# session until a release ships. On 2026-07-25 three guards were merged, closed
+# as "mechanized", and protecting nothing -- a subagent then ran `git stash -u`
+# straight past a guard that explicitly covers `stash`.
+#
+# The ledger (conexus/PENDING_RELEASE.md) requires that drift be DECLARED. This
+# workflow is what makes that requirement real on the PR path.
+#
+# WHY ITS OWN WORKFLOW rather than a job in ci.yml:
+#   * The drift tests need the pinned TAG resolvable. ci.yml's `test` job checks
+#     out shallow with no tags, deliberately (nexus-dhs30 -- "every push must
+#     not pay for a history fetch"). So the tests SKIPPED in the only CI job
+#     that collected them: the guard against believed-live-but-inert code was
+#     itself believed-CI-mechanized and was not. Found by review, not by tests.
+#   * Re-adding tags to `test` would undo that same-day cost decision for the
+#     whole matrix.
+#   * A job in ci.yml cannot use native per-path filtering; ci.yml's existing
+#     dorny/paths-filter pattern needs `fetch-depth: 0`, which would cost more
+#     than this entire job. Workflow-level `paths:` is free.
+#
+# COST: runs ONLY when the plugin surface or the pin itself changes. Depth-1
+# checkout plus a fetch of EXACTLY the pinned tags (not fetch-depth:0, not
+# fetch-tags -- both pull far more than needed). One test file. No matrix, no
+# native build, no service, no PG.
+name: plugin drift ledger
+
+on:
+  push:
+    branches: [develop]
+    paths: &surface
+      - 'conexus/hooks/**'
+      - 'conexus/commands/**'
+      - 'conexus/skills/**'
+      - 'conexus/agents/**'
+      - 'conexus/resources/**'
+      - 'conexus/PENDING_RELEASE.md'
+      - 'sn/hooks/**'
+      - '.claude-plugin/marketplace.json'
+      - 'tests/test_plugin_release_drift_ledger.py'
+      - '.github/workflows/plugin-drift-ledger.yml'
+  pull_request:
+    branches: [main, develop]
+    paths: *surface
+
+concurrency:
+  group: plugin-drift-ledger-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    name: pinned-tag freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exactly the pinned release tags
+        run: |
+          set -euo pipefail
+          refs=$(python3 -c "
+          import json
+          d = json.load(open('.claude-plugin/marketplace.json'))
+          print(' '.join(sorted({p['source']['ref'] for p in d.get('plugins', [])
+                                 if isinstance(p.get('source'), dict) and p['source'].get('ref')})))
+          ")
+          echo "pinned refs: $refs"
+          # A marketplace with no pinned ref is a defect, not a free pass.
+          test -n "$refs"
+          version=$(python3 -c "
+          import tomllib
+          print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])
+          ")
+          for ref in $refs; do
+            if git fetch --depth=1 origin "refs/tags/$ref:refs/tags/$ref"; then
+              continue
+            fi
+            # RELEASE WINDOW (first hit at the 7.0.0 cut): on the release
+            # branch the pin names the ABOUT-TO-BE-CUT tag — created only
+            # after the PR merges — so ref==v<pyproject version> with the
+            # tag absent is the documented sequencing, not drift. The
+            # in-repo tests (_in_release_window) apply the same contract:
+            # in the window the ledger must be EMPTY, and that IS checked.
+            # Any other missing tag is still a hard failure.
+            if [ "$ref" = "v$version" ]; then
+              echo "release window: $ref == v<pyproject> and not yet cut — tolerated"
+            else
+              echo "pinned ref $ref does not exist and is NOT this release's own tag" >&2
+              exit 1
+            fi
+          done
+          git tag -l
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Run the ledger contract
+        env:
+          # Taglessness is a FAILURE here, never a skip. If the fetch step above
+          # silently breaks, a skip would report green having checked nothing --
+          # precisely the bug this ledger exists to catch, one level up.
+          NX_REQUIRE_PLUGIN_DRIFT_CHECK: "1"
+        run: uv run pytest tests/test_plugin_release_drift_ledger.py -q

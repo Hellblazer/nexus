@@ -1,47 +1,42 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NO-SQLITE tripwire (Hal directive 2026-07-18, bead nexus-mx635).
+"""NO-SQLITE terminal ratchet (Hal directive 2026-07-18; RDR-186 P4,
+bead nexus-146xx.18).
 
-Nexus is MIGRATING from SQLite TO PG, in EVERY mode. There is NO SQLite
-hybrid mode. SQLite is a migration SOURCE only, never a destination:
-new persistent state goes to PG through Liquibase via the engine (the PG
-bundle ships with every install — local mode's endpoint is the bundled
-local PG, same shape as service mode). Directive of record: T2
-``nexus/directive-no-sqlite-pg-everywhere``; AGENTS.md hot rule;
-retirement epic nexus-146xx.
+Nexus migrated from SQLite to PG in EVERY mode, and the migration is
+COMPLETE on the client: RDR-158 P4 (nexus-i711w) deleted the SQLite
+stores, schema, and migration chain; RDR-155 P4b deleted Chroma; RDR-186
+P1-P3 retired the opt-out and the stray substrates. This suite is the
+closing ratchet — it no longer freezes a census of known debt, it
+asserts the debt is ZERO:
 
-This suite FREEZES the 2026-07-18 census of client-side SQLite so the
-debt can only shrink:
+* NO inline SQLite DDL (``CREATE [VIRTUAL] TABLE``) anywhere in ``src/``.
+* NO per-line ``# epsilon-allow:`` escape tokens anywhere in ``src/`` —
+  the self-service exemption mechanism is retired with the last SQLite
+  site (RDR-186 D1/D6). Surviving legitimate sites are enumerated in
+  EXPLICIT NAMED allowlists in ``storage_boundary_lint.py`` (per-file
+  exact counts, reason beside each entry) — growing one is a reviewed
+  edit to that file, never a comment.
+* NO ``sqlite3.connect`` anywhere in ``src/`` beyond the three READ-ONLY
+  frozen-migration-source diagnostics named in
+  ``storage_boundary_lint.SQLITE_CONNECT_ALLOWLIST``.
+* ``ALTER TABLE`` text appears only at the named PG/Liquibase sites in
+  :data:`PG_ALTER_TABLE_ALLOWLIST` — every survivor is Postgres DDL
+  prose (changeset recipes, admin-SQL allowlist patterns), not SQLite.
 
-* per-file counts of inline SQLite DDL (``CREATE [VIRTUAL] TABLE``),
-* per-file counts of ``ALTER TABLE`` statements (RDR-186 P0 harden
-  decision, Hal 2026-07-18 — closes the schema-GROWTH blind spot the
-  CREATE-only regex cannot see), and
-* per-file counts of ``# epsilon-allow:`` overrides — the
-  storage-boundary lint (RDR-120) accepts any >=8-char reason, which
-  made exemptions self-service; freezing the population makes each NEW
-  one a failing test instead of a comment.
+A NEW SQLite site is a HARD TEST FAILURE, not a number to bump: there is
+no census left to edit and no escape token left to write. Directive of
+record: T2 ``nexus/directive-no-sqlite-pg-everywhere``; AGENTS.md hot
+rule; retirement epic nexus-146xx.
 
-PER-FILE COUNTS, not file presence (final-critique High, 2026-07-18):
-the reverted ``leg_convergence`` near-miss would have added a second
-``CREATE TABLE`` to ``wire_reid.py`` — a file already in the census — so
-a file-granularity freeze would never have seen the exact incident that
-spawned the directive. A count going UP in any file fails; going DOWN
-fails until the census entry is updated (exact-census discipline: a
-stale entry is a lie about the debt). Growth in a NEW file fails
-likewise.
-
-Exemptions are Hal's decisions, never code comments: an increment to
-any count below requires an explicit Hal decision recorded on a bead,
-referenced next to the entry. NOTE the honest limit: nothing here
-mechanically verifies that bead reference — enforcement of *that* rule
-is review of any diff touching this file (one census file to watch,
-instead of comments scattered across the tree).
-
-Scanner is deliberately dumb (regex count, per file): the goal is a
-tripwire that cannot be silently satisfied, not a precise linter —
+Scanner is deliberately dumb (regex, per file) for the DDL and token
+axes: the goal is a tripwire that cannot be silently satisfied.
 ``storage_boundary_lint.py`` remains the AST-precise boundary check
-(its numeric ratchet covers ``sqlite3.connect`` call sites, a different
-axis than DDL statements).
+(``sqlite3.connect`` incl. aliased forms — a different axis than DDL
+statements). NOTE (zero-review Sig-3): the ``sqlite3.connect`` arm scans
+the whole of ``src/`` UNCONDITIONALLY — ``allowlist_prefixes`` gates only
+the ``voyageai.Client`` arm; the connect assertion below passes ``()``
+merely so the voyageai arm is also prefix-free in that scan, not because
+the connect arm needs it.
 """
 from __future__ import annotations
 
@@ -56,104 +51,35 @@ _ALTER_RE = re.compile(r"ALTER\s+TABLE", re.IGNORECASE)
 _EPSILON_RE = re.compile(r"#\s*epsilon-allow\s*:")
 
 _DIRECTIVE = (
-    "NO new SQLite (Hal directive 2026-07-18): nexus is migrating SQLite -> PG "
-    "in EVERY mode; there is no SQLite hybrid mode. New persistent state goes "
-    "to PG through Liquibase via the engine. Raising a count in this census "
-    "requires an explicit Hal decision recorded on a bead, referenced inline. "
+    "NO SQLite (Hal directive 2026-07-18): SQLite is DELETED as a storage "
+    "substrate — there is no census to bump and no per-line escape token. "
+    "New persistent state goes to PG through Liquibase via the engine, in "
+    "every mode. A legitimate new PG DDL mention belongs in the named "
+    "allowlist in this file (an explicit Hal decision recorded on a bead, "
+    "referenced inline); anything SQLite-shaped is forbidden outright. "
     "See T2 nexus/directive-no-sqlite-pg-everywhere and epic nexus-146xx."
 )
 
-#: 2026-07-18 census — per-file counts of inline SQLite DDL statements.
-#: Retirement targets (epic nexus-146xx), never precedents.
-DDL_CENSUS: dict[str, int] = {
-    "src/nexus/aspect_promotion.py": 1,           # aspect_promotion_log stray (dodges migrations.py)
-    "src/nexus/db/migrations.py": 25,             # the sanctioned-until-retired T2 registry
-    "src/nexus/db/t2/aspect_extraction_queue.py": 3,
-    "src/nexus/db/t2/catalog.py": 9,
-    "src/nexus/db/t2/catalog_taxonomy.py": 4,
-    "src/nexus/db/t2/chash_index.py": 2,
-    "src/nexus/db/t2/document_aspects.py": 1,
-    "src/nexus/db/t2/document_highlights.py": 1,
-    "src/nexus/db/t2/memory_store.py": 3,
-    "src/nexus/db/t2/plan_library.py": 3,
-    "src/nexus/db/t2/telemetry.py": 4,
-    "src/nexus/migration/wire_reid.py": 1,        # chash_remap.db (PG twin = RDR-185 .16 Liquibase work)
-}
-
-#: 2026-07-18 census — per-file counts of ``ALTER TABLE`` statements
-#: (RDR-186 P0 adjudication, Hal 2026-07-18: HARDEN — the CREATE-only DDL
-#: regex is blind to schema GROWTH on an already-censused store, which is
-#: exactly how the reverted ``leg_convergence`` near-miss would have
-#: landed on a second attempt; bead nexus-146xx.2).
-ALTER_CENSUS: dict[str, int] = {
-    "src/nexus/aspect_promotion.py": 5,           # 1 real + 4 prose self-mentions
-    "src/nexus/commands/enrich.py": 1,            # docstring mirror of aspect_promotion's DDL (censused there) — not own debt
-    "src/nexus/db/admin_sql.py": 2,                # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex + docstring — not SQLite debt
-    "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
-    "src/nexus/db/t2/aspect_extraction_queue.py": 2,
-    "src/nexus/db/t2/catalog.py": 9,              # 8 real + 1 self-referential SQL comment
-    "src/nexus/db/t2/chash_index.py": 1,
-    "src/nexus/db/t2/memory_store.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
-    "src/nexus/db/t2/plan_library.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
-    "src/nexus/health.py": 1,                     # PG/Liquibase RLS syntax in a comment (health.py:1673) — not SQLite debt
-    "src/nexus/plans/repair.py": 1,               # docstring mention only; module runs NO DDL — not own debt
-    "src/nexus/upgrade_ladder/rungs/chash_rekey.py": 1,  # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text — not SQLite debt
-}
-
-#: 2026-07-18 census — per-file counts of ``# epsilon-allow:`` overrides.
-#: Each is standing debt: the override was self-granted by comment, which
-#: the directive retires going forward.
-EPSILON_CENSUS: dict[str, int] = {
-    "src/nexus/_session_end_launcher.py": 1,
-    "src/nexus/aspect_promotion.py": 6,
-    "src/nexus/catalog/catalog_owners.py": 1,
-    "src/nexus/collection_audit.py": 3,
-    "src/nexus/collection_health.py": 3,
-    "src/nexus/commands/_helpers.py": 1,
-    "src/nexus/commands/aspects.py": 7,
-    "src/nexus/commands/catalog.py": 1,
-    "src/nexus/commands/catalog_cmds/backfill.py": 3,
-    "src/nexus/commands/catalog_cmds/report.py": 3,
-    "src/nexus/commands/collection.py": 1,
-    "src/nexus/commands/daemon.py": 1,
-    "src/nexus/commands/doc.py": 3,
-    "src/nexus/commands/doctor.py": 6,
-    "src/nexus/commands/enrich.py": 9,
-    # index.py 3 -> 2 (RDR-155 P4b P0a): the --dry-run epsilon-allow
-    # retired with the InMemoryVectorClient cutover.
-    "src/nexus/commands/index.py": 2,
-    "src/nexus/commands/plan.py": 2,
-    "src/nexus/commands/rdr.py": 1,
-    "src/nexus/commands/search_cmd.py": 1,
-    # storage_cmd.py entry removed (RDR-187/nexus-piwya.10): the retired
-    # `migrate chash` command carried the file's one epsilon-allow connect.
-    "src/nexus/commands/taxonomy_cmd.py": 17,
-    "src/nexus/commands/tier_status.py": 1,
-    "src/nexus/commands/upgrade.py": 3,
-    "src/nexus/console/routes/health.py": 1,
-    "src/nexus/context.py": 1,
-    "src/nexus/db/t2/chash_etl.py": 1,
-    "src/nexus/doc_indexer.py": 1,
-    "src/nexus/health.py": 2,
-    "src/nexus/indexer.py": 1,
-    "src/nexus/mcp_infra.py": 4,
-    "src/nexus/merge_candidates.py": 2,
-    "src/nexus/migration/chroma_read.py": 2,
-    # RDR-180 land-then-transform (nexus-jxizy.10.7, Hal-directed design):
-    # the guided driver's ONE read-only migration-SOURCE connect
-    # (file:...?mode=ro URI) feeding pre-land census + landing — the
-    # sanctioned remap_cascade class, never a destination.
-    "src/nexus/migration/driver.py": 1,
-    "src/nexus/migration/guided_upgrade.py": 1,
-    # orchestrator.py entry removed (RDR-187/nexus-piwya.10): the chash
-    # ETL source read carried the file's one epsilon-allow connect.
-    "src/nexus/migration/remap_cascade.py": 1,
-    "src/nexus/migration/vector_etl.py": 1,
-    "src/nexus/migration/wire_reid.py": 1,
-    "src/nexus/operators/aspect_sql.py": 6,
-    "src/nexus/storage_boundary_lint.py": 10,     # defines the token; matches its own docs
-    "src/nexus/taxonomy.py": 1,
-    "src/nexus/upgrade_ladder/rungs/t2_schema.py": 1,
+#: The only files in ``src/`` allowed to contain ``ALTER TABLE`` text — all
+#: of it is POSTGRES DDL prose (Liquibase changeset recipes an operator
+#: hands to the engine, or the admin-SQL allowlist that recognises PG
+#: statements), never an executed SQLite statement. The dumb regex cannot
+#: tell dialects apart, so the allowlist names each survivor with its
+#: reason; exact counts, both directions (a stale entry is a lie about
+#: the ledger).
+PG_ALTER_TABLE_ALLOWLIST: dict[str, int] = {
+    # PG changeset RECIPE for the retired runtime promotion verb: module
+    # docstring template + PROMOTION_RETIRED message (nexus-70x7y).
+    "src/nexus/aspect_promotion.py": 2,
+    # Comment stating the runtime statement is GONE (nexus-70x7y).
+    "src/nexus/commands/enrich.py": 1,
+    # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex
+    # + docstring.
+    "src/nexus/db/admin_sql.py": 2,
+    # PG/Liquibase RLS syntax in a comment (health.py:1673).
+    "src/nexus/health.py": 1,
+    # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text.
+    "src/nexus/upgrade_ladder/rungs/chash_rekey.py": 1,
 }
 
 
@@ -168,64 +94,209 @@ def _count_matches(pattern: re.Pattern[str]) -> dict[str, int]:
     return counts
 
 
-def _census_delta(live: dict[str, int], census: dict[str, int]) -> tuple[list[str], list[str]]:
-    """(grown, shrunk): files whose live count exceeds the census (new files
-    included), and files whose live count fell below it (removed files
-    included) — the census must be updated DOWNWARD to match reality."""
+def test_zero_inline_sqlite_ddl() -> None:
+    """RDR-186 P4 end-state D1: src/ carries ZERO inline SQLite CREATE
+    TABLE statements. The last inline-DDL site (db/migrations.py) died in
+    RDR-158 P4 Stage 4; this asserts it stays dead."""
+    live = _count_matches(_DDL_RE)
+    assert not live, (
+        f"inline SQLite DDL appeared at {live}: this is a HARD FAILURE, "
+        f"not a census to bump. {_DIRECTIVE}"
+    )
+
+
+def test_zero_epsilon_allow_tokens() -> None:
+    """RDR-186 P4 end-state D6: the per-line escape token is RETIRED with
+    the last SQLite site — with no site left there is nothing to allow.
+    Surviving read-only diagnostics are named (file + exact count + reason)
+    in storage_boundary_lint.py's explicit allowlists instead."""
+    live = _count_matches(_EPSILON_RE)
+    assert not live, (
+        f"'# epsilon-allow:' token(s) appeared at {live}: the self-service "
+        f"per-line exemption is retired. Route through the substrate, or — "
+        f"for a genuinely irreducible site — add a named entry to the "
+        f"appropriate allowlist in storage_boundary_lint.py with an "
+        f"explicit Hal decision recorded on a bead. {_DIRECTIVE}"
+    )
+
+
+def test_alter_table_only_at_named_pg_sites() -> None:
+    """Every surviving ``ALTER TABLE`` mention is named PG/Liquibase prose.
+    Exact in both directions: growth anywhere is a hard failure; shrink
+    means a survivor died — lower its entry so the ledger stays exact."""
+    live = _count_matches(_ALTER_RE)
     grown = sorted(
-        f"{f}: {live.get(f, 0)} > {census.get(f, 0)}"
-        for f in live.keys() | census.keys()
-        if live.get(f, 0) > census.get(f, 0)
+        f"{f}: {live.get(f, 0)} > {PG_ALTER_TABLE_ALLOWLIST.get(f, 0)}"
+        for f in live.keys() | PG_ALTER_TABLE_ALLOWLIST.keys()
+        if live.get(f, 0) > PG_ALTER_TABLE_ALLOWLIST.get(f, 0)
     )
     shrunk = sorted(
-        f"{f}: {live.get(f, 0)} < {census.get(f, 0)}"
-        for f in live.keys() | census.keys()
-        if live.get(f, 0) < census.get(f, 0)
+        f"{f}: {live.get(f, 0)} < {PG_ALTER_TABLE_ALLOWLIST.get(f, 0)}"
+        for f in live.keys() | PG_ALTER_TABLE_ALLOWLIST.keys()
+        if live.get(f, 0) < PG_ALTER_TABLE_ALLOWLIST.get(f, 0)
     )
-    return grown, shrunk
-
-
-def test_no_new_inline_ddl() -> None:
-    grown, shrunk = _census_delta(_count_matches(_DDL_RE), DDL_CENSUS)
-    assert not grown, f"inline SQLite DDL GREW at {grown}: {_DIRECTIVE}"
-    assert not shrunk, (
-        f"stale DDL_CENSUS count(s) {shrunk}: DDL was removed (good!) — "
-        "lower the census entry so the frozen debt ledger stays exact."
-    )
-
-
-def test_no_new_alter_table() -> None:
-    grown, shrunk = _census_delta(_count_matches(_ALTER_RE), ALTER_CENSUS)
-    assert not grown, f"ALTER TABLE statements GREW at {grown}: {_DIRECTIVE}"
-    assert not shrunk, (
-        f"stale ALTER_CENSUS count(s) {shrunk}: ALTER DDL was removed (good!) — "
-        "lower the census entry so the frozen debt ledger stays exact."
-    )
-
-
-def test_no_new_epsilon_allows() -> None:
-    grown, shrunk = _census_delta(_count_matches(_EPSILON_RE), EPSILON_CENSUS)
     assert not grown, (
-        f"'# epsilon-allow:' population GREW at {grown}: self-service "
-        f"exemptions are retired. {_DIRECTIVE}"
+        f"ALTER TABLE text GREW at {grown}: if it is PG DDL prose, add a "
+        f"named allowlist entry here with its reason; if it is SQLite, it "
+        f"is forbidden outright. {_DIRECTIVE}"
     )
     assert not shrunk, (
-        f"stale EPSILON_CENSUS count(s) {shrunk}: an override was removed "
-        "(good!) — lower the census entry so the frozen debt ledger stays exact."
+        f"stale PG_ALTER_TABLE_ALLOWLIST entr(y/ies) {shrunk}: the text was "
+        "removed (good!) — lower the entry so the ledger stays exact."
     )
 
 
-def test_census_is_nonvacuous() -> None:
-    """The tripwire must actually see the debt it freezes: if the scanner
-    ever reads zero sites while the census is non-empty, the scan itself
-    broke (path drift, encoding) and the `grown` half above would go
-    vacuously green."""
-    assert _count_matches(_DDL_RE)
-    assert _count_matches(_ALTER_RE)
-    assert _count_matches(_EPSILON_RE)
-    assert sum(DDL_CENSUS.values()) >= 15
-    # Loose sanity floor like its siblings (critic 2026-07-18): legitimate
-    # D6 shrink-side retirements must not trip it — it only proves the
-    # scanner still sees a substantial census.
-    assert sum(ALTER_CENSUS.values()) >= 20
-    assert sum(EPSILON_CENSUS.values()) >= 40
+def test_no_unallowlisted_sqlite_connect_anywhere() -> None:
+    """RDR-186 P4 end-state D1/D6, connect axis: the AST scan (aliased
+    forms included) over ALL of src/ — path prefixes disabled, so db/ is
+    in scope too — finds exactly the named read-only frozen-source
+    diagnostics and nothing else."""
+    from nexus.storage_boundary_lint import (
+        SQLITE_CONNECT_ALLOWLIST,
+        scan_repo,
+    )
+
+    result = scan_repo(repo_root=REPO_ROOT, allowlist_prefixes=())
+    sqlite_violations = [
+        (v.file, v.line) for v in result.violations if v.symbol == "sqlite3.connect"
+    ]
+    assert sqlite_violations == [], (
+        f"sqlite3.connect outside the named allowlist at {sqlite_violations}: "
+        f"this is a HARD FAILURE — SQLite is deleted as a storage substrate "
+        f"and there is no escape token. {_DIRECTIVE}"
+    )
+    # Exact-ledger discipline: the live allowlisted population equals the
+    # allowlist sum. A survivor being deleted must lower its named entry.
+    assert result.sqlite_allowlisted_connects == sum(
+        SQLITE_CONNECT_ALLOWLIST.values()
+    ), (
+        f"live allowlisted-connect count "
+        f"({result.sqlite_allowlisted_connects}) != allowlist sum "
+        f"({sum(SQLITE_CONNECT_ALLOWLIST.values())}): a named survivor was "
+        "removed (good!) — lower its SQLITE_CONNECT_ALLOWLIST entry so the "
+        "ledger stays exact."
+    )
+    # The terminal survivor set is exactly the three read-only diagnostics.
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 3
+    # Liveness: an allowlist entry naming a dead file is a free slot a
+    # future connect could squat in without review.
+    dead = sorted(
+        f for f in SQLITE_CONNECT_ALLOWLIST if not (REPO_ROOT / f).is_file()
+    )
+    assert not dead, (
+        f"SQLITE_CONNECT_ALLOWLIST entr(y/ies) name no live file: {dead} — "
+        "delete the entry with the file."
+    )
+
+
+def test_scanner_is_nonvacuous() -> None:
+    """The empty-asserts above must FAIL when debt exists — prove the
+    scanner still sees the tree and the regexes still bite, so an
+    all-clean result means clean, not broken scan (path drift, encoding)."""
+    # The tree is substantial: rglob must see hundreds of files.
+    n_files = sum(
+        1 for p in SRC.rglob("*.py") if "__pycache__" not in p.parts
+    )
+    assert n_files > 200, f"scan saw only {n_files} files under {SRC}"
+    # The regexes still match their targets (synthetic positives).
+    assert _DDL_RE.search("CREATE TABLE t (id INTEGER)")
+    assert _DDL_RE.search("create virtual table t using fts5(x)")
+    assert _ALTER_RE.search("ALTER TABLE t ADD COLUMN c")
+    assert _EPSILON_RE.search("conn = f()  # epsilon-allow: some old reason")
+    # The ALTER scan sees the live named survivors (non-empty by design),
+    # which proves _count_matches reads real file content end-to-end.
+    assert _count_matches(_ALTER_RE), (
+        "the ALTER scan sees nothing at all — if every named PG survivor "
+        "truly died, empty PG_ALTER_TABLE_ALLOWLIST first; otherwise the "
+        "scanner broke"
+    )
+
+
+# ── Act 3 (service/ half): the Java engine tree carries NO SQLite ────────────
+#
+# nexus-146xx.18's end state is verbatim "no sqlite3.connect / CREATE TABLE
+# outside the allowlist across src/ AND service/" — the zero-critique
+# Critical: a one-time clean grep is a point-in-time claim, not a ratchet.
+# This mechanizes the service/ half. Allowed, by name:
+#   * Liquibase changelogs (service/src/main/resources/db/changelog/**) —
+#     the ONLY sanctioned DDL home (ALL-DDL-through-Liquibase directive).
+#   * the test-scoped sqlite-jdbc dependency in service/pom.xml — the
+#     deliberate FTS5 unicode61 parity comparand (RDR-155 P3). Its scope
+#     must STAY test; a scope change is a violation, not a bump.
+
+_SERVICE = REPO_ROOT / "service" / "src"
+_SERVICE_CHANGELOG = REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog"
+_SERVICE_TEST = _SERVICE / "test"
+
+_JAVA_SQLITE_RE = re.compile(r"org\.sqlite|jdbc:sqlite", re.IGNORECASE)
+_JAVA_DDL_RE = re.compile(r"CREATE\s+TABLE", re.IGNORECASE)
+
+
+def _service_files():
+    for ext in ("*.java", "*.xml", "*.sql", "*.properties"):
+        yield from _SERVICE.rglob(ext)
+
+
+def test_service_tree_has_no_sqlite():
+    """No SQLite JDBC surface anywhere under service/src except the
+    test-scoped parity comparand (which lives in pom.xml, not src/)."""
+    assert _SERVICE.is_dir(), "service/src moved — update the Act-3 scan"
+    offenders = []
+    for path in _service_files():
+        rel = path.relative_to(REPO_ROOT)
+        text = path.read_text(errors="replace")
+        for m in _JAVA_SQLITE_RE.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            # The FTS5-parity comparand lives in TEST scope: Java test
+            # sources may reference the sqlite JDBC driver; main must not.
+            if _SERVICE_TEST in path.parents:
+                continue
+            offenders.append(f"{rel}:{line}")
+    assert not offenders, (
+        "SQLite JDBC surface in the engine MAIN tree: "
+        + ", ".join(offenders)
+        + "\nThe engine is PG-only (T2 nexus/directive-no-sqlite-pg-everywhere); "
+        "this is a hard failure, not a number to bump (nexus-146xx.18 Act 3)."
+    )
+
+
+def test_service_ddl_lives_only_in_liquibase():
+    """CREATE TABLE under service/src/main appears ONLY in Liquibase
+    changelogs; Java test sources may build PG fixtures."""
+    offenders = []
+    main_tree = _SERVICE / "main"
+    for path in main_tree.rglob("*"):
+        if not path.is_file() or path.suffix not in (".java", ".xml", ".sql", ".properties"):
+            continue
+        if _SERVICE_CHANGELOG in path.parents:
+            continue
+        text = path.read_text(errors="replace")
+        for m in _JAVA_DDL_RE.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            offenders.append(f"{path.relative_to(REPO_ROOT)}:{line}")
+    assert not offenders, (
+        "DDL outside Liquibase changelogs in the engine main tree: "
+        + ", ".join(offenders)
+        + "\nALL DDL goes through Liquibase (standing directive); hard "
+        "failure, not a number to bump (nexus-146xx.18 Act 3)."
+    )
+
+
+def test_service_sqlite_jdbc_dependency_stays_test_scoped():
+    """pom.xml's sqlite-jdbc (the FTS5 parity comparand) must keep
+    <scope>test</scope> — a scope promotion would put a SQLite driver on
+    the engine's runtime classpath."""
+    pom = (REPO_ROOT / "service" / "pom.xml").read_text(errors="replace")
+    m = re.search(
+        r"<artifactId>sqlite-jdbc</artifactId>.*?(<scope>(\w+)</scope>|</dependency>)",
+        pom, re.DOTALL,
+    )
+    assert m is not None, (
+        "sqlite-jdbc dependency not found in service/pom.xml — if it was "
+        "removed entirely, delete this test WITH it; if renamed, re-point."
+    )
+    assert m.group(2) == "test", (
+        f"sqlite-jdbc scope is {m.group(2)!r}, not 'test' — the FTS5 parity "
+        "comparand must never reach the engine runtime classpath "
+        "(nexus-146xx.18 Act 3)."
+    )

@@ -13,7 +13,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
-**Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started](getting-started.md#first-time-setup-the-storage-backend) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model. (The standalone SQLite T2 daemon — `nx daemon t2 install --autostart` — remains an explicit opt-in for `NX_STORAGE_BACKEND=sqlite`.)
+**Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started](getting-started.md#first-time-setup-the-storage-backend) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
 ## `nexus` — retrieval + storage (38 tools)
 

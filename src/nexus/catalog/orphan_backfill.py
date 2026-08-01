@@ -41,7 +41,7 @@ import structlog
 from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
@@ -127,7 +127,11 @@ def gather_titled_chunks(
     returned as a single group; callers can branch on them (use chash
     grouping or skip).
     """
-    col = t3_db._client.get_collection(name=collection)
+    # nexus-at2ff: was ``t3_db._client.get_collection`` — production make_t3()
+    # returns HttpVectorClient, which has no ``_client`` (only the T3Database
+    # test facade does), so these verbs raised AttributeError in service mode.
+    # Both handles expose get_collection directly.
+    col = t3_db.get_collection(name=collection)
     n = col.count()
     by_title: dict[str, list[ChunkRef]] = defaultdict(list)
     offset = 0
@@ -320,7 +324,7 @@ def _content_type_for_collection(collection: str) -> str:
 
 
 def register_dt_linked(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     owner: "Tumbler",
     collection: str,
     matches: list[DTMatch],
@@ -372,7 +376,7 @@ def register_dt_linked(
 
 
 def register_synthetic(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     owner: "Tumbler",
     collection: str,
     groups: list[TitleGroup],
@@ -497,7 +501,7 @@ def dump_csvs(
 
 
 def apply_csv(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     owner: "Tumbler",
     collection: str,
     csv_path: Path,
@@ -577,7 +581,7 @@ def apply_csv(
 
 
 def link_by_title(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     collection: str,
     groups: list[TitleGroup],
 ) -> tuple[int, int, list[TitleGroup]]:
@@ -592,12 +596,16 @@ def link_by_title(
     Untitled groups are passed through to ``unlinked_groups`` so
     callers can branch them to chash fallback.
     """
-    rows = catalog._db.execute(
-        "SELECT tumbler, title FROM documents "
-        "WHERE physical_collection = ? AND title != ''",
-        (collection,),
-    ).fetchall()
-    by_title: dict[str, str] = {r[1]: r[0] for r in rows}
+    # nexus-2hgxb (nrxs9 final review Critical-2): this was a raw
+    # ``catalog._db`` reach — an AttributeError against the service client,
+    # the only catalog since the local deletion. The public per-collection
+    # listing carries (tumbler, title, head_hash); the explicit high limit
+    # matters — a server-side default page would silently truncate the
+    # backfill's match universe.
+    entries = catalog.list_by_collection(collection, limit=1_000_000)
+    by_title: dict[str, str] = {
+        e.title: str(e.tumbler) for e in entries if e.title
+    }
     linked_chunks = 0
     linked_docs = 0
     unlinked: list[TitleGroup] = []
@@ -631,7 +639,7 @@ def link_by_title(
 
 
 def link_by_content_hash(
-    catalog: "Catalog",
+    catalog: "CatalogReader",
     t3_db,
     collection: str,
 ) -> tuple[int, int, int]:
@@ -646,16 +654,19 @@ def link_by_content_hash(
     Documents with ``head_hash`` populated. The two hashes are the
     same content-addressed identity so matching is exact.
     """
-    rows = catalog._db.execute(
-        "SELECT tumbler, head_hash FROM documents "
-        "WHERE physical_collection = ? AND head_hash != ''",
-        (collection,),
-    ).fetchall()
-    by_head: dict[str, str] = {r[1]: r[0] for r in rows}
+    # nexus-2hgxb: same public-read port as link_by_title above.
+    entries = catalog.list_by_collection(collection, limit=1_000_000)
+    by_head: dict[str, str] = {
+        e.head_hash: str(e.tumbler) for e in entries if e.head_hash
+    }
     if not by_head:
         return 0, 0, 0
 
-    col = t3_db._client.get_collection(name=collection)
+    # nexus-at2ff: was ``t3_db._client.get_collection`` — production make_t3()
+    # returns HttpVectorClient, which has no ``_client`` (only the T3Database
+    # test facade does), so these verbs raised AttributeError in service mode.
+    # Both handles expose get_collection directly.
+    col = t3_db.get_collection(name=collection)
     n = col.count()
     # Group chunks by content_hash so we batch one append_manifest per doc.
     by_hash: dict[str, list[ChunkRef]] = defaultdict(list)

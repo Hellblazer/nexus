@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.t2.document_aspects import AspectRecord, _safe_json_dict, _safe_json_list
+from nexus.db.t2.records import AspectRecord, _safe_json_dict, _safe_json_list
 
 _log = structlog.get_logger(__name__)
 
@@ -115,14 +115,14 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     class's constructor signature matches the mixin's pinned contract
     exactly, so no override is needed).
 
-    NOTE: ``promote_extras_field`` and ``list_promotions`` in
-    ``aspect_promotion.py`` reach into ``db.document_aspects.conn`` and
-    ``db.document_aspects._lock`` for raw SQLite access. When this store is
-    active those attributes raise ``AttributeError`` — callers using the
-    promotion ETL against the service backend must use the
-    ``/v1/aspects/promotion/record`` endpoint directly. The ``aspect_promotion``
-    module is SQLite-specific and is intentionally NOT forwarded over HTTP
-    (the Postgres tier owns the promotion_log table via AspectRepository).
+    Promotion log (nexus-70x7y, 2026-07-25): ``list_promotions`` IS
+    forwarded, over ``GET /v1/aspects/promotion/list``. Its former sibling
+    ``promote_extras_field`` is retired rather than forwarded — runtime
+    schema DDL has no valid implementation under the
+    ALL-DDL-through-Liquibase directive, so field promotion is now a
+    changeset that adds the column, backfills it, and appends to
+    ``aspect_promotion_log`` together (recipe in
+    ``src/nexus/aspect_promotion.py``).
 
     Args:
         base_url: Optional override for the service base URL.
@@ -226,19 +226,46 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         dry_run: bool = True,
     ) -> tuple[int, int]:
-        """Orphan deletion is SQLite-specific (ATTACH DATABASE).
+        """Orphan deletion is SQLite-specific (ATTACH DATABASE) — REFUSES here.
 
-        Over HTTP the service does not have catalog path access. Returns
-        (0, 0) to preserve the call signature without silently deleting
-        rows on a backend that cannot confirm orphan status.
+        Raises :class:`NotImplementedError`. It used to return ``(0, 0)`` with
+        only a structlog note, on the reasoning that a noop is safer than a
+        delete on a backend that cannot confirm orphan status. The delete half
+        of that reasoning still holds; the RETURN half did not.
+
+        ``(0, 0)`` is indistinguishable from "examined every row, found nothing
+        wrong". ``nx aspects gc`` consumed it and printed "examined 0 row(s)...
+        deleted 0 orphan(s)" — a clean bill of health for a check that never
+        ran (nexus-ingey). A caller cannot tell the two apart, so the value is
+        withheld rather than made ambiguous: no silent fallbacks for
+        data-correctness questions.
+
+        What is true on this backend, and why the refusal is not a coverage
+        loss for the main class: rows orphaned by a document delete cannot
+        accumulate, because fk-001-catalog-cross-store binds
+        ``document_aspects (tenant_id, doc_id)`` to
+        ``catalog_documents (tenant_id, tumbler)`` ``ON DELETE CASCADE``.
+
+        What is NOT covered, and must not be claimed clean: the
+        ``source_uri``-keyed sweep this method performs on SQLite. That
+        changeset deliberately leaves ``source_uri`` unconstrained ("a URI path
+        string, not a catalog tumbler reference").
         """
-        _log.info(
-            "http_document_aspects_store.delete_orphans_noop",
+        _log.warning(
+            "http_document_aspects_store.delete_orphans_refused",
             catalog_db_path=str(catalog_db_path),
             dry_run=dry_run,
             reason="orphan deletion requires catalog ATTACH which is SQLite-specific",
         )
-        return (0, 0)
+        raise NotImplementedError(
+            "delete_orphans is not supported on the service backend: the sweep "
+            "ATTACHes the catalog SQLite cache, which is unavailable over HTTP. "
+            "Document-delete orphans cannot accumulate here (document_aspects."
+            "doc_id is FK-bound to catalog_documents ON DELETE CASCADE), but the "
+            "source_uri-keyed class this method sweeps is deliberately "
+            "unconstrained and is NOT certified clean by this refusal. "
+            "Track: nexus-ingey."
+        )
 
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row's collection from *old* to *new*."""
@@ -250,12 +277,30 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         extractor_name: str,
         max_version: str,
     ) -> list[AspectRecord]:
-        """Return rows whose extractor_name matches and model_version < max_version."""
+        """Return rows whose extractor_name matches and model_version < max_version.
+
+        Wire param is ``extractor_name`` (AspectHandler.java:244). The client
+        sent ``extractor`` from inception — every real-engine call 400'd —
+        and the fake-server wire tests pinned the client's own wrong shape;
+        found by the nexus-i711w A3 port running against the real engine.
+        """
         rows: list[dict] = self._get("/list_by_extractor_version", {
-            "extractor": extractor_name,
+            "extractor_name": extractor_name,
             "max_version": max_version,
         })
         return [_body_to_record(r) for r in rows]
+
+    def list_promotions(self) -> list[dict]:
+        """Return the ``aspect_promotion_log`` history, oldest first.
+
+        Mirrors ``DocumentAspects.list_promotions``. The engine reads
+        ``nexus.aspect_promotion_log`` tenant-scoped and already returns the
+        SQLite key shape verbatim (``field_name``, ``sql_type``,
+        ``column_added``, ``rows_backfilled``, ``rows_pruned``, ``pruned``,
+        ``promoted_at``), so no per-key translation is needed here.
+        """
+        rows = self._get("/promotion/list")
+        return list(rows) if isinstance(rows, list) else []
 
     def set_salient_sentences(self, doc_id: str, sentences: list[str]) -> bool:
         """Write salient_sentences for doc_id. Returns True on update."""

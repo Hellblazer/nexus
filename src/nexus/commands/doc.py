@@ -106,7 +106,7 @@ def render_cmd(
     # install, no db), fall back to bead + RDR resolvers only.
     db: T2Database | None = None
     try:
-        db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        db = T2Database(default_db_path())  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         db = None
 
@@ -248,7 +248,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
 
     db: T2Database | None = None
     try:
-        db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        db = T2Database(default_db_path())  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         db = None
 
@@ -576,17 +576,23 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
 
     The Catalog is constructed from the conventional catalog path under
     ``default_db_path()``'s parent, matching ``mcp_infra.get_catalog``.
-    T3 comes from ``nexus.db.make_t3``. ChashIndex opens the same T2
-    path used by every other T2 store.
+    T3 comes from ``nexus.db.make_t3``. The chash index is
+    ``HttpChashIndex`` (the /v1/chash read surface).
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    db_path = default_db_path()
+    # RDR-152 nexus-gmiaf.16 seam, applied at RDR-155 P4b P3: this trio fed
+    # `cat.resolve_chash(...)` a SQLite ChashIndex unconditionally. Post-RDR-187
+    # a service-mode box has no nexus.chash_index behind that file, so span/chash
+    # resolution silently resolved against nothing. The reads are the surviving
+    # half of /v1/chash and answer from the chunks tables.
     cat: Any = make_catalog_reader()
     t3: Any = make_t3()
-    chash_index: Any = ChashIndex(db_path)
+    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpChashIndex is the
+    # only chash index — the SQLite arm died with the store.
+    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    chash_index: Any = HttpChashIndex()
     return cat, t3, chash_index
 
 
@@ -605,7 +611,7 @@ def _phase4_t2_taxonomy():
 
     @contextmanager
     def _taxonomy_ctx():
-        db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        db = T2Database(default_db_path())  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         try:
             yield db.taxonomy
         finally:

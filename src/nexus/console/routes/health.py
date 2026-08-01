@@ -76,11 +76,23 @@ def _collect_health_data() -> dict[str, Any]:
         data["mineru"] = {"running": False}
 
     # Catalog status
+    # nexus-k0luu: age_seconds is the mtime of the LOCAL .catalog.db cache. On a
+    # migrated box that file is frozen, so the age grows without bound and reads
+    # as "the catalog has not been touched in weeks" when the authoritative
+    # catalog is in PG and current. Marked local-only rather than deleted (it is
+    # still a real signal pre-migration) so a reader cannot mistake it for the
+    # live catalog's age.
     cat_db = nexus_config_dir() / "catalog" / ".catalog.db"
     if cat_db.exists():
+        # nexus-i711w: the catalog is service-backed in every mode; a
+        # surviving local .catalog.db is always a frozen migration source.
         mtime = cat_db.stat().st_mtime
         age = time.time() - mtime
-        data["catalog"] = {"exists": True, "age_seconds": int(age)}
+        data["catalog"] = {
+            "exists": True,
+            "age_seconds": int(age),
+            "scope": "local-cache-frozen",
+        }
     else:
         data["catalog"] = {"exists": False}
 
@@ -111,63 +123,58 @@ def _collect_health_data() -> dict[str, Any]:
     return data
 
 
+def _collect_aspect_queue_data_service() -> dict[str, Any]:
+    """Aspect-queue depth from the LIVE PG queue over HTTP (nexus-k0luu).
+
+    ``{"present": True, "backend": "service", "total": N, "failed_count": N}``.
+
+    Two deliberate shape differences from the sqlite collector, both because the
+    service list endpoint does not carry the data — declared rather than filled
+    with zeros, since a zero here is exactly the false-clean being fixed:
+      * ``by_status`` is omitted (no per-status aggregate endpoint).
+      * ``oldest_pending`` is None (enqueued_at is not in the projection).
+
+    On a transport error this returns ``{"present": True, "unavailable": True}``
+    — NOT ``{"present": False}`` and NOT a zero count. "I could not reach the
+    queue" and "the queue is empty" must not render identically.
+    """
+    import httpx  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    try:
+        q = HttpAspectQueue()
+        pending = q.pending_count()
+        failed = len(q.list_failed())
+    except (httpx.HTTPError, RuntimeError) as exc:
+        return {"present": True, "backend": "service", "unavailable": True,
+                "error": str(exc)[:200]}
+    return {
+        "present": True,
+        "backend": "service",
+        "total": pending + failed,
+        "pending": pending,
+        "failed_count": failed,
+        "oldest_pending": None,
+    }
+
+
 def _collect_aspect_queue_data() -> dict[str, Any]:
     """Return aspect_extraction_queue depth + per-status breakdown.
 
-    Returns ``{"present": False}`` when the T2 database or table is
-    missing (pre-RDR-089 install). ``{"present": True, "total": N,
-    "by_status": {status: count, ...}, "oldest_pending": iso_str|None,
-    "failed_count": N}`` otherwise.
+    nexus-k0luu: reads the SERVICE queue (PG) — the console used to read
+    the frozen SQLite queue on a migrated box and report it as current
+    (false-clean, second surface of the doctor fix). The SQLite reader
+    leg died with the =sqlite opt-out (RDR-158 P3, nexus-7bomn); the
+    resolver call below is validation only, so a stranded =sqlite export
+    hard-errors on this route rather than being silently ignored (the
+    service collector constructs HttpAspectQueue directly, bypassing
+    T2Database's validation seam).
     """
-    import sqlite3 as _sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+    from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    from nexus.config import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        return {"present": False}
-
-    try:
-        conn = _sqlite3.connect(str(db_path))  # epsilon-allow: console health probe — must operate when daemon offline; read-only schema-presence check
-    except _sqlite3.Error:
-        return {"present": False}
-
-    try:
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='aspect_extraction_queue'"
-        ).fetchone()
-        if not has_table:
-            return {"present": False}
-
-        total = conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue"
-        ).fetchone()[0]
-        by_status_rows = conn.execute(
-            "SELECT status, COUNT(*) FROM aspect_extraction_queue "
-            "GROUP BY status"
-        ).fetchall()
-        by_status = {status: int(count) for status, count in by_status_rows}
-
-        oldest = conn.execute(
-            "SELECT MIN(enqueued_at) FROM aspect_extraction_queue "
-            "WHERE status IN ('pending', 'processing')"
-        ).fetchone()
-        oldest_pending = oldest[0] if oldest and oldest[0] else None
-
-        failed_count = int(by_status.get("failed", 0))
-
-        return {
-            "present": True,
-            "total": int(total),
-            "by_status": by_status,
-            "oldest_pending": oldest_pending,
-            "failed_count": failed_count,
-        }
-    except _sqlite3.Error:
-        return {"present": False}
-    finally:
-        conn.close()
+    storage_backend_for("aspect_queue")
+    return _collect_aspect_queue_data_service()
 
 
 def _age_str(seconds: int) -> str:

@@ -2,18 +2,26 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """nexus-qgjr: T1 plan-cache mtime-guarded refresh.
 
-When the underlying SQLite ``plans`` table mutates (a new builtin
-seeded, an existing description tweaked, a row deleted) the in-process
+When the file feeding the cache mutates, the in-process
 ``plans__session`` cache must repopulate on next access without
 requiring an MCP-server restart. Pattern mirrors the catalog
 ``_last_consistency_mtime`` trick at ``catalog.py:405``.
 
-The fix:
+The contract under test lives in
+``nexus.mcp.plan_cache_registry.PlanCacheRegistry.get`` and is keyed on
+the SHAPE of ``populate_from``, not a concrete class:
 
-  - Track the mtime of the SQLite file feeding the cache.
-  - On every ``get_t1_plan_cache(populate_from=lib)`` call, compare
-    the file's current mtime to the cached value; repopulate when
-    advanced.
+  - library exposes ``.path`` → exact change detection via file mtime
+    (this file);
+  - no ``.path`` (``HttpPlanLibrary``, the production default since the
+    SQLite ``PlanLibrary`` was deleted in nexus-i711w) → bounded-staleness
+    TTL, covered by ``test_plan_cache_http_library_staleness.py``.
+
+The SQLite ``PlanLibrary`` these tests originally instantiated is gone;
+``_PathLibrary`` below carries the same two attributes the registry
+reads (``.path`` for the staleness signal, ``list_active_plans`` for
+populate), so the mtime branch — still live registry code for any
+path-bearing library — keeps its coverage.
 
 Two scenarios prove the contract:
 
@@ -26,7 +34,6 @@ These tests do not exercise the live T1 ChromaDB. They patch
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -39,6 +46,24 @@ def _reset_cache():
     reset_plan_cache_for_tests()
     yield
     reset_plan_cache_for_tests()
+
+
+class _PathLibrary:
+    """File-backed plan-library double for the registry's mtime branch.
+
+    Exposes exactly what ``PlanCacheRegistry.get`` reads: ``.path`` (a
+    ``pathlib.Path`` whose ``stat().st_mtime`` is the staleness signal)
+    and ``list_active_plans`` (what a real ``populate`` would consume —
+    unused here because ``PlanSessionCache`` itself is patched, kept so
+    the double stays honest about the populate contract).
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.touch(exist_ok=True)
+        self.path = path
+
+    def list_active_plans(self, *, project: str = ""):
+        return []
 
 
 def _stub_t1():
@@ -60,11 +85,9 @@ def _bump_mtime(path: Path, delta: float = 1.5) -> None:
 
 
 def test_initial_populate_runs_once(tmp_path: Path) -> None:
-    from nexus.db.t2.plan_library import PlanLibrary
     from nexus.mcp_infra import get_t1_plan_cache
 
-    db_path = tmp_path / "plans.sqlite"
-    lib = PlanLibrary(path=db_path)
+    lib = _PathLibrary(tmp_path / "plans.sqlite")
 
     fake_cache = MagicMock()
     fake_cache.populate.return_value = 0
@@ -85,15 +108,14 @@ def test_initial_populate_runs_once(tmp_path: Path) -> None:
 def test_mtime_advance_triggers_repopulate(tmp_path: Path) -> None:
     """nexus-qgjr core contract: file mtime > cached mtime → populate again.
 
-    Tests the path the symptom hit: re-seeding a builtin updates the
-    SQLite file, the next ``get_t1_plan_cache`` call must rebuild
-    without an MCP restart.
+    Tests the path the symptom hit: a write that touches the backing
+    file must make the next ``get_t1_plan_cache`` call rebuild without
+    an MCP restart.
     """
-    from nexus.db.t2.plan_library import PlanLibrary
     from nexus.mcp_infra import get_t1_plan_cache
 
     db_path = tmp_path / "plans.sqlite"
-    lib = PlanLibrary(path=db_path)
+    lib = _PathLibrary(db_path)
 
     fake_cache = MagicMock()
     fake_cache.populate.return_value = 0
@@ -117,7 +139,6 @@ def test_mtime_advance_triggers_repopulate(tmp_path: Path) -> None:
 
 def test_no_populate_without_populate_from_arg(tmp_path: Path) -> None:
     """Sanity: callers that don't pass populate_from never trigger populate."""
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: F401
     from nexus.mcp_infra import get_t1_plan_cache
 
     fake_cache = MagicMock()
@@ -133,11 +154,9 @@ def test_no_populate_without_populate_from_arg(tmp_path: Path) -> None:
 def test_reset_for_tests_clears_mtime(tmp_path: Path) -> None:
     """reset_plan_cache_for_tests must clear the mtime so the next
     populate_from call rebuilds against the fresh DB."""
-    from nexus.db.t2.plan_library import PlanLibrary
     from nexus.mcp_infra import get_t1_plan_cache, reset_plan_cache_for_tests
 
-    db_path = tmp_path / "plans.sqlite"
-    lib = PlanLibrary(path=db_path)
+    lib = _PathLibrary(tmp_path / "plans.sqlite")
 
     fake_cache = MagicMock()
     with patch("nexus.mcp_infra.get_t1", return_value=_stub_t1()), \
@@ -158,6 +177,11 @@ def test_missing_path_attr_falls_back_safely(tmp_path: Path) -> None:
     """A library object without a ``path`` attribute (e.g. an in-memory
     fixture) falls back to single-populate semantics — no raise, no
     extra populate calls.
+
+    (The path-less production shape, ``HttpPlanLibrary``, additionally
+    gets the nexus-ie7o8 bounded-staleness TTL — covered in
+    ``test_plan_cache_http_library_staleness.py``; within one TTL window
+    the behaviour is exactly this populate-once contract.)
     """
     from nexus.mcp_infra import get_t1_plan_cache
 
@@ -190,11 +214,9 @@ def test_populate_failure_does_not_suppress_retry(tmp_path: Path) -> None:
     state on success; failures log and leave _populated/_mtime
     unchanged so the next call retries.
     """
-    from nexus.db.t2.plan_library import PlanLibrary
     from nexus.mcp_infra import get_t1_plan_cache
 
-    db_path = tmp_path / "plans.sqlite"
-    lib = PlanLibrary(path=db_path)
+    lib = _PathLibrary(tmp_path / "plans.sqlite")
 
     fake_cache = MagicMock()
     fake_cache.populate.side_effect = [RuntimeError("transient"), 0]

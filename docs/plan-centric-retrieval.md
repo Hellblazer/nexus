@@ -195,11 +195,13 @@ Design rationale, in order of decreasing weight:
    `name IS NULL` still embeds its raw `query` text, so no signal is
    ever lost to an empty suffix.
 
-The synthesiser lives at `nexus.db.t2.plan_library._synthesize_match_text`
-and is called both from `save_plan` (so T2 FTS indexes the hybrid
-form on every insert) and from the T1 session cache's `_upsert_row`
-(so the cosine lane sees the same payload). Existing rows picked up
-from pre-RDR-092 databases are backfilled by the 4.9.13 migration
+The synthesiser lives at `nexus.plans.match_text._synthesize_match_text`
+(lifted out of the deleted SQLite `plan_library` in RDR-158 P4,
+nexus-i711w) and is called both from `HttpPlanLibrary.save_plan` (so
+T2 FTS indexes the hybrid form on every insert) and from the T1
+session cache's `_upsert_row` (so the cosine lane sees the same
+payload). Existing rows picked up from pre-RDR-092 databases were
+backfilled by the (since-deleted) 4.9.13 client migration
 `_add_plan_match_text_column`.
 
 ## Invocation patterns

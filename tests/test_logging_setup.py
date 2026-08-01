@@ -462,7 +462,7 @@ class TestDaemonModeStderrPolicy:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
-        configure_logging("t2_daemon")
+        configure_logging("storage_service")
         try:
             assert self._stderr_stream_handlers(), (
                 "--foreground terminal debugging needs the stderr handler"
@@ -483,7 +483,7 @@ class TestDaemonModeStderrPolicy:
         finally:
             self._cleanup_file_handlers()
 
-    def test_t2_daemon_mode_non_tty_drops_stderr_handler(self, tmp_path, monkeypatch):
+    def test_daemon_mode_non_tty_drops_stderr_handler(self, tmp_path, monkeypatch):
         """critic SIG-1: t2_daemon is a PRE-EXISTING mode retroactively
         added to _DAEMON_MODES; pin its membership so a refactor cannot
         silently drop it (the T2 daemon runs all SQLite writes)."""
@@ -491,7 +491,7 @@ class TestDaemonModeStderrPolicy:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
-        configure_logging("t2_daemon")
+        configure_logging("storage_service")
         try:
             assert self._stderr_stream_handlers() == []
         finally:

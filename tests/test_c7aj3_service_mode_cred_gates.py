@@ -159,7 +159,11 @@ class TestDoctorCredLines:
         for r in cred_lines:
             assert r.ok, f"{r.label} flagged failing"
             assert not getattr(r, "fatal", False)
-        assert any("migration-source only" in r.detail for r in cred_lines)
+        # RDR-155 P4b: the CHROMA_* rows and the migration-source framing
+        # died with the migration machinery; the surviving Voyage row is
+        # informational (enrichment/engine-bootstrap only).
+        assert not any("CHROMA" in r.label for r in cred_lines)
+        assert any("not for serving" in r.detail for r in cred_lines)
 
     def test_pipeline_version_line_reports_retired(self):
         """reviewer-c7aj3 Medium: the pipeline-version line must not vanish
@@ -205,7 +209,7 @@ class TestCredentialPersistenceCheck:
         nexus-m7evs warning keeps its teeth."""
         results = self._run(
             file_creds={},
-            env={"CHROMA_API_KEY": "shell-only-key"},
+            env={"VOYAGE_API_KEY": "shell-only-key"},
             monkeypatch=monkeypatch, tmp_path=tmp_path,
         )
         assert len(results) == 1 and not results[0].ok

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-176 Phase 1 (Gap 2) — failing-first coverage for the three defense-in-depth
 service-mode guards the primary tests did not exercise (substantive-critic
-Significant-2): ``_run_upgrade``, ``run_t2_daemon``, and the doctor read-only
-diagnostic connection.
+Significant-2): ``_run_upgrade`` and the doctor read-only diagnostic connection.
+(``run_t2_daemon``'s guard went with the daemon — see the Guard #3 tombstone.)
 """
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from nexus.commands import doctor, upgrade
-from nexus.daemon import t2_daemon
+
+from tests._t2_fixture_ops import bootstrap_migration_source
 from nexus.db.t2 import T2Database
 
 
@@ -28,7 +29,11 @@ def _content_digest(path: Path) -> str:
 def _seed_legacy_db(tmp_path: Path) -> Path:
     """Build a real T2 schema, stamp it to a legacy version, return the path."""
     build = tmp_path / "seed.db"
-    T2Database.bootstrap_schema(build)
+    # nexus-aqbrk: NOT bootstrap_schema — it early-returns in service mode
+    # (RDR-176 Gap 2), and this file's whole subject is the SERVICE-MODE
+    # guards over a legacy DB, so pinning to SQLite would disable the
+    # branch under test. Build the legacy source directly instead.
+    bootstrap_migration_source(build)
     conn = sqlite3.connect(str(build))
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -53,29 +58,22 @@ def test_service_mode_run_upgrade_does_not_mutate_db(
 
     db_path = _seed_legacy_db(tmp_path)
     digest_before = _content_digest(db_path)
-    monkeypatch.setattr(upgrade, "_db_path", lambda: db_path)
+    # RDR-158 P4 Stage 4 (nexus-i711w): no `_db_path` monkeypatch — the
+    # collapsed _run_upgrade resolves no local path at all; the digest
+    # assertion below proves it touched nothing.
 
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-    upgrade._run_upgrade(dry_run=False, force=False, auto_mode=False)
+    upgrade._run_upgrade(dry_run=False, auto_mode=False)
 
     assert _content_digest(db_path) == digest_before
 
 
-# ── Guard #3: the SQLite T2 daemon does not start in service mode ─────────────
-
-
-def test_service_mode_run_t2_daemon_does_not_construct_daemon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    def _boom(*_a: object, **_k: object) -> None:
-        raise AssertionError("T2Daemon must not be constructed in service mode")
-
-    monkeypatch.setattr(t2_daemon, "T2Daemon", _boom)
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-
-    # Must return cleanly without instantiating (or starting) the daemon.
-    t2_daemon.run_t2_daemon(config_dir=tmp_path, db_path=tmp_path / "memory.db")
+# NO Guard #3 (the SQLite T2 daemon does not start in service mode): the guard
+# was an early return inside `run_t2_daemon`, and both it and its module retired
+# with the daemon (nexus-i711w Stage 2 sub-stage B). A daemon that cannot be
+# started needs no service-mode check to stop it starting. Guards #4 (nx upgrade
+# no-ops) and #5 (read-only doctor diagnostics) are the surviving RDR-176 Phase 1
+# non-mutation defenses and are exercised above and below.
 
 
 # ── Guard #5: doctor diagnostics open read-only (no WAL header write) ─────────
@@ -103,16 +101,3 @@ def test_t2_diagnostic_connect_service_mode_is_read_only(
     assert _content_digest(db_path) == digest_before
 
 
-def test_t2_diagnostic_connect_sqlite_mode_is_writable_wal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Positive control: in sqlite mode the helper keeps the historical
-    writable WAL connection (the guard is mode-gated, not an unconditional ro)."""
-
-    db_path = _seed_legacy_db(tmp_path)
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-    conn = doctor._t2_diagnostic_connect(db_path, sqlite3)
-    try:
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-    finally:
-        conn.close()

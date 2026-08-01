@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Callable
 import structlog
 
 if TYPE_CHECKING:
-    from nexus.catalog import Catalog
     from nexus.hook_registry import HookRegistry
 
 _log = structlog.get_logger(__name__)
@@ -57,12 +56,14 @@ def _sha256(path: Path) -> str:
 
 
 def _has_credentials() -> bool:
+    # RDR-155 P4b: the chroma_api_key half died with the chroma credential
+    # map; the Voyage key is the only client-side cloud-ingest credential.
     from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
+    return bool(get_credential("voyage_api_key"))
 
 
 def _lookup_existing_doc_id(
-    cat: "Catalog | None", file_path: str, corpus: str,
+    cat: "CatalogReader | None", file_path: str, corpus: str,
 ) -> str:
     """Pre-flight catalog lookup for an already-indexed file (nexus-dcym).
 
@@ -117,6 +118,105 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
     return {"source_path": file_path}
 
 
+def _doc_id_for_path(file_path: Path) -> str:
+    """Best-effort READ-ONLY document identity for a source path, or "".
+
+    nexus-5xn3k AC2, prose path. The PDF gate has a doc_id in scope already
+    (``_register_or_lookup_doc_id`` runs before it); ``_index_document`` does
+    not. Resolving one must NOT register: this sits on the staleness path,
+    which by definition runs for documents that may be untouched, and minting
+    catalog rows as a side effect of *deciding whether to skip* would be a
+    far worse bug than the one being fixed.
+
+    ``by_source_uri`` is the read-only lookup — no owner resolution, no
+    create. The catalog auto-derives ``file://<abspath>`` when a document is
+    registered without an explicit URI (catalog register, RDR-096 P3.1), so
+    that is the key tried here.
+
+    Returns "" when the document cannot be identified, which
+    ``_manifest_is_fully_present`` treats as "no evidence of damage" — the
+    pre-fix behaviour. A miss is therefore SAFE, never a spurious re-embed.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return ""
+        entry = cat.by_source_uri(f"file://{file_path.resolve()}")
+        return str(entry.tumbler) if entry is not None else ""
+    except Exception as exc:  # noqa: BLE001 — fail-open: identity is best-effort here
+        _log.debug("index_doc_identity_lookup_failed", path=str(file_path), error=str(exc))
+        return ""
+
+
+def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:
+    """True iff EVERY chash the document's manifest names still exists in T3.
+
+    nexus-5xn3k AC2. The staleness gates ask ``col.get(where={"content_hash":
+    h}, limit=1)`` — "does ANY chunk with this content hash exist?" — which is
+    satisfied by a SINGLE survivor. An index that dies mid-write commits an
+    arbitrary SUBSET of the document's chunks, so from then on every re-index
+    finds one of them and returns 0: the document is permanently "up to date"
+    while most of its content is missing, and every attempt reports success.
+
+    (The bead attributed this to the gate trusting the catalog's chunk_count.
+    It does not: neither gate consults the catalog at all. The mechanism is
+    limit=1. Corollary worth keeping: PARTIAL deletion is worse than none —
+    removing 206 of 207 chunks leaves the document broken AND still skipped.)
+
+    The manifest is the authoritative expected set (RDR-108), so this compares
+    it against what T3 actually holds. Existence only — ``include=[]`` fetches
+    no documents, metadata or embeddings — and paged to the 300-id quota
+    (chroma_quotas.MAX_QUERY_RESULTS), so it is a cheap check, not a hydrate.
+
+    FAIL-OPEN, deliberately: an unreadable catalog or T3 returns True, i.e.
+    "no evidence of damage", preserving the pre-fix behaviour. This runs on the
+    hot path of every re-index, and a transient read failure must not force a
+    full re-embed of an intact document. The DAMAGE it detects is durable and
+    will be caught on the next pass; a false positive here is expensive.
+    An EMPTY manifest also returns True: that is the GH #1397 ghost class,
+    which `nx catalog reconcile` owns, and this gate must not silently take it.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        if not doc_id:
+            # Identity unresolvable (prose path, unregistered doc) — no
+            # expected set to compare against, so no evidence of damage.
+            return True
+        cat = make_catalog_reader()
+        if cat is None:
+            return True
+        rows = cat.get_manifest(str(doc_id))
+        expected = {r.get("chash", "") for r in rows if r.get("chash")}
+        if not expected:
+            return True
+        ordered = sorted(expected)
+        present: set[str] = set()
+        page = 300  # chroma_quotas.MAX_QUERY_RESULTS
+        for i in range(0, len(ordered), page):
+            got = _vector_with_retry(
+                col.get, ids=ordered[i:i + page], include=[],
+            )
+            present.update(got.get("ids", []) or [])
+        missing = expected - present
+        if missing:
+            _log.warning(
+                "index_manifest_incomplete_reindexing",
+                doc_id=str(doc_id),
+                expected=len(expected),
+                missing=len(missing),
+                detail="manifest names chunks absent from T3 — a prior index "
+                       "died mid-write; re-indexing instead of skipping",
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 — fail-open: a read failure must not force a re-embed
+        _log.debug("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
+        return True
+
+
 def _register_or_lookup_doc_id(
     file_path: Path,
     corpus: str,
@@ -166,28 +266,19 @@ def _register_or_lookup_doc_id(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.catalog)
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.types)
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
         )
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
         # RDR-146 P1.2 strict split: reads via reader, writes via the
         # write-only daemon proxy.
+        # nexus-i711w: the nexus-fq3b local auto-init leg died with the local
+        # catalog — the service owns the catalog in every mode, and
+        # make_catalog_reader always returns a service-backed reader.
         reader = make_catalog_reader()
-        if reader is None:
-            # nexus-fq3b auto-init, SQLite opt-out mode ONLY (reader is None
-            # exactly when that mode has no initialised local catalog):
-            # create it so chunks land with doc_id and the post-Phase-5c
-            # prune finds stale chunks via the doc_id-keyed where filter on
-            # re-index. Idempotent. nexus-e9ru2: in service mode the Java
-            # service owns the catalog — auto-creating a local one here
-            # built a divergent SQLite substrate the service never reads.
-            Catalog.init(catalog_path())
-            reader = make_catalog_reader()
         writer = make_catalog_writer()
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
@@ -261,18 +352,17 @@ def _register_or_lookup_doc_id(
 
 
 def _missing_credentials() -> list[str]:
-    """Return the list of unset Voyage / Chroma credentials.
+    """Return the list of unset cloud-ingest credentials.
 
     Used to construct precise error messages — callers can tell the
     user EXACTLY which key is missing rather than the generic
-    "credentials not configured" form. Empty list means both are set.
+    "credentials not configured" form. Empty list means all are set.
+    (RDR-155 P4b: chroma_api_key died with the chroma credential map.)
     """
     from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     missing: list[str] = []
     if not get_credential("voyage_api_key"):
         missing.append("voyage_api_key")
-    if not get_credential("chroma_api_key"):
-        missing.append("chroma_api_key")
     return missing
 
 
@@ -426,7 +516,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai  # noqa: PLC0415 — heavy/optional dep (voyageai) deferred to call time to keep module import cheap
-    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
     if model == "voyage-context-3":
         # CCE API accepts single-element inputs — use it for all chunk counts.
         # The old >=2 requirement was our incorrect assumption; removing it ensures
@@ -781,7 +871,15 @@ def _index_document(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        if stored_hash == content_hash and stored_model == target_model:
+        # nexus-5xn3k AC2: the match above is satisfied by ONE surviving chunk
+        # (limit=1), so a mid-write failure leaves the document permanently
+        # "fresh". Verify the manifest is whole before skipping. Identity is
+        # resolved READ-ONLY and only on the skip path; a miss fails open.
+        if (
+            stored_hash == content_hash
+            and stored_model == target_model
+            and _manifest_is_fully_present(col, _doc_id_for_path(file_path))
+        ):
             return 0
 
     now_iso = datetime.now(UTC).isoformat()
@@ -1196,7 +1294,7 @@ def _markdown_chunks(
     :func:`nexus.indexer_utils.detect_git_metadata`. Empty dict outside
     a git repo (nexus-2my fix #3).
     """
-    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     if git_meta is None:
         from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
@@ -1404,7 +1502,15 @@ def index_pdf(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        if stored_hash == content_hash and stored_model == target_model:
+        # nexus-5xn3k AC2: the hash/model match above is satisfied by ONE
+        # surviving chunk (limit=1), so a mid-write failure leaves the document
+        # permanently "fresh". Verify the manifest is actually whole before
+        # taking the skip.
+        if (
+            stored_hash == content_hash
+            and stored_model == target_model
+            and _manifest_is_fully_present(col, doc_id)
+        ):
             if return_metadata:
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
             return 0
@@ -1687,7 +1793,7 @@ def _catalog_markdown_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         # nexus-e9ru2 (sibling of nexus-f1itv): no local is_initialized
@@ -1824,7 +1930,7 @@ def index_markdown(
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     # Normalize to absolute so staleness checks are path-form-independent.
     md_path = md_path.resolve()

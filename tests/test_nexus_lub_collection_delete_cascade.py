@@ -27,8 +27,6 @@ import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
 
 def _chash(seed: str) -> str:
     """Deterministic full-width chunk hash (RDR-180: 64 lowercase hex).
@@ -62,16 +60,6 @@ def _seed_topic(tax, *, src_id: int, label: str, collection: str,
     """Seed one topics row on either substrate: raw SQLite INSERT on the
     legacy backend, the fidelity-import surface on the engine (the settled
     seeding idiom — cf. tests/db/test_telemetry_retention_marker.py)."""
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        cur = tax.conn.execute(
-            "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, '2026-04-16T00:00:00Z')",
-            (label, collection, centroid_hash, doc_count, "[]"),
-        )
-        tax.conn.commit()
-        return cur.lastrowid
     return tax.import_topic(
         src_id=src_id, label=label, parent_id=None, collection=collection,
         centroid_hash=centroid_hash, doc_count=doc_count,
@@ -81,16 +69,6 @@ def _seed_topic(tax, *, src_id: int, label: str, collection: str,
 
 def _seed_assignment(tax, *, doc_id: str, topic_id: int, assigned_by: str,
                      source_collection: str) -> None:
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        tax.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-            "VALUES (?, ?, ?, ?)",
-            (doc_id, topic_id, assigned_by, source_collection),
-        )
-        tax.conn.commit()
-        return
     tax.import_assignment(
         doc_id=doc_id, topic_id=topic_id, assigned_by=assigned_by,
         similarity=None, assigned_at=None, source_collection=source_collection,
@@ -98,16 +76,6 @@ def _seed_assignment(tax, *, doc_id: str, topic_id: int, assigned_by: str,
 
 
 def _seed_link(tax, *, from_topic_id: int, to_topic_id: int, link_count: int) -> None:
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        tax.conn.execute(
-            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-            "VALUES (?, ?, ?, ?)",
-            (from_topic_id, to_topic_id, link_count, "[]"),
-        )
-        tax.conn.commit()
-        return
     tax.import_topic_link(
         from_topic_id=from_topic_id, to_topic_id=to_topic_id,
         link_count=link_count, link_types="[]",
@@ -115,16 +83,6 @@ def _seed_link(tax, *, from_topic_id: int, to_topic_id: int, link_count: int) ->
 
 
 def _seed_meta(tax, *, collection: str, doc_count: int = 10) -> None:
-    from nexus.db.storage_mode import has_raw_access
-
-    if has_raw_access(tax):
-        tax.conn.execute(
-            "INSERT INTO taxonomy_meta (collection, last_discover_doc_count, last_discover_at) "
-            "VALUES (?, ?, ?)",
-            (collection, doc_count, "2026-04-14T12:00:00Z"),
-        )
-        tax.conn.commit()
-        return
     tax.import_taxonomy_meta(
         collection=collection, last_discover_doc_count=doc_count,
         last_discover_at="2026-04-14T12:00:00Z",
@@ -239,317 +197,12 @@ class TestPurgeCollection:
         # Survivor meta row untouched
         assert _meta_row_present(tax, "docs__keepme")
 
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: sabotages the raw SQLite conn to prove the "
-               "client-side purge transaction rolls back; the engine substrate "
-               "has no raw handle to sabotage — dies at the RDR-155 P4b flip",
-    )
-    def test_purge_is_transactional(self, seeded_taxonomy):
-        """If any step fails mid-cascade, the whole purge rolls back.
-
-        sqlite3.Connection.execute is read-only at the C-API level so
-        we sabotage via a wrapper that masquerades as the real conn.
-        """
-        db, tax, _ids = seeded_taxonomy
-
-        class FlakyConn:
-            def __init__(self, real):
-                self._real = real
-            def execute(self, sql, params=()):
-                if "DELETE FROM taxonomy_meta" in sql:
-                    raise RuntimeError("sabotaged")
-                return self._real.execute(sql, params)
-            def commit(self):
-                return self._real.commit()
-            def rollback(self):
-                return self._real.rollback()
-
-        real_conn = tax.conn
-        try:
-            tax.conn = FlakyConn(real_conn)
-            with pytest.raises(RuntimeError, match="sabotaged"):
-                tax.purge_collection("docs__doomed")
-        finally:
-            tax.conn = real_conn
-
-        # After rollback: all seeded rows must still be present.
-        topics_remaining = tax.conn.execute(
-            "SELECT COUNT(*) FROM topics WHERE collection = ?",
-            ("docs__doomed",),
-        ).fetchone()[0]
-        assert topics_remaining == 2, (
-            "purge_collection must be transactional; "
-            "a mid-cascade failure must roll back every prior delete"
-        )
 
     def test_purge_unknown_collection_returns_zero_counts(self, seeded_taxonomy):
         """Purging a collection with no rows is a silent no-op."""
         db, tax, _ids = seeded_taxonomy
         counts = tax.purge_collection("docs__never-existed")
         assert counts == {"topics": 0, "assignments": 0, "links": 0, "meta": 0}
-
-
-@pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: exercises the LOCAL client-side fan-out cascade "
-           "(mocked _t3 handle, chromadb NotFoundError fail-open, "
-           "purge-after-Chroma-delete ordering); in service mode "
-           "purge_collection_cascade routes to the engine's single atomic "
-           "deleteCollection and never touches the mocked handle — dies at "
-           "the RDR-155 P4b flip",
-)
-class TestCollectionDeleteCommandCascades:
-    """Integration: `nx collection delete` cascades via Click entry point."""
-
-    def test_cli_delete_cascades_when_t3_collection_absent(self, tmp_path):
-        """Discovered during 4.5.0 shakeout: if the Chroma collection is
-        already gone (previous delete left orphan taxonomy rows), the T3
-        delete raises NotFoundError. The cascade MUST still run so the
-        orphans can be cleaned up — otherwise the recovery case never
-        terminates and users are stuck with manual sqlite surgery per
-        the pre-fix workaround."""
-        from click.testing import CliRunner
-        from chromadb.errors import NotFoundError
-        from unittest.mock import MagicMock, patch
-
-        from nexus.db.t2 import T2Database
-        from nexus.commands.collection import delete_cmd
-
-        db_path = tmp_path / "memory.db"
-        db = T2Database(db_path)
-        _seed_topic(db.taxonomy, src_id=1, label="Orphan", collection="docs__gone",
-                    centroid_hash=_chash("h"), doc_count=1)
-        db.close()
-
-        # make_t3()/_t3() return the service-backed HttpVectorClient
-        # unconditionally in production since RDR-155 P4a.2 -- cloud
-        # creds / is_local_mode() no longer affect the handle type.
-        # delete_collection is a direct call on both handles.
-        fake_t3 = MagicMock(spec=HttpVectorClient)
-        fake_t3.delete_collection = MagicMock(
-            side_effect=NotFoundError("Collection [docs__gone] does not exist")
-        )
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
-             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
-             patch(
-                 "nexus.commands._helpers.default_db_path",
-                 return_value=db_path,
-             ):
-            result = runner.invoke(delete_cmd, ["docs__gone", "--yes"])
-
-        assert result.exit_code == 0, result.output
-        assert "already absent" in result.output, (
-            f"Expected informational note that T3 collection was absent. "
-            f"Got: {result.output!r}"
-        )
-
-        # Cascade DID run despite the NotFoundError
-        with T2Database(db_path) as verify_db:
-            remaining = verify_db.taxonomy.get_topics_for_collection("docs__gone")
-        assert remaining == [], (
-            "Cascade must run even when T3 collection is absent"
-        )
-
-    def test_cli_delete_calls_purge_collection(self, tmp_path, monkeypatch):
-        """The CLI path must invoke purge_collection after the Chroma
-        delete — not skip it, not run before (order matters for the
-        count report)."""
-        from click.testing import CliRunner
-        from unittest.mock import MagicMock, patch
-
-        from nexus.db.t2 import T2Database
-        from nexus.commands.collection import delete_cmd
-
-        db_path = tmp_path / "memory.db"
-        db = T2Database(db_path)
-        # Seed one topic for the doomed collection so purge has work
-        _seed_topic(db.taxonomy, src_id=1, label="Only", collection="docs__doomed",
-                    centroid_hash=_chash("h"), doc_count=1)
-        _seed_meta(db.taxonomy, collection="docs__doomed")
-        db.close()
-
-        # make_t3()/_t3() return the service-backed HttpVectorClient
-        # unconditionally in production since RDR-155 P4a.2 -- cloud
-        # creds / is_local_mode() no longer affect the handle type.
-        # delete_collection is a direct call on both handles.
-        fake_t3 = MagicMock(spec=HttpVectorClient)
-        fake_t3.delete_collection = MagicMock()
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
-             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
-             patch(
-                 "nexus.commands._helpers.default_db_path",
-                 return_value=db_path,
-             ):
-            result = runner.invoke(delete_cmd, ["docs__doomed", "--yes"])
-
-        assert result.exit_code == 0, result.output
-        assert fake_t3.delete_collection.called
-        # Must mention the taxonomy cascade in the report
-        assert "taxonomy" in result.output.lower() or "topic" in result.output.lower(), (
-            f"Delete report missing taxonomy cleanup count. Output: {result.output!r}"
-        )
-
-        # Cascade actually happened
-        with T2Database(db_path) as verify_db:
-            topics = verify_db.taxonomy.get_topics_for_collection("docs__doomed")
-            meta_present = _meta_row_present(verify_db.taxonomy, "docs__doomed")
-        assert topics == []
-        assert not meta_present
-
-
-# ── Phase 1.4 (nexus-r9b) — chash_index cascade ──────────────────────────────
-
-
-@pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: the chash_index router cascade's live subject is the "
-           "frozen SQLite twin (RDR-158 pre-migration installs); the engine's "
-           "/v1/chash endpoints are width-validating accept-and-no-op remnants "
-           "(RDR-187 orphan-by-design), so rows can't be seeded or counted "
-           "engine-side — dies at the RDR-155 P4b flip",
-)
-class TestChashIndexDeleteCascade:
-    """RDR-086 Phase 1.4: `nx collection delete` must also remove every
-    chash_index row pointing at the deleted collection. Without the cascade,
-    Phase 2's ``Catalog.resolve_chash`` would return stale (collection,
-    doc_id) tuples for chunks that no longer exist in T3.
-    """
-
-    def test_cli_delete_cascades_chash_index(self, tmp_path, monkeypatch):
-        """After CLI delete, every chash_index row for that collection is gone."""
-        from click.testing import CliRunner
-        from unittest.mock import MagicMock, patch
-
-        from nexus.db.t2 import T2Database
-        from nexus.commands.collection import delete_cmd
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            # Full-width chashes (RDR-180): the engine rejects anything
-            # shorter than the full 64-hex sha256 with HTTP 400.
-            db.chash_index.upsert(
-                chash=_chash("gone-1"), collection="code__gone",
-            )
-            db.chash_index.upsert(
-                chash=_chash("gone-2"), collection="code__gone",
-            )
-            # Row in a different collection — must survive the cascade.
-            db.chash_index.upsert(
-                chash=_chash("stays-1"), collection="code__stays",
-            )
-
-        # make_t3()/_t3() return the service-backed HttpVectorClient
-        # unconditionally in production since RDR-155 P4a.2 -- cloud
-        # creds / is_local_mode() no longer affect the handle type.
-        # delete_collection is a direct call on both handles.
-        fake_t3 = MagicMock(spec=HttpVectorClient)
-        fake_t3.delete_collection = MagicMock()
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
-             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
-             patch(
-                 "nexus.commands._helpers.default_db_path",
-                 return_value=db_path,
-             ):
-            result = runner.invoke(delete_cmd, ["code__gone", "--yes"])
-
-        assert result.exit_code == 0, result.output
-
-        with T2Database(db_path) as verify_db:
-            gone_rows = verify_db.chash_index.count_for_collection("code__gone")
-            stays_rows = verify_db.chash_index.count_for_collection("code__stays")
-        assert gone_rows == 0, "cascade must clear deleted collection's rows"
-        assert stays_rows == 1, "cascade must NOT touch other collections"
-
-    def test_cli_delete_cascades_chash_index_when_t3_absent(
-        self, tmp_path, monkeypatch,
-    ):
-        """Cascade runs even when the Chroma delete raises NotFoundError —
-        same fail-open contract as the taxonomy cascade.
-        """
-        from click.testing import CliRunner
-        from unittest.mock import MagicMock, patch
-        from chromadb.errors import NotFoundError
-
-        from nexus.db.t2 import T2Database
-        from nexus.commands.collection import delete_cmd
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            db.chash_index.upsert(
-                chash=_chash("orphan-1"), collection="docs__orphan",
-            )
-
-        # make_t3()/_t3() return the service-backed HttpVectorClient
-        # unconditionally in production since RDR-155 P4a.2 -- cloud
-        # creds / is_local_mode() no longer affect the handle type.
-        # delete_collection is a direct call on both handles.
-        fake_t3 = MagicMock(spec=HttpVectorClient)
-        fake_t3.delete_collection = MagicMock(
-            side_effect=NotFoundError(
-                "Collection [docs__orphan] does not exist",
-            )
-        )
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
-             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
-             patch(
-                 "nexus.commands._helpers.default_db_path",
-                 return_value=db_path,
-             ):
-            result = runner.invoke(delete_cmd, ["docs__orphan", "--yes"])
-
-        assert result.exit_code == 0, result.output
-
-        with T2Database(db_path) as verify_db:
-            remaining = verify_db.chash_index.count_for_collection("docs__orphan")
-        assert remaining == 0
-
-    def test_cli_delete_reports_chash_index_count(self, tmp_path, monkeypatch):
-        """Delete output must include the chash_index row count so the
-        operator sees the full cascade's effect, not just taxonomy rows.
-        """
-        from click.testing import CliRunner
-        from unittest.mock import MagicMock, patch
-
-        from nexus.db.t2 import T2Database
-        from nexus.commands.collection import delete_cmd
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            for i in range(5):
-                db.chash_index.upsert(
-                    chash=_chash(f"reported-{i:02d}"), collection="code__reported",
-                )
-
-        # make_t3()/_t3() return the service-backed HttpVectorClient
-        # unconditionally in production since RDR-155 P4a.2 -- cloud
-        # creds / is_local_mode() no longer affect the handle type.
-        # delete_collection is a direct call on both handles.
-        fake_t3 = MagicMock(spec=HttpVectorClient)
-        fake_t3.delete_collection = MagicMock()
-
-        runner = CliRunner()
-        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
-             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
-             patch(
-                 "nexus.commands._helpers.default_db_path",
-                 return_value=db_path,
-             ):
-            result = runner.invoke(delete_cmd, ["code__reported", "--yes"])
-
-        assert result.exit_code == 0, result.output
-        assert "chash" in result.output.lower() or "5" in result.output, (
-            f"Expected chash_index cleanup count in delete output. "
-            f"Got: {result.output!r}"
-        )
 
 
 # ── nexus-8a8e — pdf_pipeline cascade ────────────────────────────────────────
@@ -624,7 +277,7 @@ class TestPipelineDeleteCascade:
         when the T3 collection is already gone (recovery path)."""
         from click.testing import CliRunner
         from unittest.mock import MagicMock, patch
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
 
         from nexus.commands.collection import delete_cmd
         from nexus.db.t2 import T2Database

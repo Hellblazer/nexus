@@ -157,23 +157,6 @@ def test_docs_rendered_copy_matches_the_generator():
     )
 
 
-def test_cascade_covers_every_debt_table():
-    """nexus-z5j0t's completeness link: every legacy-debt entry must have a
-    remap-cascade implementation (same table + same column), so the set that
-    OBSERVES debt and the machinery that CONVERGES it cannot drift."""
-    from nexus.migration.remap_cascade import _STORE_COLUMNS
-
-    cascade = {
-        (f"nexus.{table}", column)
-        for (_db, table, column) in _STORE_COLUMNS.values()
-    }
-    for t in DEBT_CHASH_TABLES:
-        assert (t.table, t.column) in cascade, (
-            f"{t.table}.{t.column} is observed as chash legacy debt but has "
-            "no remap-cascade implementation - extend CASCADE_STORES"
-        )
-
-
 def test_poison_detail_token_couples_probe_and_gates():
     """The convergence gate (upgrade_finish.py) distinguishes REAL poison
     from probe-degraded WARNs by substring-matching the health detail
@@ -214,7 +197,37 @@ def test_grants_changeset_view_era_revokes_tables():
     — only the view's owner (the superuser provisioning path) can."""
     xml = (_REPO / "service/src/main/resources/db/changelog/grants-nexus-diag.xml").read_text()
     assert "grants-nexus-diag-2" in xml
-    assert xml.count("diag_chash_conformance") == 5  # 2x sqlCheck + 3 prose mentions
+    # 2x in-body era guard (nexus-ixsxa moved these out of <preConditions>,
+    # which INSERTED a changelog row per boot on a runAlways changeset — see
+    # tests/test_changelog_markran_lint.py) + 5 prose mentions.
+    assert xml.count("diag_chash_conformance") == 7
+    # Both changesets must stay runAlways with the era test in the BODY. Parsed,
+    # not substring-matched: this file's header documents the rejected
+    # alternatives verbatim, so `"runOnChange" not in xml` would fail on the
+    # prose explaining why runOnChange is wrong. The corpus-wide rule lives in
+    # tests/test_changelog_markran_lint.py.
+    import xml.etree.ElementTree as ET
+
+    ns = "{http://www.liquibase.org/xml/ns/dbchangelog}"
+    root = ET.parse(
+        _REPO / "service/src/main/resources/db/changelog/grants-nexus-diag.xml"
+    ).getroot()
+    diag_sets = list(root.iter(f"{ns}changeSet"))
+    assert [cs.get("id") for cs in diag_sets] == [
+        "grants-nexus-diag-1",
+        "grants-nexus-diag-2",
+    ]
+    for cs in diag_sets:
+        assert cs.get("runAlways") == "true", (
+            f"{cs.get('id')}: the era is a per-boot runtime question — runOnChange "
+            "would be filtered out once ran, so a later-created nexus_diag would "
+            "never be granted and the view-era REVOKE would never fire (nexus-ixsxa)"
+        )
+        assert cs.find(f"{ns}preConditions") is None, (
+            f"{cs.get('id')}: the era test belongs in the DO $$ body — as a "
+            "preCondition it resolves onFail=MARK_RAN, which INSERTS a "
+            "DATABASECHANGELOG row on every boot (nexus-ixsxa)"
+        )
     # The P0 shape: per-relation loop, restricted to relations this role owns.
     assert "pg_get_userbyid(c.relowner) = current_user" in xml
     assert "REVOKE SELECT ON %I.%I FROM nexus_diag" in xml

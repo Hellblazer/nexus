@@ -124,7 +124,8 @@ class TestCallerLoopsIsolatePerItem:
         ("src/nexus/exporter.py", "skip_existing_probe_failed_importing_batch"),
         ("src/nexus/doc_indexer.py", "stale_chunk_prune_failed_registration_still_running"),
         ("src/nexus/commands/catalog_cmds/integrity.py", "catalog_verify_collection_unreadable"),
-        ("src/nexus/migration/collision_audit.py", "collision_audit_page_degraded"),
+        # (RDR-155 P4b: migration/collision_audit.py's guarded page loop
+        # died with the file.)
         ("src/nexus/db/reconcile.py", "vector_etl_verify_fill_page_unreachable"),
     ]
 

@@ -167,156 +167,53 @@ def t3() -> None:
     "(the explicit-affirmation belt-and-suspenders pattern).",
 )
 def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
-    """Delete T3 chunks whose ``source_path`` is missing from disk.
+    """RETIRED — reported a false all-clear; superseded by an existing pair.
 
     \b
-    Reports per-collection summary lines: stale source_paths and
-    chunk counts. By default this is read-only (--dry-run is on).
+    It swept chunks by their ``source_path`` metadata. RDR-102 D2 hard-removed
+    that key from the chunk schema, so the sweep matched nothing and every run
+    printed a clean "0 stale" no matter how many indexed files had been deleted
+    from disk. It also opened the LOCAL catalog by probing for
+    ``documents.jsonl``, a file that has not existed since nexus-i711w — two
+    independent reasons it could not have worked.
 
     \b
-    To actually delete, pass BOTH --no-dry-run AND --confirm. The
-    two-flag dance is deliberate: --no-dry-run flips the intent,
-    --confirm verifies the operator typed it on purpose. Either flag
-    alone runs the report without deleting.
-
-    \b
-    Examples:
-      nx t3 prune-stale                              # report all collections
-      nx t3 prune-stale -c rdr__nexus-571b8edd       # one collection
-      nx t3 prune-stale --no-dry-run --confirm       # actually delete
+    It does not need rebuilding: the catalog-native pipeline already exists and
+    covers the work, though NOT strictly — the retired verb swept every
+    collection and ``nx t3 gc`` has no such mode, so the GC half must be looped
+    (nexus-iitif). ``nx catalog prune-stale`` drops documents whose
+    file_path is missing (resolving relative paths against the owner's
+    repo_root, and refusing to classify what it cannot verify), and ``nx t3 gc``
+    then collects the chunks those documents no longer reference. Doing it in
+    that order also avoids the failure mode a chunk-only sweep creates: chunks
+    deleted out from under a live manifest are exactly the dangling-manifest
+    state ``nx doctor`` now flags (nexus-5xn3k). nexus-bm8dd.
     """
-    from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
-
-    will_delete = (not dry_run) and confirm
-    if (not dry_run) and not confirm:
-        click.echo(
-            "--no-dry-run alone is treated as report-only. "
-            "Add --confirm to actually delete chunks."
-        )
-        will_delete = False
-
-    t3_db = make_t3()
-
-    if collection:
-        target_collections = [collection]
-    else:
-        try:
-            all_colls = t3_db.list_collections()
-        except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
-            click.echo(f"Failed to list collections: {exc}")
-            raise click.exceptions.Exit(1)
-        # nexus-xukbj: quarantine siblings are managed by the GC's own
-        # grace-window expiry (with its safety floor) — the legacy sweep
-        # must never hard-delete them out-of-band.
-        target_collections = [
-            c["name"] for c in all_colls
-            if not c["name"].startswith("quarantine-")
-        ]
-
-    if not target_collections:
-        click.echo("No collections to scan.")
-        return
-
-    total_stale_paths = 0
-    total_stale_chunks = 0
-    affected_collections = 0
-
-    # nexus-6ims: relative source_paths must resolve against the
-    # owning catalog document's owner.repo_root, not against the
-    # running process's cwd. Open the catalog so we can join.
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    from nexus.config import catalog_path as _catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    cat_dir = _catalog_path()
-    cat: Any = None
-    owner_roots: dict[str, str] = {}
-    if (cat_dir / "documents.jsonl").exists():
-        try:
-            cat = make_catalog_reader()
-            # nexus-xnz0o: use owners_with_roots() (uniform API).
-            owner_roots = cat.owners_with_roots()
-        except Exception as exc:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
-            click.echo(f"WARN: catalog not available for owner lookup: {exc}")
-
-    def _resolve(path_str: str) -> Path | None:
-        """Resolve a chunk source_path. Absolute → as-is. Relative → look
-        up the owning document's owner.repo_root and prepend. Returns
-        None if no owner.repo_root anchor available."""
-        if path_str.startswith("/"):
-            return Path(path_str)
-        if not cat:
-            return None
-        # nexus-xnz0o: use find_by_file_path() (uniform API).
-        entry = cat.find_by_file_path(path_str)
-        if not entry:
-            return None
-        tumbler_str = str(entry.tumbler)
-        parts = tumbler_str.split(".")
-        if len(parts) < 2:
-            return None
-        owner_id = ".".join(parts[:2])
-        root = owner_roots.get(owner_id)
-        if not root:
-            return None
-        return Path(root) / path_str
-
-    skipped_unverifiable = 0
-
-    for coll_name in target_collections:
-        try:
-            unique_paths = t3_db.list_unique_source_paths(coll_name)
-        except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
-            click.echo(f"  {coll_name}: SKIP (list failed: {exc})")
-            continue
-
-        stale_paths: list[str] = []
-        for p in unique_paths:
-            resolved = _resolve(p)
-            if resolved is None:
-                # Relative path with no owner anchor — refuse to
-                # classify (would have falsely deleted under the
-                # nexus-6ims pre-fix logic).
-                skipped_unverifiable += 1
-                continue
-            if not resolved.exists():
-                stale_paths.append(p)
-        if not stale_paths:
-            continue
-
-        affected_collections += 1
-        click.echo(f"\n{coll_name}: {len(stale_paths)} stale source_path(s)")
-        coll_chunks = 0
-        for p in stale_paths:
-            try:
-                ids = t3_db.ids_for_source(coll_name, p)
-            except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
-                click.echo(f"  {p}: SKIP (ids_for_source failed: {exc})")
-                continue
-            click.echo(f"  {p}  ->  {len(ids)} chunk(s)")
-            coll_chunks += len(ids)
-            if will_delete:
-                try:
-                    deleted = t3_db.delete_by_source(coll_name, p)
-                    if deleted != len(ids):
-                        click.echo(
-                            f"    WARN: deleted {deleted}, expected {len(ids)}"
-                        )
-                except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
-                    click.echo(f"    delete failed: {exc}")
-        total_stale_paths += len(stale_paths)
-        total_stale_chunks += coll_chunks
-
-    verb = "deleted" if will_delete else "would delete"
-    click.echo(
-        f"\nSummary: {verb} {total_stale_chunks} chunk(s) "
-        f"across {total_stale_paths} stale path(s) "
-        f"in {affected_collections} collection(s)."
+    _ = (collection, dry_run, confirm)
+    raise click.ClickException(
+        "nx t3 prune-stale is RETIRED (nexus-bm8dd).\n"
+        "\n"
+        "It swept T3 chunks by source_path metadata. RDR-102 D2 removed that "
+        "key from the chunk schema, so the sweep has matched nothing since — "
+        "and reported a clean '0 stale' on every collection rather than saying "
+        "it could not look. A verb that cannot find anything must not be "
+        "mistaken for one that found nothing.\n"
+        "\n"
+        "Use the catalog-native pipeline:\n"
+        "  nx catalog prune-stale [--collection COLLECTION] --no-dry-run --confirm\n"
+        "  nx t3 gc -c COLLECTION --no-dry-run --yes\n"
+        "\n"
+        "Prune first, GC second: deleting chunks while their document still "
+        "references them leaves a dangling manifest (nexus-5xn3k).\n"
+        "\n"
+        "NOTE: `nx t3 gc` REQUIRES -c — the orphan diff is per-collection, so "
+        "there is no sweep-every-collection mode to replace the one this verb "
+        "advertised. `nx catalog prune-stale` does take all collections. To GC "
+        "every collection, enumerate and loop:\n"
+        "  nx collection list | awk '{print $1}' | xargs -I{} "
+        "nx t3 gc -c {} --no-dry-run --yes\n"
+        "(nexus-iitif tracks whether gc should gain an all-collections mode.)"
     )
-    if skipped_unverifiable:
-        click.echo(
-            f"  Skipped {skipped_unverifiable} relative-path entries "
-            f"whose owning document has no owner.repo_root — cannot "
-            f"verify presence (nexus-6ims fail-safe)."
-        )
 
 
 @t3.command("gc")
@@ -400,11 +297,6 @@ def gc_cmd(
       nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # actually GC
       nx t3 gc -c code__nexus --orphan-window 7d --dry-run  # tighter window
     """
-    from nexus.catalog.event_log import EventLog  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.event_log)
-    from nexus.catalog.events import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.events)
-        ChunkOrphanedPayload,
-        make_event,
-    )
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
 
     window = _parse_orphan_window(orphan_window)
@@ -445,6 +337,7 @@ def gc_cmd(
     except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
         click.echo(f"Failed to list chunks for {collection}: {exc}")
         raise click.exceptions.Exit(1)
+
 
     for chunk_id, meta in chunks:
         chash = meta.get("chunk_text_hash") or ""  # RDR-180: full digest — the truncation was the quarantine-class bug
@@ -501,14 +394,6 @@ def gc_cmd(
         )
         return
 
-    # Strict order (RF-101-3): event first, then delete. The event-emit
-    # loop runs per-chunk so the log records each ChunkOrphaned BEFORE
-    # any chunk is deleted; the actual delete is BATCHED into one call
-    # afterward (delete_by_chunk_ids paginates internally at 300). A
-    # crash between event-emit and batch-delete leaves the log
-    # consistent with T3 (events present, all chunks still in T3); the
-    # next gc run idempotently re-emits and retries the batch.
-    #
     # NOTE on the manifest snapshot: ``referenced`` was sampled at the
     # top of this command. A doc registered concurrently between
     # snapshot and execution would not appear in the referenced set,
@@ -516,35 +401,13 @@ def gc_cmd(
     # Operators SHOULD NOT run gc concurrently with active indexing.
     # The window is single-operator-driven and acceptably small in
     # practice.
-    # nexus-h8rf6 live-shakeout finding #4: EventLog is the LOCAL git-backed
-    # catalog's audit trail (needs cat._dir). In service mode the catalog is
-    # an HttpCatalogClient with no local directory — emitting local events
-    # for a server-authoritative delete is neither possible nor meaningful,
-    # so skip emission (logged) rather than crash. The strict order
-    # (event-then-delete) below still holds whenever a local event log exists.
-    cat_dir = getattr(cat, "_dir", None)
-    event_log = EventLog(cat_dir) if cat_dir is not None else None
-    if event_log is None:
-        _log.info(
-            "gc_event_log_skipped",
-            reason="service-backed catalog has no local event log",
-            collection=collection,
-            candidates=len(candidates),
-        )
-    pending_chunk_ids: list[str] = []
-    for chunk_id, chash in candidates:
-        if event_log is not None:
-            event = make_event(
-                ChunkOrphanedPayload(
-                    chunk_id=chunk_id,
-                    reason=(
-                        f"chash {chash} not referenced by any manifest entry "
-                        f"in {collection}"
-                    ),
-                )
-            )
-            event_log.append(event)
-        pending_chunk_ids.append(chunk_id)
+    #
+    # AUDIT-TRAIL WINDOW (nexus-i711w item 20, Hal ruling 2026-07-30):
+    # the local ChunkOrphaned EventLog emission died with the local
+    # git-backed catalog. Until the engine's gc-audit surface ships
+    # (next engine tag), destructive T3 GC has no audit record — an
+    # explicitly accepted window; do not re-litigate here.
+    pending_chunk_ids: list[str] = [chunk_id for chunk_id, _chash in candidates]
 
     deleted_total = 0
     delete_failed = 0
@@ -554,14 +417,13 @@ def gc_cmd(
         delete_failed = len(pending_chunk_ids)
         click.echo(
             f"  batch delete failed ({len(pending_chunk_ids)} chunk(s)): "
-            f"{exc}. Events were emitted; next 'nx t3 gc' run will retry.",
+            f"{exc}. Next 'nx t3 gc' run will retry.",
             err=True,
         )
 
     if delete_failed:
         click.echo(
-            f"\nSummary: emitted {len(pending_chunk_ids)} ChunkOrphaned "
-            f"event(s); batch delete FAILED for {delete_failed} chunk(s)."
+            f"\nSummary: batch delete FAILED for {delete_failed} chunk(s)."
         )
     else:
         click.echo(

@@ -11,7 +11,7 @@ catalog AND PDF chunks carry doc_id back to that catalog entry.
 
 Reverting either half of the fix breaks the test:
 - removing ``(f, "pdf", docs_collection)`` from the pre-index registration
-  list -> catalog entry missing -> ``cat.by_file_path(...)`` returns None
+  list -> catalog entry missing -> ``active_reader().by_file_path(...)`` returns None
 - removing ``doc_id=catalog_doc_id`` from the augmented metadata
   -> chunk doc_id is empty -> normalize Step 4c drops it
 """
@@ -23,13 +23,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import active_reader
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
+
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
-from tests.conftest import make_vector_test_client
+from tests.conftest import fake_credentials, make_vector_test_client
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -77,9 +78,11 @@ def registry(tmp_path: Path, pdf_repo: Path) -> RepoRegistry:
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding is
+    # gone with the local catalog; the indexer registers via the service-only
+    # factory into the live per-test tenant, so no init is needed.
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    Catalog.init(catalog_dir)
     return catalog_dir
 
 
@@ -119,7 +122,7 @@ def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -
 
     monkeypatch.setenv("NX_LOCAL", "1")
     with patch("nexus.db.make_t3", return_value=t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+         patch("nexus.config.get_credential", side_effect=fake_credentials()), \
          patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
         index_repository(repo, registry, force=False)
 
@@ -140,7 +143,6 @@ def test_pdf_indexer_registers_catalog_and_writes_manifest(
     """
     _do_index(pdf_repo, registry, local_t3, monkeypatch)
 
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
     info = registry.get(pdf_repo)
     assert info is not None
     docs_collection = info.get("docs_collection")
@@ -161,13 +163,14 @@ def test_pdf_indexer_registers_catalog_and_writes_manifest(
         )
 
     # Resolve the catalog owner and the PDF's catalog entry.
-    owner_row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners LIMIT 1"
-    ).fetchone()
-    assert owner_row is not None, "expected catalog owner registered by indexer"
-    owner_t = Tumbler.parse(owner_row[0])
+    # nexus-aqbrk: list_owners() is the public equivalent of the raw
+    # "SELECT tumbler_prefix FROM owners LIMIT 1" and is implemented on both
+    # substrates.
+    owners = active_reader().list_owners()
+    assert owners, "expected catalog owner registered by indexer"
+    owner_t = Tumbler.parse(owners[0]["tumbler_prefix"])
 
-    pdf_entry = cat.by_file_path(owner_t, "doc.pdf")
+    pdf_entry = active_reader().by_file_path(owner_t, "doc.pdf")
     assert pdf_entry is not None, (
         "catalog has no entry for doc.pdf - PDFs must be in "
         "``indexed_for_catalog`` so the orchestrator's pre-index "
@@ -177,13 +180,13 @@ def test_pdf_indexer_registers_catalog_and_writes_manifest(
         f"expected catalog content_type='pdf', got {pdf_entry.content_type!r}"
     )
 
-    manifest_rows = cat.get_manifest(str(pdf_entry.tumbler))
+    manifest_rows = active_reader().get_manifest(str(pdf_entry.tumbler))
     assert manifest_rows, (
         f"manifest_write_batch_hook must populate document_chunks for "
         f"PDF doc_id={pdf_entry.tumbler!r}"
     )
     # nexus-zq79: documents.chunk_count cache must track manifest size.
-    fresh = cat.resolve(pdf_entry.tumbler)
+    fresh = active_reader().resolve(pdf_entry.tumbler)
     assert fresh is not None and fresh.chunk_count == len(manifest_rows), (
         f"chunk_count={fresh.chunk_count if fresh else None} != "
         f"manifest_size={len(manifest_rows)} for PDF doc_id={pdf_entry.tumbler!r}"

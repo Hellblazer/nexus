@@ -8,10 +8,12 @@ command bodies ``t2_install_cmd`` / ``t2_uninstall_cmd`` in
 **in-process** with a structured return value by:
 
 - ``nexus.mcp._first_run.ensure_installed_and_running`` — first-run on
-  MCP startup, which needs to know whether it installed fresh
+  MCP startup, which needed to know whether it installed fresh
   (``NEWLY_INSTALLED``) or found an existing unit (``ALREADY_PRESENT``)
   to drive the first-run banner's two text variants and surface the
-  unit path; and
+  unit path. RETIRED with the T2 daemon (nexus-i711w Stage 2 sub-stage
+  B); see the tombstone at ``mcp/_first_run.py``. The structured return
+  value survives it, for the callers below; and
 - the ``daemon_uninstall`` MCP tool (RDR-126 §4); and
 - the ``nx daemon t2 install/uninstall`` CLI, which becomes a thin
   wrapper that translates these results into ``click.echo`` / exit codes.
@@ -67,11 +69,35 @@ class InstallResult:
 
 @dataclass(frozen=True)
 class UninstallResult:
-    """Structured result of an autostart uninstall attempt."""
+    """Structured result of an autostart uninstall attempt.
+
+    ``survivors`` (nexus-dmgvx, GH #1419 Issue 2) names processes still
+    running AFTER the unit is gone. Removing the autostart entry stops the
+    thing from coming BACK; it does not stop what is running NOW, and
+    Postgres is left up deliberately on the stop path too ("independently
+    managed"). Reporting a bare "Removed <path>" while a supervisor and a
+    cluster are both live is how Steve Harris ended up hunting a postgres
+    process by hand. Empty on the happy path.
+    """
 
     status: UninstallStatus
     dest: Path
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    survivors: tuple[str, ...] = field(default_factory=tuple)
+    #: Whether the OS DEACTIVATION (``launchctl bootout`` /
+    #: ``systemctl --user disable --now``) actually succeeded — as distinct
+    #: from ``status``, which reports only that the unit FILE is gone. The
+    #: two diverge on exactly the case that matters: a failed or missing
+    #: deactivator is downgraded to a warning and the file is removed
+    #: anyway, so ``REMOVED`` alone cannot tell a caller whether a running
+    #: process was terminated. ``uninstall_daemon`` derives
+    #: ``daemon_stopped`` from THIS, not from ``status`` (nexus-i711w Stage
+    #: 2 sub-stage B review, High-2): reporting "daemon stopped" in the one
+    #: case where the daemon demonstrably survived is worse than the
+    #: over-pessimism it replaced. ``True`` on the NOT_INSTALLED path —
+    #: there was nothing to deactivate — which is why callers must AND it
+    #: with ``status``.
+    deactivated: bool = True
 
 
 class InstallerError(Exception):
@@ -90,35 +116,14 @@ class ActivationError(InstallerError):
     """``launchctl`` / ``systemctl`` activation failed and ``force`` is off."""
 
 
-def _render_for_t2() -> tuple[Path, str]:
-    """Resolve the destination path and the rendered unit body for T2.
-
-    Delegates to the generic helpers in ``nexus.commands.daemon`` (lazy
-    import to avoid an import cycle, since ``daemon`` imports this module
-    to back its thin CLI wrappers).
-    """
-    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-
-    install_dir = _daemon._autostart_install_dir()
-    install_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = _daemon._autostart_log_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    template_name = _daemon._autostart_filename_t2()
-    nx_bin = _daemon._resolve_nx_bin()
-    rendered = _daemon._render_template(
-        template_name,
-        nx_bin=nx_bin,
-        log_dir=str(log_dir),
-        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-    )
-    return install_dir / template_name, rendered
 
 
 def _render_for_service() -> tuple[Path, str]:
     """Resolve the destination path and rendered unit body for the storage
-    SERVICE tier (RDR-174 P2.1) — mirrors :func:`_render_for_t2`, swapping the
-    template filename. The unit execs ``nx daemon service start --foreground``.
+    SERVICE tier (RDR-174 P2.1). It was written as a mirror of the since-deleted
+    ``_render_for_t2`` (nexus-i711w Stage 2 sub-stage B), swapping the template
+    filename; it is now the only renderer. The unit execs
+    ``nx daemon service start --foreground``.
     """
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -142,8 +147,10 @@ def _render_for(tier: str) -> tuple[Path, str]:
     """Dispatch the per-tier render. ``install_autostart`` is tier-generic; the
     render path is the only tier-specific seam on the INSTALL side (activation
     is dest-based and tier-agnostic)."""
-    if tier == "t2":
-        return _render_for_t2()
+    # NO t2 RENDER: the T2 daemon is retired (nexus-i711w Stage 2 sub-stage B),
+    # so a T2 unit can no longer be INSTALLED. Removal of a unit left by an
+    # older install is still supported — see _autostart_filename_for /
+    # _deactivate_cmd, which keep their t2 arms for exactly that.
     if tier == "service":
         return _render_for_service()
     raise ValueError(f"unknown autostart tier {tier!r}")
@@ -186,14 +193,21 @@ def _autostart_filename_for(tier: str) -> str:
     raise ValueError(f"unknown autostart tier {tier!r}")
 
 
-def install_autostart(*, tier: str = "t2", force: bool = False) -> InstallResult:
+def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     """Install a daemon OS autostart unit for the current user.
 
-    ``tier`` selects which unit is rendered: ``"t2"`` (default — the historical
-    callers ``mcp._first_run`` / ``daemon_uninstall`` / the t2 CLI rely on this
-    default) or ``"service"`` (RDR-174 P2.1 — the storage service that serves
-    every tier). The activation path is tier-agnostic (dest-based); only the
-    rendered unit differs.
+    ``tier`` selects which unit is rendered. ``"service"`` (RDR-174 P2.1 — the
+    storage service that serves every tier) is the only installable tier; the
+    activation path is tier-agnostic (dest-based), only the rendered unit
+    differs.
+
+    ``tier`` is REQUIRED and deliberately has no default (nexus-i711w Stage 2
+    sub-stage B). It defaulted to ``"t2"`` while the T2 daemon existed; with
+    that daemon retired, ``_render_for`` has no t2 arm, so a default would be a
+    ``ValueError`` trap for any unqualified caller. Note the asymmetry with
+    :func:`uninstall_autostart`, which KEEPS its ``"t2"`` default: you can no
+    longer INSTALL a T2 unit, but an upgraded box must still be able to REMOVE
+    one left behind by a pre-retirement install.
 
     The OS unit is the source of truth. If the destination already holds
     the freshly-rendered content, returns ``ALREADY_PRESENT`` without
@@ -296,26 +310,13 @@ class DaemonUninstallReport:
     service_unit_dest: Path | None = None
 
 
-def _stop_daemon_best_effort() -> tuple[bool, str | None]:
-    """Best-effort ``nx daemon t2 stop``. Returns (stopped, warning).
-
-    Intentionally a subprocess: stopping the daemon is daemon-lifecycle,
-    not installer logic, so it stays a shell-out per the RDR-126 §2
-    installer-lift decision (same rationale that keeps ``ensure-running``
-    a subprocess). Depends on ``nx`` being resolvable; failure is
-    best-effort and surfaced as a warning, never raised.
-    """
-    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-
-    cmd = [*_daemon._resolve_nx_bin(), "daemon", "t2", "stop"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
-    except Exception as exc:  # noqa: BLE001 — stop is best-effort
-        return False, f"daemon stop failed: {type(exc).__name__}: {exc}"
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
-        return False, f"daemon stop exited {result.returncode}: {detail}"
-    return True, None
+# NO _stop_daemon_best_effort: it shelled out to ``nx daemon t2 stop``, a verb
+# retired with the T2 daemon (nexus-i711w Stage 2 sub-stage B). Deactivating the
+# unit already terminates a surviving process on both platforms — ``launchctl
+# bootout`` kills the running job, ``systemctl --user disable --now`` stops it —
+# so the separate shell-out was belt-and-braces that no longer has a belt.
+# ``daemon_stopped`` is now derived from that deactivation (see uninstall_daemon
+# step 2).
 
 
 def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
@@ -323,9 +324,10 @@ def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
 
     RDR-165 eu4u4: the complete teardown must stop the engine-service + embedded
     Postgres, not only the T2 daemon (the installer.py gap where uninstall only
-    ran ``nx daemon t2 stop``). Same shell-out rationale as
-    :func:`_stop_daemon_best_effort` (lifecycle is daemon-command territory, not
-    installer logic; RDR-126 §2) and routes through the existing service-stop
+    ran ``nx daemon t2 stop``). Same shell-out rationale as the since-deleted
+    ``_stop_daemon_best_effort`` (see its tombstone above): lifecycle is
+    daemon-command territory, not installer logic (RDR-126 §2). Routes through
+    the existing service-stop
     command, which relinquishes the storage_service lease via the shared
     ``service_registry.py`` primitive (RDR-149 — no duplicated lifecycle here).
     A no-running-service exit is reported as a warning, never raised.
@@ -347,10 +349,11 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
 
     With ``confirm=False`` this is a dry run: it reports what WOULD be
-    removed and touches nothing. With ``confirm=True`` it removes the OS
-    autostart unit, stops the daemon (best-effort), and removes the
-    first-run marker. With ``remove_data=True`` it additionally wipes the
-    nexus config / data directory (``nexus_config_dir()``).
+    removed and touches nothing. With ``confirm=True`` it removes BOTH OS
+    autostart units (service and the legacy T2 one), stops the engine-service +
+    Postgres stack (best-effort), and removes the first-run marker. With
+    ``remove_data=True`` it additionally wipes the nexus config / data
+    directory (``nexus_config_dir()``).
     """
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
@@ -367,7 +370,6 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             f"the service autostart unit at {service_unit_dest}",
             f"the T2 autostart unit at {unit_dest}",
             "stop the engine-service + Postgres stack (service stop --with-pg)",
-            "stop the running T2 daemon",
         ]
         if marker.exists():
             parts.append(f"the first-run marker at {marker}")
@@ -407,19 +409,28 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     unit_result = uninstall_autostart()
     warnings.extend(unit_result.warnings)
 
+    #    Deactivating the legacy T2 unit is ALSO how a surviving T2 daemon gets
+    #    stopped now that ``nx daemon t2 stop`` is gone (nexus-i711w Stage 2
+    #    sub-stage B): launchctl bootout kills the running job, systemctl
+    #    disable --now stops it. NOT_INSTALLED means there was nothing to stop.
+    #
+    #    ANDed with ``deactivated``, NOT derived from ``status`` alone: a
+    #    failed/missing deactivator is downgraded to a warning and the unit
+    #    file removed anyway, so ``REMOVED`` comes back in the one case where
+    #    the daemon demonstrably SURVIVED. Claiming "daemon stopped" there is
+    #    wrong in the dangerous direction — worse than the old code's
+    #    permanent "stop not confirmed", which was merely pessimistic.
+    daemon_stopped = (
+        unit_result.status is UninstallStatus.REMOVED and unit_result.deactivated
+    )
+
     # 2. Stop the engine-service + Postgres stack (best-effort) — RDR-165 eu4u4.
-    #    Stop the service BEFORE the T2 daemon so a complete teardown leaves no
-    #    running storage backend; both are best-effort and never raise.
+    #    A complete teardown must leave no running storage backend.
     service_stopped, service_warning = _stop_service_stack_best_effort()
     if service_warning:
         warnings.append(service_warning)
 
-    # 3. Stop the running T2 daemon (best-effort).
-    daemon_stopped, stop_warning = _stop_daemon_best_effort()
-    if stop_warning:
-        warnings.append(stop_warning)
-
-    # 4. Remove the first-run marker so a reinstall re-shows the banner.
+    # 3. Remove the first-run marker so a reinstall re-shows the banner.
     marker_removed = False
     if marker.exists():
         try:
@@ -428,7 +439,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         except OSError as exc:
             warnings.append(f"could not remove first-run marker: {exc}")
 
-    # 5. Optionally wipe all nexus data.
+    # 4. Optionally wipe all nexus data.
     data_removed = False
     if remove_data and data_dir.exists():
         import shutil  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
@@ -484,8 +495,19 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
 def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
     """Remove a daemon OS autostart unit for the current user.
 
-    ``tier`` selects the unit: ``"t2"`` (default — ``daemon_uninstall`` and the
-    t2 CLI rely on it) or ``"service"`` (RDR-174 P2.1). A non-zero / missing
+    ``tier`` selects the unit: ``"t2"`` (default — ``daemon_uninstall`` and
+    ``upgrade_finish`` rely on it) or ``"service"`` (RDR-174 P2.1).
+
+    The ``"t2"`` default SURVIVES the T2 daemon's retirement on purpose
+    (nexus-i711w Stage 2 sub-stage B). Removal machinery outlives what it
+    removes: a box upgraded from a pre-retirement install still carries a
+    launchd/systemd unit firing ``nx daemon t2 start``, and without this arm it
+    would keep firing that now-nonexistent command on every boot forever.
+    Retiring it is gated on "no supported upgrade path still carries such a
+    unit", not on the daemon going away. See :func:`install_autostart` for the
+    other half of the asymmetry — INSTALL dies, REMOVE survives.
+
+    A non-zero / missing
     ``launchctl bootout`` / ``systemctl disable`` is downgraded to a warning and
     the file is removed anyway (the unit file is the durable artifact). Returns
     ``NOT_INSTALLED`` when nothing is present.
@@ -499,16 +521,116 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         return UninstallResult(status=UninstallStatus.NOT_INSTALLED, dest=dest)
 
     warnings: list[str] = []
+    deactivated = True
     cmd = _deactivate_cmd(dest, tier=tier)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             detail = (result.stderr or "").strip() or (result.stdout or "").strip()
             warnings.append(f"{' '.join(cmd)} exited {result.returncode}: {detail}")
+            deactivated = False
     except FileNotFoundError as exc:
         warnings.append(f"{cmd[0]} not found ({exc}); removing file anyway.")
+        deactivated = False
 
     dest.unlink()
+
+    # nexus-dmgvx: the unit is gone, so nothing will come BACK — but say what
+    # is still running NOW. Probed after the unlink so the report describes
+    # the post-uninstall world, and wrapped because a probe failure must
+    # never strand a unit that has already been removed.
+    survivors: tuple[str, ...] = ()
+    try:
+        survivors = _probe_survivors(tier=tier)
+    except Exception as exc:  # noqa: BLE001 — the removal already happened; never fail it for a probe
+        warnings.append(
+            f"could not check for surviving processes ({exc}) — verify with "
+            "`nx daemon service status` yourself"
+        )
+
     return UninstallResult(
-        status=UninstallStatus.REMOVED, dest=dest, warnings=tuple(warnings)
+        status=UninstallStatus.REMOVED,
+        dest=dest,
+        warnings=tuple(warnings),
+        survivors=survivors,
+        deactivated=deactivated,
     )
+
+
+def _discover_service_lease() -> object | None:
+    """Fresh storage-service lease, or ``None``. Never raises.
+
+    Liveness is LEASE FRESHNESS via the RDR-149 primitive, deliberately not a
+    bespoke ``ps`` sweep — reinventing per-tier liveness is exactly what the
+    lifecycle gate (``tests/daemon/test_lifecycle_gate.py``) exists to stop.
+    """
+    try:
+        import os  # noqa: PLC0415 — deferred, branch-local
+
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred
+
+        # Same construction service_endpoint.discover_lease uses (tier
+        # "storage_service", scope = uid) — going through the registry rather
+        # than through discover_lease() because that helper returns only
+        # (base_url, token) and the operator line wants supervisor_pid.
+        registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
+        return registry.discover(str(os.getuid()))
+    except Exception:  # noqa: BLE001 — a probe is never a verdict
+        return None
+
+
+def _probe_live_postgres() -> int | None:
+    """Port of a reachable local Postgres from pg_credentials, else ``None``.
+
+    Never raises. A refused connection means nothing survived, which is the
+    common and desired case.
+    """
+    try:
+        import socket  # noqa: PLC0415 — deferred, branch-local
+
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 — deferred
+
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+        if not creds_path.exists():
+            return None
+        port = int((_read_credentials(creds_path) or {}).get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return None
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            return port if s.connect_ex(("127.0.0.1", port)) == 0 else None
+    except Exception:  # noqa: BLE001 — a probe is never a verdict
+        return None
+
+
+def _probe_survivors(*, tier: str) -> tuple[str, ...]:
+    """Processes still alive after the unit was removed, as operator lines.
+
+    Scoped BY TIER: uninstalling the t2 agent must not report the storage
+    service as its survivor — they are different units with different owners,
+    and a misattributed survivor sends the operator after the wrong process.
+    """
+    if tier != "service":
+        return ()
+
+    out: list[str] = []
+    lease = _discover_service_lease()
+    if lease is not None:
+        pid = getattr(lease, "supervisor_pid", None)
+        where = f" (pid {pid})" if pid else ""
+        out.append(
+            f"storage service{where} is still running — the autostart entry is "
+            "gone so it will not restart, but nothing stopped it: "
+            "`nx daemon service stop`"
+        )
+
+    pg_port = _probe_live_postgres()
+    if pg_port is not None:
+        out.append(
+            f"Postgres is still accepting connections on 127.0.0.1:{pg_port} — "
+            "it is independently managed and is NOT stopped by uninstall: "
+            "`nx daemon service stop --with-pg` (or pg_ctl -D <PG_DATA> stop)"
+        )
+    return tuple(out)

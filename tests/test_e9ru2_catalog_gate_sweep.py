@@ -34,6 +34,8 @@ import pytest
 
 import nexus.catalog.factory as factory
 
+
+
 _COLLECTION = "docs__sweep__voyage-context-3__v1"
 
 
@@ -169,58 +171,32 @@ def test_register_or_lookup_fresh_box_no_local_catalog_created(
     assert reg["chunk_count"] == 0, "preflight registers with chunk_count=0"
 
 
-def test_register_or_lookup_sqlite_mode_still_auto_inits(tmp_path, monkeypatch):
-    """SQLite opt-out mode keeps the nexus-fq3b auto-init: a fresh local
-    path gets a catalog created and a real registration lands in it."""
-    cat_path = tmp_path / "fresh-local-catalog"
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_path))
-    # suite-wide pin already forces sqlite mode; assert it to keep this
-    # test honest if the pin ever changes
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for
-
-    assert storage_backend_for("catalog") == StorageBackend.SQLITE
-
-    from nexus.doc_indexer import _register_or_lookup_doc_id
-
-    doc = tmp_path / "pre.md"
-    doc.write_text("preflight body\n")
-    doc_id = _register_or_lookup_doc_id(
-        doc,
-        "",
-        content_type="prose",
-        physical_collection=_COLLECTION,
-        title="Preflight",
-    )
-    assert cat_path.exists(), "sqlite mode must keep the fq3b auto-init"
-    assert doc_id, "auto-init + local registration must yield a tumbler"
-
-
+# test_register_or_lookup_sqlite_mode_still_auto_inits REMOVED (nexus-i711w
+# Stage 2 sub-stage C-store). Its subject was the SQLite opt-out's auto-init
+# (nexus-fq3b), and it asserted storage_backend_for('catalog') == SQLITE
+# inline to keep itself honest. With the local catalog deleted there is no
+# SQLite arm for it to describe. Its service twin,
+# test_register_or_lookup_fresh_box_no_local_catalog_created above, already
+# covers the surviving behaviour and passed on both arms before this.
+#
 def test_audit_catalog_conn_is_none_in_service_mode(tmp_path, monkeypatch):
-    """On a MIGRATED box (frozen local .catalog.db present) the audit
-    helper must not hand out a connection to stale data in service mode —
-    same degrade the module already applies to taxonomy raw access
-    (nexus-9613q.4)."""
-    from nexus.catalog import Catalog
+    """The audit helper must not hand out a local catalog connection — the
+    catalog is service-owned; the audit's catalog legs DEGRADE (orphans=[])
+    and the degradation is REPORTED, not silent (the item-17 contract).
 
-    cat_path = tmp_path / "frozen-catalog"
-    Catalog.init(cat_path)
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_path))
-
+    nexus-i711w terminal deletion: ``_open_catalog_conn`` collapsed to an
+    unconditional ``return None`` with the local catalog's deletion, and this
+    test's sqlite half (an initialised local catalog keeps the conn) retired
+    with the substrate it described. The surviving pin: no backend env value
+    can conjure a local catalog connection.
+    """
     from nexus.collection_audit import _open_catalog_conn
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
     assert _open_catalog_conn() is None, (
-        "service mode: the local .catalog.db is a frozen migration source; "
-        "audit legs must degrade (orphans=[]) rather than report stale data"
+        "the local .catalog.db no longer exists; audit legs must degrade "
+        "(orphans=[]) rather than read a local substrate"
     )
-
-    monkeypatch.delenv("NX_STORAGE_BACKEND_CATALOG")
-    conn = _open_catalog_conn()
-    try:
-        assert conn is not None, "sqlite mode with an initialised catalog keeps the conn"
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def test_markdown_hook_service_down_is_loud_not_silent(

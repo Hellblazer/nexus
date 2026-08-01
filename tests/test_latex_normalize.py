@@ -304,3 +304,157 @@ def test_page_boundaries_drift_with_prenorm_lengths() -> None:
     assert wrong_total > len(result.text), (
         "Expected drift: pre-normalization lengths should exceed normalized text length"
     )
+
+
+# ── nexus-gtltb: the inline pass must not re-enter $$ delimiters ─────────────
+#
+# _normalize_mineru_latex ran two passes over one string. The display pass left
+# the `$$` delimiters in its output, so the inline pass — `\$([^$]+?)\$`, which
+# cannot match the empty string between them — began matching ONE `$` INTO each
+# pair. That consumed a delimiter and desynced every subsequent open/close, so
+# from the first display block onward the regions treated as "math" were the
+# PROSE BETWEEN formulas, and math regions get `re.sub(r"\s+", "", s)`.
+#
+# Measured on tests/fixtures/bft-to-smr.pdf: 918 characters removed, 592 of them
+# (64%) word-spaces deleted from running prose, plus \n\n paragraph breaks and
+# `##` headings. Live corpus: 535 catastrophic chunks, body text not references.
+
+
+def test_prose_between_display_blocks_keeps_its_spaces() -> None:
+    """The minimal repro. This is the whole bug in one line."""
+    out = _normalize_mineru_latex(r"$$a + b$$ some prose here $c$ more prose $d$ end.")
+    assert "some prose here" in out, out
+    assert "more prose" in out, out
+
+
+def test_display_block_does_not_desync_following_inline_math() -> None:
+    """After a $$ block, `$x$` must still be recognised AS inline math.
+
+    The desync did not merely damage prose — it shifted what counted as a
+    formula, so real inline spans were skipped while prose was normalized.
+    """
+    out = _normalize_mineru_latex(r"$$\frac { 1 } { m }$$ text $Q _ { \phi }$ tail")
+    assert "$$\\frac{1}{m}$$" in out, out
+    assert "$Q_{\\phi}$" in out, out          # the inline span WAS normalized
+    assert " text " in out and " tail" in out  # the prose was not
+
+
+def test_paragraph_breaks_and_headings_survive() -> None:
+    """The chunker's boundary signals must not be destroyed.
+
+    \\n\\n and `##` were being collapsed along with the spaces, so downstream
+    chunking lost its section boundaries as well as its word boundaries.
+    """
+    src = "$$E = mc^2$$\n\n## 1.2. A heading\n\nBody text follows here.\n"
+    out = _normalize_mineru_latex(src)
+    assert "\n\n## 1.2. A heading\n\n" in out, out
+    assert "Body text follows here." in out, out
+
+
+def test_multiple_display_blocks_do_not_compound() -> None:
+    """Three blocks: the desync compounded, so later prose was worse hit."""
+    src = r"$$a$$ one $$b$$ two $$c$$ three"
+    out = _normalize_mineru_latex(src)
+    for word in ("one", "two", "three"):
+        assert f" {word} " in out or out.endswith(f" {word}"), (word, out)
+
+
+def test_normalization_inside_display_blocks_still_happens() -> None:
+    """The #1049 purpose must survive the fix — this is not a revert."""
+    out = _normalize_mineru_latex(r"$$\operatorname* { m a x } _ { x }$$")
+    assert out == r"$$\operatorname*{max}_{x}$$", out
+
+
+def test_idempotent_across_the_display_boundary() -> None:
+    src = r"$$\mathbf { s }$$ prose $Q _ { \phi }$ more"
+    once = _normalize_mineru_latex(src)
+    assert _normalize_mineru_latex(once) == once
+
+
+def test_text_groups_keep_internal_spaces_inside_display() -> None:
+    """\\text{...} protection must still work through the placeholder layer."""
+    out = _normalize_mineru_latex(r"$$\text{some words} + x$$ and prose")
+    assert r"\text{some words}" in out, out
+    assert " and prose" in out, out
+
+
+# ── nexus-cfy5k: the inline pass must not treat an ESCAPED dollar as a delimiter ─
+#
+# Same PROSE-not-formula inversion as nexus-gtltb, a different trigger, and it
+# survived 57a392ff. MinerU emits literal currency as `\$`. The inline pass —
+# `\$([^$]+?)\$` — does not honour the backslash escape, so the PROSE BETWEEN two
+# `\$` occurrences is matched as an inline math span and gets
+# `re.sub(r"\s+", "", s)` applied to it.
+#
+# Live corruption, catalog doc 1.14.23, chunk 375b2d1ad6ab17a1, written AFTER the
+# gtltb fix landed:
+#     contracts above \$1M.Iftheenvironmentisarelationaldatabasewithtablesfor...
+#
+# It takes a PAIR: a lone `\$` has no closing delimiter and is inert, which is why
+# the class hid behind documents that mention money exactly once.
+
+
+def test_prose_between_escaped_dollars_keeps_its_spaces() -> None:
+    """The minimal repro. This is the whole bug in one line."""
+    src = r"costs \$5 and then \$9 later."
+    assert _normalize_mineru_latex(src) == src
+
+
+def test_currency_prose_from_the_live_corpus() -> None:
+    """The shape actually found corrupted in knowledge__semantic-operators."""
+    src = (
+        r"contracts above \$1M. If the environment is a relational database "
+        r"with tables for suppliers, contracts, and locations, the target is "
+        r"naturally SQL."
+    )
+    assert _normalize_mineru_latex(src) == src
+
+
+def test_single_escaped_dollar_is_inert() -> None:
+    """One `\\$` has no partner, so it must be a no-op — and must stay one."""
+    src = r"a budget of \$5 million was approved."
+    assert _normalize_mineru_latex(src) == src
+
+
+def test_escaped_dollar_does_not_swallow_following_real_inline_math() -> None:
+    """An escaped dollar must not consume the delimiter of a real formula.
+
+    The failure mode is the gtltb one: shifting what counts as a formula, so
+    real spans are skipped while prose is normalized.
+    """
+    out = _normalize_mineru_latex(r"it cost \$5 then $Q _ { \phi }$ tail")
+    assert r"$Q_{\phi}$" in out, out          # the real span WAS normalized
+    assert r"it cost \$5 then " in out, out   # the prose was not
+    assert " tail" in out, out
+
+
+def test_escaped_dollars_around_a_display_block() -> None:
+    """Both protections must compose, not fight."""
+    src = r"pay \$5 now $$a + b$$ or \$9 later and more prose"
+    out = _normalize_mineru_latex(src)
+    assert "$$a+b$$" in out, out
+    assert r"pay \$5 now " in out, out
+    assert r" or \$9 later and more prose" in out, out
+
+
+def test_escaped_backslash_before_dollar_is_a_real_delimiter() -> None:
+    r"""Backslash parity: `\\$x$` is a line break followed by real inline math.
+
+    `\\` is an escaped backslash, so the `$` after it is NOT escaped. A naive
+    `\\\$` match would misread it and protect a genuine delimiter.
+    """
+    out = _normalize_mineru_latex(r"line\\$Q _ { \phi }$ tail")
+    assert r"$Q_{\phi}$" in out, out
+
+
+def test_idempotent_with_escaped_dollars() -> None:
+    src = r"costs \$5 and then \$9 later, with $x _ { i }$ inline."
+    once = _normalize_mineru_latex(src)
+    assert _normalize_mineru_latex(once) == once
+
+
+def test_gtltb_control_still_clean_alongside_escapes() -> None:
+    """The gtltb fix must not regress while cfy5k is fixed."""
+    out = _normalize_mineru_latex(r"$$a + b$$ some prose here $c$ more prose $d$ end.")
+    assert "some prose here" in out, out
+    assert "more prose" in out, out

@@ -5,84 +5,39 @@ Follow-up to nexus-la28 (PR #345 / #358). The la28 PR shipped
 list/show/delete/reseed but explicitly deferred ``disable`` because it
 required a schema migration plus matcher-filter wiring.
 
+Ported to the engine substrate (nexus-i711w Stage 2 sub-stage A3): the
+SQLite ``PlanLibrary`` was deleted, so every test here runs against
+``T2Database(tmp).plans`` — a real engine-backed ``HttpPlanLibrary`` on
+the per-test tenant the autouse ``_pin_t2_substrate`` fixture mints.
+The old ``TestDisabledAtMigration`` class (the ``disabled_at`` column
+migration on the local SQLite snapshot) died with the store; the
+engine-side column lives in the plans Liquibase changeset and its
+behaviour is pinned by ``tests/db/test_http_plan_library_integration.py``
+(test_i / test_l) plus this file.
+
 This file covers:
 
-  * Migration: ``disabled_at`` column added idempotently.
-  * Public API on ``PlanLibrary``: ``set_plan_disabled`` /
-    ``set_plan_enabled`` round-trip the column.
-  * Matcher integration: ``search_plans`` (T2 FTS5 lane) and
+  * Public API on the plan library: ``set_plan_disabled`` /
+    ``set_plan_enabled`` round-trip ``disabled_at``.
+  * Matcher integration: ``search_plans`` (FTS lane) and
     ``list_active_plans`` (T1 cosine populate source) skip rows with
-    ``disabled_at IS NOT NULL``.
+    ``disabled_at`` set.
   * CLI: ``nx plan disable <id>`` / ``nx plan enable <id>``;
     ``nx plan list`` skips disabled by default and shows them with
     ``--include-disabled``.
 """
 from __future__ import annotations
 
-import json as _json
-import sqlite3
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.db.migrations import apply_pending
-from nexus.commands.upgrade import _current_version
+from nexus.db.t2 import T2Database
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-
-def _seed_plans(tmp_path: Path) -> Path:
-    """Return a DB path with the plans schema fully migrated.
-
-    Instantiates ``PlanLibrary`` so the un-registered migrations
-    (``_migrate_plans_disabled_at_if_needed`` etc.) run and are not
-    gated on the package version.
-    """
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
-
-    db_path = tmp_path / "memory.db"
-    conn = sqlite3.connect(str(db_path))
-    apply_pending(conn, _current_version())
-    conn.close()
-    # Open PlanLibrary once to run the unconditional plans-table
-    # migrations (project/ttl/scope_tags/disabled_at). Close immediately.
-    lib = PlanLibrary(path=db_path)
-    lib.close()
-    return db_path
-
-
-def _seed_plan_row(
-    db_path: Path, *, name: str, query: str, verb: str = "research",
-    scope: str = "global", project: str = "", tags: str = "",
-    plan_json: str = '{"steps": []}',
-) -> int:
-    """Insert a plan row directly via SQL.
-
-    Includes ``match_text`` (set to *query* for simplicity) so the
-    plans_fts trigger indexes content the FTS5 lane can find. The real
-    ``save_plan`` path synthesizes match_text from description + verb +
-    name; for tests we just use the query string.
-    """
-    dimensions_json = _json.dumps(
-        {"verb": verb, "scope": scope, "strategy": "default"}
-    )
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.execute(
-        "INSERT INTO plans "
-        "(project, query, plan_json, outcome, tags, created_at, "
-        " name, verb, scope, dimensions, match_text) "
-        "VALUES (?, ?, ?, 'success', ?, datetime('now'), ?, ?, ?, ?, ?)",
-        (project, query, plan_json, tags, name, verb, scope,
-         dimensions_json, query),
-    )
-    conn.commit()
-    plan_id = cursor.lastrowid
-    conn.close()
-    return plan_id
+# ── Fixtures ────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
@@ -90,159 +45,106 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-# ── Migration ───────────────────────────────────────────────────────────────
+@pytest.fixture
+def plan_db(tmp_path: Path) -> T2Database:
+    """Engine-backed T2Database; ``plan_db.plans`` is HttpPlanLibrary."""
+    database = T2Database(tmp_path / "plans.db")
+    yield database
+    database.close()
 
 
-class TestDisabledAtMigration:
-    def test_disabled_at_column_present_after_migration(self, tmp_path: Path):
-        db_path = _seed_plans(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(plans)").fetchall()}
-        conn.close()
-        assert "disabled_at" in cols
+def _seed_plan(
+    db: T2Database, *, name: str, query: str, project: str = "",
+    tags: str = "", plan_json: str = '{"steps": []}',
+) -> int:
+    """Save one plan through the public API and return its row id.
 
-    def test_existing_rows_have_null_disabled_at(self, tmp_path: Path):
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(db_path, name="row-1", query="q-1")
-        conn = sqlite3.connect(str(db_path))
-        val = conn.execute(
-            "SELECT disabled_at FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert val is None
+    ``save_plan`` without verb/scope leaves dimensions NULL, so rows do
+    not collide on the (project, dimensions) uniqueness the dimensional
+    save path enforces; distinct *project* values keep that true even if
+    a caller adds dimensions later.
+    """
+    return db.plans.save_plan(
+        query=query, plan_json=plan_json, project=project,
+        tags=tags, name=name,
+    )
 
-    def test_migration_idempotent(self, tmp_path: Path):
-        """Running apply_pending twice must not error or duplicate columns."""
-        db_path = _seed_plans(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        # Re-apply
-        apply_pending(conn, _current_version())
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(plans)").fetchall()]
-        conn.close()
-        assert cols.count("disabled_at") == 1
+
+# ── TestDisabledAtMigration DELETED (nexus-i711w Stage 2 sub-stage A3) ──────
+#
+# Its three tests pinned the ``disabled_at`` column DDL on the local SQLite
+# snapshot (`apply_pending` + `_migrate_plans_disabled_at_if_needed`), which
+# died with the SQLite PlanLibrary. The engine-side column is created by the
+# plans Liquibase changeset; that new rows carry NULL and that the column
+# round-trips is asserted behaviourally below and in
+# tests/db/test_http_plan_library_integration.py::TestPlansMVV::test_i.
 
 
 # ── Library API ────────────────────────────────────────────────────────────
 
 
 class TestSetPlanDisabled:
-    def test_set_plan_disabled_stamps_timestamp(self, tmp_path: Path):
-        from nexus.db.t2.plan_library import PlanLibrary
-
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(db_path, name="r", query="q")
-        lib = PlanLibrary(path=db_path)
-        try:
-            ok = lib.set_plan_disabled(plan_id)
-        finally:
-            lib.close()
+    def test_set_plan_disabled_stamps_timestamp(self, plan_db: T2Database):
+        plan_id = _seed_plan(plan_db, name="r", query="q")
+        ok = plan_db.plans.set_plan_disabled(plan_id)
         assert ok is True
 
-        conn = sqlite3.connect(str(db_path))
-        val = conn.execute(
-            "SELECT disabled_at FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert val is not None
-        assert val.startswith("20")  # ISO-8601-ish
+        row = plan_db.plans.get_plan(plan_id)
+        assert row["disabled_at"] is not None
+        assert row["disabled_at"].startswith("20")  # ISO-8601-ish
 
-    def test_set_plan_disabled_with_reason_appends_tag(self, tmp_path: Path):
-        from nexus.db.t2.plan_library import PlanLibrary
+    def test_set_plan_disabled_with_reason_appends_tag(
+        self, plan_db: T2Database,
+    ):
+        plan_id = _seed_plan(plan_db, name="r", query="q", tags="orig")
+        plan_db.plans.set_plan_disabled(plan_id, reason="A/B test - keep retired")
 
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(db_path, name="r", query="q", tags="orig")
-        lib = PlanLibrary(path=db_path)
-        try:
-            lib.set_plan_disabled(plan_id, reason="A/B test - keep retired")
-        finally:
-            lib.close()
-
-        conn = sqlite3.connect(str(db_path))
-        tags = conn.execute(
-            "SELECT tags FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
+        tags = plan_db.plans.get_plan(plan_id)["tags"]
         assert "orig" in tags
         assert "disable-reason:" in tags
         assert "A/B test" in tags
 
-    def test_set_plan_disabled_missing_id_returns_false(self, tmp_path: Path):
-        from nexus.db.t2.plan_library import PlanLibrary
-
-        db_path = _seed_plans(tmp_path)
-        lib = PlanLibrary(path=db_path)
-        try:
-            ok = lib.set_plan_disabled(99999)
-        finally:
-            lib.close()
+    def test_set_plan_disabled_missing_id_returns_false(
+        self, plan_db: T2Database,
+    ):
+        ok = plan_db.plans.set_plan_disabled(99999)
         assert ok is False
 
-    def test_set_plan_enabled_clears_timestamp(self, tmp_path: Path):
-        from nexus.db.t2.plan_library import PlanLibrary
-
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(db_path, name="r", query="q")
-        lib = PlanLibrary(path=db_path)
-        try:
-            lib.set_plan_disabled(plan_id)
-            ok = lib.set_plan_enabled(plan_id)
-        finally:
-            lib.close()
+    def test_set_plan_enabled_clears_timestamp(self, plan_db: T2Database):
+        plan_id = _seed_plan(plan_db, name="r", query="q")
+        plan_db.plans.set_plan_disabled(plan_id)
+        ok = plan_db.plans.set_plan_enabled(plan_id)
         assert ok is True
 
-        conn = sqlite3.connect(str(db_path))
-        val = conn.execute(
-            "SELECT disabled_at FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert val is None
+        row = plan_db.plans.get_plan(plan_id)
+        assert row["disabled_at"] is None
 
 
 # ── Matcher filter ─────────────────────────────────────────────────────────
 
 
 class TestMatcherFiltersDisabled:
-    def test_search_plans_skips_disabled(self, tmp_path: Path):
-        from nexus.db.t2.plan_library import PlanLibrary
-
-        db_path = _seed_plans(tmp_path)
-        # Distinct (project, dimensions) per row to satisfy the
-        # UNIQUE partial index on the plans table.
-        active_id = _seed_plan_row(
-            db_path, name="active", query="hybrid retrieval factual",
-            scope="global", project="proj-a",
+    def test_search_plans_skips_disabled(self, plan_db: T2Database):
+        active_id = _seed_plan(
+            plan_db, name="active", query="hybrid retrieval factual",
+            project="proj-a",
         )
-        disabled_id = _seed_plan_row(
-            db_path, name="disabled", query="hybrid retrieval factual",
-            scope="global", project="proj-b",
+        disabled_id = _seed_plan(
+            plan_db, name="disabled", query="hybrid retrieval factual",
+            project="proj-b",
         )
-        lib = PlanLibrary(path=db_path)
-        try:
-            lib.set_plan_disabled(disabled_id)
-            results = lib.search_plans(query="hybrid retrieval", limit=10)
-            ids = [r["id"] for r in results]
-        finally:
-            lib.close()
+        plan_db.plans.set_plan_disabled(disabled_id)
+        results = plan_db.plans.search_plans(query="hybrid retrieval", limit=10)
+        ids = [r["id"] for r in results]
         assert active_id in ids
         assert disabled_id not in ids
 
-    def test_list_active_plans_skips_disabled(self, tmp_path: Path):
-        from nexus.db.t2.plan_library import PlanLibrary
-
-        db_path = _seed_plans(tmp_path)
-        active_id = _seed_plan_row(
-            db_path, name="a", query="qa", scope="global", project="p1",
-        )
-        disabled_id = _seed_plan_row(
-            db_path, name="d", query="qd", scope="personal", project="p2",
-        )
-        lib = PlanLibrary(path=db_path)
-        try:
-            lib.set_plan_disabled(disabled_id)
-            rows = lib.list_active_plans()
-            ids = [r["id"] for r in rows]
-        finally:
-            lib.close()
+    def test_list_active_plans_skips_disabled(self, plan_db: T2Database):
+        active_id = _seed_plan(plan_db, name="a", query="qa", project="p1")
+        disabled_id = _seed_plan(plan_db, name="d", query="qd", project="p2")
+        plan_db.plans.set_plan_disabled(disabled_id)
+        rows = plan_db.plans.list_active_plans()
+        ids = [r["id"] for r in rows]
         assert active_id in ids
         assert disabled_id not in ids
 
@@ -251,120 +153,83 @@ class TestMatcherFiltersDisabled:
 
 
 class TestPlanDisableCli:
-    def test_disable_command_round_trips(
-        self, runner: CliRunner, tmp_path: Path,
-    ):
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(db_path, name="cli-target", query="q")
+    """CLI behaviour against the live plan library.
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "disable", str(plan_id)])
+    ``_open_plan_library`` constructs ``HttpPlanLibrary()`` from the same
+    env the autouse substrate pin sets (per-test tenant token), so the
+    CliRunner invocation reads and writes exactly the rows the ``plan_db``
+    fixture seeds — the seam the old ``default_db_path`` patch stood in
+    for is gone with the local snapshot (nexus-i711w sub-stage A3).
+    """
+
+    def test_disable_command_round_trips(
+        self, runner: CliRunner, plan_db: T2Database,
+    ):
+        plan_id = _seed_plan(plan_db, name="cli-target", query="q")
+
+        result = runner.invoke(main, ["plan", "disable", str(plan_id)])
         assert result.exit_code == 0, result.output
         assert "disabled" in result.output.lower()
 
-        conn = sqlite3.connect(str(db_path))
-        val = conn.execute(
-            "SELECT disabled_at FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert val is not None
+        row = plan_db.plans.get_plan(plan_id)
+        assert row["disabled_at"] is not None
 
     def test_disable_with_reason_records_tag(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ):
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(
-            db_path, name="cli-r", query="q", tags="orig",
-        )
+        plan_id = _seed_plan(plan_db, name="cli-r", query="q", tags="orig")
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, [
-                "plan", "disable", str(plan_id),
-                "--reason", "regression in Phase 2",
-            ])
+        result = runner.invoke(main, [
+            "plan", "disable", str(plan_id),
+            "--reason", "regression in Phase 2",
+        ])
         assert result.exit_code == 0, result.output
 
-        conn = sqlite3.connect(str(db_path))
-        tags = conn.execute(
-            "SELECT tags FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
+        tags = plan_db.plans.get_plan(plan_id)["tags"]
         assert "regression in Phase 2" in tags
 
     def test_disable_unknown_id_fails(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ):
-        db_path = _seed_plans(tmp_path)
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "disable", "9999"])
+        result = runner.invoke(main, ["plan", "disable", "99999"])
         assert result.exit_code != 0
         assert "no plan" in result.output.lower()
 
     def test_enable_command_clears_disabled(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ):
-        db_path = _seed_plans(tmp_path)
-        plan_id = _seed_plan_row(db_path, name="t", query="q")
+        plan_id = _seed_plan(plan_db, name="t", query="q")
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            r1 = runner.invoke(main, ["plan", "disable", str(plan_id)])
-            assert r1.exit_code == 0, r1.output
-            r2 = runner.invoke(main, ["plan", "enable", str(plan_id)])
-            assert r2.exit_code == 0, r2.output
+        r1 = runner.invoke(main, ["plan", "disable", str(plan_id)])
+        assert r1.exit_code == 0, r1.output
+        r2 = runner.invoke(main, ["plan", "enable", str(plan_id)])
+        assert r2.exit_code == 0, r2.output
 
-        conn = sqlite3.connect(str(db_path))
-        val = conn.execute(
-            "SELECT disabled_at FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert val is None
+        row = plan_db.plans.get_plan(plan_id)
+        assert row["disabled_at"] is None
 
     def test_list_skips_disabled_by_default(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ):
-        db_path = _seed_plans(tmp_path)
-        active_id = _seed_plan_row(
-            db_path, name="active-row", query="qa",
-            scope="global", project="p1",
-        )
-        disabled_id = _seed_plan_row(
-            db_path, name="disabled-row", query="qd",
-            scope="personal", project="p2",
+        _seed_plan(plan_db, name="active-row", query="qa", project="p1")
+        disabled_id = _seed_plan(
+            plan_db, name="disabled-row", query="qd", project="p2",
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            r1 = runner.invoke(main, ["plan", "disable", str(disabled_id)])
-            assert r1.exit_code == 0, r1.output
-            result = runner.invoke(main, ["plan", "list"])
+        r1 = runner.invoke(main, ["plan", "disable", str(disabled_id)])
+        assert r1.exit_code == 0, r1.output
+        result = runner.invoke(main, ["plan", "list"])
         assert result.exit_code == 0, result.output
         assert "active-row" in result.output
         assert "disabled-row" not in result.output
 
     def test_list_include_disabled_shows_marker(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ):
-        db_path = _seed_plans(tmp_path)
-        disabled_id = _seed_plan_row(
-            db_path, name="disabled-row", query="qd",
-        )
+        disabled_id = _seed_plan(plan_db, name="disabled-row", query="qd")
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            r1 = runner.invoke(main, ["plan", "disable", str(disabled_id)])
-            assert r1.exit_code == 0, r1.output
-            result = runner.invoke(
-                main, ["plan", "list", "--include-disabled"],
-            )
+        r1 = runner.invoke(main, ["plan", "disable", str(disabled_id)])
+        assert r1.exit_code == 0, r1.output
+        result = runner.invoke(main, ["plan", "list", "--include-disabled"])
         assert result.exit_code == 0, result.output
         assert "disabled-row" in result.output

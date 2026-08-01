@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog, count_documents
 
 
 @pytest.fixture(autouse=True)
@@ -17,10 +17,34 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
+@pytest.fixture(autouse=True)
+def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim ``catalog_path()`` at the dir ``_make_catalog`` initialises.
+
+    nexus-aqbrk: the tests used to hold a direct ``Catalog`` object bound to
+    ``tmp_path/"catalog"``, so where ``catalog_path()`` pointed did not
+    matter. ``ActiveCatalog`` resolves through the same factories the code
+    under test uses, and on the SQLite arm those read ``catalog_path()`` —
+    so it has to agree. Tests that deliberately point somewhere else (the
+    not-initialised cases) still win: their in-body ``setenv`` runs after
+    this autouse fixture.
+    """
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
+
+def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
+    """Init the local catalog and hand back a facade over the LIVE one.
+
+    nexus-aqbrk: this used to return the local ``Catalog`` object, so under
+    the engine substrate the test seeded and read ``.catalog.db`` while the
+    hook under test (``_catalog_store_hook`` -> ``make_catalog_writer``)
+    wrote the SERVICE catalog. Every assertion then read an empty local file.
+    ``ActiveCatalog`` routes both halves through the same factories the hook
+    uses, so the same test body now covers whichever catalog is real.
+    nexus-i711w terminal deletion: the local ``Catalog.init`` seeding is gone.
+    """
     catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    return catalog_dir, cat
+    return catalog_dir, ActiveCatalog()
 
 
 class TestByDocId:
@@ -34,8 +58,14 @@ class TestByDocId:
             meta={"doc_id": "abc123"},
         )
         entry = cat.by_doc_id("abc123")
-        assert entry is not None
-        assert entry.title == "Test Entry"
+        # nexus-wji11/nexus-5axey (settled): by_doc_id is a TUMBLER-only
+        # lookup, permanently — tumbler is the only document identity.
+        # "abc123" is a meta.doc_id (chash-shaped) value, not a tumbler, so
+        # this is the correct terminal behavior, not a pending gap. Chash
+        # lookups go through
+        # nexus.catalog.store_hook.resolve_knowledge_doc_for_chash instead
+        # (see tests/test_5axey_chash_catalog_lookups.py).
+        assert entry is None
 
     def test_not_found(self, tmp_path):
         catalog_dir, cat = _make_catalog(tmp_path)
@@ -47,7 +77,8 @@ class TestByDocId:
         cat.register(owner, "A", content_type="knowledge", meta={"doc_id": "id1"})
         cat.register(owner, "B", content_type="knowledge", meta={"doc_id": "id2"})
         entry = cat.by_doc_id("id1")
-        assert entry.title == "A"
+        # nexus-wji11/nexus-5axey (settled): permanent TUMBLER-only lookup.
+        assert entry is None
 
 
 class TestListByCollection:
@@ -93,7 +124,11 @@ class TestListByCollection:
                 physical_collection="knowledge__delos",
                 file_path=f"/papers/p{i}.pdf",
             )
-        assert len(cat.list_by_collection("knowledge__delos", limit=3)) == 3
+        capped = len(cat.list_by_collection("knowledge__delos", limit=3))
+        # FIXED by nexus-xoimv (2026-08-01): documentsByCollection now
+        # honors (limit, offset); the inverted pin above this line fired
+        # exactly as designed when the fix landed. limit is real now.
+        assert capped == 3
         assert len(cat.list_by_collection("knowledge__delos", limit=None)) == 5
 
 
@@ -110,9 +145,18 @@ class TestStorePutHook:
             collection_name="knowledge__test",
         )
         entry = cat.by_doc_id("doc_abc123")
-        assert entry is not None
-        assert entry.title == "Test Knowledge"
-        assert entry.physical_collection == "knowledge__test"
+        # nexus-wji11 (settled) / nexus-5axey: by_doc_id is a permanent
+        # TUMBLER-only lookup, so an entry carrying meta.doc_id is
+        # unreachable by that key — this is the correct terminal contract,
+        # not an open question. The hook's OWN chash dedup goes through
+        # nexus.catalog.store_hook.resolve_knowledge_doc_for_chash instead
+        # (see tests/test_5axey_chash_catalog_lookups.py::TestDedupA1).
+        assert entry is None
+        # The registration itself must have landed on either substrate.
+        assert any(
+            e.title == "Test Knowledge"
+            for e in cat.list_by_collection("knowledge__test")
+        )
 
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
         from nexus.commands.store import _catalog_store_hook
@@ -133,7 +177,7 @@ class TestStorePutHook:
 
         _catalog_store_hook(title="A", doc_id="doc1", collection_name="knowledge__test")
         _catalog_store_hook(title="A", doc_id="doc1", collection_name="knowledge__test")
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 1
 
     def test_ghost_reconciled_by_title_instead_of_duplicated(
@@ -162,7 +206,7 @@ class TestStorePutHook:
         )
         assert result == str(ghost), "must reuse the ghost's tumbler"
 
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 1, "no duplicate document was minted"
 
         entry = cat.resolve(ghost)
@@ -197,7 +241,7 @@ class TestStorePutHook:
         )
         assert result != str(real), "must not reuse a populated document's tumbler"
 
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 2, "a new document is registered instead"
 
         untouched = cat.resolve(real)
@@ -221,7 +265,7 @@ class TestStorePutHook:
         result = _catalog_store_hook(
             title="", doc_id="some-hash", collection_name="knowledge__blank2",
         )
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 2, "empty title must not trigger reconciliation"
         assert result, "a new tumbler is still registered"
 
@@ -252,7 +296,7 @@ class TestStorePutHook:
         assert result != str(other_ghost), (
             "must not reconcile onto a ghost owned by a different owner"
         )
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 2
 
     def test_writes_route_through_factory_writer_not_direct_catalog(

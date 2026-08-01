@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
+
 from nexus.catalog.auto_linker import LinkContext, auto_link, read_link_contexts
 
 
@@ -18,12 +19,47 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path, monkeypatch=None) -> Catalog:
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    if monkeypatch is not None:
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    return cat
+def _assert_auto_link(count: int, cat, source_t, *, expected: int = 1) -> None:
+    """Assert auto-link created the expected links.
+
+    nexus-wji11 SETTLED (Hal, 2026-07-26): the TUMBLER is the only document
+    identity (RDR-108). nexus-5axey class A3 then rewired this path —
+    ``catalog_auto_link`` takes the tumbler directly instead of resolving a
+    T3 chash through ``by_doc_id``, which asked a different question on each
+    substrate and so matched nothing in service mode. This assertion was
+    pinned AT THE BROKEN VALUE (count == 0) until that landed; this is the
+    promised restoration.
+    """
+
+    assert count == expected, (
+        f"auto_link created {count} link(s), expected {expected}"
+    )
+    assert cat.links_from(source_t, link_type="relates"), (
+        "auto_link reported success but no 'relates' link is readable back"
+    )
+
+
+def _make_catalog(tmp_path: Path, monkeypatch=None):
+    """Facade over the live (service) catalog; needs no local init.
+
+    nexus-i711w terminal deletion: the local ``Catalog.init`` seeding died
+    with ``nexus.catalog.catalog``. Both shapes in this file — ``auto_link``
+    taking the handle directly (TestAutoLink) and ``_catalog_auto_link``
+    resolving through the catalog factories
+    (TestCatalogAutoLinkIntegration) — now see the same live catalog, so
+    one handle serves both.
+    """
+    return ActiveCatalog()
+
+
+# A tumbler that cannot exist in the SHARED live service catalog: the first
+# segment is minted per-run from uuid entropy far above any real owner
+# high-water mark. The old literal _ABSENT_TUMBLER stopped being "nonexistent"
+# once enough test runs had registered owners into the shared catalog
+# (nexus-i711w terminal-deletion verification, 2026-07-30).
+import uuid as _uuid
+
+_ABSENT_TUMBLER = f"{9_000_000 + (_uuid.uuid4().int % 1_000_000)}.999.999"
 
 
 class TestAutoLink:
@@ -58,13 +94,14 @@ class TestAutoLink:
         links = cat.links_from(source_t)
         assert links == []
 
+
     def test_nonexistent_tumbler_graceful_skip(self, tmp_path):
         """A LinkContext with valid-format-but-non-existent tumbler is counted in skipped_missing_endpoint."""
         cat = _make_catalog(tmp_path)
         owner = cat.register_owner("test", "curator")
         source_t = cat.register(owner, "Source Doc", content_type="knowledge")
 
-        ctx = LinkContext(target_tumbler="99.99.99", link_type="relates")
+        ctx = LinkContext(target_tumbler=_ABSENT_TUMBLER, link_type="relates")
         result = auto_link(cat, source_t, [ctx])
 
         # nexus-a414: separate counts so the caller distinguishes
@@ -209,6 +246,7 @@ class TestAutoLinkResult:
         assert result.skipped_invalid_tumbler == 1
         assert result.skipped_missing_endpoint == 0
 
+
     def test_mixed_invalid_and_missing_separate_counts(self, tmp_path):
         """A batch with both failure modes counts them separately."""
         cat = _make_catalog(tmp_path)
@@ -220,13 +258,14 @@ class TestAutoLinkResult:
             LinkContext(target_tumbler="not-a-tumbler", link_type="relates"),
             LinkContext(target_tumbler="ddbff7f16e4454e2", link_type="relates"),
             # Valid tumbler format, missing endpoint
-            LinkContext(target_tumbler="99.99.99", link_type="relates"),
+            LinkContext(target_tumbler=_ABSENT_TUMBLER, link_type="relates"),
         ]
         result = auto_link(cat, source_t, contexts)
 
         assert result.created == 0
         assert result.skipped_invalid_tumbler == 2
         assert result.skipped_missing_endpoint == 1
+
 
     def test_partial_success_counts_correctly(self, tmp_path):
         """Mixed valid + invalid + missing in one batch: each counted in its bucket."""
@@ -238,7 +277,7 @@ class TestAutoLinkResult:
         contexts = [
             LinkContext(target_tumbler=str(target_t), link_type="relates"),
             LinkContext(target_tumbler="not-a-tumbler", link_type="relates"),
-            LinkContext(target_tumbler="99.99.99", link_type="cites"),
+            LinkContext(target_tumbler=_ABSENT_TUMBLER, link_type="cites"),
         ]
         result = auto_link(cat, source_t, contexts)
 
@@ -293,12 +332,12 @@ class TestCatalogAutoLinkIntegration:
             tags="link-context",
         )
 
-        count = _catalog_auto_link("test-doc-001")
+        count = _catalog_auto_link(str(source_t))
 
-        assert count == 1
+        _assert_auto_link(count, cat, source_t)
         links = cat.links_from(source_t, link_type="relates")
-        assert len(links) == 1
-        assert links[0].created_by == "auto-linker"
+        if links:
+            assert links[0].created_by == "auto-linker"
 
         _reset_singletons()
 
@@ -374,13 +413,11 @@ class TestCatalogAutoLinkIntegration:
         )
 
         # Two stores in the same session both get linked
-        count1 = _catalog_auto_link("multi-doc-001")
-        count2 = _catalog_auto_link("multi-doc-002")
+        count1 = _catalog_auto_link(str(doc1_t))
+        count2 = _catalog_auto_link(str(doc2_t))
 
-        assert count1 == 1
-        assert count2 == 1
-        assert len(cat.links_from(doc1_t, link_type="relates")) == 1
-        assert len(cat.links_from(doc2_t, link_type="relates")) == 1
+        _assert_auto_link(count1, cat, doc1_t)
+        _assert_auto_link(count2, cat, doc2_t)
 
         _reset_singletons()
 

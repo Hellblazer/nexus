@@ -47,10 +47,10 @@ from nexus.db.reconcile import (
     verify_fill_pg_source,
 )
 
-# Reuse the locked ETL test fakes + naming helper (single source of truth;
-# mirrors test_verify_fill_regression.py's own precedent for cross-file
-# test-fake reuse — a drift in FakeVectorClient's surface trips both suites).
-from tests.migration.test_vector_etl import (  # noqa: PLC2701 — shared test fakes
+# Reuse the locked ETL test fakes + naming helper. RDR-155 P4b: their old
+# home (test_vector_etl.py) died with the migration machinery; the fakes
+# were salvaged verbatim into tests/migration/_vector_etl_fakes.py.
+from tests.migration._vector_etl_fakes import (  # noqa: PLC2701 — shared test fakes
     FakeVectorClient,
     _coll,
 )

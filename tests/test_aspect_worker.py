@@ -36,10 +36,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
-
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
 
 
 @pytest.fixture(autouse=True)
@@ -60,9 +57,10 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     RDR-128 P1 (kg8sj): the enqueue hook now routes through
     ``t2_index_write`` (daemon-or-direct), so isolate that too — here it
-    writes directly to the tmp DB (daemon routing is covered by
-    ``tests/test_rdr128_p1_index_write_routing.py``). ``t2_ctx`` stays
-    patched for the tests that open the queue directly.
+    writes directly to the tmp DB. The daemon-routing half was covered by
+    ``tests/test_rdr128_p1_index_write_routing.py``, deleted with the T2
+    daemon's SQLite substrate in nexus-i711w. ``t2_ctx`` stays patched for
+    the tests that open the queue directly.
     """
     import nexus.mcp_infra as infra
     db_path = tmp_path / "worker_t2.db"
@@ -125,15 +123,16 @@ class TestWorkerDrain:
         assert rec.proposed_method == "M"
 
     def test_queuerow_roundtrips_through_daemon_wire_shape(self) -> None:
-        """RDR-128 P3: routed through the daemon, ``claim_batch`` rows arrive
-        as plain dicts (``t2_daemon._t2_decode`` returns a dataclass's fields
-        as a dict, not a reconstructed object). The worker's poll relies on
-        ``QueueRow(**wire_dict)`` to restore object attribute access. Pin that
-        round-trip so a QueueRow field change can't silently break the routed
-        worker (the direct-fallback path returns objects and would mask it)."""
+        """The worker's poll normalises dict-shaped rows via
+        ``QueueRow(**wire_dict)`` (``_run_loop``). The T2 daemon that
+        originally produced the dict shape died with the SQLite substrate
+        (nexus-i711w Stage 2 sub-stage B), but the normalisation path it
+        pinned survives in the worker, so keep the round-trip pinned: a
+        QueueRow field change must not silently break dict-shaped claims.
+        QueueRow now lives in ``nexus.db.t2.records``."""
         import dataclasses
 
-        from nexus.db.t2.aspect_extraction_queue import QueueRow
+        from nexus.db.t2.records import QueueRow
 
         original = QueueRow(
             collection="knowledge__delos",
@@ -351,24 +350,14 @@ class TestWorkerDrain:
 
         with T2Database(_isolate_t2) as db:
             q = db.aspect_queue
-            if has_raw_access(q):
-                row = q.conn.execute(
-                    "SELECT status, retry_count, last_error "
-                    "FROM aspect_extraction_queue WHERE source_path = ?",
-                    ("/p1.pdf",),
-                ).fetchone()
-                assert row[0] == "failed"
-                assert row[1] >= 1
-                assert "worker-level failure" in row[2]
-            else:
-                # Service substrate: last_error is not exposed on the public
-                # QueueRow surface; assert the observable failed-state via
-                # list_failed (RDR-155 P4b P0a' has_raw_access branch).
-                failed = [
-                    r for r in q.list_failed() if r.source_path == "/p1.pdf"
-                ]
-                assert len(failed) == 1
-                assert failed[0].retry_count >= 1
+            # Service substrate: last_error is not exposed on the public
+            # QueueRow surface; assert the observable failed-state via
+            # list_failed (RDR-155 P4b P0a' has_raw_access branch).
+            failed = [
+                r for r in q.list_failed() if r.source_path == "/p1.pdf"
+            ]
+            assert len(failed) == 1
+            assert failed[0].retry_count >= 1
 
 
 # ── Worker lifecycle ─────────────────────────────────────────────────────────
@@ -480,48 +469,6 @@ class TestEnqueueHook:
         assert rows == []
         assert get_worker() is None  # no lazy start either
 
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: the hook's IN-PROCESS worker autostart is the "
-        "local/SQLite-backend leg of _ensure_aspect_worker; on the service "
-        "backend the hook routes to the leased aspect-worker DAEMON "
-        "(RDR-173 P2) and get_worker() stays None by design — the "
-        "in-process leg dies at the RDR-155 P4b flip",
-    )
-    def test_hook_starts_worker_on_first_supported_enqueue(
-        self, _isolate_t2: Path, monkeypatch,
-    ) -> None:
-        """The hook lazy-starts the worker on the first supported
-        enqueue. Subsequent enqueues do not re-start."""
-        # Exercises the hook's auto-spawn path specifically, so opt back into
-        # autostart (conftest disables it suite-wide to drop the per-test
-        # worker-stop teardown tax — nexus test-suite trim).
-        monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "1")
-        from nexus.aspect_worker import (
-            aspect_extraction_enqueue_hook,
-            get_worker,
-            stop_worker,
-        )
-
-        try:
-            assert get_worker() is None
-            aspect_extraction_enqueue_hook(
-                source_path="/p1.pdf",
-                collection="knowledge__delos",
-                content="x",
-            )
-            w1 = get_worker()
-            assert w1 is not None
-            assert w1.is_running()
-            aspect_extraction_enqueue_hook(
-                source_path="/p2.pdf",
-                collection="knowledge__delos",
-                content="y",
-            )
-            assert get_worker() is w1
-        finally:
-            stop_worker(timeout=2.0)
-
 
 class TestGap2SourcePathNormalization:
     """RDR-145 Phase 1 (P1.2, nexus-syga3): forward-only ``source_path``
@@ -549,29 +496,22 @@ class TestGap2SourcePathNormalization:
         file_path: str,
         title: str,
     ) -> None:
-        """Build a real local catalog at a tmp dir, register one document,
-        and inject it into the hook via ``_resolve_catalog_reader``.
+        """Seed one document into the ACTIVE (service) catalog and inject
+        the live reader into the hook via ``_resolve_catalog_reader``.
 
-        Injection (not env discovery) keeps the test hermetic and immune to
-        the ambient storage backend: ``make_catalog_reader()`` returns an HTTP
-        client to the live service whenever the shell is in service mode, so
-        env-seeding a tmp catalog would be silently ignored. The injected
-        object is a real :class:`Catalog`, so ``lookup_doc_id_by_collection_and_path``
-        and ``by_doc_id`` exercise production code, not a mock."""
+        nexus-i711w: the local ``Catalog`` this used to build is gone; the
+        seed routes through the same service-only factories the hook reads
+        with, so ``lookup_doc_id_by_collection_and_path`` and ``by_doc_id``
+        still exercise production code, not a mock."""
         import hashlib
 
         import nexus.aspect_worker as mod
-        from nexus.catalog import Catalog
+        from tests._catalog_fixture_ops import ActiveCatalog, active_reader
 
-        cat_dir = tmp_path / "catalog"
-        cat_dir.mkdir()
-        (cat_dir / "owners.jsonl").touch()
-        (cat_dir / "documents.jsonl").touch()
-        (cat_dir / "links.jsonl").touch()
         repo_root = str(tmp_path / "repo")
         (tmp_path / "repo").mkdir()
         repo_hash = hashlib.sha256(repo_root.encode()).hexdigest()[:8]
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "seed-repo", "repo", repo_hash=repo_hash, repo_root=repo_root,
         )
@@ -579,7 +519,8 @@ class TestGap2SourcePathNormalization:
             owner, title, content_type="paper",
             file_path=file_path, physical_collection=collection,
         )
-        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: cat)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", active_reader)
+
 
     def test_resolving_absolute_path_normalizes_to_canonical_relative(
         self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -710,6 +651,7 @@ class TestGap2SourcePathNormalization:
             e.get("event") == "aspect_source_path_uncanonical" for e in cap
         )
 
+
     def test_resolved_but_canonical_is_absolute_left_as_is(
         self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -767,54 +709,38 @@ class TestEnqueueFailureTripwire:
         — the tripwire is proven to increment, not just assert-zero on green."""
         import nexus.aspect_worker as mod
         from nexus.aspect_worker import aspect_extraction_enqueue_hook
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
 
-        with T2Database(_isolate_t2) as db:
-            raw = has_raw_access(db.aspect_queue)
-
         def _boom(self, *a, **k):
             raise RuntimeError("enqueue boom")
 
-        if raw:
-            monkeypatch.setattr(AspectExtractionQueue, "enqueue", _boom)
-        else:
-            # Service substrate: the enqueue routes through HttpAspectQueue
-            # and hook_failures has no public read surface — force the boom
-            # on the HTTP class and capture the tripwire persist via a spy
-            # (RDR-155 P4b P0a' has_raw_access branch).
-            monkeypatch.setattr(HttpAspectQueue, "enqueue", _boom)
-            recorded: list[dict] = []
-            real_record = HttpTelemetryStore.record_hook_failure
+        # HttpAspectQueue is the only queue post-i711w; hook_failures has no
+        # public read surface — force the boom on the HTTP class and capture
+        # the tripwire persist via a spy (the write still goes through to the
+        # engine so the persist path is exercised for real).
+        monkeypatch.setattr(HttpAspectQueue, "enqueue", _boom)
+        recorded: list[dict] = []
+        real_record = HttpTelemetryStore.record_hook_failure
 
-            def _spy(self, **kwargs):
-                recorded.append(kwargs)
-                return real_record(self, **kwargs)
+        def _spy(self, **kwargs):
+            recorded.append(kwargs)
+            return real_record(self, **kwargs)
 
-            monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _spy)
+        monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _spy)
 
         aspect_extraction_enqueue_hook(
             source_path="/p1.pdf", collection="knowledge__delos", content="x",
         )
-        if raw:
-            with T2Database(_isolate_t2) as db:
-                rows = db.telemetry.conn.execute(
-                    "SELECT doc_id, collection, hook_name, error, chain "
-                    "FROM hook_failures"
-                ).fetchall()
-            assert len(rows) == 1
-            doc_id, coll, hook_name, error, chain = rows[0]
-        else:
-            assert len(recorded) == 1
-            doc_id = recorded[0]["doc_id"]
-            coll = recorded[0]["collection"]
-            hook_name = recorded[0]["hook_name"]
-            error = recorded[0]["error"]
-            chain = recorded[0]["chain"]
+        assert len(recorded) == 1
+        doc_id = recorded[0]["doc_id"]
+        coll = recorded[0]["collection"]
+        hook_name = recorded[0]["hook_name"]
+        error = recorded[0]["error"]
+        chain = recorded[0]["chain"]
         assert doc_id == "/p1.pdf"
         assert coll == "knowledge__delos"
         assert hook_name == "aspect_extraction_enqueue_hook"
@@ -848,19 +774,13 @@ class TestEnqueueFailureTripwire:
         )
         with T2Database(_isolate_t2) as db:
             pending = db.aspect_queue.list_pending()
-            if has_raw_access(db.telemetry):
-                failures = db.telemetry.conn.execute(
-                    "SELECT count(*) FROM hook_failures "
-                    "WHERE hook_name = 'aspect_extraction_enqueue_hook'"
-                ).fetchone()[0]
-            else:
-                # Service substrate: hook_failures has no public read surface
-                # — the spy above proves zero tripwire persists fired
-                # (RDR-155 P4b P0a' has_raw_access branch).
-                failures = len(
-                    [r for r in recorded
-                     if r.get("hook_name") == "aspect_extraction_enqueue_hook"]
-                )
+            # Service substrate: hook_failures has no public read surface
+            # — the spy above proves zero tripwire persists fired
+            # (RDR-155 P4b P0a' has_raw_access branch).
+            failures = len(
+                [r for r in recorded
+                 if r.get("hook_name") == "aspect_extraction_enqueue_hook"]
+            )
         assert len(pending) == 1
         assert failures == 0
 
@@ -871,8 +791,8 @@ class TestEnqueueFailureTripwire:
         hook still returns without propagating (ingest is never blocked)."""
         import nexus.aspect_worker as mod
         from nexus.aspect_worker import aspect_extraction_enqueue_hook
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-        from nexus.db.t2.telemetry import Telemetry
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
@@ -883,8 +803,8 @@ class TestEnqueueFailureTripwire:
         def _boom_telemetry(self, *a, **k):
             raise RuntimeError("telemetry down")
 
-        monkeypatch.setattr(AspectExtractionQueue, "enqueue", _boom)
-        monkeypatch.setattr(Telemetry, "record_hook_failure", _boom_telemetry)
+        monkeypatch.setattr(HttpAspectQueue, "enqueue", _boom)
+        monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _boom_telemetry)
 
         # Must not raise.
         aspect_extraction_enqueue_hook(
@@ -913,22 +833,12 @@ def _queue_size(db_path: Path) -> int:
     rows behind)."""
     with T2Database(db_path) as db:
         q = db.aspect_queue
-        if has_raw_access(q):
-            return q.conn.execute(
-                "SELECT COUNT(*) FROM aspect_extraction_queue"
-            ).fetchone()[0]
         return 0 if q.is_drained() else 1
 
 
 def _row_status(db_path: Path, source_path: str) -> str | None:
     with T2Database(db_path) as db:
         q = db.aspect_queue
-        if has_raw_access(q):
-            row = q.conn.execute(
-                "SELECT status FROM aspect_extraction_queue WHERE source_path = ?",
-                (source_path,),
-            ).fetchone()
-            return row[0] if row else None
         # Service substrate: no raw handle — derive status from the public
         # list surfaces (failed is the only status the waiting tests poll
         # for; pending covers the rest of the observable states).
@@ -1264,58 +1174,6 @@ class TestRetryLadderRouting:
         assert db.aspect_queue.calls[0][0] == "failed"
 
 
-class TestRetryLadderIntegration:
-    """End-to-end: a retryable failure cycles the ladder to terminal at the cap."""
-
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: this test relies on the SQLite queue stub "
-        "IGNORING the backoff interval (no next_retry_at column) so the "
-        "ladder burns to terminal in unit-test time; the engine stamps a "
-        "real next_retry_at (base 30s, doubling) server-side, so the "
-        "burn-the-ladder shortcut dies at the RDR-155 P4b flip — the real "
-        "backoff ladder is exercised by the --fullstack rehearsal",
-    )
-    def test_retryable_failure_climbs_to_terminal_at_cap(self, _isolate_t2: Path) -> None:
-        import sqlite3
-
-        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS, AspectExtractionWorker
-
-        with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("knowledge__delos", "/retry.pdf")
-
-        def fake_extract(content, source_path, collection, **_kw):  # noqa: ANN001, ANN202
-            raise sqlite3.OperationalError("database is locked")
-
-        # SQLite stub ignores the backoff interval (no next_retry_at column), so
-        # the row is immediately re-claimable and the worker burns the whole
-        # retry budget quickly before going terminal — proving the ladder ran
-        # (old behaviour was a single-shot terminal fail at retry_count==1).
-        with patch("nexus.aspect_worker._extract_aspects", fake_extract):
-            worker = AspectExtractionWorker(poll_interval=0.02)
-            worker.start()
-            try:
-                _wait_until(
-                    lambda: _row_status(_isolate_t2, "/retry.pdf") == "failed",
-                    timeout=10.0,
-                )
-            finally:
-                worker.stop(timeout=5.0)
-
-        with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.conn.execute(
-                "SELECT status, retry_count FROM aspect_extraction_queue WHERE source_path = ?",
-                ("/retry.pdf",),
-            ).fetchone()
-        assert row[0] == "failed"
-        # Exact boundary (single worker => deterministic): the row is retried at
-        # claim-time counts 0..cap-1 (cap mark_retry calls, each +1), then the
-        # claim-time count == cap trips terminal mark_failed (+1 more). Final
-        # retry_count is therefore cap+1 — proving the full ladder ran, not a
-        # single-shot fail (which would terminate at retry_count == 1).
-        assert row[1] == _RETRY_MAX_ATTEMPTS + 1
-
-
 # ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────
 
 
@@ -1332,30 +1190,23 @@ class TestEnqueueHookDocIdWiring:
     def test_enqueue_persists_catalog_doc_id_verbatim(self, _isolate_t2):
         from nexus.aspect_worker import aspect_extraction_enqueue_hook
 
-        with T2Database(_isolate_t2) as db:
-            raw = has_raw_access(db.aspect_queue)
+        # Engine substrate (RDR-155 P4b P0a', idiom 6): the queue's
+        # doc_id carries a REAL FK to catalog_documents, so seed the
+        # catalog row through the engine and use ITS tumbler — the
+        # wiring assertion (verbatim persistence) is unchanged, and the
+        # FK leg is exercised live.
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
 
-        if raw:
-            # SQLite has no FK — any doc_id string pins the wiring.
-            doc_id = "1.7.42"
-        else:
-            # Engine substrate (RDR-155 P4b P0a', idiom 6): the queue's
-            # doc_id carries a REAL FK to catalog_documents, so seed the
-            # catalog row through the engine and use ITS tumbler — the
-            # wiring assertion (verbatim persistence) is unchanged, and the
-            # FK leg is now exercised live instead of skipped.
-            from nexus.catalog.http_catalog_client import HttpCatalogClient
-
-            with HttpCatalogClient() as cat:
-                owner = cat.register_owner(
-                    "wiring-repo", "repo", repo_hash="deadbeef",
-                )
-                tumbler = cat.register(
-                    owner, "doc-id wiring doc",
-                    content_type="paper",
-                    physical_collection="knowledge__delos",
-                )
-            doc_id = str(tumbler)
+        with HttpCatalogClient() as cat:
+            owner = cat.register_owner(
+                "wiring-repo", "repo", repo_hash="deadbeef",
+            )
+            tumbler = cat.register(
+                owner, "doc-id wiring doc",
+                content_type="paper",
+                physical_collection="knowledge__delos",
+            )
+        doc_id = str(tumbler)
 
         chunk_id = "bf715bbd" + "0" * 24  # the WRONG identity (T3 chunk hash)
         aspect_extraction_enqueue_hook(

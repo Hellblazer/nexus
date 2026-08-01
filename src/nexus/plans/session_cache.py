@@ -6,8 +6,8 @@
 session server in production; ``EphemeralClient`` in tests) and owns a
 ``plans__session`` collection. At :func:`nexus.hooks.session_start` the
 cache is fully rebuilt from every row in :class:`~nexus.db.t2.
-plan_library.PlanLibrary` that :meth:`~nexus.db.t2.plan_library.
-PlanLibrary.list_active_plans` returns — meaning ``outcome='success'``
+http_plan_library.HttpPlanLibrary` that :meth:`~nexus.db.t2.http_plan_library.
+HttpPlanLibrary.list_active_plans` returns — meaning ``outcome='success'``
 plus the byte-identical TTL predicate used elsewhere in the library.
 
 The collection is embedded with the same local ONNX MiniLM function
@@ -28,10 +28,18 @@ from typing import Any
 import structlog
 
 from nexus.db.local_ef import LocalEmbeddingFunction
-from nexus.db.t2.plan_library import (
-    PlanLibrary,
+from nexus.plans.match_text import (
     _synthesize_match_text as _plan_library_synthesize_match_text,
 )
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only (PEP 563 lazy): the runtime argument is whatever
+    # the caller passes — production passes HttpPlanLibrary, the only
+    # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
+    # the SQLite PlanLibrary.
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
+
 
 __all__ = ["PlanSessionCache", "PLANS_COLLECTION", "_synthesize_match_text"]
 
@@ -137,7 +145,7 @@ class PlanSessionCache:
 
     def populate(
         self,
-        library: PlanLibrary,
+        library: HttpPlanLibrary,
         *,
         project: str = "",
     ) -> int:
@@ -224,15 +232,15 @@ class PlanSessionCache:
 
 def _synthesize_match_text(row: dict[str, Any]) -> str:
     """Adapter around
-    :func:`nexus.db.t2.plan_library._synthesize_match_text` that
+    :func:`nexus.plans.match_text._synthesize_match_text` that
     unpacks a plan row dict into the kwargs the shared synthesiser
     expects. RDR-092 Phase 1 / Phase 3 / nexus-w98c.
 
     The T1 cache upserts plan rows in dict form (via the schema
-    that :data:`nexus.db.t2.plan_library._PLAN_COLUMNS` stamps on
+    that the engine plan-row column set (ex ``_PLAN_COLUMNS``) stamps on
     :func:`_row_to_dict`); the shared synthesiser lives in
     ``plan_library`` because that module also calls it from
-    :meth:`PlanLibrary.save_plan` on every insert. This adapter
+    :meth:`HttpPlanLibrary.save_plan` on every insert. This adapter
     keeps the dict signature on the cache side (no caller
     disruption) while guaranteeing the T1 cosine embedding and the
     T2 FTS payload are derived from the same bytes.

@@ -469,6 +469,155 @@ else
     bad "sweep deleted a fresh file"
 fi
 
+# ── Test 15: Gap-1 blind spot to prompt-named dispatches (nexus-mk3tw) ───
+# Reproduces the false-clean reported live 2026-07-24/25 (bead nexus-mk3tw):
+# background teammates named only inside the Agent-tool PROMPT text (there
+# is no name= field in the dispatch schema for the framework to thread into
+# the hook payload — see the header comment above expectations_undeclared)
+# arrive at SubagentStart with agent_type == the bare subagent_type and
+# agent_id == "a<hash>" — structurally IDENTICAL to an anonymous sync
+# dispatch. Both the declaration-completeness audit and the census key
+# EXCLUSIVELY on the "a<agent_type>-<hash>" named morphology, so every one
+# of these dispatches was invisible to both, and a session with N such
+# dispatches and 0 EXPECT rows reported "undeclared=0" — a false all-clear.
+echo "Test 15: Gap-1 guard blind spot to prompt-named (unnamed-morphology) dispatches"
+
+# ── frozen copy of the PRE-mk3tw logic (verbatim from the code these two
+# functions replaced) — the permanent "old guard" baseline. Kept as an
+# inline snapshot rather than a git-history lookup so this regression proof
+# does not silently stop proving anything once this fix is committed.
+_pre_mk3tw_undeclared() {
+    local file="$1"
+    awk -F'\t' '
+        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 { s[$3] = $4 }
+        $2 == "EXPECT" { e[$3] = 1 }
+        END { for (id in s) if (!(s[id] in e)) print "UNDECLARED\t" id "\t" s[id] }
+    ' "$file"
+}
+_pre_mk3tw_census_undeclared_count() {
+    local file="$1"
+    awk -F'\t' '
+        seen[$0]++ { next }
+        { rows[$2]++ }
+        $2 == "EXPECT"  { expect[$3] = 1 }
+        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 {
+            if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
+            name[$3] = $4
+        }
+        $2 == "START"   { started[$4] = 1 }
+        END {
+            undeclared = 0
+            for (i = 1; i <= n; i++) {
+                id = order[i]
+                if (name[id] != "" && !(name[id] in expect)) undeclared++
+            }
+            printf "undeclared=%d start=%d\n", undeclared, rows["START"]
+        }
+    ' "$file"
+}
+
+BSID="mk3tw-blindspot"
+bsf="$(expectations_file "$BSID")"
+rm -f "$bsf"
+# 4 prompt-named background dispatches (the bead's first-sighting shape),
+# zero EXPECT rows (the mechanism was never invoked / never existed) —
+# every START row has UNNAMED morphology: agent_id "a<hash>" with no
+# "a<agent_type>-" prefix.
+{
+    printf '2026-07-25T10:00:00Z\tSTART\ta1a2b3c4d5e6f708\tcode-review-expert\n'
+    printf '2026-07-25T10:00:05Z\tSTART\ta9f8e7d6c5b4a302\tsubstantive-critic\n'
+    printf '2026-07-25T10:00:10Z\tSTART\ta1122334455667788\tcode-review-expert\n'
+    printf '2026-07-25T10:00:15Z\tSTART\taffeeddccbbaa9988\ttest-validator\n'
+} >"$bsf"
+
+# ── baseline: the OLD guard passes when it should fail ───────────────────
+old_undeclared_out="$(_pre_mk3tw_undeclared "$bsf")"
+old_census_line="$(_pre_mk3tw_census_undeclared_count "$bsf")"
+if [[ -z "$old_undeclared_out" ]]; then
+    ok "BASELINE (old guard): 4 undeclared named-background dispatches produce ZERO UNDECLARED output (the bug, reproduced)"
+else
+    bad "BASELINE assumption broken — old guard unexpectedly flagged something: $old_undeclared_out"
+fi
+if [[ "$old_census_line" == "undeclared=0 start=4" ]]; then
+    ok "BASELINE (old guard): census-style count reads undeclared=0 despite start=4 (the false-clean, reproduced)"
+else
+    bad "BASELINE assumption broken — old census-style count: $old_census_line"
+fi
+
+# ── fixed guard: same fixture, must NOT read as clean ─────────────────────
+new_undeclared_out="$(expectations_undeclared "$BSID")"
+new_undeclared_rc=$?
+if [[ "$new_undeclared_rc" -ne 0 ]]; then
+    ok "FIXED expectations_undeclared: hard-fails (exit $new_undeclared_rc) instead of silently returning 0"
+else
+    bad "FIXED expectations_undeclared: still exits 0 on a 0-of-4-recognised session"
+fi
+if grep -q $'SUMMARY\tchecked=4 recognized=0 unrecognized=4 undeclared=0' <<<"$new_undeclared_out"; then
+    ok "FIXED expectations_undeclared: SUMMARY distinguishes checked=4 from recognized=0"
+else
+    bad "FIXED expectations_undeclared: SUMMARY line missing/wrong: $new_undeclared_out"
+fi
+if grep -q "^BLINDSPOT" <<<"$new_undeclared_out"; then
+    ok "FIXED expectations_undeclared: emits an explicit BLINDSPOT line"
+else
+    bad "FIXED expectations_undeclared: no BLINDSPOT line: $new_undeclared_out"
+fi
+
+new_census_out="$(expectations_census "$BSID")"
+new_census_rc=$?
+if [[ "$new_census_rc" -ne 0 ]]; then
+    ok "FIXED expectations_census: hard-fails (exit $new_census_rc) instead of silently returning 0"
+else
+    bad "FIXED expectations_census: still exits 0 on a 0-of-4-recognised session"
+fi
+if grep -q $'BLINDSPOT\tchecked=4 recognized=0 unrecognized=4' <<<"$new_census_out"; then
+    ok "FIXED expectations_census: BLINDSPOT line reports checked=4 recognized=0 unrecognized=4"
+else
+    bad "FIXED expectations_census: BLINDSPOT line missing/wrong: $(grep BLINDSPOT <<<"$new_census_out")"
+fi
+if grep -q 'CLASSIFIED	reported=0 blocked_resolved=0 (immediate=0 later=0) blocked_unresolved=0 wouldblock=0 no_terminal=0 undeclared=0 no_start=0 expected_no_start=0' <<<"$new_census_out"; then
+    ok "FIXED expectations_census: CLASSIFIED line unchanged in shape (undeclared=0 alone, without BLINDSPOT, would still read as clean)"
+else
+    bad "FIXED expectations_census: CLASSIFIED line format regressed: $(grep CLASSIFIED <<<"$new_census_out")"
+fi
+rm -f "$bsf"
+
+# ── control: mixed session (some recognized) must NOT hard-fail ─────────
+# Guards against the fix over-firing: one named+declared dispatch, one
+# named+undeclared dispatch (still caught by the pre-existing UNDECLARED
+# logic), and two unrecognized (blind-spotted) dispatches. recognized=2 >
+# 0, so this must stay exit 0 even though unrecognized > 0 — the hard
+# failure is reserved for the "recognised NOTHING" case, not "recognised
+# something".
+MSID="mk3tw-mixed"
+msf="$(expectations_file "$MSID")"
+rm -f "$msf"
+{
+    printf '2026-07-25T10:00:00Z\tEXPECT\tdeclared-bg\tbackground\n'
+    printf '2026-07-25T10:00:05Z\tSTART\tadeclared-bg-1234567890abcdef\tdeclared-bg\n'
+    printf '2026-07-25T10:00:10Z\tSTART\tarogue-bg-abcdef1234567890\trogue-bg\n'
+    printf '2026-07-25T10:00:15Z\tSTART\ta1a2b3c4d5e6f708\tcode-review-expert\n'
+    printf '2026-07-25T10:00:20Z\tSTART\ta9f8e7d6c5b4a302\tsubstantive-critic\n'
+} >"$msf"
+mixed_undeclared_out="$(expectations_undeclared "$MSID")"
+mixed_undeclared_rc=$?
+if [[ "$mixed_undeclared_rc" -eq 0 ]]; then
+    ok "CONTROL: mixed session (recognized=2 > 0) does not hard-fail"
+else
+    bad "CONTROL: mixed session with 2 recognized dispatches wrongly hard-failed"
+fi
+if grep -q $'UNDECLARED\tarogue-bg-abcdef1234567890\trogue-bg' <<<"$mixed_undeclared_out"; then
+    ok "CONTROL: the genuinely undeclared named dispatch is still caught"
+else
+    bad "CONTROL: undeclared named dispatch not flagged: $mixed_undeclared_out"
+fi
+if grep -q $'SUMMARY\tchecked=4 recognized=2 unrecognized=2 undeclared=1' <<<"$mixed_undeclared_out"; then
+    ok "CONTROL: SUMMARY counts exact (checked=4 recognized=2 unrecognized=2 undeclared=1)"
+else
+    bad "CONTROL: SUMMARY counts wrong: $mixed_undeclared_out"
+fi
+rm -f "$msf"
+
 echo ""
 echo "expectations_test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] || exit 1

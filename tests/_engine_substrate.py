@@ -159,9 +159,18 @@ def _boot() -> dict:
     if java is None:
         _kill_pg()
         raise RuntimeError("T2 engine substrate: no java on PATH")
+    # Engine output goes to a FILE, never a PIPE (nexus-j0nec root cause):
+    # an undrained 64KB stdout pipe fills after ~250 tenant mints of
+    # Logback console logging, write(2) blocks holding the PrintStream
+    # monitor, and every logging thread pins behind it — presenting as a
+    # total engine wedge. Evidence: jstack pin in FileOutputStream.writeBytes
+    # from TokenStore.issueToken's log.info; draining exactly the pipe's
+    # 65,702 buffered bytes instantly unwedged the next mint.
+    svc_log_path = os.path.join(pgdata, "engine.log")
+    svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
     svc = subprocess.Popen(
         [java, "-jar", str(_JAR)], env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
     try:
@@ -171,11 +180,13 @@ def _boot() -> dict:
             os.killpg(os.getpgid(svc.pid), signal.SIGKILL)
         except ProcessLookupError:
             pass
-        out = svc.stderr.read().decode(errors="replace")[-2000:] if svc.stderr else ""
+        svc_log.flush()
+        with open(svc_log_path, encoding="utf-8", errors="replace") as fh:
+            out = fh.read()[-2000:]
         _kill_pg()
         raise RuntimeError(
             f"T2 engine substrate: service did not bind port {svc_port}. "
-            f"Tail of stderr:\n{out}"
+            f"Tail of engine log ({svc_log_path}):\n{out}"
         ) from None
 
     state = {
@@ -183,6 +194,13 @@ def _boot() -> dict:
         "bearer": _BEARER,
         "pgdata": pgdata,
         "pg_bin": bin_dir,
+        # PG coordinates, so a test can query the substrate's schema DIRECTLY rather
+        # than through the engine's HTTP surface. Added for nexus-20890, whose gate
+        # asks information_schema what tables carry a denormalized collection column
+        # — a question the API cannot answer and a changelog parser can only guess at.
+        "pg_port": pg_port,
+        "pg_user": pg_user,
+        "pg_dbname": _DBNAME,
         "svc": svc,
     }
     atexit.register(_teardown)

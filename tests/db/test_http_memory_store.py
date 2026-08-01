@@ -713,8 +713,15 @@ class TestNormalization:
 
 class TestAuthAndConfig:
     def test_missing_port_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
-        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        # nexus-aqbrk: see the identical note in
+        # tests/db/test_http_telemetry_store.py::TestConfigErrors. NX_SERVICE_URL
+        # / NX_SERVICE_HOST are higher-priority resolution tiers, so leaving
+        # either set makes the endpoint resolve and this assertion unreachable
+        # under the engine substrate, where t2_service_env re-sets URL + TOKEN
+        # after the conftest scrub.
+        for var in ("NX_SERVICE_URL", "NX_SERVICE_HOST",
+                    "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
         with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
             HttpMemoryStore()
 

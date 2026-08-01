@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import pytest
+
 from nexus.health import HealthResult, format_health_for_cli
 
 
@@ -118,9 +120,9 @@ def test_format_no_detail():
 
 def test_t3_collections_census_via_service(tmp_path, monkeypatch) -> None:
     """RDR-155 P4a.2 (nexus-1k8s1): the collection census routes through the
-    pgvector service handle (``make_t3()``) — the chroma-daemon probe and its
-    empty-collection note retired with the Chroma serving path. The on-disk
-    Chroma directory is reported as the legacy store awaiting the P5 ETL.
+    pgvector service handle (``make_t3()``). RDR-155 P4b: the legacy
+    Chroma disk-size report died with the migration machinery — the census
+    is the pgvector service count only, even with a legacy dir on disk.
     """
     from nexus.health import _check_t3_local
 
@@ -139,8 +141,7 @@ def test_t3_collections_census_via_service(tmp_path, monkeypatch) -> None:
     line = next((r for r in results if r.label == "T3 collections"), None)
     assert line is not None
     assert "3 collections (pgvector service)" in line.detail
-    assert "legacy Chroma store" in line.detail
-    assert "awaiting P5 ETL" in line.detail
+    assert "legacy Chroma store" not in line.detail
 
 
 def test_t3_collections_census_degrades_when_service_unreachable(
@@ -164,36 +165,29 @@ def test_t3_collections_census_degrades_when_service_unreachable(
     assert "could not query" in line.detail
 
 
-def test_pipeline_version_check_degrades_on_make_t3_failure(monkeypatch) -> None:
-    """nexus-b6qlf regression: get_http_vector_client() (Phase 2, reached via
-    make_t3()) now runs a cloud-mode engine-version probe before returning a
-    handle. Every OTHER make_t3() call site in this module already degrades
-    gracefully on failure (see test_t3_collections_census_degrades_when_
-    service_unreachable above) -- the pipeline-version sweep's make_t3()
-    call was the one exception, left unguarded, so a probe failure crashed
-    the entire `nx doctor` run instead of reporting a soft-fail line like
-    its siblings."""
+def test_pipeline_version_row_is_retired_static(monkeypatch) -> None:
+    """RDR-155 P4b re-ground of the nexus-b6qlf regression pin: the
+    pipeline-version sweep (and its unguarded make_t3() call) died with
+    the chroma credential rows — the row is now a static retired notice
+    that never opens a T3 handle, so no probe failure can crash doctor."""
     from nexus.health import _check_t3_cloud
 
     def _cred(key: str) -> str:
-        # service_url empty -> _check_managed_service_probe() short-circuits
-        # (not under test here); the three credentials below are truthy so
-        # the pipeline-version-check branch is actually entered.
         return "" if key == "service_url" else "value"
 
     monkeypatch.setattr("nexus.config.get_credential", _cred)
     monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
 
     def _boom(**kw):
-        raise RuntimeError("stale engine — below required floor")
+        raise AssertionError("the retired pipeline row must never open T3")
 
     monkeypatch.setattr("nexus.db.make_t3", _boom)
 
     results = _check_t3_cloud()  # must not raise
     line = next((r for r in results if r.label == "pipeline versions"), None)
     assert line is not None
-    assert line.ok is False
-    assert "stale engine" in line.detail
+    assert line.ok is True
+    assert "retired" in line.detail
 
 
 def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> None:
@@ -208,7 +202,6 @@ def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
     # Local branch (census stubbed; the probe is what's under test).
-    monkeypatch.setattr("nexus.config._default_local_path", lambda: tmp_path / "nope")
     monkeypatch.setattr("nexus.db.make_t3", _down)
     local_line = next(
         (r for r in _check_t3_local() if r.label == "Vector service (/v1/vectors)"),
@@ -443,6 +436,119 @@ def test_vector_service_reachable_never_surfaces_stale_boot_failure(
     assert "catalog-013-2" not in line.detail
 
 
+def _raise_vector_service_error(code: int | None):
+    """Build a ``_get`` stub that fails the way the real client fails.
+
+    ``VectorServiceError`` carries ``code`` for HTTP-error responses and
+    ``None`` for transport-level failures — the discriminator the health
+    probe keys on.
+    """
+    from nexus.db.http_vector_client import VectorServiceError
+
+    def _boom(*a, **kw):
+        raise VectorServiceError(
+            f"GET /v1/vectors/collections → HTTP {code}: Unauthorized", code=code
+        )
+
+    return _boom
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_vector_service_auth_failure_is_not_reported_as_unreachable(
+    monkeypatch, tmp_path, code: int
+) -> None:
+    """nexus-srt1m: a 401/403 is an AUTHENTICATION failure, not unreachability.
+
+    The 2026-07-25 incident: a rotated bearer token made doctor print
+    'Vector service: not reachable' with the fix 'Start the nexus-service'
+    three lines above a green '✓ Managed/remote service — release_version
+    0.1.55'. The service was provably up; the advice pointed at the wrong
+    subsystem entirely (and in cloud mode there is no local service to start).
+    """
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(code)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    # The whole point: must NOT claim unreachability.
+    assert "not reachable" not in line.detail
+    assert "authentication" in line.detail.lower()
+    assert str(code) in line.detail
+    # Fix must point at the token, and at the stale-process-env aggravator —
+    # a rotated token never reaches an already-running MCP server.
+    fixes = " ".join(line.fix_suggestions).lower()
+    assert "nx_service_token" in fixes
+    assert "restart" in fixes
+    # Must NOT tell the operator to start a service that is answering HTTP.
+    assert "start the nexus-service" not in fixes
+
+
+def test_vector_service_auth_failure_never_surfaces_stale_boot_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """A service that answers 401 is RUNNING — a boot-failure line scraped from
+    an old log would be stale and actively misleading. The advisory belongs to
+    the transport branch only."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(401)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert "catalog-013-2" not in line.detail
+    assert "not reachable" not in line.detail
+
+
+def test_vector_service_other_http_status_surfaces_the_code(
+    monkeypatch, tmp_path
+) -> None:
+    """Any other HTTP status means the service answered — surface the code
+    rather than laundering it into 'not reachable'."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(500)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    assert "500" in line.detail
+    assert "not reachable" not in line.detail
+
+
+def test_vector_service_transport_failure_still_reports_unreachable(
+    monkeypatch, tmp_path
+) -> None:
+    """Regression guard on the discriminator: a VectorServiceError with
+    ``code=None`` is a transport failure and MUST keep the original
+    'not reachable' + boot-advisory behaviour. Without this, a fix that
+    keys on the exception TYPE instead of the STATUS would silently
+    reclassify every connection refusal as an auth problem."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(None)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert "not reachable" in line.detail
+    assert "catalog-013-2" in line.detail
+    assert "authentication" not in line.detail.lower()
+
+
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:
     """RDR-144 P5a integration: when the user chose bge-768 but the [local]
     extra is missing (EF resolves to 384), `_check_t3_local` emits the
@@ -454,9 +560,6 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
     from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
     from nexus.health import _check_t3_local
 
-    monkeypatch.setattr(
-        "nexus.config._default_local_path", lambda: tmp_path / "does_not_exist"
-    )
     # User chose bge; the active EF resolved to the 384 fallback (extra absent).
     monkeypatch.setattr(
         "nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL
@@ -492,9 +595,6 @@ def test_check_t3_local_suppresses_advisory_in_service_mode(tmp_path, monkeypatc
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     (cfg / "pg_credentials").write_text("PG_PORT=15432\n")  # service mode configured
 
-    monkeypatch.setattr(
-        "nexus.config._default_local_path", lambda: tmp_path / "does_not_exist"
-    )
     # Would normally trigger the State-2 degraded-bge advisory:
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
 
@@ -516,66 +616,6 @@ def test_check_t3_local_suppresses_advisory_in_service_mode(tmp_path, monkeypatc
     ef_line = next((r for r in results if r.label.startswith("Embedding model")), None)
     assert ef_line is not None and "T1" in ef_line.label
     assert "server-side" in ef_line.detail
-
-
-# ── _check_t3_daemon_version (RDR-149 nexus-ymn76) ───────────────────────────
-
-
-def test_check_t3_daemon_version_no_daemon(monkeypatch) -> None:
-    from nexus import health
-
-    monkeypatch.setattr(
-        "nexus.daemon.discovery.find_t3_daemon", lambda config_dir=None: None
-    )
-    results = health._check_t3_daemon_version()
-    assert len(results) == 1
-    assert results[0].ok is True
-    assert "no t3 daemon" in results[0].detail.lower()
-
-
-def test_check_t3_daemon_version_lease_without_version(monkeypatch) -> None:
-    # A pre-RDR-149 daemon lease carries no version field — informational, ok.
-    from nexus import health
-
-    monkeypatch.setattr(
-        "nexus.daemon.discovery.find_t3_daemon",
-        lambda config_dir=None: {"tcp_host": "127.0.0.1", "tcp_port": 1},
-    )
-    results = health._check_t3_daemon_version()
-    assert len(results) == 1
-    assert results[0].ok is True
-    assert "no version" in results[0].detail.lower()
-
-
-def test_check_t3_daemon_version_match(monkeypatch) -> None:
-    from importlib.metadata import version as _pkg_version
-
-    from nexus import health
-
-    cli = _pkg_version("conexus")
-    monkeypatch.setattr(
-        "nexus.daemon.discovery.find_t3_daemon",
-        lambda config_dir=None: {"version": cli, "tcp_host": "127.0.0.1", "tcp_port": 1},
-    )
-    results = health._check_t3_daemon_version()
-    assert len(results) == 1
-    assert results[0].ok is True
-    assert cli in results[0].detail
-
-
-def test_check_t3_daemon_version_mismatch_warns(monkeypatch) -> None:
-    from nexus import health
-
-    monkeypatch.setattr(
-        "nexus.daemon.discovery.find_t3_daemon",
-        lambda config_dir=None: {"version": "0.0.1-stale", "tcp_host": "127.0.0.1", "tcp_port": 1},
-    )
-    results = health._check_t3_daemon_version()
-    assert len(results) == 1
-    r = results[0]
-    assert r.ok is False and r.warn is True and r.fatal is False
-    assert "0.0.1-stale" in r.detail
-    assert any("daemon t3" in s for s in r.fix_suggestions)
 
 
 # ── _check_managed_service_probe (RDR-001 nexus-o6fch) ───────────────────────

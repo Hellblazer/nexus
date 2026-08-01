@@ -23,7 +23,14 @@ from __future__ import annotations
 
 import structlog
 
-from nexus.catalog.catalog import Catalog
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only (PEP 563 lazy): production passes whichever catalog
+    # reader/writer pair is live — HttpCatalogClient in service mode
+    # (RDR-146 P1.2). The module-level import of the dying local Catalog
+    # was purely for this annotation (nexus-37f4v sweep, 2026-07-30).
+    from nexus.catalog.catalog_protocol import CatalogReader
 from nexus.catalog.tumbler import Tumbler
 from nexus.mcp_client import devonthink as _devonthink
 
@@ -41,7 +48,7 @@ def _dt_uri(uuid: str) -> str:
 
 
 def generate_dt_links(
-    cat: Catalog,
+    cat: CatalogReader,
     this: Tumbler,
     dt_uuid: str,
     *,

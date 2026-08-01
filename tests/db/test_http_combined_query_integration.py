@@ -40,6 +40,15 @@ Fixture strategy: same Docker pgvector/pgvector:pg17 pattern as
 (``nexus_cq_tripwire_pg17``) so the two gates never collide on a shared
 Docker container when run concurrently.
 
+If a setup here dies with ``PSQLException: The connection attempt failed``,
+suspect the Docker Desktop port-forwarding wedge before the test: after enough
+container cycles the mapped port accepts TCP but never completes the PG
+handshake, which presents as a fixture that cannot connect to a container
+``docker ps`` shows healthy. Probe the mapped port from the host with ``psql``
+(expect rc=124) and clear the stuck container. Investigated under nexus-z6y58:
+running all four Docker-backed gates in ONE pytest process is NOT the cause —
+four consecutive 4-in-one-process runs are clean on a healthy daemon.
+
 Prerequisites (identical to the write-seam gate):
   - ``service/target/nexus-service-1.0-SNAPSHOT.jar`` built and fresh.
   - Docker available and ``pgvector/pgvector:pg17`` pullable.
@@ -47,7 +56,8 @@ Prerequisites (identical to the write-seam gate):
   - No VOYAGE_API_KEY needed (service runs in LOCAL/ONNX bge-768 mode).
 
 Run locally:
-    cd service && mvn package -DskipTests && cd ..
+    scripts/build-gate-jar.sh          # NOT `mvn package`: this suite needs a
+                                       # release_version-stamped jar (nexus-ao29z)
     uv run pytest tests/db/test_http_combined_query_integration.py \\
         -o addopts="" -m integration -v -s
 
@@ -91,7 +101,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisite detection ────────────────────────────────────────────────────
 
@@ -116,6 +130,10 @@ _ALL_PREREQS = _JAR.exists() and _JAVA_OK and _DOCKER_OK
 
 pytestmark = [
     pytest.mark.integration,
+    # nexus-ao29z: this suite constructs a vector client, whose cloud version
+    # probe fail-closes on a jar with no release_version — which is every jar a
+    # plain `mvn package` produces. Build with scripts/build-gate-jar.sh.
+    pytest.mark.needs_stamped_jar,
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
@@ -329,15 +347,12 @@ def local_service(pg_instance: dict):
     env.pop("VOYAGE_API_KEY", None)
     env.pop("NX_STORAGE_BACKEND", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=90.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=90.0)
         yield f"http://127.0.0.1:{svc_port}", token
     finally:
         _stop_service(proc)

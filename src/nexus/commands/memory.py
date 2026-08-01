@@ -56,10 +56,12 @@ def put_cmd(
     instead of inserting a near-duplicate. Without it, the default upsert
     keyed on (project, title) is unchanged.
 
-    RDR-120 P6 follow-up (nexus-w6txl): routes through the T2 daemon
-    so host CLI + Cowork-bridged MCP + dev-container CLI all share
-    the same arbitrated state. Requires the T2 daemon running; start
-    it with ``nx daemon t2 start``.
+    RDR-120 P6 follow-up (nexus-w6txl): shares one arbitrated state
+    across host CLI + Cowork-bridged MCP + dev-container CLI. That
+    arbitration was the T2 daemon's job until nexus-i711w Stage 2
+    sub-stage B retired it; the storage service does it now, so there
+    is nothing for the caller to start by hand. ``--help`` advertised
+    the deleted ``nx daemon t2 start`` until that sub-stage's review.
     """
     if content == "-":
         content = sys.stdin.read()
@@ -227,11 +229,11 @@ def _delete_with_taxonomy_cascade(
     """Memory + taxonomy cascade — replaces the facade-side cascade.
 
     The pre-RDR-120 ``T2Database.delete`` ran (1) ``memory.delete`` and
-    (2) ``taxonomy.purge_assignments_for_doc`` in sequence. T2Client's
-    ``database`` proxy doesn't expose the facade method, so the CLI
-    drives the cascade itself with two store-level RPC calls. In direct
-    mode (tests injecting a T2Database via the handle), the same two
-    calls hit the in-process facade and produce identical state.
+    (2) ``taxonomy.purge_assignments_for_doc`` in sequence. The CLI
+    drives the cascade itself with two store-level calls (a shape
+    inherited from the retired daemon ``T2Client`` era, RDR-158 P4);
+    the same two calls hit the facade's HTTP stores and produce
+    identical state.
     """
     deleted = db.memory.delete(project=project, title=title, id=id)
     if deleted and project and title:
@@ -252,7 +254,7 @@ def expire_cmd() -> None:
     with t2_handle() as db:
         count = db.memory.expire()
         try:
-            from nexus.db.t2.telemetry import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
+            from nexus.db.t2.records import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
             db.telemetry.expire_relevance_log(days=RELEVANCE_LOG_RETENTION_DAYS)
         except Exception:  # noqa: BLE001 — best-effort relevance_log purge; safe default (memory expiry already landed), facade logged the structured error
             # The relevance_log purge is best-effort; the facade

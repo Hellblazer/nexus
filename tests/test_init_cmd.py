@@ -542,8 +542,8 @@ class TestAutostartPrompt:
 class TestT2DaemonDemotion:
     """RDR-174 P3.2 (§Approach 6): in the default all-SERVICE config no T2 store
     resolves to SQLite, so ``nx init`` must NOT register the SQLite T2 autostart
-    unit. The ``nx daemon t2 install`` command stays available as an explicit
-    opt-in (full deletion is RDR-158 P4, two-release window — NOT here).
+    unit. ``nx daemon t2 install`` was kept as an explicit opt-in until RDR-158
+    P4; that deletion has since landed (nexus-i711w Stage 2 sub-stage B).
 
     init.py contains no T2-registration call today; these tests PIN that
     invariant against regression rather than driving a production change."""
@@ -571,15 +571,21 @@ class TestT2DaemonDemotion:
             f"(default config is all-SERVICE); installed tiers: {tiers}"
         )
 
-    def test_t2_install_command_remains_optin(self) -> None:
-        """Guard against accidental deletion: `nx daemon t2 install` stays
-        registered (the demote-now / delete-at-RDR-158-P4 contract)."""
-        from nexus.commands.daemon import t2_group
+    def test_t2_install_command_is_gone(self) -> None:
+        """The demotion guard's own end condition, now reached.
 
-        assert "install" in t2_group.commands, (
-            "nx daemon t2 install must remain an explicit opt-in — deletion is "
-            "RDR-158 P4 (two-release window), not RDR-174 P3.2"
+        It used to assert `nx daemon t2 install` STAYED registered, citing
+        "deletion is RDR-158 P4 (two-release window), not RDR-174 P3.2". This
+        IS RDR-158 P4 (nexus-i711w Stage 2 sub-stage B), so the guard flips:
+        the verb group is gone, and this pins that it does not come back.
+        """
+        from nexus.commands import daemon as daemon_cmd
+
+        assert not hasattr(daemon_cmd, "t2_group"), (
+            "the `nx daemon t2` verb group was deleted in RDR-158 P4; a "
+            "reappearance means the daemon retirement is being partially undone"
         )
+        assert "t2" not in daemon_cmd.daemon_group.commands
 
 
 def _wrap(fn):
@@ -1075,15 +1081,15 @@ class TestLocalDispatchP13:
         ):
             assert not hasattr(init_mod, name), f"{name} must be removed in P1.3"
 
-    def test_cloud_keys_no_service_url_does_not_provision_pg(
+    def test_legacy_keys_no_service_url_provisions_local(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression guard (substantive-critic SIG-1): a cloud-Voyage user with
-        cloud keys but NO service_url and NX_LOCAL unset resolves LOCAL by
-        service_url-absence, yet must NOT have a local Postgres cluster silently
-        provisioned (provision_and_start_service runs _provision_postgres_step
-        BEFORE its internal is_local_mode guard). The secondary cloud guard in
-        init_cmd short-circuits before provisioning and prints the cloud notice."""
+        """RDR-155 P4b re-ground of the SIG-1 guard: the chroma-key cloud
+        inference died with the chroma credential map, so legacy keys in the
+        env are INERT — with no service_url and NX_LOCAL unset the box is
+        genuinely LOCAL and init provisions the local stack. (Cloud is
+        service_url; the secondary cloud guard now fires only for a real
+        managed resolution.)"""
         monkeypatch.delenv("NX_LOCAL", raising=False)
         monkeypatch.delenv("NX_SERVICE_URL", raising=False)
         monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
@@ -1091,14 +1097,15 @@ class TestLocalDispatchP13:
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init.provision_and_start_service",
-            lambda embedder=None: called.append("provisioned"),
+            lambda embedder=None: called.append("provisioned") or _FAKE_LEASE,
         )
 
         result = CliRunner().invoke(init_cmd, [])
 
         assert result.exit_code == 0, result.output
-        assert called == [], "cloud-keys + no service_url must not provision a local PG"
-        assert "cloud" in result.output.lower()
+        assert called == ["provisioned"], (
+            "legacy chroma keys are inert post-P4b — a local box must provision"
+        )
 
     def test_service_flag_forces_provisioning_in_managed_mode(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -1159,12 +1166,13 @@ class TestLocalDispatchP13:
         assert installed == [], "managed --yes must not register an autostart unit"
         assert "no-op" not in result.output.lower(), "obsolete no-op notice removed"
 
-    def test_guided_upgrade_default_serve_still_calls_provision(
+    def test_provisioning_default_serve_still_calls_provision(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DO-NOT-BREAK: migration._default_serve still routes through
+        """DO-NOT-BREAK: provisioning._default_serve (P0e rehome of the
+        guided_upgrade seam) still routes through
         init.provision_and_start_service unchanged (signature intact)."""
-        from nexus.migration import guided_upgrade
+        from nexus.upgrade_ladder import provisioning
 
         called: list[str] = []
         monkeypatch.setattr(
@@ -1172,7 +1180,7 @@ class TestLocalDispatchP13:
             lambda embedder=None: called.append("served") or _FAKE_LEASE,
         )
 
-        result = guided_upgrade._default_serve()
+        result = provisioning._default_serve()
 
         assert called == ["served"]
         assert result is _FAKE_LEASE

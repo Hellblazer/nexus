@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
+
 from nexus.commands.upgrade import _migrate_repos_json_to_catalog
 from nexus.registry import RepoRegistry
 
@@ -32,10 +33,12 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def cat(cfg: Path) -> Catalog:
-    cat_dir = cfg / "catalog"
-    Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+def cat(cfg: Path) -> ActiveCatalog:
+    # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
+    # through the factories, so a local-only handle left the service
+    # catalog empty. (The local Catalog.init that used to run here died
+    # with the local catalog in the terminal nexus-i711w deletion.)
+    return ActiveCatalog()
 
 
 @pytest.fixture

@@ -59,7 +59,13 @@ class JooqRecordReflectionFeatureTest {
     // 61 -> 60: RDR-187 (nexus-piwya.9) DROPPED nexus.chash_index — the router
     // remnant of the split-store architecture; its generated record left with
     // the table (codegen derives from the changelog-booted schema).
-    private static final int EXPECTED_RECORD_TYPES = 60;
+    // 60 -> 61: nexus-jqvzk added nexus.gc_audit (the engine-side audit record
+    // for destructive T3 operations, catalog-018-gc-audit.xml). The Feature
+    // enumerates via the schema model, so GcAuditRecord is registered for
+    // native-image reflection by construction — this is the deliberate bump.
+    // It matters: recordGcAudit uses INSERT ... RETURNING, which is exactly the
+    // shape that hit MissingReflectionRegistrationError in the native image.
+    private static final int EXPECTED_RECORD_TYPES = 61;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -92,7 +92,9 @@ def test_the_pin_is_not_vacuous() -> None:
     # The rung whose production default the era-hop caught must be in scope.
     scanned = {path.name for _, _, path, _ in
                ((c.values[0], c.values[1], c.values[2], c.values[3]) for c in _CASES)}
-    assert "substrate_etl.py" in scanned, (
-        "substrate_etl.py contributes no deferred imports to the census — "
+    # RDR-155 P4b: substrate_etl.py (the original anchor) died with the
+    # migration machinery; the surviving rung anchors the non-vacuity pin.
+    assert "chash_rekey.py" in scanned, (
+        "chash_rekey.py contributes no deferred imports to the census — "
         "the module moved or the walk stopped seeing it"
     )

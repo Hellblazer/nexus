@@ -27,12 +27,12 @@ Python version (3.12 and 3.13). See:
     failure mode that ``spawn`` also avoids)
 """
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import multiprocessing
 import tempfile
 from pathlib import Path
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -193,7 +193,7 @@ def test_t3_concurrent_reads():
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     client = make_vector_test_client()
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     t3 = T3Database(_client=client, _ef_override=ef)
 
     # Seed data

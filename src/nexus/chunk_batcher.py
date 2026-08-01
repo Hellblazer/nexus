@@ -40,7 +40,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: Service write cap (chroma_quotas MAX_RECORDS_PER_WRITE parity).
+#: Service write cap (nexus.db.limits MAX_RECORDS_PER_WRITE parity).
 DEFAULT_MAX_CHUNKS: int = 300
 
 FlushFn = Callable[[str, list[str], list[str], list[dict]], None]

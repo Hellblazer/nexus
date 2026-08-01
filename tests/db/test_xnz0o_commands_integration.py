@@ -51,7 +51,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -202,15 +207,15 @@ def java_service(pg_instance):
     env.pop("NX_STORAGE_BACKEND",         None)
     env.pop("NX_STORAGE_BACKEND_CATALOG", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
+    # nexus-lom9g: FILE-backed output via the shared primitive. The old
+    # stdout=PIPE/stderr=PIPE form deadlocked the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec), and discarded the
+    # log so the failure surfaced as a bare TimeoutError.
+    proc, svc_log = spawn_service(
+        [str(_JAVA), "-jar", str(_JAR)], env, log_dir=chroma_data,
     )
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=40.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=svc_log)
         yield f"http://127.0.0.1:{svc_port}", _TOKEN, proc
     finally:
         try:
@@ -330,14 +335,21 @@ def seeded(cat):
         source_uri="file:///projects/xnz0o-a/src/xnz0o.py",
         chunk_count=3,
     )
-    # One doc with an ABSOLUTE file_path — for docs_with_absolute_paths
+    # One doc with an ABSOLUTE file_path — for docs_with_absolute_paths.
+    # file_path is the test's subject (absolute-path detection) and stays an
+    # arbitrary absolute path unrelated to repo_a's tree; source_uri is a
+    # SEPARATE field the nexus-3e4s/nexus-e7cys engine-side containment guard
+    # (CatalogRepository.checkCrossProjectContainment) checks independently
+    # for "repo"-type owners — it must nest under repo_a's repo_root
+    # (/projects/xnz0o-a) or the register call 400s, so it is set to a
+    # repo_root-coherent path rather than mirroring file_path verbatim.
     doc_abs = cat.register(
         str(repo_a), "XNZ0O Absolute Path",
         content_type="paper",
         corpus="knowledge",
         physical_collection=coll_paper,
         file_path="/absolute/path/to/doc.pdf",
-        source_uri="file:///absolute/path/to/doc.pdf",
+        source_uri="file:///projects/xnz0o-a/absolute/path/to/doc.pdf",
         chunk_count=2,
     )
     # One doc with no physical_collection — must NOT appear in distinct_doc_collections
@@ -392,13 +404,23 @@ class TestNoSQLiteAccess:
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         assert isinstance(cat, HttpCatalogClient), type(cat)
 
-    def test_db_property_raises_runtime_error(self, cat) -> None:
-        """._db must raise RuntimeError with 'service mode' in the message.
+    def test_db_property_raises_attributeerror(self, cat) -> None:
+        """._db must raise AttributeError with 'service mode' in the message.
+
+        AttributeError, NOT RuntimeError (nexus-xj744). ``hasattr()`` only
+        swallows AttributeError, so a RuntimeError here would make the
+        sanctioned ``hasattr(cat, "_db")`` / ``has_raw_access(cat)`` probe
+        CRASH in service mode instead of returning False — the guard idiom that
+        exists to make such checks safe would become the thing that breaks
+        them. The contract is pinned suite-wide by
+        tests/db/test_raw_handle_guard_contract.py.
 
         Non-vacuous: a real SQLite Catalog handle would NOT raise — the test
-        fails if someone wires the wrong backend.
+        fails if someone wires the wrong backend. And ``match=`` keeps a bare
+        un-guarded AttributeError (the thing the sentinel replaced) from
+        passing as though the guard were present.
         """
-        with pytest.raises(RuntimeError, match="service mode"):
+        with pytest.raises(AttributeError, match="local SQLite catalog was deleted"):
             _ = cat._db
 
 

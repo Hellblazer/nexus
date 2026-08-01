@@ -28,16 +28,3 @@ def test_check_plan_library_reports_na_in_service_mode(monkeypatch, capsys):
     assert "T2 database not found" not in out
 
 
-def test_check_plan_library_sqlite_mode_still_fails_loud(monkeypatch, tmp_path, capsys):
-    """In SQLite mode with no DB, the existing exit-1 not-found path holds."""
-    monkeypatch.setattr(
-        "nexus.db.storage_mode.storage_backend_for",
-        lambda store: StorageBackend.SQLITE,
-    )
-    monkeypatch.setattr(
-        "nexus.commands._helpers.default_db_path", lambda: tmp_path / "absent.db"
-    )
-    with pytest.raises(click.exceptions.Exit):
-        _run_check_plan_library()
-    out = capsys.readouterr().out
-    assert "T2 database not found" in out

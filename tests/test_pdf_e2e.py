@@ -13,8 +13,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from tests.conftest import fake_credentials
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import index_pdf
@@ -55,9 +57,15 @@ def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, o
     (list[list[float]], str) signature.  Passing model through (not "test-local")
     keeps the stored embedding_model matching target_model, which is required for
     the staleness guard (AC-E3) to trigger correctly on re-index.
-    Uses .tolist() to convert numpy float32 to Python native floats.
+
+    RDR-155 P4b P3: this used ``[v.tolist() for v in _local_ef(chunks)]``
+    because chroma's ONNX EF returned numpy float32 rows. The nexus EF
+    (minilm_direct) already returns plain ``list[list[float]]``, so the
+    conversion is not just unnecessary — it raised AttributeError on a list.
+    Coerce defensively rather than assuming either shape, so the stub survives
+    an EF that goes back to returning arrays.
     """
-    return [v.tolist() for v in _local_ef(chunks)], model
+    return [list(v) for v in _local_ef(chunks)], model
 
 
 # ── AC-E1 / AC-E2 / AC-E3 — index_pdf E2E ────────────────────────────────────
@@ -67,7 +75,7 @@ class TestIndexPdfE2E:
 
     def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0."""
-        with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
             count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3)
 
@@ -80,7 +88,7 @@ class TestIndexPdfE2E:
 
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
-        with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
             count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3)
 
@@ -100,7 +108,7 @@ class TestIndexPdfE2E:
 
     def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged."""
-        with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
             first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
             second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)

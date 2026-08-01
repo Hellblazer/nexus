@@ -61,6 +61,10 @@ RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
 # reuses this SAME cold-acquire box via run.sh --hole-punch, which overrides
 # the entrypoint below — see run.sh for the --entrypoint swap.
 COPY rehearse_cold.sh /home/nexus/rehearse_cold.sh
+# nexus-1ddsy: the published-artifact acquire gate reuses this COLD image
+# (bare box, no system PG, wheel only) — it is the acquire half of the
+# retired rehearse_cold.sh, without the guided-upgrade tail that retired it.
+COPY rehearse_acquire.sh /home/nexus/rehearse_acquire.sh
 COPY rehearse_hole_punch.sh /home/nexus/rehearse_hole_punch.sh
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 

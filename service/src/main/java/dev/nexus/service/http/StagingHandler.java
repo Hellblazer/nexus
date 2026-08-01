@@ -71,9 +71,6 @@ public final class StagingHandler implements HttpHandler {
         "document_chunks", new StoreSpec("staging.document_chunks",
             List.of("doc_id", "position", "chash", "chunk_index", "line_start", "line_end", "char_start", "char_end"),
             "ON CONFLICT (tenant_id, doc_id, position) DO UPDATE SET chash = excluded.chash"),
-        "chash_index", new StoreSpec("staging.chash_index",
-            List.of("chash", "physical_collection", "created_at"),
-            "ON CONFLICT (tenant_id, chash, physical_collection) DO NOTHING"),
         "topic_assignments", new StoreSpec("staging.topic_assignments",
             // topic_label + topic_collection are the CROSS-STORE topic
             // identity (critic-p1 Critical): the landing client sends the

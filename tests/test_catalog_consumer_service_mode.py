@@ -19,7 +19,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 
@@ -155,152 +154,10 @@ def http_client(fake_server):
     )
 
 
-# ── SQLite Catalog new methods ───────────────────────────────────────────────
-
-
-@pytest.fixture
-def sqlite_cat(tmp_path):
-    """A fresh SQLite Catalog with seed data for all new method tests."""
-    db_path = tmp_path / ".catalog.db"
-    cat = Catalog(tmp_path, db_path)
-    # Seed owners — epsilon-allow: test fixture seeds raw rows for unit-testing
-    # the new public API methods (curator_owner_tumbler_by_name, etc.). These
-    # bypasses Catalog.register_owner() so we can test the read methods in
-    # isolation without standing up the full registration pipeline.
-    cat._db.execute(  # epsilon-allow: test fixture seeds owners for API unit tests (nexus-qnp5s)
-        "INSERT INTO owners (tumbler_prefix, name, owner_type, repo_root, head_hash) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("1.1", "myrepo", "curator", "/tmp/myrepo", "abc123"),
-    )
-    cat._db.execute(  # epsilon-allow: test fixture seeds owners for API unit tests (nexus-qnp5s)
-        "INSERT INTO owners (tumbler_prefix, name, owner_type, repo_root, head_hash) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("1.2", "testrepo", "repo", "/tmp/testrepo", None),
-    )
-    # Seed collections
-    cat._db.execute(  # epsilon-allow: test fixture seeds collections for API unit tests (nexus-qnp5s)
-        "INSERT INTO collections (name, owner_id, content_type) VALUES (?, ?, ?)",
-        ("code__owner1__voyage-code-3__v1", "owner1", "code"),
-    )
-    cat._db.execute(  # epsilon-allow: test fixture seeds collections for API unit tests (nexus-qnp5s)
-        "INSERT INTO collections (name, owner_id, content_type) VALUES (?, ?, ?)",
-        ("knowledge__owner2__voyage-context-3__v1", "owner2", "knowledge"),
-    )
-    # Seed documents for chunk_counts_for_docs
-    cat._db.execute(  # epsilon-allow: test fixture seeds documents for chunk_counts API test (nexus-qnp5s)
-        "INSERT INTO documents (tumbler, title, content_type, physical_collection, chunk_count) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("1.1.1", "Doc A", "paper", "knowledge__owner1__v1", 20),
-    )
-    cat._db.execute(  # epsilon-allow: test fixture seeds documents for chunk_counts API test (nexus-qnp5s)
-        "INSERT INTO documents (tumbler, title, content_type, physical_collection, chunk_count) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("1.1.2", "Doc B", "paper", "knowledge__owner1__v1", 5),
-    )
-    # Seed links for links_from_batch
-    cat._db.execute(  # epsilon-allow: test fixture seeds links for links_from_batch API test (nexus-qnp5s)
-        "INSERT INTO links (from_tumbler, to_tumbler, link_type, created_by) "
-        "VALUES (?, ?, ?, ?)",
-        ("1.1.1", "1.1.2", "cites", "test"),
-    )
-    cat._db.execute(  # epsilon-allow: test fixture seeds links for links_from_batch API test (nexus-qnp5s)
-        "INSERT INTO links (from_tumbler, to_tumbler, link_type, created_by) "
-        "VALUES (?, ?, ?, ?)",
-        ("1.1.1", "1.1.3", "relates", "test"),
-    )
-    cat._db.commit()
-    return cat
-
-
-class TestSQLiteCatalogNewMethods:
-    """Verify the new public API methods on SQLite Catalog (nexus-qnp5s)."""
-
-    def test_curator_owner_tumbler_by_name_hit(self, sqlite_cat):
-        result = sqlite_cat.curator_owner_tumbler_by_name("myrepo")
-        assert result is not None
-        assert str(result) == "1.1"
-
-    def test_curator_owner_tumbler_by_name_miss(self, sqlite_cat):
-        result = sqlite_cat.curator_owner_tumbler_by_name("nonexistent")
-        assert result is None
-
-    def test_curator_owner_tumbler_by_name_repo_type_excluded(self, sqlite_cat):
-        """An owner with owner_type='repo' must NOT be returned."""
-        result = sqlite_cat.curator_owner_tumbler_by_name("testrepo")
-        assert result is None
-
-    def test_stats_returns_counts(self, sqlite_cat):
-        s = sqlite_cat.stats()
-        assert s["owner_count"] == 2
-        assert s["doc_count"] == 2
-        assert s["link_count"] == 2
-
-    def test_stats_keys(self, sqlite_cat):
-        s = sqlite_cat.stats()
-        assert set(s.keys()) >= {"doc_count", "link_count", "owner_count"}
-
-    def test_collections_by_owner_filters(self, sqlite_cat):
-        result = sqlite_cat.collections_by_owner("owner1")
-        assert len(result) == 1
-        assert result[0]["name"] == "code__owner1__voyage-code-3__v1"
-
-    def test_collections_by_owner_miss(self, sqlite_cat):
-        result = sqlite_cat.collections_by_owner("nobody")
-        assert result == []
-
-    def test_get_owner_by_prefix_hit(self, sqlite_cat):
-        result = sqlite_cat.get_owner_by_prefix("1.1")
-        assert result is not None
-        assert result["name"] == "myrepo"
-        assert result["owner_type"] == "curator"
-        assert result["head_hash"] == "abc123"
-
-    def test_get_owner_by_prefix_miss(self, sqlite_cat):
-        result = sqlite_cat.get_owner_by_prefix("9.9")
-        assert result is None
-
-    def test_list_owners_by_type_repo(self, sqlite_cat):
-        result = sqlite_cat.list_owners_by_type("repo")
-        assert len(result) == 1
-        assert result[0]["name"] == "testrepo"
-        assert result[0]["owner_type"] == "repo"
-        assert result[0]["repo_root"] == "/tmp/testrepo"
-
-    def test_list_owners_by_type_curator(self, sqlite_cat):
-        result = sqlite_cat.list_owners_by_type("curator")
-        assert len(result) == 1
-        assert result[0]["tumbler_prefix"] == "1.1"
-
-    def test_list_owners_by_type_empty(self, sqlite_cat):
-        result = sqlite_cat.list_owners_by_type("nonexistent")
-        assert result == []
-
-    def test_chunk_counts_for_docs_batch(self, sqlite_cat):
-        result = sqlite_cat.chunk_counts_for_docs(["1.1.1", "1.1.2"])
-        assert result["1.1.1"] == 20
-        assert result["1.1.2"] == 5
-
-    def test_chunk_counts_for_docs_empty(self, sqlite_cat):
-        result = sqlite_cat.chunk_counts_for_docs([])
-        assert result == {}
-
-    def test_chunk_counts_for_docs_miss(self, sqlite_cat):
-        result = sqlite_cat.chunk_counts_for_docs(["9.9.9"])
-        assert result == {}
-
-    def test_links_from_batch_hit(self, sqlite_cat):
-        result = sqlite_cat.links_from_batch(["1.1.1"])
-        assert "1.1.1" in result
-        link_types = {lnk["link_type"] for lnk in result["1.1.1"]}
-        assert link_types == {"cites", "relates"}
-
-    def test_links_from_batch_empty(self, sqlite_cat):
-        result = sqlite_cat.links_from_batch([])
-        assert result == {}
-
-    def test_links_from_batch_miss(self, sqlite_cat):
-        result = sqlite_cat.links_from_batch(["9.9.9"])
-        assert result == {}
+# ── SQLite Catalog new methods: RETIRED (nexus-i711w terminal deletion) ─────
+# The sqlite_cat fixture and TestSQLiteCatalogNewMethods (18 tests over the
+# local Catalog's nexus-qnp5s API surface) died with nexus.catalog.catalog.
+# The HttpCatalogClient half below is the surviving side of the parity pair.
 
 
 # ── HttpCatalogClient new endpoints ──────────────────────────────────────────
@@ -392,13 +249,8 @@ _REQUIRED_METHODS = [
 ]
 
 
-@pytest.mark.parametrize("method_name", _REQUIRED_METHODS)
-def test_sqlite_catalog_has_method(method_name):
-    """SQLite Catalog must have every method that HttpCatalogClient provides
-    (nexus-qnp5s public API parity)."""
-    assert hasattr(Catalog, method_name), (
-        f"Catalog is missing {method_name!r} — consumers cannot use uniform API"
-    )
+# test_sqlite_catalog_has_method retired (nexus-i711w terminal deletion):
+# the local Catalog side of the API-parity pair is gone.
 
 
 @pytest.mark.parametrize("method_name", _REQUIRED_METHODS)
@@ -427,8 +279,9 @@ def test_scoring_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"scoring.py has ._db accesses that should have been migrated: {violations}"
     )
@@ -449,8 +302,9 @@ def test_repos_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"repos.py has ._db accesses that should have been migrated: {violations}"
     )
@@ -470,8 +324,9 @@ def test_health_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"health.py has ._db accesses that should have been migrated: {violations}"
     )
@@ -491,8 +346,9 @@ def test_pipeline_stages_py_has_no_raw_db_access():
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "_db":
             line_text = lines[node.lineno - 1]
-            if "epsilon-allow" not in line_text:
-                violations.append((node.lineno, line_text.strip()))
+            # (The old "epsilon-allow" comment-exemption is retired —
+            # nexus-146xx.18: the token grants nothing anywhere.)
+            violations.append((node.lineno, line_text.strip()))
     assert violations == [], (
         f"pipeline_stages.py has ._db accesses: {violations}"
     )

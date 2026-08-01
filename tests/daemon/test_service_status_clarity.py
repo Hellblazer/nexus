@@ -238,8 +238,18 @@ class TestPgVectorPreflight:
             check_pgvector_available(bins)
         msg = str(exc.value)
         assert "vector.control" in msg
-        assert "PG_CONFIG=" in msg
         assert "nx init --service" in msg
+        # The remedy names the two ways this can now happen. It used to hand
+        # out a PG_CONFIG= build-pgvector-from-source recipe aimed at a
+        # Homebrew versioned major, which stopped being reachable when host-PG
+        # discovery was removed (tests/db/test_no_host_pg_fallback.py): the
+        # only PostgreSQL nexus resolves is its own bundle or an explicit
+        # NEXUS_PG_BIN, and the bundle always carries pgvector.
+        assert "NEXUS_PG_BIN" in msg
+        assert "PG_CONFIG=" not in msg, (
+            "the remedy tells the user to compile pgvector against a host "
+            f"PostgreSQL that nexus will never use: {msg}"
+        )
 
     def test_present_control_file_passes(self, tmp_path: Path) -> None:
         bins = self._bins(tmp_path)

@@ -22,8 +22,6 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.db.t2 import T2Database
 from nexus.operators import aspect_sql
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
 
 @pytest.fixture(autouse=True)
 def _no_live_claude_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,27 +121,13 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             extras={"venue": "OSDI", "year": 2023},
             confidence=0.78,
         ))
-        # A paper with null fields (extractor failed 3x). The SQLite
-        # store silently DROPS a confidence=None record (nexus-17wf), so
-        # the row is absent on both substrates; the engine's /upsert
-        # 500s on a JSON-null confidence (NPE in the handler) instead of
-        # dropping, so the engine leg skips the call — same end state
-        # (row absent), which is what every test below asserts against.
-        if not _ENGINE_SUBSTRATE:
-            db.document_aspects.upsert(AspectRecord(
-                collection="knowledge__delos",
-                source_path="/papers/null.pdf",
-                problem_formulation=None,
-                proposed_method=None,
-                experimental_datasets=[],
-                experimental_baselines=[],
-                experimental_results=None,
-                extras={},
-                confidence=None,
-                extracted_at=datetime.now(UTC).isoformat(),
-                model_version="claude-haiku-4-5-20251001",
-                extractor_name="scholarly-paper-v1",
-            ))
+        # NOT seeded: a paper with null fields (extractor failed 3x).
+        # The retired SQLite store silently DROPPED a confidence=None
+        # record (nexus-17wf); the engine's /upsert 500s on a JSON-null
+        # confidence (NPE in the handler) instead of dropping. Both
+        # substrates therefore ended with the row ABSENT, which is what
+        # every test below asserts against — so with SQLite gone
+        # (nexus-i711w) the seed is simply omitted rather than guarded.
         # A paper from a different collection (must be excluded).
         db.document_aspects.upsert(_make_record(
             source_path="/papers/other.pdf",
@@ -396,52 +380,6 @@ class TestDualRead:
             "chroma://knowledge__delos//papers/paxos.pdf"
         )
 
-    @pytest.mark.skipif(
-        _ENGINE_SUBSTRATE,
-        reason="dies-roster: simulates the legacy SQLite NULL-source_uri "
-        "state via a raw conn UPDATE; the engine schema cannot represent "
-        "it (source_uri is the write-path identity) — dies at the "
-        "RDR-155 P4b flip",
-    )
-    def test_filter_legacy_null_uri_row_is_unreachable_post_drop(
-        self, env: Path, monkeypatch,
-    ) -> None:
-        """nexus-ocu9.11 (RDR-096 P5.2): the COALESCE second arm
-        retired with the source_path column drop. A row with
-        source_uri NULL is now structurally unreachable by the
-        operator: the WHERE clause keys on source_uri IN (...), so
-        a NULL source_uri row never matches the WHERE; the operator
-        treats it as "row absent" with an empty source_uri.
-
-        This is the post-drop contract. The migration's pre-audit
-        in ``migrate_drop_source_path_column`` blocks if any row
-        has NULL/empty source_uri, so in production this state is
-        unreachable. The test simulates the legacy state to lock
-        the operator's "no fallback synthesis" behavior.
-        """
-        # NULL out source_uri on one row to mimic the now-unreachable
-        # legacy state. The migration's audit would have blocked
-        # this in prod; the test forces it via SQL.
-        with T2Database(env) as db:
-            db.document_aspects.conn.execute(
-                "UPDATE document_aspects SET source_uri = NULL "
-                "WHERE source_path = '/papers/raft.pdf'"
-            )
-            db.document_aspects.conn.commit()
-
-        items = _items("/papers/raft.pdf")
-        result = aspect_sql.try_filter(
-            items, "raft",
-            source="auto", aspect_field="proposed_method",
-        )
-        assert result is not None
-        match = [r for r in result["rationale"] if r["id"] == "/papers/raft.pdf"]
-        assert len(match) == 1
-        # Post-drop: NULL source_uri row never matches the WHERE,
-        # so the operator surfaces it as "aspect row absent" with
-        # empty source_uri. There is no synthesised file:// fallback.
-        assert match[0]["source_uri"] == ""
-        assert "absent" in match[0]["reason"] or "does not match" in match[0]["reason"]
 
     def test_filter_non_match_rationale_has_empty_source_uri(
         self, env: Path,

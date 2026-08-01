@@ -16,11 +16,6 @@
           },
           {
             "type": "command",
-            "command": "nx daemon t2 ensure-running --quiet --timeout=10 2>/dev/null || true",
-            "timeout": 15
-          },
-          {
-            "type": "command",
             "command": "nx hook session-start",
             "timeout": 10
           },
@@ -153,6 +148,16 @@
             "type": "command",
             "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/routing/phase_review_close_requires_gate.py",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/agent-dispatch-expect.sh",
+            "timeout": 10
           }
         ]
       }

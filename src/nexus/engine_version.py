@@ -133,7 +133,160 @@ from __future__ import annotations
 #: per-query-diff cloud-gated GREEN 2026-07-23Z (parity 106/113 ==
 #: baseline with zero per-query regressions, recall AC-3 identical,
 #: reranker=rerank-2.5 active with zero degrade events, T2 [21062]).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 52)
+#: -> (0,1,56) 2026-07-25: ONE-ENGINE-IDENTITY bump, not a feature dependency.
+#: v0.1.53-.56 were cut, gated and deployed while this constant sat at
+#: (0,1,52), so four tags of engine work reached NO local-mode install —
+#: cloud users get whatever conexus deployed, local installs get ONLY what
+#: this constant names. Carries: v0.1.53 the P2-J chroma-trio + ingest-cloud
+#: deletion (RDR-155 P4b) and the chash-410 recut; v0.1.55 the manifest
+#: count guard (nexus-ir6eh, partial-truncation defense), /livez and
+#: /version off the pool (nexus-hubc0), /links/orphaned; v0.1.56 the
+#: nexus-asaod fix — an RLS row refusal on /import/* is a caller-resolvable
+#: 409, not an opaque 500, without leaking that the id exists under another
+#: tenant. Gates: --shakeout PASSED, published-artifact --acquire PASSED
+#: 11/11 on a bare box (/version == the tag, store/index/search, doctor
+#: clean), deployed to api.conexus-nexus.com and cloud-gated GREEN
+#: 2026-07-25 (recall@20 12/12 local==cloud, hybrid parity 113/105 zero
+#: per-query regressions, p95 1873ms < v0.1.55's 1886ms). Deploy verified
+#: independently via `nx service probe` before this bump; record-deploy
+#: written [21141]. Bumped AFTER the deploy on purpose — bumping first makes
+#: every cloud client refuse the managed service as below-identity (GH #1402
+#: inverted). Detection for the gap that let this drift: nexus-6igii.
+#: -> (0,1,57) 2026-07-27: the T2/catalog read-correctness cohort. Four engine
+#: defects, all of them silent-wrong-answer rather than error, all found while
+#: porting the test suite onto the engine substrate (nexus-aqbrk):
+#: memory FTS could not find a word INSIDE a dotted title, so every
+#: .md-suffixed T2 note was unfindable by title fragment (nexus-22r1f,
+#: 73fdd124); memory and catalog search did not fold Latin-1 diacritics, so
+#: 'resume' missed 'résumé' where the SQLite baseline matched (c52068bb,
+#: 0bd62f93); tombstoned documents stayed visible to 21 catalog LIST reads
+#: (nexus-23wlw, 12614bdb); and graph traversal ignored include_heuristic, so
+#: the implements-heuristic flood was back on by default (nexus-ybj1b,
+#: 12614bdb). The floor IS the fix-delivery vehicle: cloud users already have
+#: these, local-mode installs get ONLY what this constant names.
+#: Gates: deployed to api.conexus-nexus.com (digest sha256:eeab1cad..., cosign
+#: KMS verified at redeploy), STEP-6 GREEN — parity 105/113 BYTE-IDENTICAL to
+#: the v0.1.56 baseline with zero per-query regressions, recall AC-3 12/12
+#: local==cloud with zero vacuous legs. STEP-6 structurally CANNOT see this
+#: release's behaviour change (its legs read chunks_{384,768,1024}; these
+#: changesets touch nexus.memory and nexus.catalog_documents), so conexus wrote
+#: a separate read-only probe: 11/11 PASS live, including the Latin-1 boundary
+#: (Cyrillic 'Тодор' UNCHANGED — the fold is a 1:1 translate() matching FTS5's
+#: remove_diacritics=1 exactly, NOT unaccent, which is absent from every
+#: shipped PG bundle and over-folds). record-deploy written and verified
+#: against the live /version before this bump; relay T2 [21164].
+#: NOT in this tag, so do not assume them from the floor: analyze-002
+#: (the BUG-0148 ANALYZE invariant, 308522b3) and the staging-4 rollback-split
+#: fix (c13d0c84) both landed AFTER the cut.
+#: -> (0,1,58) 2026-07-28: the nexus-onjvy write-only-surface cohort, plus the
+#: two changesets the v0.1.57 note above flagged as deliberately absent.
+#: THREE READ ROUTES for data the engine already wrote and no route returned:
+#: GET /v1/telemetry/hook_failures/list (the failure log existed only as
+#: /record + /trim, so the thing that surfaces SILENT hook failures could be
+#: written and never inspected); POST /v1/taxonomy/assignments/details
+#: (similarity / assigned_at / source_collection were written by assign and
+#: projected by nothing, so an operator could not ask how confident an
+#: assignment was); and /hubs now returns max_last_discover_at,
+#: never_discovered_count and is_stale, so detect_hubs(warn_stale=) stops being
+#: accepted-and-silently-dropped. No DDL — every column already existed.
+#: Also carries analyze-002 (307 changesets now, up from 206), which conexus
+#: confirmed working on deploy: both rewritten tables came back FRESH with no
+#: hand-run ANALYZE, where v0.1.57 needed one as nexus_admin.
+#: A TIMESTAMP WIRE FIX rides along and is worth knowing about: these reads
+#: emit UTC ISO-8601 with explicit seconds via each repository's UTC_SECOND
+#: formatter. OffsetDateTime.toString() renders in the JVM's LOCAL offset and
+#: elides zero seconds, so the same instant crossed as "2026-04-08T17:00-07:00"
+#: on one host and "...T00:00:00Z" on another — either property breaks a client
+#: that compares these as strings, which the retired SQLite oracle did.
+#: Gates: full engine suite 1475/0/0 twice consecutively; CANDIDATE SHAKEOUT
+#: PASSED pre-tag (native build + verb matrix + zero 5xx under load); ACQUIRE
+#: GATE PASSED 12/12 on the PUBLISHED, cosign-verified bytes; deployed to
+#: api.conexus-nexus.com (digest sha256:dea44148..., cosign KMS + spdxjson
+#: attestation verified at redeploy). record-deploy written and verified
+#: against the live /version before this bump [21219 relay chain].
+#: ONE THING NOT ESTABLISHED, so nobody infers it from the floor: v0.1.58's
+#: STEP-6 parity moved 105 -> 104 and that is CORPUS DRIFT (+1,514 chunks,
+#: +34 documents between captures), NOT this release. An ekn9n topic-boost
+#: attribution was floated across the bus and WITHDRAWN by both sides:
+#: apply_topic_boost is Python-client-only and absent from the engine, so it
+#: cannot execute on the /v1/vectors/* path STEP-6 measures. See nexus-j46lz.
+#: ── v0.1.59 (2026-07-31) — the 7.0.0 catalog defect set ──────────────────────
+#: Carries nexus-mqd6t (tombstone filters across every manifest-rooted read:
+#: chashesForCollection, docsForChashes, getManifest, getManifestMany,
+#: resolveChash's doc_id attribution, two PgVectorRepository siblings — plus the
+#: non-resurrection rule), nexus-e4gel (chunk_count re-derivation, guarded so an
+#: incidental update cannot zero a positive count against an EMPTY manifest —
+#: that disagreement is the GH #1371 damage signature reconcile classifies on),
+#: nexus-s4e1n (the co_discovered_by link-merge fold), nexus-tz1cx (a real
+#: metadata.doc_id lookup route), nexus-ekaxn (alias following on /show and
+#: updateDocument) and nexus-jqvzk (the gc_audit surface).
+#: nexus-9ssih was deliberately HELD OUT: its 400 would have broken every
+#: already-installed client, since nothing client-side caught it. Its client
+#: half shipped first (bc175f29-adjacent, a62649ef) and the engine half rides
+#: the NEXT tag.
+#: SCHEMA: exactly TWO new changesets, catalog-018-1/-2 (orders 517/518),
+#: creating nexus.gc_audit + indexes + RLS. 207 -> 209. A NEW table, so no
+#: existing table rewritten (no stale-planner-stats exposure) and no executed
+#: changeset mutated (no Liquibase checksum risk) — conexus called it the safest
+#: deploy shape they have taken; rollback to 0.1.58 is a plain image revert.
+#: Gates: engine suite 1517/0; deployed to api.conexus-nexus.com (digest
+#: sha256:ba7a0a18..., cosign KMS + spdxjson attestation verified, on-host
+#: cosign verify PASS at redeploy); STEP-6 parity BYTE-IDENTICAL to the v0.1.58
+#: baseline (113 evaluated / 104 passed / p50_jaccard 1.0, zero per-query
+#: regressions), recall AC-3 12/12 local == cloud with zero vacuous legs,
+#: latency margins the widest recorded, corpus drift NONE (41 collections,
+#: drifted=false — the check built after the v0.1.58 mis-attribution, running
+#: live for the first time). Relay [21293].
+#: AND THE ONE THAT MATTERS MOST: nexus-bwulw's CLOUD CLIENT-PATH GATE, written
+#: as EXPECTED RED, now PASSES all four legs from a real cloud-mode box against
+#: the live public edge — /version fields come through (voyage threshold gating
+#: ON, dimension-orphan tooling live), /health honors the ez5.1 contract for
+#: bearers, the embedding_mode probe resolves, the read path round-trips.
+#: conexus's own STEP-6 probes the engine DIRECTLY and structurally cannot see
+#: the client path; it was green throughout the period those three features were
+#: dead on arrival for cloud boxes.
+#: HONEST LIMIT on that evidence, as reported: their run's exit code was
+#: swallowed by a shell redirect, so the PASS is the script's literal sentinel
+#: line rather than a captured 0. The script defines them as equivalent; the
+#: numeric code was not verified and is not being claimed.
+#:
+#: ── v0.1.60 (2026-08-01) ──────────────────────────────────────────────────
+#: THAT HONEST LIMIT IS NOW RESOLVED: conexus reports the client-path gate at
+#: TRUE EXIT 0, all four legs, on this deploy. The caveat above stands as the
+#: record of what v0.1.59's evidence actually was; it no longer applies.
+#: CONTENT — ten service/ commits, and TWO of them were P0s found by REVIEW,
+#: not by CI, both in the same file within one week:
+#:   nexus-v6za0  rename onto a POPULATED supersede tombstone silently merged
+#:                two collections across two vector spaces. Third attempt at
+#:                one guard; liveness and identity were both proxies for the
+#:                property that mattered, and both shipped or nearly shipped
+#:                behind green suites. It now MEASURES emptiness.
+#:   nexus-upg3s  that fix's OWN regression — converging by identity blanked
+#:                repo_root/repo_hash/description when the payload omitted
+#:                them. repo_root anchors deriveSourceUri, so it re-tumbles
+#:                already-registered files (the nexus-3e4s class). 24 green
+#:                tests missed it: the fixture created its owner WITHOUT the
+#:                fields the bug destroyed.
+#:   nexus-kjjab  a rotated NX_SERVICE_TOKEN raised an unhandled 23505 on the
+#:                AUTH BOOTSTRAP path and hard-aborted boot, HTTP never
+#:                binding. Plus the nexus-0ehwe arbiter class (pbawi/jq53b/
+#:                z3ssg) and the rename/supersede chain.
+#: SCHEMA: boot Liquibase applied 5 changesets, ALL GRANT-CLASS — no table
+#: rewritten, so the RDR-180 stale-planner-stats trap did not apply.
+#: Gates: native build trip-wire GREEN pre-tag (this set adds four new classes,
+#: and GraalVM reachability fails only in the release build, i.e. AFTER the
+#: tag); local full mvn suite on a tree verified BYTE-IDENTICAL to the tag
+#: target; STEP-6 exit 0 with parity 104/113 IDENTICAL to the v0.1.59 baseline
+#: and ZERO per-query jaccard movement; recall 12/12 local == cloud, no vacuous
+#: legs; hybrid p95 1950.8ms against a 2376ms bound.
+#: Deployed digest sha256:2b97cdd7...; live /version independently confirmed
+#: UNAUTHENTICATED from this box (release_version 0.1.60, embedding_mode
+#: voyage) — i.e. client-visibly, not merely engine-direct. Relay [21320],
+#: reply [21321].
+#: NOT EXERCISED: no token rotation was performed on this deploy, so kjjab's
+#: ordering hazard was not tested in production. Rotation is safe from here
+#: because the host now runs 0.1.60; it was NOT safe before it.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 60)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

@@ -194,6 +194,64 @@ public final class MemoryRepository {
     }
 
     /**
+     * The OR'd tsquery expression every memory FTS surface must use.
+     *
+     * <p>nexus-22r1f. Three surfaces — {@code search}, {@code searchGlob},
+     * {@code searchByTag} — each carried this expression inline, in both the
+     * WHERE and the {@code ts_rank} ORDER BY: seven copies of one decision.
+     * The memory-002 separator-normalized title segment needs a matching
+     * query leg, and fixing one copy while leaving the others is precisely
+     * how catalog-015 came to fix {@code catalog_documents} in 2026-07-13
+     * while {@code nexus.memory} kept the same bug until now. One owner.
+     *
+     * <p>Two cases, and only one needs the extra leg:
+     * <ul>
+     *   <li>query WITHOUT a separator ({@code auth}) — the plain 'simple' leg
+     *       already matches the translated STORED segment, because memory-002
+     *       pre-splits the title. No extra leg.</li>
+     *   <li>query WITH a separator ({@code auth-design}) — plainto_tsquery
+     *       yields {@code 'auth' & '-design'}, which the pre-split stored
+     *       lexemes never satisfy, so the QUERY is translated the same way the
+     *       column was.</li>
+     * </ul>
+     *
+     * <p>Skipped when the query has no separator: {@code translate()} would be
+     * a no-op and the leg identical to the plain 'simple' one, so adding it
+     * unconditionally would cost a redundant tsquery on every search.
+     *
+     * <p>DIACRITIC FOLDING. Every leg runs the query through
+     * {@code nexus.fold_diacritics} because memory-002 runs the STORED column
+     * through it too. This is the load-bearing half of the replace-not-add
+     * decision: the stored lexemes are now folded, so a query leg that skipped
+     * the mapping would stop matching accented input that matched before.
+     * Applying the identical deterministic mapping to both sides is what makes
+     * the change incapable of narrowing anything — {@code résumé} and
+     * {@code resume} both reduce to {@code resum} on both sides. Diverging the
+     * two sides is the whole failure mode, and it is a SILENT one: the
+     * stored-side-only version of this change still passed every test that did
+     * not query with an accent.
+     *
+     * <p>Injection-safety is preserved: the query is still bound via
+     * {@code {0}} and never concatenated — {@code translate()} and
+     * {@code fold_diacritics()} wrap the BIND PARAMETER, not the literal.
+     *
+     * <p>WHERE and ORDER BY must use the SAME expression; ranking by a
+     * narrower tsquery than the one that matched puts translated-only hits at
+     * rank 0 and sorts them last.
+     */
+    private static String ftsQuery(String query) {
+        boolean hasSeparator = query != null && query.chars()
+            .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
+        String q = "nexus.fold_diacritics({0})";
+        String base = "(plainto_tsquery('english', " + q + ") "
+                    + "|| plainto_tsquery('simple', " + q + ")";
+        return hasSeparator
+            ? base + " || plainto_tsquery('simple', "
+                   + "nexus.fold_diacritics(translate({0}, '/.-_', '    '))))"
+            : base + ")";
+    }
+
+    /**
      * FTS search using the {@code fts_vector} GIN index.
      *
      * <p>Uses a dual-tsquery OR to cover both prose and identifier columns:
@@ -222,20 +280,21 @@ public final class MemoryRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // OR'd tsquery: prose stemming (english) + exact identifier/tag match (simple).
             // plainto_tsquery is injection-safe: bound via {0}.
+            String tsq = ftsQuery(query);
             String ftsWhere = project != null && !project.isBlank()
-                ? "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND project = {1}"
-                : "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))";
+                ? "fts_vector @@ " + tsq + " AND project = {1}"
+                : "fts_vector @@ " + tsq;
 
             Result<MemoryRecord> rows;
             if (project != null && !project.isBlank()) {
                 rows = ctx.selectFrom(MEMORY)
                           .where(condition(ftsWhere, val(query), val(project)))
-                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
+                          .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
             } else {
                 rows = ctx.selectFrom(MEMORY)
                           .where(condition(ftsWhere, val(query)))
-                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
+                          .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
             }
             if (trackAccess && !rows.isEmpty()) {
@@ -326,9 +385,9 @@ public final class MemoryRepository {
                                             .replace("?", "_");
             return ctx.selectFrom(MEMORY)
                       .where(condition(
-                          "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND project LIKE {1} ESCAPE '\\'",
+                          "fts_vector @@ " + ftsQuery(query) + " AND project LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
+                      .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
         });
     }
@@ -349,9 +408,9 @@ public final class MemoryRepository {
             String likePattern = "%," + escapedTag + ",%";
             return ctx.selectFrom(MEMORY)
                       .where(condition(
-                          "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
+                          "fts_vector @@ " + ftsQuery(query) + " AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc(), MEMORY.ID.asc())
+                      .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
         });
     }

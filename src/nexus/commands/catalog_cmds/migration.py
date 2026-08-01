@@ -197,13 +197,31 @@ def migrate_fallback_cmd(
 
     if len(targets_seen) == 1:
         only_target = next(iter(targets_seen))
-        writer.supersede_collection(
-            source, only_target, reason="migrate-fallback",
-        )
-        click.echo(
-            f"\nMigrated {len(proposals)} doc(s); source {source!r} "
-            f"superseded by {only_target!r}."
-        )
+        # nexus-g8z8n: supersede now REFUSES its preconditions (unregistered
+        # source, unregistered target, an existing supersession to a different
+        # target) instead of silently updating zero rows. The documents have
+        # already moved by this point, so a refusal must not abort the command
+        # with a traceback — but it must not be reported as a supersession that
+        # happened, either, which is what the unconditional echo below used to do
+        # on every silent no-op.
+        try:
+            writer.supersede_collection(
+                source, only_target, reason="migrate-fallback",
+            )
+        except ValueError as exc:
+            click.echo(
+                f"\nMigrated {len(proposals)} doc(s) to {only_target!r}, but "
+                f"source {source!r} was NOT marked superseded: {exc}\n"
+                f"The migration itself is complete; only the supersession "
+                f"pointer is missing. Register the source (nx catalog "
+                f"backfill-collections) and re-run if you want the history "
+                f"recorded."
+            )
+        else:
+            click.echo(
+                f"\nMigrated {len(proposals)} doc(s); source {source!r} "
+                f"superseded by {only_target!r}."
+            )
     else:
         click.echo(
             f"\nMigrated {len(proposals)} doc(s) across "

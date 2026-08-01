@@ -74,6 +74,8 @@ new scope, not a mechanical mixin swap.
 """
 from __future__ import annotations
 
+import contextlib
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -81,9 +83,10 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.catalog.catalog import CatalogEntry, CatalogLink, Tumbler
+from nexus.catalog.tumbler import Tumbler
+from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
-from nexus.catalog.catalog_writes import ManifestRow
+from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
@@ -149,6 +152,22 @@ _REGISTER_MANY_PAGE = 1000
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
+
+
+def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
+    """Best-effort human text from an engine error response.
+
+    Engine handlers reply ``{"error": "<message>"}``; fall back to the raw body
+    (then the status line) so a refusal never surfaces as an empty reason.
+    """
+    with contextlib.suppress(Exception):
+        body = exc.response.json()
+        if isinstance(body, dict) and body.get("error"):
+            return str(body["error"])
+    with contextlib.suppress(Exception):
+        if text := exc.response.text.strip():
+            return text
+    return f"HTTP {exc.response.status_code}"
 
 
 def _coerce_legacy_grandfathered(d: dict) -> dict:
@@ -236,6 +255,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         _token: str | None = None,
     ) -> None:
         super().__init__(base_url=base_url, tenant=tenant, _token=_token)
+        #: nexus-5i864: per-instance owner cache for resolve_path (see
+        #: ``_owner_for_resolve_path``). Maps owner tumbler_prefix ->
+        #: owner dict. HITS ONLY — misses are never cached, because this
+        #: client is a process-lifetime singleton and a pinned miss would
+        #: silently zero the auto-linker for any owner registered later
+        #: by another process.
+        self._resolve_path_owner_cache: dict[str, dict] = {}
         _log.debug("http_catalog_client.init", base_url=self._base_url, tenant=tenant)
 
     def close(self) -> None:
@@ -261,13 +287,22 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Bead nexus-xnz0o is a HARD BLOCKER of Phase-4 catalog deletion
         (nexus-gmiaf.24).
+
+        RAISES AttributeError, NEVER RuntimeError (nexus-xj744). ``hasattr()``
+        only swallows ``AttributeError``; anything else propagates. A
+        ``RuntimeError`` here means a caller writing the sanctioned
+        ``hasattr(cat, "_db")`` / ``has_raw_access(cat)`` probe would CRASH in
+        service mode instead of getting ``False`` and taking the service branch
+        — the guard idiom that exists to make such checks safe would become the
+        thing that breaks them. ``db/t2/_raw_handle_guard.py`` states this
+        contract explicitly; this property was the one place violating it.
         """
-        raise RuntimeError(
-            "catalog._db is unavailable in service mode "
-            "(NX_STORAGE_BACKEND_CATALOG=service).  "
+        raise AttributeError(
+            "catalog._db does not exist: the local SQLite catalog was "
+            "deleted (RDR-158 P4, nexus-i711w) and the engine's HTTP "
+            "catalog is the only substrate.  "
             "This command path is not yet ported to the public catalog API — "
-            "tracked in bead nexus-xnz0o.  "
-            "Run with NX_STORAGE_BACKEND_CATALOG unset to use SQLite mode."
+            "tracked in bead nexus-xnz0o."
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────────
@@ -339,6 +374,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if repo_root:      payload["repo_root"] = str(repo_root)
         if head_hash:      payload["head_hash"] = head_hash
         result = self._post("/owners/upsert", payload)
+        # nexus-5i864: an owner upsert can change owner_type/repo_root —
+        # drop the resolve_path owner cache so later resolutions re-read.
+        # AFTER the POST: a raising upsert changed nothing to invalidate.
+        self._resolve_path_owner_cache.clear()
         # If server echoes tumbler_prefix in response (future enhancement), use it
         if isinstance(result, dict) and result.get("tumbler_prefix"):
             return Tumbler.parse(result["tumbler_prefix"])
@@ -397,6 +436,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if tumbler_prefix: payload["tumbler_prefix"] = tumbler_prefix
         if head_hash:      payload["head_hash"] = head_hash
         result = self._post("/owners/upsert", payload)
+        # nexus-5i864: see register_owner — invalidate after a successful upsert.
+        self._resolve_path_owner_cache.clear()
         if isinstance(result, dict) and result.get("tumbler_prefix"):
             return Tumbler.parse(result["tumbler_prefix"])
         if tumbler_prefix:
@@ -662,6 +703,42 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._get("/docs/orphaned")
         return result.get("documents", []) if result else []
 
+    def orphaned_links(self) -> list[dict]:
+        """Return catalog_links rows whose from_tumbler or to_tumbler
+        resolves to no document (nexus-ysrwi, GH #1419 issue 7).
+
+        ``catalog_links`` carries a PK and a UNIQUE constraint but NO
+        foreign key to ``catalog_documents`` (catalog-001-baseline.xml), so
+        a link survives when its referenced document is hard-deleted. The
+        only production hard-delete of document rows is
+        ``CatalogRepository.deleteCollectionTxn``'s per-collection
+        ``catalog_documents`` delete (called from :meth:`delete_collection`)
+        — it has no corresponding ``catalog_links`` cleanup step, so a
+        cross-collection link whose endpoint's collection gets deleted
+        dangles forever. Closing that write-time gap needs an engine change
+        (a new step in that transaction) — this method is the DETECTION
+        half only.
+
+        Uses GET /v1/catalog/links/orphaned (v0.1.55,
+        ``CatalogRepository.orphanedLinks`` / ``CatalogHandler
+        .handleLinksOrphaned``). Each dict carries ``id``, ``from_tumbler``,
+        ``to_tumbler``, ``link_type``, ``created_by``, and ``side``
+        (``"from"``/``"to"``/``"both"``) naming which endpoint is missing.
+        """
+        result = self._get("/links/orphaned")
+        # Shape-guard the response. A truthy NON-dict (a bare JSON array, say)
+        # would make .get() raise AttributeError, which is NOT in doctor.py's
+        # `except (httpx.HTTPError, RuntimeError)` -- so the caller would crash
+        # with a raw traceback instead of the UNKNOWN/exit(2) contract that this
+        # check and its three same-day siblings exist to guarantee. Raise the
+        # type the caller already handles, and say what arrived.
+        if result and not isinstance(result, dict):
+            raise RuntimeError(
+                f"/links/orphaned returned {type(result).__name__}, expected an "
+                f"object with a 'links' key -- the engine's wire shape changed"
+            )
+        return (result or {}).get("links", [])
+
     def docs_with_absolute_paths(self) -> list[dict]:
         """Return documents whose file_path begins with '/'.
 
@@ -759,6 +836,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Uses POST /v1/catalog/doc/register for server-side atomic tumbler
         assignment via catalog_owners.next_seq (SELECT FOR UPDATE).
+
+        nexus-e7cys: the engine enforces the nexus-3e4s cross-project
+        containment guard on an explicit ``source_uri`` (rejecting one that
+        resolves outside a "repo" owner's ``repo_root``). The LOCAL arm's
+        escape hatch was the ``NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1``
+        environment variable read directly by the process doing the
+        registering; the engine has no access to the CLIENT's environment,
+        so this method reads it here and forwards ``allow_cross_project``
+        on the wire — the honest way an env-var escape hatch survives a
+        client/server split. An explicit ``allow_cross_project`` kwarg
+        always wins over the env-var default.
         """
         payload: dict = {
             "owner_prefix": str(owner),
@@ -775,6 +863,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if head_hash: payload["head_hash"] = head_hash
         if meta:      payload["meta"] = meta
+        if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
+            payload["allow_cross_project"] = True
         payload.update(kwargs)
         result = self._post("/doc/register", payload)
         return Tumbler.parse(result["tumbler"])
@@ -801,6 +891,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         if not docs:
             return []
+        # nexus-e7cys: same env-var-to-wire-field forwarding as register()
+        # above; an explicit per-doc allow_cross_project always wins.
+        if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
+            docs = [{"allow_cross_project": True, **d} for d in docs]
         out: list[Tumbler] = []
         for start in range(0, len(docs), _REGISTER_MANY_PAGE):
             page = docs[start : start + _REGISTER_MANY_PAGE]
@@ -833,7 +927,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self, tumbler: Tumbler | str, *, follow_alias: bool = True
     ) -> CatalogEntry | None:
         try:
-            result = self._get("/show", tumbler=str(tumbler))
+            # nexus-fguo5: this declared follow_alias but never sent it —
+            # the engine's handleShow (nexus-ekaxn) defaults follow_alias to
+            # FALSE for wire back-compat, so every client call silently got
+            # the identity (non-alias-following) lookup regardless of what
+            # was passed here.
+            result = self._get(
+                "/show", tumbler=str(tumbler), follow_alias=follow_alias
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
@@ -999,15 +1100,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return self._docs_from(self._get("/list", **params))
         # limit == 0 means UNBOUNDED (canonical semantics).
         if content_type:
-            # The service's content_type branch (CatalogHandler.handleList ->
-            # documentsByContentType) ignores limit/offset and returns ALL matching rows
-            # in one shot. A pagination loop would re-fetch the same full set every page
-            # and never terminate, so issue a single unbounded request. (Service-side
-            # content_type+limit interaction is a CA-4 / P4 item: nexus-pwclh.)
+            # nexus-xoimv: the service's content_type branch (CatalogHandler.handleList ->
+            # documentsByContentType) now HONORS an explicit limit/offset — the accept-
+            # and-drop behaviour nexus-pwclh documented here is fixed. But this call
+            # deliberately sends neither: omitting them is the documented "absent from
+            # the query string" contract, which stays UNBOUNDED on every filter branch
+            # (same as before xoimv, now by design instead of by omission) — so a single
+            # request still returns ALL matching rows in one shot and a pagination loop
+            # here would just re-fetch the same full set every page and never terminate.
             return self._docs_from(self._get("/list", content_type=content_type))
-        # Unfiltered: the service respects limit/offset (listDocuments), so paginate
-        # exhaustively rather than silently capping — a hardcoded cap would truncate
-        # large catalogs with no error.
+        # Unfiltered: the service always respects limit/offset here (listDocuments
+        # defaults limit to 200 whether or not the caller sends one — unlike the filter
+        # branches above, which stay unbounded when limit is absent, per nexus-xoimv), so
+        # paginate exhaustively rather than silently capping — a hardcoded cap would
+        # truncate large catalogs with no error.
         page = 1000
         out: list[CatalogEntry] = []
         cur = offset
@@ -1028,6 +1134,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return self._docs_from(self._get("/list", **params))
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
+        """TUMBLER-only lookup, collapsed into :meth:`resolve` (nexus-5axey).
+
+        Despite the name, ``doc_id`` here MUST be a tumbler — the settled
+        wji11 contract is that tumbler is the only document identity, so a
+        chash cannot resolve through this method (it will simply mismatch,
+        same as any other malformed tumbler string). Callers with a
+        content-chash (T3 chunk natural id, e.g. a store_put's ``meta.doc_id``)
+        want :func:`nexus.catalog.store_hook.resolve_knowledge_doc_for_chash`
+        (backed by :meth:`docs_for_chashes`) instead — the class of bug this
+        distinction exists to prevent (dedup/delete-path/reap silently
+        mismatching every chash they were passed) is nexus-5axey.
+
+        Kept as a thin alias rather than removed: ``commands/collection.py``
+        and ``search_engine.py`` still call it with a genuine tumbler.
+        """
         return self.resolve(doc_id)
 
     def resolve_many(self, doc_ids: list[str]) -> "dict[str, CatalogEntry]":
@@ -1097,14 +1218,105 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})
 
     def resolve_alias(self, tumbler: Tumbler | str, *, max_hops: int = 16) -> Tumbler:
+        """Resolve *tumbler* to its canonical (alias-followed) target.
+
+        nexus-fguo5: this was an accidental identity function — it always
+        called ``resolve(follow_alias=True)``, but ``resolve()`` never wired
+        ``follow_alias`` onto the wire, so the server's default-FALSE
+        ``/show`` handler ignored it and echoed the input tumbler back
+        unresolved. Now that ``resolve()`` actually sends the param, the
+        engine's ``alias_of`` chain-walk (``CatalogRepository
+        .resolveAliasTarget``, capped at its own 16-hop limit) runs
+        server-side and the returned entry's ``tumbler`` is the resolved
+        target. ``max_hops`` is accepted for signature parity with the
+        (never-shipped) local arm; the actual hop cap lives server-side.
+        """
         entry = self.resolve(tumbler, follow_alias=True)
         if entry:
             return entry.tumbler
         return Tumbler.parse(str(tumbler))
 
     def resolve_path(self, tumbler: Tumbler | str) -> Path | None:
-        entry = self.resolve(tumbler)
-        return Path(entry.file_path) if entry and entry.file_path else None
+        """Return the absolute filesystem path for a document, or ``None``.
+
+        nexus-5i864: ports the deleted local ``Catalog.resolve_path``
+        resolution order (catalog_docs.py, RDR-137 P3.6 form) into the
+        service client. The pre-fix client returned the STORED
+        ``file_path`` verbatim — for the relative paths the catalog hook
+        always writes, that re-anchored on the caller's CWD (the
+        nexus-3e4s class) and silently zeroed / mis-fed the auto-linker.
+
+        Resolution order:
+          1. resolve(tumbler); no entry or empty file_path -> None
+          2. owner lookup by ``tumbler.owner_address()`` (cached per
+             client instance — the link generator calls this in loops)
+          3. owner missing or ``owner_type == "curator"`` -> None
+             (curator-owned PDFs / standalone docs are not resolvable)
+          4. absolute ``file_path`` -> returned as-is
+          5. non-empty ``owner.repo_root`` -> ``repo_root / file_path``
+          6. else DEBUG ``catalog_resolve_path_legacy_owner_missing_repo_root``
+             and None (legacy owner healed by re-running ``nx index repo``)
+        """
+        tum = tumbler if isinstance(tumbler, Tumbler) else Tumbler.parse(tumbler)
+        entry = self.resolve(tum)
+        if not entry or not entry.file_path:
+            return None
+
+        owner_prefix = str(tum.owner_address())
+        owner = self._owner_for_resolve_path(owner_prefix)
+        if owner is None:
+            return None
+        if owner.get("owner_type") == "curator":
+            return None
+
+        fp = Path(entry.file_path)
+        if fp.is_absolute():
+            return fp
+
+        repo_root = owner.get("repo_root") or ""
+        if repo_root:
+            return Path(repo_root) / entry.file_path
+
+        _log.debug(
+            "catalog_resolve_path_legacy_owner_missing_repo_root",
+            tumbler=str(tum),
+            owner_prefix=owner_prefix,
+            repo_hash=owner.get("repo_hash", ""),
+            file_path=entry.file_path,
+            hint="re-run 'nx index repo' on the source repo to backfill repo_root",
+        )
+        return None
+
+    def _owner_for_resolve_path(self, owner_prefix: str) -> dict | None:
+        """Cached owner lookup for :meth:`resolve_path` (nexus-5i864).
+
+        ``resolve_path`` is driven in loops by the link generator
+        (link_generator.py) where consecutive tumblers overwhelmingly
+        share an owner; caching per client instance turns N owner
+        round-trips into one per distinct owner.
+
+        POSITIVE RESULTS ONLY — a miss is never cached. This client is a
+        PROCESS-LIFETIME SINGLETON (catalog/factory.py
+        ``_get_shared_service_catalog_client``, nexus-53x7s), so caching
+        a ``None`` would pin "this owner does not exist" for the life of
+        the process: an owner registered afterwards by ANOTHER process
+        (a separate ``nx index repo`` run, a daemon) would never be
+        observed here, and ``resolve_path`` would keep returning None —
+        silently zeroing the auto-linker for that repo indefinitely.
+        That is the very failure shape nexus-5i864 exists to remove, so
+        the miss path re-queries every call. A found owner is safe to
+        cache: ``owner_type`` / ``repo_root`` change only on
+        re-registration, which clears this cache (:meth:`register_owner`,
+        :meth:`ensure_owner_for_repo`).
+        """
+        cache = self._resolve_path_owner_cache
+        cached = cache.get(owner_prefix)
+        if cached is not None:
+            return cached
+        owner = self.get_owner_by_prefix(owner_prefix)
+        if owner is not None:
+            cache[owner_prefix] = owner
+        return owner
 
     def resolve_span(
         self,
@@ -1311,6 +1523,46 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # LINKS
     # ══════════════════════════════════════════════════════════════════════════
 
+    def _post_link(self, payload: dict) -> bool:
+        """POST /link, translating a dangling-endpoint refusal into ValueError.
+
+        nexus-9ssih, CLIENT HALF — deliberately landed AHEAD of its engine half.
+        The engine will reject a link whose endpoint does not resolve to a live
+        document with ``400 {"code": "dangling_endpoint", ...}``. The canonical
+        local ``link_if_absent`` raised ``ValueError`` for exactly that case,
+        and ``auto_linker.auto_link`` counts ``skipped_missing_endpoint`` inside
+        an ``except ValueError``. Without this translation the refusal would
+        surface as ``httpx.HTTPStatusError``, which nothing on the client
+        catches — every install would take an uncaught exception on its next
+        index pass, since a stale link-context reference occurs on every one.
+
+        FORWARD-COMPATIBLE BY CONSTRUCTION, which is why it can ship first:
+        against an engine that never emits that code this branch is unreachable,
+        and ``allow_dangling`` on the payload is ignored by an engine that does
+        not read it. So this is safe on today's engine and correct on the next.
+
+        Discriminates on ``code``, never on the bare 400: a malformed-body 400
+        must keep raising what it raises today.
+        """
+        try:
+            result = self._post("/link", payload)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                code = ""
+                with contextlib.suppress(Exception):
+                    body = exc.response.json()
+                    if isinstance(body, dict):
+                        code = str(body.get("code", ""))
+                if code == "dangling_endpoint":
+                    raise ValueError(
+                        f"dangling link endpoint: {payload.get('from_tumbler')} -> "
+                        f"{payload.get('to_tumbler')} ({payload.get('link_type')}) — "
+                        "an endpoint does not resolve to a live catalog document. "
+                        "Pass allow_dangling=True to write the edge anyway."
+                    ) from exc
+            raise
+        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
+
     def link(
         self,
         from_t: Tumbler | str,
@@ -1334,8 +1586,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if meta:
             payload["metadata"] = dict(meta)
-        result = self._post("/link", payload)
-        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
+        return self._post_link(payload)
 
     def link_if_absent(
         self,
@@ -1377,8 +1628,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if meta:
             payload["metadata"] = dict(meta)
-        result = self._post("/link", payload)
-        return bool(result.get("created") if result else False)  # True=created, False=merged (njrcn.3)
+        return self._post_link(payload)
 
     def unlink(
         self,
@@ -1576,7 +1826,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             effective_link_types.insert(0, link_type)
         if effective_link_types:
             payload["link_types"] = effective_link_types
-        # include_heuristic: forwarded to service for future support; currently informational
+        # nexus-ybj1b: the service HONOURS this now (CatalogHandler.handleTraverse
+        # -> CatalogRepository.graphBFS). Sending it only when True is correct:
+        # absent means false server-side, and false is the default that EXCLUDES
+        # implements-heuristic. It was previously "informational" — the server
+        # ignored it entirely, so the default silently included the heuristic
+        # flood and the opt-in did nothing.
         if include_heuristic:
             payload["include_heuristic"] = True
         return self._traverse(payload)
@@ -1602,13 +1857,71 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             effective_link_types.insert(0, link_type)
         if effective_link_types:
             payload["link_types"] = effective_link_types
-        # include_heuristic: forwarded to service for future support; currently informational
+        # nexus-ybj1b: the service HONOURS this now (CatalogHandler.handleTraverse
+        # -> CatalogRepository.graphBFS). Sending it only when True is correct:
+        # absent means false server-side, and false is the default that EXCLUDES
+        # implements-heuristic. It was previously "informational" — the server
+        # ignored it entirely, so the default silently included the heuristic
+        # flood and the opt-in did nothing.
         if include_heuristic:
             payload["include_heuristic"] = True
         return self._traverse(payload)
 
     def link_audit(self, *, t3: Any = None) -> dict:
-        return {}  # not supported in initial service-mode implementation
+        """Audit the link graph: totals, per-type/creator breakdown, orphans, dupes.
+
+        nexus-ai41v: this used to ``return {}`` — "not supported in initial
+        service-mode implementation". Service mode is now EVERY mode, and the
+        verb ships on two surfaces (``nx catalog link-audit`` and the MCP
+        ``catalog_link_audit`` tool), so an empty dict was not a graceful
+        degradation: ``--json`` printed ``{}``, which reads as a CLEAN audit.
+        That is the silent-false-clean shape this project has been burned by
+        before (nexus-ou4tb folded unreadable collections in as "no ghosts").
+
+        Everything here is computed from reads the engine already serves — the
+        paginated ``/link_query`` with no filters, and ``/links/orphaned``
+        (nexus-ysrwi) — so no engine change is required.
+
+        ``t3`` is accepted and ignored: the local implementation used it for a
+        stale-chash cross-check against T3, which this substrate answers from
+        the manifest instead. It stays in the signature for call-site parity.
+        """
+        by_type: dict[str, int] = defaultdict(int)
+        by_creator: dict[str, int] = defaultdict(int)
+        seen: dict[tuple[str, str, str], int] = defaultdict(int)
+        total = 0
+
+        page = 200
+        offset = 0
+        while True:
+            batch = self.link_query(limit=page, offset=offset)
+            if not batch:
+                break
+            for lk in batch:
+                total += 1
+                by_type[lk.link_type] += 1
+                by_creator[lk.created_by or ""] += 1
+                seen[(str(lk.from_tumbler), str(lk.to_tumbler), lk.link_type)] += 1
+            if len(batch) < page:
+                break
+            offset += page
+
+        duplicates = {k: n for k, n in seen.items() if n > 1}
+        result = self._get("/links/orphaned")
+        orphaned = (result.get("links", []) if result else [])
+
+        return {
+            "total": total,
+            "by_type": dict(by_type),
+            "by_creator": dict(by_creator),
+            "duplicate_count": len(duplicates),
+            "duplicates": [
+                {"from_tumbler": f, "to_tumbler": t, "link_type": lt, "count": n}
+                for (f, t, lt), n in sorted(duplicates.items())
+            ],
+            "orphaned_count": len(orphaned),
+            "orphaned": orphaned,
+        }
 
     # ══════════════════════════════════════════════════════════════════════════
     # COLLECTIONS
@@ -1623,8 +1936,38 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         embedding_model: str = "",
         model_version: str = "v1",
         display_name: str = "",
-        legacy_grandfathered: bool = False,
+        legacy_grandfathered: bool | None = None,
     ) -> None:
+        """Register (upsert) a collection row.
+
+        ``legacy_grandfathered`` DEFAULTS TO DERIVED, not to False (nexus-cecqy,
+        scope-corrected 2026-07-29). The retired local catalog derived the flag
+        by regex; the engine infers nothing (``upsertCollection`` binds the
+        caller's value verbatim) and this client used to default the kwarg
+        ``False`` — so every *bare* ``register_collection(name)`` call site left
+        non-conformant names UN-flagged. Those bare calls are BY CONSTRUCTION
+        the non-conformant branch of an ``if is_conformant_collection_name(...)``
+        fork, which is exactly where the flag has to be True:
+
+            src/nexus/indexer.py:784                         (post-rename registration)
+            src/nexus/commands/catalog_cmds/collections.py:138 (backfill loop)
+            src/nexus/commands/catalog_cmds/collections.py:349 (rename --allow-legacy)
+
+        The defect was invisible on the conformant branch because a conformant
+        name wants False and the old default WAS False — correct by accident,
+        which is what made this read as an ``--allow-legacy``-only bug when it
+        reached the ordinary ``nx index`` and backfill paths too.
+
+        Deriving here rather than at the call sites puts the inference on the
+        same side of the boundary as the implementation it replaced, and covers
+        callers that do not yet exist. Pass the kwarg explicitly to force it.
+        """
+        from nexus.corpus import (  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+            is_conformant_collection_name,
+        )
+
+        if legacy_grandfathered is None:
+            legacy_grandfathered = not is_conformant_collection_name(name)
         self._post("/collections/upsert", {
             "name": name,
             "content_type": content_type,
@@ -1743,14 +2086,42 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *,
         reason: str = "",
         superseded_at: str | None = None,
-    ) -> None:
+    ) -> int:
+        """Mark *old_name* superseded by *new_name*; return rows actually updated.
+
+        Raises ``ValueError`` when the engine refuses on a precondition
+        (nexus-g8z8n): *old_name* unregistered, *new_name* unregistered (which
+        would leave a dangling ``superseded_by`` pointer), or *old_name* already
+        superseded to a DIFFERENT target. Re-asserting the SAME target is
+        idempotent and returns 1 without moving the recorded instant.
+
+        nexus-cecqy: returns the engine's rowcount instead of None. Zero used to
+        be the routine outcome — the rename DELETEd the old row out from under
+        this call — and discarding it is what let the CLI announce a supersede
+        that had not happened. The rename now retires the row as a tombstone
+        instead, so zero is once again the exceptional case.
+        """
         # Wire keys: name (old_name), superseded_by (new_name); reason is informational.
         payload: dict = {"name": old_name, "superseded_by": new_name}
         if reason:
             payload["reason"] = reason
         if superseded_at:
             payload["superseded_at"] = superseded_at
-        self._post("/collections/supersede", payload)
+        try:
+            result = self._post("/collections/supersede", payload)
+        except httpx.HTTPStatusError as exc:
+            # 404 = guard 1 or 3 (an endpoint names nothing), 409 = guard 2 (a
+            # second supersession would rewrite the chain). Every one of these
+            # used to be a 200 {"updated": 0} the client threw away, so a typo on
+            # an explicit action silently did nothing — the exact shape the
+            # no-silent-fallbacks directive exists to prevent.
+            if exc.response is not None and exc.response.status_code in (404, 409):
+                raise ValueError(
+                    f"supersede_collection({old_name!r} -> {new_name!r}) refused: "
+                    f"{_engine_error_detail(exc)}"
+                ) from exc
+            raise
+        return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
     def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
@@ -1958,8 +2329,53 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return out
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Referenced-chash alive-set for a collection, count-reconciled.
+
+        nexus-ir6eh: this list is the indexer GC's alive-set — chunks
+        absent from it are classified orphan and DELETED, so a
+        PARTIALLY-truncated list silently destroys live data (a fully
+        missing list is guarded downstream by the indexer's
+        ``manifest_empty_skipping_gc``). The engine emits ``count``
+        alongside ``chashes`` since v0.1.55 (CatalogHandler.
+        handleManifestChashes; the release floor guarantees it), so the
+        client reconciles ``len(chashes) == count`` BEFORE returning and
+        fails loud on any deviation — a missing ``count`` field means a
+        field-stripping hop interposed (the nexus-znwc2 class) and is
+        itself a contract violation, never treated as optional.
+        """
         result = self._get("/manifest/chashes", collection=physical_collection)
-        return set(result.get("chashes", [])) if result else set()
+        result = result if isinstance(result, dict) else {}
+        chashes = result.get("chashes") or []
+        if "count" not in result:
+            _log.error(
+                "manifest_chashes_count_missing",
+                collection=physical_collection,
+                received=len(chashes),
+                response_keys=sorted(result),
+            )
+            raise RuntimeError(
+                f"manifest/chashes response for {physical_collection!r} "
+                "carried no `count` field — the engine emits it "
+                "unconditionally (floor >= v0.1.55), so something "
+                "interposed on the read path; refusing to hand GC an "
+                "unverifiable alive-set "
+                f"(response keys: {sorted(result)})"
+            )
+        count = int(result["count"])
+        if len(chashes) != count:
+            _log.error(
+                "manifest_chashes_count_mismatch",
+                collection=physical_collection,
+                received=len(chashes),
+                count=count,
+            )
+            raise RuntimeError(
+                f"manifest/chashes truncated for {physical_collection!r}: "
+                f"list carries {len(chashes)} chashes but count says "
+                f"{count} — orphan classification off this list would "
+                "delete live chunks; refusing"
+            )
+        return set(chashes)
 
     def purge_manifest_for_doc(self, doc_id: str) -> None:
         self._post("/manifest/purge", {"doc_id": doc_id})

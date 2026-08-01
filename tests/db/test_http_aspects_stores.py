@@ -17,9 +17,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from nexus.db.t2.aspect_extraction_queue import QueueRow
-from nexus.db.t2.document_aspects import AspectRecord
-from nexus.db.t2.document_highlights import HighlightRecord
+from nexus.db.t2.records import QueueRow
+from nexus.db.t2.records import AspectRecord
+from nexus.db.t2.records import HighlightRecord
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
 from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
@@ -188,10 +188,19 @@ class TestHttpDocumentAspectsStore:
         store = self._store({"/v1/aspects/delete": {"deleted": 1}})
         assert store.delete("coll", "doc.pdf") == 1
 
-    def test_delete_orphans_returns_zero_zero(self):
+    def test_delete_orphans_refuses_instead_of_returning_zero_zero(self):
+        """Successor to test_delete_orphans_returns_zero_zero (nexus-ingey).
+
+        The old contract returned (0, 0) so a caller could keep the signature
+        without a delete happening on a backend that cannot confirm orphan
+        status. The no-delete half was right; the RETURN was not. (0, 0) is
+        indistinguishable from "examined everything, found nothing wrong", and
+        `nx aspects gc` consumed it and printed a clean bill of health for a
+        check that never ran. The value is withheld rather than made ambiguous.
+        """
         store = self._store({})
-        result = store.delete_orphans(Path("/some/path.db"))
-        assert result == (0, 0)
+        with pytest.raises(NotImplementedError, match="nexus-ingey"):
+            store.delete_orphans(Path("/some/path.db"))
 
     def test_rename_collection(self):
         store = self._store({"/v1/aspects/rename_collection": {"updated": 5}})
@@ -605,27 +614,10 @@ class TestT2DatabaseAspectsSeam:
         finally:
             db.aspect_queue.close()
 
-    def test_sqlite_seam_when_backend_sqlite(self, tmp_path, monkeypatch):
-        """With NX_STORAGE_BACKEND=sqlite, T2Database uses the SQLite aspect stores.
-
-        RDR-152 nexus-fjwxh: the default flipped to SERVICE, so the SQLite seam
-        is now pinned explicitly (was env-unset). The per-store vars are cleared
-        so the global opt-out governs all three.
-        """
-        monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", raising=False)
-        monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_HIGHLIGHTS", raising=False)
-        monkeypatch.delenv("NX_STORAGE_BACKEND_ASPECT_QUEUE", raising=False)
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-
-        from nexus.db.t2 import T2Database
-        from nexus.db.t2.document_aspects import DocumentAspects
-        from nexus.db.t2.document_highlights import DocumentHighlights
-        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-
-        db = T2Database(tmp_path / "memory.db", run_migrations=False)
-        assert isinstance(db.document_aspects, DocumentAspects)
-        assert isinstance(db.document_highlights, DocumentHighlights)
-        assert isinstance(db.aspect_queue, AspectExtractionQueue)
+    # test_sqlite_seam_when_backend_sqlite DELETED (nexus-i711w Stage 2
+    # sub-stage A): the SQLite arms it pinned for aspect_queue and
+    # document_highlights died with their stores; the remaining
+    # document_aspects SQLite arm retires in sub-stage A3.
 
     def test_missing_port_raises(self, tmp_path, monkeypatch):
         """RuntimeError when NX_SERVICE_PORT is absent."""

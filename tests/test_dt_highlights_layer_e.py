@@ -68,17 +68,27 @@ def test_long_body_opening_with_sentinel_phrase_is_kept() -> None:
 
 # ── _ingest_highlights_record ───────────────────────────────────────────────
 
+# _register_real_doc DELETED (nexus-i711w Stage 2 sub-stage A2): it existed so
+# writes could satisfy the ENGINE's FK to catalog_documents.tumbler
+# (nexus-aqbrk) when the tests round-tripped through a real store. Both former
+# callers now route through _FakeHttpHighlights (the SQLite DocumentHighlights
+# they exercised is deleted; HttpDocumentHighlightsStore is the only store),
+# so no real registration is needed here. The FK contract itself stays pinned
+# by the engine-side store/repository tests.
+
+
 def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
-    """Patch nexus.catalog.catalog.Catalog (lazy-imported inside the helper)."""
+    """Route the dt helpers' factory-resolved catalog to a mock.
+
+    nexus-i711w: the ``nexus.catalog.catalog.Catalog`` patch that used to
+    accompany this died with the local catalog — the helpers reach the
+    catalog exclusively via the (service-only) factory seam now.
+    """
     entry = MagicMock()
     entry.tumbler = tumbler
     entry.physical_collection = collection
     cat = MagicMock()
     cat.by_source_uri.return_value = entry
-    cat._db = MagicMock()
-    CatalogMock = MagicMock(return_value=cat)
-    CatalogMock.is_initialized = staticmethod(lambda p: True)
-    monkeypatch.setattr("nexus.catalog.catalog.Catalog", CatalogMock)
     monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path)
     # RDR-146 P1.2: dt helpers reach the catalog via the factory; route
     # both reader and writer to the same mock.
@@ -92,20 +102,32 @@ def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
 
 
 def test_ingest_highlights_record_writes_store(tmp_path, monkeypatch) -> None:
+    """The ingest helper resolves the catalog entry, builds the record, and
+    writes it through the highlights store — then the SAME store seam reads it
+    back. Ported (nexus-i711w Stage 2 sub-stage A2) off the deleted SQLite
+    DocumentHighlights/T2-facade round-trip onto the
+    HttpDocumentHighlightsStore construction seam with a stateful fake; the
+    real HTTP round-trip is pinned in tests/db/test_http_aspects_stores.py."""
     from nexus.commands import dt as dt_mod
-    from nexus.db.t2.document_highlights import DocumentHighlights
 
-    _patch_catalog(monkeypatch, tmp_path,
-                   collection="knowledge__dt__voyage-context-3__v1")
-    monkeypatch.setattr("nexus.config.default_db_path", lambda: tmp_path / "memory.db")
+    _coll = "knowledge__dt__voyage-context-3__v1"
+    _patch_catalog(monkeypatch, tmp_path, tumbler="1.7", collection=_coll)
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_highlights",
                         lambda u: "## Highlights\n- x")
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_mentions",
                         lambda u: None)
+    fake = _FakeHttpHighlights()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_highlights_store.HttpDocumentHighlightsStore",
+        lambda: fake,
+    )
 
     assert dt_mod._ingest_highlights_record("ABC") is True
-    rec = DocumentHighlights(tmp_path / "memory.db").get("1.2.3")
+    # Read back through the same store seam the show command uses.
+    rec = dt_mod._open_highlights_store().get("1.7")
     assert rec is not None
+    assert rec.doc_id == "1.7"
+    assert rec.collection == _coll
     assert rec.highlights_md == "## Highlights\n- x"
     assert rec.source_uri == "x-devonthink-item://ABC"
 
@@ -165,17 +187,25 @@ def test_no_highlights_flag_skips_ingest(runner, fake_gather, monkeypatch) -> No
 
 
 def test_highlights_show_command(runner, tmp_path, monkeypatch) -> None:
+    """`nx dt highlights <tumbler>` reads through _open_highlights_store and
+    renders the record; a miss is a clean error. Ported (nexus-i711w Stage 2
+    sub-stage A2) off the deleted SQLite DocumentHighlights/T2-facade seeding
+    onto the HttpDocumentHighlightsStore construction seam."""
     from nexus.cli import main
-    from nexus.db.t2.document_highlights import DocumentHighlights, HighlightRecord
+    from nexus.db.t2.records import HighlightRecord
 
-    db = tmp_path / "memory.db"
-    DocumentHighlights(db).upsert(HighlightRecord(
-        doc_id="1.2.3", source_uri="x-devonthink-item://ABC", collection="c",
+    fake = _FakeHttpHighlights()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_highlights_store.HttpDocumentHighlightsStore",
+        lambda: fake,
+    )
+    fake.upsert(HighlightRecord(
+        doc_id="1.2", source_uri="x-devonthink-item://ABC",
+        collection="c",
         highlights_md="## Highlights\n- the point", mentions_md="",
         ingested_at="2026-05-30T00:00:00Z",
     ))
-    monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-    result = runner.invoke(main, ["dt", "highlights", "1.2.3"])
+    result = runner.invoke(main, ["dt", "highlights", "1.2"])
     assert result.exit_code == 0, result.output
     assert "the point" in result.output
     # unknown tumbler -> clean error
@@ -188,21 +218,29 @@ def test_highlights_show_command(runner, tmp_path, monkeypatch) -> None:
 
 
 class _FakeHttpHighlights:
+    """Stateful stand-in for HttpDocumentHighlightsStore: records calls AND
+    round-trips upserted records so write-then-read tests exercise the same
+    store seam the production paths share (nexus-i711w Stage 2 sub-stage A2)."""
+
     def __init__(self) -> None:
         self.upserts: list = []
         self.gets: list = []
+        self._by_doc: dict = {}
+        self._by_uri: dict = {}
 
     def upsert(self, record) -> bool:
         self.upserts.append(record)
+        self._by_doc[record.doc_id] = record
+        self._by_uri[record.source_uri] = record
         return True
 
     def get(self, doc_id):
         self.gets.append(("get", doc_id))
-        return None
+        return self._by_doc.get(doc_id)
 
     def get_by_source_uri(self, uri):
         self.gets.append(("uri", uri))
-        return None
+        return self._by_uri.get(uri)
 
 
 def test_ingest_routes_to_http_store_in_service_mode(

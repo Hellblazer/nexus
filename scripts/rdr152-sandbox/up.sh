@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # RDR-152 sandbox harness — up.sh
-# Provisions a fully isolated Postgres + Chroma + Java service sandbox.
+# Provisions a fully isolated Postgres + Java service sandbox.
 # NEVER touches prod ~/.config/nexus.
 #
 # Usage:
@@ -93,13 +93,7 @@ find_free_port() {
     python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p=s.getsockname()[1]; s.close(); print(p)"
 }
 SVC_PORT="$(find_free_port)"
-CHROMA_PORT="$(find_free_port)"
 echo "[up] Service port:  ${SVC_PORT}"
-echo "[up] Chroma port:   ${CHROMA_PORT}"
-
-# ── CHROMA DATA DIR ────────────────────────────────────────────────────────────
-CHROMA_PATH="${SANDBOX_CONFIG}/chroma"
-mkdir -p "${CHROMA_PATH}"
 
 # ── GENERATE SANDBOX TOKEN ────────────────────────────────────────────────────
 SANDBOX_TOKEN="sandbox-rdr152-$(openssl rand -hex 8)"
@@ -120,9 +114,6 @@ env \
     NX_DB_USER="${NX_DB_USER}" \
     NX_DB_PASS="${NX_DB_PASS}" \
     NX_POOL_SIZE=4 \
-    NX_CHROMA_MODE=local \
-    NX_CHROMA_PATH="${CHROMA_PATH}" \
-    NX_CHROMA_HTTP_PORT="${CHROMA_PORT}" \
     java -jar "${JAR}" \
     > "${SANDBOX_HOME}/service.log" 2>&1 &
 
@@ -187,11 +178,6 @@ export NX_DB_USER="${NX_DB_USER}"
 export NX_DB_PASS="${NX_DB_PASS}"
 export PG_PORT="${PG_PORT}"
 export PG_DATA="${PG_DATA}"
-
-# Chroma (sandbox)
-export NX_CHROMA_MODE=local
-export NX_CHROMA_PATH="${CHROMA_PATH}"
-export NX_CHROMA_HTTP_PORT=${CHROMA_PORT}
 ENV
 
 chmod 600 "${SANDBOX_ENV}"

@@ -514,7 +514,7 @@ class TestSearchDiagnostics:
 
 
 class _StubTelemetry:
-    """Stand-in for ``db.t2.telemetry.Telemetry`` capturing log_search_batch calls."""
+    """Stand-in for the telemetry store (``HttpTelemetryStore``) capturing log_search_batch calls."""
 
     def __init__(self) -> None:
         self.batches: list[list[tuple]] = []
@@ -524,8 +524,8 @@ class _StubTelemetry:
 
 
 class TestSearchTelemetryHotPath:
-    """``search_cross_corpus`` writes one row per collection to
-    ``Telemetry.log_search_batch`` when a telemetry store is injected.
+    """``search_cross_corpus`` writes one row per collection to the
+    telemetry store's ``log_search_batch`` when a telemetry store is injected.
     Row shape: ``(ts, query_hash, collection, raw_count, kept_count,
     top_distance, threshold)``. ``top_distance`` here is the min distance
     across ALL raw candidates (not just the dropped subset).
@@ -633,24 +633,13 @@ class TestSearchTelemetryHotPath:
         assert kept == 1  # no filtering → all raw are kept
         assert threshold is None
 
-    def test_duplicate_insert_is_ignored_not_raised(self, tmp_path):
-        """INSERT OR IGNORE on the real Telemetry store absorbs a duplicate PK."""
-        from nexus.db.t2.telemetry import Telemetry
-
-        telemetry = Telemetry(tmp_path / "mem.db")
-        try:
-            row = (
-                "2026-04-17T18:00:00Z", "h" * 64, "code__a",
-                3, 1, 0.30, 0.45,
-            )
-            telemetry.log_search_batch([row])
-            telemetry.log_search_batch([row])  # duplicate PK — must not raise
-            count = telemetry.conn.execute(
-                "SELECT COUNT(*) FROM search_telemetry"
-            ).fetchone()[0]
-            assert count == 1
-        finally:
-            telemetry.close()
+    # test_duplicate_insert_is_ignored_not_raised DELETED (nexus-i711w Stage 2
+    # sub-stage A2): its subject was the SQLite Telemetry store's own
+    # INSERT OR IGNORE — that store died this commit. The surviving contract
+    # (duplicate rows must not raise) lives engine-side: event-log tables use
+    # ON CONFLICT ... DO NOTHING (TelemetryRepository javadoc; exercised in
+    # TelemetryRepositoryTest + the import-dedup test in
+    # tests/db/test_http_telemetry_store.py).
 
 
 # ── nexus-1qed: _attach_display_paths catalog projection ────────────────────

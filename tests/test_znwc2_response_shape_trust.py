@@ -104,59 +104,56 @@ class TestManifestOrphansCountRequired:
         assert result["count"] == 3
 
 
-# ── 3. ingest-cloud parity: missing copied/dest is NOT 0 == 0 ────────────────
+# ── 3. manifest/chashes: count reconciled before orphan classification ───────
 
 
-class TestIngestCloudParityRequiresCounts:
-    def _run(self, per_collection: dict) -> tuple[list, list[str]]:
-        from nexus.migration.vector_etl import _delegate_ingest_cloud
+class TestManifestChashesCountReconciled:
+    """nexus-ir6eh client half: the manifest chashes list is the GC's
+    alive-set — chunks absent from it are classified orphan and DELETED.
+    A partially-truncated list therefore destroys live data silently.
+    The engine emits ``count`` since v0.1.55 (floor (0,1,58) >= that), so
+    the client reconciles ``len(chashes) == count`` and a missing count
+    field is itself a contract violation (fail loud, never optional)."""
 
-        class _Resp:
-            text = ""
+    def _client_with(self, monkeypatch: pytest.MonkeyPatch, response: Any):
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
 
-            def __init__(self, body: dict, status_code: int) -> None:
-                self._body = body
-                self.status_code = status_code
-
-            def json(self) -> dict:
-                return self._body
-
-        class _Client:
-            def post(self, url: str, **kw: Any) -> Any:
-                return _Resp({"job_id": "j1"}, 202)
-
-            def get(self, url: str, **kw: Any) -> Any:
-                return _Resp(
-                    {"state": "done", "per_collection": per_collection}, 200,
-                )
-
-            def close(self) -> None:
-                pass
-
-        return _delegate_ingest_cloud(
-            ["knowledge__k__stub-cce-1024__v1"],
-            tenant="t", database="d", api_key="k", base_url="http://x",
-            token="tok", nexus_tenant="default", http_client=_Client(),
-            sleep=lambda s: None, now=lambda: 0.0,
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(
+            c, "_get", lambda path, **params: response, raising=False,
         )
+        return c
 
-    def test_stripped_counts_route_to_fallback(self) -> None:
-        """An entry with copied/dest stripped must NOT pass parity on the
-        0 == 0 defaults and get certified 'migrated' with zero evidence —
-        it routes to the client-mediated fallback leg."""
-        results, fallback = self._run(
-            {"knowledge__k__stub-cce-1024__v1": {"status": "done"}},
-        )
-        assert results == []
-        assert fallback == ["knowledge__k__stub-cce-1024__v1"]
+    def test_missing_count_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Floor >= (0,1,55): the engine emits count unconditionally, so a
+        response without it means a field-stripping hop — refuse rather
+        than hand GC an unverifiable alive-set."""
+        c = self._client_with(monkeypatch, {"chashes": ["a" * 64]})
+        with pytest.raises(RuntimeError, match="count"):
+            c.chashes_for_collection("code__x__stub-code-1024__v1")
 
-    def test_intact_counts_still_delegate(self) -> None:
-        results, fallback = self._run(
-            {"knowledge__k__stub-cce-1024__v1": {"copied": 5, "dest": 5}},
+    def test_truncated_list_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(
+            monkeypatch, {"chashes": ["a" * 64, "b" * 64], "count": 3},
         )
-        assert fallback == []
-        assert len(results) == 1
-        assert results[0].collection == "knowledge__k__stub-cce-1024__v1"
+        with pytest.raises(RuntimeError, match="chashes"):
+            c.chashes_for_collection("code__x__stub-code-1024__v1")
+
+    def test_intact_response_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(
+            monkeypatch, {"chashes": ["a" * 64, "b" * 64], "count": 2},
+        )
+        assert c.chashes_for_collection("code__x__stub-code-1024__v1") == {
+            "a" * 64, "b" * 64,
+        }
+
+    def test_empty_intact_response_passes(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """count=0 with an empty list is a legitimate empty manifest — the
+        indexer's manifest_empty_skipping_gc guard handles it downstream."""
+        c = self._client_with(monkeypatch, {"chashes": [], "count": 0})
+        assert c.chashes_for_collection("code__x__stub-code-1024__v1") == set()
 
 
 # ── 4. merge sort: missing distance sorts LAST, never first ──────────────────
@@ -220,34 +217,6 @@ class TestDistanceKeySentinel:
 
 
 class TestWriteAckNotAssumed:
-    def test_remap_record_batch_missing_ack_raises(self) -> None:
-        """record_batch's own contract: a map fact that did not durably land
-        must abort before the target write. A response without `recorded`
-        cannot attest durability — raising beats fabricating len(page)."""
-        from nexus.migration.remap_client import HttpRemapStore
-        from nexus.migration.wire_reid import RemapEntry
-
-        store = object.__new__(HttpRemapStore)
-        store._post = lambda path, body: {}  # stripped ack
-        entry = RemapEntry(
-            tenant_id="t", source_collection="s", old_id="o",
-            new_chash="c" * 64, target_collection="tc", provenance="p",
-        )
-        with pytest.raises(RuntimeError, match="recorded"):
-            store.record_batch([entry])
-
-    def test_remap_record_batch_intact_ack_counts(self) -> None:
-        from nexus.migration.remap_client import HttpRemapStore
-        from nexus.migration.wire_reid import RemapEntry
-
-        store = object.__new__(HttpRemapStore)
-        store._post = lambda path, body: {"recorded": len(body["entries"])}
-        entry = RemapEntry(
-            tenant_id="t", source_collection="s", old_id="o",
-            new_chash="c" * 64, target_collection="tc", provenance="p",
-        )
-        assert store.record_batch([entry]) == 1
-
     @pytest.mark.parametrize("method", ["log_relevance_batch", "log_search_batch"])
     def test_telemetry_batch_missing_ack_counts_zero(self, method: str) -> None:
         """Telemetry is advisory — missing `inserted` reads as 0 (visible

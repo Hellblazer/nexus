@@ -264,7 +264,7 @@ def catalog_register(
         import json as _json  # noqa: PLC0415 — deliberate function-local import
         from pathlib import Path as _Path  # noqa: PLC0415 — deliberate function-local import
 
-        from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — function-local import avoids catalog import at module load
+        from nexus.catalog.types import make_relative  # noqa: PLC0415 — function-local import avoids catalog import at module load
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         # Relativize absolute file_path if it falls under a known repo
@@ -273,7 +273,7 @@ def catalog_register(
         # canonical repo_root; registry fills in pre-catalog installs.
         fp = file_path
         if fp and _Path(fp).is_absolute():
-            from nexus.catalog.catalog import _default_registry_path  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
+            from nexus.catalog.types import _default_registry_path  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
             from nexus.repos import list_repos_dual  # noqa: PLC0415 — branch-local import, only needed for absolute file_path relativization
 
             reg_path = _default_registry_path()
@@ -637,7 +637,12 @@ def catalog_link_audit() -> dict:
         return {"error": err}
     try:
         t3 = _get_t3()
-        return cat.link_audit(t3=t3._client)
+        # nexus-at2ff: pass the HANDLE, not ``._client``. HttpVectorClient has
+        # no such attribute, so this tool returned
+        # "'HttpVectorClient' object has no attribute '_client'" in production
+        # (swallowed into the error dict by the except below). link_audit's
+        # contract now documents the handle explicitly.
+        return cat.link_audit(t3=t3)
     except Exception as e:  # noqa: BLE001 — demoted tool handler: catch-and-return-error-dict so the call never crashes the caller
         return {"error": str(e)}
 
@@ -719,7 +724,6 @@ def main():
     import structlog  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
-    from nexus.mcp._first_run import ensure_installed_and_running  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
     from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
     configure_logging("mcp")
@@ -731,8 +735,8 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
-    # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
-    ensure_installed_and_running()
+    # NO first-run daemon install here — retired with the T2 daemon
+    # (nexus-i711w Stage 2 sub-stage B); see nexus/mcp/core.py.
     # nexus-gynt2: stranded-install detector — deliberately wired on BOTH
     # MCP servers, in contrast to the embedder advisory's single-channel-
     # on-core decision (RDR-144 P5b below): that one is cosmetic and

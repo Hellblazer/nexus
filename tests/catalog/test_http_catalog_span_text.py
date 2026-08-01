@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nexus.catalog.catalog import CatalogEntry
+from nexus.catalog.types import CatalogEntry
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.http_vector_client import VectorServiceError

@@ -226,9 +226,10 @@ def _chash_poison(store_state: StoreState) -> Playbook:
         ),
         constraints=(
             "Do NOT drop the chash length constraints.",
-            "Do NOT roll back a serving store — rollback (nx storage "
-            "migrate vectors --rollback) is reserved for the will-not-boot "
-            "class in the escape below.",
+            "Do NOT roll back a serving store — the will-not-boot class "
+            "in the escape below is handled on the LAST_MIGRATION_CAPABLE "
+            "pinned release (RDR-155 P4b: this version no longer ships "
+            "the rollback/migration tooling).",
             "Diagnostics are read-only — no DML against pgvector; the only "
             "mutating actions are the documented ladder commands in the "
             "steps.",
@@ -237,28 +238,27 @@ def _chash_poison(store_state: StoreState) -> Playbook:
             "resolve the affected legacy-id collections to their repos "
             "(nx catalog owners list) and re-index the file-backed ones "
             "(nx index repo <path> — additive, per-collection)",
-            "run nx upgrade — the substrate-etl rung converges the "
-            "re-indexed collections and the chash-rekey rung recomputes "
-            "conformant ids from stored chunk text for the rest "
-            "(store_put-only notes included)",
+            "run nx upgrade — the chash-rekey rung recomputes conformant "
+            "ids from stored chunk text (store_put-only notes included)",
             "re-run nx doctor and confirm the 'Chunk chash conformance' "
             "warning has cleared",
         ),
         deliverable=(
             "Report back: the re-indexed collection names with their row "
-            "counts, nx upgrade's rung verdict lines (substrate-etl and "
-            "chash-rekey), and the final nx doctor 'Chunk chash "
-            "conformance' line showing the warning cleared."
+            "counts, nx upgrade's chash-rekey rung verdict line, and the "
+            "final nx doctor 'Chunk chash conformance' line showing the "
+            "warning cleared."
         ),
         escape=(
             "If the service itself will NOT BOOT (Liquibase crash-loop at "
             "startup — the closed GH #1390 shape, seen on pre-v0.1.48 "
-            "char-era engines), the ladder cannot run: roll back the "
-            "poisoned target (nx storage migrate vectors --rollback), "
-            "re-index, and re-run nx guided-upgrade per runbook §8.1. If "
-            "a file-backed collection's source content is gone, skip its "
-            "re-index — the chash-rekey rung recomputes ids from stored "
-            "text; STOP and report only if the ladder itself refuses."
+            "char-era engines), the ladder cannot run: recover on the "
+            "LAST_MIGRATION_CAPABLE pinned release (install "
+            "conexus==<pin>, roll back / re-migrate there per runbook "
+            "§8.1, then return to this version). If a file-backed "
+            "collection's source content is gone, skip its re-index — the "
+            "chash-rekey rung recomputes ids from stored text; STOP and "
+            "report only if the ladder itself refuses."
         ),
         goal="let me upgrade the engine",
         incident_ref="nexus-pnwu0 / GH #1414",
@@ -373,77 +373,70 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
 
 def _migration_legacy_ids(store_state: StoreState) -> Playbook:
     """nexus-4s19o / GH #1390-adjacent (nexus-sot7v): pre-RDR-108 Chroma
-    collections carry 16/18-char chunk ids; the migration pre-gate blocks
-    them LOUDLY before any write. Recovery = runbook §8: re-index
-    file-backed collections from source, re-put note-shaped content so
-    store_put recomputes the canonical chash, then re-run the migration."""
+    collections carry 16/18-char chunk ids. RDR-155 P4b: THIS release no
+    longer ships the Chroma read path or the migration tool — recovery is
+    the pinned-release redirect: install the LAST_MIGRATION_CAPABLE
+    release, salvage + migrate there (its own remediate playbook carries
+    the full salvage choreography), then return to this version."""
     return Playbook(
         topic="migration-legacy-ids",
         context=(
-            "My conexus/nexus Chroma store has pre-RDR-108 collections with "
-            "legacy 16/18-char chunk ids; nx migrate-to-service pre-gate-"
-            "blocks them (nexus-sot7v / GH #1390 class) and I need to "
-            "remediate so the migration can complete."
+            "My conexus/nexus install still holds a pre-PG Chroma store "
+            "with pre-RDR-108 legacy 16/18-char chunk ids (nexus-sot7v / "
+            "GH #1390 class); this conexus version no longer ships the "
+            "Chroma read path or the migration tool, and I need the data "
+            "carried across."
         ),
         constraints=(
             "NEVER drop or weaken the chash length CHECK constraints to "
             "force upserts through — that exact action caused GH #1390 "
             "(silently corrupted store, crash-looping engine).",
-            "Copy, never move: take a backup of the Chroma source directory "
-            "BEFORE touching any collection, and verify the salvage "
-            "artifact exists and is non-empty BEFORE any delete.",
-            "Note-shaped knowledge__ content (no source file) exists ONLY "
-            "in Chroma — salvage it first; after RDR-155 P4b removes the "
-            "Chroma read path it is unrecoverable.",
+            "Copy, never move: back up the Chroma source directory before "
+            "anything else; this version cannot read it, so the backup is "
+            "the only local safety net.",
+            "Do NOT attempt to hand-migrate Chroma rows into Postgres from "
+            "this version — the lint-verified migration path exists only "
+            "in the pinned release.",
         ),
         steps=(
-            "back up the Chroma source dir (copy-not-move), then run "
-            "nx migrate-to-service --dry-run and list every collection the "
-            "pre-gate classifies unsupported with the legacy-id diagnostic",
-            "classify each blocked collection: file-backed (code__/docs__/"
-            "rdr__, or knowledge__ indexed from a PDF/file with a "
-            "source_uri) vs note-shaped (knowledge__ written via store_put "
-            "with no source_uri) vs derived (taxonomy centroids — "
-            "regenerated later, nothing to salvage)",
-            "salvage every note-shaped collection NOW: read each note's "
-            "text out (nx store get, or the Chroma documents field via a "
-            "direct chromadb.PersistentClient — CLI verbs route to the "
-            "service in service mode) into a local JSON artifact of "
-            "(documents + metadatas); verify it is non-empty",
-            "remove the blocked collections from the Chroma source (the "
-            "backup from step 1 is the archive), and re-run "
-            "nx migrate-to-service / nx guided-upgrade to completion",
-            "rebuild after the migration VERIFIES: nx index repo (and "
-            "nx index pdf) for the file-backed set, store_put each salvaged "
-            "note (store_put recomputes the canonical 32-char chash from "
-            "the text), then nx taxonomy discover",
+            "back up the legacy Chroma source dir (copy-not-move) and the "
+            "pre-PG SQLite files (t2.db / memory.db / .catalog.db)",
+            "install the last migration-capable release in an isolated "
+            "environment: `uv tool install conexus==<LAST_MIGRATION_"
+            "CAPABLE>` (the stranded-install banner and `nx doctor` on "
+            "this version print the exact pin)",
+            "on that pinned release, run `nx upgrade` and follow its "
+            "remediate:migration-legacy-ids playbook if the pre-gate "
+            "blocks legacy-id collections (salvage note-shaped content "
+            "first; it carries the full choreography)",
+            "verify the migration reports VERIFIED with zero failures, "
+            "then upgrade conexus back to this version",
         ),
         deliverable=(
-            "Report back: the blocked-collection list with its per-"
-            "collection classification, the salvage artifact path and note "
-            "count, the final 'Migration VERIFIED and unlocked' line, and "
-            "the rebuild commands run with their row counts."
+            "Report back: the backup paths, the pinned release installed, "
+            "the final 'Migration VERIFIED' line from the pinned release, "
+            "and confirmation this version now serves the migrated data."
         ),
         escape=(
-            "If a note-shaped collection's text cannot be read out (Chroma "
-            "dir corrupt or already deleted), STOP before removing anything "
-            "— report which collections are salvageable and which are not; "
-            "runbook §8 covers when rebuild-from-source is the only path."
+            "If the Chroma source directory is gone entirely, STOP — "
+            "nothing is salvageable and the pinned-release hop has nothing "
+            "to migrate; report that state."
         ),
-        goal="clear the pre-gate block and complete the migration",
+        goal="carry legacy Chroma-era data across via the pinned release",
         incident_ref="nexus-sot7v",
         refusal_lead=(
-            "Migration pre-gate block (nexus-sot7v / GH #1390 class): "
-            "legacy 16/18-char chunk ids cannot migrate."
+            "Legacy Chroma-era data (nexus-sot7v / GH #1390 class): this "
+            "version cannot read or migrate it — pinned-release redirect."
         ),
         closing_warning=(
-            "Do NOT drop the chash length constraints to force it through — "
-            "that is the exact action that caused GH #1390. Salvage note-"
-            "shaped content BEFORE any delete."
+            "Do NOT drop the chash length constraints to force anything "
+            "through — that is the exact action that caused GH #1390. The "
+            "pinned release owns the salvage choreography."
         ),
         force_risk=(
-            "Forcing past the pre-gate migrates nothing for the blocked "
-            "collections and strands their content in Chroma."
+            "Forcing writes from this version migrates nothing and risks "
+            "corrupting the Postgres store the pinned release would "
+            "migrate into."
         ),
         runbook_section="8",
         store_detail=store_state.detail,
@@ -470,15 +463,18 @@ def _migration_legacy_ids_forensics(store_state: StoreState) -> Playbook:
             "Do NOT drop or weaken the chash length constraints.",
         ),
         steps=(
-            "run nx migrate-to-service --dry-run and collect every "
-            "collection the pre-gate classifies unsupported with the "
-            "legacy-id diagnostic",
-            "for each, record its name-derived kind (code__/docs__/rdr__ = "
-            "file-backed; knowledge__ = check for source_uri metadata to "
-            "split file-backed from note-shaped; taxonomy centroids = "
-            "derived) and its row count",
+            "check for a legacy Chroma footprint on disk (chroma.sqlite3 "
+            "under the legacy store dir; the stranded-install banner / "
+            "nx doctor on this version already reports it) — this version "
+            "cannot read the store itself (RDR-155 P4b removed the Chroma "
+            "read path)",
+            "for each collection directory present, record its "
+            "name-derived kind (code__/docs__/rdr__ = file-backed; "
+            "knowledge__ = potentially note-shaped; taxonomy centroids = "
+            "derived)",
             "interpret: note-shaped rows are the ONLY copy of their text — "
-            "their count is the salvage workload; file-backed rows rebuild "
+            "salvage/migration runs on the LAST_MIGRATION_CAPABLE pinned "
+            "release, never on this version; file-backed rows rebuild "
             "from source at zero content risk",
         ),
         deliverable=(

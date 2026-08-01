@@ -28,16 +28,16 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 
 Run `/conexus:nx-preflight` after installing to verify all dependencies are present.
 
-The plugin's SessionStart hook auto-spawns the T2 daemon (`nx daemon
-t2 ensure-running --quiet`) on every Claude Code session start, so a
-fresh `pip install conexus` + `/plugin install conexus@nexus-plugins`
-yields a working substrate on first session without any manual
-`nx daemon t2 start` incantation. For a daemon that survives
-across reboots independent of Claude Code (recommended for any host
-with regular `nx` CLI use), run `nx daemon t2 install --autostart`
-once after install. See [Container Integration](../docs/container-integration.md)
-for the full story including dev-container TCP and Claude Cowork
-SDK-bridge transport.
+A fresh `pip install conexus` + `/plugin install conexus@nexus-plugins`
+yields a working substrate on first session with no daemon incantation
+of any kind: T2 is served by the storage service, which `nx init`
+provisions. The plugin's SessionStart hook no longer spawns anything for
+T2 — the T2 daemon was retired in favour of that service. For a storage
+service that survives reboots independent of Claude Code (recommended for
+any host with regular `nx` CLI use), run `nx daemon service install
+--autostart` once after install. See
+[Container Integration](../docs/container-integration.md) for the full
+story.
 
 **Companion plugin:**
 - **[sn](../sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.
@@ -260,6 +260,7 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 | `Stop` | `hooks/scripts/stop_verification_hook.sh` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hooks/scripts/stop_failure_hook.py` | Advisory on abnormal session termination |
 | `PreToolUse` (`Bash`) | `hooks/scripts/pre_close_verification_hook.sh` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
+| `PreToolUse` (`Agent\|Task`) | `hooks/scripts/agent-dispatch-expect.sh` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
 | `SubagentStart` | `hooks/scripts/subagent-start.sh` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/auto-approve-nx-mcp.sh` | Auto-approve nexus and nexus-catalog MCP tool calls |
 

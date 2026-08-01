@@ -1,31 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-089 Phase E: extras → fixed-column promotion mechanic.
+"""RDR-089 Phase E after the runtime verb's retirement (nexus-70x7y).
 
-Substrate at ``src/nexus/aspect_promotion.py``; CLI wrapper at
-``nx enrich aspects-promote-field``. These tests pin both surfaces.
+``promote_extras_field()`` ran a runtime ``ALTER TABLE`` + backfill against
+SQLite. That has no valid implementation under the ALL-DDL-through-Liquibase
+directive, so the verb is deleted rather than ported to the service backend:
+promoting a field is now one changeset that does the ADD COLUMN, the backfill,
+and the ``aspect_promotion_log`` insert together.
+
+These tests pin what SURVIVES — the audit-log read path on both substrates,
+and the fail-loud recipe an operator gets for the retired verb. Each assertion
+below is the successor of a test that pinned the old mechanic; the retired
+behaviour is asserted ABSENT rather than left as a hole.
 """
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from tests._t2_fixture_ops import bootstrap_migration_source
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.aspect_promotion import (
-    list_promotions, promote_extras_field,
-)
+from nexus.aspect_promotion import PROMOTION_RETIRED, list_promotions
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
 
-
-def _make_record(
-    *, source_path: str = "/p1.pdf",
-    extras: dict | None = None,
-) -> AspectRecord:
+def _make_record(*, source_path: str = "/p1.pdf", extras: dict | None = None) -> AspectRecord:
     return AspectRecord(
         collection="knowledge__delos",
         source_path=source_path,
@@ -43,288 +46,254 @@ def _make_record(
 
 
 @pytest.fixture()
-def db_with_papers(tmp_path: Path):
-    """T2 DB pre-populated with three papers carrying ``extras.venue``
-    and ``extras.year``."""
+def db_with_papers(tmp_path: Path) -> Path:
+    """T2 DB with three papers carrying ``extras.venue`` / ``extras.year``."""
     db_path = tmp_path / "promotion.db"
+    # nexus-aqbrk: build the local SQLite schema explicitly — T2Database(path)
+    # never creates it (the bootstrap machinery died with db/migrations.py in
+    # RDR-158 P4 Stage 4; the fixture executescripts a frozen DDL snapshot).
+    # Kept so the CLI tests that open this path see a well-formed
+    # migration-source file.
+    # (The legacy-history seed itself no longer touches this file — since
+    # sub-stage A3 it goes through the promotion ETL import; see
+    # _seed_legacy_history.)
+    bootstrap_migration_source(db_path)
     with T2Database(db_path) as db:
         db.document_aspects.upsert(_make_record(
-            source_path="/p1.pdf",
-            extras={"venue": "VLDB", "year": 2023},
-        ))
+            source_path="/p1.pdf", extras={"venue": "VLDB", "year": 2023}))
         db.document_aspects.upsert(_make_record(
-            source_path="/p2.pdf",
-            extras={"venue": "OSDI", "year": 2024},
-        ))
+            source_path="/p2.pdf", extras={"venue": "OSDI", "year": 2024}))
         db.document_aspects.upsert(_make_record(
-            source_path="/p3.pdf",
-            extras={"venue": "SIGMOD"},  # year missing
-        ))
-    yield db_path
+            source_path="/p3.pdf", extras={"venue": "SIGMOD"}))
+    return db_path
 
 
-# ── Substrate tests ─────────────────────────────────────────────────────────
+def _seed_legacy_history(db_path: Path, rows: list[dict]) -> None:
+    """Plant rows in the log as a pre-retirement install's history.
+
+    Ported (nexus-i711w Stage 2 sub-stage A3): the raw sqlite3 INSERT died
+    with the SQLite ``aspect_promotion_log`` read path. Post-migration, the
+    history of an install that promoted while the mechanic was live reaches
+    the engine via the promotion ETL import — so the seed IS that path:
+    ``HttpDocumentAspectsStore.import_promotion_batch`` (the RDR-176 P3
+    bulk import, ``POST /v1/aspects/promotion/import``).
+    """
+    with T2Database(db_path) as db:
+        imported = db.document_aspects.import_promotion_batch(rows)
+    assert imported == len(rows), (
+        f"promotion ETL seed: expected {len(rows)} rows imported, got {imported}"
+    )
 
 
-class TestPromoteSubstrate:
-    def test_promote_adds_column_and_backfills(self, db_with_papers: Path) -> None:
+def _history_row(
+    field_name: str,
+    sql_type: str,
+    column_added: bool,
+    rows_backfilled: int,
+    rows_pruned: int,
+    pruned: bool,
+    promoted_at: str,
+) -> dict:
+    """One pre-retirement promotion event in the ETL import's dict shape.
+
+    ``column_added`` / ``pruned`` must be real booleans — the engine's
+    importer applies ``Boolean.TRUE.equals`` (the SQLite tuples' 1/0 ints
+    would silently import as False).
+    """
+    return {
+        "field_name": field_name,
+        "sql_type": sql_type,
+        "column_added": column_added,
+        "rows_backfilled": rows_backfilled,
+        "rows_pruned": rows_pruned,
+        "pruned": pruned,
+        "promoted_at": promoted_at,
+    }
+
+
+# ── The retired verb ────────────────────────────────────────────────────────
+
+
+class TestPromotionVerbRetired:
+    """Successor to TestPromoteSubstrate: the mechanic is asserted GONE."""
+
+    def test_promote_extras_field_no_longer_exists(self) -> None:
+        """The runtime promotion entry point is deleted, not deprecated.
+
+        Successor assertion for every test that exercised ALTER TABLE +
+        backfill: a re-added runtime promoter fails here rather than
+        silently reintroducing client-side DDL.
+        """
+        import nexus.aspect_promotion as ap
+
+        assert not hasattr(ap, "promote_extras_field")
+        assert not hasattr(ap, "PromotionResult")
+
+    def test_module_runs_no_ddl(self) -> None:
+        """The module carries no CREATE/ALTER TABLE text at all.
+
+        The old module held both (the lazy audit-table bootstrap and the
+        promotion ALTER); the NO-SQLITE census froze them as debt. This
+        pins the debt at zero so a future edit cannot quietly restore it.
+        """
+        src = Path("src/nexus/aspect_promotion.py").read_text(encoding="utf-8")
+        assert "CREATE TABLE" not in src.upper()
+        # The changeset recipe in the docstring is PG DDL for Liquibase, not
+        # SQLite executed here — assert no statement is ever handed to sqlite3.
+        assert "conn.execute" not in src
+        assert "executescript" not in src
+
+    def test_retired_message_names_the_replacement_path(self) -> None:
+        """The recipe must tell the operator what to do instead — all three
+        changeset phases plus where the template lives."""
+        msg = PROMOTION_RETIRED.format(field="venue")
+        assert "venue" in msg
+        assert "Liquibase" in msg
+        assert "ADD COLUMN" in msg
+        assert "aspect_promotion_log" in msg
+        assert "aspect_promotion.py" in msg
+
+
+# ── Audit-log read path (SQLite substrate) ──────────────────────────────────
+
+
+class TestHistoryReadPath:
+    def test_empty_when_never_promoted(self, db_with_papers: Path) -> None:
+        """A migrated T2 that never promoted anything has an empty log."""
         with T2Database(db_with_papers) as db:
-            result = promote_extras_field(db, "venue", sql_type="TEXT")
+            assert list_promotions(db) == []
 
-        assert result.field_name == "venue"
-        assert result.sql_type == "TEXT"
-        assert result.column_added is True
-        assert result.rows_backfilled == 3
-        assert result.rows_pruned == 0
-        assert result.pruned is False
+    # test_absent_table_reads_empty_and_is_not_created stood here
+    # (nexus-i711w Stage 2 sub-stage A3). It pinned the SQLite store's OWN
+    # refusal to lazily bootstrap ``aspect_promotion_log`` — asserted via
+    # sqlite_master on a bare ``DocumentAspects(path)``. The store is
+    # deleted, so the subject (a client-side SQLite table that could be
+    # bootstrapped at read time) is gone; the no-client-DDL half survives
+    # as TestPromotionVerbRetired::test_module_runs_no_ddl, and the PG
+    # table is Liquibase-owned from birth (aspects-001-baseline.xml), so
+    # "absent table" is not a reachable state on the only substrate left.
 
-        # Column exists, backfilled values match extras.
-        with T2Database(db_with_papers) as db:
-            cols = {
-                r[1] for r in db.document_aspects.conn.execute(
-                    "PRAGMA table_info(document_aspects)"
-                ).fetchall()
-            }
-            assert "venue" in cols
-            rows = dict(db.document_aspects.conn.execute(
-                "SELECT source_path, venue FROM document_aspects "
-                "ORDER BY source_path"
-            ).fetchall())
-        assert rows == {
-            "/p1.pdf": "VLDB",
-            "/p2.pdf": "OSDI",
-            "/p3.pdf": "SIGMOD",
-        }
-
-    def test_promote_with_prune_removes_extras_key(
+    # Ported (nexus-i711w Stage 2 sub-stage A3, superseding the nexus-aqbrk
+    # pin): the pin's rationale — "no service-mode way to plant what the old
+    # install left behind" — stopped being true when the promotion ETL
+    # import landed (RDR-176 P3, /v1/aspects/promotion/import): that IS the
+    # channel a pre-retirement install's history arrives by after migration.
+    # _seed_legacy_history now seeds through it, so the local_t2_backend pin
+    # (whose SQLite read path is deleted) is gone.
+    def test_reads_pre_retirement_rows_oldest_first(
         self, db_with_papers: Path,
     ) -> None:
+        """An install that promoted while the mechanic was live keeps its
+        history. Successor to TestAuditLog::test_multiple_promotions_logged."""
+        _seed_legacy_history(db_with_papers, [
+            _history_row("venue", "TEXT", True, 3, 0, False, "2026-01-01T00:00:00+00:00"),
+            _history_row("year", "INTEGER", True, 2, 0, False, "2026-02-01T00:00:00+00:00"),
+            _history_row("venue", "TEXT", False, 0, 3, True, "2026-03-01T00:00:00+00:00"),
+        ])
         with T2Database(db_with_papers) as db:
-            result = promote_extras_field(
-                db, "venue", sql_type="TEXT", prune=True,
-            )
-            assert result.pruned is True
-            assert result.rows_pruned == 3
-
-            # extras should no longer carry the venue key.
-            for sp in ["/p1.pdf", "/p2.pdf", "/p3.pdf"]:
-                rec = db.document_aspects.get("knowledge__delos", sp)
-                assert "venue" not in rec.extras
-            # Other keys preserved (year on p1, p2).
-            rec = db.document_aspects.get("knowledge__delos", "/p1.pdf")
-            assert rec.extras.get("year") == 2023
-
-    def test_promote_idempotent_re_run(self, db_with_papers: Path) -> None:
-        with T2Database(db_with_papers) as db:
-            r1 = promote_extras_field(db, "venue")
-            r2 = promote_extras_field(db, "venue")
-
-        # Second call: column already added, no backfill needed
-        # (typed column is non-NULL for every row from r1).
-        assert r1.column_added is True
-        assert r2.column_added is False
-        assert r2.rows_backfilled == 0
-
-    def test_promote_skips_rows_with_existing_typed_value(
-        self, db_with_papers: Path,
-    ) -> None:
-        """If a row already has a value in the typed column (e.g. set
-        directly by an extractor), promotion does NOT overwrite it
-        from extras."""
-        with T2Database(db_with_papers) as db:
-            promote_extras_field(db, "venue")
-            # Manually overwrite p1's venue.
-            with db.document_aspects._lock:
-                db.document_aspects.conn.execute(
-                    "UPDATE document_aspects SET venue = 'OVERWRITTEN' "
-                    "WHERE source_path = ?", ("/p1.pdf",),
-                )
-                db.document_aspects.conn.commit()
-            # Re-run; the row's venue should NOT revert to extras.
-            r = promote_extras_field(db, "venue")
-            assert r.rows_backfilled == 0
-            row = db.document_aspects.conn.execute(
-                "SELECT venue FROM document_aspects WHERE source_path = ?",
-                ("/p1.pdf",),
-            ).fetchone()
-        assert row[0] == "OVERWRITTEN"
-
-    def test_promote_with_partial_extras_only_updates_present(
-        self, db_with_papers: Path,
-    ) -> None:
-        """``year`` is present on p1 + p2 but missing from p3. Only
-        the two rows that have it get backfilled."""
-        with T2Database(db_with_papers) as db:
-            r = promote_extras_field(db, "year", sql_type="INTEGER")
-            assert r.rows_backfilled == 2
-            rows = dict(db.document_aspects.conn.execute(
-                "SELECT source_path, year FROM document_aspects "
-                "ORDER BY source_path"
-            ).fetchall())
-        # p3 stays NULL because extras.year was missing.
-        assert rows == {
-            "/p1.pdf": 2023,
-            "/p2.pdf": 2024,
-            "/p3.pdf": None,
-        }
-
-    def test_promote_rejects_reserved_name(
-        self, db_with_papers: Path,
-    ) -> None:
-        with T2Database(db_with_papers) as db:
-            for name in [
-                "collection", "source_path",
-                "problem_formulation", "extras", "confidence",
-            ]:
-                with pytest.raises(ValueError, match="reserved"):
-                    promote_extras_field(db, name)
-
-    def test_promote_rejects_unsafe_identifier(
-        self, db_with_papers: Path,
-    ) -> None:
-        with T2Database(db_with_papers) as db:
-            for bad in [
-                "1leading_digit",
-                "has-hyphen",
-                "has space",
-                'has"quote',
-                "has;semi",
-                "DROP TABLE document_aspects",
-                "",
-            ]:
-                with pytest.raises(ValueError):
-                    promote_extras_field(db, bad)
-
-    def test_promote_rejects_unknown_sql_type(
-        self, db_with_papers: Path,
-    ) -> None:
-        with T2Database(db_with_papers) as db:
-            with pytest.raises(ValueError, match="sql_type"):
-                promote_extras_field(db, "venue", sql_type="BLOB")
-
-
-# ── Audit log ───────────────────────────────────────────────────────────────
-
-
-class TestAuditLog:
-    def test_promotion_logged(self, db_with_papers: Path) -> None:
-        with T2Database(db_with_papers) as db:
-            promote_extras_field(db, "venue")
             entries = list_promotions(db)
-        assert len(entries) == 1
-        e = entries[0]
-        assert e["field_name"] == "venue"
-        assert e["sql_type"] == "TEXT"
-        assert e["column_added"] is True
-        assert e["rows_backfilled"] == 3
-        assert e["pruned"] is False
 
-    def test_multiple_promotions_logged_in_order(
-        self, db_with_papers: Path,
-    ) -> None:
-        with T2Database(db_with_papers) as db:
-            promote_extras_field(db, "venue")
-            promote_extras_field(db, "year", sql_type="INTEGER")
-            promote_extras_field(db, "venue", prune=True)  # second venue with prune
-            entries = list_promotions(db)
-        assert len(entries) == 3
-        names = [e["field_name"] for e in entries]
-        assert names == ["venue", "year", "venue"]
-        # Last entry is the pruning re-run.
+        assert [e["field_name"] for e in entries] == ["venue", "year", "venue"]
+        assert entries[0]["sql_type"] == "TEXT"
+        assert entries[0]["column_added"] is True
+        assert entries[0]["rows_backfilled"] == 3
+        assert entries[0]["pruned"] is False
+        assert entries[1]["sql_type"] == "INTEGER"
         assert entries[-1]["pruned"] is True
+        assert entries[-1]["rows_pruned"] == 3
 
 
-# ── CLI tests ───────────────────────────────────────────────────────────────
+# ── CLI ─────────────────────────────────────────────────────────────────────
 
 
 class TestCLI:
-    def test_cli_promotes_and_reports(
+    def test_promote_invocation_prints_recipe_and_exits_two(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        import nexus.commands._helpers as h
+        """Successor to test_cli_promotes_and_reports: the old happy path is
+        now the fail-loud path, and it teaches the replacement."""
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+
+        result = CliRunner().invoke(enrich, ["aspects-promote-field", "venue"])
+
+        assert result.exit_code == 2, result.output
+        combined = (result.output or "") + (result.stderr or "")
+        assert "venue" in combined
+        assert "Liquibase" in combined
+        assert "Traceback" not in combined
+
+    def test_bare_invocation_exits_two(
+        self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+
+        result = CliRunner().invoke(enrich, ["aspects-promote-field"])
+
+        assert result.exit_code == 2
+        assert "Traceback" not in ((result.output or "") + (result.stderr or ""))
+
+    def test_retired_options_are_gone(
+        self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--type and --prune only fed the deleted DDL path. They must fail
+        loudly rather than linger as flags that silently do nothing."""
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
-        result = runner.invoke(
-            enrich, ["aspects-promote-field", "venue"],
-        )
-        assert result.exit_code == 0, result.output
-        assert "Added column venue TEXT" in result.output
-        assert "Backfilled 3 row(s)" in result.output
-
-    def test_cli_idempotent_re_run(
-        self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        import nexus.commands._helpers as h
-        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
-
-        runner = CliRunner()
-        runner.invoke(enrich, ["aspects-promote-field", "venue"])
-        result = runner.invoke(
-            enrich, ["aspects-promote-field", "venue"],
-        )
-        assert result.exit_code == 0
-        assert "already exists" in result.output
-
-    def test_cli_prune_flag(
-        self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        import nexus.commands._helpers as h
-        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
-
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich,
+        for argv in (
+            ["aspects-promote-field", "venue", "--type", "TEXT"],
             ["aspects-promote-field", "venue", "--prune"],
-        )
-        assert result.exit_code == 0
-        assert "Pruned 3 extras key(s)" in result.output
+        ):
+            result = runner.invoke(enrich, argv)
+            assert result.exit_code != 0, argv
+            combined = (result.output or "") + (result.stderr or "")
+            assert "no such option" in combined.lower(), combined
 
-    def test_cli_history_flag(
+    def test_history_flag_renders_entries(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        import nexus.commands._helpers as h
+        _seed_legacy_history(db_with_papers, [
+            _history_row("venue", "TEXT", True, 3, 0, False, "2026-01-01T00:00:00+00:00"),
+            _history_row("year", "INTEGER", True, 2, 0, False, "2026-02-01T00:00:00+00:00"),
+        ])
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
-        runner = CliRunner()
-        runner.invoke(enrich, ["aspects-promote-field", "venue"])
-        runner.invoke(
-            enrich,
-            ["aspects-promote-field", "year", "--type", "INTEGER"],
+        result = CliRunner().invoke(
+            enrich, ["aspects-promote-field", "--history"],
         )
-        result = runner.invoke(
-            enrich, ["aspects-promote-field", "_unused", "--history"],
-        )
-        assert result.exit_code == 0
+
+        assert result.exit_code == 0, result.output
         assert "venue" in result.output
         assert "year" in result.output
         assert "INTEGER" in result.output
 
-    def test_cli_history_empty(
+    def test_history_accepts_the_legacy_dummy_argument(
+        self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """FIELD_NAME became optional; the old ``--history <dummy>`` form that
+        operators (and scripts) already type must keep working."""
+        _seed_legacy_history(db_with_papers, [
+            _history_row("venue", "TEXT", True, 3, 0, False, "2026-01-01T00:00:00+00:00"),
+        ])
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+
+        result = CliRunner().invoke(
+            enrich, ["aspects-promote-field", "_x", "--history"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "venue" in result.output
+
+    def test_history_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        import nexus.commands._helpers as h
         empty_db = tmp_path / "empty.db"
         T2Database(empty_db).close()
         monkeypatch.setattr("nexus.config.default_db_path", lambda: empty_db)
 
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich, ["aspects-promote-field", "_x", "--history"],
+        result = CliRunner().invoke(
+            enrich, ["aspects-promote-field", "--history"],
         )
+
         assert result.exit_code == 0
         assert "No promotion history" in result.output
-
-    def test_cli_rejects_reserved_name_with_clear_error(
-        self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        import nexus.commands._helpers as h
-        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
-
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich, ["aspects-promote-field", "extras"],
-        )
-        assert result.exit_code == 2
-        assert "reserved" in result.output.lower() \
-            or "reserved" in (result.stderr or "").lower()

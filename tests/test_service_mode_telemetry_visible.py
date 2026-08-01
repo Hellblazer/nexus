@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-pyzk7: tier_writes + nx_answer_runs persist via the telemetry STORE
-(SQLite raw OR the service endpoint), never by reaching for a raw .conn the
-service-backed store lacks (which silently dropped every row)."""
+(``HttpTelemetryStore`` — the only telemetry store since nexus-i711w Stage 2
+sub-stage A deleted the SQLite ``Telemetry``), never by reaching for a raw
+``.conn`` the HTTP store lacks (which silently dropped every row)."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -32,27 +33,20 @@ def test_nx_answer_record_run_trace_true_keeps_text():
     assert kw["question"] == "q" and kw["final_text"] == "a"
 
 
-def test_canonical_and_http_telemetry_have_record_methods():
-    # Both backends expose the same record API so the consumer is backend-blind.
-    from nexus.db.t2.telemetry import Telemetry
+def test_http_telemetry_has_record_methods():
+    # nexus-i711w Stage 2 sub-stage A2: the SQLite Telemetry twin died, so the
+    # backend-parity form collapsed to pinning the record API on the sole
+    # surviving store — the consumer contract _nx_answer_record_run relies on.
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-    for cls in (Telemetry, HttpTelemetryStore):
-        assert callable(getattr(cls, "record_tier_write", None)), cls
-        assert callable(getattr(cls, "record_nx_answer_run", None)), cls
+    assert callable(getattr(HttpTelemetryStore, "record_tier_write", None))
+    assert callable(getattr(HttpTelemetryStore, "record_nx_answer_run", None))
 
 
-def test_canonical_telemetry_record_persists(tmp_path):
-    # Real SQLite round-trip through the canonical store method.
-    from nexus.db.t2.telemetry import Telemetry
-    t = Telemetry(tmp_path / "tel.db")
-    t.record_tier_write(session_id="s", ts="2026-01-01T00:00:00+00:00",
-                        tool="x", tier="T2", project="p")
-    t.record_nx_answer_run(question="q", plan_id=None, matched_confidence=None,
-                           step_count=1, final_text="a", cost_usd=0.0, duration_ms=1)
-    n_tw = t.conn.execute("SELECT count(*) FROM tier_writes").fetchone()[0]
-    n_ar = t.conn.execute("SELECT count(*) FROM nx_answer_runs").fetchone()[0]
-    t.close()
-    assert n_tw == 1 and n_ar == 1
+# test_canonical_telemetry_record_persists DELETED (nexus-i711w Stage 2
+# sub-stage A2): its subject was the SQLite Telemetry store's own round-trip;
+# that store died this commit. Persistence of tier_writes / nx_answer_runs is
+# covered by test_http_telemetry_record_posts_to_endpoints below plus the
+# engine-side TelemetryRepositoryTest.java.
 
 
 def test_record_run_store_failure_warns_once_and_does_not_raise():
@@ -111,31 +105,19 @@ def test_http_telemetry_record_posts_to_endpoints():
 # so consumers are backend-blind, and make a failed persist VISIBLE.
 
 
-def test_canonical_and_http_telemetry_have_record_hook_failure():
-    from nexus.db.t2.telemetry import Telemetry
+def test_http_telemetry_has_record_hook_failure():
+    # nexus-i711w Stage 2 sub-stage A2: SQLite twin died; pin the sole
+    # surviving store's record API (the hook_registry consumer contract).
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-    for cls in (Telemetry, HttpTelemetryStore):
-        assert callable(getattr(cls, "record_hook_failure", None)), cls
+    assert callable(getattr(HttpTelemetryStore, "record_hook_failure", None))
 
 
-def test_canonical_hook_failure_persists_all_chains(tmp_path):
-    from nexus.db.t2.telemetry import Telemetry
-    t = Telemetry(tmp_path / "tel.db")
-    t.record_hook_failure(doc_id="d1", collection="c", hook_name="h",
-                          error="boom", chain="single")
-    t.record_hook_failure(doc_id="d2", collection="c", hook_name="h",
-                          error="boom", chain="batch",
-                          batch_doc_ids='["d2","d3"]', is_batch=True)
-    t.record_hook_failure(doc_id="/p/x", collection="c", hook_name="h",
-                          error="boom", chain="document")
-    rows = t.conn.execute(
-        "SELECT doc_id, chain, is_batch, batch_doc_ids FROM hook_failures "
-        "ORDER BY id"
-    ).fetchall()
-    t.close()
-    assert len(rows) == 3
-    assert [r[1] for r in rows] == ["single", "batch", "document"]
-    assert rows[1][2] == 1 and rows[1][3] == '["d2","d3"]'
+# test_canonical_hook_failure_persists_all_chains DELETED (nexus-i711w Stage 2
+# sub-stage A2): subject was the SQLite store's own hook_failures round-trip.
+# Chain routing (single/batch/document) stays pinned by
+# test_hook_failure_routes_through_telemetry_store below; the wire shape by
+# test_http_hook_failure_posts_to_record_endpoint; persistence engine-side in
+# TelemetryRepositoryTest.java (hook_failures fidelity tests).
 
 
 def test_http_hook_failure_posts_to_record_endpoint():

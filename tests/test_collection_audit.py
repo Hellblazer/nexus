@@ -5,6 +5,20 @@ Four sections in one report: distance histogram, top-5 cross-projections,
 orphan chunks, hub-topic assignments. Section 1 (distance histogram)
 ships telemetry-only in this bead; the live-probe fallback is deferred
 to follow-up bead ``nexus-fx2d``.
+
+CATALOG SUBSTRATE (nexus-i711w terminal deletion). Seven of the eleven tests
+— the live-distance-probe section and the chash-coverage section — never
+touch a catalog at all and are unaffected.
+
+The remaining FOUR are PORT-BLOCKED on nexus-e9ru2 and are annotated at
+their own sites: ``TestOrphanChunks`` (both) plus the two
+``TestCollectionAuditCli`` tests that monkeypatch ``_open_catalog_conn``.
+They pass a raw ``sqlite3.Connection`` into ``compute_orphan_chunks``, whose
+production ``_open_catalog_conn`` seam now returns ``None`` (degraded by
+design) but survives precisely as this fixture's injection point. The
+fixture carries its own two-table DDL (``_ORPHAN_AUDIT_DDL``) since
+``nexus/catalog/catalog_db.py`` is deleted. They are the sole coverage of
+``compute_orphan_chunks`` repo-wide, so they stay rather than being dropped.
 """
 from __future__ import annotations
 
@@ -15,22 +29,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 from tests.conftest import make_vector_test_client
-
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
-# RDR-155 P4b P0a' dies-roster: the collection-audit T2 diagnostic sections
-# (distance histogram / cross-projections / hubs) are raw-SQLite SELECTs over
-# ``db.taxonomy.conn`` — DELIBERATELY degraded to empty in service mode
-# (nexus-9613q.4). The chash-coverage drift ratio is likewise a genuine
-# signal only on the SQLite substrate (service mode is a tautology by design,
-# RDR-187 nexus-piwya.3/.4). Tests asserting those SQLite-populated sections
-# die at the flip.
-_sqlite_audit_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: raw-SQLite T2 audit diagnostics (taxonomy_conn "
-    "SELECTs / sqlite chash_index drift ratio) die at the RDR-155 P4b flip; "
-    "service mode degrades these sections by design (nexus-9613q.4)",
-)
 
 
 def _clean_ephemeral_client():
@@ -57,82 +55,63 @@ def runner() -> CliRunner:
 
 
 def _seed_t2(path: Path) -> None:
-    """Build a T2 DB with topics, topic_assignments, and search_telemetry
-    seeded for a ``code__main`` collection under audit plus a few others
-    so cross-projection + hub queries have data."""
-    from nexus.db.storage_mode import has_raw_access
+    """No-op: the audit's T2 diagnostic sections are degraded by design.
+
+    The topics / topic_assignments / search_telemetry seeding this built
+    died with the SQLite stores (nexus-9613q.4 degrade contract; RDR-158
+    P3 nexus-7bomn removed the selector). Kept as a seam so the CLI tests
+    below keep their call shape.
+    """
     from nexus.db.t2 import T2Database
 
     db = T2Database(path)
-    if not has_raw_access(db.taxonomy):
-        # Engine substrate (RDR-155 P4b P0a'): the audit's T2 diagnostic
-        # sections are service-mode-degraded by design (nexus-9613q.4), so
-        # there is nothing meaningful to seed — callers that assert on
-        # SQLite-populated sections carry a dies-roster skip instead.
-        db.close()
-        return
-    c = db.taxonomy.conn
-    c.executemany(
-        "INSERT OR IGNORE INTO topics "
-        "(id, label, collection, created_at) VALUES (?, ?, ?, ?)",
-        [
-            (1, "auth",    "code__main",    "2026-04-01"),
-            (2, "search",  "code__main",    "2026-04-01"),
-            (3, "db",      "docs__alpha",   "2026-04-01"),
-            (4, "misc",    "code__other",   "2026-04-01"),
-            (5, "hub-A",   "code__main",    "2026-04-01"),  # high-src hub
-            (6, "hub-B",   "code__main",    "2026-04-01"),
-        ],
-    )
-    # topic_assignments:
-    # - topic 3 (docs__alpha) gets multiple chunks from code__main → cross-projection pair.
-    # - topic 4 (code__other) gets 1 chunk from code__main → another pair.
-    # - topics 5 and 6 get chunks from many source collections → they're cross-coll hubs.
-    c.executemany(
-        "INSERT INTO topic_assignments "
-        "(doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        [
-            # code__main → docs__alpha/db (3 shared docs, avg sim 0.7)
-            ("cm1", 3, "projection", 0.8, "2026-04-01", "code__main"),
-            ("cm2", 3, "projection", 0.7, "2026-04-01", "code__main"),
-            ("cm3", 3, "projection", 0.6, "2026-04-01", "code__main"),
-            # code__main → code__other/misc (1 shared doc, avg sim 0.5)
-            ("cm4", 4, "projection", 0.5, "2026-04-01", "code__main"),
-            # Hub-A (topic 5) gets chunks from 3 source collections → hub
-            ("cm5", 5, "projection", 0.9, "2026-04-01", "code__main"),
-            ("hx",  5, "projection", 0.9, "2026-04-01", "docs__alpha"),
-            ("hy",  5, "projection", 0.9, "2026-04-01", "code__other"),
-            # Hub-B (topic 6) gets chunks from 2 source collections
-            ("cm6", 6, "projection", 0.85, "2026-04-01", "code__main"),
-            ("hy2", 6, "projection", 0.85, "2026-04-01", "code__other"),
-        ],
-    )
-    c.commit()
-    # search_telemetry: seed 15 rows for code__main in the last 30d
-    # with top_distance values spread across buckets.
-    now = datetime.now(UTC)
-    tel_rows = []
-    dists = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 1.05,
-             1.25, 0.15, 0.25, 0.35, 0.45]  # 15 samples
-    for i, d in enumerate(dists):
-        ts = (now - timedelta(days=1)).isoformat()
-        tel_rows.append(
-            (ts, f"hash{i:04d}", "code__main", 5, 3, d, 0.45),
-        )
-    db.telemetry.log_search_batch(tel_rows)
     db.close()
 
 
+#: Minimal DDL for the two tables ``compute_orphan_chunks`` anti-joins.
+#: nexus-i711w terminal deletion: this used to import ``_SCHEMA_SQL`` from
+#: ``nexus.catalog.catalog_db``, which is deleted. The production seam these
+#: tests exercise SURVIVES on purpose (``_open_catalog_conn`` stays a
+#: monkeypatchable function precisely for this fixture — see its docstring),
+#: so the fixture carries its own schema for the columns the query reads.
+_ORPHAN_AUDIT_DDL = """
+CREATE TABLE documents (
+    tumbler TEXT PRIMARY KEY,
+    title TEXT,
+    author TEXT,
+    year INTEGER,
+    content_type TEXT,
+    file_path TEXT,
+    corpus TEXT,
+    physical_collection TEXT,
+    chunk_count INTEGER,
+    head_hash TEXT,
+    indexed_at TEXT,
+    metadata TEXT
+);
+CREATE TABLE links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_tumbler TEXT,
+    to_tumbler TEXT,
+    link_type TEXT,
+    created_by TEXT
+);
+"""
+
+
 def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
-    """Build a minimal catalog SQLite cache directly — skip the
-    JSONL/git facade that would rebuild from source on first open."""
+    """Build a minimal catalog-shaped SQLite DB for the orphan-audit seam.
+
+    nexus-e9ru2 / nexus-i711w: ``compute_orphan_chunks`` still takes a raw
+    ``sqlite3.Connection`` (its only remaining audience is a pre-migration
+    SQLite catalog handed in via the ``_open_catalog_conn`` monkeypatch
+    seam); its four callers here remain its sole repo-wide coverage until
+    e9ru2 provides a service-side orphan query.
+    """
     import sqlite3
 
-    from nexus.catalog.catalog_db import _SCHEMA_SQL
-
     conn = sqlite3.connect(str(db_path))
-    conn.executescript(_SCHEMA_SQL)
+    conn.executescript(_ORPHAN_AUDIT_DDL)
     old_ts = (datetime.now(UTC) - timedelta(days=45)).isoformat()
     new_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
     conn.executemany(
@@ -159,57 +138,21 @@ def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
     return conn
 
 
-# ── Section 2: cross-projections ────────────────────────────────────────────
-
-
-class TestCrossProjections:
-    @_sqlite_audit_dies_at_flip
-    def test_ranked_by_score_shared_x_similarity(self, tmp_path: Path) -> None:
-        from nexus.collection_audit import compute_cross_projections
-        from nexus.db.t2 import T2Database
-
-        db_path = tmp_path / "memory.db"
-        _seed_t2(db_path)
-        db = T2Database(db_path)
-        try:
-            pairs = compute_cross_projections(
-                db.taxonomy.conn, "code__main", top_n=5,
-            )
-        finally:
-            db.close()
-
-        # code__main → docs__alpha is higher-score than → code__other.
-        names = [p.other_collection for p in pairs]
-        assert "docs__alpha" in names
-        assert "code__other" in names
-        idx_alpha = names.index("docs__alpha")
-        idx_other = names.index("code__other")
-        assert idx_alpha < idx_other
-        # code__main should NOT project to itself even though topics 5/6
-        # are in code__main (that's not cross-projection).
-        assert "code__main" not in names
-
-    @_sqlite_audit_dies_at_flip
-    def test_empty_when_no_projection_rows(self, tmp_path: Path) -> None:
-        from nexus.collection_audit import compute_cross_projections
-        from nexus.db.t2 import T2Database
-
-        db_path = tmp_path / "memory.db"
-        _seed_t2(db_path)
-        db = T2Database(db_path)
-        try:
-            pairs = compute_cross_projections(
-                db.taxonomy.conn, "code__unseen", top_n=5,
-            )
-        finally:
-            db.close()
-        assert pairs == []
-
-
 # ── Section 3: orphan chunks ────────────────────────────────────────────────
 
 
 class TestOrphanChunks:
+    """PORT-BLOCKED on nexus-e9ru2 — DO NOT convert, weaken, or delete.
+
+    ``compute_orphan_chunks`` takes a raw ``sqlite3.Connection`` and runs a
+    local-catalog ``documents``/``links`` anti-join. In service mode the audit
+    is degraded BY DESIGN (``src/nexus/collection_audit.py``:376-382) — there
+    is no service-side orphan query to point these at, so a "port" could only
+    assert that nothing is computed. These two are the ONLY coverage of
+    ``compute_orphan_chunks`` repo-wide and become its regression tests when
+    e9ru2 provides a service-side equivalent.
+    """
+
     def test_flags_old_unlinked_documents(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_orphan_chunks
 
@@ -241,74 +184,6 @@ class TestOrphanChunks:
         assert orphans == []
 
 
-# ── Section 4: hub assignments ──────────────────────────────────────────────
-
-
-class TestHubAssignments:
-    @_sqlite_audit_dies_at_flip
-    def test_top_10_by_source_collection_breadth(self, tmp_path: Path) -> None:
-        from nexus.collection_audit import compute_hub_assignments
-        from nexus.db.t2 import T2Database
-
-        db_path = tmp_path / "memory.db"
-        _seed_t2(db_path)
-        db = T2Database(db_path)
-        try:
-            hubs = compute_hub_assignments(
-                db.taxonomy.conn, "code__main", top_n=10,
-            )
-        finally:
-            db.close()
-
-        # Topic 5 (hub-A) sees chunks from 3 collections; topic 6 from 2;
-        # topic 3 from 1 (only code__main); topic 4 from 1 (only code__main).
-        # Assuming "hub" threshold is simply top-N by src_count, all topics
-        # appear in the top-10; code__main chunks in each:
-        by_id = {h.topic_id: h for h in hubs}
-        # code__main contributes 1 chunk (cm5) to topic 5.
-        assert by_id[5].chunks_in_hub == 1
-        # code__main contributes 1 chunk (cm6) to topic 6.
-        assert by_id[6].chunks_in_hub == 1
-
-
-# ── Section 1: distance histogram (telemetry-only for this bead) ────────────
-
-
-class TestDistanceHistogramTelemetryOnly:
-    @_sqlite_audit_dies_at_flip
-    def test_buckets_cover_0_to_2_in_10_bins(self, tmp_path: Path) -> None:
-        from nexus.collection_audit import compute_distance_histogram
-        from nexus.db.t2 import T2Database
-
-        db_path = tmp_path / "memory.db"
-        _seed_t2(db_path)
-        db = T2Database(db_path)
-        try:
-            hist = compute_distance_histogram(
-                db.taxonomy.conn, "code__main",
-            )
-        finally:
-            db.close()
-        assert len(hist.buckets) == 10
-        assert sum(hist.buckets) == hist.sample_size == 15
-        assert hist.source == "telemetry"
-
-    @_sqlite_audit_dies_at_flip
-    def test_reports_empty_source_when_no_rows(self, tmp_path: Path) -> None:
-        from nexus.collection_audit import compute_distance_histogram
-        from nexus.db.t2 import T2Database
-
-        db_path = tmp_path / "memory.db"
-        _seed_t2(db_path)
-        db = T2Database(db_path)
-        try:
-            hist = compute_distance_histogram(db.taxonomy.conn, "code__cold")
-        finally:
-            db.close()
-        assert hist.sample_size == 0
-        assert hist.source == "empty"
-
-
 # ── Section 1: live-probe fallback (nexus-fx2d) ─────────────────────────────
 
 
@@ -319,7 +194,7 @@ class TestLiveDistanceProbe:
     def _ephemeral_collection_with_embeddings(self, name: str):
         """Seed a Chroma EphemeralClient collection with N deterministic
         embeddings so ``col.query`` returns repeatable distances."""
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
         client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
@@ -373,7 +248,7 @@ class TestLiveDistanceProbe:
 
     def test_live_histogram_empty_when_collection_empty(self) -> None:
         from nexus.collection_audit import compute_live_distance_histogram
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
         client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
@@ -387,31 +262,6 @@ class TestLiveDistanceProbe:
         assert hist.source == "empty"
         assert hist.sample_size == 0
 
-    @_sqlite_audit_dies_at_flip
-    def test_run_audit_uses_live_probe_only_when_telemetry_is_cold(
-        self, tmp_path: Path,
-    ) -> None:
-        """If warm telemetry already exists the live probe must not
-        fire — keeps the audit cheap and avoids rate-limit contention."""
-        from nexus.collection_audit import run_collection_audit
-        from unittest.mock import patch
-
-        _seed_t2(tmp_path / "memory.db")
-
-        # make_t3 must never be called because telemetry is warm.
-        sentinel_called = {"hit": False}
-
-        class ExplodingT3:
-            def get_or_create_collection(self_, name):
-                sentinel_called["hit"] = True
-                raise AssertionError("live probe fired despite warm telemetry")
-
-        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"):
-            report = run_collection_audit(
-                "code__main", live=True, t3=ExplodingT3(),
-            )
-        assert sentinel_called["hit"] is False
-        assert report.distance_histogram.source == "telemetry"
 
     def test_run_audit_falls_back_to_live_when_telemetry_empty(
         self, tmp_path: Path,
@@ -437,114 +287,47 @@ class TestLiveDistanceProbe:
 # ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
 
 
+class _FakeChashIndex:
+    """Stand-in for ``HttpChashIndex`` — the only chash index since
+    nexus-i711w Stage 2 sub-stage A deleted the SQLite ``ChashIndex``.
+    ``compute_chash_coverage`` constructs it via the function-local
+    ``nexus.db.t2.http_chash_index.HttpChashIndex`` seam, so tests
+    monkeypatch that attribute with a factory returning this fake."""
+
+    def __init__(self, count: int = 0, chashes: set[str] | None = None) -> None:
+        self._count = count
+        self._chashes = chashes or set()
+        self.closed = False
+
+    def count_for_collection(self, collection: str) -> int:
+        return self._count
+
+    def registered_chashes_for_collection(self, collection: str) -> set[str]:
+        return set(self._chashes)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class TestChashCoverageSection:
     """Audit section 5 ratio + missing_sample shape.
 
     The production ``compute_chash_coverage`` hits T3 for the total
-    chunk count. We exercise the pure-T2 path by stubbing make_t3's
-    collection.count() so the test is deterministic without network.
+    chunk count and the HTTP chash index for the indexed-row count. Both
+    are stubbed (``_FakeChashIndex`` + a fake T3) so the test is
+    deterministic without network. (Ported off the deleted SQLite
+    ``ChashIndex`` seed in nexus-i711w Stage 2 sub-stage A2.)
     """
-
-    def _seed_chash_index(self, db_path: Path, rows: list[tuple[str, str, str]]):
-        """Seed ``chash_index`` rows: (chash, collection, doc_id)."""
-        from nexus.db.t2.chash_index import ChashIndex
-
-        idx = ChashIndex(db_path)
-        try:
-            for chash, coll, doc_id in rows:
-                idx.upsert(chash=chash, collection=coll)
-        finally:
-            idx.close()
-
-    @_sqlite_audit_dies_at_flip
-    def test_full_coverage_ratio_1(self, tmp_path: Path, monkeypatch) -> None:
-        from nexus.collection_audit import compute_chash_coverage
-
-        db_path = tmp_path / "memory.db"
-        self._seed_chash_index(db_path, [
-            ("h0", "code__x", "id0"),
-            ("h1", "code__x", "id1"),
-            ("h2", "code__x", "id2"),
-        ])
-
-        class _FakeCol:
-            def count(self): return 3
-        class _FakeT3:
-            def get_or_create_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
-
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
-
-        cov = compute_chash_coverage("code__x")
-        assert cov is not None
-        assert cov.total_chunks == 3
-        assert cov.indexed_rows == 3
-        assert cov.ratio == 1.0
-        assert cov.missing_sample == []
-
-    @_sqlite_audit_dies_at_flip
-    def test_partial_coverage_ratio_less_than_one(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from nexus.collection_audit import compute_chash_coverage
-
-        db_path = tmp_path / "memory.db"
-        # RDR-108 D1: T3 chunk natural ID == chash[:32]. Only 2 of 4
-        # chunks indexed: h0, h1 (live), h2, h3 (T3 has them but
-        # chash_index does not, so they are the audit's "missing" sample).
-        self._seed_chash_index(db_path, [
-            ("h0" * 32, "code__x", ("h0" * 32)[:32]),
-            ("h1" * 32, "code__x", ("h1" * 32)[:32]),
-        ])
-
-        class _FakeCol:
-            def count(self): return 4
-            def get(self, **kwargs):
-                return {
-                    "ids": [
-                        ("h0" * 32)[:32],
-                        ("h1" * 32)[:32],
-                        ("h2" * 32)[:32],
-                        ("h3" * 32)[:32],
-                    ],
-                    "metadatas": [{}, {}, {}, {}],
-                }
-        class _FakeT3:
-            def get_or_create_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
-
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
-
-        cov = compute_chash_coverage("code__x")
-        assert cov is not None
-        assert cov.total_chunks == 4
-        assert cov.indexed_rows == 2
-        assert cov.ratio == 0.5
-        # Missing-sample contains the non-indexed chash[:32] values.
-        assert set(cov.missing_sample).issubset({
-            ("h2" * 32)[:32], ("h3" * 32)[:32],
-        })
-        assert len(cov.missing_sample) == 2
 
     def test_empty_t3_collection_returns_none_ratio(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
         from nexus.collection_audit import compute_chash_coverage
 
-        db_path = tmp_path / "memory.db"
-        self._seed_chash_index(db_path, [])
+        idx = _FakeChashIndex(count=0)
+        monkeypatch.setattr(
+            "nexus.db.t2.http_chash_index.HttpChashIndex", lambda: idx,
+        )
 
         class _FakeCol:
             def count(self): return 0
@@ -552,12 +335,7 @@ class TestChashCoverageSection:
             def get_or_create_collection(self, _n): return _FakeCol()
             # nexus-8lbe: compute_chash_coverage now uses get_collection
             def get_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
 
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__empty")
@@ -565,20 +343,8 @@ class TestChashCoverageSection:
         assert cov.total_chunks == 0
         assert cov.indexed_rows == 0
         assert cov.ratio is None
+        assert idx.closed, "coverage probe must close the chash index"
 
-    @_sqlite_audit_dies_at_flip
-    def test_missing_t2_returns_none(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from nexus.collection_audit import compute_chash_coverage
-
-        # T2 file does not exist.
-        monkeypatch.setattr(
-            "nexus.config.default_db_path",
-            lambda: tmp_path / "nonexistent.db",
-        )
-        cov = compute_chash_coverage("code__x")
-        assert cov is None
 
     def test_missing_t3_collection_does_not_create_zombie(
         self, tmp_path: Path, monkeypatch,
@@ -595,12 +361,14 @@ class TestChashCoverageSection:
         audit catches and returns total_chunks=None.
         ``get_or_create_collection`` MUST NOT be called.
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
 
         from nexus.collection_audit import compute_chash_coverage
 
-        db_path = tmp_path / "memory.db"
-        self._seed_chash_index(db_path, [])
+        monkeypatch.setattr(
+            "nexus.db.t2.http_chash_index.HttpChashIndex",
+            lambda: _FakeChashIndex(count=0),
+        )
 
         get_or_create_calls: list[str] = []
 
@@ -614,9 +382,6 @@ class TestChashCoverageSection:
             def get_collection(self, name):
                 raise _ChromaNotFoundError(f"Collection {name} not found")
 
-        monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: db_path,
-        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__never_created")
@@ -635,9 +400,21 @@ class TestChashCoverageSection:
 
 
 class TestCollectionAuditCli:
+    """The first two tests here are PORT-BLOCKED on nexus-e9ru2 alongside
+    ``TestOrphanChunks``: both monkeypatch
+    ``nexus.collection_audit._open_catalog_conn`` to hand the verb a raw
+    local-catalog ``sqlite3.Connection`` seeded by ``_seed_catalog_conn``, and
+    both assert the ORPHAN section is present in the report. In service mode
+    that section is degraded by design, so the assertion has no service-mode
+    form yet. The third (``--live``) test needs no catalog and is unaffected.
+    """
+
     def test_default_output_covers_four_sections(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
+        """PORT-BLOCKED — nexus-e9ru2. Asserts the ``orphan`` section renders;
+        see the class docstring.
+        """
         from nexus.cli import main
 
         db_path = tmp_path / "memory.db"
@@ -664,6 +441,9 @@ class TestCollectionAuditCli:
     def test_json_flag_emits_parseable_payload(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
+        """PORT-BLOCKED — nexus-e9ru2. Asserts ``payload["orphans"]``; see the
+        class docstring.
+        """
         import json
         from nexus.cli import main
 
@@ -697,7 +477,7 @@ class TestCollectionAuditCli:
         """nexus-fx2d — ``--live`` promotes source="empty" → source="live"
         by probing ChromaDB for chunks that have never been searched."""
         import json
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
         from unittest.mock import patch
 
         from nexus.cli import main

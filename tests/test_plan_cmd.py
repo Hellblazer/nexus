@@ -1,21 +1,30 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for ``nx plan`` CLI commands. RDR-092 Phase 0d.2.
 
-``nx plan repair`` is the Day-2 ops command that re-runs the
-:func:`nexus.db.migrations._backfill_plan_dimensions` heuristic
-against the live T2 DB and surfaces low-confidence rows so the
-operator can correct the heuristic's edge cases manually.
+Ported to the engine substrate (nexus-i711w Stage 2 sub-stage A3): the
+SQLite ``PlanLibrary`` was deleted, so seeding goes through
+``T2Database(tmp).plans`` — a real engine-backed ``HttpPlanLibrary`` on
+the per-test tenant the autouse ``_pin_t2_substrate`` fixture mints.
+``_open_plan_library`` in the CLI constructs ``HttpPlanLibrary()`` from
+the same env, so the CliRunner invocations read and write exactly the
+rows the ``plan_db`` fixture seeds (the shape test_plan_disable.py
+established).
+
+The ``nx plan repair`` verb group DIED with the SQLite store
+([21098] verb fates: `nx plan repair` D) — its tests are tombstoned
+below, not ported.
 """
 from __future__ import annotations
 
-import sqlite3
+import json
+
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.t2 import T2Database
 
 
 @pytest.fixture()
@@ -23,119 +32,23 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def _seed_plans(tmp_path: Path) -> Path:
-    """Return a DB path with a minimal schema + a NULL-dimension row."""
-    from nexus.db.migrations import apply_pending
-    from nexus.commands.upgrade import _current_version
-
-    db_path = tmp_path / "memory.db"
-    conn = sqlite3.connect(str(db_path))
-    apply_pending(conn, _current_version())
-    conn.close()
-    return db_path
+# The autouse ``_pin_plans_to_local_snapshot`` fixture
+# (NX_STORAGE_BACKEND_PLANS=sqlite) was DELETED with the seam it pinned
+# (nexus-i711w sub-stage A3): T2Database and ``_open_plan_library`` now
+# construct HttpPlanLibrary unconditionally, so there is no local snapshot
+# for the pin to select.
 
 
-def _insert_null_dim_plan(db_path: Path, query: str, tags: str = "") -> int:
-    """Insert a row bypassing the migration so dimensions is NULL again."""
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.execute(
-        "INSERT INTO plans (query, plan_json, outcome, tags, created_at) "
-        "VALUES (?, '{}', 'success', ?, datetime('now'))",
-        (query, tags),
-    )
-    conn.commit()
-    # Strip the dimensions set by apply_pending's inline backfill.
-    conn.execute(
-        "UPDATE plans SET dimensions = NULL, verb = NULL, "
-        "name = NULL, scope = NULL WHERE id = ?",
-        (cursor.lastrowid,),
-    )
-    conn.commit()
-    conn.close()
-    return cursor.lastrowid
-
-
-class TestPlanRepair:
-    def test_repair_idempotent(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """Running ``nx plan repair`` twice in a row must be a no-op the
-        second time: the first run backfills the NULL rows, the second
-        finds nothing to do.
-        """
-        db_path = _seed_plans(tmp_path)
-        _insert_null_dim_plan(db_path, "analyze the ranker")
-
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            first = runner.invoke(main, ["plan", "repair", "dimensions"])
-        assert first.exit_code == 0, first.output
-        assert "backfilled" in first.output.lower()
-
-        # Second run: nothing to backfill.
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            second = runner.invoke(main, ["plan", "repair", "dimensions"])
-        assert second.exit_code == 0, second.output
-        # "nothing to do" / "0 backfilled" — must not assert the exact
-        # phrasing, but the number must be zero.
-        assert "backfilled: 0" in second.output.lower() or (
-            "0 backfilled" in second.output.lower()
-        ) or (
-            "nothing" in second.output.lower()
-        )
-
-    def test_repair_lists_low_conf_first(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """Low-confidence rows (wh-fallback hits) should surface at the
-        top of the report so the operator can audit them first.
-        """
-        db_path = _seed_plans(tmp_path)
-        # Two NULL-dim rows: one stem-match (analyze), one wh-fallback
-        # (only "what" matches).
-        _insert_null_dim_plan(db_path, "analyze the ranker output")
-        _insert_null_dim_plan(db_path, "what about the graph")
-
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "repair", "dimensions"])
-        assert result.exit_code == 0, result.output
-        output = result.output.lower()
-        # The low-conf row is named and appears in the review section.
-        assert "backfill-low-conf" in output
-        assert "what about the graph" in output
-        # The high-conf row is counted but not individually listed in
-        # the review surface.
-        assert (
-            "1 low-conf row" in output
-            or "1 row needs review" in output
-            or "low_conf: 1" in output
-        )
-
-    def test_repair_no_db_file(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """When T2 DB doesn't exist yet, repair exits cleanly with a
-        'nothing to do' message rather than a traceback.
-        """
-        db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "repair", "dimensions"])
-        assert result.exit_code == 0
-        assert "not found" in result.output.lower()
-
-
-# ── nx plan list / show / delete / reseed (nexus-la28) ─────────────────────
+@pytest.fixture
+def plan_db(tmp_path: Path) -> T2Database:
+    """Engine-backed T2Database; ``plan_db.plans`` is HttpPlanLibrary."""
+    database = T2Database(tmp_path / "plans.db")
+    yield database
+    database.close()
 
 
 def _seed_plan_row(
-    db_path: Path,
+    db: T2Database,
     *,
     name: str,
     query: str,
@@ -143,61 +56,66 @@ def _seed_plan_row(
     scope: str = "global",
     project: str = "",
     tags: str = "",
-    dimensions_json: str | None = None,
     plan_json: str = '{"steps": []}',
 ) -> int:
-    """Insert a fully-populated plan row directly via SQL."""
-    if dimensions_json is None:
-        dimensions_json = _json_dumps(
-            {"verb": verb, "scope": scope, "strategy": "default"}
-        )
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.execute(
-        "INSERT INTO plans "
-        "(project, query, plan_json, outcome, tags, created_at, "
-        " name, verb, scope, dimensions) "
-        "VALUES (?, ?, ?, 'success', ?, datetime('now'), ?, ?, ?, ?)",
-        (project, query, plan_json, tags, name, verb, scope, dimensions_json),
+    """Seed one plan through the public save path and return its row id.
+
+    ``dimensions`` is left NULL so rows never collide on the
+    ``UNIQUE (project, dimensions)`` dedupe the dimensional save path
+    enforces; ``verb`` / ``scope`` / ``name`` are stored as plain columns
+    (all the CLI verbs under test read).
+    """
+    return db.plans.save_plan(
+        query=query,
+        plan_json=plan_json,
+        project=project,
+        tags=tags,
+        name=name,
+        verb=verb,
+        scope=scope,
     )
-    conn.commit()
-    plan_id = cursor.lastrowid
-    conn.close()
-    return plan_id
 
 
-def _json_dumps(obj):
-    import json as _json
-    return _json.dumps(obj)
+# ── TestPlanRepair DELETED (nexus-i711w Stage 2 sub-stage A3) ───────────────
+#
+# Its three tests (idempotent backfill, low-conf-first report, missing-DB
+# clean exit) drove ``nx plan repair dimensions``, which re-ran the
+# ``_backfill_plan_dimensions`` heuristic against the local SQLite T2 file.
+# The whole ``nx plan repair`` group (and its `_open_plans_db` sqlite3
+# helper) was deleted with the SQLite PlanLibrary ([21098] verb fates);
+# the live library is engine-served and content repairs are engine-side
+# operations. The SQLite seed helpers ``_seed_plans`` /
+# ``_insert_null_dim_plan`` died with them.
+
+
+# ── nx plan list / show / delete / reseed (nexus-la28) ─────────────────────
 
 
 class TestPlanList:
-    def test_list_empty_db(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "memory.db"
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "list"])
-        assert result.exit_code == 0
-        assert "not found" in result.output.lower()
+    def test_list_empty_library(self, runner: CliRunner) -> None:
+        """A fresh tenant has no plans; list says so instead of erroring.
+
+        (Was ``test_list_empty_db`` asserting the missing-local-file
+        message — that state died with the local snapshot.)
+        """
+        result = runner.invoke(main, ["plan", "list"])
+        assert result.exit_code == 0, result.output
+        assert "no plans match" in result.output.lower()
 
     def test_list_one_builtin_one_grown(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
         builtin_id = _seed_plan_row(
-            db_path, name="research-default", query="research walkthrough",
+            plan_db, name="research-default", query="research walkthrough",
             verb="research", tags="builtin-template,rdr-078",
         )
         grown_id = _seed_plan_row(
-            db_path, name="grown-1", query="auto-grown", verb="research",
+            plan_db, name="grown-1", query="auto-grown", verb="research",
             scope="personal", project="personal", tags="",
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "list"])
-        assert result.exit_code == 0
+        result = runner.invoke(main, ["plan", "list"])
+        assert result.exit_code == 0, result.output
         assert "builtin" in result.output
         assert "grown" in result.output
         assert "research-default" in result.output
@@ -206,64 +124,49 @@ class TestPlanList:
         assert str(grown_id) in result.output
 
     def test_list_origin_filter(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
         _seed_plan_row(
-            db_path, name="research-default", query="r",
+            plan_db, name="research-default", query="r",
             verb="research", tags="builtin-template",
         )
         _seed_plan_row(
-            db_path, name="grown-x", query="g", verb="research",
+            plan_db, name="grown-x", query="g", verb="research",
             scope="personal", project="personal", tags="",
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(
-                main, ["plan", "list", "--origin", "grown"],
-            )
-        assert result.exit_code == 0
+        result = runner.invoke(main, ["plan", "list", "--origin", "grown"])
+        assert result.exit_code == 0, result.output
         assert "grown-x" in result.output
         assert "research-default" not in result.output
 
     def test_list_name_substring(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
         _seed_plan_row(
-            db_path, name="hybrid-factual-lookup", query="h",
+            plan_db, name="hybrid-factual-lookup", query="h",
             verb="lookup", tags="builtin-template",
         )
         _seed_plan_row(
-            db_path, name="research-default", query="r",
+            plan_db, name="research-default", query="r",
             verb="research", tags="builtin-template",
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(
-                main, ["plan", "list", "--name", "hybrid"],
-            )
-        assert result.exit_code == 0
+        result = runner.invoke(main, ["plan", "list", "--name", "hybrid"])
+        assert result.exit_code == 0, result.output
         assert "hybrid-factual-lookup" in result.output
         assert "research-default" not in result.output
 
-    def test_list_json(self, runner: CliRunner, tmp_path: Path) -> None:
-        import json as _json
-        db_path = _seed_plans(tmp_path)
+    def test_list_json(
+        self, runner: CliRunner, plan_db: T2Database,
+    ) -> None:
         _seed_plan_row(
-            db_path, name="some-plan", query="q", verb="research",
+            plan_db, name="some-plan", query="q", verb="research",
             tags="builtin-template",
         )
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "list", "--json"])
-        assert result.exit_code == 0
-        data = _json.loads(result.stdout)
+        result = runner.invoke(main, ["plan", "list", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
         assert isinstance(data, list)
         assert len(data) == 1
         assert data[0]["name"] == "some-plan"
@@ -271,119 +174,88 @@ class TestPlanList:
 
 
 class TestPlanShow:
-    def test_show_by_id(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = _seed_plans(tmp_path)
+    def test_show_by_id(
+        self, runner: CliRunner, plan_db: T2Database,
+    ) -> None:
         plan_id = _seed_plan_row(
-            db_path, name="show-target", query="q",
+            plan_db, name="show-target", query="q",
             verb="research", tags="builtin-template",
             plan_json='{"steps": [{"tool": "search", "args": {}}]}',
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "show", str(plan_id)])
-        assert result.exit_code == 0
+        result = runner.invoke(main, ["plan", "show", str(plan_id)])
+        assert result.exit_code == 0, result.output
         assert "show-target" in result.output
         assert "search" in result.output  # plan_json content rendered
 
     def test_show_by_name_substring(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
         _seed_plan_row(
-            db_path, name="hybrid-factual-lookup", query="q",
+            plan_db, name="hybrid-factual-lookup", query="q",
             verb="lookup", tags="builtin-template",
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "show", "hybrid"])
-        assert result.exit_code == 0
+        result = runner.invoke(main, ["plan", "show", "hybrid"])
+        assert result.exit_code == 0, result.output
         assert "hybrid-factual-lookup" in result.output
 
-    def test_show_no_match(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = _seed_plans(tmp_path)
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "show", "missing"])
+    def test_show_no_match(
+        self, runner: CliRunner, plan_db: T2Database,
+    ) -> None:
+        result = runner.invoke(main, ["plan", "show", "missing"])
         assert result.exit_code != 0
         assert "no plan" in result.output.lower()
 
 
 class TestPlanDelete:
     def test_delete_with_yes_flag(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
         plan_id = _seed_plan_row(
-            db_path, name="grown-doomed", query="q", verb="research",
+            plan_db, name="grown-doomed", query="q", verb="research",
             scope="personal", project="personal",
         )
 
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(
-                main, ["plan", "delete", str(plan_id), "-y"],
-            )
+        result = runner.invoke(main, ["plan", "delete", str(plan_id), "-y"])
         assert result.exit_code == 0, result.output
         assert "Removed 1" in result.output
 
-        # Verify the row is actually gone.
-        conn = sqlite3.connect(str(db_path))
-        cnt = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert cnt == 0
+        # Verify the row is actually gone (engine read replaces the old
+        # raw-SQL COUNT against the local file).
+        assert plan_db.plans.get_plan(plan_id) is None
 
     def test_delete_missing_id(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            result = runner.invoke(main, ["plan", "delete", "9999", "-y"])
+        result = runner.invoke(main, ["plan", "delete", "999999999", "-y"])
         assert result.exit_code != 0
         assert "no plan" in result.output.lower()
 
     def test_delete_aborts_without_yes(
-        self, runner: CliRunner, tmp_path: Path,
+        self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        db_path = _seed_plans(tmp_path)
         plan_id = _seed_plan_row(
-            db_path, name="grown-x", query="q", verb="research",
+            plan_db, name="grown-x", query="q", verb="research",
             scope="personal", project="personal",
         )
-        with patch(
-            "nexus.commands._helpers.default_db_path", return_value=db_path,
-        ):
-            # Decline the confirmation prompt.
-            result = runner.invoke(
-                main, ["plan", "delete", str(plan_id)], input="n\n",
-            )
+        # Decline the confirmation prompt.
+        result = runner.invoke(
+            main, ["plan", "delete", str(plan_id)], input="n\n",
+        )
         assert result.exit_code != 0  # Click abort returns non-zero
         # Verify the row is still there.
-        conn = sqlite3.connect(str(db_path))
-        cnt = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE id = ?", (plan_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert cnt == 1
+        assert plan_db.plans.get_plan(plan_id) is not None
 
 
 class TestPlanReseed:
-    def test_reseed_idempotent(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        db_path = _seed_plans(tmp_path)
-        monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
-        )
+    def test_reseed_idempotent(self, runner: CliRunner) -> None:
+        """Reseed against the live (engine-served) library is idempotent.
+
+        Service mode skips the old missing-local-file check, so no
+        ``default_db_path`` patch is needed: the four-tier loader dedupes
+        on ``UNIQUE (project, dimensions)`` against the fresh tenant.
+        """
         # First run installs the builtin set.
         first = runner.invoke(main, ["plan", "reseed"])
         assert first.exit_code == 0, first.output
@@ -392,34 +264,12 @@ class TestPlanReseed:
         assert second.exit_code == 0, second.output
         assert "Seeded 0" in second.output
 
-    def test_reseed_force_clears_builtins(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        db_path = _seed_plans(tmp_path)
-        monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
-        )
-        # Seed once.
-        runner.invoke(main, ["plan", "reseed"])
-
-        # Add a non-builtin grown row to verify --force only deletes
-        # builtins.
-        grown_id = _seed_plan_row(
-            db_path, name="grown-survivor", query="q", verb="research",
-            scope="personal", project="personal", tags="",
-        )
-
-        result = runner.invoke(main, ["plan", "reseed", "--force"])
-        assert result.exit_code == 0, result.output
-        assert "removed" in result.output.lower()
-
-        # Grown survivor is still in the table.
-        conn = sqlite3.connect(str(db_path))
-        cnt = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE id = ?", (grown_id,),
-        ).fetchone()[0]
-        conn.close()
-        assert cnt == 1, "non-builtin row must survive --force reseed"
+    # test_reseed_force_clears_builtins DELETED (nexus-i711w sub-stage A3):
+    # its subject was the --force raw-SQL builtin purge against the local
+    # SQLite snapshot ("grown row survives the DELETE"). In service mode —
+    # the only mode left — reseed_cmd REFUSES --force by design (nexus-o02xe),
+    # and that refusal is pinned by
+    # test_plan_reseed_force_refuses_in_service_mode below.
 
 
 # ── nexus-o02xe: service-mode facade routing (RDR-179 Phase 1) ───────────────
@@ -488,15 +338,17 @@ def test_plan_delete_routes_to_service(runner, _service_plans):
     assert "get_plan:7" in calls and "delete_plan:7" in calls
 
 
-def test_plan_repair_refuses_in_service_mode(runner, monkeypatch):
-    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "service")
-    result = runner.invoke(main, ["plan", "repair", "scope-tags"])
-    assert result.exit_code != 0
-    assert "served by the storage service" in result.output
+# test_plan_repair_refuses_in_service_mode DELETED (nexus-i711w sub-stage
+# A3): its subject was the service-mode REFUSAL of `nx plan repair` — the
+# whole repair group is deleted, so `nx plan repair ...` is now a Click
+# usage error, not a routed verb with a refusal branch.
 
 
-def test_plan_reseed_force_refuses_in_service_mode(runner, monkeypatch):
-    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "service")
+def test_plan_reseed_force_refuses(runner, monkeypatch):
+    """--force refuses unconditionally: the raw-SQL purge died with the
+    SQLite plan library (nexus-i711w Stage 2 sub-stage A3); the refusal
+    message routes the operator to per-id deletes."""
     result = runner.invoke(main, ["plan", "reseed", "--force"])
     assert result.exit_code != 0
-    assert "--force is unavailable in service mode" in result.output
+    assert "--force is unavailable" in result.output
+    assert "nx plan delete" in result.output

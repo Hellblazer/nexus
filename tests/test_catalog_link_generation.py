@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 
 
 @pytest.fixture(autouse=True)
@@ -17,10 +16,11 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> Catalog:
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    return cat
+def _make_catalog(tmp_path: Path):
+    # nexus-i711w terminal deletion: the local Catalog.init arm is gone;
+    # ActiveCatalog routes to the live catalog and needs no init.
+    from tests._catalog_fixture_ops import ActiveCatalog
+    return ActiveCatalog()
 
 
 class TestCitationLinks:

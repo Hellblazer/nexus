@@ -291,26 +291,12 @@ def test_compute_rebuild_plan_short_circuits() -> None:
 # ── Re-export parity: CatalogTaxonomy still exposes the same objects ──────────
 
 
-def test_catalog_taxonomy_reexports_same_objects() -> None:
-    """Behaviour-preserving: existing call sites that reach the compute core via
-    ``CatalogTaxonomy`` (and ``from catalog_taxonomy import AssignResult``) must
-    resolve to the very objects now living in taxonomy_compute."""
-    from nexus.db.t2 import catalog_taxonomy as ct
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-
-    assert ct.AssignResult is tc.AssignResult
-    assert ct.HubRow is tc.HubRow
-    assert ct.AuditReport is tc.AuditReport
-    assert ct.AuditHub is tc.AuditHub
-    assert ct.DEFAULT_HUB_STOPWORDS is tc.DEFAULT_HUB_STOPWORDS
-    assert CatalogTaxonomy._PROJECTION_THRESHOLD == tc.PROJECTION_THRESHOLD
-    assert CatalogTaxonomy._LARGE_COLLECTION_THRESHOLD == tc.LARGE_COLLECTION_THRESHOLD
-    # The compute statics resolve through the class to the moved functions.
-    assert CatalogTaxonomy.compute_split is tc.compute_split
-    assert CatalogTaxonomy.compute_discovered_topics is tc.compute_discovered_topics
-    assert CatalogTaxonomy.compute_rebuild_plan is tc.compute_rebuild_plan
-    assert CatalogTaxonomy._merge_labels is tc._merge_labels
-    assert CatalogTaxonomy._cluster is tc._cluster
+# test_catalog_taxonomy_reexports_same_objects stood here. It asserted that
+# reaching the compute core THROUGH catalog_taxonomy resolved to the very
+# objects in taxonomy_compute — a behaviour-preservation guard for the
+# RDR-158 P1 move. The re-exporting module is deleted (nexus-i711w Stage 2
+# sub-stage C), so there is no second path left to agree with the first.
+# Every surviving caller imports from taxonomy_compute directly.
 
 
 class TestDedupSpecsByLabel:

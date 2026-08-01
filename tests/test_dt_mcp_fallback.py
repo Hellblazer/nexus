@@ -15,8 +15,9 @@ not "no crash":
   written, ``index_markdown`` never called); file-backed chunks carry NO
   ``extraction_source`` key (absent == file).  *(P2.2 Layer D — nexus-t62jy.)*
 
-Integration over mocks: a real ``Catalog`` on tmp SQLite; only the DT client's
-``available()`` is forced False (the genuine fallback trigger).
+Integration over mocks: the real (service) catalog via the active facade;
+only the DT client's ``available()`` is forced False (the genuine fallback
+trigger).
 """
 
 from __future__ import annotations
@@ -25,17 +26,19 @@ from unittest.mock import patch
 
 import pytest
 
-from nexus.catalog.catalog import Catalog
 from nexus.catalog.dt_link_generator import generate_dt_links
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.dt_writeback import writeback_record
 
 
 @pytest.fixture
-def cat(tmp_path):
-    d = tmp_path / "catalog"
-    d.mkdir()
-    return Catalog(d, d / ".catalog.db")
+def cat():
+    # nexus-i711w: the local Catalog this used to build is gone; the live
+    # service catalog (per-test tenant) plays the same role via the
+    # substrate-agnostic facade.
+    from tests._catalog_fixture_ops import ActiveCatalog
+
+    return ActiveCatalog()
 
 
 class _UnavailableDT:

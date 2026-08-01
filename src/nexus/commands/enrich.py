@@ -1072,7 +1072,7 @@ def _select_entries(
         # Filter to entries whose existing aspect row has model_version
         # below the threshold. Rows without an existing aspect entry
         # are also included (they need first-time extraction).
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             outdated_paths = {
                 r.source_path
                 for r in db.document_aspects.list_by_extractor_version(
@@ -1306,12 +1306,12 @@ def _run_extraction(
     # indexer) is active. The `db` handle below is retained for READS
     # only (doc_id_lookup / manifest_lookup / skip checks); WAL permits
     # concurrent readers, so reads need no routing. The prior stale
-    # epsilon-allow claimed document_aspects.upsert was "not routable" —
+    # annotation claimed document_aspects.upsert was "not routable" —
     # true for the raw AspectRecord arg, but complete_aspect(asdict(...))
     # IS routable (added in nexus-zir76) and is the correct path.
     import dataclasses as _dataclasses  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.mcp_infra)
-    with T2Database(db_path) as db:  # epsilon-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
+    with T2Database(db_path) as db:  # boundary-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
         for i, entry in enumerate(entries, 1):
             source_path = entry.file_path or entry.title
             if not source_path:
@@ -1617,7 +1617,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
             collection, limit=limit if limit > 0 else None,
         )
@@ -1664,7 +1664,7 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         record = db.document_aspects.get(collection, source_path)
 
     if record is None:
@@ -1745,120 +1745,73 @@ def enrich_aspects_delete(
         )
 
 
-# ── extras → fixed-column promotion (RDR-089 Phase E) ───────────────────────
+# ── extras → fixed-column promotion: history only (RDR-089 Phase E) ─────────
+#
+# The runtime promotion verb is RETIRED (Hal decision 2026-07-25, bead
+# nexus-70x7y): schema changes go through Liquibase in every mode, so there is
+# no runtime ALTER TABLE left to run. The command keeps its name so an operator
+# reaching for the old verb lands on the changeset recipe instead of a
+# "no such command", and so --history stays where it has always been.
 
 
 @enrich.command(name="aspects-promote-field")
-@click.argument("field_name")
-@click.option(
-    "--type", "sql_type",
-    type=click.Choice(["TEXT", "INTEGER", "REAL"], case_sensitive=False),
-    default="TEXT",
-    show_default=True,
-    help="SQL type for the new column.",
-)
-@click.option(
-    "--prune",
-    is_flag=True,
-    help=(
-        "After backfilling, remove the key from extras. Only run "
-        "after every reader has been updated to consume the typed "
-        "column."
-    ),
-)
+@click.argument("field_name", required=False)
 @click.option(
     "--history",
     is_flag=True,
-    help="Print the promotion audit log and exit (no promotion).",
+    help="Print the promotion audit log and exit.",
 )
-def enrich_aspects_promote_field(
-    field_name: str, sql_type: str, prune: bool, history: bool,
-) -> None:
-    """Promote ``extras['<FIELD_NAME>']`` to its own typed column.
+def enrich_aspects_promote_field(field_name: str | None, history: bool) -> None:
+    """Show the extras->column promotion history.
 
-    Three-phase mechanic (see ``src/nexus/aspect_promotion.py`` for
-    the full contract):
+    Promoting a field is a Liquibase changeset, not a runtime command —
+    invoking this with a FIELD_NAME prints the changeset recipe and exits
+    non-zero. See ``src/nexus/aspect_promotion.py`` for the full template.
 
-      1. ALTER TABLE document_aspects ADD COLUMN <field_name> <type>
-         (idempotent)
-      2. Backfill the new column from ``extras[<field_name>]`` for
-         rows where the column is currently NULL and the extras
-         key is set
-      3. If ``--prune``: remove the key from ``extras`` so future
-         readers always go to the typed column
-
-    Phase 3 is opt-in. The default (no --prune) leaves ``extras``
-    untouched, supporting a dual-read cutover where readers are
-    updated incrementally.
-
-    Each invocation logs to T2 ``aspect_promotion_log``; the
-    promotion history is queryable via ``--history``.
+    ``--history`` reads ``aspect_promotion_log`` on whichever
+    ``document_aspects`` backend is configured.
     """
     from nexus.aspect_promotion import (  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
-        list_promotions, promote_extras_field,
+        PROMOTION_RETIRED, list_promotions,
     )
+    import httpx  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    if history:
-        try:
-            with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-                entries = list_promotions(db)
-        except (NotImplementedError, RuntimeError) as exc:
-            # nexus-gmiaf.35: NotImplementedError from list_promotions guard;
-            # RuntimeError from T2Database init when NX_SERVICE_PORT is absent.
-            click.echo(f"Error: {exc}", err=True)
-            raise click.exceptions.Exit(2)
-        if not entries:
-            click.echo("No promotion history.")
-            return
-        for e in entries:
-            note = " (pruned)" if e["pruned"] else ""
-            click.echo(
-                f"  {e['promoted_at']}  {e['field_name']:32s} "
-                f"{e['sql_type']:8s} +{e['rows_backfilled']:>4d} rows"
-                f"{note}"
-            )
-        return
-
-    try:
-        with T2Database(default_db_path()) as db:  # epsilon-allow: promote_extras_field runs raw DDL plus aspect_promotion_log writes on the live connection; not a routable store op (RDR-128 P3 documented-irreducible)
-            try:
-                result = promote_extras_field(
-                    db, field_name,
-                    sql_type=sql_type.upper(),
-                    prune=prune,
-                )
-            except ValueError as exc:
-                click.echo(f"Error: {exc}", err=True)
-                raise click.exceptions.Exit(2)
-            except NotImplementedError as exc:
-                # nexus-gmiaf.35: promote_extras_field is not supported on the
-                # service backend (document_aspects=service). Fail with a clear
-                # message and non-zero exit rather than an unhandled traceback.
-                click.echo(f"Error: {exc}", err=True)
-                raise click.exceptions.Exit(2)
-    except click.exceptions.Exit:
-        raise
-    except RuntimeError as exc:
-        # nexus-gmiaf.35: T2Database init fails with RuntimeError when the
-        # service backend is configured (NX_STORAGE_BACKEND_DOCUMENT_ASPECTS=service)
-        # but NX_SERVICE_PORT/NX_SERVICE_TOKEN are missing. Surface clearly.
-        click.echo(f"Error: {exc}", err=True)
+    if not history:
+        # A bare invocation with no field and no --history is a usage error;
+        # with a field it is the retired verb. Both end at the recipe.
+        click.echo(
+            PROMOTION_RETIRED.format(field=field_name or "<field>"), err=True,
+        )
         raise click.exceptions.Exit(2)
 
-    if result.column_added:
+    try:
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+            entries = list_promotions(db)
+    except RuntimeError as exc:
+        # RuntimeError from T2Database init when the service backend is
+        # configured but NX_SERVICE_PORT/NX_SERVICE_TOKEN are missing.
+        click.echo(f"Error: {exc}", err=True)
+        raise click.exceptions.Exit(2)
+    except httpx.HTTPError as exc:
+        # Service backend with a RESOLVABLE endpoint that is down, wedged, or
+        # answering non-2xx. The SQLite path could only ever fail at open
+        # time; the HTTP read path adds a whole transport-error class that
+        # would otherwise reach the operator as a traceback.
+        click.echo(f"Error: promotion history unavailable: {exc}", err=True)
+        raise click.exceptions.Exit(2)
+    if not entries:
+        click.echo("No promotion history.")
+        return
+    for e in entries:
+        note = " (pruned)" if e["pruned"] else ""
         click.echo(
-            f"Added column {result.field_name} {result.sql_type}."
+            f"  {e['promoted_at']}  {e['field_name']:32s} "
+            f"{e['sql_type']:8s} +{e['rows_backfilled']:>4d} rows"
+            f"{note}"
         )
-    else:
-        click.echo(
-            f"Column {result.field_name} already exists "
-            f"(promotion is idempotent)."
-        )
-    click.echo(f"Backfilled {result.rows_backfilled} row(s).")
-    if result.pruned:
-        click.echo(f"Pruned {result.rows_pruned} extras key(s).")
 
 
 # ── nexus-bkvk: aspect read verbs (show / list) ─────────────────────────────
@@ -1994,7 +1947,7 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         )
         return
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         # nexus-6xp2: post-drop, source_path-keyed lookup is unreliable
         # when the writer used a non-uri_for source_uri. Tumbler-keyed
         # get_by_doc_id is exact; fall back to legacy (coll, path) get
@@ -2063,7 +2016,7 @@ def aspects_list_cmd(
                 "Catalog not initialized. Run 'nx catalog setup' first."
             )
         entries = cat.list_by_collection(collection)
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {
                 r.source_path for r in db.document_aspects.list_by_collection(
                     collection,
@@ -2096,7 +2049,7 @@ def aspects_list_cmd(
             click.echo(f"  ... and {len(gaps) - limit} more.")
         return
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
             collection, limit=(limit if limit else None),
         )

@@ -44,11 +44,18 @@ class TestResolveIndexConcurrency:
         assert resolve_index_concurrency() == 2
 
     def test_override_onto_non_service_backend_warns_but_wins(self, monkeypatch):
-        """Forcing concurrency onto a sqlite catalog is allowed but loud."""
+        """Forcing concurrency onto a non-service backend is allowed but loud.
+
+        nexus-i711w terminal deletion: the sqlite-CATALOG leg of the gate is
+        gone (the catalog is service-backed in every mode), so the surviving
+        non-service default-1 arm is the VECTORS opt-out — re-premised here;
+        the warn contract itself is unchanged.
+        """
         from nexus.indexer_utils import resolve_index_concurrency
 
         monkeypatch.setenv("NX_INDEX_CONCURRENCY", "3")
-        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
         import structlog.testing
         with structlog.testing.capture_logs() as logs:
             assert resolve_index_concurrency() == 3
@@ -64,13 +71,11 @@ class TestResolveIndexConcurrency:
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         assert resolve_index_concurrency() == 2
 
-    def test_non_service_catalog_defaults_one(self, monkeypatch):
-        from nexus.indexer_utils import resolve_index_concurrency
-
-        monkeypatch.delenv("NX_INDEX_CONCURRENCY", raising=False)
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
-        assert resolve_index_concurrency() == 1
+    # test_non_service_catalog_defaults_one RETIRED (nexus-i711w terminal
+    # deletion): the catalog conjunct of the concurrency gate collapsed — the
+    # catalog is service-backed in every mode, so a "sqlite catalog defaults
+    # to 1" state no longer exists. The surviving non-service default-1 arm
+    # (vectors opt-out) is pinned by test_vectors_opt_out_defaults_one below.
 
     def test_vectors_opt_out_defaults_one(self, monkeypatch):
         from nexus.indexer_utils import resolve_index_concurrency

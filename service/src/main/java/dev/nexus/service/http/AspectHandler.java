@@ -29,7 +29,7 @@ import java.util.Optional;
  *   GET   /v1/aspects/get                         get by collection= &amp; source_path=
  *   GET   /v1/aspects/get_by_doc_id               get by doc_id=
  *   GET   /v1/aspects/list_by_collection          list by collection= (limit=, offset=)
- *   GET   /v1/aspects/list_by_extractor_version   list for re-extraction (extractor=, max_version=)
+ *   GET   /v1/aspects/list_by_extractor_version   list for re-extraction (extractor_name=, max_version=)
  *   POST  /v1/aspects/delete                      delete by collection + source_path
  *   POST  /v1/aspects/rename_collection           rename collection denorm
  *   POST  /v1/aspects/salient_sentences/set       set salient_sentences by doc_id

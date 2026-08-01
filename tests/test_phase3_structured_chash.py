@@ -12,12 +12,12 @@ Covers the three structured-return surfaces:
     when structured=True.
 """
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -61,7 +61,7 @@ def t2_path():
 @pytest.fixture()
 def t3():
     client = make_vector_test_client()
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
     return db

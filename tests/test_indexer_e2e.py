@@ -8,20 +8,40 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
-from tests.conftest import make_vector_test_client
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader, documents_by_file_path
+from tests.conftest import fake_credentials, make_vector_test_client
 
-# All tests in this module are end-to-end: real ChromaDB, real local
+# All tests in this module are end-to-end: real vector substrate, real local
 # embeddings, real CLI subprocesses. They average ~5.8s/test on CI and
 # accounted for ~138s (16%) of the pre-marker pytest runtime. Per the
 # project convention (pyproject.toml addopts deselects integration), e2e
 # suites belong under the ``integration`` marker. Run explicitly with
 # ``uv run pytest -m integration``; release-shakedown already exercises
 # the same code paths through ``nx index repo`` end-to-end on every tag.
-pytestmark = pytest.mark.integration
+#
+# nexus-i711w C-store: the ``local_catalog_backend`` half of the old
+# module pin (23f56218) is retired here, per the port contract — the
+# CATALOG substrate moves to the suite's engine default (per-test tenant
+# via ``t2_service_env``); the VECTOR half stays pinned local by
+# ``_legacy_vector_backend`` below (the test seam these tests wire
+# ``local_t3`` through). Every subject in this file is live indexer
+# behaviour, so the whole file PORTS; the raw ``cat._db`` reads the pin
+# was covering for are converted to the public reader surface
+# (tests/_catalog_fixture_ops), and the manifest sabotage goes through
+# the whitelisted writer ops.
+#
+# KNOWN HAZARD, recorded for the serial verify run (the pin commit's
+# measured signature): under this vector-local/catalog-service split the
+# nexus-7vuw legacy -> conformant collection rename's data plane can hit
+# a collection the engine catalog has never seen (``HTTP 404``). That
+# failure is CAUGHT in ``_migrate_legacy_collections`` (falls back to the
+# legacy name, non-fatal), but the three rename-adjacent tests carry
+# PORT-VERIFY marks so a mismatch is attributed, not shrugged at.
+pytestmark = [pytest.mark.integration]
 
 _CORPUS_FILES = [
     "src/nexus/ttl.py",
@@ -178,7 +198,7 @@ def rich_registry(tmp_path: Path, rich_repo: Path) -> RepoRegistry:
 def _index(repo: Path, registry: RepoRegistry, t3: T3Database, **kw) -> None:
     from nexus.indexer import index_repository
     with patch("nexus.db.make_t3", return_value=t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         index_repository(repo, registry, **kw)
 
 
@@ -231,6 +251,11 @@ def test_index_legacy_registry_name_no_catalog_owner_succeeds(
     Reproduces the arcaneum post-release shakeout crash (pre-existing
     since v4.23.0): before the fix, ``db.get_or_create_collection`` got the
     legacy 2-segment name and raised ``ValueError: ... is not conformant``.
+
+    PORT-VERIFY (nexus-i711w): the "no catalog owner" premise now holds via
+    the fresh per-test engine tenant (nothing registered yet) instead of an
+    uninitialized local dir; single index run, so the nexus-7vuw rename data
+    plane should not fire — if this fails, see the module-header hazard.
     """
     from nexus.corpus import is_conformant_collection_name
     from nexus.indexer import _legacy_collection_name
@@ -421,6 +446,17 @@ def test_index_stamps_pipeline_version_without_force(
     """
     from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
 
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     code_col = local_t3.get_or_create_collection(info["code_collection"])
@@ -448,6 +484,17 @@ def test_index_stamps_pipeline_version_with_force(
 def test_smart_index_creates_both_collections(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     for key in ("code_collection", "docs_collection"):
@@ -464,6 +511,17 @@ def test_smart_index_file_routing(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
     file: str, expected_col: str, excluded_col: str | None,
 ) -> None:
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     sources = _get_sources(local_t3, info[expected_col])
@@ -476,6 +534,17 @@ def test_smart_index_file_routing(
 def test_smart_index_config_yaml_excluded(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     docs_sources = _get_sources(local_t3, info["docs_collection"])
@@ -485,6 +554,17 @@ def test_smart_index_config_yaml_excluded(
 def test_smart_index_py_excluded_from_docs(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     docs_sources = _get_sources(local_t3, info["docs_collection"])
@@ -511,6 +591,17 @@ def test_smart_index_rdr_routing(
     propagates as section_title for all chunks under it) AND by
     asserting the rdr collection has chunks while docs does not.
     """
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     docs_col = local_t3.get_or_create_collection(info["docs_collection"])
@@ -522,8 +613,6 @@ def test_smart_index_rdr_routing(
         f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
     )
 
-    from nexus.indexer import _repo_collection_or_legacy
-    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
     # nexus-x2x6v hardening: make the mode-pin's effect explicit — with
     # cloud_mode first, every derivation point resolves the SAME
     # voyage-shaped name (this line also brings the test under the
@@ -546,6 +635,17 @@ def test_smart_index_search(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
     query: str, corpus_key: str, expected_file: str,
 ) -> None:
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     results = local_t3.search(query, [info[corpus_key]], n_results=5)
@@ -563,6 +663,17 @@ def test_smart_index_embedding_model_metadata(
     # nexus-x2x6v: cloud_mode FIRST (was last — set up AFTER rich_registry
     # had already minted minilm-named collections; see the sibling test's
     # comment for the full mechanism).
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     code_col = local_t3.get_or_create_collection(info["code_collection"])
@@ -576,6 +687,17 @@ def test_smart_index_embedding_model_metadata(
 def test_smart_index_staleness_check(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
+    # the same resolution point the indexer itself uses. On a LIVE catalog,
+    # _index registers the repo owner mid-run, so a post-run derivation
+    # returns the owner-prefixed CONFORMANT name while this run's chunks
+    # were written under the LEGACY name (first-index drift window; the
+    # next-run convergence is _migrate_legacy_collections' subject, pinned
+    # by the migration/tombstone-probe suites). The old pinned substrate
+    # had no catalog at either point, which is why both derivations agreed.
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     counts = {}
@@ -618,15 +740,13 @@ def test_migration_moves_prose_from_code_to_docs(
          and remove the seed chunk because README.md is in
          file_to_doc_id (catalog hook re-runs every index).
     """
-    from nexus.catalog.catalog import Catalog
-    from nexus.config import catalog_path
-
-    # _catalog_hook returns early when the catalog is not initialized
-    # at NEXUS_CATALOG_PATH. Initialize it so the hook can register
-    # README.md and the indexer threads its tumbler into file_to_doc_id.
-    cat_path = catalog_path()
-    Catalog.init(cat_path)
-
+    # nexus-i711w: no Catalog.init — ``_catalog_hook``'s local
+    # is_initialized gate does not apply in service mode (indexer.py:933),
+    # so the hook registers README.md in the per-test engine tenant.
+    # PORT-VERIFY: the second _index below triggers the nexus-7vuw
+    # legacy-rename migration — under the vector-local/catalog-service
+    # split its data plane may 404 and fall back to the legacy name (see
+    # module header); the final registry re-read is what absorbs that.
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
     info = reg.get(rich_repo)
@@ -634,17 +754,13 @@ def test_migration_moves_prose_from_code_to_docs(
     # Step 1 — first index populates the catalog with README's tumbler.
     _index(rich_repo, reg, local_t3)
 
-    # Step 2 — read the tumbler that _catalog_hook assigned.
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
-    row = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE file_path = ?",
-        ("README.md",),
-    ).fetchone()
-    cat._db.close()
-    assert row is not None, (
+    # Step 2 — read the tumbler that _catalog_hook assigned, via the
+    # public reader (raw ``cat._db`` has no service-mode equivalent).
+    readme_docs = documents_by_file_path("README.md")
+    assert readme_docs, (
         "expected catalog to have README.md after first index"
     )
-    readme_tumbler = row[0]
+    readme_tumbler = str(readme_docs[0].tumbler)
 
     # Step 3 — seed a bad chunk with README's doc_id into code__.
     code_col = local_t3.get_or_create_collection(info["code_collection"])
@@ -709,7 +825,7 @@ def test_cli_index_repo(
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         result = runner.invoke(main, ["index", "repo", str(mini_repo)])
     assert result.exit_code == 0
     assert "Done" in result.output
@@ -724,7 +840,7 @@ def test_cli_index_then_search(
     runner = CliRunner()
     col_name = f"code__{mini_repo.name}-{hashlib.sha256(str(mini_repo).encode()).hexdigest()[:8]}"
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+         patch("nexus.config.get_credential", side_effect=fake_credentials()), \
          patch("nexus.commands.search_cmd._t3", return_value=local_t3):
         idx = runner.invoke(main, ["index", "repo", str(mini_repo)])
         assert idx.exit_code == 0
@@ -741,7 +857,7 @@ def test_cli_index_frecency_only(
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         runner.invoke(main, ["index", "repo", str(mini_repo)])
         result = runner.invoke(main, ["index", "repo", str(mini_repo), "--frecency-only"])
     assert result.exit_code == 0
@@ -776,11 +892,9 @@ def test_reindex_self_heals_missing_manifest(
     structurally wrong. The exact bead repro: index, delete a doc's
     manifest rows + zero its chunk_count, re-index. The self-heal pass
     must rebuild the manifest from T3 WITHOUT re-embedding."""
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — file pattern: deferred imports
-    from nexus.config import catalog_path  # noqa: PLC0415 — file pattern: deferred imports
-
-    cat_path = catalog_path()
-    Catalog.init(cat_path)
+    # nexus-i711w: no Catalog.init — the hook writes to the active (engine)
+    # catalog in service mode. PORT-VERIFY: the second settling pass can
+    # trip the nexus-7vuw rename's mode-split 404 fallback (module header).
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
 
@@ -791,24 +905,26 @@ def test_reindex_self_heals_missing_manifest(
     _index(rich_repo, reg, local_t3)
     _index(rich_repo, reg, local_t3)
 
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
-    row = cat._db.execute(
-        "SELECT tumbler, chunk_count FROM documents WHERE file_path = ?",
-        ("README.md",),
-    ).fetchone()
-    assert row is not None
-    tumbler, count_before = row
+    readme_docs = documents_by_file_path("README.md")
+    assert readme_docs
+    tumbler = str(readme_docs[0].tumbler)
+    count_before = readme_docs[0].chunk_count
     assert count_before > 0
+    cat = ActiveCatalog()
     manifest_before = cat.get_manifest(tumbler)
     assert len(manifest_before) > 0
 
     # Sabotage: the GH #1397 shape — manifest rows gone, chunk_count zeroed.
-    cat._db.execute("DELETE FROM document_chunks WHERE doc_id = ?", (tumbler,))  # epsilon-allow: deliberate corruption injection — the GH #1397 manifest-drop shape under test
-    cat._db.execute(
-        "UPDATE documents SET chunk_count = 0 WHERE tumbler = ?", (tumbler,),  # epsilon-allow: deliberate corruption injection — the GH #1397 manifest-drop shape under test
+    # nexus-i711w: the raw ``DELETE FROM document_chunks`` + ``UPDATE``
+    # injection has no service-mode SQL seam; the SAME shape is produced
+    # through the whitelisted writer surface — an atomic manifest replace
+    # with ZERO rows plus a zeroed chunk_count cache.
+    # PORT-VERIFY: relies on /manifest/write's documented atomic
+    # delete+insert semantics purging all rows when ``rows=[]``.
+    cat.atomic_manifest_replace(tumbler, [], new_chunk_count=0)
+    assert cat.get_manifest(tumbler) == [], (
+        "sabotage precondition: manifest rows must be gone"
     )
-    cat._db.commit()
-    cat._db.close()
 
     # Reproduce the FIELD configuration (docs 1.3.142-150, GH #1397): the
     # stuck population's chunks carry INLINE doc_id metadata (the RDR-101
@@ -839,12 +955,10 @@ def test_reindex_self_heals_missing_manifest(
     # only the new self-heal pass can repair the manifest.
     _index(rich_repo, reg, local_t3)
 
-    cat2 = Catalog(cat_path, cat_path / ".catalog.db")
-    healed = cat2.get_manifest(tumbler)
-    count_after = cat2._db.execute(
-        "SELECT chunk_count FROM documents WHERE tumbler = ?", (tumbler,),
-    ).fetchone()[0]
-    cat2._db.close()
+    healed = active_reader().get_manifest(tumbler)
+    healed_entry = active_reader().resolve(tumbler)
+    assert healed_entry is not None
+    count_after = healed_entry.chunk_count
 
     assert [r.chash for r in healed] == [r.chash for r in manifest_before], (
         "self-heal must rebuild the exact manifest from T3 chunks"
@@ -865,13 +979,11 @@ def test_manifest_self_heal_runs_after_indexing_before_prunes(
     manifest-write hook are healed too) and BEFORE the prune passes (so the
     manifest-keyed GC — the nexus-mr89x hazard — never sees an unhealed
     gap). Pin the call order."""
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — file pattern: deferred imports
-    from nexus.config import catalog_path  # noqa: PLC0415 — file pattern: deferred imports
-
     import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
     from nexus.catalog import manifest_heal as heal_mod  # noqa: PLC0415 — file pattern: deferred imports
 
-    Catalog.init(catalog_path())
+    # nexus-i711w: no Catalog.init — service mode needs no local dir; the
+    # heal pass keys on the owner the hook registers in this same run.
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
 

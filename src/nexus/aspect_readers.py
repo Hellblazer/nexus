@@ -64,10 +64,10 @@ __all__ = [
 
 def uri_for(collection: str, source_path: str) -> str | None:
     """Persistent URI for ``(collection, source_path)``. Single source
-    of truth: both the going-forward writer in
-    :mod:`nexus.aspect_extractor` and the backfill migration in
-    :mod:`nexus.db.migrations` import this helper to avoid silent
-    divergence on future prefix additions.
+    of truth for the going-forward writer in
+    :mod:`nexus.aspect_extractor` (the other importer, the backfill
+    migration in ``nexus.db.migrations``, died in RDR-158 P4 Stage 4)
+    so future prefix additions cannot silently diverge.
 
     Returns ``None`` when ``source_path`` is empty — that maps to
     SQLite ``NULL`` in :class:`AspectRecord` writes and matches the

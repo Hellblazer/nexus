@@ -27,9 +27,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  *   <li>{@code nexus.chash_index} does NOT exist (nor its indexes or octet
  *       CHECK — they die with the table)</li>
+ *   <li>{@code staging.chash_index} (the dead-sink landing twin) is ALSO
+ *       gone — dropped by rdr187-002 at nexus-piwya.11</li>
  *   <li>the SURVIVORS are intact: {@code nexus.chash_alias} (permanent by
- *       RDR-180 decision), {@code staging.chash_index} (the dead-sink
- *       landing surface, kept until nexus-piwya.11), the three
+ *       RDR-180 decision), the three
  *       {@code idx_chunks_<dim>_tenant_chash} probe indexes, and the four
  *       surviving chash octet CHECKs (3-of-4 validated narrative: the
  *       chunks three are VALIDATED at rekey; the manifest's stays NOT
@@ -111,8 +112,9 @@ class ChashIndexDropLiquibaseTest {
         assertThat(intOf(
             "SELECT count(*) FROM information_schema.tables " +
             "WHERE table_schema = 'staging' AND table_name = 'chash_index'"))
-            .as("staging.chash_index (dead-sink landing) survives until nexus-piwya.11")
-            .isEqualTo(1);
+            .as("staging.chash_index (dead-sink landing) is dropped at "
+                + "nexus-piwya.11 (rdr187-002)")
+            .isZero();
         assertThat(intOf(
             "SELECT count(*) FROM pg_indexes WHERE schemaname = 'nexus' " +
             "AND indexname LIKE 'idx_chunks_%_tenant_chash'"))

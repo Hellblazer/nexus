@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import itertools
-import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -273,9 +272,6 @@ def _attach_display_paths(
 # Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.
 _MAX_PREFILTER_IDS = 500
 
-# Selectivity threshold — only pre-filter when <5% of docs match.
-_SELECTIVITY_THRESHOLD = 0.05
-
 # Known collection prefixes mapped to their threshold config key.
 _PREFIX_TO_KEY: list[tuple[str, str]] = [
     ("code__", "code"),
@@ -339,119 +335,6 @@ def _overfetch_multiplier(collection_name: str) -> int:
     return 2
 
 
-# ── Catalog pre-filtering (Compass, RF-3) ────────────────────────────────────
-
-# ChromaDB where-clause operators mapped to SQL operators.
-_OP_MAP = {"$eq": "=", "$gte": ">=", "$lte": "<=", "$gt": ">", "$lt": "<", "$ne": "!="}
-
-# Predicates we can route to catalog SQLite for pre-filtering.
-_PREDICATE_TO_COLUMN = {"bib_year": "year"}
-
-
-def _catalog_doc_ids_for_predicates(
-    db: sqlite3.Connection, predicates: dict,
-) -> list[str]:
-    """Query catalog SQLite for ``doc_id`` values matching *predicates*.
-
-    Only handles predicates that map to catalog columns (bib_year → year).
-    Returns the list of ``Document.doc_id`` values (extracted from
-    ``documents.metadata`` via ``json_extract($.doc_id)``) used as the
-    ``doc_id`` $in filter in ChromaDB. Rows whose metadata lacks a
-    ``doc_id`` are excluded; the prefilter relies on the catalog
-    carrying ``doc_id`` for the document (RDR-101 Phase 4 wrote it at
-    register time; pre-Phase-4 rows fall through to standard search).
-    """
-    clauses: list[str] = []
-    params: list[Any] = []
-
-    for key, value in predicates.items():
-        col = _PREDICATE_TO_COLUMN.get(key)
-        if col is None:
-            return []  # unsupported predicate — can't pre-filter
-        if isinstance(value, dict):
-            for op_key, op_val in value.items():
-                sql_op = _OP_MAP.get(op_key)
-                if sql_op is None:
-                    return []
-                clauses.append(f"{col} {sql_op} ?")
-                params.append(op_val)
-        else:
-            clauses.append(f"{col} = ?")
-            params.append(value)
-
-    if not clauses:
-        return []
-
-    where = " AND ".join(clauses)
-    rows = db.execute(
-        f"SELECT json_extract(metadata, '$.doc_id') FROM documents "
-        f"WHERE {where} AND json_extract(metadata, '$.doc_id') IS NOT NULL",
-        params,
-    ).fetchall()
-    return [r[0] for r in rows]
-
-
-def _prefilter_from_catalog(
-    where: dict | None, catalog: Any | None,
-) -> dict | None:
-    """Build a ChromaDB ``doc_id`` pre-filter from catalog when selectivity is high.
-
-    Returns a ChromaDB ``where`` dict with ``doc_id $in`` if the catalog
-    match set is small enough (<5% of total docs, ≤500 IDs). Returns
-    ``None`` to fall through to standard post-filtering otherwise.
-
-    RDR-101 Phase 4 (nexus-ufyl) replaces the legacy ``source_path``-keyed
-    filter so the prune of deprecated chunk-metadata keys could drop
-    ``source_path`` without breaking catalog prefiltering. The chunk-
-    side identity field is the ``doc_id`` metadata column written at
-    chunk-creation time by every indexer (the t3-backfill-doc-id
-    migration verb that historically populated it for legacy chunks
-    was retired post Phase 5b, nexus-iftc).
-    """
-    if not where or catalog is None:
-        return None
-
-    # Service-mode HttpCatalogClient deliberately exposes ``_db`` as a
-    # RAISING property (the xnz0o sentinel) — getattr's default only covers
-    # a MISSING attribute, so without the try this best-effort optimization
-    # killed every MCP search carrying a catalog-mappable where key
-    # (page_count, bib_year, ...) in service mode, the shipped default
-    # (found live in the 6.7.0 post-release shakeout). No prefilter is
-    # available over HTTP; fall through to standard post-filtering.
-    try:
-        db = getattr(catalog, "_db", None)
-    except Exception:  # noqa: BLE001 — the sentinel raises by design; prefilter is best-effort
-        return None
-    if db is None:
-        return None
-
-    # Only attempt pre-filter for predicates we can map to catalog columns
-    mappable = {k: v for k, v in where.items() if k in _PREDICATE_TO_COLUMN}
-    if not mappable:
-        return None
-
-    try:
-        # Get the raw sqlite3 connection from CatalogDB wrapper
-        conn = getattr(db, "_conn", db)
-        doc_ids = _catalog_doc_ids_for_predicates(conn, mappable)
-    except Exception:  # noqa: BLE001 — best-effort prefilter; failure logged at debug, returns None to skip prefilter
-        _log.debug("catalog_prefilter_failed", exc_info=True)
-        return None
-
-    if not doc_ids:
-        return None
-    if len(doc_ids) > _MAX_PREFILTER_IDS:
-        _log.debug("catalog_prefilter_too_many", count=len(doc_ids))
-        return None
-
-    # Selectivity check
-    total = catalog.doc_count() if hasattr(catalog, "doc_count") else 0
-    if total > 0 and len(doc_ids) / total > _SELECTIVITY_THRESHOLD:
-        return None
-
-    return {"doc_id": {"$in": doc_ids}}
-
-
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
 _CLUSTER_DEFAULT = "semantic"
@@ -489,8 +372,9 @@ def search_cross_corpus(
 
     Pass ``cluster_by=None`` to disable all clustering.
 
-    *taxonomy* is an optional :class:`CatalogTaxonomy` instance for topic
-    lookups. When ``None`` and ``cluster_by="semantic"``, falls back to
+    *taxonomy* is an optional :class:`~nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore`
+    instance for topic lookups (it named the SQLite ``CatalogTaxonomy`` until
+    nexus-i711w Stage 2 sub-stage C deleted that class). When ``None`` and ``cluster_by="semantic"``, falls back to
     Ward clustering.
 
     *threshold_override* (RDR-087 Phase 1.1 / nexus-yi4b.1.1) replaces the
@@ -558,20 +442,13 @@ def search_cross_corpus(
         threshold_override is not None or _voyage_thresholds_active(t3)
     )
 
-    # Catalog pre-filter: for high-selectivity predicates, narrow the search
-    # space via doc_id $in filter (Compass, RF-3; RDR-101 Phase 4 nexus-ufyl
-    # switched the key from source_path to doc_id).
-    prefilter = _prefilter_from_catalog(where, catalog)
-    if prefilter is not None:
-        # Merge pre-filter with original where — pre-filter narrows on doc_id,
-        # original where keeps the metadata predicates for ChromaDB post-filter.
-        effective_where: dict | None = {"$and": [prefilter, where]} if where else prefilter
-        _log.debug(
-            "catalog_prefilter_applied",
-            doc_ids=len(prefilter.get("doc_id", {}).get("$in", [])),
-        )
-    else:
-        effective_where = where
+    # The catalog SQLite pre-filter (Compass RF-3, RDR-101 Phase 4) is
+    # deleted: it read the local catalog's raw ``_db`` handle, which died
+    # with the SQLite catalog (RDR-158 P4, nexus-i711w). The service-mode
+    # sentinel already made it return None on every production path, so
+    # this is behaviorally identical: metadata predicates post-filter in
+    # the vector store as before.
+    effective_where = where
 
     # nexus-pebfx.8: dedupe — failed_collections is keyed by name, so a
     # duplicated input name would break the all-failed equality check below
@@ -1095,8 +972,6 @@ def _apply_salience_boost(
     Results without ``doc_id`` or whose document has no salient
     sentences fall through unchanged.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
-    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415 — circular-dep avoidance (nexus.db.t2.document_aspects)
     from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
     targeted = [
@@ -1106,21 +981,13 @@ def _apply_salience_boost(
     if not targeted:
         return results
 
-    # nexus-g8r2h fold (sweep [21089] item 8): route via the storage facade —
-    # the old direct DocumentAspects(memory.db) read served STALE frozen
-    # pre-migration salient_sentences on migrated boxes (and no boost at all
-    # for post-migration docs).
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance
+    # nexus-g8r2h fold (sweep [21089] item 8) routed this via the storage
+    # facade; the seam is now COLLAPSED (nexus-i711w Stage 2 sub-stage A3):
+    # HttpDocumentAspectsStore is the only aspects store — the SQLite arm's
+    # stale-frozen-read hazard died with it.
+    from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — circular-dep avoidance
 
-    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — circular-dep avoidance
-
-        aspects = HttpDocumentAspectsStore()
-    else:
-        db_path = nexus_config_dir() / "memory.db"
-        if not db_path.exists():
-            return results
-        aspects = DocumentAspects(db_path)
+    aspects = HttpDocumentAspectsStore()
     try:
         cache: dict[str, list[str]] = {}
         for r in targeted:

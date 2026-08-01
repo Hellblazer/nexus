@@ -21,7 +21,7 @@ Three arrows cross downward from the Planning band into the third band: a dashed
 
 The third band (green, "Unified Execution Layer") contains, left to right: a cluster of four colored hexagons connected by lines representing the Execution Plan DAG; an Execution Engine subgroup containing a `plan_run` panel (with a miniature DAG glyph) and a Result Cache cylinder labeled T1, connected by a bidirectional arrow; and a Defined Operator Set box divided into three labeled columns — RETRIEVAL (Search, Query, Traverse, FindNode, Filter, GroupBy), SYNTHESIS (Extract, Summarize, Compare, Rank, Generate, Aggregate), and STATE (`memory_*`, `store_*`, `plan_*`, `scratch_*`, `catalog_link`, `operator_*`).
 
-The fourth band (purple, "Knowledge Representation Layer") flows left to right: a stack-of-documents icon labeled "Source Documents" feeds an Inner-document Content Extractor (classifier, chunker via tree-sitter across 31 languages, `code_indexer`, `prose_indexer`, `pdf_extractor` routing Docling → MinerU → PyMuPDF, `bib_enricher`). An arrow labeled "Scholarly Document Knowledge" continues into Problem/Method Taxonomy Construction (`CatalogTaxonomy`, BERTopic plus HDBSCAN). Below Taxonomy, a Progressive Update box (`auto_linker`, `taxonomy_assign_hook`, `link_generator`) connects bidirectionally upward and receives a dashed "new documents" arrow from Source Documents. A "construct" arrow leads right from Taxonomy to the Nexus Knowledge Graph — rendered as a node-link cluster of orange and white circles — representing the three-tier store (T1 ChromaDB, T2 SQLite+FTS5, T3 Postgres 17 + pgvector behind the native nexus-service) with tumbler addresses and typed links (`cites`, `implements`, `supersedes`, `relates`).
+The fourth band (purple, "Knowledge Representation Layer") flows left to right: a stack-of-documents icon labeled "Source Documents" feeds an Inner-document Content Extractor (classifier, chunker via tree-sitter across 31 languages, `code_indexer`, `prose_indexer`, `pdf_extractor` routing Docling → MinerU → PyMuPDF, `bib_enricher`). An arrow labeled "Scholarly Document Knowledge" continues into Problem/Method Taxonomy Construction (`CatalogTaxonomy`, BERTopic plus HDBSCAN). Below Taxonomy, a Progressive Update box (`auto_linker`, `taxonomy_assign_hook`, `link_generator`) connects bidirectionally upward and receives a dashed "new documents" arrow from Source Documents. A "construct" arrow leads right from Taxonomy to the Nexus Knowledge Graph — rendered as a node-link cluster of orange and white circles — representing the three-tier store (T1 session scratch, T2 SQLite+FTS5 migrating to PG, T3 Postgres 17 + pgvector behind the native nexus-service) with tumbler addresses and typed links (`cites`, `implements`, `supersedes`, `relates`).
 </details>
 
 Source: [`architecture-diagram.svg`](architecture-diagram.svg) — edit the SVG directly, then re-render the PNG with `rsvg-convert -z 1.5 docs/architecture-diagram.svg -o docs/architecture-diagram.png`.
@@ -64,11 +64,13 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     surfaces: MCP nexus-catalog server (10 tools) + nx catalog CLI
     │
 
-    └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; T2 daemon-mediated, T3 service-mediated)
+    └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
-          T2: SQLite + FTS5 daemon ── nx daemon t2 start
-                Nine domain stores (eight share nexus.db + catalog) behind T2Database / T2Client
-                Transport: UDS (UID-gated) + 127.0.0.1 loopback TCP
+          T2: nexus-service over Postgres (the write arbiter)
+                Nine domain stores (eight share nexus.db + catalog) behind T2Database
+                Transport: HTTP to the nexus-service
+                (the SQLite + FTS5 `nx daemon t2` daemon is RETIRED — it
+                 arbitrated a single SQLite writer; Postgres does that now)
                 memory · plans · taxonomy · telemetry · document_aspects ·
                 aspect_queue · document_highlights · catalog
                 (chash_index RETIRED — table dropped by RDR-187, v0.1.51)
@@ -91,26 +93,26 @@ BOTH local and managed-cloud modes. `make_t3()` returns an
 (`storage_service_addr.<uid>`). Start it via `nx daemon service start`. The
 older ChromaDB serving path (`nx daemon t3`) still registers but is the
 RETIRED serving route, kept only as the immutable migration source until
-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b deletes it. T2 domain stores hard-default to the same service
-backend ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)); the SQLite + FTS5 single-writer daemon ([RDR-120](rdr/rdr-120-storage-substrate-split.md)) remains
-only as the `NX_STORAGE_BACKEND=sqlite` opt-out path.
+[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b deletes it. T2 domain stores serve through the same service
+backend ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)); the SQLite + FTS5 substrate ([RDR-120](rdr/rdr-120-storage-substrate-split.md)) is
+deleted (RDR-158 P4) and its `NX_STORAGE_BACKEND=sqlite` opt-out hard-errors (P3).
 
 **One-service convergence.** Both tiers now serve through the native
 `nexus-service`: T3 vectors on Postgres + pgvector, and the T2 domain stores
 **hard-default to the service backend** as of [RDR-152](rdr/rdr-152-postgres-java-storage-service.md) (`nexus-gmiaf`).
-`NX_STORAGE_BACKEND[_<store>]=sqlite` is the explicit opt-out; the single-writer
-SQLite daemon remains only as that fallback path. One service backs both tiers,
-with SQLite retained as the local opt-out.
+`NX_STORAGE_BACKEND[_<store>]=sqlite` is retired (RDR-158 P3 — a hard error
+with the stranded-install redirect); the SQLite stores and their single-writer
+daemon are deleted. One service backs both tiers.
 
-For container deployments (Claude Co-Work and similar): containers
-reach the host's T2 daemon via the loopback TCP socket exposed by
-``nx daemon t2 status``, and the host's nexus-service for T3 via
-``NX_SERVICE_URL`` + ``NX_SERVICE_TOKEN``. Pattern:
+For container deployments (Claude Co-Work and similar): containers reach the
+host's nexus-service for BOTH tiers via ``NX_SERVICE_URL`` +
+``NX_SERVICE_TOKEN``. The separate T2 transport (``NX_T2_ADDR`` /
+``NX_T2_SOCK``, pointed at the T2 daemon's loopback TCP or UDS socket) is gone
+with that daemon — one URL now covers what took three variables. Pattern:
 
 ```
 # macOS Docker Desktop:
 docker run --rm \
-    -e NX_T2_ADDR=host.docker.internal:<port> \
     -e NX_SERVICE_URL=http://host.docker.internal:<service_port> \
     -e NX_SERVICE_TOKEN=<token> \
     <image-with-conexus>
@@ -118,7 +120,6 @@ docker run --rm \
 # Linux (default bridge):
 docker run --rm \
     --add-host=host.docker.internal:host-gateway \
-    -e NX_T2_ADDR=host.docker.internal:<port> \
     -e NX_SERVICE_URL=http://host.docker.internal:<service_port> \
     -e NX_SERVICE_TOKEN=<token> \
     <image>
@@ -143,11 +144,12 @@ SQLite+FTS5, T3 uid-scoped pgvector behind the nexus-service) but share
 (`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
 election, ungraceful-death reap, restart fencing, self-heal re-assert, and
 version-skew cycling all live in that one primitive, parameterized by tier
-and scope. Each tier is a thin consumer: T1 via `daemon/t1_lease.py`
-(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), T2 via
-`daemon/t2_daemon.py`, T3 via `daemon/storage_service_daemon.py` (the
-nexus-service supervisor; the retired `daemon/t3_daemon.py` ChromaDB path
-remains only as the migration source). Liveness is **lease freshness (TTL),
+and scope. Each surviving tier is a thin consumer: T1 via `daemon/t1_lease.py`
+(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), and the
+storage service via `daemon/storage_service_daemon.py`. Both per-tier daemons
+that used to sit here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b)
+and `daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w) — the service
+supervises every tier now. Liveness is **lease freshness (TTL),
 not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
 MinerU (`daemon/mineru_lifecycle.py`, nexus-1qdb9) consumes the substrate's
 public `election()` spawn guard rather than a full lease: the PDF pipeline's
@@ -407,27 +409,23 @@ The partial-commit failure mode (a batch hook commits an early sub-step then rai
 ## T2 Domain Stores
 
 `src/nexus/db/t2/` is a Python package split into eight domain-specific
-stores. Each store owns its own tables in a shared SQLite file and runs
-against its own `sqlite3.Connection` in WAL mode. Reads in one domain
-are never blocked by writes in another (the Phase 1 global Python
-mutex is gone); concurrent writes across domains still serialize at
-SQLite's single-writer WAL lock. Each serving connection sets
-`busy_timeout=30000` (the shared `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`,
-raised from 5000 in [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B1 after two shakeouts showed 5s was too short to
-absorb sustained cross-store contention) and the daemon dispatch retries on a
-transient `database is locked` ([RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B2), so a contention window becomes a
-wait rather than a dropped write.
+stores. Each store is an HTTP client (`Http*Store`) against the
+engine's Postgres — the SQLite twins that used to own tables in a
+shared `memory.db` were deleted in RDR-158 P4 (nexus-i711w), and the
+engine's Postgres is the single write arbiter. Cross-store contention
+tuning (`busy_timeout`, WAL single-writer serialization, the daemon
+dispatch retry of [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B1/B2) died with that substrate.
 
-| Store             | Class                     | Attribute              | Responsibility                                                             |
-|-------------------|---------------------------|------------------------|----------------------------------------------------------------------------|
-| Memory            | `MemoryStore`             | `db.memory`            | Persistent notes, project context, FTS5 search, access tracking, TTL       |
-| Plans             | `PlanLibrary`             | `db.plans`             | Plan templates, plan search, plan TTL                                      |
-| Taxonomy          | `CatalogTaxonomy`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
-| Telemetry         | `Telemetry`               | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
-| Chash index       | `ChashIndex`              | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
-| Document aspects  | `DocumentAspects`         | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
-| Aspect queue      | `AspectExtractionQueue`   | `db.aspect_queue`      | Durable WAL buffer feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
-| Document highlights | `DocumentHighlights`    | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
+| Store             | Class                       | Attribute              | Responsibility                                                             |
+|-------------------|-----------------------------|------------------------|----------------------------------------------------------------------------|
+| Memory            | `HttpMemoryStore`           | `db.memory`            | Persistent notes, project context, full-text search, access tracking, TTL  |
+| Plans             | `HttpPlanLibrary`           | `db.plans`             | Plan templates, plan search, plan TTL                                      |
+| Taxonomy          | `HttpTaxonomyStore`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
+| Telemetry         | `HttpTelemetryStore`        | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
+| Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
+| Document aspects  | `HttpDocumentAspectsStore`  | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
+| Aspect queue      | `HttpAspectQueue`           | `db.aspect_queue`      | Durable queue feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
+| Document highlights | `HttpDocumentHighlightsStore` | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
 
 `T2Database` is a composing facade: it constructs the eight stores in
 order (memory → plans → taxonomy → telemetry → chash_index →
@@ -436,8 +434,8 @@ methods as thin delegates for backward compatibility, and runs
 cross-domain operations like `expire()` over all of them. The
 chash_index, taxonomy, document_aspects, and aspect_queue domains are
 accessed directly via their attributes -- no facade delegates exist
-for them. The facade holds no database connection of its own; every
-SQL statement runs through a specific domain store.
+for them. The facade holds no connection of its own; every
+operation runs through a specific domain store's HTTP client.
 
 **Preferred call style for new code**:
 
@@ -451,7 +449,13 @@ db.telemetry.log_relevance(query, ...)             # domain method
 Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
 etc. continue to work via facade delegation -- no migration required.
 
-### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2)
+### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
+
+> **This subsection describes the retired SQLite substrate.** The per-store
+> `sqlite3.Connection`s, WAL locks, and `busy_timeout` tuning below were
+> deleted with the SQLite stores (RDR-158 P4, nexus-i711w); concurrency is
+> now arbitered by the engine's Postgres. Kept as design heritage for the
+> domain-split shape the HTTP twins inherited.
 
 Phase 2 replaced a single shared connection with per-store connections:
 
@@ -483,11 +487,20 @@ Phase 2 consequences:
   own `threading.Lock` plus the SQLite file-level write lock -- callers
   never see `OperationalError: database is locked`.
 
-### Cross-process single writer ([RDR-120](rdr/rdr-120-storage-substrate-split.md) / [RDR-128](rdr/rdr-128-t2-single-writer-enforcement.md))
+### Cross-process single writer ([RDR-120](rdr/rdr-120-storage-substrate-split.md) / [RDR-128](rdr/rdr-128-t2-single-writer-enforcement.md)) — HISTORICAL
+
+> **This whole section describes a retired mechanism.** The T2 daemon, its
+> client, and the `nx daemon t2` verb group were deleted by nexus-i711w
+> (RDR-158 P4). The problem it solved — many processes contending on one
+> SQLite WAL writer lock — does not exist against Postgres, which is the write
+> arbiter now. The section is kept because the RDR-129/140/146 sequence is the
+> design heritage behind the current single-writer *lease* primitive
+> (`daemon/service_registry.py`), which generalised out of it; read it as how
+> we got here, not as how T2 works today.
 
 The per-store `busy_timeout` above absorbs *within-process* cross-domain
-contention. *Across* processes, `memory.db` has a single owner: the **T2
-daemon** ([RDR-120](rdr/rdr-120-storage-substrate-split.md)). Other processes reach T2 through it over a local RPC
+contention. *Across* processes, `memory.db` had a single owner: the **T2
+daemon** ([RDR-120](rdr/rdr-120-storage-substrate-split.md)). Other processes reached T2 through it over a local RPC
 (`nexus.daemon.t2_client.T2Client`) rather than opening the WAL writer
 lock directly.
 
@@ -507,12 +520,14 @@ is locked` daemon incidents):
   client side.
 - **Enforcement.** `nexus.storage_boundary_lint` (wired into `nx doctor
   --check-storage-boundary`) hard-fails any raw `sqlite3.connect` or
-  direct `T2Database(...)` construction outside `src/nexus/db/` +
-  `src/nexus/daemon/` that lacks a documented `# epsilon-allow:
-  <reason>` override. The genuinely-irreducible direct opens (bootstrap
-  `nx upgrade`, the daemon-unreachable fallback, read-only diagnostics,
-  the taxonomy CLI factory whose read-only subcommands need raw cursors)
-  each carry that justification.
+  direct `T2Database(...)` construction outside its explicit named
+  allowlists. The per-line `epsilon-allow` escape token was RETIRED at
+  RDR-186 P4 (census-to-zero): surviving sites — the three read-only
+  frozen-migration-source diagnostics (`SQLITE_CONNECT_ALLOWLIST`) and
+  the documented-irreducible direct constructions
+  (`T2DATABASE_CONSTRUCTION_ALLOWLIST`) — are enumerated per file with
+  exact counts in `storage_boundary_lint.py`; a new site is a hard
+  failure, never a comment to write.
 - **Bootstrap serialization.** `nx upgrade` and the daemon's own startup
   migration take an exclusive `fcntl.flock` on
   `~/.config/nexus/t2_migration.lock` before any schema write, and the
@@ -548,17 +563,20 @@ is locked` daemon incidents):
   surfaces a `restarts_in_window` count in `nx daemon t2 status`. The
   non-daemon direct-writer fallbacks (the `t2_index_write`
   schema-mismatch arm) remain the [RDR-128](rdr/rdr-128-t2-single-writer-enforcement.md) A1 boundary, unchanged.
-- **Catalog behind the daemon ([RDR-146](rdr/rdr-146-catalog-store-behind-daemon.md)).** `.catalog.db` (the 8th T2
+- **Catalog behind the daemon ([RDR-146](rdr/rdr-146-catalog-store-behind-daemon.md)) — HISTORICAL.** `.catalog.db` (the 8th T2
   domain store, on its own file) was the last shared-state store still on
   the direct-`sqlite3` model; GH #1046 was its starvation symptom (an
   interactive `nx dt index` starved ~30 min by a hook-spawned `nx index
-  repo` on the shared catalog writer). The T2 daemon now hosts the one rich
-  `Catalog` (sole `.catalog.db` writer + JSONL append path) behind a
-  write-only op whitelist; consumers reach it through typed
-  `make_catalog_reader` (read-only, local) / `make_catalog_writer`
-  (daemon-routed, direct fallback when no daemon) factories, enforced by
-  the same boundary lint (`CATALOG_CONSTRUCTION_BASELINE = 0`). Within the
-  single daemon, fairness is producer back-pressure: an interactive write
+  repo` on the shared catalog writer). RDR-146 put the one rich local
+  `Catalog` behind the T2 daemon with a write-only op whitelist. The
+  daemon died in nexus-i711w sub-stage B and the local catalog itself in
+  the terminal i711w deletion; what SURVIVES of RDR-146 is its typed
+  factory surface — consumers reach the (now service-backed)
+  catalog through `make_catalog_reader` / `make_catalog_writer`
+  (`HttpCatalogClient` under both), still enforced by
+  the same boundary lint (`CATALOG_CONSTRUCTION_BASELINE = 0`). The
+  daemon-era fairness protocol described next is retained as history: an
+  interactive write
   tags its RPC frame (`NX_WRITE_PRIORITY` / `isatty` / per-command intent),
   opening a short in-memory window the background indexer polls
   (`catalog.is_interactive_write_pending`) and yields to over a bounded
@@ -566,25 +584,21 @@ is locked` daemon incidents):
   next idempotent pass; the per-repo advisory lock keeps its orthogonal
   two-same-repo job.
 
-**Migration Registry** ([RDR-076](rdr/rdr-076-idempotent-upgrade-mechanism.md)): All T2 schema migrations are centralised in
-`src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
-`Migration(introduced, name, fn)` entries. `apply_pending(conn, current_version)`
-runs migrations between the last-seen version (stored in `_nexus_version` table)
-and the current CLI version. Each migration function is idempotent via
-`PRAGMA table_info()` or `sqlite_master` guards.
-
-`T2Database.__init__()` opens a transient connection, calls `apply_pending()`,
-closes it, then constructs the eight domain stores. The `_upgrade_done` set
-(guarded by `_upgrade_lock`) provides a process-level fast path — subsequent
-constructions skip all DB access. Domain stores retain their own
-`_migrated_paths` guards for standalone construction outside `T2Database`.
-
-**T3 Upgrade Steps**: `T3UpgradeStep(introduced, name, fn)` entries in the
-`T3_UPGRADES` list handle T3 vector-store operations (backfills, re-indexing)
-that require a T3 client. These run via `nx upgrade` (not `--auto` mode).
+**Migration Registry — DELETED** ([RDR-076](rdr/rdr-076-idempotent-upgrade-mechanism.md) → RDR-158 P4 Stage 4, nexus-i711w):
+the client-side T2 migration chain (`src/nexus/db/migrations.py`: the
+`MIGRATIONS` / `T3_UPGRADES` registries, `apply_pending`,
+`T2Database.bootstrap_schema`, the migration flock) is deleted. Schema is
+engine-owned via Liquibase in every mode; the local `.db` files are a FROZEN
+migration source ([RDR-176](rdr/rdr-176-survivable-managed-migration-readiness.md) Gap 2)
+that nothing migrates or re-stamps. `T2Database.__init__()` constructs the
+domain stores (all HTTP clients) and runs no schema work; its
+`run_migrations` parameter is retained-and-ignored for signature stability.
+Installs still carrying pre-PG local data use the pinned last
+migration-capable 6.x release (the two-hop redirect).
 
 **Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook,
-applying T2 migrations silently. T3 steps are skipped in auto mode.
+converging pending ladder rungs and preconditions silently (there are no
+local T2 migrations — RDR-158 P4 Stage 4).
 
 **In-memory SQLite**: Tests that want an ephemeral database should use
 a temp file path, not `":memory:"` -- `:memory:` databases are
@@ -601,9 +615,9 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
 | **Command preambles** | `commands/rdr.py` (`preamble` subgroup), `commands/command_context.py`, `conexus/commands/*.md` | [RDR-130](rdr/rdr-130-command-preambles-via-nx-cli.md): slash-command context preambles. Each of the 25 conexus slash commands injects its preamble via a single-line `` !`nx <subcommand> -- "$ARGUMENTS"` `` call — the 9 RDR-lifecycle commands use `nx rdr preamble <name>`, the 16 agent-relay commands use `nx command-context <name>`. Preamble logic lives in the tested `nx` CLI (normal Python, unit-covered) and prints markdown; Claude Code injects that stdout as plain text and does NOT re-parse it, so emitted tables/fences are safe. No command inlines bash, no command depends on `$CLAUDE_PLUGIN_ROOT` (empty in command-bash context); a static guard (`test_migrated_command_uses_single_line_nx`) enforces the single-line form across all 25. Replaced the inlined-bash approach whose fenced-block truncation caused the 5.1.2 regression class |
-| **Catalog** | `catalog/catalog.py`, `catalog/catalog_db.py`, `catalog/tumbler.py`, `catalog/link_generator.py`, `catalog/auto_linker.py`, `catalog/consolidation.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put`. `consolidation.py` merges per-paper collections into corpus-level collections |
-| **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py`, `db/http_vector_client.py`, `db/managed_endpoint.py`, `db/service_endpoint.py`, `db/pg_provision.py`, `db/chroma_quotas.py`, `db/local_ef.py` | Tier implementations. T2 is a package split into domain stores (see § T2 Domain Stores). `make_t3()` (`db/__init__.py`) returns `HttpVectorClient` (T3 over the nexus-service `/v1/vectors`) by default; `db/t3.py` is the retired ChromaDB path kept as migration source. `managed_endpoint.py` / `service_endpoint.py` resolve the service URL/token (T3 reads `NX_SERVICE_URL`; the T2-stores/catalog resolver uses `NX_SERVICE_HOST`/`PORT`); `pg_provision.py` provisions the local PG17 cluster + writes `pg_credentials`. `chroma_quotas.py` is the single source of truth for ChromaDB Cloud quota constants and validators. `local_ef.py` provides the local ONNX embedding function |
-| **Service stack** | `daemon/storage_service_daemon.py`, `daemon/aspect_worker_daemon.py`, `daemon/binary_install.py`, `commands/guided_upgrade_cmd.py`, `commands/migrate_cmd.py`, `commands/uninstall.py`, `db/storage_mode.py` | Native nexus-service lifecycle ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)/161): `storage_service_daemon.py` supervises the PG17+pgvector+service binary; `binary_install.py` fetches/installs the engine-service binary (`PINNED_SERVICE_TAG` — build-time pin, bumped per release as the compatible engine-service version advances; `None` pre-6.0). `aspect_worker_daemon.py` (`nx daemon aspect-worker start`, [RDR-173](rdr/rdr-173-service-mode-aspect-worker-hosting.md)) is a leased, per-tenant host for the aspect-extraction loop + `reclaim_stale`, one more tier on the [RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) service-registry substrate — spawned automatically (spawn-if-absent, single-flight) by the `store_put` enqueue hook so extraction no longer depends on the storing process's lifetime. `guided_upgrade_cmd.py` (`nx guided-upgrade`) and `migrate_cmd.py` (`nx migrate-to-service`) are the [RDR-159](rdr/rdr-159-guided-upgrade-migration.md) provision-then-ETL pair (cross-model mode [RDR-162](rdr/rdr-162-truthful-post-rdr160-upgrade-path.md)); as of [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md) both are **demoted internal primitives** — their ETL/verify/report engine is inherited by the ladder's substrate rung, which is what `nx upgrade` walks (see **Upgrade ladder** below). They remain callable for surgical use until [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b deletes the Chroma read path. `uninstall.py` (`nx uninstall`, [RDR-165](rdr/rdr-165-agent-lifecycle-and-operations.md)) is the first-class teardown for both local-service and managed-only installs. `storage_mode.py` routes each T2/T1 store to the service backend (hard default) or SQLite (`NX_STORAGE_BACKEND` opt-out, [RDR-152](rdr/rdr-152-postgres-java-storage-service.md)) |
+| **Catalog** | `catalog/http_catalog_client.py`, `catalog/catalog_protocol.py`, `catalog/factory.py`, `catalog/types.py`, `catalog/tumbler.py`, `catalog/link_generator.py`, `catalog/auto_linker.py`, `catalog/store_hook.py`, `catalog/collection_name.py` | Service-owned document registry + typed link graph (the engine's Postgres tables, reached through `HttpCatalogClient` via the `make_catalog_reader`/`make_catalog_writer` factories — the local JSONL+SQLite catalog was deleted in the nexus-i711w terminal deletion, RDR-158 P4). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put`. `store_hook.py` is the shared `store_put`-origin primitive: `catalog_store_hook`/`catalog_store_hook_tracked` register the catalog row at write time, and `resolve_knowledge_doc_for_chash` (nexus-5axey) is the chash-keyed dedup/delete/reap lookup — `content_type == "knowledge"` with no `file_path`, unambiguous match only, ambiguous candidates deliberately left for `nx catalog gc` rather than guessed. `collection_name.py` validates conformant collection-name shape (`<content_type>__<owner_id>__<embedding_model>__v<n>`, RDR-103) at construction time |
+| **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py`, `db/http_vector_client.py`, `db/managed_endpoint.py`, `db/service_endpoint.py`, `db/pg_provision.py`, `db/limits.py`, `db/local_ef.py`, `db/inmemory_vector_store.py`, `db/minilm_direct.py`, `db/voyage_ef.py` | Tier implementations. T2 is a package split into domain stores (see § T2 Domain Stores). `make_t3()` (`db/__init__.py`) returns `HttpVectorClient` (T3 over the nexus-service `/v1/vectors`) by default; `db/t3.py` is the retired serving path, now chroma-free and kept only as the test facade + ETL wrapper (RDR-155 P4b P3). `managed_endpoint.py` / `service_endpoint.py` resolve the service URL/token (T3 reads `NX_SERVICE_URL`; the T2-stores/catalog resolver uses `NX_SERVICE_HOST`/`PORT`); `pg_provision.py` provisions the local PG17 cluster + writes `pg_credentials`. `limits.py` is the single source of truth for size/batch/concurrency ceilings (`chroma_quotas.py` was DELETED at RDR-155 P4b P3; its `QuotaValidator` died with no replacement). `inmemory_vector_store.py` is the dependency-free in-process substrate the tests and the T1 isolated path use; `minilm_direct.py` / `voyage_ef.py` are the nexus-owned embedding functions that replaced chromadb's. `local_ef.py` provides the local ONNX embedding function |
+| **Service stack** | `daemon/storage_service_daemon.py`, `daemon/aspect_worker_daemon.py`, `daemon/binary_install.py`, `commands/uninstall.py`, `db/storage_mode.py` | Native nexus-service lifecycle ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)/161): `storage_service_daemon.py` supervises the PG17+pgvector+service binary; `binary_install.py` fetches/installs the engine-service binary (`PINNED_SERVICE_TAG` — build-time pin, bumped per release as the compatible engine-service version advances; `None` pre-6.0). `aspect_worker_daemon.py` (`nx daemon aspect-worker start`, [RDR-173](rdr/rdr-173-service-mode-aspect-worker-hosting.md)) is a leased, per-tenant host for the aspect-extraction loop + `reclaim_stale`, one more tier on the [RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) service-registry substrate — spawned automatically (spawn-if-absent, single-flight) by the `store_put` enqueue hook so extraction no longer depends on the storing process's lifetime. `commands/guided_upgrade_cmd.py` (`nx guided-upgrade`) and `commands/migrate_cmd.py` (`nx migrate-to-service`) were the [RDR-159](rdr/rdr-159-guided-upgrade-migration.md) provision-then-ETL pair (cross-model mode [RDR-162](rdr/rdr-162-truthful-post-rdr160-upgrade-path.md)); [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md) folded their ETL/verify/report engine into the ladder's substrate rung that `nx upgrade` walks (see **Upgrade ladder** below), and RDR-155 P4b then **deleted both files outright** along with the rest of the Chroma read path — they are not present in this release. A pre-PG install is redirected to the pinned last migration-capable release (`nx guided-upgrade` there) rather than calling anything in this tree; the true demoted-not-deleted survivors are `nx migration`, `nx collection backfill-hash`, and `nx hooks update-all` (see [cli-reference.md § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives)). `uninstall.py` (`nx uninstall`, [RDR-165](rdr/rdr-165-agent-lifecycle-and-operations.md)) is the first-class teardown for both local-service and managed-only installs. `storage_mode.py` routes each T2/T1 store to the service backend, the only backend since RDR-158 — `NX_STORAGE_BACKEND=sqlite` hard-errors with the stranded-install redirect rather than selecting anything ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)) |
 | **Upgrade ladder** | `upgrade_ladder/protocol.py`, `upgrade_ladder/registry.py`, `upgrade_ladder/completion.py`, `upgrade_ladder/runner.py`, `upgrade_ladder/preconditions.py`, `upgrade_ladder/census.py`, `upgrade_ladder/rungs/`, `commands/upgrade.py` | [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md): every DATA transition is a rung on ONE ordered ladder, auto-applied when newer code meets older data — extending the proven T2 `apply_pending` model to all axes. `registry.py` holds the walk order with RQ2's hard edges validated as data (chunk-identity and embedder-era are CO-RESIDENT inside the substrate rung — in-flight wire transforms, never sequenced rungs). `runner.py` walks it under the [RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md) verify-before-record guard; `completion.py` is the ladder-local completion store from which the position is DERIVED (max contiguous verified prefix — never stored, no setter). `preconditions.py` converges the non-data axes (package, engine, process, provisioning) STATELESSLY before the walk: re-derived from on-disk state every invocation (provenance sidecar, lease, package metadata), never recorded — crash-loop-safe by construction. `census.py` surfaces era debt (pre-[RDR-108](rdr/rdr-108-graph-identity-normalization.md) chunk ids) from the release that ships the detector, not on migration day. `commands/upgrade.py` (`nx upgrade`) is the single trigger; `nx doctor` reports pending rungs read-only |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per [RDR-032](rdr/rdr-032-indexer-decomposition.md)). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (default-installed since nexus-2fyb) for LaTeX extraction; non-math PDFs use Docling. MinerU absence at runtime raises a `RuntimeError` rather than silently falling back to formula-stripped Docling — the prior silent fallback wiped formulas from every PDF indexed for weeks. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. the three-stage streaming pipeline ([RDR-048](rdr/rdr-048-streaming-pdf-pipeline.md)) buffers through the engine's `nexus.pdf_pipeline`/`pdf_pages`/`pdf_chunks` tables via `db/http_pipeline_client.py` (RDR-186 retired the local `pipeline.db` SQLite buffer); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents ([RDR-047](rdr/rdr-047-large-pdf-extraction-resilience.md)) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
@@ -618,7 +632,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture ([RDR-062](rdr/rdr-062-mcp-interface-tiering.md), [RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md)). `nexus` core server (26 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). (The RDR-139 Layer A' `nx-mcp-devonthink` proxy was retired 2026-07-07, nexus-goypg — clients connect to DEVONthink's own MCP server directly; its `dt_incorporate` composite lives on as `nx dt incorporate`.) Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
 | **Enrichment** | `bib_enricher.py`, `aspect_extractor.py`, `aspect_worker.py`, `commands/enrich.py` | Two enrichment surfaces. (1) Bibliographic via Semantic Scholar (`bib_enricher.py` lookup + `nx enrich bib` CLI). (2) Structured aspects via Claude CLI (`aspect_extractor.py` synchronous extractor + `aspect_worker.py` async-queue daemon worker registered as the document-grain post-store hook + `nx enrich aspects` CLI). Aspect extraction is `knowledge__*` only in Phase 1 ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)); the worker drains `aspect_extraction_queue` and writes to `document_aspects` |
 | **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
-| **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py`, `commands/_provision.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). `_provision.py`: ChromaDB Cloud database provisioning (tenant resolution, database creation) |
+| **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). (`_provision.py` — ChromaDB Cloud database provisioning — was DELETED at RDR-155 P4b P2; it had zero src callers.) |
 
 ### Builtin plan templates
 
@@ -658,7 +672,7 @@ Grouped by verb:
 2. **No ORM** -- Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **Session-id leased T1 discovery** -- The MCP server's chroma lifespan starts a per-session ChromaDB HTTP server (the `chroma` entry-point co-installed with the package) and publishes a leased registry record at `~/.config/nexus/t1_addr.<session_id>` ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4, `daemon/t1_lease.py`), keyed on the Claude session-id. Child agents and Bash-tool siblings resolve the same session-id from `current_session` and discover the live lease, sharing T1 scratch across the agent tree. Liveness is lease freshness (TTL), not pid. Concurrent independent windows stay isolated via distinct session-ids. Falls back to `EphemeralClient` only under `NX_T1_ISOLATED=1`; otherwise an unresolvable session raises `T1ServerNotFoundError`.
+5. **Session-id leased T1 discovery** -- The MCP server's chroma lifespan starts a per-session ChromaDB HTTP server (the `chroma` entry-point co-installed with the package) and publishes a leased registry record at `~/.config/nexus/t1_addr.<session_id>` ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4, `daemon/t1_lease.py`), keyed on the Claude session-id. Child agents and Bash-tool siblings resolve the same session-id from `current_session` and discover the live lease, sharing T1 scratch across the agent tree. Liveness is lease freshness (TTL), not pid. Concurrent independent windows stay isolated via distinct session-ids. Falls back to a process-scoped `InMemoryVectorClient` only under `NX_T1_ISOLATED=1` (RDR-155 P4b P0a replaced the former `EphemeralClient` leg); otherwise an unresolvable session raises `T1ServerNotFoundError`.
 6. **MCP tools over agent-spawns for utility operations** ([RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md)) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. Agent files are retained as stubs that redirect to the MCP tool.
 
    **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.

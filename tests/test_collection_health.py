@@ -1,114 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``nx collection health`` composite report — RDR-087 Phase 3.4.
 
-Tests decompose into three layers:
+Tests decompose into two layers:
 
-1. ``Telemetry.query_collection_stats`` — new T2 aggregate API pinned in
-   isolation with seeded rows.
-2. ``compute_collection_health`` orchestrator — every per-column
+1. ``compute_collection_health`` orchestrator — every per-column
    computation is dependency-injected so the test can drive each
    outcome class deterministically without live T2/T3/catalog.
-3. Formatters (human + JSON) and the ``nx collection health`` CLI
+2. Formatters (human + JSON) and the ``nx collection health`` CLI
    wiring, asserting ``--sort`` and ``--format=json`` behaviour.
+
+The former layer 1 (``Telemetry.query_collection_stats`` pinned against
+seeded SQLite rows) died with the SQLite telemetry store (nexus-i711w
+Stage 2 sub-stage A2). The aggregate's semantics — 30d windowing,
+zero_hit_rate, median over raw_count>0 rows only, days>=1 validation —
+now live solely in the engine's ``TelemetryRepository.queryCollectionStats``
+(GET /v1/telemetry/search/stats); see TelemetryRepositoryTest.java and
+tests/db/test_http_telemetry_store.py for the surviving coverage.
 """
 from __future__ import annotations
 
 import json
-import sqlite3
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-
-
-# ── Telemetry.query_collection_stats ────────────────────────────────────────
-
-
-class TestTelemetryQueryCollectionStats:
-    def _fresh_telemetry(self, tmp_path: Path):
-        from nexus.db.t2.telemetry import Telemetry
-
-        db_path = tmp_path / "memory.db"
-        return Telemetry(db_path)
-
-    def _seed(self, tm, collection: str, rows):
-        """Rows: iterable of (age_days, raw, kept, top_distance)."""
-        now = datetime.now(UTC)
-        payload = []
-        for i, (age, raw, kept, dist) in enumerate(rows):
-            ts = (now - timedelta(days=age)).isoformat()
-            payload.append(
-                (ts, f"hash{i:04d}", collection, raw, kept, dist, 0.45),
-            )
-        tm.log_search_batch(payload)
-
-    def test_empty_table_returns_none_placeholders(self, tmp_path) -> None:
-        tm = self._fresh_telemetry(tmp_path)
-        stats = tm.query_collection_stats("code__x")
-        assert stats["row_count"] == 0
-        assert stats["zero_hit_rate"] is None
-        assert stats["median_top_distance"] is None
-        tm.close()
-
-    def test_zero_hit_rate_computed_over_window(self, tmp_path) -> None:
-        tm = self._fresh_telemetry(tmp_path)
-        # 4 in-window rows: 2 kept>0, 2 kept==0 → rate=0.5.
-        # 1 out-of-window row: 45d old, should be ignored.
-        self._seed(tm, "docs__a", [
-            (1, 5, 3, 0.30),
-            (2, 4, 2, 0.40),
-            (3, 3, 3, 0.50),  # kept_count = 3 - 3 = 0? no: kept=3, dropped=0.
-            (5, 5, 0, 0.20),  # kept=0
-            (45, 2, 0, 0.10),  # out of window
-        ])
-        # Re-seed row #3 as genuinely kept==0 (my list had kept=3 above —
-        # reorder so test matches the 0.5 rate assertion cleanly):
-        tm.conn.execute("DELETE FROM search_telemetry")
-        tm.conn.commit()
-        self._seed(tm, "docs__a", [
-            (1, 5, 3, 0.30),   # kept>0
-            (2, 4, 0, 0.40),   # kept==0
-            (3, 3, 2, 0.50),   # kept>0
-            (5, 5, 0, 0.20),   # kept==0
-            (45, 2, 0, 0.10),  # out of window
-        ])
-        stats = tm.query_collection_stats("docs__a", days=30)
-        assert stats["row_count"] == 4
-        assert stats["zero_hit_rate"] == pytest.approx(0.5)
-        tm.close()
-
-    def test_median_top_distance_ignores_raw_zero(self, tmp_path) -> None:
-        """Median is computed only over rows with raw_count > 0."""
-        tm = self._fresh_telemetry(tmp_path)
-        self._seed(tm, "code__x", [
-            (1, 5, 2, 0.20),
-            (1, 3, 0, 0.40),
-            (1, 4, 1, 0.60),
-            (1, 0, 0, None),  # raw_count==0 — excluded
-        ])
-        stats = tm.query_collection_stats("code__x")
-        # distances in raw>0 rows: 0.20, 0.40, 0.60 — median = 0.40.
-        assert stats["median_top_distance"] == pytest.approx(0.40)
-        tm.close()
-
-    def test_other_collections_do_not_leak(self, tmp_path) -> None:
-        tm = self._fresh_telemetry(tmp_path)
-        self._seed(tm, "code__a", [(1, 5, 3, 0.30)])
-        self._seed(tm, "code__b", [(1, 3, 0, 0.70)])
-        stats_a = tm.query_collection_stats("code__a")
-        stats_b = tm.query_collection_stats("code__b")
-        assert stats_a["row_count"] == 1
-        assert stats_a["zero_hit_rate"] == pytest.approx(0.0)
-        assert stats_b["row_count"] == 1
-        assert stats_b["zero_hit_rate"] == pytest.approx(1.0)
-        tm.close()
-
-    def test_rejects_zero_days(self, tmp_path) -> None:
-        tm = self._fresh_telemetry(tmp_path)
-        with pytest.raises(ValueError):
-            tm.query_collection_stats("any", days=0)
-        tm.close()
 
 
 # ── compute_collection_health orchestrator ─────────────────────────────────

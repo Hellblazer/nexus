@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase 1 — verify formerly-silent catch blocks now emit structlog events."""
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import logging
 from pathlib import Path
@@ -278,8 +279,6 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
     failures, creating the inverse-of-#244 orphan shape (T3 row with no
     catalog tumbler) with zero observability.
     """
-    import chromadb
-
     from nexus.db.t1 import T1Database
     from nexus.db.t2 import T2Database
     from nexus.db.t3 import T3Database
@@ -300,7 +299,7 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         _inject_t1(T1Database(session_id="hook-fail", client=t1_client))
 
         t3_client = make_vector_test_client()
-        ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+        ef = MiniLMDirectEmbeddingFunction()
         _inject_t3(T3Database(_client=t3_client, _ef_override=ef))
 
         # Force the catalog hook to raise.
@@ -413,43 +412,44 @@ def test_set_owner_head_hash_failed_logs_warning(tmp_path, monkeypatch):
     )
 
 
-def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path, monkeypatch):
+def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path):
     """_CatalogBackedRegistry.update catches Exception around
     cat.register_collection and emits
     catalog_registry_adapter_register_failed before returning
-    success=False to the caller."""
-    # RDR-155 P4b P0a': the test builds a LOCAL file catalog; under the
-    # engine substrate the service backend opens it frozen-readonly and
-    # the owner write fails before the mocked register path. Pin the
-    # catalog backend so the adapter's catch-and-warn contract stays
-    # exercised (dies with the rich catalog at flip).
-    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
+    success=False to the caller.
+
+    nexus-i711w terminal deletion: this used to build a LOCAL file catalog
+    (its comment scheduled it to die "with the rich catalog at flip"). The
+    SUBJECT — the adapter's catch-and-warn boundary in commands/index.py —
+    survives, and the adapter takes an injected writer, so a stub writer
+    exercises the same boundary without any substrate.
+    """
     from nexus.commands.index import _CatalogBackedRegistry
-    from nexus.catalog.catalog import Catalog
 
-    cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
-    Catalog.init(cat_dir)
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    cat = MagicMock()
+    cat.ensure_owner_for_repo.return_value = "1.1"
+    cat.register_collection.side_effect = RuntimeError(
+        "simulated catalog write failure"
+    )
 
-    import subprocess
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
 
     adapter = _CatalogBackedRegistry(
         cat=cat, registry_path=tmp_path / "repos.json",
     )
-    with patch.object(
-        cat, "register_collection",
-        side_effect=RuntimeError("simulated catalog write failure"),
-    ):
-        # Non-voyage collection name: register_collection is mocked to
-        # raise, so the literal never reaches validation. Using a plain
-        # name keeps this file out of the RDR-109 mode-lint scope (it is
-        # not a cloud-mode test file).
-        with capture_logs() as cap:
-            adapter.update(repo, docs_collection="knowledge__xrepo")
+    # Non-voyage collection name: register_collection is stubbed to raise,
+    # so the literal never reaches validation. Using a plain name keeps
+    # this file out of the RDR-109 mode-lint scope (it is not a cloud-mode
+    # test file).
+    with capture_logs() as cap:
+        success = adapter.update(repo, docs_collection="knowledge__xrepo")
+    assert success is False, (
+        "SIG-10 contract: a failed catalog write must return False"
+    )
+    assert cat.register_collection.called, (
+        "guard: the stubbed write path must actually have been attempted"
+    )
     assert any(
         e.get("event") == "catalog_registry_adapter_register_failed"
         and e.get("log_level") == "warning"

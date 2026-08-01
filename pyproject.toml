@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "6.18.1"
+version = "7.0.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -19,7 +19,7 @@ keywords = [
     "llm",
     "rag",
     "code-search",
-    "chromadb",
+    "pgvector",
     "voyage-ai",
 ]
 classifiers = [
@@ -34,17 +34,23 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    # Upper bound (issue #1058): the unbounded ``>=0.6`` silently resolved
-    # chromadb 1.5.9, which tightened the embedding-function return contract
-    # (EFs must return numpy arrays; chromadb calls ``.tolist()`` itself) and
-    # broke all local-mode search until local_ef.py was aligned. Cap below the
-    # next major so a future breaking bump can't ship silently again.
-    "chromadb>=0.6,<2",
+    # RDR-155 P4b P3 (2026-07-25): ``chromadb>=0.6,<2`` REMOVED. T3 serving is
+    # pgvector through the engine in both modes (P4a), the migration read legs
+    # are deleted (P2), and the in-process substrate every test and the T1
+    # isolated path used to get from chromadb.EphemeralClient is now
+    # nexus.db.inmemory_vector_store (P0a) — pinned by 74 differential
+    # contracts that were written against chroma as the oracle first.
+    # Frozen Chroma directories on disk are orphaned BY DESIGN (Hal's two-hop
+    # contract): they stay as rollback sources and there is no cleanup verb.
+    # A pre-migration box that upgrades straight into this release gets the
+    # loud two-hop redirect from nexus.stranded_install, never a silent empty
+    # install.
     "click>=8.1",
     # RDR-155 P4b P0b (Hal decision 3): first-class, no longer transitive
     # via chromadb — consumed by nexus.cross_encoder (salience) and
-    # nexus.db.minilm_direct (the tier-0 EF). Must survive chromadb's
-    # departure at P3.
+    # nexus.db.minilm_direct (the tier-0 EF). These are the reason the P0b
+    # ordering mattered: had chromadb left first, the reranker would have lost
+    # onnxruntime silently at runtime.
     "onnxruntime>=1.20",
     "tokenizers>=0.20",
     "llama-index-core>=0.12.7,<0.15",
@@ -192,7 +198,9 @@ markers = [
     "slow: expensive benchmarks (deselect with '-m not slow')",
     "stress: RDR-120 stress harness scenarios (run with 'pytest -m stress')",
     "no_service_jar: integration test that drives PostgreSQL directly and is exempt from the service-jar freshness gate",
+    "needs_stamped_jar: integration test that constructs a vector client, so its service jar must carry a release_version (build with scripts/build-gate-jar.sh) — nexus-ao29z",
     "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
+    "cloud_mode: integration test that needs the SERVICE embedding voyage-* collections, i.e. cloud mode. Incompatible with a local-service install, which RDR-160 pins to bge-768 and which serves one embedding mode at a time (deselect with '-m \"integration and not cloud_mode\"')",
 ]
 
 [dependency-groups]

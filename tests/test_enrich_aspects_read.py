@@ -28,21 +28,8 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
-
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
-
-# These tests seed the rich SQLite Catalog (Catalog.init + cat.register) and
-# expect the CLI's make_catalog_reader() to resolve those rows. On the engine
-# substrate the factory returns the service catalog client instead, which
-# cannot see the local rich-catalog rows ("Not found: <tumbler>").
-_rich_catalog_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded CLI "
-    "catalog resolution) dies at the RDR-155 P4b flip",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -55,16 +42,15 @@ def _git_identity(monkeypatch):
 
 @pytest.fixture()
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Tmp catalog + tmp T2 + plumbing patches."""
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    db_path = tmp_path / "t2.db"
+    """Live service catalog + tmp T2 path + plumbing patches (nexus-i711w:
+    the local SQLite catalog is gone; seeding routes through the same
+    service-only factories the verbs read with)."""
+    from tests._catalog_fixture_ops import ActiveCatalog  # noqa: PLC0415
 
-    import nexus.config
-    monkeypatch.setattr(nexus.config, "catalog_path", lambda: catalog_dir)
-    import nexus.commands._helpers as h
+    catalog_dir = tmp_path / "catalog"
+    db_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
-    return catalog_dir, db_path, cat
+    return catalog_dir, db_path, ActiveCatalog()
 
 
 def _seed_one(env, *, source_path: str = "docs/papers/p.pdf") -> str:
@@ -105,93 +91,6 @@ def _seed_one(env, *, source_path: str = "docs/papers/p.pdf") -> str:
 
 
 class TestAspectsShow:
-    @_rich_catalog_dies_at_flip
-    def test_show_displays_all_fields_by_tumbler(self, env) -> None:
-        tumbler = _seed_one(env)
-        runner = CliRunner()
-        result = runner.invoke(enrich, ["aspects-show", tumbler])
-        assert result.exit_code == 0, result.output
-        # All 7 aspect fields surface in the output.
-        for marker in (
-            "Stale-reads in multi-region",
-            "Vector-clock + bounded",
-            "YCSB-A",
-            "raft",
-            "2.3x throughput",
-            "VLDB 2024",
-            "0.92",
-        ):
-            assert marker in result.output, f"missing {marker!r} in output"
-        # Extractor metadata also visible.
-        assert "scholarly-paper-v1" in result.output
-        assert "claude-haiku-4-5" in result.output
-
-    @_rich_catalog_dies_at_flip
-    def test_show_resolves_by_title(self, env) -> None:
-        _seed_one(env)
-        runner = CliRunner()
-        result = runner.invoke(enrich, ["aspects-show", "Sample Paper"])
-        assert result.exit_code == 0, result.output
-        assert "Stale-reads" in result.output
-
-    @_rich_catalog_dies_at_flip
-    def test_show_json_emits_structured(self, env) -> None:
-        tumbler = _seed_one(env)
-        runner = CliRunner()
-        result = runner.invoke(enrich, ["aspects-show", tumbler, "--json"])
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout)
-        assert data["collection"] == "knowledge__myrepo-papers"
-        assert data["problem_formulation"].startswith("Stale-reads")
-        assert data["experimental_datasets"] == ["YCSB-A", "TPC-C"]
-        assert data["experimental_baselines"] == ["raft", "paxos-quorum"]
-        assert data["extras"]["venue"] == "VLDB 2024"
-        assert data["confidence"] == 0.92
-
-    @_rich_catalog_dies_at_flip
-    def test_show_field_projection(self, env) -> None:
-        tumbler = _seed_one(env)
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich, ["aspects-show", tumbler, "--field", "proposed_method"],
-        )
-        assert result.exit_code == 0, result.output
-        assert "Vector-clock" in result.output
-        # Other fields are NOT in projection output.
-        assert "YCSB-A" not in result.output
-        assert "scholarly-paper-v1" not in result.output
-
-    @_rich_catalog_dies_at_flip
-    def test_show_unknown_field_errors(self, env) -> None:
-        tumbler = _seed_one(env)
-        runner = CliRunner()
-        result = runner.invoke(
-            enrich, ["aspects-show", tumbler, "--field", "made_up"],
-        )
-        assert result.exit_code != 0
-        assert "made_up" in result.output
-
-    @_rich_catalog_dies_at_flip
-    def test_show_no_aspect_record_friendly_message(self, env) -> None:
-        """Catalog row exists but no aspect data extracted yet."""
-        cat_dir, db_path, cat = env
-        owner = cat.register_owner(
-            "myrepo", "repo", repo_hash="abcd1234",
-            repo_root="/tmp/myrepo",
-        )
-        t = cat.register(
-            owner, "Empty Paper",
-            content_type="paper",
-            physical_collection="knowledge__myrepo-papers",
-            file_path="docs/papers/empty.pdf",
-        )
-        runner = CliRunner()
-        result = runner.invoke(enrich, ["aspects-show", str(t)])
-        assert result.exit_code == 0
-        assert "no aspect" in result.output.lower() or "not extracted" in result.output.lower()
-        # And nudge the operator to the extract verb.
-        assert "nx enrich aspects" in result.output
-
     def test_show_unknown_tumbler_errors(self, env) -> None:
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects-show", "1.99.99"])
@@ -263,48 +162,6 @@ class TestAspectsList:
         )
         assert appearances == 2
 
-    @_rich_catalog_dies_at_flip
-    def test_list_missing_shows_catalog_rows_without_aspects(self, env) -> None:
-        """``--missing`` filters to catalog rows in the collection that
-        have NO matching aspect record. Used to find gaps after partial
-        enrichment runs."""
-        cat_dir, db_path, cat = env
-        owner = cat.register_owner(
-            "myrepo", "repo", repo_hash="abcd1234",
-            repo_root="/tmp/myrepo",
-        )
-        # 3 catalog rows; only the first has aspects.
-        for i, sp in enumerate(("docs/papers/has.pdf",
-                                 "docs/papers/missing1.pdf",
-                                 "docs/papers/missing2.pdf")):
-            cat.register(
-                owner, Path(sp).stem,
-                content_type="paper",
-                physical_collection="knowledge__myrepo-papers",
-                file_path=sp,
-            )
-        with T2Database(db_path) as db:
-            db.document_aspects.upsert(AspectRecord(
-                collection="knowledge__myrepo-papers",
-                source_path="docs/papers/has.pdf",
-                problem_formulation="x", proposed_method="y",
-                experimental_datasets=[], experimental_baselines=[],
-                experimental_results="", extras={}, confidence=0.5,
-                extracted_at=datetime.now(UTC).isoformat(),
-                model_version="m", extractor_name="scholarly-paper-v1",
-            ))
-
-        runner = CliRunner()
-        result = runner.invoke(enrich, [
-            "aspects-list",
-            "--collection", "knowledge__myrepo-papers",
-            "--missing",
-        ])
-        assert result.exit_code == 0, result.output
-        # Both gaps surface; the seeded one does NOT.
-        assert "missing1.pdf" in result.output
-        assert "missing2.pdf" in result.output
-        assert "has.pdf" not in result.output
 
     def test_list_json_emits_array(self, env) -> None:
         self._seed_many(env, ["docs/papers/a.pdf", "docs/papers/b.pdf"])

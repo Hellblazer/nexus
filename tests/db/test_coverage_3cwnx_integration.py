@@ -22,7 +22,8 @@ What is exercised:
   A) coverage_by_content_type() with no owner_prefix: exact {total, linked} per
      content_type for a catalog with mixed link coverage.
   B) coverage_by_content_type(owner_prefix=...) scopes to the prefix subtree.
-  C) Differential parity: service results == SQLite Catalog results on identical data.
+  C) RETIRED (nexus-i711w terminal deletion) — was the differential
+     service-vs-SQLite parity proof; died with the SQLite Catalog mirror.
   D) coverage_cmd routing: no catalog._db access; guard removed; ClickException gone.
 
 Cross-tenant RLS isolation is tested at the Java layer in
@@ -30,6 +31,24 @@ service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java
 (@Order(143-145) coverageByContentType_* tests).
 This integration test uses the OS superuser (bypasses FORCE RLS) which is the
 correct setup for consumer-path correctness tests per tests/db/_service_fixture.py.
+
+CATALOG SUBSTRATE (nexus-i711w Stage 2). Disposition: 3 PORT, 1 DIE.
+
+Tests A, B and D already drive ``HttpCatalogClient.coverage_by_content_type``
+against the real service, so nothing about their ASSERTIONS needed porting.
+What coupled them to the dying substrate was the SEEDING: a single ``seeded``
+fixture that populated the HTTP catalog AND a SQLite ``CatalogStore``
+(``nexus.db.t2.catalog``), so all four tests dragged in the SQLite store and
+would have failed at fixture setup the moment it is deleted. The fixture is
+therefore SPLIT — ``seeded`` (HTTP only) and ``seeded_parity`` (both) — rather
+than swapped, which is the same fixture-split rule the rest of this sub-stage
+followed.
+
+Test C (``test_coverage_parity_service_equals_sqlite``) was the DIE: its whole
+subject was the differential SQLite-vs-service parity proof, so it retired
+WITH the SQLite mirror it compared against (the ``sqlite_db`` /
+``sqlite_cat`` / ``seeded_parity`` fixture chain died with it — the terminal
+deletion executed the disposition above).
 """
 from __future__ import annotations
 
@@ -44,7 +63,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
@@ -192,15 +216,12 @@ def java_service(pg_instance):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_STORAGE_BACKEND_CATALOG", None)
 
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=40.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", _TOKEN, proc
     finally:
         try:
@@ -234,35 +255,12 @@ def cat(java_service):
         os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
 
-@pytest.fixture(scope="module")
-def sqlite_db():
-    """Raw SQLite CatalogStore pre-seeded with identical data for parity checks."""
-    from nexus.db.t2.catalog import CatalogStore
-    db_fd, db_path = tempfile.mkstemp(suffix=".db", prefix="3cwnx_parity_")
-    os.close(db_fd)
-    store = CatalogStore(Path(db_path))
-    yield store, Path(db_path)
-    store.close()
-    Path(db_path).unlink(missing_ok=True)
-
-
-@pytest.fixture(scope="module")
-def sqlite_cat(sqlite_db):
-    """Real Catalog instance wrapping sqlite_db for parity checks.
-
-    Uses the actual Catalog.coverage_by_content_type() method — not a proxy —
-    so the parity assertion covers the real implementation, not a reimplementation.
-    """
-    from nexus.catalog.catalog import Catalog
-    store, db_path = sqlite_db
-    catalog_dir = Path(tempfile.mkdtemp(prefix="3cwnx_catdir_"))
-    # Open read_only=False so Catalog can initialise; the store's _conn is
-    # already open from the sqlite_db fixture, but Catalog opens its own
-    # CatalogDB handle on the same file — SQLite WAL mode allows this.
-    cat = Catalog(catalog_dir, db_path, read_only=False)
-    yield cat
-    cat._db.close()
-    shutil.rmtree(catalog_dir, ignore_errors=True)
+# TOMBSTONE (nexus-i711w terminal deletion): the ``sqlite_db`` and
+# ``sqlite_cat`` fixtures lived here. They built the SQLite
+# ``CatalogStore`` (``nexus.db.t2.catalog``) + local ``Catalog``
+# (``nexus.catalog.catalog``) mirror that the DIE parity test compared
+# the service against; both substrates are deleted, so the fixtures
+# retired with them per this module's "3 PORT, 1 DIE" disposition.
 
 
 _DOCS = [
@@ -297,31 +295,18 @@ def _seed_http(cat) -> None:
         cat.link(from_t, to_t, lt, created_by="inttest-3cwnx")
 
 
-def _seed_sqlite(store) -> None:
-    """Seed the SQLite CatalogStore with identical data."""
-    for tumbler, title, ct in _DOCS:
-        store.execute(
-            "INSERT OR IGNORE INTO documents (tumbler, title, content_type) "
-            "VALUES (?, ?, ?)",
-            (tumbler, title, ct),
-        )
-    store._conn.commit()
-
-    for from_t, to_t, lt in _LINKS:
-        store.execute(
-            "INSERT OR IGNORE INTO links (from_tumbler, to_tumbler, link_type, created_by) "
-            "VALUES (?, ?, ?, ?)",
-            (from_t, to_t, lt, "inttest-3cwnx"),
-        )
-    store._conn.commit()
-
-
 @pytest.fixture(scope="module")
-def seeded(cat, sqlite_db):
-    """Seed both backends with identical data."""
-    store, _ = sqlite_db
+def seeded(cat):
+    """Seed the SERVICE catalog only (nexus-i711w Stage 2).
+
+    SPLIT from the old form, which seeded the HTTP catalog AND the SQLite
+    ``CatalogStore`` in one fixture. That coupling is what made all four
+    tests depend on the dying substrate even though three of them never look
+    at it: a shared fixture requesting ``sqlite_db`` meant every consumer
+    failed at SETUP once ``nexus/db/t2/catalog.py`` was gone. The parity
+    test (now retired with the substrate) took ``seeded_parity`` instead.
+    """
     _seed_http(cat)
-    _seed_sqlite(store)
     return True
 
 
@@ -381,32 +366,12 @@ def test_coverage_owner_prefix_scoping(seeded, cat) -> None:
     assert by_type["paper"]["total"] == 4
 
 
-def test_coverage_parity_service_equals_sqlite(seeded, cat, sqlite_cat) -> None:
-    """C) Differential parity: service == real Catalog.coverage_by_content_type().
-
-    Calls the ACTUAL Catalog.coverage_by_content_type() method (not a proxy
-    reimplementation) on an identical seeded SQLite store, then asserts exact
-    equality with the service result.  A bug in Catalog.coverage_by_content_type
-    would surface here as a parity mismatch, not a silent pass.
-    """
-    def _normalize(rows: list[dict]) -> dict[str, dict]:
-        """Normalise for deterministic comparison."""
-        return {r["content_type"]: {"total": int(r["total"]), "linked": int(r["linked"])}
-                for r in rows}
-
-    # No prefix: all documents
-    svc_all = _normalize(cat.coverage_by_content_type())
-    sql_all = _normalize(sqlite_cat.coverage_by_content_type())
-    assert svc_all == sql_all, (
-        f"Parity failure (no prefix):\n  service={svc_all}\n  sqlite={sql_all}"
-    )
-
-    # With prefix "30" — exercises LIKE arm AND exact-match arm
-    svc_30 = _normalize(cat.coverage_by_content_type(owner_prefix="30"))
-    sql_30 = _normalize(sqlite_cat.coverage_by_content_type(owner_prefix="30"))
-    assert svc_30 == sql_30, (
-        f"Parity failure (prefix=30):\n  service={svc_30}\n  sqlite={sql_30}"
-    )
+# TOMBSTONE (nexus-i711w terminal deletion): the DIE test
+# ``test_coverage_parity_service_equals_sqlite`` lived here — the
+# differential SQLite-vs-service parity proof. Its assertion WAS the
+# comparison against the deleted local ``Catalog.coverage_by_content_type``
+# mirror, so it retired with the substrate; the service-side coverage
+# contract remains pinned by tests A, B and D above/below.
 
 
 def test_coverage_cmd_no_guard_service_mode(cat) -> None:
@@ -423,9 +388,9 @@ def test_coverage_cmd_no_guard_service_mode(cat) -> None:
         assert "content_type" in r
         assert "total" in r
         assert "linked" in r
-    # Verify cat is HttpCatalogClient — accessing _db must raise RuntimeError (service mode)
-    try:
+    # Verify cat is HttpCatalogClient — accessing _db must raise the guarded
+    # AttributeError, NOT a RuntimeError (nexus-xj744; hasattr() only swallows
+    # AttributeError, so the guard must not break the probe idiom it exists to
+    # protect). Contract pinned by tests/db/test_raw_handle_guard_contract.py.
+    with pytest.raises(AttributeError, match="local SQLite catalog was deleted"):
         _ = cat._db
-        raise AssertionError("Expected RuntimeError from HttpCatalogClient._db property")
-    except RuntimeError:
-        pass  # expected: _db property raises RuntimeError in service mode

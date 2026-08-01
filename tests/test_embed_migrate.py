@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 
+
 from nexus.db.embed_migrate import (
     StaleCollection,
     detect_stale_local_collections,
@@ -189,36 +190,6 @@ class TestMigrateSafe:
         assert t3.collection_info(old)["count"] == 2  # old untouched
         assert not t3.collection_exists(target)  # nothing created
 
-    def test_success_reindexes_then_deletes_old(self, t3: T3Database) -> None:
-        old = "docs__proj__minilm-l6-v2-384__v1"
-        target = "docs__proj__bge-base-en-v15-768__v1"
-        _seed(t3, old, _DIM_384)
-        # target must not pre-exist
-        try:
-            t3._client.delete_collection(target)
-        except Exception:
-            pass
-
-        def _reindex_fn(db, tgt, sources, corpus):
-            # Simulate a real reindex: populate target with 768-dim vectors.
-            col = db._client.get_or_create_collection(tgt)
-            col.add(
-                ids=[f"{tgt}:0", f"{tgt}:1"],
-                embeddings=[_vec(_DIM_768), _vec(_DIM_768)],
-                documents=["a", "b"],
-                metadatas=[{"source_path": "doc.md"}, {"source_path": "doc.md"}],
-            )
-            return (1, 2)  # (indexed_sources, after_count)
-
-        outcome = migrate_collection_safe(
-            t3, self._stale(old, target), dry_run=False, reindex_fn=_reindex_fn
-        )
-
-        assert outcome.status == "migrated"
-        assert outcome.after == 2
-        assert t3.collection_exists(target)
-        assert t3.collection_info(target)["count"] == 2
-        assert not t3.collection_exists(old)  # deleted ONLY after verify
 
     def test_reindex_failure_midway_leaves_old_intact(self, t3: T3Database) -> None:
         old = "docs__proj__minilm-l6-v2-384__v1"
@@ -315,36 +286,6 @@ class TestMigrateSafe:
         assert t3.collection_exists(old)  # notes preserved
         assert t3.collection_info(old)["count"] == 2
 
-    def test_mixed_sourceless_migrates_with_explicit_optin(self, t3: T3Database) -> None:
-        """With allow_sourceless_loss=True the mixed collection migrates (the
-        caller has accepted the documented note loss)."""
-        old = "knowledge__notes__minilm-l6-v2-384__v1"
-        target = "knowledge__notes__bge-base-en-v15-768__v1"
-        _seed(t3, old, _DIM_384)
-        try:
-            t3._client.delete_collection(target)
-        except Exception:
-            pass
-        stale = StaleCollection(
-            name=old, count=5, source_paths=frozenset({"doc.md"}),
-            sourceless=3, target_name=target, kind="reindexable",
-        )
-
-        def _reindex_fn(db, tgt, sources, corpus):
-            col = db._client.get_or_create_collection(tgt)
-            col.add(
-                ids=[f"{tgt}:0"], embeddings=[_vec(_DIM_768)],
-                documents=["a"], metadatas=[{"source_path": "doc.md"}],
-            )
-            return (1, 1)
-
-        outcome = migrate_collection_safe(
-            t3, stale, dry_run=False, reindex_fn=_reindex_fn,
-            allow_sourceless_loss=True,
-        )
-
-        assert outcome.status == "migrated"
-        assert not t3.collection_exists(old)
 
     def test_old_collection_delete_runs_full_cascade(self, t3: T3Database) -> None:
         """nexus-prgf4 (O1): the migration must purge the old collection via the

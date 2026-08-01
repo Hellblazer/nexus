@@ -30,7 +30,7 @@ superseding an earlier draft of test #1): race the SYNC helper directly
 across threads via a ``threading.Barrier``, exactly mirroring
 ``tests/db/test_t1_cli_dedicated_session.py::test_first_creation_race_is_safe``
 (which races ``_cli_dedicated_session_id`` across 8 threads the same way).
-This does NOT drive the full async ``_t1_chroma_lifespan`` across threads --
+This does NOT drive the full async ``_t1_lifespan`` across threads --
 that needs a per-thread event loop and is out of scope for this bead
 (Branch-0 wiring is nexus-jwqjm.2's job). Consequently these tests need NO
 fake HTTP service harness: a tmp ``config_dir``, a monkeypatched

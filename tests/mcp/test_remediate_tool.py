@@ -149,34 +149,101 @@ def test_confirm_records_consent_and_releases_full_playbook(
         assert step in result
 
 
-def test_release_is_refused_when_consent_audit_unavailable(
-    enabled_config, monkeypatch, no_diag
-):
-    """Fail-closed auditing: service mode has no record_consent until
-    nexus-ng2sy — the release must REFUSE loudly, never hand out the
-    mutation playbook unaudited."""
+def _refusal_for(monkeypatch, telemetry_obj):
+    """Drive remediate(confirm=True) with a stubbed telemetry store."""
     from contextlib import contextmanager
 
     from nexus.mcp import core
-    from nexus.remediation import StoreState, emit_playbook
-
-    class _HttpTelemetryLike:
-        pass  # no record_consent attribute — the real service-mode shape
 
     class _Db:
-        telemetry = _HttpTelemetryLike()
+        telemetry = telemetry_obj
 
     @contextmanager
     def _ctx():
         yield _Db()
 
     monkeypatch.setattr(core, "_t2_ctx", _ctx)
-    result = core.remediate("chash-poison", confirm=True)
-    assert "nexus-ng2sy" in result
+    return core.remediate("chash-poison", confirm=True)
+
+
+def _assert_playbook_withheld(result: str) -> None:
+    from nexus.remediation import StoreState, emit_playbook
+
+    for step in emit_playbook("chash-poison", StoreState(detail="x")).steps:
+        assert step not in result, "playbook released despite a failed audit"
+
+
+def test_release_is_refused_when_the_engine_lacks_the_consent_route(
+    enabled_config, monkeypatch, no_diag
+):
+    """The REAL version-skew shape (nexus-huaef corrects this test's premise).
+
+    This test used to stub a telemetry object with NO ``record_consent``
+    attribute and call that "the real service-mode shape". It is not:
+    HttpTelemetryStore has had ``record_consent`` since nexus-ng2sy, so the
+    ``hasattr`` branch the test was pinning could never fire in production —
+    the test made a dead branch look covered. Third instance today of a fixture
+    encoding a handle shape that does not exist (cf. tests/test_catalog.py,
+    tests/test_projection_quality.py).
+
+    What an old engine ACTUALLY does: the method exists, posts, and the route
+    404s. That must still produce the actionable "upgrade the engine" message,
+    not a bare HTTP error.
+    """
+    import httpx
+
+    class _OldEngineTelemetry:
+        def record_consent(self, **_kw):
+            request = httpx.Request("POST", "http://svc/v1/telemetry/consents/record")
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("HTTP 404: not found", request=request,
+                                        response=response)
+
+    result = _refusal_for(monkeypatch, _OldEngineTelemetry())
+    assert "nexus-ng2sy" in result, result
     assert "consent" in result.lower()
-    steps = emit_playbook("chash-poison", StoreState(detail="x")).steps
-    for step in steps:
-        assert step not in result  # playbook NOT released
+    _assert_playbook_withheld(result)
+
+
+def test_release_is_refused_on_any_other_audit_failure(
+    enabled_config, monkeypatch, no_diag
+):
+    """Fail-closed is UNCONDITIONAL — the skew diagnosis only changes the
+    explanation, never whether the playbook is released.
+
+    A 500 from a present-but-broken consents route is a real write failure and
+    must NOT be mislabelled as a version skew (that would send the operator to
+    upgrade an engine that is fine while their audit store is broken)."""
+    import httpx
+
+    class _BrokenStore:
+        def record_consent(self, **_kw):
+            request = httpx.Request("POST", "http://svc/v1/telemetry/consents/record")
+            response = httpx.Response(500, request=request)
+            raise httpx.HTTPStatusError("HTTP 500: boom", request=request,
+                                        response=response)
+
+    result = _refusal_for(monkeypatch, _BrokenStore())
+    assert "REFUSING" in result
+    assert "nexus-ng2sy" not in result, (
+        "a 500 is a broken audit store, not a missing route — must not tell the "
+        f"operator to upgrade the engine: {result}"
+    )
+    _assert_playbook_withheld(result)
+
+
+def test_release_is_refused_when_the_store_raises_anything_at_all(
+    enabled_config, monkeypatch, no_diag
+):
+    """Belt and braces on the contract itself: ANY exception withholds."""
+
+    class _Exploding:
+        def record_consent(self, **_kw):
+            raise ValueError("unexpected")
+
+    result = _refusal_for(monkeypatch, _Exploding())
+    assert "REFUSING" in result
+    _assert_playbook_withheld(result)
 
 
 def test_release_refused_on_any_audit_write_failure(

@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
 import voyageai.error as _ve
 
 from nexus.retry import _is_retryable_voyage_error, _voyage_with_retry
+
+#: structlog's ConsoleRenderer emits ANSI colour when FORCE_COLOR is set, which
+#: interleaves escape codes inside `key=value` pairs. Log-content assertions
+#: strip it so they measure the log's CONTENT in every environment.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 # Review remediation (Reviewer A/I-4): reset the retry accumulators on
@@ -179,12 +185,18 @@ def test_retry_warn_log_fires_on_backoff(capsys) -> None:
     with patch("nexus.retry.time.sleep"):
         assert _voyage_with_retry(fn) == "ok"
     captured = capsys.readouterr()
+    # Strip ANSI first: structlog's ConsoleRenderer colorizes whenever
+    # FORCE_COLOR is set (independent of isatty, so capsys does not disable it),
+    # which splits `attempt=1` into `\x1b[36mattempt\x1b[0m=\x1b[35m1\x1b[0m`.
+    # CI has no FORCE_COLOR, so this pin was green there and red in any
+    # developer terminal that sets one.
+    plain = _ANSI_RE.sub("", captured.out)
     warn_lines = [
-        ln for ln in captured.out.splitlines()
+        ln for ln in plain.splitlines()
         if "voyage_transient_error_retry" in ln and "warning" in ln
     ]
     assert len(warn_lines) == 2, (
-        f"expected 2 WARN retry lines, got {len(warn_lines)}: {captured.out!r}"
+        f"expected 2 WARN retry lines, got {len(warn_lines)}: {plain!r}"
     )
     # Each carries attempt, delay, and error_type so operators can tell
     # rate-limit from unavailable from connection drop.

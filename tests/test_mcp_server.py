@@ -7,6 +7,7 @@ All tests use injected clients -- no API keys or network required.
 - T3: chromadb.EphemeralClient with DefaultEmbeddingFunction override
 """
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import json
 import os
@@ -17,7 +18,6 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -129,7 +129,7 @@ def _clear_ephemeral_collections(client) -> None:
 def t3():
     client = make_vector_test_client()
     _clear_ephemeral_collections(client)
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
     yield db
@@ -970,10 +970,13 @@ def test_plan_delete_not_found(t2_path):
 # ── Query catalog-routing ────────────────────────────────────────────────────
 
 @pytest.fixture()
-def catalog_with_docs(tmp_path, monkeypatch):
-    from nexus.catalog.catalog import Catalog
-    catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
+def catalog_with_docs():
+    # nexus-i711w terminal deletion: seed through the ACTIVE (service)
+    # catalog — query()'s catalog-routing resolves the same per-test
+    # tenant, so the old local-Catalog pin on _get_catalog is gone with
+    # the local Catalog itself.
+    from tests._catalog_fixture_ops import ActiveCatalog
+    cat = ActiveCatalog()
     o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
     o2 = cat.register_owner("papers", "curator")
     cat.register(o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
@@ -986,15 +989,6 @@ def catalog_with_docs(tmp_path, monkeypatch):
                  physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=15, author="Devlin")
     cat.link(cat.find("Attention Paper")[0].tumbler,
              cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    # Pin query()'s catalog to THIS local fixture instance (same pattern as
-    # test_catalog_params_without_catalog). The SUBJECT here is query()'s
-    # catalog-routing logic over these registered docs; without the pin, the
-    # engine substrate's global NX_STORAGE_BACKEND=service makes
-    # make_catalog_reader() return the service catalog client — an empty
-    # per-test tenant that never sees the fixture's registrations.
-    import nexus.mcp.core as _core_mod
-    monkeypatch.setattr(_core_mod, "_get_catalog", lambda: cat)
     return cat
 
 

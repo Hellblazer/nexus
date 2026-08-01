@@ -4,32 +4,18 @@ import os
 import pytest
 from pathlib import Path
 
-import chromadb
 import structlog
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
 
-def _enable_t2_test_auto_migrate() -> None:
-    """RDR-120 P3b: T2Database.__init__ no longer auto-runs migrations
-    in production (the daemon owns ``apply_pending``). The test suite
-    has hundreds of direct-open call sites that rely on a freshly-
-    migrated schema, so we opt the in-process default ON and also
-    set the ``NX_T2_AUTO_MIGRATE`` env var so subprocesses
-    (``subprocess.run`` / ``claude -p`` / MCP children) that inherit
-    ``os.environ`` but not Python module state get the same default.
-    Production code paths (CLI, MCP servers) keep the
-    daemon-owns-migration semantic; only the test process tree sees
-    the flipped default.
-    """
-    import os
-
-    from nexus.db import t2 as _t2
-
-    _t2._DEFAULT_RUN_MIGRATIONS = True
-    os.environ.setdefault(_t2._RUN_MIGRATIONS_ENV, "1")
+# NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
+# (``_DEFAULT_RUN_MIGRATIONS`` / ``NX_T2_AUTO_MIGRATE``) died with
+# ``nexus/db/migrations.py`` in RDR-158 P4 Stage 4 (nexus-i711w).
+# ``T2Database(run_migrations=...)`` is retained-and-ignored for signature
+# stability; construction never migrates anything in any mode.
 
 
 def _disable_aspect_worker_autostart() -> None:
@@ -53,7 +39,6 @@ def _disable_aspect_worker_autostart() -> None:
     os.environ.setdefault("NX_ASPECT_WORKER_AUTOSTART", "0")
 
 
-_enable_t2_test_auto_migrate()
 _disable_aspect_worker_autostart()
 
 # RDR-155 P4b P0a': import at collection start so the engine substrate
@@ -124,13 +109,61 @@ def _scan_fixture_cache_files() -> set[Path]:
 _fixture_cache_baseline: set[Path] = set()
 
 
+def _warn_if_service_jar_is_stale() -> None:
+    """Say ONCE, at session start, that the service jar is stale (nexus-zryqm).
+
+    The information already exists: ``jar_freshness_skip_reason`` is consulted
+    per-test by the engine-substrate fixtures, which fail LOUD with a directive
+    message. That is right for a targeted run and wrong for a full suite — it
+    surfaces as ~73 identical errors THIRTEEN MINUTES IN, after which the whole
+    run has to be discarded and repeated.
+
+    That happened three times in one day (2026-07-25), twice after the operator
+    had read a handoff note explicitly warning about it. A documented
+    precondition that a human must remember is not a mechanism; this makes the
+    same fact arrive at second 2 instead of minute 13.
+
+    Deliberately a WARNING, not a hard stop: the stale jar only affects the
+    engine-substrate tests, and someone iterating on unrelated Python must not
+    be blocked by a Java artifact they never touched. The per-test fail-loud
+    guard is unchanged and still authoritative.
+    """
+    try:
+        from tests.db._service_fixture import jar_freshness_skip_reason
+    except Exception:  # noqa: BLE001 — advisory only; never break collection
+        return
+    try:
+        reason = jar_freshness_skip_reason()
+    except Exception:  # noqa: BLE001 — advisory only
+        return
+    if not reason:
+        return
+    import sys as _sys
+
+    banner = (
+        "\n"
+        "=" * 78 + "\n"
+        f"SERVICE JAR STALE — engine-substrate tests will error: {reason}\n"
+        "Rebuild BEFORE trusting this run, or ~73 errors will surface at the END:\n"
+        "    mvn -f service/pom.xml package -DskipTests\n"
+        "(nexus-zryqm: this notice exists because the same 13-minute run was\n"
+        " discarded three times in one day for exactly this reason.)\n"
+        + "=" * 78 + "\n"
+    )
+    print(banner, file=_sys.stderr)  # noqa: T201 — session banner, must be seen before the run
+
+
 def pytest_sessionstart(session):
     """Snapshot fixture cache files in ~/.config/nexus/ at session
     start so ``pytest_sessionfinish`` can detect leaks introduced
     during the session (nexus-nifd).
+
+    Also emits the stale-service-jar banner (nexus-zryqm) so a doomed
+    engine-substrate run is visible immediately rather than 13 minutes later.
     """
     global _fixture_cache_baseline
     _fixture_cache_baseline = _scan_fixture_cache_files()
+    _warn_if_service_jar_is_stale()
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -174,21 +207,6 @@ def pytest_sessionfinish(session, exitstatus):
         f"  Cleanup: leaked files removed; failing the session.\n",
         flush=True,
     )
-
-
-@pytest.fixture(autouse=True)
-def _disable_migration_notice(monkeypatch: pytest.MonkeyPatch) -> None:
-    """nexus-0rwwv: pin the substrate-migration bridge probe OFF for the
-    whole suite. ``pending_migration_notice`` (called by interactive
-    ``nx upgrade`` and default ``nx doctor``) opens the local Chroma read
-    leg — and on a lived-in box the isolated test config reads as SQLITE
-    mode while the XDG chroma default resolves to the REAL store (the
-    immutable post-migration rollback source), which unit tests must never
-    open. Tests of the notice itself opt back in with
-    ``monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")`` plus a patched
-    ``detect_pending_migration``.
-    """
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -283,9 +301,8 @@ def t2_service_env(request: pytest.FixtureRequest,
     per-test token. Tests never share or clean up state. Returns the
     tenant name.
 
-    Opt-in during the incremental migration; replaces the sqlite pin
-    (set AFTER _pin_storage_backend_sqlite — later setenv wins) and
-    becomes the suite default when the pin flips at the end of P0a'.
+    The suite default: ``_pin_t2_substrate`` pulls this fixture in for every
+    test. Still requestable directly by tests that want the tenant name.
     """
     from tests._engine_substrate import ensure_engine, mint_test_tenant
     from tests.db._service_fixture import jar_freshness_skip_reason
@@ -309,39 +326,220 @@ def t2_service_env(request: pytest.FixtureRequest,
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
     monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    # ORTHOGONALITY PIN (nexus-aqbrk): this fixture selects a T2 SUBSTRATE.
+    # It must not also change the install's cloud/local POSTURE — a different
+    # axis entirely.
+    #
+    # ``NX_SERVICE_URL`` is overloaded. The T2 Http*Stores need it to find the
+    # engine, but ``config.is_local_mode()`` also reads ``service_url`` as the
+    # "this is a managed/cloud install" signal (nexus-3k43p, so a greenfield
+    # managed user is not mis-detected as local). Setting it therefore flips
+    # EVERY test in the suite from local to cloud posture as a side effect of
+    # choosing where T2 rows live. The sqlite arm has no service_url, so it is
+    # local — meaning the two arms were not comparing like with like.
+    #
+    # Measured, not assumed: tests/test_doc_indexer.py failed 12 on the engine
+    # arm, 8 of them ``CredentialsMissingError: cannot index in cloud mode
+    # without voyage_api_key``. Re-running with NX_LOCAL=1 took it to 8 — the
+    # 4 mode-posture failures are a pure artifact of the substrate pin, and the
+    # remainder are genuine catalog work.
+    #
+    # NX_LOCAL=1 restores the suite's default posture. Tests that WANT cloud
+    # posture use the ``cloud_mode`` fixture, which setenvs NX_LOCAL=0 and
+    # still wins: non-autouse fixtures resolve AFTER autouse ones, so its
+    # setenv lands later on the same monkeypatch — the same ordering contract
+    # documented on ``_isolate_service_endpoint_env`` below.
+    monkeypatch.setenv("NX_LOCAL", "1")
     return tenant
 
 
 @pytest.fixture(autouse=True)
-def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
-                                monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip ambient service-endpoint env from every unit test (nexus-dvom6).
 
-    FLIP MECHANISM (RDR-155 P4b P0a'): ``NX_TEST_T2_SUBSTRATE=engine``
-    routes this autouse pin to the engine-backed substrate instead —
-    every test gets the session PG+JAR with a freshly minted tenant
-    (exactly what the ``t2_service_env`` opt-in fixture provides). This
-    is both the flip dry-run switch (run any subset against the engine
-    without editing files) and, when the migration completes, the
-    default this fixture body becomes.
+    Same ambient-pollution class as ``_isolate_config_dir`` /
+    ``_isolate_t1_sessions`` / the ``CLAUDE_CODE_SESSION_ID`` scrub above, and
+    the missing half of ``_pin_t2_substrate``'s stated intent
+    ("independent of ambient service/lease state"): that fixture pins the
+    BACKEND, but a developer shell that has sourced the managed-service
+    credentials still leaks the ENDPOINT into every test.
 
-    ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
-    bare ``T2Database(path)`` would construct the Http* stores and try to reach
-    the nexus-service — which unit tests neither run nor want. Pinning sqlite
-    here keeps the ~116 T2Database-constructing unit tests deterministic and
-    independent of ambient service/lease state (a dev box with the supervisor
-    running would otherwise auto-discover a real lease mid-unit-test).
+    ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` / ``NX_SERVICE_TOKEN`` are tier 1
+    of :mod:`nexus.db.service_endpoint`'s resolution order, and
+    ``NX_SERVICE_URL`` is the ``service_url`` credential override
+    (``config.CREDENTIALS``). With any of them present, tests that assert on
+    the "nothing is resolvable" failure modes instead resolve a real endpoint:
+    ``test_missing_port_raises`` gets the "service_url is set but no token"
+    error rather than the ``NX_SERVICE_PORT`` one it matches on, and the
+    om64x lease-recovery tests never reach the lease tier they exist to
+    exercise, because env-first already won.
+
+    This is not a hypothetical: sourcing ``~/.config/nexus/activate.sh`` is the
+    documented way to get a working token, and ``nx doctor``'s 401 advice
+    (nexus-srt1m) sends operators straight to it. So before this fixture, the
+    more correctly a developer configured their shell, the more of the suite
+    failed -- and it failed as though the checked-out branch had broken
+    something.
+
+    ORDERING: must be defined BEFORE ``_pin_t2_substrate``. Autouse
+    function-scoped fixtures run in definition order, and that fixture may pull
+    in ``t2_service_env`` (via ``getfixturevalue``), which ``setenv``s
+    ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` for the engine substrate. Tests
+    requesting ``t2_service_env`` directly are also safe: non-autouse fixtures
+    resolve after autouse ones. Either way the explicit ``setenv`` lands after
+    this ``delenv`` and wins -- the same "later call on the same monkeypatch
+    wins" contract documented on ``_isolate_config_dir``.
+    """
+    for var in (
+        "NX_SERVICE_URL",
+        "NX_SERVICE_TOKEN",
+        "NX_SERVICE_HOST",
+        "NX_SERVICE_PORT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
+    """Route every test to the session's T2 substrate — the ENGINE.
+
+    Every test gets the session PG+JAR with a freshly minted tenant, exactly
+    what the ``t2_service_env`` opt-in fixture provides. This is what the
+    product actually ships on; ``storage_backend_for`` has defaulted to
+    ``service`` since the T2 cutover, so the suite agrees with the shipping
+    default instead of contradicting it.
+
+    THE SQLITE LEG IS GONE (nexus-i711w Stage 1b, 2026-07-28). Until now
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` opted out to the local SQLite stores, and
+    ``engine_substrate_selected()`` was the single lever every dies-roster
+    ``skipif`` read. Both retire here, with the stores themselves: a predicate
+    with one reachable value is not a choice, and 69 ``skipif`` markers reading
+    a constant are worse than no marker at all.
+
+    ``=sqlite`` now RAISES rather than resolving to the engine. It is the one
+    value a stale shell can still be carrying — the escape hatch was
+    documented, so someone bisecting an engine-side regression against "the old
+    baseline" will type it again. Silently handing them the engine would give a
+    green run that did not test what they believe it tested, which is the
+    silent-fallback class the project bans outright.
+
+    HISTORY, because the old body's rationale is still worth knowing: this
+    fixture used to pin SQLite so a bare ``T2Database(path)`` would not
+    construct Http* stores and try to reach the nexus-service — which unit
+    tests neither ran nor wanted. That kept ~116 T2Database-constructing tests
+    deterministic and independent of ambient service/lease state (a dev box
+    with the supervisor running would otherwise auto-discover a real lease
+    mid-unit-test). The engine substrate solves the same problem the other way:
+    a per-session JAR + PG with a per-test tenant is hermetic, so ambient
+    leases cannot leak in either.
 
     Tests that exercise the resolver itself (``test_storage_mode.py``) carry
     their own ``_clean_storage_env`` autouse fixture that ``delenv``s the
     backend vars AFTER this one, so they still observe the true default. Any
-    test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
-    which overrides this pin (later ``setenv`` wins).
+    test that wants a specific backend sets ``NX_STORAGE_BACKEND[_<store>]``
+    itself, which overrides this pin (later ``setenv`` wins).
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine":
-        request.getfixturevalue("t2_service_env")
+    # NX_TEST_T2_SUBSTRATE=none — provision NOTHING (nexus-lom9g / i711w).
+    # For tests whose subject needs no T2 store at all: endpoint resolution,
+    # env scrubbing, lease recovery. They previously said "=sqlite" to mean
+    # "don't boot an engine", which worked only while a SQLite substrate
+    # existed to fall back to. i711w deletes it, so the intent needs its own
+    # spelling rather than riding on a backend that is about to vanish.
+    # Checked FIRST: it is a statement about needing no substrate, not a
+    # choice between two.
+    selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
+    if selected == "none":
         return
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+    if selected == "sqlite":
+        raise RuntimeError(
+            "NX_TEST_T2_SUBSTRATE=sqlite: the SQLite test substrate was "
+            "deleted with the SQLite T2 stores (nexus-i711w). The engine is "
+            "the only substrate. If you meant 'this test needs no T2 store', "
+            "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
+        )
+    request.getfixturevalue("t2_service_env")
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_service_catalog_client() -> None:
+    """Drop the process-lifetime shared SERVICE catalog client between tests
+    (nexus-aqbrk).
+
+    ``nexus.catalog.factory`` memoises ONE ``HttpCatalogClient`` for the life
+    of the process (nexus-5en9j — it was the largest reconstruction count in
+    the nexus-53x7s shakeout, 394 constructions in one run). Correct in
+    production, where the tenant never changes mid-process. Wrong for a
+    pytest session, where the engine substrate mints a FRESH TENANT AND TOKEN
+    per test: the memoised client keeps the FIRST test's token, so every
+    later test's catalog reads and writes land in the first test's tenant.
+
+    The visible symptom is not "wrong tenant" — it is accumulation. Rows pile
+    up in tenant #1 across the whole module, and eventually a
+    ``register_owner`` that is the first of its name IN ITS OWN TEST hits a
+    row an earlier test already wrote, and the engine correctly refuses:
+    ``HTTP 409: integrity constraint violation`` on ``/v1/catalog/owners/
+    upsert`` (catalog_owners_unique_name_type). Order-dependent, passes in
+    isolation, and the error names a constraint rather than the cause — the
+    same profile as the import-seed-id defect, and the same trap.
+
+    ``reset_shared_service_catalog_client_for_tests`` already existed for
+    exactly this; nothing called it outside the one test that owns the
+    caching behaviour itself. Reset on BOTH sides so a test that constructs
+    the client cannot leak it forward, and a test that inherits one cannot
+    start dirty.
+    """
+    from nexus.catalog import factory
+
+    factory.reset_shared_service_catalog_client_for_tests()
+    yield
+    factory.reset_shared_service_catalog_client_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _reset_service_t2_db() -> None:
+    """Drop the process-lifetime service ``T2Database`` singleton between tests
+    (nexus-aqbrk).
+
+    THE SAME DEFECT AS ``_reset_shared_service_catalog_client`` ABOVE, one
+    tier over, and named as such in nexus-5en9j: ``mcp_infra`` memoises ONE
+    service-backed ``T2Database`` in ``_service_t2_db`` and every service-mode
+    ``t2_index_write`` runs against it (``_service_t2_write_locked``). Its
+    ``Http*Store`` clients bake in the endpoint and BEARER TOKEN they saw at
+    construction, and the engine substrate mints a fresh tenant + token per
+    test — so a singleton built by the first test writes every later test's
+    rows into the FIRST test's tenant.
+
+    The symptom is a test reading an empty store it just wrote to: the write
+    landed in tenant #1, the read-back runs in its own tenant. Order-dependent
+    — passes solo, fails in file order — and harmless on the SQLite substrate,
+    where ``t2_index_write`` never takes the service branch and this reset is
+    a no-op.
+
+    Already diagnosed once, per-file: ``tests/test_rdr_084_plan_grow.py``
+    carries a local autouse fixture calling ``reset_singletons()`` for exactly
+    this reason. That is the same shape the catalog client had before the
+    fixture above — one file working around a session-wide hazard. This
+    promotes the eviction to the whole suite.
+
+    SCOPE IS DELIBERATELY NARROWER THAN ``reset_singletons()``. That helper
+    also drops ``_t1_instance`` / ``_t3_instance`` / ``_collections_cache`` /
+    the plan cache / the vector client; making all of that autouse would
+    invalidate module-scoped T1/T3 injections that tests legitimately expect
+    to survive across a file. Only the credential-bearing T2 handle is evicted
+    here. Reset on BOTH sides, for the same reason as the catalog client: a
+    test cannot leak one forward, and cannot start dirty.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    def _evict() -> None:
+        with mcp_infra._service_t2_lock:
+            if mcp_infra._service_t2_db is not None:
+                mcp_infra._service_t2_db.close()
+            mcp_infra._service_t2_db = None
+
+    _evict()
+    yield
+    _evict()
 
 
 @pytest.fixture(autouse=True)
@@ -451,56 +649,26 @@ def _reset_aspect_worker_singleton() -> None:
     reset_worker_for_tests()
 
 
-@pytest.fixture(autouse=True)
-def _reap_spawned_daemons(tmp_path: Path):
-    """nexus-scoo5: reap any T2/T3 daemon a test spawned under its own
-    isolated tmp ``NEXUS_CONFIG_DIR``.
-
-    A test that drives a real ``nx upgrade`` (non-``--auto``) reaches
-    ``upgrade._cycle_daemon_to_current()``, which shells out to ``nx daemon
-    t2 ensure-running`` and spawns a *detached* ``nx daemon t2 start`` bound
-    to the per-test config dir. ``subprocess.run`` returns once the daemon
-    is up, so the process outlives the test body and lingers as an orphan
-    after pytest GCs the tmp dir (observed: three orphan daemons on
-    ``garbage-*/test_force0/.config/nexus/memory.db``).
-
-    The autouse ``_isolate_config_dir`` fixture sets ``NEXUS_CONFIG_DIR`` to
-    ``tmp_path / ".config" / "nexus"``, so a spawned daemon's discovery file
-    lands there. This teardown is the process-level analog of the
-    ``pytest_sessionfinish`` cache-file leak guard: it is scoped strictly to
-    that per-test tmp path (and double-guarded by a cmdline check in
-    ``reap_tmp_daemons``), so it can never signal the user's real daemon,
-    whose discovery file lives under ``~/.config/nexus``.
-
-    Best-effort; never raises. Tests that suppress the spawn at source
-    (patching ``_cycle_daemon_to_current``) make this a no-op.
-    """
-    yield
-    from tests._daemon_leak_guard import reap_tmp_daemons
-
-    # Scoped to the autouse ``_isolate_config_dir`` default
-    # (``tmp_path/.config/nexus``) only. A full-suite sweep confirmed this is
-    # leak-free: the ``tests/daemon`` lifecycle tests that spawn real daemons
-    # under the ``--config-dir str(tmp_path)`` root form self-clean. Scanning
-    # the tmp_path root too would reach the fake discovery files those tests
-    # pre-seed (with mocked ``subprocess.run`` / ``os.kill``) and trip their
-    # "must not spawn" guards at teardown — cost with no proven benefit.
-    try:
-        reap_tmp_daemons(tmp_path / ".config" / "nexus")
-    except BaseException:  # noqa: BLE001 — teardown guard must never fail a test
-        pass
+# NO _reap_spawned_daemons fixture: it SIGTERMed any T2/T3 daemon a test had
+# spawned into its own tmp NEXUS_CONFIG_DIR (nexus-scoo5 — real `nx upgrade`
+# runs reached `nx daemon t2 ensure-running`, which spawned a DETACHED
+# `nx daemon t2 start` that outlived the test body). It reaped tiers ("t2",
+# "t3") only; T3's daemon retired in RDR-155 P4b and T2's in nexus-i711w
+# Stage 2 sub-stage B, and both spawn paths are gone with them, so there is
+# nothing left for it to find. Its implementation (tests/_daemon_leak_guard.py)
+# and contract tests went with it.
 
 
 def set_credentials(monkeypatch) -> None:
-    """Set required T3/Voyage credential env vars for tests that call _has_credentials().
+    """Set the cloud-ingest credential env for tests that call _has_credentials().
 
-    Shared helper used by test_doc_indexer.py and test_pdf_subsystem.py to avoid
-    duplicating the same four setenv calls across both files.
+    Shared helper used by test_doc_indexer.py and test_pdf_subsystem.py.
+    RDR-155 P4b: the CHROMA_* keys died with the chroma credential map and
+    key presence no longer implies cloud mode — pin NX_LOCAL=0 explicitly
+    so the voyage embed path under test fires.
     """
+    monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
-    monkeypatch.setenv("CHROMA_API_KEY", "ck_test")
-    monkeypatch.setenv("CHROMA_TENANT", "tenant")
-    monkeypatch.setenv("CHROMA_DATABASE", "db")
 
 
 # RDR-109 Phase 1: cloud-mode opt-in fixture.
@@ -557,6 +725,13 @@ def cloud_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # at module scope instead. See ``docs/contributing.md`` and
 # ``tests/AGENTS.md``.
 _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
+    # RDR-155 P4b P3: the nexus-owned Voyage EF's own unit tests. Reason class
+    # "string-literal-as-name" — the voyage tokens are ``model_name=`` values
+    # asserted against the mocked ``voyageai.Client.embed`` kwargs, which is
+    # the wire contract under test. Every test patches the client, so no
+    # embedding, no credential and no cloud mode is involved; requesting
+    # cloud_mode would add a live-credential dependency to a fully mocked test.
+    "test_voyage_ef.py",
     # Cloud-behavior files — Phase 1 ships the lint mechanism with these
     # excluded; subsequent PRs promote each to module-level
     # ``pytestmark = pytest.mark.usefixtures("cloud_mode")``. Promotion is
@@ -572,24 +747,6 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # test pins mode explicitly via T3Database(local_mode=...), not the
     # ambient cloud_mode fixture.
     "test_local_daemon_client_embed.py",
-    # RDR-159 P0 detection classifier: voyage tokens are collection-NAME
-    # fixtures driving the support matrix; every test pins deployment mode
-    # explicitly via the ``voyage_key_present`` argument, never the ambient
-    # cloud_mode fixture (the classifier is a pure deployment-mode function).
-    "test_detection.py",
-    # RDR-166 nexus-hxry2 vector-ETL: voyage tokens are collection-NAME segments
-    # driving same-model passthrough vs cross-model routing (_is_same_model_
-    # passthrough / _migrate_one). The ETL never embeds — the server does — so
-    # these tests are deployment-mode-agnostic; they pin behavior via explicit
-    # target_name / collection names, never the ambient cloud_mode fixture.
-    "test_vector_etl.py",
-    # RDR-159 P1d pre-gate + P1c quiesce: voyage tokens are collection-NAME /
-    # wired-model-set fixtures driving the support gate and the count-mismatch
-    # attribution message; mode is pinned explicitly via the injected
-    # WiredModelSource / ``voyage_key_present`` argument, never the ambient
-    # cloud_mode fixture.
-    "test_pregate.py",
-    "test_quiesce.py",
     # RDR-169 G5 bridge address-field tests: voyage tokens appear only as
     # collection-NAME fixtures (knowledge__test__voyage-context-3__v1) in fully
     # mocked HttpVectorClient / _ServiceCollectionStub unit tests. The server
@@ -760,24 +917,25 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # test_catalog_path.py for the full sweep methodology.
     "test_backfill_hash.py",
     "test_catalog_backfill_collections.py",
+    # Five entries removed (nexus-i711w terminal deletion): test_catalog_
+    # collections_rebuild / concurrent_writer_lock / db / incremental_rebuild
+    # / collections_owner_backfill died with the local catalog. DOWNWARD-only.
     "test_catalog_collection_name.py",
     "test_catalog_collections.py",
-    "test_catalog_collections_rebuild.py",
-    "test_catalog_concurrent_writer_lock.py",
-    "test_catalog_db.py",
-    # RDR-152 catalog SQLite->Postgres ETL: voyage tokens are collection-NAME
-    # fixtures being migrated as data (owner/collection/document rows), never
-    # assertions of cloud-mode embedding behaviour. The whole file is mode-agnostic.
-    "test_catalog_etl.py",
+    # test_catalog_etl.py entry removed (nexus-i711w Stage 2 sub-stage A):
+    # the file died with the SQLite->PG ETL readers. DOWNWARD-only edit.
     "test_catalog_doctor_collections_drift.py",
     # RDR-103 / nexus-j9ey + b03o advisor: voyage tokens appear in
     # synthetic collection names being asserted against, not as
     # cloud-mode behaviour under test.
     "test_catalog_doctor_name_vs_embed_dim.py",
-    "test_upgrade_name_vs_embed_dim_advisory.py",
-    "test_catalog_incremental_rebuild.py",
-    "test_catalog_manifest_backfill.py",
-    "test_catalog_migrate_fallback.py",
+    # test_upgrade_name_vs_embed_dim_advisory.py entry removed (RDR-158 P4
+    # Stage 4, nexus-i711w): the file died with _run_upgrade's local leg.
+    # DOWNWARD-only edit.
+    # test_catalog_manifest_backfill.py entry removed (nexus-i711w terminal
+    # deletion): the file's raw-Catalog harness died with the local catalog.
+    # test_catalog_migrate_fallback.py entry removed (nexus-i711w terminal
+    # deletion, DIE batch-b rm). DOWNWARD-only edit.
     "test_catalog_papers_curator_isolation.py",
     "test_catalog_rename_collection.py",
     "test_catalog_spans_chunk_char.py",
@@ -786,11 +944,6 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # nexus-vgq89 correction sweep: test_collection_name_migration.py
     # removed here (same free-win reason as above — pre-existing module
     # cloud_mode mark).
-    # RDR-137 P1.5a: voyage tokens appear in synthetic conformant
-    # collection names used as backfill fixtures (e.g.
-    # ``code__nexus-1-1__voyage-code-3__v1``). Tests exercise pure
-    # SQLite + string parsing; no Voyage call is ever made.
-    "test_collections_owner_backfill.py",
     # RDR-137 P2a (nexus-tts0d.4): same voyage-token-in-fixture pattern
     # — the catalog-backed reader tests register synthetic conformant
     # collection names and read them back; no Voyage call.
@@ -838,10 +991,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # behavior.
     "test_dt_content_layer_d.py",
     "test_dt_mcp_fallback.py",
-    "test_document_highlights.py",
+    # test_document_highlights.py entry removed (nexus-i711w Stage 2
+    # sub-stage A): the file died with the SQLite store. DOWNWARD-only edit.
     "test_dt_highlights_layer_e.py",
     "test_dt_capture_cmd.py",
-    "test_migrations_rdr108_phase1c.py",
+    # test_migrations_rdr108_phase1c.py entry removed (RDR-158 P4 Stage 4,
+    # nexus-i711w): the file died with db/migrations.py. DOWNWARD-only edit.
     "test_plan_run.py",
     # nexus-vgq89 correction sweep: test_rdr_hook.py (tests/hooks/) and
     # test_registry.py removed here (same free-win reason — pre-existing
@@ -866,38 +1021,35 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
-    # RDR-185 ladder — reason: "string-literal-as-name". Every one of these
-    # builds a conformant RDR-103 collection NAME (or a
-    # CollectionClassification carrying the name's model SEGMENT) and asserts
-    # on planning/rollback/re-id behaviour keyed off that segment. None calls
-    # a Voyage embedder: the rung tests inject fakes for every collaborator,
-    # and the local bge-768 path is what actually runs. cloud_mode would
-    # change nothing they assert.
+    # nexus-9n485 tombstone probe — reason: "string-literal-as-name". Both
+    # tests pass "knowledge__1-1__voyage-context-3__v1" as the rename TARGET
+    # of `nx catalog rename-collection`; the voyage token is one segment of a
+    # conformant RDR-103 name, and what is asserted is the three-state
+    # tombstone guard's refusal (exit != 0, "tombstoned"/"restore" in the
+    # message). The HttpVectorClient's network boundary is patched in both,
+    # so no embedder is constructed and no credential is read — cloud_mode
+    # would add a live-credential dependency to a fully patched test without
+    # changing a single assertion.
+    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
+    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
     #
-    # The mislabel pair is the sharpest case FOR the exclusion: their whole
-    # subject is a name whose voyage token LIES (a pre-RDR-109 collection
-    # named voyage-context-3 whose stored vectors measure as local bge-768,
-    # bead nexus-j5diu). Opting them into cloud_mode would assert the
-    # opposite of their point.
+    # RDR-185 ladder — reason: "string-literal-as-name". Builds a conformant
+    # RDR-103 collection NAME (or a CollectionClassification carrying the
+    # name's model SEGMENT) and asserts on planning/rollback/re-id behaviour
+    # keyed off that segment. It does not call a Voyage embedder: the rung
+    # tests inject fakes for every collaborator, and the local bge-768 path
+    # is what actually runs. cloud_mode would change nothing it asserts.
     #
-    # The six P2 entries (test_rollback_via_map, test_substrate_leg) were
-    # already offending before P4 and went unnoticed because this arc ran
-    # narrow, path-scoped selections — this lint only fires when the full
-    # session is collected, so `pytest tests/upgrade/` alone never sees it.
+    # This began as nine entries. Eight (test_rollback_via_map ×2,
+    # test_substrate_leg ×4, test_substrate_rung ×2) were dropped in the
+    # nexus-i711w liveness burn-down: 88d91bd5 deleted those files with the
+    # Chroma migration machinery, and the entries had been dead ever since.
     # nexus-r5f3c — reason: "string-literal-as-config-value". The test's
     # subject is the SUPERVISOR's env-plumbing gate: a legacy config with
     # local.embed_model="voyage-context-3" must still plumb the credential
     # chain (the mirror of the bge-blocks-plumb case). Popen is mocked; no
     # embedder or cloud call exists. cloud_mode would change nothing.
     "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_voyage_configured_model_still_plumbs",
-    "tests/upgrade/test_rollback_via_map.py::test_cross_model_rollback_deletes_from_recorded_target",
-    "tests/upgrade/test_rollback_via_map.py::test_cross_model_conformant_ids_roll_back_via_target_names",
-    "tests/upgrade/test_substrate_leg.py::test_execute_cross_model_leg_targets_remapped_collection",
-    "tests/upgrade/test_substrate_leg.py::test_reid_only_leg_passes_through_stored_vectors",
-    "tests/upgrade/test_substrate_leg.py::test_mis_provenanced_vector_falls_back_to_reembed",
-    "tests/upgrade/test_substrate_leg.py::test_pure_reembed_leg_rolls_back_via_plan_target_names",
-    "tests/upgrade/test_substrate_rung.py::test_measured_768_mislabel_is_planned_without_a_voyage_key",
-    "tests/upgrade/test_substrate_rung.py::test_genuine_voyage_without_a_key_is_still_the_credential_case",
     "tests/upgrade/test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_live_never_cached",
     #
     # REAL keyed integration tests (-m integration, @requires_voyage_key):
@@ -911,21 +1063,22 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_integration.py::test_cce_query_retrieves_cce_indexed_markdown",
     "tests/test_integration.py::test_t3_put_embedding_model_in_search_metadata",
     #
-    # nexus-pebfx.2: Java-SOURCE-PARSING parity tests — they regex the
-    # EmbedderRouter/embedder .java files for RDR-103 model tokens and
-    # cross-check Python _MODEL_DIMS. The voyage tokens are registry
-    # labels being compared, not embedder behavior; no embedder runs and
-    # no mode-dependent code path is exercised ("canonical-set" class).
-    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_cloud_mode_dispatch_tokens_are_known_models",
     # nexus-e0w01 / nexus-gednd (2026-07-13): "string-literal-as-name" class —
     # the voyage token appears only inside RDR-103-conformant collection-NAME
     # strings; the frecency test pins the service path via
     # NX_STORAGE_BACKEND_VECTORS + a mocked HttpVectorClient (no embedder
     # runs), and the tripwire tests mock get_t3/compute_assignments entirely.
+    # RENAMED, not added (nexus-i711w Stage 2 sub-stage C): the first tripwire
+    # entry below was `::test_local_path_failure_records_hook_failures_row`
+    # until 9c0cff18 ported it to the service arm and renamed it. The reason
+    # class is unchanged — `_force_service_path` mocks get_t3 and the captured
+    # t2's compute_assignments, so still no embedder runs — but the old nodeid
+    # no longer resolved, which silently converted a granted exclusion into a
+    # non-exclusion and left this lint red on develop. Retargeting the pointer
+    # keeps the count at 58; no ceiling bump is warranted for a rename.
     "tests/test_frecency_service_mode.py::TestFrecencyRdrCollection::test_rdr_collection_included_in_frecency_update",
-    "tests/test_taxonomy_hook_tripwire.py::test_local_path_failure_records_hook_failures_row",
+    "tests/test_taxonomy_hook_tripwire.py::test_service_path_failure_records_hook_failures_row",
     "tests/test_taxonomy_hook_tripwire.py::test_tripwire_persist_failure_never_propagates",
-    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
     #
     # #1060: pure collection-NAME validation (length/charset) — references a
     # legacy voyage-named collection as realistic input but makes no cloud-mode
@@ -948,18 +1101,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/catalog/test_docs_for_chashes_live_content.py::TestBuildStalenessCacheLiveContent::test_nonzero_docs_after_index_like_write",
     "tests/test_http_vector_client_parity.py::TestExpire::test_expire_deletes_only_expired_knowledge_rows",
     "tests/test_http_vector_client_parity.py::TestExpire::test_expire_no_knowledge_collections_returns_zero",
-    "tests/test_http_vector_client_parity.py::TestUpdateSourcePath::test_rewrites_matching_rows_and_returns_count",
     "tests/test_http_vector_client_parity.py::TestCollectionMetadata::test_returns_t3_parity_keys",
-    #
-    # RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade driver's two-leg test
-    # uses a conformant voyage-named collection STRING to assert the composite
-    # read client routes it to the cloud leg + that distinct dims (384, 1024)
-    # are extracted. The engine is fully mocked; no embedder runs and no
-    # mode-dependent path executes ("string-literal-as-name" class).
-    # (renamed test_two_leg_composes_collections_and_dims -> _reopens_both_legs_
-    # for_landing in the RDR-180 land-then-transform rewrite, nexus-jxizy.10.7 —
-    # same fully-mocked engine, same string-literal-as-name rationale.)
-    "tests/migration/test_driver.py::test_two_leg_reopens_both_legs_for_landing",
     #
     # nexus-gc2ze + nexus-c9xr2/u37lw wave (2026-07-04): all
     # "string-literal-as-name" — a REAL HttpCatalogClient/HttpVectorClient
@@ -972,14 +1114,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_uses_verbatim_passthrough",
-    #
-    # nexus-gilf2: the cross-model remap-target test asserts the driver derives
-    # voyage target NAMES (voyage-code-3 / voyage-context-3) in cloud mode. Mode
-    # is pinned explicitly by patching ``voyage_key_available`` (via the
-    # ``voyage_key=True`` engine patch), not the ambient cloud_mode fixture —
-    # the target resolver is a pure deployment-mode function, same rationale as
-    # the ``test_detection.py`` file exclusion ("string-literal-as-name" class).
-    "tests/migration/test_driver.py::test_cross_model_target_is_voyage_in_cloud_mode",
     #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /
@@ -994,7 +1128,8 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # assertions (real collections ARE voyage-named); these test the catalog
     # public-API methods, not cloud-mode embedder behavior, so cloud_mode is
     # not applicable.
-    "tests/test_catalog_consumer_service_mode.py::TestSQLiteCatalogNewMethods::test_collections_by_owner_filters",
+    # TestSQLiteCatalogNewMethods entry removed (nexus-i711w terminal
+    # deletion): the SQLite parity arm retired. DOWNWARD-only edit.
     "tests/test_catalog_consumer_service_mode.py::TestHttpCatalogClientNewMethods::test_collections_by_owner",
     #
     # RDR-152 nexus-enehl: frecency metadata-update service client test. The
@@ -1010,43 +1145,12 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
     #
-    # nexus-5b9v0: the target-name collision guard tests build
-    # CollectionClassification/message fixtures naming real conformant
-    # collections (code__1-3__voyage-code-3__v1 etc.) to assert the pre-flight
-    # collision detector fires and its message names the colliding sources
-    # correctly. The voyage tokens are collection-NAME/model-label DATA the
-    # guard reasons about structurally (classify_collections is fully mocked);
-    # no embedder runs and no mode-dependent path executes
-    # ("string-literal-as-name" class, same rationale as test_driver.py's
-    # existing exclusions above).
-    # (renamed ..._blocked_before_sequence -> ..._before_land_then_transform in
-    # the RDR-180 rewrite, nexus-jxizy.10.7 — voyage_key pinned False, engine
-    # fully mocked.)
-    "tests/migration/test_driver.py::test_target_name_collision_blocked_before_land_then_transform",
-    "tests/migration/test_driver.py::test_target_name_collision_between_two_remapped_collections",
-    "tests/migration/test_driver.py::test_target_name_no_collision_when_targets_distinct",
-    "tests/migration/test_driver.py::test_target_name_collision_three_way",
-    "tests/migration/test_driver.py::test_target_name_collision_message_carries_classification_metadata",
-    "tests/migration/test_driver.py::test_target_name_collision_message_flags_likely_stale_source",
-    "tests/commands/test_migrate_cost_guardrail.py::TestRunMigrationCollisionGuard::test_target_name_collision_renders_as_click_exception",
-    #
-    # nexus-p9vqa / nexus-772h2 (nx migration-audit + dual-world false-clean
-    # regression): both build CollisionAuditReport / CollectionClassification
-    # fixtures and conformant collection-NAME strings (code__1-3__voyage-code-3__v1)
-    # as the audit's opaque input data. classify_collections / read+vector
-    # clients are fully monkeypatched — no embedder runs and no mode-dependent
-    # path executes ("string-literal-as-name" class, same rationale as the
-    # test_driver.py collision exclusions above).
-    "tests/migration/test_collision_audit.py::test_false_clean_regression_merge_only_visible_in_no_key_world",
-    "tests/test_migration_audit_cmd.py::test_json_output_is_machine_readable",
-    #
     # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
     # mocked /v1/vectors/collections response using conformant collection-
     # NAME strings (code__nexus-1-1__voyage-code-3__v1,
     # knowledge__nexus-1-1__voyage-context-3__v1) purely as PgReadClient
     # list_collections() parsing test data. No embedder runs and no
-    # mode-dependent path executes ("string-literal-as-name" class, same
-    # rationale as the test_driver.py collision exclusions above).
+    # mode-dependent path executes ("string-literal-as-name" class).
     "tests/migration/test_pg_read.py::TestListCollections::test_returns_name_objects",
     #
     # nexus-vgq89 burn-down (2026-07-15): test_collection_cmd.py promoted
@@ -1108,14 +1212,38 @@ def db(tmp_path: Path) -> T2Database:
 
 
 #: Process-wide unique id source for fidelity-import seeding (RDR-155
-#: P4b P0a'). import_topic/import_plan preserve ids VERBATIM without
-#: advancing the engine's serial sequences, and the topics PK is GLOBAL
-#: across tenants on the shared session engine — so per-module counters
-#: collide across modules in one pytest session (bisected finding).
-#: Every module that seeds preserved ids MUST draw from THIS counter.
+#: P4b P0a'). The topics PK is GLOBAL across tenants on the shared session
+#: engine, so per-module counters collide across modules in one pytest
+#: session (bisected finding). Every module that seeds preserved ids MUST
+#: draw from THIS counter.
+#:
+#: THE STRIDE IS LOAD-BEARING (nexus-aqbrk, 2026-07-25). The note here used
+#: to claim imports "preserve ids VERBATIM without advancing the engine's
+#: serial sequences". That is false: TaxonomyRepository.importTopic ends with
+#: advanceTopicsIdSequence(ctx, srcId), a setval to GREATEST(last_value,
+#: srcId) — deliberately, so a migrated tenant's next live topic cannot
+#: collide with its own imported ids. The consequence for a shared session
+#: engine is that ONE import at N drags the global serial sequence to N, and
+#: every subsequent ORDINARY topic creation (persist_discovered,
+#: persist_rebuild, ...) in ANY tenant then consumes N+1, N+2, ... — walking
+#: straight into the ids this counter is about to hand out. The next import
+#: to draw an already-consumed id hits ON CONFLICT (id) against a row owned
+#: by a different tenant, which RLS rejects as a WITH CHECK violation and the
+#: handler reports as "supplied id is not available in this tenant".
+#:
+#: Symptom when this breaks: a cascade of HTTP 409s that looks like an
+#: engine defect and is order-dependent (test_taxonomy.py failed at test 20;
+#: deselecting three topic-creating tests moved it to test 33). A larger
+#: starting offset does NOT help — the serial path just follows the counter
+#: up from wherever it lands. The STRIDE is what fixes it: after an import
+#: at N, ordinary inserts would have to burn a million ids to reach N + STEP,
+#: and a pytest session creates thousands.
 import itertools
 
-_import_seed_ids = itertools.count(1_000_000_000)
+_IMPORT_SEED_ID_BASE = 1_000_000_000
+_IMPORT_SEED_ID_STEP = 1_000_000
+
+_import_seed_ids = itertools.count(_IMPORT_SEED_ID_BASE, _IMPORT_SEED_ID_STEP)
 
 
 def next_import_seed_id() -> int:
@@ -1402,3 +1530,325 @@ def require_docling(docling_available: bool) -> None:
             "genuine regression from a missing local cache. This skip only fires on "
             "a local run."
         )
+
+
+# --- nexus-1odsl: reap test daemons the suite leaked --------------------------
+#
+# TWO process classes leak, for two DIFFERENT reasons, and a fix for one does
+# not touch the other:
+#
+#   aspect-worker  `stop_worker()` stops the IN-PROCESS singleton thread. It
+#                  does not touch the DETACHED `nx daemon aspect-worker start`
+#                  subprocess that `ensure_aspect_worker_daemon` spawns (Popen
+#                  + start_new_session), so any test exercising the auto-spawn
+#                  path leaves a real daemon behind. Nothing reaps a daemon.
+#
+#   postgres       tests/_engine_substrate.py DOES clean up, via
+#                  atexit.register(_teardown). But atexit does not run on
+#                  SIGKILL, on a double Ctrl-C, or on a hard crash -- i.e.
+#                  exactly how a long suite actually gets aborted. So the
+#                  cluster survives with its postmaster still listening.
+#
+# They are not inert. On 2026-07-24, six workers and three postmasters were
+# found still running from finished runs, and leaked workers produced a
+# 1,375-entry burst of 401s against the PRODUCTION cloud endpoint on
+# 2026-07-10: test daemons polling prod with a stale token.
+#
+# WHY A SESSION-START PASS AND NOT ONLY SESSION-END. A session-END reaper can
+# only see its OWN basetemp, and by construction cannot run at all when the
+# run is killed -- which is the case that leaks. Everything stranded by an
+# aborted run is therefore reachable only from a LATER session, so the start
+# pass is what actually drains the backlog (21 stale session dirs were present
+# on this box when the bead was fixed). The end pass is kept for the
+# aspect-worker case, which leaks even on a clean exit.
+#
+# SCOPE IS THE WHOLE POINT. Only processes whose own path argument lies under
+# a pytest tmp root are signalled. A broad "kill anything named postgres"
+# would kill the developer's real database.
+
+#: (label, argument flag naming the process's own directory, signal to send).
+#: The flag is what makes the match precise: it is the process's OWN state
+#: directory, so a match cannot be a coincidence of some unrelated process
+#: merely mentioning a tmp path.
+_LEAK_SPECS: tuple[tuple[str, str, str], ...] = (
+    # SIGTERM: the worker's normal shutdown signal.
+    ("aspect-worker", "--config-dir ", "TERM"),
+    # SIGQUIT is postgres's IMMEDIATE shutdown. SIGTERM would be a "smart"
+    # shutdown that WAITS for clients to disconnect, which can hang forever on
+    # a stranded cluster. These clusters are throwaway (fsync=off), so there is
+    # nothing to protect by shutting down gracefully.
+    ("postgres", "-D ", "QUIT"),
+)
+
+
+def _ps_all() -> list[tuple[int, str]]:
+    """(pid, cmdline) for every live process. Never raises."""
+    import subprocess  # noqa: PLC0415 -- deferred; teardown-only path
+
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,command="], capture_output=True, text=True, timeout=10,
+    ).stdout
+    rows: list[tuple[int, str]] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_s, _, cmd = line.partition(" ")
+        if not pid_s.isdigit():
+            continue
+        rows.append((int(pid_s), cmd))
+    return rows
+
+
+# Back-compat alias: the reaper's own tests import this name.
+_ps_aspect_workers = _ps_all
+
+
+def _matches_class(cmd: str, label: str) -> bool:
+    """Is *cmd* an instance of the *label* process class?
+
+    postgres is matched on the executable's BASENAME rather than a substring so
+    that neither `pg_ctl -D ...` (transient, also carries -D) nor postgres's own
+    `postgres: checkpointer` worker processes are swept up. Killing the
+    postmaster reaps its children anyway.
+    """
+    if label == "postgres":
+        head = cmd.split(maxsplit=1)[0] if cmd.split() else ""
+        return Path(head).name == "postgres"
+    return "aspect-worker" in cmd or "aspect_worker" in cmd
+
+
+def reap_leaked_test_daemons(
+    *,
+    tmp_root: Path,
+    labels: tuple[str, ...] | None = None,
+    _list_procs=_ps_all,
+    _kill=None,
+) -> list[tuple[str, int]]:
+    """SIGNAL test daemons whose own state directory is under *tmp_root*.
+
+    Returns (label, pid) for each process actually signalled. Never raises:
+    this runs at session setup/teardown, where an exception would turn a
+    tidy-up into a suite error and mask the real result.
+
+    *labels* restricts which classes are considered. It gates the KILL, not the
+    return value -- filtering afterwards would signal a process and then omit it
+    from the report, which is strictly worse than not filtering at all.
+    """
+    if _kill is None:
+        import os as _os  # noqa: PLC0415 -- deferred; teardown-only path
+        import signal as _signal  # noqa: PLC0415 -- deferred; teardown-only path
+
+        def _kill(pid: int, sig: str) -> None:  # noqa: ANN202 -- local default
+            _os.kill(pid, getattr(_signal, f"SIG{sig}"))
+
+    try:
+        procs = list(_list_procs())
+    except Exception:  # noqa: BLE001 -- a teardown probe is never a verdict
+        return []
+
+    # RESOLVE both sides. On macOS the tmp root is handed to us as
+    # /var/folders/... while the spawned process carries the realpath
+    # /private/var/folders/... (/var is a symlink to /private/var). A plain
+    # string prefix compare silently matches NOTHING -- which is exactly how
+    # this reaper passed its unit tests and still reaped zero real daemons on
+    # its first end-to-end run.
+    try:
+        root = Path(tmp_root).resolve()
+    except Exception:  # noqa: BLE001 -- teardown probe
+        root = Path(tmp_root)
+
+    reaped: list[tuple[str, int]] = []
+    for pid, cmd in procs:
+        for label, marker, sig in _LEAK_SPECS:
+            if labels is not None and label not in labels:
+                continue
+            if not _matches_class(cmd, label):
+                continue
+            idx = cmd.find(marker)
+            if idx < 0:
+                continue
+            tail = cmd[idx + len(marker):].split()
+            if not tail:
+                continue
+            # `ps -eo command=` returns argv joined by spaces, UNQUOTED, so a
+            # directory containing a space is split across tokens. Taking
+            # tail[0] truncates it, the path resolves somewhere else, the
+            # containment test fails, and a real leaked daemon is left running
+            # with NO error -- a silent false negative. Found by review; the
+            # fake-ps unit tests all used space-free tmp paths.
+            #
+            # So try progressively longer token joins until one resolves under
+            # the root, stopping at the next flag.
+            own_dir = None
+            for k in range(1, len(tail) + 1):
+                if k > 1 and tail[k - 1].startswith("-"):
+                    break                       # ran into the next flag
+                candidate = " ".join(tail[:k])
+                # Absolute only: a relative value would resolve against the
+                # REAPER's cwd, not the target process's cwd at spawn time.
+                # Both current call sites pass absolute paths; refusing
+                # relative ones keeps a future call site from silently
+                # matching the wrong directory.
+                if not candidate.startswith("/"):
+                    break
+                try:
+                    resolved = Path(candidate).resolve()
+                except Exception:  # noqa: BLE001 -- unparseable is not ours
+                    continue
+                if resolved.is_relative_to(root):
+                    own_dir = resolved
+                    break
+            if own_dir is None:
+                continue
+            try:
+                _kill(pid, sig)
+            except Exception:  # noqa: BLE001 -- already exited / not ours anymore
+                continue
+            reaped.append((label, pid))
+            break
+    return reaped
+
+
+def reap_leaked_aspect_workers(
+    *,
+    tmp_root: Path,
+    _list_procs=_ps_all,
+    _kill=None,
+) -> list[int]:
+    """Aspect-worker-only view of :func:`reap_leaked_test_daemons`.
+
+    Retained because it is the documented entry point and its ``_kill`` takes a
+    single pid; the generalised reaper's takes (pid, signal).
+
+    Passes ``labels`` through rather than filtering the RESULT: filtering after
+    the fact would still have signalled every postgres it walked past while
+    reporting none of them. The pre-existing
+    ``test_spares_unrelated_processes_that_mention_the_tmp_root`` asserts on the
+    kill list, not the return value, and caught exactly that.
+    """
+    def _shim(pid: int, _sig: str) -> None:
+        if _kill is None:
+            import os as _os  # noqa: PLC0415 -- deferred
+            import signal as _signal  # noqa: PLC0415 -- deferred
+            _os.kill(pid, _signal.SIGTERM)
+        else:
+            _kill(pid)
+
+    return [
+        pid
+        for _label, pid in reap_leaked_test_daemons(
+            tmp_root=tmp_root, labels=("aspect-worker",),
+            _list_procs=_list_procs, _kill=_shim,
+        )
+    ]
+
+
+def stale_pytest_roots(basetemp: Path) -> list[Path]:
+    """Sibling pytest session dirs from OTHER runs, newest-first.
+
+    pytest lays sessions out as ``<tmp>/pytest-of-<user>/pytest-<n>``. The
+    current session's own dir is excluded -- reaping it would kill the run in
+    progress.
+
+    Assumes ONE pytest run at a time on a box, which is this project's standing
+    rule (feedback_no_parallel_tests). A second concurrent run's daemons would
+    be reaped by this. That is why every reap is PRINTED rather than silent.
+    """
+    try:
+        parent = Path(basetemp).resolve().parent
+        current = Path(basetemp).resolve()
+    except Exception:  # noqa: BLE001 -- probe
+        return []
+    if not parent.is_dir() or not parent.name.startswith("pytest-of-"):
+        return []
+    try:
+        sibs = [
+            d for d in parent.iterdir()
+            if d.is_dir() and d.name.startswith("pytest-") and d.resolve() != current
+        ]
+    except Exception:  # noqa: BLE001 -- probe
+        return []
+    return sorted(sibs, key=lambda d: d.name, reverse=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reap_leaked_test_daemons(tmp_path_factory):
+    """Drain the backlog at START; catch this run's own leaks at END.
+
+    Deliberately session-scoped and autouse: more than one test reaches the
+    spawn paths, and a per-test fixture would have to be remembered by each of
+    them -- which is exactly what failed. This catches the class.
+    """
+    basetemp = Path(tmp_path_factory.getbasetemp())
+
+    # START: everything stranded by earlier aborted runs. This is the only
+    # place those are reachable -- the run that leaked them was killed before
+    # any teardown of its own could run.
+    # ONE `ps` for the whole scan. The naive loop calls it once per stale root,
+    # and there were 21 stale roots on the dev box when this landed -- 21 process
+    # listings before the first test runs. The snapshot going stale mid-scan is
+    # harmless: killing an already-exited pid raises, and that is caught.
+    stale_roots = stale_pytest_roots(basetemp)
+    drained: list[tuple[str, int]] = []
+    if stale_roots:
+        try:
+            snapshot = _ps_all()
+        except Exception:  # noqa: BLE001 -- a startup probe is never a verdict
+            snapshot = []
+        for stale in stale_roots:
+            drained.extend(
+                reap_leaked_test_daemons(tmp_root=stale, _list_procs=lambda: snapshot)
+            )
+    if drained:
+        print(f"\n[nexus-1odsl] reaped {len(drained)} daemon(s) stranded by "
+              f"earlier runs: {drained}")
+
+    yield
+
+    # END: this run's own leaks, on a clean exit. Cannot fire on a kill; that
+    # is what the START pass above is for.
+    reaped = reap_leaked_test_daemons(tmp_root=basetemp)
+    if reaped:
+        print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked daemon(s): {reaped}")
+        print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked aspect-worker daemon(s): {reaped}")
+
+
+def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = (
+    "service_url", "service_token",
+)):
+    """A ``get_credential`` side_effect that does NOT poison the endpoint.
+
+    nexus-aqbrk. The common form in indexer tests is::
+
+        patch("nexus.config.get_credential", side_effect=lambda k: "test-key")
+
+    which answers EVERY key — including ``service_url``. That key is not a
+    generic credential: it is the authoritative FULL service endpoint
+    (``service_endpoint.py``: "used VERBATIM ... NX_SERVICE_URL env FIRST,
+    then nx config set service_url"). So the blanket stub hands endpoint
+    resolution the literal string "test-key", every client builds
+    ``base_url="test-key"``, and the first request dies on
+    ``httpx.UnsupportedProtocol: Request URL is missing an 'http://' or
+    'https://' protocol``.
+
+    Invisible on the SQLite arm, because nothing resolves a service endpoint
+    there. Under the engine substrate it was the single largest failure
+    cause found in this port — 29 of 32 in tests/test_indexer_e2e.py plus 4
+    in tests/test_indexer_duplicate_content.py.
+
+    This keeps the blanket answer for the credential the tests actually care
+    about (embedder routing keys on ``voyage_api_key`` PRESENCE) while
+    delegating the endpoint keys to the real resolver, so the substrate's
+    own configuration survives the mock. It is the same orthogonality bug
+    ``t2_service_env``'s NX_LOCAL pin documents: a stub chosen for one axis
+    silently perturbing a neighbouring one.
+    """
+    from nexus.config import get_credential as _real
+
+    def _side_effect(key: str):
+        if key in passthrough:
+            return _real(key)
+        return value
+
+    return _side_effect

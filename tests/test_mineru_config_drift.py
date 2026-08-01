@@ -19,7 +19,13 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import inspect
+from importlib.metadata import version as _pkg_version
+
 import pytest
+
+from nexus import _mineru_spawn
+from nexus.config import _read_live_mineru_port as _live_port
 
 
 # ── _read_live_mineru_port ───────────────────────────────────────────
@@ -271,3 +277,60 @@ def test_mineru_start_binds_configured_port_not_random_free_port(monkeypatch) ->
     assert "53947" in captured_cmd["cmd"], (
         f"start() must bind the configured fixed port, not a random one; got argv {captured_cmd['cmd']}"
     )
+
+
+# ── nexus-yq3vk: the pid file must prove IDENTITY, not just liveness ─────────
+#
+# get_mineru_server_url step 2 adopts whatever server the shared config dir has
+# registered, and the only check was is_process_alive() — existence. Measured on
+# a real box: ~/.config/nexus/mineru.pid pointed at a server the INSTALLED tool
+# started under mineru 3.4.4, while the develop checkout pinned 3.1.11. Every
+# `uv run` from develop therefore extracted through 3.4.4, so uv.lock did not
+# control the code that produced the text, and one PDF yielded three different
+# outputs on one machine. Different extraction is a data-correctness difference.
+
+
+def _pidfile(tmp_path: Path, monkeypatch, **extra) -> None:
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    (tmp_path / "mineru.pid").write_text(json.dumps({
+        "pid": os.getpid(), "port": 49353, **extra,
+    }))
+
+
+def test_matching_version_is_adopted(tmp_path: Path, monkeypatch) -> None:
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version=_pkg_version("mineru"), python="/some/python")
+    assert _live_port() == 49353
+
+
+def test_skewed_version_is_REFUSED(tmp_path: Path, monkeypatch) -> None:
+    """The whole point: a server running a different mineru must not be used.
+
+    Refusing returns None, so resolution falls through to the default and a
+    matching server gets spawned — rather than silently extracting through a
+    version this environment does not pin.
+    """
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version="0.0.0-not-ours", python="/other/python")
+    assert _live_port() is None
+
+
+def test_legacy_pidfile_without_the_field_still_works(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Backward compatibility, deliberately.
+
+    A pid file written before this change records no version. Refusing those
+    would break every existing install until the user restarted the server, for
+    a mismatch we have no evidence of. It is adopted, with a debug breadcrumb —
+    absent identity is not matching identity, and the log says so.
+    """
+    _pidfile(tmp_path, monkeypatch)
+    assert _live_port() == 49353
+
+
+def test_spawn_records_version_and_interpreter(tmp_path: Path) -> None:
+    """The write side: without these fields the read side can never compare."""
+    src = inspect.getsource(_mineru_spawn)
+    assert '"mineru_version"' in src, "spawn must stamp the mineru version"
+    assert '"python": sys.executable' in src, "spawn must stamp the interpreter"

@@ -39,6 +39,18 @@
 # pre-migrate, default 8), CHUNK_K / HOOK_K (rows punched out target-side per
 # table, default 3 each — a SMALL hole, not the whole store).
 set -uo pipefail
+# ── RETIRED at RDR-155 P4b (2026-07-24) ──────────────────────────────────────
+# This rehearsal drives `nx guided-upgrade` / `nx migrate-to-service` — the
+# Chroma→PG guided-migration verbs DELETED in RDR-155 P4b P2. The journey is
+# replaced by the two-hop stranded-install redirect (Hal-locked D-D,
+# 2026-07-21): install the LAST_MIGRATION_CAPABLE release, migrate there, then
+# upgrade to 7.0.0. The replacement acceptance rehearsal is tracked in
+# nexus-8nlj4 (cut-time, gated on the LAST_MIGRATION_CAPABLE stamp). This
+# script cannot run on a post-P4b tree — fail loud rather than false-pass.
+if ! nx guided-upgrade --help >/dev/null 2>&1; then
+    echo "RETIRED (RDR-155 P4b): nx guided-upgrade is gone; this rehearsal is superseded by the two-hop redirect journey (nexus-8nlj4). Do not invoke on a post-P4b tree." >&2
+    exit 2
+fi
 
 SERVICE_TAG="${NEXUS_SERVICE_TAG:?NEXUS_SERVICE_TAG must be set (e.g. engine-service-v0.1.18)}"
 EXPECT_RELEASE_VERSION="${SERVICE_TAG#engine-service-v}"
