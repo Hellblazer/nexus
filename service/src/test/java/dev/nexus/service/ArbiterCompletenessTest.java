@@ -300,6 +300,72 @@ class ArbiterCompletenessTest {
     }
 
     /**
+     * nexus-upg3s. Converging by identity must not BLANK the fields the payload omitted.
+     *
+     * <p>The pin above cannot see this defect and never could: it creates the owner with no
+     * repo_hash/repo_root/description, so there is nothing for a blind overwrite to destroy,
+     * and it asserts only hasSize(1) + tumbler_prefix. Twenty-four green tests missed a P0 for
+     * exactly that reason — the fixture decided what the pin was able to prove.
+     *
+     * <p>The payload here is not hypothetical. http_catalog_client.register_owner builds its
+     * body omit-if-falsy, so {@code register_owner("nexus", "repo")} sends precisely
+     * {@code {name, owner_type}} — the destructive shape, from the ordinary client call.
+     *
+     * <p>repo_root is asserted first because it is the one with teeth: deriveSourceUri anchors
+     * every derived source_uri on it, so blanking it makes the idempotency lookup miss and
+     * already-registered files draw NEW tumblers (the nexus-3e4s duplicate-document class).
+     */
+    @Test
+    void ownersIdentityKey_convergingDoesNotBlankOmittedFields() throws Exception {
+        Map<String, Object> full = Map.of(
+            "name", "preserve-me", "owner_type", "repo",
+            "repo_hash", "hash-abc123", "description", "the original description",
+            "repo_root", "/original/repo/root", "head_hash", "head-deadbeef");
+        repo.upsertOwner(TENANT, full);
+        String prefix = (String) repo.ownersByName(TENANT, "preserve-me").get(0).get("tumbler_prefix");
+
+        // The bare client shape: identity only, everything else omitted.
+        repo.upsertOwner(TENANT, Map.of("name", "preserve-me", "owner_type", "repo"));
+
+        var after = repo.ownersByName(TENANT, "preserve-me");
+        assertThat(after).as("still exactly one owner, at the same address").hasSize(1);
+        assertThat(after.get(0).get("tumbler_prefix")).isEqualTo(prefix);
+
+        assertThat(after.get(0).get("repo_root"))
+            .as("repo_root anchors deriveSourceUri — blanking it re-tumbles every registered file")
+            .isEqualTo("/original/repo/root");
+        assertThat(after.get(0).get("repo_hash"))
+            .as("omitted means unchanged, not cleared").isEqualTo("hash-abc123");
+        assertThat(after.get(0).get("description"))
+            .as("omitted means unchanged, not cleared").isEqualTo("the original description");
+        assertThat(after.get(0).get("head_hash"))
+            .as("omitted means unchanged, not cleared").isEqualTo("head-deadbeef");
+    }
+
+    /**
+     * The converse, so preserve-on-omit cannot quietly become preserve-always: a field the
+     * caller DOES send must still be written. Without this, deleting the whole DO UPDATE for
+     * those columns would leave the test above green.
+     */
+    @Test
+    void ownersIdentityKey_convergingStillAppliesFieldsThatWereSent() throws Exception {
+        repo.upsertOwner(TENANT, Map.of(
+            "name", "update-me", "owner_type", "repo",
+            "repo_hash", "hash-old", "repo_root", "/root/old"));
+
+        repo.upsertOwner(TENANT, Map.of(
+            "name", "update-me", "owner_type", "repo",
+            "repo_hash", "hash-new", "repo_root", "/root/new"));
+
+        var after = repo.ownersByName(TENANT, "update-me");
+        assertThat(after).hasSize(1);
+        assertThat(after.get(0).get("repo_hash"))
+            .as("a field that WAS sent must still be applied").isEqualTo("hash-new");
+        assertThat(after.get(0).get("repo_root"))
+            .as("a field that WAS sent must still be applied").isEqualTo("/root/new");
+    }
+
+    /**
      * The other half of Hal's decision: identity is idempotent, but it must NOT be
      * silently transferable. An explicit address asking for an identity that lives
      * elsewhere is a rename/merge, and rename must never route through the ensure path

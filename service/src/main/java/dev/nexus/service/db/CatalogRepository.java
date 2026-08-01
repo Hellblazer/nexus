@@ -398,6 +398,50 @@ public final class CatalogRepository {
     // OWNERS
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * The DO UPDATE assignments for {@code upsertOwner}, PRESERVE-ON-OMIT when the row was
+     * reached by identity rather than by address (nexus-upg3s).
+     *
+     * <p><strong>The bug this exists to prevent.</strong> Resolving a prefix-less payload onto
+     * an existing owner makes the INSERT conflict on the PK and take the DO UPDATE arm. That
+     * arm used to assign EVERY column from EXCLUDED unconditionally — so a payload that merely
+     * OMITTED a field wrote emptiness over the incumbent's value ({@code s()} yields null for
+     * an absent key, {@code nne()} yields ""). The reachable shape is not exotic:
+     * {@code register_owner("nexus", "repo")} in http_catalog_client sends exactly
+     * {@code {name, owner_type}}, because that client builds its payload omit-if-falsy.
+     *
+     * <p>Before the identity-converge change, that same payload allocated a FRESH prefix,
+     * collided on {@code catalog_owners_unique_name_type}, and rolled back — a loud 23505 that
+     * changed nothing. Converging made the statement REACH a row it could never reach before,
+     * which turned a safe no-op into a silent partial overwrite.
+     *
+     * <p>{@code repo_root} is the severe one: {@code deriveSourceUri} anchors every derived
+     * source_uri on it (RDR-096 / nexus-3e4s), so blanking it makes the idempotency lookup miss
+     * and already-registered files draw NEW tumblers — the duplicate-document class
+     * catalog-016 exists to prevent, and one the partial unique index cannot catch because the
+     * resulting URIs genuinely differ.
+     *
+     * <p><strong>Scope, deliberately narrow.</strong> Only the converge path preserves. When the
+     * caller supplied an EXPLICIT prefix it named this row on purpose, and the blind overwrite
+     * there is pre-existing behaviour that this change does not touch — widening the fix to
+     * that path is a separate decision, not a bug fix.
+     *
+     * <p>Presence, not truthiness, is the test: a caller that explicitly sends {@code ""} means
+     * to clear the field and still can.
+     */
+    private static Map<Field<?>, Object> ownerUpdateSet(Map<String, Object> o, boolean converged) {
+        Map<Field<?>, Object> upd = new LinkedHashMap<>();
+        // Identity columns: always assigned. On the converge path these are what we matched
+        // on, so EXCLUDED already carries the incumbent's own values.
+        upd.put(CATALOG_OWNERS.NAME, EX_OWN_NAME);
+        upd.put(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE);
+        if (!converged || o.containsKey("repo_hash"))   upd.put(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO);
+        if (!converged || o.containsKey("description")) upd.put(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC);
+        if (!converged || o.containsKey("repo_root"))   upd.put(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT);
+        if (!converged || o.containsKey("head_hash"))   upd.put(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD);
+        return upd;
+    }
+
     /** Upsert an owner row. ON CONFLICT update all mutable fields. */
     public void upsertOwner(String tenant, Map<String, Object> o) {
         // nexus-45ykb: the wildcard sentinel '*' can never be a registered owner. Enforce
@@ -428,6 +472,11 @@ public final class CatalogRepository {
             // That is reachable with no concurrency at all: registering the same
             // name+type twice was enough (the nexus-aqbrk sequential repro).
             String existing = resolveOwnerAddress(ctx, tenant, name, ownerType, repoHash);
+            // nexus-upg3s: did this call land on an EXISTING row purely by IDENTITY — no
+            // address given, none allocated? That is the one case where the caller never
+            // named this row, so an OMITTED field means "leave it alone", not "blank it".
+            // See the DO UPDATE below; this flag is the whole reason it is conditional.
+            boolean convergedOnExisting = false;
             if (prefix == null || prefix.isBlank()) {
                 prefix = existing;
                 if (prefix == null || prefix.isBlank()) {
@@ -443,6 +492,8 @@ public final class CatalogRepository {
                         .where(CATALOG_OWNERS.TUMBLER_PREFIX.like("1.%"))
                         .fetchOne(0, Integer.class);
                     prefix = "1." + ((maxNum == null ? 0 : maxNum) + 1);
+                } else {
+                    convergedOnExisting = true;
                 }
             } else {
                 // An EXPLICIT prefix is an address. Honour it — but not by silently
@@ -459,12 +510,7 @@ public final class CatalogRepository {
                        s(o,"head_hash"))
                .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                .doUpdate()
-               .set(CATALOG_OWNERS.NAME, EX_OWN_NAME)
-               .set(CATALOG_OWNERS.OWNER_TYPE, EX_OWN_TYPE)
-               .set(CATALOG_OWNERS.REPO_HASH, EX_OWN_REPO)
-               .set(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC)
-               .set(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT)
-               .set(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD)
+               .set(ownerUpdateSet(o, convergedOnExisting))
                .execute();
             return null;
         }));
