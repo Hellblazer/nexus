@@ -909,7 +909,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self, tumbler: Tumbler | str, *, follow_alias: bool = True
     ) -> CatalogEntry | None:
         try:
-            result = self._get("/show", tumbler=str(tumbler))
+            # nexus-fguo5: this declared follow_alias but never sent it —
+            # the engine's handleShow (nexus-ekaxn) defaults follow_alias to
+            # FALSE for wire back-compat, so every client call silently got
+            # the identity (non-alias-following) lookup regardless of what
+            # was passed here.
+            result = self._get(
+                "/show", tumbler=str(tumbler), follow_alias=follow_alias
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
@@ -1173,6 +1180,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})
 
     def resolve_alias(self, tumbler: Tumbler | str, *, max_hops: int = 16) -> Tumbler:
+        """Resolve *tumbler* to its canonical (alias-followed) target.
+
+        nexus-fguo5: this was an accidental identity function — it always
+        called ``resolve(follow_alias=True)``, but ``resolve()`` never wired
+        ``follow_alias`` onto the wire, so the server's default-FALSE
+        ``/show`` handler ignored it and echoed the input tumbler back
+        unresolved. Now that ``resolve()`` actually sends the param, the
+        engine's ``alias_of`` chain-walk (``CatalogRepository
+        .resolveAliasTarget``, capped at its own 16-hop limit) runs
+        server-side and the returned entry's ``tumbler`` is the resolved
+        target. ``max_hops`` is accepted for signature parity with the
+        (never-shipped) local arm; the actual hop cap lives server-side.
+        """
         entry = self.resolve(tumbler, follow_alias=True)
         if entry:
             return entry.tumbler

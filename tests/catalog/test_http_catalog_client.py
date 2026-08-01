@@ -108,12 +108,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: /link response shape: None omits the key (old-JAR skew), bool sets created (njrcn.3).
     link_created: "bool | None" = True
 
+    #: nexus-fguo5: single-hop alias_of map for /show's follow_alias arm,
+    #: mirroring CatalogRepository.resolveAliasTarget's chain-walk. Empty by
+    #: default so /show is an identity lookup unless a test seeds it.
+    show_alias_map: dict[str, str] = {}
+    #: last follow_alias value /show actually decoded (boolParam semantics:
+    #: "1"/"true"/"yes" case-insensitively true, everything else — including
+    #: absence — false). Lets tests assert the WIRE value the client sent,
+    #: not just the client-side kwarg.
+    last_show_follow_alias: "bool | None" = None
+
     @classmethod
     def reset_log(cls) -> None:
         cls.get_ops = []
         cls.post_ops = []
         cls.last_link_body = {}
         cls.list_content_type_count = 0
+        cls.show_alias_map = {}
+        cls.last_show_follow_alias = None
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -154,7 +166,27 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "by_content_type": {"code": 5, "prose": 2},
             })
         elif op == "/show":
-            self._send_json(_entry_dict())
+            # nexus-fguo5: mirror CatalogHandler.handleShow exactly —
+            # follow_alias defaults FALSE (boolParam semantics: "1"/"true"/
+            # "yes" case-insensitively true, anything else including
+            # absence false), and only when true does the fake walk
+            # show_alias_map to a target and return THAT tumbler, mirroring
+            # CatalogRepository.getDocument(tenant, tumbler, followAlias).
+            params = self._query_params()
+            tumbler = params.get("tumbler", _fake_tumbler())
+            raw = params.get("follow_alias", "")
+            follow_alias = raw.lower() in ("1", "true", "yes")
+            FakeCatalogHandler.last_show_follow_alias = follow_alias
+            target = tumbler
+            if follow_alias:
+                seen: set[str] = set()
+                while (
+                    target in FakeCatalogHandler.show_alias_map
+                    and target not in seen
+                ):
+                    seen.add(target)
+                    target = FakeCatalogHandler.show_alias_map[target]
+            self._send_json(_entry_dict(tumbler=target))
         elif op == "/list":
             params = self._query_params()
             if params.get("content_type") and FakeCatalogHandler.list_content_type_count:
@@ -796,6 +828,77 @@ class TestHttpCatalogClientRoundTrip:
             c._get = _fake_get
             result = c.resolve("9.9.9")
             assert result is None
+
+    def test_resolve_sends_follow_alias_true_by_default(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """nexus-fguo5: resolve() declared follow_alias=True but never sent
+        it on the wire. The fake decodes the SAME boolParam semantics the
+        real engine's handleShow uses, so this fails red against the
+        pre-fix client (which sent no follow_alias param at all -> the
+        fake's raw="" -> decoded False, not True)."""
+        FakeCatalogHandler.last_show_follow_alias = None
+        try:
+            client.resolve("1.1.1")
+            assert FakeCatalogHandler.last_show_follow_alias is True
+        finally:
+            FakeCatalogHandler.last_show_follow_alias = None
+
+    def test_resolve_sends_follow_alias_false_when_requested(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        FakeCatalogHandler.last_show_follow_alias = None
+        try:
+            client.resolve("1.1.1", follow_alias=False)
+            assert FakeCatalogHandler.last_show_follow_alias is False
+        finally:
+            FakeCatalogHandler.last_show_follow_alias = None
+
+    def test_resolve_follows_alias_to_canonical_target(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """With follow_alias=True (the default) and a seeded alias chain,
+        the returned entry's tumbler is the RESOLVED target, mirroring
+        CatalogRepository.getDocument(..., followAlias=True)."""
+        FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
+        try:
+            entry = client.resolve("2.2.2")
+            assert entry is not None
+            assert str(entry.tumbler) == "3.3.3"
+        finally:
+            FakeCatalogHandler.show_alias_map = {}
+
+    def test_resolve_does_not_follow_alias_when_false(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """follow_alias=False is byte-identical to a pre-fix client: the
+        alias is never followed, even though one is registered."""
+        FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
+        try:
+            entry = client.resolve("2.2.2", follow_alias=False)
+            assert entry is not None
+            assert str(entry.tumbler) == "2.2.2"
+        finally:
+            FakeCatalogHandler.show_alias_map = {}
+
+    def test_resolve_alias_returns_canonical_target(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        """resolve_alias() was an accidental identity function before
+        nexus-fguo5 (resolve() dropped follow_alias on the floor). With the
+        wire fixed, it returns the resolved target tumbler."""
+        FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
+        try:
+            target = client.resolve_alias("2.2.2")
+            assert str(target) == "3.3.3"
+        finally:
+            FakeCatalogHandler.show_alias_map = {}
+
+    def test_resolve_alias_returns_same_tumbler_when_no_alias(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        target = client.resolve_alias("1.1.1")
+        assert str(target) == "1.1.1"
 
     def test_find_returns_list(self, client: HttpCatalogClient) -> None:
         results = client.find("test query")
