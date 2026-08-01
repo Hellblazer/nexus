@@ -58,9 +58,32 @@ class TestLogic:
         )
         assert gate.check("engine-service-vTEST") == 2
 
-    def test_latest_release_tag_ignores_engine_tags(self):
+    @pytest.fixture()
+    def hermetic_repo(self, tmp_path, monkeypatch):
+        """A scratch git repo with both tag shapes — CI checkouts are
+        SHALLOW AND TAGLESS (found on the 7.0.0 release PR: the two
+        against-the-real-repo tests 128'd), so these tests must carry
+        their own git state."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = ["-c", "user.email=t@t.invalid", "-c", "user.name=t"]
+        def g(*args):
+            subprocess.run(["git", "-C", str(repo), *env, *args],
+                           capture_output=True, text=True, check=True)
+        g("init", "-q")
+        g("commit", "--allow-empty", "-q", "-m", "one")
+        g("commit", "--allow-empty", "-q", "-m", "two")
+        g("tag", "v1.2.3")
+        g("tag", "engine-service-v9.9.9")
+        # The gate's git helpers run in CWD by design (the script runs from
+        # the repo root) — chdir scopes every git call to the scratch repo.
+        monkeypatch.chdir(repo)
+        return repo
+
+    def test_latest_release_tag_ignores_engine_tags(self, hermetic_repo):
         """The v[0-9]* glob must never match engine-service-v* tags."""
         tag = gate.latest_release_tag()
+        assert tag == "v1.2.3"
         assert re.fullmatch(r"v\d+\.\d+\.\d+", tag), tag
         assert not tag.startswith("engine-service")
 
@@ -69,12 +92,14 @@ class TestLogic:
         pre = gate.ENGINE_CLIENT_PRECONDITIONS["engine-service-v0.1.61"]
         assert any(c.startswith("a62649ef") for c in pre)
 
-    def test_is_ancestor_real_git_smoke(self):
-        """Against real repo state: a root-ward commit is an ancestor of HEAD."""
-        root_ward = subprocess.run(
-            ["git", "rev-parse", "HEAD~1"], capture_output=True, text=True,
-        ).stdout.strip()
-        assert gate.is_ancestor(root_ward, "HEAD")
+    def test_is_ancestor_real_git_smoke(self, hermetic_repo):
+        """A root-ward commit is an ancestor of HEAD (hermetic repo — the
+        real CI checkout is single-commit, HEAD~1 does not resolve)."""
+        proc = subprocess.run(
+            ["git", "-C", str(hermetic_repo), "rev-parse", "HEAD~1"],
+            capture_output=True, text=True,
+        )
+        assert gate.is_ancestor(proc.stdout.strip(), "HEAD")
 
 
 class TestWiring:

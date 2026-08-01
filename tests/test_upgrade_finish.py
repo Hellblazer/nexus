@@ -158,8 +158,14 @@ class TestRestartStale:
             calls.append((pid, sig))
             if sig == 0:
                 raise ProcessLookupError  # drained on first poll
+        # process_command reads /proc directly on Linux — a subprocess.run
+        # mock never reaches it there (CI-only IndexError, 2026-08-01). The
+        # test's subject is the KILL choreography; pin the command-read at
+        # its own seam (the transport has its own tests).
         with patch("nexus.upgrade_finish.os.kill", side_effect=_kill), \
                 patch("nexus.upgrade_finish.time.sleep"), \
+                patch("nexus.upgrade_finish.process_command",
+                      return_value=probe.stdout.strip()), \
                 patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
             actions = restart_stale(self._report())
         assert calls[0] == (200, signal.SIGTERM)
