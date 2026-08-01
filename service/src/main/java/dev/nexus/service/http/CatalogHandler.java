@@ -743,8 +743,23 @@ public final class CatalogHandler implements HttpHandler {
         List<String> chashes = raw instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        // nexus-uu4b9: cap the IN-list well under PostgreSQL's 32767-parameter
+        // Bind limit (mirrors handleManifestGetMany's identical guard below) —
+        // this endpoint had NO cap, so an unbounded chash list went straight
+        // into a jOOQ IN toward that hard limit.
+        if (chashes.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many chashes (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var docs = repo.docsForChashes(tenant, chashes);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", docs)));
+        // nexus-ocf52: this list is the union guard for the superseded-vector
+        // sweep — a chash is hard-deleted from T3 iff no tumbler here
+        // references it, so a partially-delivered list silently destroys a
+        // live shared row. The client reconciles len(tumblers) == count before
+        // any delete decision (same contract as nexus-ir6eh's chashes/count
+        // in handleManifestChashes above).
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("tumblers", docs, "count", docs.size())));
     }
 
     /**
@@ -768,7 +783,7 @@ public final class CatalogHandler implements HttpHandler {
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
         if (docIds.isEmpty()) {
-            HttpUtil.send(exchange, 200, "{\"manifests\":{}}"); return;
+            HttpUtil.send(exchange, 200, "{\"manifests\":{},\"count\":0}"); return;
         }
         // nexus-7lm3q review (CR High-2 / critic Sig-1): cap the IN-list well
         // under PostgreSQL's 32767-parameter Bind limit. The sole production
@@ -780,7 +795,12 @@ public final class CatalogHandler implements HttpHandler {
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
         var manifests = repo.getManifestMany(tenant, docIds);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("manifests", manifests)));
+        // nexus-b9puj: same union-guard chain as nexus-ocf52 (handleDocsForChashes),
+        // one hop deeper — get_manifests fails loud on a page FAILURE (500) but
+        // cannot detect a silently truncated page. The count lets the client
+        // reconcile manifests.size() == count before trusting a page as complete.
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("manifests", manifests, "count", manifests.size())));
     }
 
     /**
