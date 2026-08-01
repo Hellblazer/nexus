@@ -228,3 +228,54 @@ class TestAmbiguousChash:
 
         assert (tumbler, error) == ("", "")
         assert count_documents() == 2, "ambiguous match leaves both docs alone"
+
+
+class TestFollowAliasAtThisCallSite:
+    """nexus-fguo5 call-site pin (review 2026-08-01 Medium finding).
+
+    ``resolve()``'s declared default ``follow_alias=True`` was silently
+    never sent on the wire, so every caller that relied on the default —
+    including ``resolve_knowledge_doc_for_chash``'s candidate loop —
+    actually got the literal-tumbler entry. The fguo5 fix makes the
+    declared default real. This test pins the NEW semantics at a real
+    call site: a manifest tumbler that is an alias resolves to its
+    CANONICAL entry, and the candidate filter judges the canonical row's
+    attributes. If a future change flips the polarity back (or a caller
+    starts passing follow_alias=False here), this fails loudly instead
+    of the behavior drifting silently — the review found ~20 call sites
+    inheriting the default with no coverage; this is the representative
+    pin for the store-hook family.
+    """
+
+    def test_alias_tumbler_resolves_to_canonical_at_dedup_call_site(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.catalog.store_hook import resolve_knowledge_doc_for_chash
+
+        cat = _make_catalog(tmp_path)
+        chash = _chash("aliased-doc")
+        alias_tumbler = _populate_knowledge_doc(
+            cat, title="Old Home", chash=chash, collection="knowledge__old",
+        )
+        canonical_tumbler = _populate_knowledge_doc(
+            cat, title="Canonical Home", chash=_chash("other"),
+            collection="knowledge__new",
+        )
+        # set_alias is not on CATALOG_WRITE_OPS (nexus-iltyk) — use the
+        # fixture ops' documented escape hatch for un-whitelisted writes.
+        from tests._catalog_fixture_ops import unroutable_write_target
+
+        unroutable_write_target().set_alias(alias_tumbler, canonical_tumbler)
+
+        entry = resolve_knowledge_doc_for_chash(
+            active_reader(), chash, log_event="test_alias",
+        )
+
+        assert entry is not None, (
+            "alias-following resolve must still yield a candidate"
+        )
+        assert str(entry.tumbler) == str(canonical_tumbler), (
+            "the declared follow_alias=True default must be honored at the "
+            "call site: the manifest names the alias, the caller gets the "
+            "canonical entry"
+        )
