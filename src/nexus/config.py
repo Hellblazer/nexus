@@ -577,15 +577,31 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
     The single assembler every entry point (``nx init``, CLI startup, MCP
     startup, ``nx doctor``) calls, so the path-resolution knowledge stays
     here with the resolvers. Near-zero cost while the detector is
-    disarmed (``stranded_install.LAST_MIGRATION_CAPABLE is None`` — every
-    migration-capable release): the leaf short-circuits before touching
-    the filesystem.
+    disarmed (``stranded_install.LAST_MIGRATION_CAPABLE is None``): the
+    leaf short-circuits before touching the filesystem.
+
+    SCOPE CONSISTENCY (nexus-rjod2, found at the 7.0.0 gate where it
+    reddened 60 tests + two E2E legs): every probed root must resolve
+    from the SAME scope. When ``NEXUS_CONFIG_DIR`` is overridden (sandbox
+    / test / multi-profile) and ``NX_LOCAL_CHROMA_PATH`` is not, the
+    legacy-chroma probe must NOT fall back to the user-global default —
+    that mixes roots: artifacts found under the real HOME while the
+    migration-report suppression is consulted under the override, so a
+    healthy box's sandbox sees a phantom stranded banner. Under an
+    override the probe anchors at ``<override>/chroma``; a sandbox that
+    wants to exercise detection seeds that path or sets
+    ``NX_LOCAL_CHROMA_PATH`` explicitly.
     """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
     from nexus.stranded_install import detect_stranded_install, legacy_chroma_dir  # noqa: PLC0415 — leaf module, deferred to keep config import-light
 
-    return detect_stranded_install(
-        nexus_config_dir(), legacy_chroma_dir(), catalog_path()
-    )
+    config_dir = nexus_config_dir()
+    if os.environ.get("NX_LOCAL_CHROMA_PATH") or not os.environ.get("NEXUS_CONFIG_DIR"):
+        chroma_dir = legacy_chroma_dir()
+    else:
+        chroma_dir = config_dir / "chroma"
+    return detect_stranded_install(config_dir, chroma_dir, catalog_path())
 
 
 def is_local_mode() -> bool:

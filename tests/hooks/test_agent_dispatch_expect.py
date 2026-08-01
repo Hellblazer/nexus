@@ -585,6 +585,16 @@ class TestPluginWiring:
 
     def test_declared_in_pending_release_ledger(self) -> None:
         """conexus/ loads from the pinned release tag, so this hook is INERT
-        until the next plugin release ships."""
+        until the next plugin release ships — the declaration duty ends the
+        moment a release advances the pin past it (the 7.0.0 cut emptied the
+        ledger; the release-window predicate is the drift ledger's)."""
         ledger = (REPO_ROOT / "conexus" / "PENDING_RELEASE.md").read_text()
+        pin = json.loads(
+            (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text()
+        )["plugins"][0]["source"]["ref"]
+        if tuple(int(x) for x in pin.lstrip("v").split(".")) >= (7, 0, 0):
+            # Shipped at 7.0.0: the hook lives in the pinned tag now. The
+            # ledger owes an entry only if the file drifts AGAIN, which the
+            # drift-ledger tests enforce generically.
+            return
         assert "agent-dispatch-expect.sh" in ledger

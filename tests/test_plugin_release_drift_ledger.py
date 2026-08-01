@@ -236,8 +236,38 @@ def test_every_marketplace_plugin_has_a_surface() -> None:
 # --- the pin itself ----------------------------------------------------------
 
 
+def _in_release_window() -> bool:
+    """True during the release-PR window: every pinned ref is ``v<X.Y.Z>``
+    where X.Y.Z equals pyproject's version AND the tag does not exist yet.
+
+    The release checklist bumps ``source.ref`` to the ABOUT-TO-BE-CUT tag on
+    the release branch; the tag is created only after the PR merges (skill
+    step 9), so on that branch — and for the seconds between merge-push and
+    tag-push — the ref legitimately names a not-yet-existing tag. In that
+    window the working tree IS the tag's future content: the ref-exists check
+    passes, and the drift contract reduces to "the pending ledger is EMPTY"
+    (advancing the pin is what empties it; checklist step 3). Outside the
+    window (versions differ, or the tag exists) every check is strict — a
+    stale ref pointing at a never-created tag still fails, which is the
+    botched-release case this gate exists for. First exercised at the 7.0.0
+    cut (2026-08-01), the first release since these gates were built.
+    """
+    import tomllib
+
+    with open(REPO_ROOT / "pyproject.toml", "rb") as fh:
+        version = tomllib.load(fh)["project"]["version"]
+    for ref in set(_pinned_refs().values()):
+        if ref != f"v{version}":
+            return False
+        if _git("rev-parse", "--verify", f"{ref}^{{commit}}").returncode == 0:
+            return False
+    return True
+
+
 def test_every_pinned_ref_is_a_real_tag() -> None:
     _require_or_skip()
+    if _in_release_window():
+        return  # ref names the tag this very branch cuts; created at merge
     for name, ref in sorted(_pinned_refs().items()):
         proc = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
         assert proc.returncode == 0, (
@@ -253,6 +283,16 @@ def test_every_pinned_ref_is_a_real_tag() -> None:
 def test_every_drifted_file_is_declared_in_the_ledger() -> None:
     """Undeclared drift is the failure -- drift itself is not."""
     _require_or_skip()
+    if _in_release_window():
+        # The tree IS the future tag's content: drift is zero by
+        # construction and the contract reduces to "the ledger is empty"
+        # (checklist step 3 empties it when the pin advances).
+        assert not _declared_paths(), (
+            "release window (pin == pyproject, tag not yet cut) but the "
+            "PENDING_RELEASE ledger still lists entries — the pin advance "
+            "ships them, so the list must be emptied in the release commit."
+        )
+        return
     declared = _declared_paths()
     drifted: set[str] = set()
     for ref in set(_pinned_refs().values()):
@@ -281,6 +321,12 @@ def test_the_ledger_has_no_stale_entries() -> None:
     could count as declared while never being checked for staleness.
     """
     _require_or_skip()
+    if _in_release_window():
+        assert not _declared_paths(), (
+            "release window: the ledger must be EMPTY (see "
+            "test_every_drifted_file_is_declared_in_the_ledger)."
+        )
+        return
     declared = _declared_paths()
     drifted: set[str] = set()
     for ref in set(_pinned_refs().values()):

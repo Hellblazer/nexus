@@ -490,3 +490,61 @@ class TestWiring:
         server = SimpleNamespace(_mcp_server=SimpleNamespace(instructions="untouched"))
         assert apply_stranded_notice(server) is False
         assert server._mcp_server.instructions == "untouched"
+
+
+class TestAssemblerScopeConsistency:
+    """nexus-rjod2: detect_stranded_install_default must never mix roots.
+
+    Found at the 7.0.0 release gate: 60 tests (init/doctor/CLI — the wired
+    entry points) ran with NEXUS_CONFIG_DIR under tmp while the legacy
+    chroma probe fell back to the REAL ~/.local/share/nexus/chroma, so a
+    lived-in dev box's artifacts tripped the armed detector against a
+    sandbox config root that held no migration report. Artifacts from one
+    scope, suppression evidence from another = phantom stranded banner.
+    """
+
+    def test_config_override_scopes_the_chroma_probe(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.config import detect_stranded_install_default
+
+        real_global = tmp_path / "fake-home-data" / "nexus" / "chroma"
+        real_global.mkdir(parents=True)
+        (real_global / "chroma.sqlite3").write_bytes(b"x")
+        # The global default would find artifacts...
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "fake-home-data"))
+        # ...but the config root is overridden to a clean sandbox scope.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "sandbox-config"))
+        monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
+        assert detect_stranded_install_default() is None, (
+            "config-root override must scope the chroma probe with it — "
+            "global artifacts must not trip a sandboxed detector"
+        )
+
+    def test_override_scope_still_detects_its_own_artifacts(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.config import detect_stranded_install_default
+
+        sandbox = tmp_path / "sandbox-config"
+        (sandbox / "chroma").mkdir(parents=True)
+        (sandbox / "chroma" / "chroma.sqlite3").write_bytes(b"x")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(sandbox))
+        monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
+        result = detect_stranded_install_default()
+        assert result is not None, (
+            "a sandbox that seeds <override>/chroma must still detect"
+        )
+
+    def test_explicit_chroma_override_wins_regardless(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.config import detect_stranded_install_default
+
+        chroma = tmp_path / "explicit-chroma"
+        chroma.mkdir(parents=True)
+        (chroma / "chroma.sqlite3").write_bytes(b"x")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(chroma))
+        result = detect_stranded_install_default()
+        assert result is not None, "NX_LOCAL_CHROMA_PATH is always honored"
