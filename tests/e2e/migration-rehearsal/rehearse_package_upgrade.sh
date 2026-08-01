@@ -31,6 +31,31 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
 
+# Evidence dump for the convergence leg. `nx daemon restart-stale` drives the
+# stop/start cycle INSIDE the product, so when it reports "still running the
+# old engine" the harness log otherwise shows only the verdict. This prints
+# the lease, the live process table (read from /proc -- this box deliberately
+# ships no procps, see Dockerfile.package-upgrade), and the tail of every log
+# the supervisor writes. Cheap, and it runs on the happy path too so a PASS
+# still records what a healthy cycle looks like.
+_diag() {
+  printf '\n       ---- diag: %s ----\n' "$1"
+  printf '       [lease]\n'
+  ls -la "$HOME"/.config/nexus/storage_service_addr.* 2>&1 | sed 's/^/       /'
+  cat "$HOME"/.config/nexus/storage_service_addr.* 2>&1 | sed 's/^/       /'
+  printf '\n       [conexus processes, from /proc]\n'
+  for p in /proc/[0-9]*; do
+    printf '%s %s\n' "${p#/proc/}" "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)"
+  done 2>/dev/null | grep -iE "nexus|nxenv" | sed 's/^/       /'
+  printf '       [status --json]\n'
+  nx daemon service status --json 2>&1 | head -40 | sed 's/^/       /'
+  for f in storage_service.log storage_service_native.log storage_service.crash.log; do
+    printf '       [tail %s]\n' "$f"
+    tail -25 "$HOME/.config/nexus/logs/$f" 2>&1 | sed 's/^/       /'
+  done
+  printf '       ---- end diag: %s ----\n\n' "$1"
+}
+
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
 git config --global user.email "package-upgrade@nexus.local" >/dev/null 2>&1 || true
 git config --global user.name  "nexus package-upgrade"       >/dev/null 2>&1 || true
@@ -205,16 +230,42 @@ fi
 # ── Stage 5: THE CONVERGENCE PASS UNDER TEST ──────────────────────────────────
 say "Stage 5 — nx daemon restart-stale (engine convergence + diag-view heal)"
 unset NEXUS_SERVICE_TAG NX_SERVICE_TAG 2>/dev/null || true
+_diag "pre-restart-stale"
 RS_OUT="$(nx daemon restart-stale 2>&1)"
 RS_RC=$?
 printf '%s\n' "$RS_OUT" | sed 's/^/       /'
+_diag "post-restart-stale"
 [ "$RS_RC" = 0 ] && ok "nx daemon restart-stale exited 0" || bad "nx daemon restart-stale exited $RS_RC"
 printf '%s' "$RS_OUT" | grep -q "converged engine" \
   && ok "convergence action fired (engine was stale, as expected)" \
   || bad "no 'converged engine' action line — convergence did not fire"
-printf '%s' "$RS_OUT" | grep -qi "NEEDS HUMAN" \
-  && bad "a NEEDS HUMAN line appeared — convergence was blocked or failed" \
-  || ok "no NEEDS HUMAN lines — convergence completed cleanly"
+# `nx daemon restart-stale` runs FOUR INDEPENDENT legs (process-skew, engine
+# convergence, diag-view heal, launchagent unload) and any of them may emit a
+# NEEDS HUMAN. Grepping the whole output and blaming CONVERGENCE conflates
+# them. It only ever passed here because the process-skew leg could not run at
+# all on this procps-less box; once it could, its CORRECT report of the
+# pre-upgrade supervisor tripped a convergence assert.
+#
+# The process-skew leg's lines have a distinct shape -- `NEEDS HUMAN: <kind>
+# (pid N) ...`. Everything else belongs to a leg this assert is actually about.
+# NOTE: plain BRE — parens are LITERAL here and must NOT be backslash-escaped
+# (`\(` is a GROUP in BRE, so an escaped form silently matches nothing, which
+# would make the non-vacuity assert below fail and the exclusion filter a
+# no-op). Verified against real restart-stale output before use.
+SKEW_SHAPE='NEEDS HUMAN: [a-z-]* (pid [0-9]*)'
+OTHER_NEEDS_HUMAN="$(printf '%s\n' "$RS_OUT" | grep -i "NEEDS HUMAN" | grep -v "$SKEW_SHAPE" || true)"
+if [ -n "$OTHER_NEEDS_HUMAN" ]; then
+  bad "a non-process-skew NEEDS HUMAN line appeared — convergence/heal was blocked or failed: $OTHER_NEEDS_HUMAN"
+else
+  ok "no convergence/heal NEEDS HUMAN lines — those legs completed cleanly"
+fi
+# NON-VACUITY + a real property of this scenario: the supervisor that was
+# started by $PREV_RELEASE is, after a package-only upgrade, genuinely running
+# OLD code, so the process-skew leg MUST name it. This is the leg that silently
+# did nothing on this box before the /proc fallback -- assert it ran.
+printf '%s' "$RS_OUT" | grep -q "$SKEW_SHAPE" \
+  && ok "process-skew leg RAN and named the pre-upgrade storage service (no ps on this box — /proc fallback)" \
+  || bad "process-skew leg named no stale process — after a package-only upgrade the running supervisor IS stale, so this leg either did not run or failed to see it"
 
 # ── Assert: the engine on disk is now the NEW tag, acquired for real ─────────
 say "Assert — installed engine converged to $NEW_ENGINE_TAG"
@@ -277,6 +328,7 @@ fi
 
 # ── Assert: T1 round-trips post-convergence, and the PRE-upgrade row survived
 say "Assert — T1 scratch round-trip post-convergence"
+_diag "pre-T1-roundtrip"
 POST_MARKER="post-convergence-marker-$$-$(date +%s)"
 POST_PUT="$(nx scratch put "$POST_MARKER" --tags rehearsal-cfgo9 2>&1)"
 printf '%s\n' "$POST_PUT" | sed 's/^/       /'

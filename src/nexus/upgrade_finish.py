@@ -200,42 +200,136 @@ def install_mtime_and_version() -> tuple[float, str]:
     return mtime, version
 
 
-def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
-    """``[(pid, age_s, command)]`` for every running conexus process.
+#: Where Linux exposes the process table without any userland tool.
+PROCFS_ROOT = Path("/proc")
+
+
+def _procfs_available() -> bool:
+    """True when this box exposes a Linux-shaped ``/proc``."""
+    return (PROCFS_ROOT / "uptime").exists()
+
+
+def _procfs_enumerate() -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for EVERY process, read from ``/proc``.
+
+    nexus-cfgo9 follow-up: the ``ps``-shaped path below is a userland
+    DEPENDENCY, and a minimal container (debian-slim without procps — the
+    package-upgrade rehearsal box, and a real deployment shape) has no such
+    binary. Skipping the leg for want of a tool is the silent-fallback class:
+    the one detection written for post-upgrade skew stops running exactly on
+    the boxes most likely to have it. Linux always mounts ``/proc``, so the
+    dependency is removable rather than merely tolerable.
+
+    Age is derived the same way ``ps etime`` derives it: system uptime minus
+    the process's ``starttime`` (field 22 of ``/proc/<pid>/stat``, in clock
+    ticks since boot). A process whose files vanish mid-scan (exited between
+    ``iterdir`` and ``read``) is skipped, never guessed at.
+    """
+    uptime_s = float((PROCFS_ROOT / "uptime").read_text().split()[0])
+    hz = os.sysconf("SC_CLK_TCK") or 100
+    out: list[tuple[int, int, str]] = []
+    for entry in PROCFS_ROOT.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            raw_cmdline = (entry / "cmdline").read_bytes()
+            stat = (entry / "stat").read_text()
+        except (OSError, ValueError):
+            continue  # exited mid-scan, or not ours to read
+        # Kernel threads have an empty cmdline — never a conexus process.
+        command = raw_cmdline.replace(b"\x00", b" ").decode(
+            "utf-8", "replace",
+        ).strip()
+        if not command:
+            continue
+        # Field 2 (comm) is parenthesised and may itself contain spaces or
+        # ')', so index from the LAST ')': the remainder starts at field 3,
+        # making starttime (field 22) index 19.
+        try:
+            after = stat[stat.rindex(")") + 1:].split()
+            start_ticks = float(after[19])
+        except (ValueError, IndexError):
+            continue
+        age = int(max(0.0, uptime_s - start_ticks / hz))
+        out.append((pid, age, command))
+    return out
+
+
+def _ps_enumerate() -> list[tuple[int, int, str]] | None:
+    """``[(pid, age_s, command)]`` from POSIX ``ps``, or ``None`` when this
+    box has no ``ps`` binary at all (the caller then tries ``/proc``).
 
     ``ps -eo pid,etime,command`` is POSIX-portable (etime, unlike lstart,
-    parses identically on macOS and Linux). Injectable for tests.
+    parses identically on macOS and Linux).
     """
-    if ps_output is None:
-        try:
-            proc = subprocess.run(
-                ["ps", "-wweo", "pid,etime,command"],
-                capture_output=True, text=True, timeout=15,
-            )
-        except FileNotFoundError as exc:
-            # nexus-cfgo9: a minimal-container deployment (no procps package)
-            # has no `ps` binary at all -- distinct from "ps ran and failed"
-            # below. Re-raised as a RuntimeError (not the bare
-            # FileNotFoundError) so this is still fail-loud and diagnosable,
-            # never a silent "zero processes" read (review 38b7db3d M5), but
-            # with an actionable message. Every caller (check_version_
-            # transition, nx doctor's _check_process_skew, nx daemon
-            # restart-stale) already degrades this ONE leg gracefully on any
-            # Exception and continues — this does not need its own recovery
-            # path, just a clear cause.
-            raise RuntimeError(
-                "the 'ps' command is not available on this system "
-                "(install procps, or run on a host that provides it) — "
-                "process-skew detection cannot run"
-            ) from exc
-        if proc.returncode != 0 or not proc.stdout.strip():
-            # Review 38b7db3d M5: a silent empty ps = zero processes
-            # detected = the fail-open class again. Fail loud instead.
-            raise RuntimeError(
-                f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
-            )
-        ps_output = proc.stdout
+    try:
+        proc = subprocess.run(
+            ["ps", "-wweo", "pid,etime,command"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        # Review 38b7db3d M5: a silent empty ps = zero processes
+        # detected = the fail-open class again. Fail loud instead.
+        raise RuntimeError(
+            f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+        )
+    return _parse_ps_table(proc.stdout)
+
+
+def _parse_ps_table(ps_output: str) -> list[tuple[int, int, str]]:
+    """Parse a ``pid etime command`` table into ``[(pid, age_s, command)]``."""
     out: list[tuple[int, int, str]] = []
+    for line in ps_output.splitlines()[1:]:
+        m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
+        if not m:
+            continue
+        try:
+            age = _parse_etime(m.group(2))
+        except ValueError:
+            continue
+        out.append((int(m.group(1)), age, m.group(3)))
+    return out
+
+
+def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
+
+    Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (nexus-cfgo9
+    follow-up — see :func:`_procfs_enumerate`). Only a box with NEITHER
+    raises, and it raises rather than reporting an empty table: a silent
+    "zero processes" is the fail-open this module exists to eliminate
+    (review 38b7db3d M5). ``ps_output`` is injectable for tests.
+
+    The venv-marker-filtered view is :func:`enumerate_processes`; the
+    NATIVE engine binary does not carry the venv path in its argv, so
+    anything that needs to see the engine must read this table.
+    """
+    if ps_output is not None:
+        return _parse_ps_table(ps_output)
+    rows = _ps_enumerate()
+    if rows is None:
+        if not _procfs_available():
+            raise RuntimeError(
+                "this system has neither a 'ps' command nor a readable "
+                "/proc filesystem — process-skew detection cannot run "
+                "(install procps, or run on a host that provides one)"
+            )
+        rows = _procfs_enumerate()
+    return rows
+
+
+def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for every running conexus-VENV process.
+
+    Source resolution (ps, else /proc, else raise) lives in
+    :func:`all_process_rows`; this adds only the venv-marker filter that
+    :func:`detect_stale_processes` wants. ``ps_output`` is injectable for
+    tests.
+    """
+    rows = all_process_rows(ps_output)
     me = os.getpid()
     try:
         # site-packages -> lib/pythonX.Y -> lib -> THE VENV ROOT: the one
@@ -243,19 +337,35 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
         markers: tuple[str, ...] = (str(_install_root().parents[2]),)
     except Exception:  # noqa: BLE001 — metadata unavailable: fall back to the conventional layout
         markers = _PROC_MARKERS
-    for line in ps_output.splitlines()[1:]:
-        m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
-        if not m:
-            continue
-        pid, etime, command = int(m.group(1)), m.group(2), m.group(3)
-        if pid == me or not any(k in command for k in markers):
-            continue
+    return [
+        (pid, age, command)
+        for pid, age, command in rows
+        if pid != me and any(k in command for k in markers)
+    ]
+
+
+def process_command(pid: int) -> str:
+    """The full command line of *pid*, or ``""`` when it is gone.
+
+    The pid-recycle re-check in :func:`restart_stale` needs one process's
+    command, and used ``ps -p`` directly — the same userland dependency
+    :func:`enumerate_processes` just shed, on a path whose ``FileNotFoundError``
+    escaped the narrow ``except`` around it and aborted the whole leg.
+    """
+    if _procfs_available():
         try:
-            age = _parse_etime(etime)
-        except ValueError:
-            continue
-        out.append((pid, age, command))
-    return out
+            raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    try:
+        probe = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+    return probe.stdout.strip()
 
 
 def detect_stale_processes(
@@ -296,11 +406,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 # Review 38b7db3d High-3 (pid-recycle TOCTOU): re-verify the
                 # pid still runs OUR command immediately before signaling —
                 # the same convention as t2_daemon's pre-kill re-check.
-                probe = subprocess.run(
-                    ["ps", "-p", str(proc.pid), "-o", "command="],
-                    capture_output=True, text=True, timeout=10,
-                )
-                current = probe.stdout.strip()
+                current = process_command(proc.pid)
                 if "aspect-worker" not in current or not any(
                     k in current for k in _PROC_MARKERS
                 ):
@@ -729,6 +835,148 @@ def _running_engine(config_dir: Path) -> RunningEngine:
     return RunningEngine(up=True, version=parsed)
 
 
+def _pid_alive(pid: int) -> bool:
+    """True when signalling 0 to *pid* succeeds."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
+    """``[(pid, command)]`` for the storage-service SUPERVISOR and ENGINE
+    processes belonging to *config_dir*, read from the OS process table.
+
+    nexus-cfgo9 follow-up. ``stop_storage_service`` decides what to signal
+    from the LEASE, and concludes "already stopped" when no live lease is
+    discoverable (``storage_service_daemon.py``, the ``no_live_lease``
+    arm). A lease is a DISCOVERY record on a TTL, not a liveness oracle: a
+    supervisor whose heartbeat has stalled past the 15s TTL is alive and
+    serving while being completely invisible to that check. The process
+    table is the ground truth, and it is now readable without ``ps``.
+
+    Identification is by argv, which is exact for both members of the
+    stack: the supervisor is spawned as ``nx daemon service start
+    --foreground --config-dir <config_dir>`` (``ensure_storage_supervisor``
+    always passes the flag), and the engine's argv[0] IS the well-known
+    binary path under *config_dir*. Never matches this process, and never
+    matches ``nx daemon restart-stale`` itself.
+    """
+    engine_path = str(config_dir / "service" / "nexus-service")
+    me = os.getpid()
+    found: list[tuple[int, str]] = []
+    for pid, _age, command in all_process_rows():
+        if pid == me:
+            continue
+        is_engine = engine_path in command
+        is_supervisor = (
+            "daemon service start" in command and str(config_dir) in command
+        )
+        if is_engine or is_supervisor:
+            found.append((pid, command))
+    return found
+
+
+def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
+    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still alive.
+
+    Supervisors are signalled before engines by the caller: the supervisor
+    arms ``PR_SET_PDEATHSIG=SIGKILL`` on its engine child, so killing the
+    supervisor usually takes the engine with it on Linux, and the explicit
+    engine pass is the portable backstop.
+    """
+    import signal as _signal  # noqa: PLC0415 — stdlib, deferred
+
+    live = [p for p in pids if _pid_alive(p)]
+    for pid in live:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        live = [p for p in live if _pid_alive(p)]
+        if not live:
+            return []
+        time.sleep(0.2)
+    for pid in live:
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    time.sleep(0.5)
+    return [p for p in live if _pid_alive(p)]
+
+
+def _sweep_surviving_stack(
+    config_dir: Path, before: list[tuple[int, str]],
+) -> str:
+    """Kill any pre-stop stack member that survived ``nx daemon service stop``.
+
+    THE FIX for the nexus-cfgo9 convergence defect. ``stop`` reports success
+    having signalled nothing whenever the old supervisor's lease has aged
+    out (a stalled heartbeat under container/host load), and ``start`` is
+    BY DESIGN a no-op whenever a live lease exists
+    (``ensure_storage_supervisor``'s ``return existing``; ``_start_locked``'s
+    short-circuit). Composing those two verbs therefore does not restart
+    anything reliably — whether the engine is cycled comes down to whether
+    the stalled supervisor re-stamps its lease in the window between the two
+    calls. Observed BOTH ways on the same scenario: race lost, the old
+    v0.1.52 engine kept serving and convergence reported a mystified NEEDS
+    HUMAN; race won, a SECOND supervisor+engine stack was spawned alongside
+    the surviving one, two engines against one Postgres.
+
+    Verifying the stop against the process table removes the race from the
+    convergence path: after this returns, nothing from the pre-stop stack is
+    running, so ``start`` cannot short-circuit onto it.
+    """
+    # Pid-recycle TOCTOU guard (the convention review 38b7db3d High-3 set for
+    # restart_stale): a pid that died in the stop and was immediately reused
+    # by an unrelated process must never be signalled. Re-read each survivor's
+    # CURRENT argv and require it to still be the process we recorded.
+    survivors: list[tuple[int, str]] = []
+    for pid, cmd in before:
+        if not _pid_alive(pid):
+            continue
+        current = process_command(pid)
+        # An unreadable argv (permissions, a zombie mid-reap) is not evidence
+        # of a recycle; fall back to the recorded command rather than skipping
+        # a genuine survivor.
+        if current and current.split() != cmd.split():
+            _log.info(
+                "restart_stop_sweep_pid_recycled", pid=pid,
+                recorded=cmd[:120], current=current[:120],
+            )
+            continue
+        survivors.append((pid, cmd))
+    if not survivors:
+        return ""
+    engine_path = str(config_dir / "service" / "nexus-service")
+    supervisors = [p for p, c in survivors if engine_path not in c]
+    engines = [p for p, c in survivors if engine_path in c]
+    stubborn = terminate_pids(supervisors)
+    stubborn += terminate_pids(engines)
+    listed = ", ".join(str(p) for p, _ in survivors)
+    if stubborn:
+        return (
+            f"[stop-sweep] `nx daemon service stop` left pid(s) {listed} "
+            f"running (its lease-based check saw no live lease); "
+            f"pid(s) {', '.join(str(p) for p in stubborn)} survived SIGKILL"
+        )
+    return (
+        f"[stop-sweep] `nx daemon service stop` left pid(s) {listed} running "
+        "(its lease-based check saw no live lease) — terminated them directly "
+        "so the restart cycles the engine instead of short-circuiting"
+    )
+
+
 def _restart_and_verify(
     config_dir: Path,
     actions: list[str],
@@ -745,13 +993,29 @@ def _restart_and_verify(
     the new engine — the same fail-quiet class as the deferral loop above,
     one layer down. Convergence is now claimed only when the running service
     reports the required version.
+
+    nexus-cfgo9 follow-up: the cycle no longer TRUSTS ``stop``. Both verbs
+    can legitimately no-op — ``stop`` when it cannot discover a live lease,
+    ``start`` when it can — so composing them restarts nothing whenever the
+    old supervisor's heartbeat has stalled past its lease TTL. The pre-stop
+    stack is now snapshotted from the process table and swept after the stop
+    (:func:`_sweep_surviving_stack`), which is what makes the subsequent
+    start a real spawn rather than a short-circuit.
     """
     try:
+        before = service_stack_pids(config_dir)
+    except Exception as exc:  # noqa: BLE001 — no process table: degrade to the old choreography
+        _log.warning("restart_stack_snapshot_failed", error=str(exc))
+        before = []
+    try:
         stop = subprocess.run(
-            ["nx", "daemon", "service", "stop"], capture_output=True, timeout=60,
+            ["nx", "daemon", "service", "stop"],
+            capture_output=True, text=True, timeout=60,
         )
+        sweep_note = _sweep_surviving_stack(config_dir, before)
         start = subprocess.run(
-            ["nx", "daemon", "service", "start"], capture_output=True, timeout=120,
+            ["nx", "daemon", "service", "start"],
+            capture_output=True, text=True, timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
         actions.append(
@@ -760,11 +1024,15 @@ def _restart_and_verify(
             "then `nx doctor` to confirm the engine converged"
         )
         return actions
+    cycle_transcript = _cycle_transcript(stop, start)
+    if sweep_note:
+        cycle_transcript = f"{sweep_note} {cycle_transcript}"
     if stop.returncode != 0 or start.returncode != 0:
         actions.append(
             "NEEDS HUMAN: the service restart did not report success — run "
             "`nx daemon service stop && nx daemon service start` yourself, "
-            "then `nx doctor` to confirm the engine converged"
+            "then `nx doctor` to confirm the engine converged. "
+            + cycle_transcript
         )
         return actions
 
@@ -790,8 +1058,13 @@ def _restart_and_verify(
                 break
 
     if after.version is not None and after.version == REQUIRED_ENGINE_VERSION:
+        # The sweep note rides the SUCCESS line too: an incomplete `stop` is
+        # a real event even when the cycle then went on to converge, and
+        # silence here would hide the very condition that used to make this
+        # a coin flip.
         actions.append(
             f"restarted the storage service — verified running v{req_s}"
+            + (f" ({sweep_note})" if sweep_note else "")
         )
         return actions
     if after.version is not None:
@@ -801,15 +1074,82 @@ def _restart_and_verify(
             f"v{got_run}, not the required v{req_s}. The restart exited "
             "cleanly, so something is holding the old engine (a supervisor "
             "that re-execs a different binary, or a second service process). "
-            "Check `nx doctor` and `nx daemon service status`."
+            "Check `nx doctor` and `nx daemon service status`. "
+            + cycle_transcript + " " + _holder_evidence(config_dir)
         )
         return actions
     actions.append(
         "NEEDS HUMAN: the service restarted but its version could not be "
         f"confirmed ({after.reason or 'no /version answer'}) — convergence to "
-        f"v{req_s} is UNVERIFIED. Check `nx doctor`."
+        f"v{req_s} is UNVERIFIED. Check `nx doctor`. " + cycle_transcript
     )
     return actions
+
+
+def _cycle_transcript(
+    stop: subprocess.CompletedProcess[str],
+    start: subprocess.CompletedProcess[str],
+) -> str:
+    """One-line transcript of the stop/start cycle.
+
+    The predecessor captured both commands' output and DISCARDED it, so
+    every NEEDS-HUMAN line below described the outcome without a shred of
+    evidence about the cycle that produced it — "already stopped" (the
+    supervisor was never signalled) and "stopped (pid=N)" are opposite
+    diagnoses and the operator could not tell which had happened.
+    """
+    def _fold(p: subprocess.CompletedProcess[str]) -> str:
+        text = " ".join(
+            ((p.stdout or "") + " " + (p.stderr or "")).split()
+        )
+        return text[:300] or "(no output)"
+
+    return (
+        f"[cycle] stop rc={stop.returncode}: {_fold(stop)} | "
+        f"start rc={start.returncode}: {_fold(start)}"
+    )
+
+
+def _holder_evidence(config_dir: Path) -> str:
+    """Name what is actually holding the old engine, instead of guessing.
+
+    The NEEDS-HUMAN line above lists two candidate causes ("a supervisor
+    that re-execs a different binary, or a second service process") and
+    asks the operator to go look. The product can look: the lease says
+    which endpoint answered and which supervisor published it, and
+    :func:`enumerate_processes` (no longer ``ps``-dependent) says which
+    conexus processes are alive. Best-effort — evidence gathering must
+    never turn a diagnosis into a crash.
+    """
+    bits: list[str] = []
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, CLI startup cost
+
+        registry = ServiceRegistry(
+            dir=config_dir or nexus_config_dir(), tier="storage_service",
+        )
+        record = registry.discover(str(os.getuid()))
+        if record is None:
+            bits.append("lease=none")
+        else:
+            ep = record.endpoint
+            bits.append(
+                f"lease=host {ep.get('host')}:{ep.get('port')} "
+                f"service_pid={ep.get('pid')} "
+                f"supervisor_pid={record.payload.get('supervisor_pid')} "
+                f"generation={record.generation}"
+            )
+    except Exception as exc:  # noqa: BLE001 — evidence, never a verdict
+        bits.append(f"lease=unreadable ({type(exc).__name__})")
+    try:
+        procs = [
+            f"{pid}({age}s)" for pid, age, _cmd in enumerate_processes()
+        ]
+        bits.append(f"live conexus pids={', '.join(procs) or 'none'}")
+    except Exception as exc:  # noqa: BLE001 — evidence, never a verdict
+        bits.append(f"process table unavailable ({exc})")
+    return "[holder] " + "; ".join(bits)
 
 
 def converge_engine(

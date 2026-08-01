@@ -509,7 +509,14 @@ class TestItem19AliasOfPopulation:
 
         cat.set_alias(src, canonical)
 
-        after = cat.resolve(str(src))
+        # follow_alias=False: this test pins POPULATION (the src row itself
+        # carries alias_of), not FOLLOWING. cat.resolve()'s default
+        # follow_alias=True hops the server's alias chain-walk (nexus-ekaxn)
+        # straight to the canonical row, whose OWN alias_of is empty (it is
+        # not itself aliased) — asserting against that default silently
+        # checked the wrong row and would pass for any alias_of value the
+        # engine wrote, including none at all.
+        after = cat.resolve(str(src), follow_alias=False)
         assert after is not None, "aliased entry must still resolve (population, not deletion)"
         assert after.alias_of == str(canonical), (
             f"alias_of must surface the canonical tumbler: "

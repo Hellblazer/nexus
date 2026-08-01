@@ -281,13 +281,22 @@ def seeded_catalog(cat):
         repo_root="/Users/hal/git/qnp5s-repo-2",
     )
 
-    # Register documents under the repo owner
+    # Register documents under the repo owner.
+    #
+    # source_uri MUST nest under the owner's repo_root
+    # (/Users/hal/git/qnp5s-repo) — the nexus-3e4s/nexus-e7cys engine-side
+    # containment guard (CatalogRepository.checkCrossProjectContainment)
+    # rejects a "repo"-type owner's explicit file:// source_uri that
+    # normalizes outside its repo_root with HTTP 400. These fixture docs
+    # are a synthetic scoring/repos-identity dataset with no filesystem
+    # counterpart — arbitrary but repo_root-coherent paths preserve that
+    # while satisfying the guard.
     doc_a = cat.register(
         str(repo_owner_t),
         "QNP5S Doc A",
         content_type="paper",
         corpus="knowledge",
-        source_uri="file:///qnp5s/doc-a.md",
+        source_uri="file:///Users/hal/git/qnp5s-repo/doc-a.md",
         chunk_count=15,
         physical_collection="knowledge__qnp5s-repo__voyage-context-3__v1",
     )
@@ -296,7 +305,7 @@ def seeded_catalog(cat):
         "QNP5S Doc B",
         content_type="paper",
         corpus="knowledge",
-        source_uri="file:///qnp5s/doc-b.md",
+        source_uri="file:///Users/hal/git/qnp5s-repo/doc-b.md",
         chunk_count=7,
         physical_collection="knowledge__qnp5s-repo__voyage-context-3__v1",
     )
@@ -305,7 +314,7 @@ def seeded_catalog(cat):
         "QNP5S Doc C (no chunks)",
         content_type="paper",
         corpus="knowledge",
-        source_uri="file:///qnp5s/doc-c.md",
+        source_uri="file:///Users/hal/git/qnp5s-repo/doc-c.md",
         # chunk_count omitted — stored as 0 by Java service
     )
 

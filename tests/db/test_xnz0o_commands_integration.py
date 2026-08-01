@@ -335,14 +335,21 @@ def seeded(cat):
         source_uri="file:///projects/xnz0o-a/src/xnz0o.py",
         chunk_count=3,
     )
-    # One doc with an ABSOLUTE file_path — for docs_with_absolute_paths
+    # One doc with an ABSOLUTE file_path — for docs_with_absolute_paths.
+    # file_path is the test's subject (absolute-path detection) and stays an
+    # arbitrary absolute path unrelated to repo_a's tree; source_uri is a
+    # SEPARATE field the nexus-3e4s/nexus-e7cys engine-side containment guard
+    # (CatalogRepository.checkCrossProjectContainment) checks independently
+    # for "repo"-type owners — it must nest under repo_a's repo_root
+    # (/projects/xnz0o-a) or the register call 400s, so it is set to a
+    # repo_root-coherent path rather than mirroring file_path verbatim.
     doc_abs = cat.register(
         str(repo_a), "XNZ0O Absolute Path",
         content_type="paper",
         corpus="knowledge",
         physical_collection=coll_paper,
         file_path="/absolute/path/to/doc.pdf",
-        source_uri="file:///absolute/path/to/doc.pdf",
+        source_uri="file:///projects/xnz0o-a/absolute/path/to/doc.pdf",
         chunk_count=2,
     )
     # One doc with no physical_collection — must NOT appear in distinct_doc_collections

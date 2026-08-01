@@ -33,6 +33,23 @@ _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
 _PINNED_TAG = "engine-service-v" + _REQUIRED_STR
 
 
+def _assert_service_cycled(sp) -> None:
+    """Assert the stop AND start verbs were actually invoked, by ARGV.
+
+    Replaces a `sp.call_count == 2` count. The count was coupled to how many
+    subprocesses the cycle happens to spawn, so adding the nexus-cfgo9
+    pre-stop process-table snapshot (a `ps` probe) broke three tests that
+    were not about probe counts at all. Argv is what these tests mean, and
+    it keeps asserting when the choreography around it changes.
+    """
+    argvs = [
+        c.args[0] for c in sp.call_args_list
+        if c.args and isinstance(c.args[0], list)
+    ]
+    assert ["nx", "daemon", "service", "stop"] in argvs, argvs
+    assert ["nx", "daemon", "service", "start"] in argvs, argvs
+
+
 def _older_version_str() -> str:
     major, minor, patch = REQUIRED_ENGINE_VERSION
     if patch > 0:
@@ -303,23 +320,167 @@ class TestFailLoud:
                 _pytest.raises(RuntimeError, match="ps failed"):
             enumerate_processes(None)
 
-    def test_ps_binary_missing_raises_actionable_runtimeerror(self):
-        """nexus-cfgo9: a minimal-container box with no `ps` at all (no
-        procps) must raise a CLEAR, actionable RuntimeError -- not let the
-        bare FileNotFoundError escape as an unhandled traceback. Found via
-        the real --package-upgrade rehearsal (debian:trixie-slim has no
-        procps): `nx daemon restart-stale` crashed entirely before engine
-        convergence ever ran. Still fail-loud (never silently zero
-        processes) -- every caller already degrades this ONE leg gracefully
-        on any Exception and continues (restart_stale_cmd,
-        check_version_transition, nx doctor's _check_process_skew)."""
+    def test_ps_binary_missing_falls_back_to_procfs(self):
+        """nexus-cfgo9 follow-up: no `ps` binary is NOT the end of the leg.
+
+        The predecessor raised here, and every caller degrades one leg
+        gracefully -- so on a minimal container (debian:trixie-slim, the
+        --package-upgrade rehearsal box) process-skew detection simply
+        never ran. That is the silent-fallback class: the detection
+        written for post-upgrade skew stops running exactly where skew is
+        most likely. Linux always mounts /proc, so the ps DEPENDENCY is
+        removable rather than merely tolerable."""
+        rows = [(4242, 99, "/opt/uv/tools/conexus/bin/python -m nexus.mcp")]
+        with patch(
+            "nexus.upgrade_finish.subprocess.run",
+            side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
+        ), patch("nexus.upgrade_finish._procfs_available", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._procfs_enumerate", return_value=rows,
+                ), patch(
+                    "nexus.upgrade_finish._install_root",
+                    side_effect=RuntimeError("no dist"),
+                ):
+            assert enumerate_processes(None) == rows
+
+    def test_no_ps_and_no_procfs_raises_actionable_runtimeerror(self):
+        """Fail-loud survives the fallback: a box with NEITHER source must
+        still raise, never read as zero processes (review 38b7db3d M5).
+        Every caller degrades this ONE leg on any Exception and continues
+        (restart_stale_cmd, check_version_transition, nx doctor's
+        _check_process_skew)."""
         import pytest as _pytest  # noqa: PLC0415 — file pattern: deferred imports
 
         with patch(
             "nexus.upgrade_finish.subprocess.run",
             side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
-        ), _pytest.raises(RuntimeError, match="'ps' command is not available"):
+        ), patch(
+            "nexus.upgrade_finish._procfs_available", return_value=False,
+        ), _pytest.raises(RuntimeError, match="neither a 'ps' command nor"):
             enumerate_processes(None)
+
+    def test_service_stack_pids_finds_supervisor_and_engine(self, tmp_path):
+        """nexus-cfgo9: the convergence restart needs the stack's ground
+        truth from the PROCESS TABLE, because the lease -- which is what
+        `nx daemon service stop` decides from -- goes invisible on a TTL
+        while the processes are still alive and serving."""
+        cfg = tmp_path / "nexus"
+        rows = [
+            (196, 60, f"/v/bin/python3 /v/bin/nx daemon service start "
+                      f"--foreground --config-dir {cfg}"),
+            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+            (153, 60, "/x/pg-bundle/bundle/bin/postgres -D /x/postgres"),
+            (900, 5, "/v/bin/python3 /v/bin/nx daemon restart-stale"),
+            (901, 5, "/other/config/service/nexus-service"),
+        ]
+        with patch("nexus.upgrade_finish.all_process_rows", return_value=rows):
+            from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — file pattern: deferred imports
+
+            found = service_stack_pids(cfg)
+        assert sorted(p for p, _ in found) == [196, 214], (
+            "must match exactly the supervisor + engine for THIS config_dir "
+            "— never Postgres, never restart-stale itself, never another "
+            f"install's engine. Got: {found}"
+        )
+
+    def test_sweep_kills_a_stack_that_survived_stop(self, tmp_path):
+        """THE FIX: `nx daemon service stop` reports success having signalled
+        nothing when it cannot discover a live lease, and `nx daemon service
+        start` is a no-op when it CAN — so the composed restart is a race.
+        Verifying the stop against the process table removes it."""
+        cfg = tmp_path / "nexus"
+        before = [
+            (196, f"nx daemon service start --foreground --config-dir {cfg}"),
+            (214, f"{cfg}/service/nexus-service -Xmx1g"),
+        ]
+        killed: list[list[int]] = []
+        with patch("nexus.upgrade_finish._pid_alive", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish.process_command",
+                    side_effect=lambda pid: dict(before)[pid],
+                ), \
+                patch(
+                    "nexus.upgrade_finish.terminate_pids",
+                    side_effect=lambda pids, **_: killed.append(pids) or [],
+                ):
+            from nexus.upgrade_finish import _sweep_surviving_stack  # noqa: PLC0415 — file pattern: deferred imports
+
+            note = _sweep_surviving_stack(cfg, before)
+        assert killed == [[196], [214]], (
+            "supervisor must be signalled BEFORE the engine (PDEATHSIG rides "
+            f"the supervisor); got {killed}"
+        )
+        assert "196" in note and "214" in note and "stop-sweep" in note, note
+
+    def test_sweep_never_signals_a_recycled_pid(self, tmp_path):
+        """Pid-recycle TOCTOU (the review 38b7db3d High-3 convention): a pid
+        that died in the stop and was instantly reused by an unrelated
+        process must NOT be signalled. An unreadable argv is not evidence of
+        a recycle and must not skip a genuine survivor."""
+        cfg = tmp_path / "nexus"
+        before = [
+            (196, f"nx daemon service start --foreground --config-dir {cfg}"),
+            (214, f"{cfg}/service/nexus-service -Xmx1g"),
+        ]
+        killed: list[list[int]] = []
+        # 196 was recycled into someone's editor; 214's argv is unreadable.
+        current = {196: "vim /etc/hosts", 214: ""}
+        with patch("nexus.upgrade_finish._pid_alive", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish.process_command",
+                    side_effect=lambda pid: current[pid],
+                ), \
+                patch(
+                    "nexus.upgrade_finish.terminate_pids",
+                    side_effect=lambda pids, **_: killed.append(pids) or [],
+                ):
+            from nexus.upgrade_finish import _sweep_surviving_stack  # noqa: PLC0415 — file pattern: deferred imports
+
+            note = _sweep_surviving_stack(cfg, before)
+        assert killed == [[], [214]], (
+            "the recycled pid 196 must never be signalled; 214 (unreadable "
+            f"argv, still alive) must still be swept. Got {killed}"
+        )
+        assert "196" not in note, note
+
+    def test_sweep_is_silent_when_stop_actually_stopped(self, tmp_path):
+        """No survivors => no note and no signals. The sweep must not narrate
+        a healthy cycle, or the line stops meaning anything."""
+        cfg = tmp_path / "nexus"
+        with patch("nexus.upgrade_finish._pid_alive", return_value=False), \
+                patch("nexus.upgrade_finish.terminate_pids") as term:
+            from nexus.upgrade_finish import _sweep_surviving_stack  # noqa: PLC0415 — file pattern: deferred imports
+
+            note = _sweep_surviving_stack(cfg, [(196, "x"), (214, "y")])
+        assert note == ""
+        term.assert_not_called()
+
+    def test_procfs_enumerate_parses_a_synthetic_proc_tree(self, tmp_path):
+        """The /proc reader itself: NUL-separated cmdline, and an age
+        derived from uptime minus starttime (field 22 of stat, indexed
+        from the LAST ')' because comm can contain spaces and parens)."""
+        import os as _os  # noqa: PLC0415 — file pattern: deferred imports
+
+        hz = _os.sysconf("SC_CLK_TCK") or 100
+        (tmp_path / "uptime").write_text("500.00 1000.00\n")
+        proc = tmp_path / "1234"
+        proc.mkdir()
+        (proc / "cmdline").write_bytes(b"/venv/bin/python\x00-m\x00nexus.mcp\x00")
+        # comm deliberately contains a space and a ')' — the naive split(3)
+        # parse gets the wrong field for this shape.
+        after = " ".join(["S"] + ["0"] * 18 + [str(200 * hz)] + ["0"] * 30)
+        (proc / "stat").write_text(f"1234 (py (x) thing) {after}\n")
+        # A kernel thread: empty cmdline, must be skipped rather than named.
+        kt = tmp_path / "2"
+        kt.mkdir()
+        (kt / "cmdline").write_bytes(b"")
+        (kt / "stat").write_text(f"2 (kthreadd) {after}\n")
+
+        with patch("nexus.upgrade_finish.PROCFS_ROOT", tmp_path):
+            from nexus.upgrade_finish import _procfs_enumerate  # noqa: PLC0415 — file pattern: deferred imports
+
+            rows = _procfs_enumerate()
+        assert rows == [(1234, 300, "/venv/bin/python -m nexus.mcp")]
 
 
 class TestCrossVenvGuard:
@@ -502,7 +663,7 @@ class TestConvergeEngine:
         install.assert_called_once()
         called_tag = install.call_args[0][0]
         assert called_tag == _PINNED_TAG
-        assert sp.call_count == 2  # stop && start
+        _assert_service_cycled(sp)
         assert any("converged engine" in a and _PINNED_TAG in a for a in actions)
         # nexus-4yf4u: this assertion used to read "restarted the storage
         # service", which the predecessor emitted purely from stop/start both
@@ -881,7 +1042,7 @@ class TestConvergeEngineLiveVerification:
             actions = converge_engine(tmp_path)
 
         install.assert_not_called()          # disk is already correct
-        assert sp.call_count == 2            # stop && start
+        _assert_service_cycled(sp)
         assert actions                       # never a silent "already converged"
         assert any(_older_version_str() in a for a in actions)
         assert not any("NEEDS HUMAN" in a for a in actions)
@@ -1021,7 +1182,7 @@ class TestConvergeEngineLiveVerification:
                 ):
             actions = converge_engine(tmp_path)     # default: attended
 
-        assert sp.call_count == 2
+        _assert_service_cycled(sp)
         assert any("verified running" in a for a in actions)
 
     # ── review CRE-A finding 2 (Medium): the settle-poll loop itself ──
