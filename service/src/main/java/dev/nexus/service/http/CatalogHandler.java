@@ -1291,15 +1291,20 @@ public final class CatalogHandler implements HttpHandler {
             // data is at risk — the unaudited chain rewrite handleCollectionSupersede guard 2
             // refuses. Both must hold; the message names which one failed.
             boolean identityOk = oldName.equals(tgtSuperseded);
-            boolean empty = repo.collectionIsEmpty(tenant, newName);
+            // nexus-34wrg option (c): name WHICH table blocked so an operator can tell an
+            // audit breadcrumb (relevance_log/search_telemetry/hook_failures/gc_audit) from
+            // real data, rather than being told to "purge" a collection that already holds
+            // nothing.
+            var blocker = repo.blockingTable(tenant, newName);
+            boolean empty = blocker.isEmpty();
             if (!identityOk || !empty) {
                 HttpUtil.send(exchange, 409,
                     "{\"error\":" + MAPPER.writeValueAsString("target collection " + newName
                         + " is retired (superseded by " + tgtSuperseded + ") and cannot be revived by "
                         + "this rename: "
                         + (!empty
-                            ? "it still holds data, so renaming onto it would merge two collections. "
-                              + "Purge or restore it first."
+                            ? "it still holds " + blocker.get().describe() + ", so renaming onto it "
+                              + "would merge two collections. Purge or restore it first."
                             : "it was retired in favour of " + tgtSuperseded + ", not of " + oldName
                               + ", so reviving it here would erase that supersession unaudited. "
                               + "Unwind the rename chain one hop at a time.")) + "}"); return;

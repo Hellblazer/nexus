@@ -369,11 +369,13 @@ Reports link graph health: total counts by type and creator, orphaned links (poi
 
 Orphaned links are kept as historical record — they are not auto-deleted. Use `link-bulk-delete` to clean them up if needed.
 
-### Cross-project source_uri guard (nexus-3e4s)
+### Cross-project source_uri guard (nexus-3e4s, nexus-e7cys)
 
-`Catalog.register()` and `Catalog.update()` enforce a register-time invariant: for `repo` owners with a `repo_root`, the entry's `source_uri` must resolve inside that root. A `file://` URI that lands outside the owner's tree raises a `ValueError` with both URIs in the message. This is the load-bearing guard against the contamination class that produced ~6,500 mis-attributed rows in the wild: entries whose `source_uri` pointed at one project's tree but were attributed to a different project's owner, silently breaking aspect extraction.
+The guard is enforced **engine-side** (`CatalogRepository.deriveSourceUri`'s 5-arg overload), not by a local `Catalog` class — the local SQLite catalog was deleted at RDR-158 P4, and `HttpCatalogClient` against the engine's PG is the only substrate. `POST /doc/register` and `POST /doc/register_many` enforce the invariant: for `repo` owners with a `repo_root`, an explicit `source_uri` must resolve inside that root. A `file://` URI that lands outside the owner's tree is rejected with a 400 naming both URIs. This is the load-bearing guard against the contamination class that produced ~6,500 mis-attributed rows in the wild: entries whose `source_uri` pointed at one project's tree but were attributed to a different project's owner, silently breaking aspect extraction.
 
-`Catalog.update()` runs the same check on every call, not just when the caller passes `source_uri` explicitly. The production hot path (the catalog hook in `indexer.py`) updates `head_hash`, `physical_collection`, `meta`, and `source_mtime` on re-index without touching `source_uri`; the guard still validates the carried-through value so an in-place row whose URI drifted out of the owner's tree cannot be silently re-anointed.
+The check is deliberately **lexical**, not realpath-resolving: the engine has no meaningful relationship to the calling client's filesystem, so resolving symlinks server-side would mean resolving against the wrong machine (or coincidentally matching an unrelated path that happens to exist on the server host). The pre-RDR-158 local arm's symlink tolerance (e.g. macOS's `/private/var` vs `/var`) is deliberately not restored here — normalize-then-prefix is the honest engine-side equivalent.
+
+**Known gap:** the local arm also re-validated `source_uri` on every `Catalog.update()` call, not just `register()`. That update-time re-validation has not been restored on the engine — an in-place row whose URI already exists is not re-checked on a plain field update. Register-time enforcement (below) is the current state; closing the update-time gap is unstarted work, not a silent regression to paper over.
 
 The guard skips:
 
@@ -386,7 +388,7 @@ The guard skips:
 
 To detect or remediate pre-existing contamination see [`nx catalog audit-membership`](cli-reference.md#nx-catalog-audit-membership), including `--all-collections` for a single-shot health check across the entire catalog.
 
-Set `NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` to bypass the guard for emergency recovery only. Never the right answer for normal indexing.
+Set `NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` in the **client's** environment to bypass the guard for emergency recovery only — never the right answer for normal indexing. The client (`HttpCatalogClient.register` / `.register_many`) reads this env var and forwards it on the wire as an `allow_cross_project` request field, since the engine process has no access to the client's environment; an explicit `allow_cross_project` kwarg on a `register()` call always wins over the env-var default. The engine logs `event=cross_project_source_uri_override_used` whenever the override actually bypasses a check that would otherwise have failed, so the bypass leaves an audit trail.
 
 ### Backfill and recovery
 

@@ -318,6 +318,15 @@
          needs to precede the runAlways grants below. -->
     <include file="db/changelog/catalog-018-gc-audit.xml"/>
 
+    <!-- Tombstone audit 2026-08-01 (nexus-se9r3, nexus-l1nre, nexus-cah9n +
+         nexus-t7m8e's SQL-function half): four read-shape views made
+         tombstone-aware (catalog_stats, collection_doc_counts,
+         coverage_by_content_type, collection_health_meta) plus the
+         search_graph_hop_<dim> functions' own tombstone-relay traversal fix.
+         After catalog-018 (appended changeset); before the runAlways grants
+         below — no new schema objects, CREATE OR REPLACE only. -->
+    <include file="db/changelog/catalog-019-tombstone-aware-read-views.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001

@@ -75,6 +75,7 @@ new scope, not a mechanical mixin swap.
 from __future__ import annotations
 
 import contextlib
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,7 @@ import structlog
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
-from nexus.catalog.types import ManifestRow
+from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
@@ -835,6 +836,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Uses POST /v1/catalog/doc/register for server-side atomic tumbler
         assignment via catalog_owners.next_seq (SELECT FOR UPDATE).
+
+        nexus-e7cys: the engine enforces the nexus-3e4s cross-project
+        containment guard on an explicit ``source_uri`` (rejecting one that
+        resolves outside a "repo" owner's ``repo_root``). The LOCAL arm's
+        escape hatch was the ``NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1``
+        environment variable read directly by the process doing the
+        registering; the engine has no access to the CLIENT's environment,
+        so this method reads it here and forwards ``allow_cross_project``
+        on the wire — the honest way an env-var escape hatch survives a
+        client/server split. An explicit ``allow_cross_project`` kwarg
+        always wins over the env-var default.
         """
         payload: dict = {
             "owner_prefix": str(owner),
@@ -851,6 +863,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if head_hash: payload["head_hash"] = head_hash
         if meta:      payload["meta"] = meta
+        if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
+            payload["allow_cross_project"] = True
         payload.update(kwargs)
         result = self._post("/doc/register", payload)
         return Tumbler.parse(result["tumbler"])
@@ -877,6 +891,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         if not docs:
             return []
+        # nexus-e7cys: same env-var-to-wire-field forwarding as register()
+        # above; an explicit per-doc allow_cross_project always wins.
+        if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
+            docs = [{"allow_cross_project": True, **d} for d in docs]
         out: list[Tumbler] = []
         for start in range(0, len(docs), _REGISTER_MANY_PAGE):
             page = docs[start : start + _REGISTER_MANY_PAGE]

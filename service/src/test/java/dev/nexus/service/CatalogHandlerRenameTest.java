@@ -650,7 +650,11 @@ class CatalogHandlerRenameTest {
         // thing that can refuse is emptiness — assert the emptiness branch's text, or this pin
         // would keep passing if the refusal ever came from somewhere else. Same lesson the
         // Python half of this change records: a red test tells you SOMETHING caught it.
-        assertThat(resp.body()).contains("still holds data");
+        //
+        // nexus-34wrg option (c): the message now NAMES which table blocked (here,
+        // catalog_documents via seedDocumentIn) instead of the bare "still holds data" —
+        // an operator can tell real data from an audit breadcrumb without guessing.
+        assertThat(resp.body()).contains("still holds real data in 'catalog_documents'");
         // ...and the target's data must be untouched by the refusal.
         assertThat(collectionRow("hren__prov-x").get("superseded_by")).isEqualTo("hren__prov-y");
     }

@@ -45,6 +45,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -704,6 +705,104 @@ public final class CatalogRepository {
         return "file://" + p.normalize();
     }
 
+    /**
+     * nexus-e7cys: {@link #deriveSourceUri(String, String, String)} plus the
+     * nexus-3e4s cross-project containment guard, restored engine-side.
+     *
+     * <p>The local arm ({@code catalog.py}, deleted at RDR-158 P4) REJECTED an
+     * explicit {@code file://} {@code source_uri} whose path did not resolve
+     * inside a {@code "repo"} owner's {@code repo_root} — the signature of a
+     * ~6,500-row contamination class where one project's owner accumulated
+     * rows whose source_uri lived in a DIFFERENT project's working tree. The
+     * port to this class kept the RECOMBINATION leg (relative {@code
+     * file_path} anchored on {@code repoRoot}, which is inherently
+     * containment-safe by construction) but dropped the REJECTION leg: an
+     * explicit {@code source_uri} was returned verbatim, unchecked.
+     *
+     * <p>This overload restores the rejection leg with ONE deliberate
+     * departure from the local arm: it is LEXICAL, never REALPATH. The local
+     * guard resolved symlinks on both sides (tolerating e.g. macOS's
+     * {@code /private/var} vs {@code /var}) because it ran on the SAME
+     * filesystem the paths described. This server does not — a
+     * {@code file://} URI names a path on the CALLING client's filesystem,
+     * and resolving it against the server's own filesystem would be
+     * resolving against the wrong machine entirely (or, worse, silently
+     * "succeeding" against a same-named path that happens to exist on the
+     * server host by coincidence). A normalize()-then-{@code startsWith()}
+     * prefix check is the honest engine-side equivalent; the local arm's
+     * symlink tolerance is deliberately NOT restored here.
+     *
+     * <p>Scope, matching the local arm exactly: only {@code "repo"} owners
+     * with a non-empty {@code repoRoot} enforce the check; {@code "curator"}
+     * owners and pre-existing repo owners with no {@code repoRoot} pass
+     * through. Only {@code file://} URIs carry a filesystem identity to
+     * compare — {@code chroma://}, {@code https://}, etc. pass through
+     * unchanged. {@code allowCrossProject} is the wire form of the local
+     * arm's {@code NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1} escape hatch (see
+     * {@code src/nexus/catalog/types.py:143}): the CLIENT reads its own
+     * environment and populates this field, since the server has no access
+     * to the client's environment.
+     */
+    public static String deriveSourceUri(String sourceUri, String filePath, String repoRoot,
+                                          String ownerType, boolean allowCrossProject) {
+        String derived = deriveSourceUri(sourceUri, filePath, repoRoot);
+        if (!sourceUri.isEmpty()) {
+            // derived == sourceUri whenever sourceUri was non-empty (the 3-arg
+            // method's own early return) — this is exactly the explicit-uri
+            // (rejection-leg) case; the recombination leg never reaches here.
+            checkCrossProjectContainment(derived, ownerType, repoRoot, allowCrossProject);
+        }
+        return derived;
+    }
+
+    /** Thrown by {@link #checkCrossProjectContainment}; maps to 400 like {@link DanglingEndpointException}. */
+    public static final class CrossProjectSourceUriException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
+        CrossProjectSourceUriException(String message) {
+            super(message);
+        }
+    }
+
+    private static void checkCrossProjectContainment(
+            String sourceUri, String ownerType, String repoRoot, boolean allowCrossProject) {
+        if (sourceUri == null || sourceUri.isEmpty()) return;
+        if (!"repo".equals(ownerType)) return;
+        if (repoRoot == null || repoRoot.isEmpty()) return;
+
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(sourceUri);
+        } catch (IllegalArgumentException e) {
+            // Malformed URI is a different bug class; not this guard's job.
+            return;
+        }
+        if (!"file".equals(uri.getScheme())) return;
+        String rawPath = uri.getPath();
+        if (rawPath == null || rawPath.isEmpty()) return;
+
+        java.nio.file.Path filePath = java.nio.file.Paths.get(rawPath).normalize();
+        java.nio.file.Path root = java.nio.file.Paths.get(repoRoot).normalize();
+        if (filePath.startsWith(root)) return;
+
+        if (allowCrossProject) {
+            // nexus-e7cys: the override was actually EXERCISED (the check would
+            // have failed without it) — log so the bypass leaves an audit trail,
+            // matching the local arm's "never the right answer for normal
+            // indexing" framing of the env-var escape hatch.
+            log.warn("event=cross_project_source_uri_override_used repo_root={} source_uri={}",
+                      repoRoot, sourceUri);
+            return;
+        }
+        throw new CrossProjectSourceUriException(
+            "cross-project source_uri rejected (nexus-3e4s/nexus-e7cys): "
+            + "owner repo_root=" + repoRoot + " but source_uri=" + sourceUri
+            + " normalizes to " + filePath + ", which is outside the owner's "
+            + "repo_root. This is the signature of the contamination bug "
+            + "class. Pass allow_cross_project=true to bypass for emergency "
+            + "recovery.");
+    }
+
     private String ownerRepoRoot(org.jooq.DSLContext ctx, String tenant, String ownerPrefix) {
         String root = ctx.select(CATALOG_OWNERS.REPO_ROOT).from(CATALOG_OWNERS)
                          .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
@@ -761,19 +860,23 @@ public final class CatalogRepository {
             // blind DO-NOTHING upsert this replaces named only the address key and was
             // exposed to catalog_owners' other two. Same round-trip count — this SELECT
             // is the repo_root lookup that used to happen a few lines below.
+            String ownerType = s(fields, "owner_type", "repo");
             String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
                 s(fields, "owner_name", ownerPrefix),
-                s(fields, "owner_type", "repo"));
+                ownerType);
 
             // Idempotency check BEFORE claiming a sequence number — avoids permanent seq gaps
             // on re-registration of existing documents.
             // Idempotency check: only match LIVE (non-tombstoned) docs.
             // A tombstoned source_uri re-registration allocates a NEW tumbler;
             // the trash entry is left untouched (users can restore or purge it separately).
+            // nexus-e7cys: cross-project containment guard on an explicit source_uri;
+            // allow_cross_project is the wire form of the client's
+            // NEXUS_CATALOG_ALLOW_CROSS_PROJECT env-var escape hatch.
             String srcUri = deriveSourceUri(
                 s(fields, "source_uri", ""),
                 s(fields, "file_path", ""),
-                repoRoot);
+                repoRoot, ownerType, bool(fields, "allow_cross_project", false));
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
                                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
@@ -931,8 +1034,10 @@ public final class CatalogRepository {
             java.util.List<String> filePaths = new java.util.ArrayList<>();
             for (int i = 0; i < docs.size(); i++) {
                 var d = docs.get(i);
+                // nexus-e7cys: per-doc containment guard, same as the single-doc path.
                 uriOf[i] = deriveSourceUri(
-                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot);
+                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot,
+                    s(d, "owner_type", "repo"), bool(d, "allow_cross_project", false));
                 if (!uriOf[i].isEmpty()) srcUris.add(uriOf[i]);
                 String fp = s(d, "file_path", "");
                 if (!fp.isEmpty()) filePaths.add(fp);
@@ -2368,6 +2473,17 @@ public final class CatalogRepository {
         "formalizes", "same-as");
 
     /**
+     * Port-parity sweep D8 (nexus-t7m8e comment, 2026-08-01): the local arm's
+     * {@code _MAX_GRAPH_NODES} cap (catalog_links.py, pre-RDR-158-P4-deletion),
+     * ported verbatim. graphBFS had no node cap — an unbounded BFS on a large
+     * graph. Depth cap (see {@code Math.min(maxDepth, 3)} in {@link #graphBFS})
+     * is applied BEFORE this node limit so the lowest-depth nodes always
+     * survive truncation; truncation itself is ordered by (min_depth, tumbler)
+     * so the surviving set is deterministic across repeated calls.
+     */
+    private static final int MAX_GRAPH_NODES = 500;
+
+    /**
      * BFS graph traversal from seed tumblers.
      * Mirrors Catalog.graph() / Catalog.graph_many(): breadth-first up to maxDepth hops.
      *
@@ -2420,6 +2536,21 @@ public final class CatalogRepository {
             :                                             DEFAULT_GRAPH_LINK_TYPES;
 
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-t7m8e leg (a)/(b): both endpoints of every traversed edge
+            // must be a LIVE document. INNER-joining CATALOG_DOCUMENTS on both
+            // from_tumbler and to_tumbler with deleted_at IS NULL closes two
+            // defects at once: (i) an edge naming a tumbler absent from the
+            // final node set (tombstoned OR never registered — a dangling
+            // reference) is never emitted, and (ii) a tombstoned document can
+            // no longer act as a live RELAY (A -> D(tombstoned) -> B is no
+            // longer reachable at depth 2 just because D is invisible — the
+            // join excludes the A->D and D->B edges alike, so D never enters
+            // the frontier).
+            var fromDocs = CATALOG_DOCUMENTS.as("cd_bfs_from");
+            var toDocs   = CATALOG_DOCUMENTS.as("cd_bfs_to");
+
+            Map<String, Integer> depthOf = new LinkedHashMap<>();
+            for (String s : seeds) depthOf.put(s, 0);
             Set<String> visited = new LinkedHashSet<>(seeds);
             List<Map<String, Object>> edges = new ArrayList<>();
             Set<String> frontier = new LinkedHashSet<>(seeds);
@@ -2442,26 +2573,56 @@ public final class CatalogRepository {
 
                 var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-                              .from(CATALOG_LINKS).where(dirCond).fetch();
+                              .from(CATALOG_LINKS)
+                              .join(fromDocs).on(fromDocs.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
+                              .join(toDocs).on(toDocs.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
+                              .where(dirCond
+                                     .and(fromDocs.DELETED_AT.isNull())
+                                     .and(toDocs.DELETED_AT.isNull()))
+                              .fetch();
                 for (var r : rows) {
                     Map<String, Object> lm = linkRow(r.value1(), r.value2(), r.value3(), r.value4(),
                                                       r.value5(), r.value6(), r.value7(), r.value8(), r.value9());
                     edges.add(lm);
                     String fromT = (String) lm.get("from_tumbler");
                     String toT   = (String) lm.get("to_tumbler");
-                    if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); }
-                    if (!visited.contains(toT))   { next.add(toT);   visited.add(toT); }
+                    if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
+                    if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
                 }
                 frontier = next;
             }
 
+            // nexus-t7m8e leg (c): the 500-node cap, ported from the local arm
+            // (_MAX_GRAPH_NODES). Depth cap already applied above (the BFS ran
+            // at most `depth` rounds); ordering the FULL reachable set by
+            // (min_depth, tumbler) before truncating means the lowest-depth
+            // nodes always survive and the surviving 500 are deterministic
+            // across repeated calls on the same graph.
+            List<String> ordered = visited.stream()
+                .sorted(Comparator
+                    .comparingInt((String t) -> depthOf.getOrDefault(t, Integer.MAX_VALUE))
+                    .thenComparing(Comparator.naturalOrder()))
+                .toList();
+            boolean atOrOverCap = ordered.size() >= MAX_GRAPH_NODES;
+            Set<String> surviving = new LinkedHashSet<>(
+                atOrOverCap ? ordered.subList(0, MAX_GRAPH_NODES) : ordered);
+            if (atOrOverCap) {
+                log.warn("event=graph_node_limit tenant={} visited={} max_nodes={}",
+                          tenant, ordered.size(), MAX_GRAPH_NODES);
+            }
+
+            List<Map<String, Object>> survivingEdges = edges.stream()
+                .filter(e -> surviving.contains((String) e.get("from_tumbler"))
+                          && surviving.contains((String) e.get("to_tumbler")))
+                .toList();
+
             List<Map<String, Object>> nodes = new ArrayList<>();
-            if (!visited.isEmpty()) {
+            if (!surviving.isEmpty()) {
                 nodes = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(visited)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(surviving)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
-            return Map.of("nodes", nodes, "edges", edges);
+            return Map.of("nodes", nodes, "edges", survivingEdges);
         });
     }
 
@@ -3538,6 +3699,62 @@ public final class CatalogRepository {
     }
 
     /**
+     * nexus-34wrg option (c): the four audit tables in {@link #COLLECTION_SCOPED_TABLES}
+     * ({@code relevance_log}, {@code search_telemetry}, {@code hook_failures},
+     * {@code gc_audit}) hold no content — they are written as a SIDE EFFECT of ordinary
+     * reads and maintenance, never by a caller depositing data on purpose. A rename's
+     * empty-tombstone target can read as non-empty purely because a search happened to log
+     * telemetry against it, a GC pass audited it, or a hook failed against it — the refusal
+     * "it still holds data" is then misleading: there is no data and no merge hazard, only
+     * an audit breadcrumb. {@link #blockingTable} names WHICH table blocked so a caller can
+     * tell the two apart; this set is what turns that name into an actionable distinction.
+     */
+    private static final java.util.Set<String> AUDIT_ONLY_TABLES =
+        java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
+
+    /**
+     * nexus-34wrg option (c): which table blocked an emptiness check, and whether it is one
+     * of the audit-only tables (no content — see {@link #AUDIT_ONLY_TABLES}). Self-describing
+     * so a caller (the rename handler, {@link #CollectionMergeRefused}) never has to know the
+     * audit-table set itself to render an accurate message.
+     */
+    public record BlockingTable(String table, boolean auditOnly) {
+        /** Human-readable clause for a refusal message: "real data in 'x'" or "an audit trail entry in 'x' (no content)". */
+        public String describe() {
+            return auditOnly
+                ? "an audit trail entry in '" + table + "' (no content — it is written as a "
+                  + "side effect of reads/maintenance, not a merge hazard)"
+                : "real data in '" + table + "'";
+        }
+    }
+
+    /**
+     * RLS-scoped {@link #blockingTable(DSLContext, String)} for callers outside a txn
+     * (nexus-34wrg option (c)).
+     */
+    public java.util.Optional<BlockingTable> blockingTable(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> blockingTable(ctx, name));
+    }
+
+    /**
+     * The first table in {@link #COLLECTION_SCOPED_TABLES} (in list order) holding a row
+     * for {@code name}, or empty if none does — the diagnostic form {@link
+     * #collectionIsEmpty} collapses to a boolean. nexus-34wrg option (c): a bare "not empty"
+     * refusal cannot tell an operator whether a real-data table is populated or only an
+     * audit table logged against the name in passing; naming the table lets the caller
+     * decide.
+     */
+    private java.util.Optional<BlockingTable> blockingTable(DSLContext ctx, String name) {
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
+                return java.util.Optional.of(
+                    new BlockingTable(t.countKey(), AUDIT_ONLY_TABLES.contains(t.countKey())));
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
      * True if {@code name} holds no row in ANY table listed in {@link #COLLECTION_SCOPED_TABLES}
      * — which is, by construction, exactly the set {@code renameCollectionTxn} step 2 re-homes.
      *
@@ -3565,12 +3782,7 @@ public final class CatalogRepository {
      * Ask the data instead.
      */
     private boolean collectionIsEmpty(DSLContext ctx, String name) {
-        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
-            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
-                return false;
-            }
-        }
-        return true;
+        return blockingTable(ctx, name).isEmpty();
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
@@ -3638,10 +3850,16 @@ public final class CatalogRepository {
             // (opt-in via a non-null expectedTargetSupersededBy) precisely so it can be
             // additive: it does not change behavior for any caller that passes null, and it
             // re-verifies — it does not replace — the emptiness check above.
-            if (targetRowExists && !liveTargetExists && !collectionIsEmpty(ctx, newName)) {
-                throw new CollectionMergeRefused(
-                    "target collection " + newName + " is retired but still holds data; "
-                    + "renaming onto it would merge two collections. Purge or restore it first.");
+            if (targetRowExists && !liveTargetExists) {
+                var blocker = blockingTable(ctx, newName);
+                if (blocker.isPresent()) {
+                    // nexus-34wrg option (c): name WHICH table blocked so an operator can
+                    // tell an audit breadcrumb from real data instead of purging on faith.
+                    throw new CollectionMergeRefused(
+                        "target collection " + newName + " is retired but still holds "
+                        + blocker.get().describe() + "; renaming onto it would merge two "
+                        + "collections. Purge or restore it first.");
+                }
             }
             if (targetRowExists && !liveTargetExists && expectedTargetSupersededBy != null) {
                 String actualTargetSupersededBy = ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY)
@@ -4894,6 +5112,14 @@ public final class CatalogRepository {
         Object v = m.get(k);
         if (v instanceof Number n) return n.doubleValue();
         return null;
+    }
+
+    /** Boolean field extraction tolerant of a real JSON boolean or its string form. */
+    private static boolean bool(Map<String, Object> m, String k, boolean def) {
+        Object v = m.get(k);
+        if (v == null) return def;
+        if (v instanceof Boolean b) return b;
+        return "true".equalsIgnoreCase(String.valueOf(v));
     }
 
     /** Non-null empty: returns "" if null. */
