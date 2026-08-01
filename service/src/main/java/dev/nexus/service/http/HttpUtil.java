@@ -87,6 +87,35 @@ public final class HttpUtil {
     }
 
     /**
+     * Walk the cause chain for a {@link SQLException} whose SQLSTATE is class 22
+     * (data exception — e.g. {@code 22021 character_not_in_repertoire}, the
+     * NUL byte Postgres {@code text}/{@code jsonb} cannot store; {@code 22P05
+     * untranslatable_character}; and siblings). Returns the offending SQLSTATE
+     * string, or {@code null} if no class-22 cause exists.
+     *
+     * <p>Bead nexus-dmrkm, split out of nexus-yvzhz (the PDF-with-NUL-bytes
+     * page_text 500). Class-wide (matches the whole {@code 22*} family), not a
+     * {@code 22021}-only allowlist — mirrors {@link #sqlState23}'s class-wide
+     * class-23 match rather than enumerating individual codes: the same
+     * "caller-supplied data the database legitimately refuses is a 4xx, not a
+     * 500" reasoning applies uniformly across class 22, not only to the NUL
+     * case that happened to surface it first. Walks {@link Throwable#getCause()}
+     * only, depth-bounded, same shape as {@link #sqlState23}.
+     */
+    public static String sqlStateDataException(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof SQLException se) {
+                String state = se.getSQLState();
+                if (state != null && state.startsWith("22")) {
+                    return state;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Walk the cause chain for a {@link SQLTransientConnectionException} — HikariCP's
      * "Connection is not available, request timed out" signal, thrown from
      * {@code dataSource.getConnection()} when every pooled connection is checked out
@@ -180,6 +209,26 @@ public final class HttpUtil {
                 + jsonString(sqlState)
                 + (constraint == null ? "" : ",\"constraint\":" + jsonString(constraint))
                 + "}");
+            return true;
+        }
+        String dataExceptionState = sqlStateDataException(e);
+        if (dataExceptionState != null) {
+            // nexus-dmrkm: class-22 data exceptions (22021 the NUL byte Postgres
+            // text/jsonb cannot store — nexus-yvzhz; 22P05 untranslatable
+            // character; siblings) are caller-data problems, not server faults —
+            // typed 422 ahead of the generic 500, mirroring the class-23 branch
+            // above. Unlike a constraint violation, Postgres's encoding-layer
+            // rejection carries no column/table context in the driver exception
+            // (it fires below the row, at client-encoding conversion), so the
+            // body can only name the SQLSTATE, not the specific field — the raw
+            // driver message (which does include the offending byte) goes to the
+            // log only, never the client, same info-disclosure discipline as the
+            // class-23 branch.
+            log.warn("event={}_data_exception {} sqlstate={} error={}",
+                event, context, dataExceptionState, e.getMessage());
+            send(exchange, 422,
+                "{\"error\":\"unrepresentable data rejected by the database\",\"sqlstate\":"
+                + jsonString(dataExceptionState) + "}");
             return true;
         }
         return false;

@@ -192,7 +192,16 @@ public final class PipelineRepository {
 
     // ── pages ────────────────────────────────────────────────────────────────
 
-    /** Batch upsert (INSERT-OR-REPLACE parity); one call = one transaction. */
+    /** Batch upsert (INSERT-OR-REPLACE parity); one call = one transaction.
+     *
+     * <p>nexus-yvzhz: {@code page_text} and {@code metadata_json} are sanitized
+     * (NUL stripped, mirroring {@code PgVectorRepository.stripNul}) before the
+     * bind — a broken PDF ToUnicode CMap can carry raw NUL bytes in the
+     * PyMuPDF text layer, and Postgres {@code text} cannot store {@code 0x00}
+     * (SQLSTATE 22021). Safe here because neither is an identity source: no
+     * chash derives from page text. Contrast {@link #writeChunks}, where
+     * {@code chunk_text} is NOT sanitized because it IS caller-computed
+     * identity (the chash is over the exact bytes). */
     public int writePages(String tenant, String contentHash, List<Map<String, Object>> pages) {
         requireNonBlank(contentHash, "content_hash");
         if (pages.isEmpty()) return 0;
@@ -204,8 +213,8 @@ public final class PipelineRepository {
                         PDF_PAGES.PAGE_TEXT, PDF_PAGES.METADATA_JSON, PDF_PAGES.CREATED_AT)
                    .values(tenant, contentHash,
                            ((Number) page.get("page_index")).intValue(),
-                           (String) page.get("page_text"),
-                           page.get("metadata_json") instanceof String s ? s : "{}",
+                           stripNul((String) page.get("page_text")),
+                           stripNul(page.get("metadata_json") instanceof String s ? s : "{}"),
                            now)
                    .onConflict(PDF_PAGES.TENANT_ID, PDF_PAGES.CONTENT_HASH, PDF_PAGES.PAGE_INDEX)
                    .doUpdate()
@@ -233,7 +242,17 @@ public final class PipelineRepository {
     // ── chunks ───────────────────────────────────────────────────────────────
 
     /** Batch INSERT-OR-IGNORE (idempotent resume; existing rows keep their
-     *  embeddings); one call = one transaction. Returns rows actually inserted. */
+     *  embeddings); one call = one transaction. Returns rows actually inserted.
+     *
+     * <p>nexus-yvzhz: unlike {@link #writePages}, {@code chunk_text} is bound
+     * RAW, deliberately NOT NUL-stripped — {@code chunk_id}/chash is
+     * caller-computed identity over the exact bytes, and silently mutating the
+     * text would desync content addressing. A NUL byte in {@code chunk_text}
+     * therefore still reaches Postgres unsanitized and SQLSTATE 22021 fires;
+     * nexus-dmrkm maps that to a typed 422 (not the previous opaque 500) so
+     * the rejection is legible instead of silent-mutation-or-crash.
+     * {@code metadata_json} is NOT an identity source (only {@code chunk_id}
+     * and {@code chunk_text} are), so it IS sanitized like the pages path. */
     public int writeChunks(String tenant, String contentHash, List<Map<String, Object>> chunks) {
         requireNonBlank(contentHash, "content_hash");
         if (chunks.isEmpty()) return 0;
@@ -249,7 +268,7 @@ public final class PipelineRepository {
                            ((Number) chunk.get("chunk_index")).intValue(),
                            (String) chunk.get("chunk_text"),
                            (String) chunk.get("chunk_id"),
-                           chunk.get("metadata_json") instanceof String s ? s : "{}",
+                           stripNul(chunk.get("metadata_json") instanceof String s ? s : "{}"),
                            (byte[]) chunk.get("embedding"),
                            Boolean.FALSE,
                            now)
@@ -369,6 +388,14 @@ public final class PipelineRepository {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb}
+     *  (nexus-rvfwj / nexus-yvzhz). Mirrors {@code PgVectorRepository.stripNul};
+     *  duplicated rather than shared because the two repositories live in
+     *  different packages with no existing common base. */
+    private static String stripNul(String s) {
+        return (s != null && s.indexOf('\u0000') >= 0) ? s.replace("\u0000", "") : s;
+    }
 
     /** Stringify temporal values so the HTTP layer serializes stably. */
     private static Map<String, Object> timeToString(Map<String, Object> row) {

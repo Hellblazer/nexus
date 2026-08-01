@@ -361,6 +361,66 @@ class PipelineHandlerTest {
         assertThat(badChunk.statusCode()).isEqualTo(400);
     }
 
+    // -- Test 9c: nexus-yvzhz -- NUL bytes in page_text are sanitized, not 500 --
+
+    @Test
+    void pages_nulBytesInPageText_sanitizedNotRejected() throws Exception {
+        String hash = "h9c-" + "0".repeat(26);
+        post("/v1/pipeline/create", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"/tmp/k.pdf\",\"collection\":\"knowledge__t\"}");
+
+        // A broken PDF ToUnicode CMap can carry raw NUL bytes in the PyMuPDF
+        // text layer (nexus-yvzhz); Postgres text cannot store 0x00 (SQLSTATE
+        // 22021). page_text is display/storage text, not an identity source
+        // (no chash derives from it), so sanitizing it is safe.
+        var w = post("/v1/pipeline/pages", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"pages\":["
+            + "{\"page_index\":0,\"page_text\":\"before\\u0000after\",\"metadata_json\":\"{}\"}"
+            + "]}");
+        assertThat(w.statusCode())
+            .as("a NUL byte in page_text must be sanitized, not a 500")
+            .isEqualTo(200);
+        assertThat(mapper.readValue(w.body(), MAP_T).get("written")).isEqualTo(1);
+
+        var resp = get("/v1/pipeline/pages?content_hash=" + hash + "&start=0", TOKEN, TENANT);
+        @SuppressWarnings("unchecked")
+        var pages = (List<Map<String, Object>>) mapper.readValue(resp.body(), MAP_T).get("pages");
+        assertThat(pages).hasSize(1);
+        String storedText = (String) pages.get(0).get("page_text");
+        assertThat(storedText)
+            .as("the stored text must be NUL-free")
+            .isEqualTo("beforeafter");
+    }
+
+    // -- Test 9d: nexus-yvzhz/nexus-dmrkm -- chunk_text is NOT silently
+    // stripped (chash is caller identity over the exact bytes); a NUL byte
+    // there is a typed 422 rejection (nexus-dmrkm's class-22 mapping), never
+    // a silent mutation and never a bare 500. --------------------------------
+
+    @Test
+    void chunks_nulBytesInChunkText_typedRejection_notSilentlyStripped() throws Exception {
+        String hash = "h9d-" + "0".repeat(26);
+        post("/v1/pipeline/create", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"/tmp/l.pdf\",\"collection\":\"knowledge__t\"}");
+
+        var w = post("/v1/pipeline/chunks", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"chunks\":["
+            + "{\"chunk_index\":0,\"chunk_text\":\"before\\u0000after\",\"chunk_id\":\"id0\","
+            + "\"metadata_json\":\"{}\",\"embedding\":null}"
+            + "]}");
+        assertThat(w.statusCode())
+            .as("chunk_text is caller-computed chash identity -- a NUL byte must be a typed "
+                + "rejection (nexus-dmrkm), never a silent strip and never a bare 500")
+            .isEqualTo(422);
+        assertThat(w.body()).contains("\"sqlstate\":\"22021\"");
+
+        // The row must not exist half-written or silently mutated.
+        var resp = get("/v1/pipeline/chunks?content_hash=" + hash, TOKEN, TENANT);
+        @SuppressWarnings("unchecked")
+        var chunks = (List<Map<String, Object>>) mapper.readValue(resp.body(), MAP_T).get("chunks");
+        assertThat(chunks).as("the rejected chunk must not have landed a row").isEmpty();
+    }
+
     // ── Test 10: auth — 401 without bearer ───────────────────────────────────
 
     @Test
