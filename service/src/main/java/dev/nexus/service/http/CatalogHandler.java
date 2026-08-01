@@ -1091,12 +1091,47 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
         }
-        // Guard 3 — superseded_by must name a registered collection, or the pointer
-        // dangles and nothing can follow it.
-        if (!repo.collectionExists(tenant, supersededBy)) {
+        // Guard 3 — superseded_by must name a registered, LIVE collection. This used to
+        // be repo.collectionExists(tenant, supersededBy) — "a row exists, tombstone
+        // included" — but a RETIRED target is exactly a pointer nothing can usefully
+        // follow: supersede(X -> Y) where Y already has superseded_by = Z builds the
+        // two-hop unaudited chain guard 2 (below) refuses from the SOURCE side. Reading
+        // the row directly gives the same 404 for "unregistered" plus a distinct 409 for
+        // "registered but itself retired", naming the target's own superseded_by so the
+        // caller can follow the real chain instead (nexus-laa8j).
+        //
+        // nexus-v6za0's lesson applies here too: superseded_by alone cannot distinguish a
+        // RENAME tombstone (left empty, its children already re-homed by
+        // renameCollectionTxn step 3) from a SUPERSEDE tombstone (left fully populated —
+        // supersedeCollection is a pure UPDATE that never touches chunks). That
+        // distinction does not change the answer HERE: either shape is a target nothing
+        // should chain a fresh supersede onto, so both refuse identically with this same
+        // 409. (It matters only for handleCollectionRename's REVIVE decision above, which
+        // asks a different question — may an EMPTY tombstone be resurrected — not "may a
+        // new supersede point at this name".)
+        //
+        // Disposition of the handler's other collectionExists-family reads, so the next
+        // reader does not have to re-derive it (1232585d shipped this one silently, which
+        // is what produced this bead): the rename SOURCE guard a few lines below (nexus-
+        // c29vr) and the rename TARGET guard (nexus-cecqy/nexus-v6za0) already read
+        // getCollection()+superseded_by directly, not collectionExists; the cross_model
+        // converse guard (nexus-tnx48, keyed on !tgtLive) is the opposite polarity on
+        // purpose — it demands the target be LIVE — and is correct as written. This was
+        // the last remaining direct repo.collectionExists call in this handler.
+        Map<String, Object> targetRow = repo.getCollection(tenant, supersededBy);
+        if (targetRow == null) {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString(
                     "superseded_by names an unregistered collection: " + supersededBy) + "}"); return;
+        }
+        Object targetSupersededObj = targetRow.get("superseded_by");
+        String targetRetiredBy = targetSupersededObj instanceof String s ? s : "";
+        if (!targetRetiredBy.isEmpty()) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "superseded_by names a retired collection: " + supersededBy
+                    + " is itself superseded by " + targetRetiredBy
+                    + "; refusing to build an unaudited two-hop chain") + "}"); return;
         }
         // Guard 2 — refuse to CHAIN a second supersession. Re-asserting the SAME target
         // is idempotent, not a chain: the canonical rename now tombstones X -> Y itself
@@ -1121,15 +1156,26 @@ public final class CatalogHandler implements HttpHandler {
         int updated = repo.supersedeCollection(tenant, name, supersededBy, supersededAt != null ? supersededAt : "");
         if (updated == 0) {
             // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
-            // means a concurrent supersede of the same old_name to a DIFFERENT target
-            // committed between our read above and this write. Report it as the same 409
-            // the serial case gets rather than replying 200 {"updated":0} — a zero the
-            // caller cannot distinguish from success is the defect this whole route was
-            // fixed for.
+            // means the row we just read has already changed. That precondition rules out
+            // exactly ONE cause — a concurrent supersede to a DIFFERENT target — but it is
+            // not the only way to get zero. POST /collections/delete hard-deletes the
+            // registry row, and a concurrent delete between guard 1's read and this UPDATE
+            // also matches nothing, where the correct answer is 404 (the row is gone), not
+            // a 409 naming a supersession that never happened (nexus-0svvu). Asserting a
+            // specific cause the code did not observe is the same honesty failure these
+            // comments criticise elsewhere — so ask, rather than assert.
+            Map<String, Object> recheck = repo.getCollection(tenant, name);
+            if (recheck == null) {
+                HttpUtil.send(exchange, 404,
+                    "{\"error\":" + MAPPER.writeValueAsString(
+                        "collection not found: " + name) + "}"); return;
+            }
+            Object recheckSuperseded = recheck.get("superseded_by");
+            String actualSupersededBy = recheckSuperseded instanceof String s ? s : "";
             HttpUtil.send(exchange, 409,
                 "{\"error\":" + MAPPER.writeValueAsString(
-                    "collection " + name + " was superseded to a different target "
-                    + "concurrently; refusing to chain a second supersede to "
+                    "collection " + name + " was superseded to " + actualSupersededBy
+                    + " concurrently; refusing to chain a second supersede to "
                     + supersededBy) + "}"); return;
         }
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
@@ -1275,7 +1321,14 @@ public final class CatalogHandler implements HttpHandler {
                     + "existing LIVE collection; it cannot revive a tombstone or create a collection. "
                     + "Drop cross_model for a plain rename.") + "}"); return;
         }
-        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName);
+        // nexus-2sovp: thread OUR observation of the target's superseded_by into the
+        // transaction's additive identity belt, rather than let the txn re-derive it —
+        // "the caller's observation is what's verified". tgtSuperseded is null when the
+        // target was absent at this read (nothing to verify) and the txn's belt is inert
+        // whenever the target turns out live or absent anyway; it only compares when the
+        // target is STILL a non-live tombstone at commit time, same as this handler's own
+        // identityOk/empty gate above.
+        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 

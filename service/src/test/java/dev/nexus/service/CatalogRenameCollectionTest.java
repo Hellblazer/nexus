@@ -227,6 +227,70 @@ class CatalogRenameCollectionTest {
         }
     }
 
+    @Test @Order(45)
+    void renameCollection_identityBeltMatches_revivesNormally() throws Exception {
+        // nexus-2sovp: the ADDITIVE identity belt only ever NARROWS what already
+        // succeeds — passing the caller's own correct observation of the target's
+        // superseded_by must not change the outcome of a rename that would have
+        // succeeded anyway (the existing round-trip test above covers the 3-arg,
+        // belt-inert overload; this is the same shape through the 4-arg overload).
+        final String a = "knowledge__ren-belt-ok__minilm-l6-v2-384__v1";
+        final String b = "knowledge__ren-belt-ok__minilm-l6-v2-384__v2";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + a + "')");
+        }
+        repo.renameCollection(TENANT_A, a, b); // A -> B; A is now a tombstone, superseded_by=B.
+        // Rename back B -> A, threading the belt with the OBSERVED value at A: "b" — the
+        // same fact a real caller reading A's row would see.
+        Map<String, Integer> c = repo.renameCollection(TENANT_A, b, a, b);
+        assertThat(c.get("catalog_collections_inserted")).as("A revived").isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
+                + "' AND name='" + a + "' AND superseded_by=''")).as("A revived and live").isEqualTo(1);
+        }
+    }
+
+    @Test @Order(46)
+    void renameCollection_identityBeltMismatch_refusesEvenThoughEmptinessWouldAllowIt() throws Exception {
+        // nexus-2sovp: the belt exists for a caller that does NOT replicate
+        // CatalogHandler's own identity pre-check (a future CLI path, migration step, or
+        // scheduled repair calling this method directly). Force exactly that: rename
+        // A -> B leaves A as an EMPTY tombstone (superseded_by=B) — the pre-existing
+        // emptiness check has nothing to object to — then call renameCollection with a
+        // WRONG expected value for A's superseded_by. The belt must refuse BY NAME, and
+        // the refusal must be additive: it does not touch the emptiness check's own
+        // throw, it is a second, independent guard.
+        final String a  = "knowledge__ren-belt-bad__minilm-l6-v2-384__v1";
+        final String b  = "knowledge__ren-belt-bad__minilm-l6-v2-384__v2";
+        final String c2 = "knowledge__ren-belt-bad__minilm-l6-v2-384__v3";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + a + "')");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + c2 + "')");
+        }
+        repo.renameCollection(TENANT_A, a, b); // A -> B; A is now an EMPTY tombstone, superseded_by=B.
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, c2, a, "not-" + b))
+            .as("a stale/wrong observed superseded_by must refuse the revive by name, "
+                + "not silently proceed because emptiness alone would have allowed it")
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .hasMessageContaining(a)
+            .hasMessageContaining(b);
+
+        try (Connection su = pg.createConnection("")) {
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
+                + "' AND name='" + a + "' AND superseded_by='" + b + "'"))
+                .as("the tombstone must survive the refused revive unchanged").isEqualTo(1);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
+                + "' AND name='" + c2 + "'"))
+                .as("the source must be untouched: no half-done rename").isEqualTo(1);
+        }
+    }
+
     @Test @Order(50)
     void renameCollection_crossModelCopyBranch_targetExists_repointsDocsAndManifests() throws Exception {
         // RDR-162 regression: pre-register the TARGET (simulating the bge-768 cross-model

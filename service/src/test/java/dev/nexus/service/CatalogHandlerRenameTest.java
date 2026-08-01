@@ -299,6 +299,96 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
+    void post_supersede_targetIsARenameTombstone_returns409NamingItsSupersededBy() throws Exception {
+        // nexus-laa8j, shape (a): a RENAME tombstone — EMPTY, its children already
+        // re-homed by renameCollectionTxn step 3. Guard 3 used to be
+        // repo.collectionExists(tenant, supersededBy), which accepts ANY row including
+        // this one, building the two-hop unaudited chain guard 2 exists to refuse from
+        // the source side. It must 409, naming the target's OWN superseded_by.
+        seedCollections("hsup__g3r-old", "hsup__g3r-tgt-src");
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hsup__g3r-tgt-src\",\"new_name\":\"hsup__g3r-tgt\"}")
+            .statusCode()).isEqualTo(200);
+        // NON-VACUITY: the target really is a tombstone, and it is EMPTY (a rename leaves
+        // it so) — this is shape (a), not shape (b) below.
+        assertThat(collectionRow("hsup__g3r-tgt-src").get("superseded_by")).isEqualTo("hsup__g3r-tgt");
+
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g3r-old\",\"superseded_by\":\"hsup__g3r-tgt-src\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("is itself superseded by").contains("hsup__g3r-tgt");
+        assertThat((String) collectionRow("hsup__g3r-old").get("superseded_by"))
+            .as("a refused supersede must write nothing").isEmpty();
+    }
+
+    @Test
+    void post_supersede_targetIsASupersedeTombstone_returns409NamingItsSupersededBy() throws Exception {
+        // nexus-laa8j, shape (b): a SUPERSEDE tombstone — FULLY POPULATED, since
+        // supersedeCollection is a pure UPDATE that never touches chunks. superseded_by
+        // cannot distinguish this from shape (a) above (nexus-v6za0's lesson), and guard 3
+        // does not need to: both shapes refuse identically here.
+        seedCollections("hsup__g3s-old", "hsup__g3s-tgt", "hsup__g3s-successor");
+        assertThat(post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g3s-tgt\",\"superseded_by\":\"hsup__g3s-successor\"}")
+            .statusCode()).isEqualTo(200);
+        // NON-VACUITY: the target really is superseded.
+        assertThat(collectionRow("hsup__g3s-tgt").get("superseded_by")).isEqualTo("hsup__g3s-successor");
+
+        var resp = post("/v1/catalog/collections/supersede",
+            "{\"name\":\"hsup__g3s-old\",\"superseded_by\":\"hsup__g3s-tgt\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("is itself superseded by").contains("hsup__g3s-successor");
+        assertThat((String) collectionRow("hsup__g3s-old").get("superseded_by"))
+            .as("a refused supersede must write nothing").isEmpty();
+    }
+
+    @Test
+    void post_supersede_concurrentHardDelete_returns404NotAFalseConflict() throws Exception {
+        // nexus-0svvu (b): the zero-rows branch used to assert a cause it never
+        // observed — "superseded to a different target concurrently" — but a concurrent
+        // HARD DELETE (POST /collections/delete) also yields zero rows from the same
+        // UPDATE, and the correct answer there is 404 (the row is gone), not a 409
+        // naming a supersession that never happened.
+        //
+        // Force the race deterministically instead of hoping two HTTP calls interleave:
+        // hold the target row's lock in a manually-managed transaction (FOR UPDATE) BEFORE
+        // starting the supersede request. The request's own guards are plain SELECTs and
+        // are not blocked by the lock (MVCC readers do not wait on writers), so they see
+        // the row live and proceed to the UPDATE, which DOES need the lock and blocks.
+        // Deleting-and-committing on the lock-holding connection then lets Postgres
+        // re-evaluate the blocked UPDATE's WHERE against the now-gone row: it matches
+        // zero rows, exactly the concurrent-delete shape this test exists to pin.
+        seedCollections("hsup__del409-old", "hsup__del409-new");
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(1);
+        try (Connection lockConn = pg.createConnection("")) {
+            lockConn.setAutoCommit(false);
+            try (var st = lockConn.createStatement()) {
+                st.execute("SELECT 1 FROM nexus.catalog_collections WHERE name='hsup__del409-old' FOR UPDATE");
+            }
+            var supersedeFuture = pool.submit(() ->
+                post("/v1/catalog/collections/supersede",
+                    "{\"name\":\"hsup__del409-old\",\"superseded_by\":\"hsup__del409-new\"}"));
+            // Let the request's guard reads (unblocked SELECTs) complete before its
+            // UPDATE reaches the same row and blocks on the lock this connection holds.
+            Thread.sleep(300);
+            try (var del = lockConn.createStatement()) {
+                del.execute("DELETE FROM nexus.catalog_collections WHERE name='hsup__del409-old'");
+            }
+            lockConn.commit();
+
+            var resp = supersedeFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(resp.statusCode())
+                .as("a concurrent hard delete must read as 404 (row gone), not a 409 "
+                    + "naming a supersession that never happened")
+                .isEqualTo(404);
+            assertThat(resp.body()).contains("collection not found");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void post_supersede_alreadySupersededToDifferentTarget_returns409() throws Exception {
         // nexus-g8z8n guard 2: a second supersession rewrote the chain unaudited.
         seedCollections("hsup__g2-old", "hsup__g2-new1", "hsup__g2-new2");
