@@ -1514,6 +1514,25 @@ class CatalogRepositoryTest {
         assertThat(stats.get("links_by_type")).isNotNull();
     }
 
+    /**
+     * nexus-se9r3 closing assertion: stats().doc_count must equal
+     * countDocuments() — the two surfaces disagreeing (doc_count raw,
+     * countDocuments tombstone-filtered) was the bead's own repro.
+     */
+    @Test
+    void stats_docCount_matchesCountDocuments() {
+        String tenant = "stats-parity-" + System.nanoTime();
+        repo.upsertDocument(tenant, mapOf("tumbler", "sp.1", "title", "Live", "content_type", "paper"));
+        repo.upsertDocument(tenant, mapOf("tumbler", "sp.2", "title", "Dead", "content_type", "paper"));
+        assertThat(repo.deleteDocument(tenant, "sp.2")).isEqualTo(1);
+
+        var stats = repo.stats(tenant);
+        assertThat((Long) stats.get("doc_count"))
+            .as("stats().doc_count must equal countDocuments() post-tombstone")
+            .isEqualTo(repo.countDocuments(tenant))
+            .isEqualTo(1L);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // ETL — fidelity-preserving + idempotent
     // ══════════════════════════════════════════════════════════════════════════
@@ -2682,6 +2701,44 @@ class CatalogRepositoryTest {
         var yPaper = rowsY.get(0);
         assertThat(((Number) yPaper.get("total")).longValue()).isEqualTo(3L);
         assertThat(((Number) yPaper.get("linked")).longValue()).isEqualTo(3L);
+    }
+
+    /**
+     * nexus-l1nre meta-assertion: the view branch (empty ownerPrefix) and the
+     * owner-prefix hand-aggregation branch of coverageByContentType must
+     * AGREE on the same fixture, tombstone included. Before this fix the view
+     * branch was unfiltered while the hand-aggregation branch already
+     * filtered deleted_at IS NULL — the same method disagreeing with itself
+     * depending purely on whether a prefix argument was supplied.
+     */
+    @Test
+    void coverageByContentType_viewBranchAndOwnerPrefixBranch_agree_withTombstone() {
+        String tenant = "cov-agree-" + System.nanoTime();
+        repo.upsertDocument(tenant, mapOf("tumbler", "covagree.1", "title", "P1", "content_type", "paper"));
+        repo.upsertDocument(tenant, mapOf("tumbler", "covagree.2", "title", "P2", "content_type", "paper"));
+        repo.upsertDocument(tenant, mapOf("tumbler", "covagree.3", "title", "P3 (tombstoned)", "content_type", "paper"));
+        repo.upsertLink(tenant, mapOf(
+            "from_tumbler", "covagree.1", "to_tumbler", "covagree.2", "link_type", "cites", "created_by", "test"));
+
+        assertThat(repo.deleteDocument(tenant, "covagree.3")).isEqualTo(1);
+
+        var viewBranch = repo.coverageByContentType(tenant, "");
+        var prefixBranch = repo.coverageByContentType(tenant, "covagree");
+
+        assertThat(viewBranch).as("non-vacuity: exactly one content_type in this tenant").hasSize(1);
+        assertThat(prefixBranch).hasSize(1);
+
+        var v = viewBranch.get(0);
+        var p = prefixBranch.get(0);
+        assertThat(v.get("content_type")).isEqualTo(p.get("content_type"));
+        assertThat(((Number) v.get("total")).longValue())
+            .as("the two branches must AGREE on total, tombstone included")
+            .isEqualTo(((Number) p.get("total")).longValue())
+            .isEqualTo(2L);
+        assertThat(((Number) v.get("linked")).longValue())
+            .as("the two branches must AGREE on linked, tombstone included")
+            .isEqualTo(((Number) p.get("linked")).longValue())
+            .isEqualTo(2L);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,597 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Tombstone audit 2026-08-01 (beads nexus-se9r3, nexus-l1nre, nexus-cah9n) +
+    nexus-t7m8e's SQL-function half — four read-shape views whose predicates
+    disagreed with the rest of the tombstone-aware surface, plus the
+    search_graph_hop_<dim> functions' own tombstone-relay gap (see the last
+    changeset group below).
+
+    catalog-009's own header documented the views as DELIBERATELY unfiltered
+    ("Tombstone-aware counts are a separate decision and are deliberately out
+    of P1 scope") — a decision deferred, not revisited, until it became
+    user-visible drift: countDocuments() (catalog_documents read directly)
+    already filters deleted_at IS NULL, so these views disagreed with the
+    repository method sitting right next to them.
+
+    Views touched (all CREATE OR REPLACE — predicate-only changes, legal per
+    catalog-011 precedent; every view restates WITH (security_invoker = true)
+    since dropping it would silently revert to definer semantics and bypass
+    FORCE RLS, the exact regression tests/db/test_view_security_invoker_guard.py
+    pins):
+
+      - catalog_stats (nexus-se9r3): doc_count filters deleted_at IS NULL.
+
+        chunk_count DECISION: soft-delete does NOT cascade to
+        catalog_document_chunks (the manifest table), so a document's chunk
+        rows survive its own tombstoning. The naive raw count(*) therefore
+        counts a tombstoned document's chunks as if they still belonged to a
+        live corpus. The chosen semantics: chunk_count counts only chunks
+        whose owning document is LIVE (an EXISTS join to catalog_documents
+        filtered deleted_at IS NULL), matching the doc_count column's own
+        liveness semantics in the same row. The alternative (raw manifest
+        count, unfiltered) was rejected because it would silently re-widen
+        exactly the gap this changeset closes — chunk_count would report a
+        DIFFERENT liveness policy than doc_count in the same view.
+
+      - collection_doc_counts (nexus-se9r3): add AND d.deleted_at IS NULL
+        alongside the existing physical_collection filter.
+
+      - coverage_by_content_type (nexus-l1nre): add WHERE d.deleted_at IS NULL.
+        CatalogRepository.coverageByContentType's owner-prefix branch (hand
+        aggregation, not this view) already filtered deleted_at IS NULL — this
+        view was the ONLY unfiltered branch of the same method, so the same
+        query returned a different answer depending on whether an ownerPrefix
+        was supplied. That drift is the bead's own designated meta-test
+        fixture (CatalogRepositoryTest: the two branches must AGREE on the
+        same fixture).
+
+      - collection_health_meta (nexus-cah9n): add AND d.deleted_at IS NULL
+        alongside physical_collection IS NOT NULL. A tombstoned document has
+        no inbound links (nothing points at a deleted doc), so it always fell
+        into orphan_count's NOT EXISTS filter — deleting documents RAISED the
+        reported orphan count, moving the health metric the wrong direction on
+        cleanup. Because last_indexed, orphan_count, and stale_source_ratio
+        share one GROUP BY over the same filtered row set, the single added
+        predicate fixes all three columns at once.
+
+    nexus-hg4er cross-check (reasoning only, no live-store action taken here):
+    hg4er found /stats reporting ~487 more documents than any enumeration
+    returns. This se9r3 fix (doc_count filters deleted_at IS NULL) is exactly
+    the kind of mechanism that would produce that symptom on a live store
+    carrying ~487 tombstoned rows: doc_count would drop by the tombstone
+    population once deployed, and — if tombstones are the actual mechanism —
+    the post-fix doc_count should converge on the enumeration figure. This
+    view fix does not itself touch the live store; it is reasoning about what
+    a live-store deploy of it would change, for whoever picks up hg4er next.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── nexus-se9r3: catalog_stats — doc_count + chunk_count tombstone-aware ── -->
+    <changeSet id="catalog-019-1" author="nexus-se9r3">
+        <comment>catalog_stats: doc_count filters deleted_at IS NULL; chunk_count counts only chunks of LIVE documents (manifest does not cascade tombstones)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.catalog_stats
+    WITH (security_invoker = true)
+AS
+SELECT (SELECT count(*) FROM nexus.catalog_documents WHERE deleted_at IS NULL) AS doc_count,
+       (SELECT count(*) FROM nexus.catalog_links)            AS link_count,
+       (SELECT count(*) FROM nexus.catalog_owners)           AS owner_count,
+       (SELECT count(*) FROM nexus.catalog_collections)      AS collection_count,
+       (SELECT count(*) FROM nexus.catalog_document_chunks c
+         WHERE EXISTS (
+             SELECT 1 FROM nexus.catalog_documents d
+              WHERE d.tenant_id = c.tenant_id
+                AND d.tumbler   = c.doc_id
+                AND d.deleted_at IS NULL
+         ))                                                  AS chunk_count
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.catalog_stats
+    WITH (security_invoker = true)
+AS
+SELECT (SELECT count(*) FROM nexus.catalog_documents)        AS doc_count,
+       (SELECT count(*) FROM nexus.catalog_links)            AS link_count,
+       (SELECT count(*) FROM nexus.catalog_owners)           AS owner_count,
+       (SELECT count(*) FROM nexus.catalog_collections)      AS collection_count,
+       (SELECT count(*) FROM nexus.catalog_document_chunks)  AS chunk_count
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── nexus-se9r3: collection_doc_counts — tombstone-aware ──────────────── -->
+    <changeSet id="catalog-019-2" author="nexus-se9r3">
+        <comment>collection_doc_counts: add deleted_at IS NULL alongside the physical_collection filter</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_doc_counts
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection,
+       count(*) AS doc_count
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.physical_collection &lt;&gt; ''
+   AND d.deleted_at IS NULL
+ GROUP BY d.tenant_id, d.physical_collection
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_doc_counts
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection,
+       count(*) AS doc_count
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.physical_collection &lt;&gt; ''
+ GROUP BY d.tenant_id, d.physical_collection
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── nexus-l1nre: coverage_by_content_type — tombstone-aware ───────────── -->
+    <changeSet id="catalog-019-3" author="nexus-l1nre">
+        <comment>coverage_by_content_type: add WHERE deleted_at IS NULL — the view branch was the ONLY unfiltered branch of coverageByContentType; the owner-prefix hand-aggregation branch already filtered</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.coverage_by_content_type
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       COALESCE(d.content_type, '') AS content_type,
+       count(*) AS total,
+       count(*) FILTER (
+           WHERE EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.from_tumbler = d.tumbler
+                   OR l.to_tumbler   = d.tumbler
+           )
+       ) AS linked
+  FROM nexus.catalog_documents d
+ WHERE d.deleted_at IS NULL
+ GROUP BY d.tenant_id, COALESCE(d.content_type, '')
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.coverage_by_content_type
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       COALESCE(d.content_type, '') AS content_type,
+       count(*) AS total,
+       count(*) FILTER (
+           WHERE EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.from_tumbler = d.tumbler
+                   OR l.to_tumbler   = d.tumbler
+           )
+       ) AS linked
+  FROM nexus.catalog_documents d
+ GROUP BY d.tenant_id, COALESCE(d.content_type, '')
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── nexus-cah9n: collection_health_meta — tombstone-aware ─────────────── -->
+    <changeSet id="catalog-019-4" author="nexus-cah9n">
+        <comment>collection_health_meta: add deleted_at IS NULL alongside physical_collection IS NOT NULL — fixes orphan_count (deletion no longer RAISES it), last_indexed, and stale_source_ratio in one predicate</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (
+           WHERE d.indexed_at ~ '^[0-9]{4}-'
+             AND d.indexed_at &lt; to_char(
+                     (now() - interval '30 days') AT TIME ZONE 'UTC',
+                     'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        ))::double precision
+        / NULLIF(count(*) FILTER (WHERE d.indexed_at ~ '^[0-9]{4}-'), 0)
+        AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.deleted_at IS NULL
+ GROUP BY d.tenant_id, d.physical_collection
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (
+           WHERE d.indexed_at ~ '^[0-9]{4}-'
+             AND d.indexed_at &lt; to_char(
+                     (now() - interval '30 days') AT TIME ZONE 'UTC',
+                     'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        ))::double precision
+        / NULLIF(count(*) FILTER (WHERE d.indexed_at ~ '^[0-9]{4}-'), 0)
+        AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+ GROUP BY d.tenant_id, d.physical_collection
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!--
+        nexus-t7m8e SQL-function half. The graph-hop combined-query functions
+        (catalog-007, revised to 8-arg by catalog-012) already gated the FINAL
+        joined document on deleted_at IS NULL, but the recursive `reach` CTE's
+        traversal step had NO liveness check at all — the exact same defect
+        graphBFS carried (CatalogRepository.java): a tombstoned document could
+        still act as a live RELAY, forwarding reachability through itself to
+        documents beyond it. GraphHopParityIntegrationTest's own fixture only
+        tombstones a REACHABLE LEAF (nothing beyond it), so it could not catch
+        this — the final-row filter and a traversal-time filter are
+        indistinguishable when there is nothing past the tombstone to reach.
+
+        Fix: INNER JOIN catalog_documents on BOTH traversed endpoints (from AND
+        to) with deleted_at IS NULL, in the recursive term only — mirrors
+        graphBFS's fix exactly (same reasoning: closes the dangling-edge class
+        AND the relay class in one join). The base case (seed row) is left
+        unconditional, matching graphBFS's own seed handling — a tombstoned
+        seed still occupies depth 0 in `reach`, but every edge touching it now
+        fails the liveness join, so it cannot forward reachability either; the
+        seed itself is still excluded from the final output by the existing
+        `d.deleted_at IS NULL` filter on the OUTER select.
+
+        Signature is UNCHANGED (still the 8-arg catalog-012 form) — only the
+        function body changes, so CREATE OR REPLACE suffices without a
+        preceding DROP FUNCTION.
+
+        HEX-BOUNDARY CARRY-FORWARD (rdr180-002-hex-boundary-functions.xml,
+        included earlier in the master changelog than this file): that
+        changeset changed these same three functions' chash projection from
+        raw `c.chash` to `encode(c.chash, 'hex')` (RDR-180 Item1 — chash is
+        bytea in storage, hex text at the interchange boundary). A first
+        draft of this changeset re-created the functions from the catalog-012
+        text and silently reverted that projection, caught by
+        GraphHopParityTest.chashColumn_matchesSeededChunkChash (JDBC returned
+        the raw Postgres bytea_output "\x..." escape instead of the plain hex
+        interchange form). The bodies below carry `encode(c.chash, 'hex')`
+        forward alongside the tombstone-relay join.
+    -->
+    <changeSet id="catalog-019-5" author="nexus-t7m8e">
+        <comment>search_graph_hop_384: tombstone-filter the recursive traversal itself, not just the final row — closes the tombstoned-document-as-live-relay gap</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks_384 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- Restores the rdr180-002 state (encode() projection, no
+                 tombstone-relay join) — the state immediately preceding this
+                 changeset, not the pre-RDR-180 catalog-012 shape. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks_384 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-019-6" author="nexus-t7m8e">
+        <comment>search_graph_hop_768: same tombstone-relay fix as _384</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks_768 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- Restores the rdr180-002 state (encode() projection, no
+                 tombstone-relay join) — the state immediately preceding this
+                 changeset, not the pre-RDR-180 catalog-012 shape. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks_768 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-019-7" author="nexus-t7m8e">
+        <comment>search_graph_hop_1024: same tombstone-relay fix as _384</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks_1024 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- Restores the rdr180-002 state (encode() projection, no
+                 tombstone-relay join) — the state immediately preceding this
+                 changeset, not the pre-RDR-180 catalog-012 shape. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks_1024 c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -436,6 +436,42 @@ class GraphHopParityTest {
         }
     }
 
+    /**
+     * nexus-t7m8e: a tombstoned document must not act as a live RELAY. Before
+     * this fix, {@code reach}'s recursive term had no liveness check at all —
+     * only the FINAL joined document was gated on {@code deleted_at IS NULL} —
+     * so a doc reachable ONLY through a tombstoned intermediate hop still
+     * surfaced. {@code tombstone_dropsAndReturns} above cannot catch this: it
+     * tombstones a doc with NOTHING beyond it, so the final-row filter and a
+     * traversal-time filter are indistinguishable there. This fixture plants a
+     * doc reachable ONLY via the tombstoned hop to discriminate the two.
+     */
+    @Test @Order(61)
+    void tombstonedRelay_blocksReachabilityBeyondIt() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // Isolated chain (not the shared g0/g1/g2 fixture): relay-a (live)
+            // --cites--> relay-b (tombstoned mid-test) --cites--> relay-c (live).
+            seedDoc(su, 1024, COLL_G, "relay-a", 1.0, 0.0);
+            seedDoc(su, 1024, COLL_G, "relay-b", 0.9, 0.1);
+            seedDoc(su, 1024, COLL_G, "relay-c", 0.8, 0.2);
+            link(su, TENANT_A, "relay-a", "relay-b", "cites");
+            link(su, TENANT_A, "relay-b", "relay-c", "cites");
+
+            assertThat(callGraph(su, 1024, COLL_G, "relay-a", "cites", 2, "out", 10))
+                .as("baseline: relay-c reachable at depth 2 via relay-b")
+                .containsExactlyInAnyOrder("relay-a", "relay-b", "relay-c");
+
+            setDeleted(su, TENANT_A, "relay-b", true);
+            assertThat(callGraph(su, 1024, COLL_G, "relay-a", "cites", 2, "out", 10))
+                .as("relay-c is reachable ONLY via the tombstoned relay-b — the "
+                    + "traversal itself must gate on deleted_at, not just the final row")
+                .containsExactly("relay-a");
+
+            setDeleted(su, TENANT_A, "relay-b", false);
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // GROUP 7 — RLS isolation (SECURITY INVOKER, caller RLS)
     // ══════════════════════════════════════════════════════════════════════════
@@ -631,6 +667,11 @@ class GraphHopParityTest {
             "  UNION " +
             "    SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END, r.d + 1 " +
             "    FROM reach r JOIN nexus.catalog_links l ON " + dirPred + " " +
+            // nexus-t7m8e: both traversed endpoints must be LIVE — an algorithmic
+            // alias of the function body's own fix, so this oracle stays in
+            // lockstep with search_graph_hop_<dim> rather than silently diverging.
+            "    JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL " +
+            "    JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL " +
             "    WHERE r.d < " + depth +
             "      AND (" + sqlText(linkType) + " IS NULL OR l.link_type = " + sqlText(linkType) + ") " +
             "), reached AS (SELECT DISTINCT tumbler FROM reach) " +
