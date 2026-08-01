@@ -137,6 +137,76 @@ class Catalog016SourceUriUniqueTest {
         assertEquals("", CatalogRepository.deriveSourceUri("", "", "/repo/root"));
     }
 
+    /**
+     * nexus-e7cys: the cross-project containment guard restored engine-side
+     * on the 5-arg overload. The 3-arg overload above stays unchanged (no
+     * owner_type to check against) — every case here uses the 5-arg form.
+     */
+    @Test
+    void deriveSourceUri_outsideRepoRoot_rejectedWithNamedError() {
+        var ex = assertThrows(CatalogRepository.CrossProjectSourceUriException.class, () ->
+            CatalogRepository.deriveSourceUri(
+                "file:///other/project/file.py", "", "/repo/root", "repo", false));
+        assertTrue(ex.getMessage().contains("cross-project source_uri rejected"));
+        assertTrue(ex.getMessage().contains("nexus-3e4s"));
+    }
+
+    @Test
+    void deriveSourceUri_insideRepoRoot_passesVerbatim() {
+        assertEquals("file:///repo/root/docs/a.md",
+            CatalogRepository.deriveSourceUri(
+                "file:///repo/root/docs/a.md", "", "/repo/root", "repo", false));
+    }
+
+    @Test
+    void deriveSourceUri_overrideHonored_logsWarning() {
+        ch.qos.logback.classic.Logger rootLogger =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        rootLogger.addAppender(logs);
+        try {
+            String result = CatalogRepository.deriveSourceUri(
+                "file:///other/project/file.py", "", "/repo/root", "repo", true);
+            assertEquals("file:///other/project/file.py", result);
+
+            var warnings = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=cross_project_source_uri_override_used"))
+                .toList();
+            assertEquals(1, warnings.size(), "the override bypass must be logged exactly once");
+        } finally {
+            rootLogger.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    @Test
+    void deriveSourceUri_nonRepoOwner_passesThrough() {
+        assertEquals("file:///other/project/file.py",
+            CatalogRepository.deriveSourceUri(
+                "file:///other/project/file.py", "", "/repo/root", "curator", false));
+    }
+
+    @Test
+    void deriveSourceUri_nonFileSchemes_passThrough() {
+        assertEquals("chroma://x",
+            CatalogRepository.deriveSourceUri("chroma://x", "", "/repo/root", "repo", false));
+        assertEquals("https://example.com/doc",
+            CatalogRepository.deriveSourceUri("https://example.com/doc", "", "/repo/root", "repo", false));
+    }
+
+    @Test
+    void deriveSourceUri_recombinationLeg_unaffectedByContainmentGuard() {
+        // The recombination leg (relative file_path anchored on repo_root) is
+        // inherently containment-safe by construction — the 5-arg overload
+        // must not regress it.
+        assertEquals("file:///repo/root/docs/a.md",
+            CatalogRepository.deriveSourceUri("", "docs/a.md", "/repo/root", "repo", false));
+    }
+
     @Test
     void filePathOnlyRegistrationsDeriveUriAndAreRaceGuarded() throws Exception {
         // The critique's Critical 2: the dominant `nx index repo` path sends

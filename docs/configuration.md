@@ -20,7 +20,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
 | `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to a legacy ChromaDB store. **Inert as of 7.0.0** — the migration reader was deleted with the `chromadb` dependency (RDR-155 P4b). The directory is left on disk untouched as a rollback source; T3 serves from the Postgres+pgvector service. |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
-| `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
+| `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` on the **client** to bypass the register-time cross-project source_uri guard, enforced engine-side (`CatalogRepository.deriveSourceUri`, nexus-e7cys). `HttpCatalogClient.register`/`.register_many` read this and forward it on the wire as `allow_cross_project` — the engine has no access to the client's environment. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing. The engine logs `event=cross_project_source_uri_override_used` whenever the override is actually exercised |
 
 **`config.yml` keys** (set by `nx init`, under the `local:` block in `~/.config/nexus/config.yml`):
 

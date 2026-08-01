@@ -680,6 +680,104 @@ public final class CatalogRepository {
         return "file://" + p.normalize();
     }
 
+    /**
+     * nexus-e7cys: {@link #deriveSourceUri(String, String, String)} plus the
+     * nexus-3e4s cross-project containment guard, restored engine-side.
+     *
+     * <p>The local arm ({@code catalog.py}, deleted at RDR-158 P4) REJECTED an
+     * explicit {@code file://} {@code source_uri} whose path did not resolve
+     * inside a {@code "repo"} owner's {@code repo_root} — the signature of a
+     * ~6,500-row contamination class where one project's owner accumulated
+     * rows whose source_uri lived in a DIFFERENT project's working tree. The
+     * port to this class kept the RECOMBINATION leg (relative {@code
+     * file_path} anchored on {@code repoRoot}, which is inherently
+     * containment-safe by construction) but dropped the REJECTION leg: an
+     * explicit {@code source_uri} was returned verbatim, unchecked.
+     *
+     * <p>This overload restores the rejection leg with ONE deliberate
+     * departure from the local arm: it is LEXICAL, never REALPATH. The local
+     * guard resolved symlinks on both sides (tolerating e.g. macOS's
+     * {@code /private/var} vs {@code /var}) because it ran on the SAME
+     * filesystem the paths described. This server does not — a
+     * {@code file://} URI names a path on the CALLING client's filesystem,
+     * and resolving it against the server's own filesystem would be
+     * resolving against the wrong machine entirely (or, worse, silently
+     * "succeeding" against a same-named path that happens to exist on the
+     * server host by coincidence). A normalize()-then-{@code startsWith()}
+     * prefix check is the honest engine-side equivalent; the local arm's
+     * symlink tolerance is deliberately NOT restored here.
+     *
+     * <p>Scope, matching the local arm exactly: only {@code "repo"} owners
+     * with a non-empty {@code repoRoot} enforce the check; {@code "curator"}
+     * owners and pre-existing repo owners with no {@code repoRoot} pass
+     * through. Only {@code file://} URIs carry a filesystem identity to
+     * compare — {@code chroma://}, {@code https://}, etc. pass through
+     * unchanged. {@code allowCrossProject} is the wire form of the local
+     * arm's {@code NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1} escape hatch (see
+     * {@code src/nexus/catalog/types.py:143}): the CLIENT reads its own
+     * environment and populates this field, since the server has no access
+     * to the client's environment.
+     */
+    public static String deriveSourceUri(String sourceUri, String filePath, String repoRoot,
+                                          String ownerType, boolean allowCrossProject) {
+        String derived = deriveSourceUri(sourceUri, filePath, repoRoot);
+        if (!sourceUri.isEmpty()) {
+            // derived == sourceUri whenever sourceUri was non-empty (the 3-arg
+            // method's own early return) — this is exactly the explicit-uri
+            // (rejection-leg) case; the recombination leg never reaches here.
+            checkCrossProjectContainment(derived, ownerType, repoRoot, allowCrossProject);
+        }
+        return derived;
+    }
+
+    /** Thrown by {@link #checkCrossProjectContainment}; maps to 400 like {@link DanglingEndpointException}. */
+    public static final class CrossProjectSourceUriException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
+        CrossProjectSourceUriException(String message) {
+            super(message);
+        }
+    }
+
+    private static void checkCrossProjectContainment(
+            String sourceUri, String ownerType, String repoRoot, boolean allowCrossProject) {
+        if (sourceUri == null || sourceUri.isEmpty()) return;
+        if (!"repo".equals(ownerType)) return;
+        if (repoRoot == null || repoRoot.isEmpty()) return;
+
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(sourceUri);
+        } catch (IllegalArgumentException e) {
+            // Malformed URI is a different bug class; not this guard's job.
+            return;
+        }
+        if (!"file".equals(uri.getScheme())) return;
+        String rawPath = uri.getPath();
+        if (rawPath == null || rawPath.isEmpty()) return;
+
+        java.nio.file.Path filePath = java.nio.file.Paths.get(rawPath).normalize();
+        java.nio.file.Path root = java.nio.file.Paths.get(repoRoot).normalize();
+        if (filePath.startsWith(root)) return;
+
+        if (allowCrossProject) {
+            // nexus-e7cys: the override was actually EXERCISED (the check would
+            // have failed without it) — log so the bypass leaves an audit trail,
+            // matching the local arm's "never the right answer for normal
+            // indexing" framing of the env-var escape hatch.
+            log.warn("event=cross_project_source_uri_override_used repo_root={} source_uri={}",
+                      repoRoot, sourceUri);
+            return;
+        }
+        throw new CrossProjectSourceUriException(
+            "cross-project source_uri rejected (nexus-3e4s/nexus-e7cys): "
+            + "owner repo_root=" + repoRoot + " but source_uri=" + sourceUri
+            + " normalizes to " + filePath + ", which is outside the owner's "
+            + "repo_root. This is the signature of the contamination bug "
+            + "class. Pass allow_cross_project=true to bypass for emergency "
+            + "recovery.");
+    }
+
     private String ownerRepoRoot(org.jooq.DSLContext ctx, String tenant, String ownerPrefix) {
         String root = ctx.select(CATALOG_OWNERS.REPO_ROOT).from(CATALOG_OWNERS)
                          .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
@@ -737,19 +835,23 @@ public final class CatalogRepository {
             // blind DO-NOTHING upsert this replaces named only the address key and was
             // exposed to catalog_owners' other two. Same round-trip count — this SELECT
             // is the repo_root lookup that used to happen a few lines below.
+            String ownerType = s(fields, "owner_type", "repo");
             String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
                 s(fields, "owner_name", ownerPrefix),
-                s(fields, "owner_type", "repo"));
+                ownerType);
 
             // Idempotency check BEFORE claiming a sequence number — avoids permanent seq gaps
             // on re-registration of existing documents.
             // Idempotency check: only match LIVE (non-tombstoned) docs.
             // A tombstoned source_uri re-registration allocates a NEW tumbler;
             // the trash entry is left untouched (users can restore or purge it separately).
+            // nexus-e7cys: cross-project containment guard on an explicit source_uri;
+            // allow_cross_project is the wire form of the client's
+            // NEXUS_CATALOG_ALLOW_CROSS_PROJECT env-var escape hatch.
             String srcUri = deriveSourceUri(
                 s(fields, "source_uri", ""),
                 s(fields, "file_path", ""),
-                repoRoot);
+                repoRoot, ownerType, bool(fields, "allow_cross_project", false));
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
                                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
@@ -907,8 +1009,10 @@ public final class CatalogRepository {
             java.util.List<String> filePaths = new java.util.ArrayList<>();
             for (int i = 0; i < docs.size(); i++) {
                 var d = docs.get(i);
+                // nexus-e7cys: per-doc containment guard, same as the single-doc path.
                 uriOf[i] = deriveSourceUri(
-                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot);
+                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot,
+                    s(d, "owner_type", "repo"), bool(d, "allow_cross_project", false));
                 if (!uriOf[i].isEmpty()) srcUris.add(uriOf[i]);
                 String fp = s(d, "file_path", "");
                 if (!fp.isEmpty()) filePaths.add(fp);
@@ -4821,6 +4925,14 @@ public final class CatalogRepository {
         Object v = m.get(k);
         if (v instanceof Number n) return n.doubleValue();
         return null;
+    }
+
+    /** Boolean field extraction tolerant of a real JSON boolean or its string form. */
+    private static boolean bool(Map<String, Object> m, String k, boolean def) {
+        Object v = m.get(k);
+        if (v == null) return def;
+        if (v instanceof Boolean b) return b;
+        return "true".equalsIgnoreCase(String.valueOf(v));
     }
 
     /** Non-null empty: returns "" if null. */
