@@ -125,14 +125,10 @@ class TestListByCollection:
                 file_path=f"/papers/p{i}.pdf",
             )
         capped = len(cat.list_by_collection("knowledge__delos", limit=3))
-        # nexus-23wlw: the client sends limit=, the engine's
-        # documentsByCollection has no limit parameter at all, so the cap
-        # is silently dropped. Assert the broken value so the fix fails
-        # loudly here instead of going quietly green.
-        assert capped == 5, (
-            f"nexus-23wlw looks FIXED (limit=3 returned {capped}, not the "
-            f"broken 5) — restore `assert capped == 3`"
-        )
+        # FIXED by nexus-xoimv (2026-08-01): documentsByCollection now
+        # honors (limit, offset); the inverted pin above this line fired
+        # exactly as designed when the fix landed. limit is real now.
+        assert capped == 3
         assert len(cat.list_by_collection("knowledge__delos", limit=None)) == 5
 
 
