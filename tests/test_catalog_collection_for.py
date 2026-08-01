@@ -85,16 +85,6 @@ def test_owner_segment_for_tumbler_single_segment_returns_empty() -> None:
 
 # ── Catalog.collection_for: validation ──────────────────────────────────
 
-@pytest.mark.xfail(
-
-    strict=True,
-
-    raises=AssertionError,
-
-    reason="nexus-fm3th: CollectionName constructor performs no content_type validation — only .parse() validates (previously mislabelled nexus-cecqy family). CLIENT fix; flips with fm3th.",
-
-)
-
 def test_collection_for_rejects_unknown_content_type(catalog) -> None:
     raised = False
     try:
@@ -106,21 +96,6 @@ def test_collection_for_rejects_unknown_content_type(catalog) -> None:
     except ValueError:
         raised = True
     assert raised, "expected ValueError from the canonical validation contract"
-
-
-@pytest.mark.xfail(
-
-
-    strict=True,
-
-
-    raises=AssertionError,
-
-
-    reason="nexus-fm3th: CollectionName constructor performs no embedding_model validation — only .parse() validates (previously mislabelled nexus-cecqy family). CLIENT fix; flips with fm3th.",
-
-
-)
 
 
 def test_collection_for_rejects_non_canonical_embedding_model(catalog) -> None:
