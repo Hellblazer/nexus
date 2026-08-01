@@ -24,6 +24,7 @@ from nexus.upgrade_finish import (
     detect_stale_processes,
     enumerate_processes,
     heal_diag_view,
+    invocation_is_preview,
     restart_stale,
     unload_stale_t2_launchagent,
     unload_stale_service_launchagent,
@@ -48,6 +49,28 @@ def _assert_service_cycled(sp) -> None:
     ]
     assert ["nx", "daemon", "service", "stop"] in argvs, argvs
     assert ["nx", "daemon", "service", "start"] in argvs, argvs
+
+
+def _converged_provenance(tmp_path, version: str = _REQUIRED_STR) -> dict:
+    """Write a REAL installed binary + return the receipt that backs it.
+
+    nexus-8eaeg: "converged" now means the receipt AND the bytes agree, so a
+    fixture that claims convergence has to put a binary on disk. A bare
+    ``{"version": ...}`` dict no longer describes a converged box — it
+    describes one whose receipt nothing backs, which is a re-acquisition
+    trigger (see ``TestNoAcquisitionOnPreviewOrConvergedBox``).
+    """
+    import hashlib
+
+    svc = tmp_path / "service"
+    svc.mkdir(parents=True, exist_ok=True)
+    payload = b"native-engine-image"
+    (svc / "nexus-service").write_bytes(payload)
+    return {
+        "version": version,
+        "tag": "engine-service-v" + version,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
 
 
 def _older_version_str() -> str:
@@ -672,7 +695,7 @@ class TestConvergeEngine:
         self._creds(tmp_path)
         with patch("nexus.config.is_local_mode", return_value=True), patch(
             "nexus.daemon.binary_lifecycle.read_installed_provenance",
-            return_value={"version": _REQUIRED_STR},
+            return_value=_converged_provenance(tmp_path),
         ), patch("nexus.daemon.binary_install.install_binary") as install:
             actions = converge_engine(tmp_path)
         assert actions == []
@@ -945,7 +968,7 @@ class TestConvergeEngineLiveVerification:
         self._creds(tmp_path)
         return patch(
             "nexus.daemon.binary_lifecycle.read_installed_provenance",
-            return_value={"version": _REQUIRED_STR},
+            return_value=_converged_provenance(tmp_path),
         )
 
     def _running(self, **kw):
@@ -2140,3 +2163,365 @@ class TestBackfillDiagRoleBestEffort:
             lambda: (_ for _ in ()).throw(RuntimeError("no bins")),
         )
         assert pp.backfill_diag_role_best_effort() is False
+
+
+class TestNoAcquisitionOnPreviewOrConvergedBox:
+    """nexus-8eaeg: the ACQUISITION seam pins.
+
+    Observed live on the first 7.0.0 run: `nx upgrade --dry-run` held a 4-5
+    minute HTTPS pull of the ~190 MB engine release asset and persisted
+    nothing. Two independent properties are pinned here, both stated as
+    "the downloader is never invoked" rather than "the summary looks right",
+    because the summary was fine in the incident — it was the socket that
+    was not:
+
+    1. a DRY RUN plans and never acquires (any box, converged or not);
+    2. a WET run on a converged box whose receipt is BACKED BY THE BYTES
+       does not re-acquire either — and one whose receipt is NOT backed
+       (missing/corrupt binary) does, loudly.
+
+    The seam asserted is ``binary_install.install_binary``: everything below
+    it opens the network, nothing above it does.
+    """
+
+    def _creds(self, tmp_path):
+        (tmp_path / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+
+    def _receipt(self, tmp_path, version: str, *, payload: bytes = b"engine",
+                 sha: str | None = None, place_binary: bool = True):
+        """Write a real sidecar + (optionally) a real binary on disk."""
+        import hashlib
+        import json
+
+        svc = tmp_path / "service"
+        svc.mkdir(parents=True, exist_ok=True)
+        if place_binary:
+            (svc / "nexus-service").write_bytes(payload)
+        digest = sha if sha is not None else hashlib.sha256(payload).hexdigest()
+        (svc / "nexus-service.meta.json").write_text(
+            json.dumps({
+                "version": version,
+                "tag": "engine-service-v" + version,
+                "sha256": digest,
+            })
+        )
+
+    def test_dry_run_on_a_converged_box_acquires_nothing(self, tmp_path):
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _REQUIRED_STR)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=_RunningEngine(up=False, version=None),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.daemon.binary_install._download") as dl:
+            actions = converge_engine(tmp_path, dry_run=True)
+        install.assert_not_called()
+        dl.assert_not_called()
+        assert actions == []
+
+    def test_dry_run_on_a_stale_box_plans_the_acquisition_without_doing_it(
+        self, tmp_path,
+    ):
+        """The --dry-run promise, stated positively: the pending acquisition
+        is REPORTED as an action line, and the downloader is untouched."""
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _older_version_str())
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.daemon.binary_install._download") as dl:
+            actions = converge_engine(tmp_path, dry_run=True)
+        install.assert_not_called()
+        dl.assert_not_called()
+        assert len(actions) == 1
+        assert actions[0].startswith("would converge engine")
+        assert _older_version_str() in actions[0]
+        assert _REQUIRED_STR in actions[0]
+
+    def test_wet_run_on_a_converged_verified_box_does_not_reacquire(self, tmp_path):
+        """The severity question: does a plain `nx upgrade` re-pull 190 MB on
+        a box that is already right? It must not — and the verification that
+        earns that skip is LOCAL (receipt digest vs the installed file)."""
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _REQUIRED_STR)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=_RunningEngine(up=False, version=None),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.daemon.binary_install._download") as dl:
+            actions = converge_engine(tmp_path)
+        install.assert_not_called()
+        dl.assert_not_called()
+        assert actions == []
+
+    def test_wet_run_on_a_version_mismatch_does_acquire(self, tmp_path):
+        """The inverse pin — the skip above must be earned, not universal."""
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _older_version_str())
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service",
+                                  {"version": _REQUIRED_STR}),
+                ) as install, \
+                patch(
+                    "nexus.upgrade_finish._restart_and_verify",
+                    return_value=["<restart stubbed>"],
+                ):
+            actions = converge_engine(tmp_path)
+        install.assert_called_once()
+        assert install.call_args.args[0] == _PINNED_TAG
+        assert actions == ["<restart stubbed>"]
+
+    def test_wet_run_reacquires_when_the_receipt_is_not_backed_by_the_bytes(
+        self, tmp_path,
+    ):
+        """FAIL LOUD, not fail silent: a receipt claiming the required version
+        with NO binary behind it used to read as converged forever. It is a
+        re-acquisition trigger, and the reason is named."""
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _REQUIRED_STR, place_binary=False)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service",
+                                  {"version": _REQUIRED_STR}),
+                ) as install, \
+                patch(
+                    "nexus.upgrade_finish._restart_and_verify",
+                    return_value=["<restart stubbed>"],
+                ):
+            actions = converge_engine(tmp_path)
+        install.assert_called_once()
+        assert actions == ["<restart stubbed>"]
+
+    def test_dry_run_reports_an_unbacked_receipt_instead_of_reacquiring(
+        self, tmp_path,
+    ):
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _REQUIRED_STR, place_binary=False)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.daemon.binary_install._download") as dl:
+            actions = converge_engine(tmp_path, dry_run=True)
+        install.assert_not_called()
+        dl.assert_not_called()
+        assert len(actions) == 1
+        assert "would converge engine" in actions[0]
+        assert "unverified" in actions[0]
+        assert "missing" in actions[0]
+
+    def test_corrupt_installed_binary_is_reacquired_on_a_wet_run(self, tmp_path):
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _REQUIRED_STR, payload=b"engine",
+                      sha="0" * 64)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service",
+                                  {"version": _REQUIRED_STR}),
+                ) as install, \
+                patch(
+                    "nexus.upgrade_finish._restart_and_verify",
+                    return_value=["<restart stubbed>"],
+                ):
+            actions = converge_engine(tmp_path)
+        install.assert_called_once()
+
+
+class TestInvocationIsPreview:
+    """nexus-8eaeg: the root-group finish trigger has no other way to learn
+    that the invocation promised to change nothing — ``--dry-run`` is a
+    SUBCOMMAND flag and Click's group callback runs before it is parsed
+    (verified against click 8.3: ``ctx.args``/``ctx.protected_args`` are both
+    empty at group-callback time)."""
+
+    def test_dry_run_token_is_a_preview(self):
+        assert invocation_is_preview(["upgrade", "--dry-run"]) is True
+
+    def test_ordinary_invocation_is_not_a_preview(self):
+        assert invocation_is_preview(["upgrade"]) is False
+        assert invocation_is_preview(["search", "dry run of the release"]) is False
+
+    def test_mcp_style_argv_is_not_a_preview(self):
+        assert invocation_is_preview([]) is False
+
+
+class TestCheckVersionTransitionPreview:
+    """The end-to-end shape of the incident: a version transition + a
+    ``--dry-run`` invocation. Nothing may be acquired, nothing restarted, and
+    — the part that makes the deferral safe — the one-shot version stamp must
+    NOT be consumed, so the next ordinary invocation still finishes for real.
+    """
+
+    def _transitioning(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.18.1\n")
+        (tmp_path / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+
+    def test_preview_plans_acquires_nothing_and_leaves_the_stamp(self, tmp_path):
+        self._transitioning(tmp_path)
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
+            "nexus.config.is_local_mode", return_value=True,
+        ), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _older_version_str()},
+        ), patch(
+            "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+        ), patch(
+            "nexus.daemon.binary_install.install_binary",
+        ) as install, patch(
+            "nexus.daemon.binary_install._download",
+        ) as dl, patch(
+            "nexus.upgrade_finish.heal_diag_view",
+        ) as heal, patch(
+            "nexus.upgrade_finish.unload_stale_service_launchagent",
+        ) as unload:
+            line = check_version_transition(tmp_path, preview=True)
+
+        install.assert_not_called()
+        dl.assert_not_called()
+        heal.assert_not_called()
+        unload.assert_not_called()
+        assert line is not None
+        assert "PREVIEW ONLY" in line
+        assert "would converge engine" in line
+        # The transition is still owed — the stamp was not consumed.
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.18.1"
+
+    def test_the_wet_pass_still_converges_after_a_preview(self, tmp_path):
+        """The deferral must be a deferral, not a cancellation."""
+        self._transitioning(tmp_path)
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.unload_stale_service_launchagent", return_value=[],
+        ), patch(
+            "nexus.config.is_local_mode", return_value=True,
+        ), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _older_version_str()},
+        ), patch(
+            "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+        ), patch(
+            "nexus.daemon.binary_install.install_binary",
+            return_value=(tmp_path / "service" / "nexus-service",
+                          {"version": _REQUIRED_STR}),
+        ) as install, patch(
+            "nexus.upgrade_finish._restart_and_verify", return_value=["cycled"],
+        ):
+            check_version_transition(tmp_path, preview=True)
+            install.assert_not_called()
+            line = check_version_transition(tmp_path, preview=False)
+
+        install.assert_called_once()
+        assert "converged" not in (line or "") or "cycled" in (line or "")
+        assert (tmp_path / "last_seen_version").read_text().strip() == "7.0.0"
+
+    def test_preview_defaults_from_argv(self, tmp_path, monkeypatch):
+        """No explicit ``preview=`` at the ``nexus/cli.py`` call site — the
+        default must come from the process's own argv, or the incident
+        returns."""
+        self._transitioning(tmp_path)
+        monkeypatch.setattr("sys.argv", ["nx", "upgrade", "--dry-run"])
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
+            "nexus.config.is_local_mode", return_value=True,
+        ), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _older_version_str()},
+        ), patch(
+            "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+        ), patch(
+            "nexus.daemon.binary_install.install_binary",
+        ) as install, patch(
+            "nexus.daemon.binary_install._download",
+        ) as dl:
+            line = check_version_transition(tmp_path)
+
+        install.assert_not_called()
+        dl.assert_not_called()
+        assert "PREVIEW ONLY" in line
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.18.1"
+
+    def test_stale_processes_are_only_named_in_preview_never_restarted(
+        self, tmp_path,
+    ):
+        """The /proc-vs-subprocess mock seam gotcha this file documents makes
+        a real restart hard to observe; assert on ``restart_stale``'s own
+        dry_run contract instead — the finish pass must hand it through."""
+        self._transitioning(tmp_path)
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "7.0.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(
+                installed_version="7.0.0",
+                stale=[
+                    StaleProcess(
+                        pid=200, kind="aspect-worker", command="x", age_s=99999,
+                    )
+                ],
+            ),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.os.kill",
+        ) as kill:
+            line = check_version_transition(tmp_path, preview=True)
+
+        kill.assert_not_called()
+        assert "would restart aspect-worker (pid 200)" in line
