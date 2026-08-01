@@ -397,6 +397,67 @@ class TaxonomyRepositoryTest {
 
     // ── Links ──────────────────────────────────────────────────────────────────
 
+    @Test @Order(191)
+    void linkDrift_mirrorsRefreshProjectionLinksPredicate() {
+        // nexus-ypori. The audit and the materializer must agree on what
+        // "linkable" means. They did not: the client-side check required the
+        // co-occurring partner to BE projection while refreshProjectionLinks
+        // requires it to be NON-projection, so it reported 50 unlinkable
+        // topics as drift and suppressed the 2 real ones. These three shapes
+        // are the whole contract.
+        long drifted   = repo.insertTopic(TENANT_A, "drift-proj", null, COL_A, 0, null, null);
+        long partner   = repo.insertTopic(TENANT_A, "drift-centroid", null, COL_A, 0, null, null);
+        long bothProj1 = repo.insertTopic(TENANT_A, "bothproj-1", null, COL_A, 0, null, null);
+        long bothProj2 = repo.insertTopic(TENANT_A, "bothproj-2", null, COL_A, 0, null, null);
+        long lonely    = repo.insertTopic(TENANT_A, "lonely-proj", null, COL_A, 0, null, null);
+
+        // (1) LINKABLE: projection + non-projection on one doc, no link row.
+        repo.assignTopic(TENANT_A, "doc-drift", drifted, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, "doc-drift", partner, "centroid",   0.8, COL_A, null);
+
+        // (2) NOT linkable: two projection assignments produce no link at all.
+        repo.assignTopic(TENANT_A, "doc-bothproj", bothProj1, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, "doc-bothproj", bothProj2, "projection", 0.8, COL_A, null);
+
+        // (3) NOT linkable: a lone assignment has nothing to pair with.
+        repo.assignTopic(TENANT_A, "doc-lonely", lonely, "projection", 0.7, COL_A, null);
+
+        var report = repo.linkDrift(TENANT_A, 50);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) report.get("rows");
+        List<Long> ids = rows.stream()
+            .map(m -> ((Number) m.get("topic_id")).longValue()).toList();
+
+        assertThat(ids).contains(drifted);
+        assertThat(ids).doesNotContain(bothProj1, bothProj2, lonely);
+
+        // and once the link exists, the drift clears
+        repo.upsertTopicLink(TENANT_A, drifted, partner, 1, "projection");
+        var after = repo.linkDrift(TENANT_A, 50);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> afterRows = (List<Map<String, Object>>) after.get("rows");
+        assertThat(afterRows.stream()
+            .map(m -> ((Number) m.get("topic_id")).longValue()).toList())
+            .doesNotContain(drifted);
+    }
+
+    @Test @Order(192)
+    void linkDrift_countIsExactWhileRowsAreCapped() {
+        // drift_count must not be len(rows): an operator who caps the payload
+        // still needs to know the true blast radius.
+        long partner = repo.insertTopic(TENANT_A, "cap-partner", null, COL_A, 0, null, null);
+        for (int i = 0; i < 4; i++) {
+            long t = repo.insertTopic(TENANT_A, "cap-" + i, null, COL_A, 0, null, null);
+            repo.assignTopic(TENANT_A, "doc-cap-" + i, t, "projection", 0.9, COL_A, null);
+            repo.assignTopic(TENANT_A, "doc-cap-" + i, partner, "centroid", 0.8, COL_A, null);
+        }
+        var report = repo.linkDrift(TENANT_A, 2);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) report.get("rows");
+        assertThat(rows).hasSize(2);
+        assertThat(((Number) report.get("drift_count")).intValue()).isGreaterThanOrEqualTo(4);
+    }
+
     @Test @Order(19)
     void upsertAndGetTopicLinks() {
         long t1 = repo.insertTopic(TENANT_A, "link-topic-1", null, COL_A, 0, null, null);

@@ -1935,6 +1935,93 @@ def _run_check_taxonomy() -> None:
     """
     import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
 
+    # THE VERDICT IS SERVICE-SCOPED; the census below is not (nexus-ypori).
+    #
+    # This check has always read the local SQLite file. That was the operating
+    # substrate once; since RDR-158 P4 it is a FROZEN MIGRATION SOURCE, so
+    # auditing it and exiting non-zero reports a stale relic as a live fault —
+    # which is how the release-sandbox smoke came to block on 29-day-old rows
+    # that do not exist in the engine at all.
+    #
+    # Its two siblings in the same doctor loop already resolved this by
+    # reporting N/A (_run_check_schema, _run_check_plan_library); the
+    # plan-library docstring names this exact failure, "without that a fresh
+    # install exits non-zero from the release-sandbox smoke".
+    #
+    # The census is KEPT rather than deleted, because it is the only taxonomy
+    # inspection of the frozen source and RDR-176 Gap 2 wants those probes
+    # working with no engine running (it is why storage_boundary_lint
+    # allowlists this module's one sqlite3.connect). It is demoted from
+    # verdict to note: it reports what it found and names the store, and it
+    # never decides the exit code.
+    #
+    # The engine cannot answer this question yet — there is no route that
+    # computes the drift, and reconstructing it client-side costs one round
+    # trip per topic plus a bulk assignment read. Tracked separately.
+    # SERVICE FIRST. The engine computes this against the store the running
+    # system actually writes, with the predicate held next to the materializer
+    # it audits (TaxonomyRepository.linkDrift). Only when no service answers do
+    # we fall back to the legacy census below, and we say which store we read.
+    from contextlib import suppress as _suppress  # noqa: PLC0415 — branch-local
+
+    report: dict[str, Any] | None = None
+    _unreachable = "unknown"
+    try:
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
+
+        store = HttpTaxonomyStore()   # self-resolves the endpoint, as t2/__init__ does
+        try:
+            report = store.get_link_drift()
+        finally:
+            with _suppress(Exception):
+                store.close()
+    except Exception as exc:  # noqa: BLE001 — unreachable or too-old engine: fall through, saying which
+        text = str(exc)
+        if "404" in text:
+            # The route is newer than the deployed engine. Distinguish this
+            # from "no service" — the operator's action differs entirely
+            # (deploy an engine carrying /links/drift vs. start one).
+            _unreachable = (
+                "the deployed engine has no /links/drift route (added for "
+                "nexus-ypori) — it reports this check only once an engine "
+                "carrying it is deployed"
+            )
+        else:
+            _unreachable = text
+
+    if report is not None:
+        total = int(report.get("projection_total") or 0)
+        count = int(report.get("drift_count") or 0)
+        if not count:
+            click.echo(
+                f"✓ topic_links invariant holds ({total} topic(s) with "
+                "projection assignments)."
+            )
+            return
+        click.echo(
+            f"✗ topic_links drift: {count}/{total} topic(s) have projection "
+            "assignments but no topic_links row."
+        )
+        for row in (report.get("rows") or [])[:10]:
+            tid = row.get("topic_id")
+            pretty = row.get("label") or f"(unlabelled id={tid})"
+            coll = row.get("collection")
+            scope = f" [{coll}]" if coll else ""
+            click.echo(f"  - topic {tid}: {pretty}{scope}")
+        if count > 10:
+            click.echo(f"  … {count - 10} more")
+        click.echo(
+            "Fix: re-run `nx taxonomy project --backfill --persist` to rebuild "
+            "the materialized view."
+        )
+        raise click.exceptions.Exit(1)
+
+    click.echo(
+        f"Engine check unavailable ({_unreachable}). Reading the frozen SQLite "
+        "migration source instead — downgrade/migration troubleshooting only, "
+        "and NOT a statement about the running system."
+    )
+
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     db_path = default_db_path()
@@ -1944,7 +2031,7 @@ def _run_check_taxonomy() -> None:
 
     # Context manager guards against a raise/early-return leaking the
     # connection, matching _run_check_plan_library (RDR-176 review M-3).
-    from contextlib import closing  # noqa: PLC0415 — branch-local; avoids import cost on the non-doctor path
+    from contextlib import closing, suppress  # noqa: PLC0415 — branch-local; avoids import cost on the non-doctor path
 
     with closing(_t2_diagnostic_connect(db_path, sqlite3)) as conn:
         _run_check_taxonomy_body(conn)
@@ -2030,26 +2117,30 @@ def _run_check_taxonomy_body(conn: Any) -> None:
 
     if not drift_rows:
         click.echo(
-            f"✓ topic_links invariant holds ({projection_total} topic(s) "
-            "with projection assignments)."
+            f"  legacy source: topic_links invariant holds ({projection_total} "
+            "topic(s) with projection assignments)."
         )
         return
 
+    # A NOTE, not a verdict — no Exit(1). These rows are in the frozen
+    # migration source, so failing on them would block a release on data the
+    # running system does not use.
     click.echo(
-        f"✗ topic_links drift: {len(drift_rows)}/{projection_total} topic(s) "
-        "have projection assignments but no topic_links row."
+        f"  legacy source: topic_links drift, {len(drift_rows)}/"
+        f"{projection_total} topic(s) with projection assignments but no "
+        "topic_links row."
     )
     for topic_id, label, coll in drift_rows[:10]:
         pretty = label or f"(unlabelled id={topic_id})"
         scope = f" [{coll}]" if coll else ""
-        click.echo(f"  - topic {topic_id}: {pretty}{scope}")
+        click.echo(f"    - topic {topic_id}: {pretty}{scope}")
     if len(drift_rows) > 10:
-        click.echo(f"  … {len(drift_rows) - 10} more")
+        click.echo(f"    … {len(drift_rows) - 10} more")
     click.echo(
-        "Fix: re-run `nx taxonomy project --backfill --persist` to rebuild "
-        "the materialized view."
+        "  This is the frozen SQLite migration source, NOT the engine. It is "
+        "reported for downgrade/migration troubleshooting and does not affect "
+        "this check's result."
     )
-    raise click.exceptions.Exit(1)
 
 
 def _run_check_quotas(*, json_out: bool = False) -> None:

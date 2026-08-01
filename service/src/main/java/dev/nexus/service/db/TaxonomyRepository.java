@@ -1543,6 +1543,77 @@ public final class TaxonomyRepository {
     }
 
     /**
+     * Topics carrying projection assignments that have no {@code topic_links}
+     * row, restricted to those a link is structurally POSSIBLE for.
+     *
+     * <p>The predicate mirrors {@link #refreshProjectionLinks} exactly, and that
+     * is the whole point: a drift audit whose notion of "linkable" differs from
+     * the materializer's reports fiction. {@code refreshProjectionLinks} pairs a
+     * projection TARGET with a NON-projection SOURCE, so a topic is only drifted
+     * if some doc gives it a non-projection partner. Two projection assignments
+     * on one doc produce no link and are not drift; a lone assignment cannot
+     * pair at all.
+     *
+     * <p>This route exists because the client-side check could not ask the
+     * engine and audited the frozen SQLite migration source instead
+     * (nexus-ypori) — reporting stale relic rows as live faults while the real
+     * store went unexamined. Computing it here is also the only affordable
+     * shape: reconstructing it client-side costs one round trip per topic plus
+     * a bulk assignment read.
+     *
+     * @param limit max drift rows returned; the total count is exact regardless
+     * @return {@code {projection_total, drift_count, rows:[{topic_id,label,collection}]}}
+     */
+    public Map<String, Object> linkDrift(String tenant, int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var tgt = TOPIC_ASSIGNMENTS.as("ta");
+            var src = TOPIC_ASSIGNMENTS.as("ta2");
+
+            var linkable = tgt.ASSIGNED_BY.eq("projection")
+                .and(notExists(
+                    ctx.selectOne().from(TOPIC_LINKS)
+                       .where(TOPIC_LINKS.FROM_TOPIC_ID.eq(tgt.TOPIC_ID)
+                           .or(TOPIC_LINKS.TO_TOPIC_ID.eq(tgt.TOPIC_ID)))))
+                .and(exists(
+                    ctx.selectOne().from(src)
+                       .where(src.DOC_ID.eq(tgt.DOC_ID)
+                           .and(src.TOPIC_ID.ne(tgt.TOPIC_ID))
+                           .and(src.ASSIGNED_BY.ne("projection")))));
+
+            int projectionTotal = ctx.select(countDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID))
+                .from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection"))
+                .fetchOne(0, int.class);
+
+            int driftCount = ctx.select(countDistinct(tgt.TOPIC_ID))
+                .from(tgt).where(linkable)
+                .fetchOne(0, int.class);
+
+            var rows = ctx.selectDistinct(tgt.TOPIC_ID, TOPICS.LABEL, tgt.SOURCE_COLLECTION)
+                .from(tgt)
+                .leftJoin(TOPICS).on(TOPICS.ID.eq(tgt.TOPIC_ID))
+                .where(linkable)
+                .orderBy(tgt.TOPIC_ID)
+                .limit(Math.max(0, limit))
+                .fetch();
+
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : rows) {
+                var m = new LinkedHashMap<String, Object>();
+                m.put("topic_id", r.get(tgt.TOPIC_ID));
+                m.put("label", r.get(TOPICS.LABEL));
+                m.put("collection", r.get(tgt.SOURCE_COLLECTION));
+                out.add(m);
+            }
+            var result = new LinkedHashMap<String, Object>();
+            result.put("projection_total", projectionTotal);
+            result.put("drift_count", driftCount);
+            result.put("rows", out);
+            return result;
+        });
+    }
+
+    /**
      * Generate cooccurrence links: find topic pairs sharing docs across different collections.
      * Returns the count of upserted link pairs.
      */

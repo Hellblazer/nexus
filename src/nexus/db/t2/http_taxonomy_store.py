@@ -563,6 +563,28 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             (r["from_topic_id"], r["to_topic_id"]): r["link_count"] for r in result
         }
 
+    def get_link_drift(self, *, limit: int = 50) -> dict[str, Any]:
+        """Topics with projection assignments but no ``topic_links`` row.
+
+        nexus-ypori. The doctor check that asks this question had no
+        service-mode path — it read the frozen local SQLite migration source
+        and reported its 29-day-old rows as live faults, while the engine, the
+        only store the running system writes, went unexamined.
+
+        Computed ENGINE-SIDE deliberately. The predicate must mirror
+        ``refreshProjectionLinks`` (a projection target needs a NON-projection
+        partner on the same doc), and keeping the two in one codebase is what
+        stops them drifting apart — they already had, in opposite directions,
+        which is what produced 50 false positives while suppressing the 2 real
+        ones. Reconstructing it client-side would also cost a round trip per
+        topic plus a bulk assignment read.
+
+        :return: ``{projection_total, drift_count, rows: [{topic_id, label,
+            collection}]}``. ``drift_count`` is exact; ``rows`` is capped at
+        *limit* so a large drift does not return a huge payload.
+        """
+        return self._post("/links/drift", {"limit": limit}) or {}
+
     def upsert_topic_links(
         self,
         links: list[dict[str, Any]],

@@ -151,6 +151,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 // Links
                 case "/links/upsert"              -> handleUpsertLink(exchange, tenant, method);
                 case "/links/pairs"               -> handleGetLinkPairs(exchange, tenant, method);
+                case "/links/drift"               -> handleLinkDrift(exchange, tenant, method);
                 // ICF
                 case "/icf/source_count"          -> handleSourceCount(exchange, tenant, method);
                 case "/icf/rows"                  -> handleIcfRows(exchange, tenant, method);
@@ -569,6 +570,15 @@ public final class TaxonomyHandler implements HttpHandler {
             ? lst.stream().map(v -> ((Number) v).longValue()).toList()
             : List.of();
         HttpUtil.send(ex, 200, json(repo.getTopicLinkPairs(tenant, ids)));
+    }
+
+    /** nexus-ypori: topic_links drift, computed where the data actually lives. */
+    private void handleLinkDrift(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object rawLimit = body.get("limit");
+        int limit = rawLimit instanceof Number n ? n.intValue() : 50;
+        HttpUtil.send(ex, 200, json(repo.linkDrift(tenant, limit)));
     }
 
     // ── ICF ────────────────────────────────────────────────────────────────────

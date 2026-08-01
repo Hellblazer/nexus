@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -227,9 +227,137 @@ class TestDoctorCheckTaxonomy:
         bootstrap_migration_source(db_path)
         return db_path
 
+    @staticmethod
+    def _no_service():
+        """Force the legacy-source branch (nexus-ypori).
+
+        --check-taxonomy asks the ENGINE first; these fixtures seed a local
+        SQLite file, so without this the service answers and the fixture is
+        never read. Patching the store to raise exercises the documented
+        fallback: no reachable service -> read the frozen migration source and
+        say so.
+        """
+        return patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            side_effect=RuntimeError("no service in test"),
+        )
+
+    # ── the SERVICE branch (nexus-ypori) ────────────────────────────────────
+
+    @staticmethod
+    def _service_reports(report: dict):
+        """Stub the engine's /links/drift answer."""
+        store = MagicMock()
+        store.get_link_drift.return_value = report
+        return patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            return_value=store,
+        )
+
+    def test_service_clean_exits_zero(self, runner: CliRunner) -> None:
+        with self._service_reports(
+            {"projection_total": 986, "drift_count": 0, "rows": []}
+        ):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code == 0, result.output
+        assert "986" in result.output
+        # MUST NOT pass via the legacy fallback. These three assertions exist
+        # because the first version of this test DID: the service branch threw
+        # UnboundLocalError on a mis-scoped import, fell through to the SQLite
+        # census, and "invariant holds" matched that path's wording too. A
+        # green test proved nothing about the branch it named.
+        assert "Engine check unavailable" not in result.output, result.output
+        assert "frozen SQLite" not in result.output, result.output
+        assert "legacy source" not in result.output, result.output
+
+    def test_service_drift_exits_nonzero_and_names_rows(
+        self, runner: CliRunner
+    ) -> None:
+        """The verdict comes from the ENGINE, not the frozen SQLite source.
+
+        This is the whole point of nexus-ypori: before it, this check read a
+        29-day-old migration relic and reported its rows as live faults while
+        the store the system actually writes went unexamined.
+        """
+        with self._service_reports({
+            "projection_total": 986,
+            "drift_count": 2,
+            "rows": [
+                {"topic_id": 1559, "label": None, "collection": "docs__x"},
+                {"topic_id": 1560, "label": "named", "collection": None},
+            ],
+        }):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code != 0, result.output
+        assert "2/986" in result.output
+        assert "Engine check unavailable" not in result.output, result.output
+        assert "(unlabelled id=1559)" in result.output
+        assert "named" in result.output
+        assert "[docs__x]" in result.output
+        # the remedy IS correct here — it rebuilds the Postgres view this
+        # verdict was computed from
+        assert "nx taxonomy project" in result.output
+        # and the legacy census must not have run
+        assert "frozen SQLite migration source" not in result.output
+
+    def test_service_truncates_the_row_list_but_not_the_count(
+        self, runner: CliRunner
+    ) -> None:
+        """drift_count is exact; rows are capped engine-side."""
+        with self._service_reports({
+            "projection_total": 100,
+            "drift_count": 37,
+            "rows": [
+                {"topic_id": i, "label": f"t{i}", "collection": None}
+                for i in range(1, 11)
+            ],
+        }):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code != 0
+        assert "37/100" in result.output
+        assert "… 27 more" in result.output
+        assert "Engine check unavailable" not in result.output, result.output
+
+    def test_engine_without_the_route_says_so_and_does_not_mask_it(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A 404 from an older engine must surface AS a 404.
+
+        Regression pin. The first version of this branch referenced
+        ``suppress`` before its import, so the cleanup in ``finally`` raised
+        UnboundLocalError *while handling* the 404 and REPLACED it — the
+        operator was told "cannot access local variable 'suppress'" when the
+        real answer was "your engine predates this route". A masked cause is
+        worse than a loud one, and the mock-only tests above could not see it
+        because none of them made the call raise.
+        """
+        import httpx
+
+        db_path = self._setup_db(tmp_path)
+        store = MagicMock()
+        store.get_link_drift.side_effect = httpx.HTTPStatusError(
+            "HttpTaxonomyStore./v1/taxonomy/links/drift failed: HTTP 404: not found",
+            request=MagicMock(), response=MagicMock(),
+        )
+        with patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            return_value=store,
+        ), patch("nexus.config.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 0, result.output
+        assert "no /links/drift route" in result.output, result.output
+        assert "suppress" not in result.output, (
+            f"the cleanup error masked the real cause:\n{result.output}"
+        )
+        # and it must still fall back rather than reporting nothing
+        assert "frozen SQLite migration source" in result.output
+
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
         assert result.exit_code == 0
         assert "not found" in result.output.lower()
@@ -239,7 +367,9 @@ class TestDoctorCheckTaxonomy:
     ) -> None:
         """Empty taxonomy tables still satisfy the invariant vacuously."""
         db_path = self._setup_db(tmp_path)
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
         assert result.exit_code == 0
         assert "invariant holds" in result.output
@@ -279,13 +409,25 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
-        assert result.exit_code == 1
+        # The exit code is now scoped to the SERVICE verdict (nexus-ypori);
+        # the legacy-source census is a NOTE, so detection is asserted on the
+        # output rather than on $?. Exiting non-zero here would block a release
+        # on the frozen migration source.
+        assert result.exit_code == 0, result.output
         assert "topic_links drift" in result.output
         assert "orphan-topic" in result.output
-        assert "nx taxonomy project" in result.output
+        # The `nx taxonomy project --backfill --persist` remedy must NOT be
+        # offered here. It rebuilds the POSTGRES materialized view and does
+        # nothing whatsoever to the frozen SQLite file this branch just read,
+        # so printing it would send an operator to run a verb that cannot
+        # change the thing they were shown.
+        assert "nx taxonomy project" not in result.output, result.output
+        assert "NOT the engine" in result.output
 
     def test_isolated_projection_topic_not_flagged(
         self, runner: CliRunner, tmp_path: Path
@@ -311,7 +453,9 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0, result.output
@@ -358,12 +502,15 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
-        assert result.exit_code != 0, (
+        assert result.exit_code == 0, result.output
+        assert "topic_links drift" in result.output, (
             f"projection+centroid on one doc is linkable — a missing "
-            f"topic_links row must be reported as drift:\n{result.output}"
+            f"topic_links row must be REPORTED as drift:\n{result.output}"
         )
         assert "projection-side" in result.output, result.output
 
@@ -398,7 +545,9 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0, result.output
@@ -434,7 +583,9 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with self._no_service(), patch(
+            "nexus.config.default_db_path", return_value=db_path
+        ):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0
