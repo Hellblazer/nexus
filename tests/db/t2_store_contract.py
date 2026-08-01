@@ -287,6 +287,13 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # connection, so there is no oracle method for the parity contract to
         # see — without this entry the method is silently deletable.
         'get_assignment_details': ['doc_ids'],
+        # nexus-ypori (1b5b6275): the topic_links drift check's ENGINE path.
+        # Same class as get_assignment_details — a service-only READ with no
+        # SQLite twin by construction: the doctor check it serves previously
+        # read the frozen local migration source, and this replaces that, so
+        # there is no oracle method for the parity contract to see. Landing it
+        # without this entry left the tripwire red on develop.
+        'get_link_drift': ['limit'],
     },
     'telemetry': {
         # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,
