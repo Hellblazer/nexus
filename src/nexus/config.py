@@ -253,6 +253,43 @@ def _read_live_mineru_port() -> int | None:
         return None
     if not is_process_alive(pid):
         return None
+
+    # nexus-yq3vk: IDENTITY, not just existence. The pid file is shared by every
+    # process reading this config dir, and until now the only check was "is that
+    # pid alive". A develop checkout pinning mineru 3.1.11 therefore routed
+    # extraction to a server an installed tool had started under 3.4.4 — so
+    # uv.lock did not control the code that produced the text, and the same PDF
+    # yielded different output depending on which server happened to be
+    # registered. Different extraction is a data-correctness difference, not a
+    # performance one, so a KNOWN mismatch refuses rather than degrading.
+    recorded = info.get("mineru_version")
+    if recorded is not None:
+        try:
+            from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred
+
+            ours = _pkg_version("mineru")
+        except Exception:  # noqa: BLE001 — cannot compare: fall through rather than block
+            ours = None
+        if ours is not None and ours != recorded:
+            _log.warning(
+                "mineru_server_version_skew",
+                registered_version=recorded,
+                our_version=ours,
+                registered_python=info.get("python"),
+                pid=pid,
+                port=port,
+                remedy="nx mineru restart  (or set pdf.mineru_server_url explicitly)",
+            )
+            return None
+    # A pid file without the field predates nexus-yq3vk. Say so once rather than
+    # silently trusting it — absent identity is not matching identity.
+    elif info.get("python") is None:
+        _log.debug(
+            "mineru_server_identity_unrecorded",
+            pid=pid, port=port,
+            detail="pid file predates version stamping; cannot verify the "
+                   "server runs the mineru this environment pins",
+        )
     return port
 
 

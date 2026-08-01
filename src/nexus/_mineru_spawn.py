@@ -190,10 +190,27 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
     # the per-user extraction artifact directory.
     from nexus._mineru_pid import _pid_file_path  # noqa: PLC0415 — deferred: patchable at the source module
 
+    # nexus-yq3vk: record WHICH mineru this server runs, and under which
+    # interpreter. The pid file is discovered by any process sharing the config
+    # dir (config.get_mineru_server_url step 2), and validation was
+    # is_process_alive() alone — existence, not identity. A develop checkout
+    # pinning mineru 3.1.11 therefore sent extraction to a server started by an
+    # installed tool running 3.4.4, and uv.lock silently did not control the
+    # code that produced the text. Different versions produce different
+    # extraction, so this is a data-correctness fact, not bookkeeping.
+    try:
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred
+
+        _mineru_version: str | None = _pkg_version("mineru")
+    except Exception:  # noqa: BLE001 — an unknown version must not block a spawn
+        _mineru_version = None
+
     _write_pid_file(_pid_file_path(), {
         "pid": proc.pid,
         "port": port,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
+        "mineru_version": _mineru_version,
+        "python": sys.executable,
     })
     return proc
