@@ -629,6 +629,13 @@ public final class CatalogHandler implements HttpHandler {
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
         if (seeds.size() > MAX_BATCH_DOC_IDS) {
+            // NOTE for cap-sizing: the scoring callers of the batch reads
+            // (src/nexus/scoring.py chunk_counts_for_docs / links_from_batch)
+            // wrap these calls in a broad except and DEGRADE — they lose the
+            // scoring signal on a 400, they do not crash. That degrade-not-
+            // crash contract is load-bearing if a corpus="all" aggregation
+            // ever exceeds the cap; do not narrow their except arms without
+            // adding client-side paging first.
             HttpUtil.send(exchange, 400, "{\"error\":\"too many seeds (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }

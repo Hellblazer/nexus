@@ -74,6 +74,22 @@ Notes:
   the acceptance journey that replaced the retired guided legs; add it here
   then, alongside `--shakeout` rather than instead of it.
 
+### 3b. PRE-TAG gate: client-release preconditions (BLOCKING)
+
+```bash
+uv run python scripts/check_client_release_precondition.py --engine-tag engine-service-vX.Y.Z
+```
+
+Some engine changes BREAK clients that predate a specific client commit (the
+nexus-9ssih dangling-endpoint 400 is the canonical case — its first landing
+was REMOVED by 6714e70e to wait for the client half). This script refuses
+(exit 1) until every client commit the tag requires is an ancestor of the
+latest RELEASED `v*` tag. Non-zero exit = STOP: cut the conexus PyPI release
+carrying the listed commits first, then re-run. Register new preconditions in
+the script's `ENGINE_CLIENT_PRECONDITIONS` whenever an engine change ships a
+wire behavior old clients mishandle. Prose deploy-gates get skipped; this one
+does not — do not tag past a red exit.
+
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
 Releaser is **human** by default (AI preps + validates); the human pushes the

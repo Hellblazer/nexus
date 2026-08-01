@@ -121,8 +121,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "name), not one row per document -- not a truncation-risk surface";
 
     private static final String RESOLVE_BOUNDED =
-        "each branch returns at most one document or a small bounded sample (the title branch "
-        + "caps at 10 via searchDocuments) -- not a page of a large, growing set";
+        "the file_path+collection branch returns at most one document, the title branch caps "
+        + "at 10 via searchDocuments, and the source_uri branch is <=1 by the catalog-016 "
+        + "partial unique index. HONEST EXCEPTION (review 2026-08-01): the BARE file_path "
+        + "branch is unbounded and unscoped by owner -- file_path has no uniqueness "
+        + "constraint, so multi-owner same-path rows return an uncapped array with no "
+        + "count/truncation signal. Tracked as nexus-oii5r; this exemption converts to a "
+        + "count requirement (or the branch gains a bound) when that bead lands";
 
     private static final String WHITELISTED_NOT_BIND_RISK =
         "the relation-name list is filtered against a small, fixed server-side whitelist "
