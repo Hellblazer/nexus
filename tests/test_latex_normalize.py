@@ -304,3 +304,75 @@ def test_page_boundaries_drift_with_prenorm_lengths() -> None:
     assert wrong_total > len(result.text), (
         "Expected drift: pre-normalization lengths should exceed normalized text length"
     )
+
+
+# ── nexus-gtltb: the inline pass must not re-enter $$ delimiters ─────────────
+#
+# _normalize_mineru_latex ran two passes over one string. The display pass left
+# the `$$` delimiters in its output, so the inline pass — `\$([^$]+?)\$`, which
+# cannot match the empty string between them — began matching ONE `$` INTO each
+# pair. That consumed a delimiter and desynced every subsequent open/close, so
+# from the first display block onward the regions treated as "math" were the
+# PROSE BETWEEN formulas, and math regions get `re.sub(r"\s+", "", s)`.
+#
+# Measured on tests/fixtures/bft-to-smr.pdf: 918 characters removed, 592 of them
+# (64%) word-spaces deleted from running prose, plus \n\n paragraph breaks and
+# `##` headings. Live corpus: 535 catastrophic chunks, body text not references.
+
+
+def test_prose_between_display_blocks_keeps_its_spaces() -> None:
+    """The minimal repro. This is the whole bug in one line."""
+    out = _normalize_mineru_latex(r"$$a + b$$ some prose here $c$ more prose $d$ end.")
+    assert "some prose here" in out, out
+    assert "more prose" in out, out
+
+
+def test_display_block_does_not_desync_following_inline_math() -> None:
+    """After a $$ block, `$x$` must still be recognised AS inline math.
+
+    The desync did not merely damage prose — it shifted what counted as a
+    formula, so real inline spans were skipped while prose was normalized.
+    """
+    out = _normalize_mineru_latex(r"$$\frac { 1 } { m }$$ text $Q _ { \phi }$ tail")
+    assert "$$\\frac{1}{m}$$" in out, out
+    assert "$Q_{\\phi}$" in out, out          # the inline span WAS normalized
+    assert " text " in out and " tail" in out  # the prose was not
+
+
+def test_paragraph_breaks_and_headings_survive() -> None:
+    """The chunker's boundary signals must not be destroyed.
+
+    \\n\\n and `##` were being collapsed along with the spaces, so downstream
+    chunking lost its section boundaries as well as its word boundaries.
+    """
+    src = "$$E = mc^2$$\n\n## 1.2. A heading\n\nBody text follows here.\n"
+    out = _normalize_mineru_latex(src)
+    assert "\n\n## 1.2. A heading\n\n" in out, out
+    assert "Body text follows here." in out, out
+
+
+def test_multiple_display_blocks_do_not_compound() -> None:
+    """Three blocks: the desync compounded, so later prose was worse hit."""
+    src = r"$$a$$ one $$b$$ two $$c$$ three"
+    out = _normalize_mineru_latex(src)
+    for word in ("one", "two", "three"):
+        assert f" {word} " in out or out.endswith(f" {word}"), (word, out)
+
+
+def test_normalization_inside_display_blocks_still_happens() -> None:
+    """The #1049 purpose must survive the fix — this is not a revert."""
+    out = _normalize_mineru_latex(r"$$\operatorname* { m a x } _ { x }$$")
+    assert out == r"$$\operatorname*{max}_{x}$$", out
+
+
+def test_idempotent_across_the_display_boundary() -> None:
+    src = r"$$\mathbf { s }$$ prose $Q _ { \phi }$ more"
+    once = _normalize_mineru_latex(src)
+    assert _normalize_mineru_latex(once) == once
+
+
+def test_text_groups_keep_internal_spaces_inside_display() -> None:
+    """\\text{...} protection must still work through the placeholder layer."""
+    out = _normalize_mineru_latex(r"$$\text{some words} + x$$ and prose")
+    assert r"\text{some words}" in out, out
+    assert " and prose" in out, out
