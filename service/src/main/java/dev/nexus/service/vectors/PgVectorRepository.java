@@ -2360,6 +2360,11 @@ public final class PgVectorRepository {
      *                               never a silently partial document (application-enforced
      *                               referential check, T2 nexus_rdr/155-manifest-fk-decision)
      */
+    // TOMBSTONE-EXEMPT (nexus-mqd6t): the CATALOG_DOCUMENT_CHUNKS manifest read
+    // below (step 2) carries no filter of its own -- it is gated by the
+    // PRECEDING live-document existence check (step 1): a tombstoned or
+    // unknown tumbler throws IllegalStateException before the manifest select
+    // ever runs. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
     public List<Map<String, Object>> fetchDocumentChunks(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx -> {
             // 1. The document must be visible under RLS. A foreign tenant's tumbler is

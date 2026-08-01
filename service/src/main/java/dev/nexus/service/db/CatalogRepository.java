@@ -659,6 +659,9 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
                .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
                // nexus-mqd6t: explicit un-tombstone (see the javadoc above).
+               // TOMBSTONE-EXEMPT (nexus-mqd6t): the ONE sanctioned resurrection --
+               // deliberately unconditional, no WHERE guard applies to an ON
+               // CONFLICT DO UPDATE arm. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
                .set(CATALOG_DOCUMENTS.DELETED_AT, (java.time.OffsetDateTime) null)
                .execute();
             return null;
@@ -1018,9 +1021,14 @@ public final class CatalogRepository {
             long tStart = System.nanoTime();
             // Ensure owner row exists — once. Resolve-first, same as the single-doc
             // path (nexus-0ehwe arbiter class); this is also the repo_root lookup.
+            // One owner_type for the whole batch — the owner row is ensured ONCE
+            // from docs[0], so a per-doc re-read below could silently diverge from
+            // the owner's registered type if a caller ever sent mixed values
+            // (review 2026-08-01 finding on nexus-e7cys's batch guard).
+            String batchOwnerType = s(docs.get(0), "owner_type", "repo");
             String repoRoot = ensureOwnerRow(ctx, tenant, ownerPrefix,
                 s(docs.get(0), "owner_name", ownerPrefix),
-                s(docs.get(0), "owner_type", "repo"));
+                batchOwnerType);
             long tOwner = System.nanoTime();
 
             // Batch idempotency: fetch existing LIVE docs for every source_uri and
@@ -1037,7 +1045,7 @@ public final class CatalogRepository {
                 // nexus-e7cys: per-doc containment guard, same as the single-doc path.
                 uriOf[i] = deriveSourceUri(
                     s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot,
-                    s(d, "owner_type", "repo"), bool(d, "allow_cross_project", false));
+                    batchOwnerType, bool(d, "allow_cross_project", false));
                 if (!uriOf[i].isEmpty()) srcUris.add(uriOf[i]);
                 String fp = s(d, "file_path", "");
                 if (!fp.isEmpty()) filePaths.add(fp);
@@ -1281,6 +1289,10 @@ public final class CatalogRepository {
      * {@code next_seq + 1}.
      */
     private static long highestChildSeq(DSLContext ctx, String tenant, String ownerPrefix) {
+        // TOMBSTONE-EXEMPT (nexus-mqd6t): tumbler allocator -- the tumbler PK
+        // does not exclude tombstones, and filtering would re-issue an
+        // already-taken child sequence number to a NEW document. See
+        // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
         // tumbler is "<prefix>.<n>"; the child segment starts one char past the dot.
         int childStart = ownerPrefix.length() + 2;
         Long max = ctx.select(DSL.field(
@@ -1649,6 +1661,11 @@ public final class CatalogRepository {
         return buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, null);
     }
 
+    // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the ctx.update(CATALOG_DOCUMENTS)
+    // initiator below and its .where(...DELETED_AT.isNull()...) guard are
+    // different Java statements -- the SET clause is built across a loop over
+    // *fields*. ONE query, split across statements; see
+    // TombstoneFilterGateTest.WIDEN.
     private Query buildUpdateDocumentQuery(
         DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields,
         Map<String, String> prefetchedAliasTargets
@@ -1745,7 +1762,16 @@ public final class CatalogRepository {
      * Correlated {@code SELECT count(*)} over a document's manifest rows, used
      * as a SET expression so the fold happens inside the same statement (no
      * read-then-write race with a concurrent manifest writer).
+     *
+     * <p>A-1 constraint: stays unfiltered ONLY because every caller already
+     * guards the OUTER update's WHERE with {@code DELETED_AT.isNull()} (see
+     * {@link #buildUpdateDocumentQuery}, {@link #writeManifestRows}, {@link
+     * #appendManifestChunks}) — filtering this subquery in isolation would
+     * silently zero the count instead of failing loud on those guarded
+     * D-5/eldyi paths. Do not filter it here.
      */
+    // TOMBSTONE-EXEMPT (nexus-mqd6t): see the A-1 constraint above. See
+    // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
     private static Field<Integer> manifestRowCount(DSLContext ctx, String tenant, String tumbler) {
         return DSL.field(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
                             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
@@ -1804,6 +1830,11 @@ public final class CatalogRepository {
     // hard path must explicitly purge that doc's assignments by its
     // manifest chashes (deleteCollection does the collection-scoped
     // equivalent at line ~1917). Pinned by CatalogDocumentCascadeTest.
+    // TOMBSTONE-EXEMPT note (nexus-mqd6t): this method's DELETED_AT.isNull()
+    // WHERE guard is IDEMPOTENCY (double-tombstone must not reset the purge
+    // age clock), a different reason than the read-invisibility concern this
+    // gate otherwise enforces -- it passes TombstoneFilterGateTest on its own
+    // merits (the guard is present) and is not a TOMBSTONE_EXEMPT table entry.
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(CATALOG_DOCUMENTS)
@@ -1831,6 +1862,10 @@ public final class CatalogRepository {
      *         membership, not position, unlike updateDocumentsMany's
      *         positional contract, since there's only one outcome shape
      *         here: deleted or not).
+     *
+     * <p>TOMBSTONE-EXEMPT note (nexus-mqd6t): same idempotency rationale as
+     * {@link #deleteDocument} — passes on its own merits, not a {@code
+     * TombstoneFilterGateTest.TOMBSTONE_EXEMPT} table entry.
      */
     public Set<String> deleteDocumentsMany(String tenant, List<String> tumblers) {
         if (tumblers.isEmpty()) return Set.of();
@@ -1849,6 +1884,11 @@ public final class CatalogRepository {
      * FTS search over title/author/corpus/file_path using OR'd tsquery.
      * Optionally filter by content_type. Returns up to limit results.
      */
+    // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the WHERE Condition is assembled
+    // into a local variable in an earlier statement (folding the FTS match
+    // with DELETED_AT.isNull()) and applied via .where(where) in the
+    // ctx.select(...) initiator's own statement below. See
+    // TombstoneFilterGateTest.WIDEN.
     public List<Map<String, Object>> searchDocuments(String tenant, String query,
                                                       String contentType, int limit) {
         if (query == null || query.isBlank()) return List.of();
@@ -1931,6 +1971,16 @@ public final class CatalogRepository {
      * unrecognised relation is silently omitted from the result (never a SQL
      * passthrough — the names are not user-authored beyond this fixed set).
      * The caller treats a missing relation as INDETERMINATE, never a pass.
+     *
+     * <p>TOMBSTONE-EXEMPT note (nexus-mqd6t): this is a migration physical
+     * row-count verify, deliberately including tombstones — it counts real
+     * rows in the named relation, whatever that relation is, not "documents
+     * visible to a reader." Not a {@code TombstoneFilterGateTest.TOMBSTONE_EXEMPT}
+     * table entry: the table it selects from is resolved dynamically ({@code
+     * DSL.table(DSL.name(...))} from the caller's relation string), so the
+     * literal {@code CATALOG_DOCUMENTS} token this gate scans for never
+     * appears here — structurally outside the gate's reach, not a suppressed
+     * violation.
      */
     public Map<String, Long> relationCounts(String tenant, List<String> relations) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -2658,19 +2708,26 @@ public final class CatalogRepository {
      * doc has no physical_collection (ghost/sourceless docs) — those rows stay
      * NULL, same as the backfill's own skip semantics.
      *
-     * <p>nexus-23wlw: DELIBERATELY NOT tombstone-filtered — the ONE
-     * {@code CATALOG_DOCUMENTS} read in this class that is not. Every other
-     * read gained {@code deleted_at IS NULL} because a tombstone must be
-     * invisible to readers; this is not a reader. Its only callers are the
-     * manifest WRITE paths ({@code writeManifestRows},
-     * {@code appendManifestChunks}, and the two import-chunk paths), where
-     * filtering would silently stamp NULL onto rows being written for a
-     * tombstoned doc — re-introducing the exact silent-empty class the
-     * nexus-x6kdz stamp above exists to fix, and doing it on the ETL/import
-     * leg, which legitimately writes manifests for documents whose live state
-     * it does not control. If a future caller uses this as a read, filter it
-     * there rather than here.
+     * <p>nexus-23wlw: DELIBERATELY NOT tombstone-filtered. Every other read
+     * gained {@code deleted_at IS NULL} because a tombstone must be invisible
+     * to readers; this is not a reader. Its only callers are the manifest
+     * WRITE paths ({@code writeManifestRows}, {@code appendManifestChunks},
+     * and the two import-chunk paths), where filtering would silently stamp
+     * NULL onto rows being written for a tombstoned doc — re-introducing the
+     * exact silent-empty class the nexus-x6kdz stamp above exists to fix, and
+     * doing it on the ETL/import leg, which legitimately writes manifests for
+     * documents whose live state it does not control. If a future caller uses
+     * this as a read, filter it there rather than here.
+     *
+     * <p>nexus-eg5gx: this is NOT "the ONE unfiltered read in this class" —
+     * that claim went stale the moment other deliberate exemptions were
+     * documented ({@code highestChildSeq}, {@code upsertDocument}, {@code
+     * manifestRowCount}, {@code renameCollectionTxn}). The authoritative,
+     * exhaustive list is {@link TombstoneFilterGateTest#TOMBSTONE_EXEMPT} —
+     * consult that table, not a count claimed in any one method's javadoc.
      */
+    // TOMBSTONE-EXEMPT (nexus-mqd6t): manifest WRITE-path helper, not a
+    // reader -- see the javadoc above. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
     private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {
         String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                        .from(CATALOG_DOCUMENTS)
@@ -3876,6 +3933,14 @@ public final class CatalogRepository {
             if (liveTargetExists) {
                 // RDR-162 cross-model COPY branch: repoint catalog_documents; leave
                 // both registry rows (renaming the source would collide on the name PK).
+                // TOMBSTONE-EXEMPT (nexus-mqd6t): deliberately NOT filtered on
+                // DELETED_AT.isNull() -- a rename must repoint ALL documents under
+                // the old physical_collection name, tombstoned or not, so a
+                // tombstoned document's physical_collection tracks the collection's
+                // CURRENT name. Filtering here would leave a later restore pointing
+                // at a retired collection name (found during TombstoneFilterGateTest
+                // authorship; undocumented before this). See
+                // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
                 counts.put("catalog_documents",
                     ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName)
                        .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());

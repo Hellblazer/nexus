@@ -612,6 +612,13 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Request: {"seeds": [...], "link_types": [...], "direction": "both", "depth": 1}
      * Response: {"nodes": [...], "edges": [...]}
+     *
+     * <p>{@code seeds} capped at {@value #MAX_BATCH_DOC_IDS} (found during
+     * CatalogHandlerEnvelopeConformanceGateTest authorship): the BFS's first
+     * round uses the raw seeds list directly in a jOOQ {@code .in(...)} — the
+     * 500-node MAX_GRAPH_NODES cap in {@link CatalogRepository#graphBFS}
+     * bounds the REACHABLE set, not this initial IN-list, so an oversized
+     * seeds array reached the bind-parameter risk uncapped.
      */
     @SuppressWarnings("unchecked")
     private void handleTraverse(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -621,6 +628,10 @@ public final class CatalogHandler implements HttpHandler {
         List<String> seeds = rawSeeds instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        if (seeds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many seeds (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         Object rawTypes = body.get("link_types");
         List<String> linkTypes = rawTypes instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
@@ -1654,6 +1665,12 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Request: {"doc_ids": ["1.1.1", "1.1.2", ...]}
      * Response: {"1.1.1": 42, "1.1.2": 17}  (missing docs absent)
+     *
+     * <p>Capped at {@value #MAX_BATCH_DOC_IDS} (found during
+     * CatalogHandlerEnvelopeConformanceGateTest authorship: this batch
+     * endpoint's doc_ids flowed straight into a jOOQ {@code .in(...)} with no
+     * size guard, unlike every sibling batch endpoint — same bind-limit
+     * rationale as handleManifestGetMany/handleResolveMany).
      */
     @SuppressWarnings("unchecked")
     private void handleDocChunkCounts(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1663,6 +1680,10 @@ public final class CatalogHandler implements HttpHandler {
         List<String> docIds = rawIds instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var counts = repo.chunkCountsForDocs(tenant, docIds);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));
     }
@@ -1672,6 +1693,10 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Request: {"tumblers": ["1.1.1", "1.1.2", ...]}
      * Response: {"1.1.1": [{"from_tumbler": "1.1.1", "link_type": "cites"}], ...}
+     *
+     * <p>Capped at {@value #MAX_BATCH_DOC_IDS} (found during
+     * CatalogHandlerEnvelopeConformanceGateTest authorship: same missing-guard
+     * shape as handleDocChunkCounts above).
      */
     @SuppressWarnings("unchecked")
     private void handleLinksFromBatch(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1681,6 +1706,10 @@ public final class CatalogHandler implements HttpHandler {
         List<String> tumblers = rawT instanceof List<?> l
             ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
             : List.of();
+        if (tumblers.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many tumblers (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
         var links = repo.linksFromBatch(tenant, tumblers);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
     }

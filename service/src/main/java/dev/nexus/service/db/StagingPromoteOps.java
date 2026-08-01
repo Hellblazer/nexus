@@ -355,6 +355,10 @@ public final class StagingPromoteOps {
             // actually-promoted manifest rows for every doc this migration
             // staged — never trust the imported count. Scoped to staged docs
             // so live serving writes outside the migration are untouched.
+            // TOMBSTONE-EXEMPT (nexus-mqd6t): no deleted_at filter -- RDR-180
+            // land-then-transform migration leg (nexus-jxizy.10.3/10.4), one-shot,
+            // never serving-path, same sanction class as RawSqlGateTest's raw-SQL
+            // allowance for this file. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
             counts.put("chunk_count_resynced", ctx.execute(
                 "UPDATE nexus.catalog_documents d "
                 + "SET chunk_count = COALESCE(m.cnt, 0) "
@@ -369,6 +373,8 @@ public final class StagingPromoteOps {
             // 'knowledge', empty file_path) have NO source file — an
             // unresolved pointer for one can never converge via re-index, so
             // it must be surfaced BY TITLE for the user to re-store.
+            // TOMBSTONE-EXEMPT (nexus-mqd6t): same migration-leg sanction as the
+            // chunk_count_resync UPDATE above. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
             List<String> unresolvedKnowledgeTitles = ctx.fetch(
                 "SELECT DISTINCT d.title FROM nexus.catalog_documents d "
                 + "JOIN staging.document_chunks s ON s.doc_id = d.tumbler "
