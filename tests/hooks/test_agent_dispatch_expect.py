@@ -217,6 +217,53 @@ class TestPairsWithSubagentStart:
         assert "SUMMARY\tchecked=1 recognized=1 unrecognized=0 undeclared=0" in undeclared.stdout
         assert "UNDECLARED" not in undeclared.stdout
 
+    def test_hand_written_row_must_carry_the_colon_verbatim(self, tmp_path: Path) -> None:
+        """The HAND-WRITTEN path, which is what agents use while the hook is inert.
+
+        AGENTS.md told agents for weeks that ``expectations_expect``
+        validates ``^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`` and that a
+        plugin-namespaced type "must have its colon sanitized before it
+        is accepted at all". The charset at expectations.sh:137 actually
+        includes ``:``. Following that guidance was itself the thing that
+        produced ``recognized=0`` — four consecutive sessions read the
+        result as "the guard cannot recognise anything" (nexus-nu7fo).
+
+        Two arms, one difference: the colon.
+        """
+        _lib_call(
+            "expectations_expect", tmp_path, SESSION,
+            "conexus:code-review-expert", "background",
+        )
+        _run(
+            _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
+            tmp_path, script=STAMP,
+        )
+        census = _lib_call("expectations_census", tmp_path, SESSION)
+        assert census.returncode == 0, f"colon form must pair: {census.stdout}"
+        assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in census.stdout
+
+    def test_hand_written_row_sanitized_to_a_dash_does_NOT_pair(
+        self, tmp_path: Path
+    ) -> None:
+        """The control arm. Sanitizing destroys the only shared key.
+
+        This is the exact signature of the four "broken guard" sessions,
+        and it is a DOCUMENTATION defect, not a design defect — which is
+        why it is pinned rather than merely described.
+        """
+        proc = _lib_call(
+            "expectations_expect", tmp_path, SESSION,
+            "conexus-code-review-expert", "background",
+        )
+        assert proc.returncode == 0, "the dash form is accepted — that is the trap"
+        _run(
+            _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
+            tmp_path, script=STAMP,
+        )
+        census = _lib_call("expectations_census", tmp_path, SESSION)
+        assert "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" in census.stdout
+        assert "expected_no_start=1" in census.stdout
+
     def test_undispatched_start_is_still_flagged(self, tmp_path: Path) -> None:
         """Non-vacuity: with the dispatch hook NOT run, the same start row
         reads exactly as the five broken sessions did."""
