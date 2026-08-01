@@ -149,8 +149,20 @@ def _check_process_skew() -> list[HealthResult]:
         )
 
         report = detect_stale_processes()
-    except Exception:  # noqa: BLE001 — probe failure must not fail doctor; skip silently
-        return []
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        # nexus-bawvu: a bare `return []` here made the row VANISH on probe
+        # failure — indistinguishable from "no stale processes found", which
+        # is exactly the state the oyo2g stall diagnosis depends on this row
+        # NOT being in. Same no-silent-fallback posture as the stranded-
+        # install / legacy-catalog checks below: report "could not check"
+        # loudly instead of disappearing.
+        _log.warning("doctor_process_freshness_check_failed", error=str(exc))
+        return [HealthResult(
+            label="Process freshness",
+            ok=False,
+            warn=True,
+            detail=f"could not check — probe failed: {exc}",
+        )]
     if not report.stale:
         return [HealthResult(
             label="Process freshness",
