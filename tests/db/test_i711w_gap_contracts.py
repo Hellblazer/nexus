@@ -22,7 +22,7 @@ the spec says and marked ``xfail(strict=True)`` with the Java evidence — a
 divergence here is a product finding, not a test to weaken:
 
   item 1  update() re-derive of chunk_count      — DIVERGES (see test)
-  item 3  update() indexed_at refresh            — DIVERGES (see test)
+  item 3  update() indexed_at refresh            — CONVERGED (nexus-927mo, 2026-08-01)
   item 8  delete_document() manifest cascade     — DIVERGES (see test)
 
 Marked @pytest.mark.integration — skipped automatically when the service jar,
@@ -211,21 +211,6 @@ class TestUpdateContracts:
         assert entry is not None
         assert entry.chunk_count == 99
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "nexus-i711w.1 item 3: engine diverges — updateDocument sets ONLY "
-            "the caller-provided columns (buildUpdateDocumentQuery, "
-            "service/.../db/CatalogRepository.java:971-1017); indexed_at is "
-            "stamped exclusively by the MANIFEST write paths (stampIndexedAt, "
-            "CatalogRepository.java:1701-1712, called from writeManifestRows "
-            ":1718 and appendManifestChunks :1855 — nexus-p5qk8/GH #1397), "
-            "never by /update. A head_hash-only update leaves indexed_at "
-            "frozen, so `nx catalog show` last_indexed does not advance for "
-            "re-indexes that bump head_hash without rewriting the manifest."
-        ),
-    )
     def test_update_refreshes_indexed_at_when_head_hash_changes(
         self, cat, owner,
     ) -> None:
