@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CatalogIdentityConflictException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -559,6 +560,84 @@ class TaxonomyRepositoryTest {
         assertThat(nextId)
             .as("serial insert after batch fidelity import must not collide")
             .isGreaterThan(importedId);
+    }
+
+    // ── nexus-q2ign: topics ON CONFLICT arbiter completeness ────────────────────
+
+    @Test @Order(217)
+    void importTopic_refusesRootLabelConflictAtDifferentId() {
+        // Sequential double-write repro of the unhandled 23505: two fidelity
+        // imports at DIFFERENT ids both claiming the same (collection, label)
+        // ROOT topic identity. ON CONFLICT (TOPICS.ID) cannot see this — it is
+        // a genuinely different key — so pre-fix this raised a raw PSQLException
+        // (23505 on idx_topics_root_tenant_collection_label) instead of the
+        // typed refusal.
+        final String col = "knowledge__q2ign_dup";
+        repo.importTopic(TENANT_A, 9910001L, "q2ign-dup-label", null, col,
+                         null, 0, PAST_TS, "pending", null);
+
+        assertThatThrownBy(() -> repo.importTopic(TENANT_A, 9910002L, "q2ign-dup-label", null, col,
+                                                   null, 0, PAST_TS, "pending", null))
+            .as("a second id claiming the same live root-topic identity must be REFUSED, "
+                + "not silently merged and not a raw 23505")
+            .isInstanceOf(CatalogIdentityConflictException.class)
+            .satisfies(e -> assertThat(((CatalogIdentityConflictException) e).constraint())
+                .isEqualTo("idx_topics_root_tenant_collection_label"));
+
+        // The refused write must not have landed — exactly one row for this identity.
+        assertThat(repo.getAllTopics(TENANT_A, col)).hasSize(1);
+        assertThat(repo.getTopicById(TENANT_A, 9910002L)).isEmpty();
+    }
+
+    @Test @Order(218)
+    void importTopic_sameIdReimport_sameLabelIsNotRefused() {
+        // The idempotent ETL re-run case (already covered functionally by
+        // importTopic_preservesId_docCountNotEtlMerged above) must stay
+        // unaffected by the new guard: re-importing the SAME id is a
+        // convergent no-op regardless of the root-label key.
+        final String col = "knowledge__q2ign_same_id";
+        repo.importTopic(TENANT_A, 9910010L, "q2ign-same-id", null, col,
+                         null, 0, PAST_TS, "pending", null);
+        assertThatCode(() -> repo.importTopic(TENANT_A, 9910010L, "q2ign-same-id", null, col,
+                                              "new-centroid", 0, PAST_TS, "accepted", null))
+            .doesNotThrowAnyException();
+        assertThat(repo.getTopicById(TENANT_A, 9910010L).get().get("centroid_hash"))
+            .isEqualTo("new-centroid");
+    }
+
+    @Test @Order(219)
+    void importTopic_childTopicNotGovernedByRootLabelKey() {
+        // parent_id NOT NULL is outside idx_topics_root_tenant_collection_label's
+        // predicate entirely — two children may legitimately share a label under
+        // the same parent (SQLite never enforced uniqueness there either).
+        final String col = "knowledge__q2ign_child";
+        long parent = repo.importTopic(TENANT_A, 9910020L, "q2ign-parent", null, col,
+                                       null, 0, PAST_TS, "pending", null);
+        repo.importTopic(TENANT_A, 9910021L, "q2ign-child-dup", parent, col,
+                         null, 0, PAST_TS, "pending", null);
+        assertThatCode(() -> repo.importTopic(TENANT_A, 9910022L, "q2ign-child-dup", parent, col,
+                                              null, 0, PAST_TS, "pending", null))
+            .as("child topics (parent_id NOT NULL) carry no root-label identity to guard")
+            .doesNotThrowAnyException();
+        assertThat(repo.getChildTopics(TENANT_A, parent)).hasSize(2);
+    }
+
+    @Test @Order(220)
+    void importTopicsBatch_refusesRootLabelConflictAtDifferentId() {
+        // Batch twin of Order(217) — the multi-row ON CONFLICT (TOPICS.ID)
+        // form is not exempt from the key its arbiter omits.
+        final String col = "knowledge__q2ign_batch_dup";
+        repo.importBatch(TENANT_A, "topic", List.of(m(
+            "id", 9910030L, "label", "q2ign-batch-dup", "collection", col,
+            "created_at", PAST_TS, "doc_count", 0, "review_status", "pending")));
+
+        assertThatThrownBy(() -> repo.importBatch(TENANT_A, "topic", List.of(m(
+                "id", 9910031L, "label", "q2ign-batch-dup", "collection", col,
+                "created_at", PAST_TS, "doc_count", 0, "review_status", "pending"))))
+            .as("batch import must refuse the same identity conflict as the single-row path")
+            .isInstanceOf(CatalogIdentityConflictException.class);
+
+        assertThat(repo.getAllTopics(TENANT_A, col)).hasSize(1);
     }
 
     @Test @Order(22)

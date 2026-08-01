@@ -1542,10 +1542,42 @@ public final class CatalogRepository {
         if (!fields.containsKey("chunk_count")) {
             more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, reDerivedChunkCount(ctx, tenant, target));
         }
+        // nexus-927mo: /update must refresh indexed_at when it CHANGES head_hash —
+        // the same re-index-refresh contract the manifest write paths already
+        // enforce via stampIndexedAt (nexus-p5qk8/GH #1397), which this method
+        // never shared. Before this, a head_hash-only update (re-index that
+        // finds an unchanged chunk set, so no manifest write follows) left
+        // indexed_at frozen at the last manifest write or register time, and
+        // `nx catalog show` last_indexed never advanced for that class of
+        // re-index. A no-op update (same head_hash resubmitted) must NOT stamp —
+        // only an actual change advances it — so this compares against the OLD
+        // row's head_hash via a single-statement CASE (mirrors
+        // reDerivedChunkCount immediately above: no read-then-write race with a
+        // concurrent writer, and updateDocumentsMany's ctx.batch(...) inherits it
+        // for free since it is folded into the same Query). An explicit
+        // caller-supplied indexed_at still wins outright — checked here, before
+        // this SET is added, exactly like chunk_count's explicit-wins rule.
+        if (!fields.containsKey("indexed_at") && fields.get("head_hash") != null) {
+            more = more.set(CATALOG_DOCUMENTS.INDEXED_AT,
+                             stampedIndexedAtOnHeadHashChange(String.valueOf(fields.get("head_hash"))));
+        }
         // AND deleted_at IS NULL: refuse to update tombstoned documents
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+    }
+
+    /**
+     * The head_hash-triggered indexed_at refresh used by
+     * {@link #buildUpdateDocumentQuery} (nexus-927mo). {@code IS DISTINCT FROM}
+     * is the null-safe comparison — a document whose head_hash has never been
+     * set (empty string, per {@link #registerDocument}'s default) still counts
+     * a first real head_hash as a change.
+     */
+    private static Field<String> stampedIndexedAtOnHeadHashChange(String newHeadHash) {
+        return DSL.when(CATALOG_DOCUMENTS.HEAD_HASH.isDistinctFrom(newHeadHash),
+                        DSL.val(java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT)))
+                  .otherwise(CATALOG_DOCUMENTS.INDEXED_AT);
     }
 
     /**
@@ -1925,25 +1957,35 @@ public final class CatalogRepository {
         );
     }
 
-    /** Update physical_collection for one document. */
+    /**
+     * Update physical_collection for one document.
+     *
+     * <p>nexus-eldyi: guarded — silent 0-row no-op on a tombstoned target
+     * (unlike the manifest writers above, no typed refusal here: this method
+     * already returns the real {@code int} rows-affected, so a caller reading
+     * 0 gets the honest answer without needing an exception to surface it).
+     */
     public int updateDocumentCollection(String tenant, String tumbler, String newCollection) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
     }
 
-    /** Update physical_collection for many documents. */
+    /** Update physical_collection for many documents. Guarded like the single-doc form above (nexus-eldyi). */
     public int updateDocumentsCollectionBatch(String tenant, List<String> tumblers, String newCollection) {
         if (tumblers.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection).where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection)
+               .where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
     }
 
-    /** Set alias_of for a document. */
+    /** Set alias_of for a document. Guarded — silent 0-row no-op on a tombstoned target (nexus-eldyi; see updateDocumentCollection). */
     public int setAlias(String tenant, String tumbler, String aliasOf) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf)).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute()
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
         );
     }
 
@@ -2424,12 +2466,56 @@ public final class CatalogRepository {
         // datetime.now(UTC).isoformat(): indexed_at is TEXT and MAX()'d
         // lexicographically (catalog-009 collection_health_meta) — mixed
         // widths/suffixes would break sortability at second-boundary ties.
+        //
+        // nexus-eldyi: guarded with deleted_at IS NULL — the non-resurrection
+        // rule buildUpdateDocumentQuery enforces was bypassed here, so a
+        // manifest write against a tombstoned doc_id still stamped its
+        // indexed_at. ADVISORY write (a provenance timestamp, not data the
+        // manifest count depends on): a 0-row no-op is the correct outcome,
+        // no typed refusal needed — unlike the manifest ROW writers below,
+        // which fail loud (see writeManifestRows / appendManifestChunks /
+        // purgeManifest).
         ctx.update(CATALOG_DOCUMENTS)
            .set(CATALOG_DOCUMENTS.INDEXED_AT,
                 java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT))
            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
            .execute();
+    }
+
+    /**
+     * Refused write against a tombstoned document (nexus-eldyi). Thrown by the
+     * manifest ROW writers ({@link #writeManifestRows}, {@link
+     * #appendManifestChunks}, {@link #purgeManifest}) when their guarded
+     * CATALOG_DOCUMENTS update affects 0 rows BECAUSE the target is
+     * tombstoned — distinct from "tumbler unknown", which stays a silent 0/no-op
+     * (the long-standing contract for a doc_id that was never registered).
+     * These three are void or return an UNRELATED count (deleted
+     * catalog_document_chunks rows, not the guarded documents-row update), so a
+     * silent no-op here would misreport success on a data-bearing write; a
+     * per-int-return-value writer (updateDocumentCollection,
+     * updateDocumentsCollectionBatch, setAlias) does not need this — the
+     * caller already sees the honest 0.
+     */
+    public static final class TombstonedDocumentException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        TombstonedDocumentException(String docId, String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Does *docId* exist AND carry a non-null deleted_at (nexus-eldyi)? Used
+     * ONLY after a guarded UPDATE already returned 0 rows — an extra read on
+     * the rare refusal path, never on the common live-doc path.
+     */
+    private static boolean isTombstonedDocument(DSLContext ctx, String tenant, String docId) {
+        return ctx.fetchExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()));
     }
 
     private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
@@ -2451,10 +2537,23 @@ public final class CatalogRepository {
         }
         // nexus-b6enc F5: the manifest IS the count's source of truth — fold
         // it in the same transaction so no REPLACE can leave a stale count.
-        ctx.update(CATALOG_DOCUMENTS)
+        // nexus-eldyi: guarded — a tombstoned doc_id must not have its
+        // CATALOG_DOCUMENTS row mutated. FAIL LOUD (not the stampIndexedAt
+        // silent-noop shape): this is a data-bearing manifest writer with a
+        // VOID public signature (writeManifest/writeManifestMany), so a
+        // silent 0-row update here would misreport success to the caller
+        // while quietly discarding the just-written manifest rows above (this
+        // throw rolls back the whole per-doc transaction, including the
+        // delete+insert above — TenantScope.withTenant wraps this in one txn).
+        int updated = ctx.update(CATALOG_DOCUMENTS)
            .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
-           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
+                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
            .execute();
+        if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+            throw new TombstonedDocumentException(docId,
+                "writeManifest refused: document is tombstoned: " + docId);
+        }
     }
 
     /**
@@ -2561,7 +2660,8 @@ public final class CatalogRepository {
         // runtime exception's message can carry internal state (e.g. the
         // TenantScope admission-queue message wraps a null-SQLState
         // SQLTransientConnectionException and would fall through here).
-        if (e instanceof IllegalArgumentException && e.getMessage() != null) {
+        if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException)
+                && e.getMessage() != null) {
             out.put("reason", e.getMessage());
         } else {
             out.put("reason", "internal error (" + e.getClass().getSimpleName() + ")");
@@ -2597,11 +2697,19 @@ public final class CatalogRepository {
             // count(*) rather than += rows.size(): appends upsert BY POSITION,
             // so an append that overwrites existing positions adds no rows.
             if (!rows.isEmpty()) {
-                ctx.update(CATALOG_DOCUMENTS)
+                // nexus-eldyi: guarded, fail loud — same reasoning as
+                // writeManifestRows (data-bearing, VOID public signature; the
+                // throw rolls back the append written above in this same txn).
+                int updated = ctx.update(CATALOG_DOCUMENTS)
                    .set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, docId))
                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)))
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                    .execute();
+                if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+                    throw new TombstonedDocumentException(docId,
+                        "appendManifestChunks refused: document is tombstoned: " + docId);
+                }
             }
             return null;
         });
@@ -2664,10 +2772,22 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
                              .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
-            ctx.update(CATALOG_DOCUMENTS)
+            // nexus-eldyi: guarded, fail loud. *deleted* counts
+            // catalog_document_chunks rows (a DIFFERENT table with no
+            // deleted_at of its own), so it stays an honest count regardless
+            // of tombstone status — but it does NOT reflect whether this
+            // CATALOG_DOCUMENTS fold succeeded, so a caller reading
+            // deleted > 0 could otherwise believe the parent row's
+            // chunk_count was zeroed when the guard silently refused it.
+            int updated = ctx.update(CATALOG_DOCUMENTS)
                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 0)
-               .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute();
+            if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+                throw new TombstonedDocumentException(docId,
+                    "purgeManifest refused: document is tombstoned: " + docId);
+            }
             return deleted;
         });
     }

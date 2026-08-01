@@ -908,6 +908,90 @@ public final class TaxonomyRepository {
                    "count",             r.get("cnt", Integer.class))));
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // UNIQUE-KEY COMPLETENESS (nexus-q2ign — nexus-0ehwe arbiter class, 4th instance)
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // nexus.topics carries TWO caller-determined unique keys:
+    //   topics_pk                              PRIMARY KEY (id)                     taxonomy-001-baseline.xml:58
+    //   idx_topics_root_tenant_collection_label UNIQUE (tenant_id, collection, label)
+    //                                           WHERE parent_id IS NULL             taxonomy-004-dedup-root-topics.xml:87
+    //
+    // id is BIGSERIAL, but the fidelity ETL import (importTopic / importTopicsBatch
+    // below) supplies it explicitly to preserve topic_assignments/topic_links FK
+    // references across a migration — so for THIS write path id is caller-determined,
+    // not server-generated, and the "server-generated keys are exempt" rule
+    // (5c8c978e / catalog_links, memory, *_etl_dedup) does not apply to it. Those two
+    // sites arbitrate ON CONFLICT (TOPICS.ID) and never name the root-label key, so an
+    // imported row whose (tenant, collection, label) already lives at a DIFFERENT id
+    // (root-topic re-parented/relabeled between snapshots, or two partial imports of
+    // overlapping history) raises a raw, undiagnosable 23505 on
+    // idx_topics_root_tenant_collection_label.
+    //
+    // PER-TABLE DECISION (Hal, matching 5c8c978e's catalog_documents shape): id is the
+    // ADDRESS, (tenant, collection, label WHERE parent_id IS NULL) is the IDENTITY.
+    // REFUSE, do not converge — converging onto the pre-existing id would silently
+    // renumber the row the caller is fidelity-importing, breaking the very
+    // topic_assignments/topic_links FK references (which point at the SOURCE id) this
+    // import exists to preserve. Same reasoning as guardDocumentIdentity's source_uri
+    // guard in CatalogRepository (silent convergence there would misroute a write;
+    // here it would corrupt referential fidelity).
+    //
+    // persistRebuildTopics / persistDiscoveredTopics (the LIVE discovery write paths,
+    // not ETL) are NOT in scope: they never supply an explicit id (server-generated,
+    // exempt), and they already arbitrate the ONLY key they can hit
+    // (TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL) WHERE PARENT_ID IS NULL) —
+    // plus lockTaxonomyCollection serializes per-collection writers, a stronger belt
+    // than the retry this class's import siblings use. Non-root topics (parent_id NOT
+    // NULL) are outside the partial index's predicate entirely — no identity key to
+    // guard.
+    //
+    // No UniqueRaceRetry here, unlike upsertOwner/upsertDocument (the LIVE write
+    // paths in CatalogRepository): importOwner/importOwnersBatch/importDocument/
+    // importDocumentsBatch — this method's direct siblings — carry the same guard
+    // WITHOUT a retry wrapper, because fidelity ETL import is a migration/seeding
+    // path, never concurrent with live writes for the same tenant (see
+    // advanceTopicsIdSequence's javadoc immediately below, which accepts the same
+    // non-concurrency assumption for the sequence advance).
+
+    /** Address key of {@code nexus.topics} (taxonomy-001-baseline.xml:58). */
+    static final String TOPICS_PK = "topics_pk";
+    /** Root-topic identity key of {@code nexus.topics}, partial (taxonomy-004-dedup-root-topics.xml:87). */
+    static final String TOPICS_ROOT_LABEL = "idx_topics_root_tenant_collection_label";
+
+    /**
+     * The id of the LIVE root topic already holding {@code (tenant, collection,
+     * label)}, or {@code null}. Only root topics (parent_id IS NULL) are governed
+     * by this identity key — mirrors the partial index's own predicate exactly.
+     */
+    private static Long resolveRootTopicId(DSLContext ctx, String tenant,
+                                           String collection, String label) {
+        return ctx.select(TOPICS.ID).from(TOPICS)
+                  .where(TOPICS.TENANT_ID.eq(tenant)
+                         .and(TOPICS.COLLECTION.eq(collection))
+                         .and(TOPICS.LABEL.eq(label))
+                         .and(TOPICS.PARENT_ID.isNull()))
+                  .limit(1)
+                  .fetchOne(TOPICS.ID);
+    }
+
+    /**
+     * Refuse a fidelity-import write that would give a root-topic label identity
+     * to a second id (nexus-q2ign). {@code parentId != null} (a non-root topic)
+     * is never governed by this key and returns quietly.
+     */
+    private static void guardTopicIdentity(DSLContext ctx, String tenant, long attemptedId,
+                                           Long parentId, String collection, String label) {
+        if (parentId != null) return;
+        Long existing = resolveRootTopicId(ctx, tenant, collection, label);
+        if (existing != null && existing != attemptedId) {
+            throw new CatalogIdentityConflictException(
+                TOPICS_ROOT_LABEL,
+                "collection=" + collection + " label=" + label,
+                String.valueOf(existing), String.valueOf(attemptedId));
+        }
+    }
+
     // ── Fidelity ETL import ────────────────────────────────────────────────────
 
     /**
@@ -953,6 +1037,11 @@ public final class TaxonomyRepository {
         OffsetDateTime createdAtTs = parseTsStrict(createdAt);
         tenantScope.withTenant(tenant, ctx -> {
             ensureCollectionRegistered(ctx, tenant, collection);
+            // nexus-q2ign: this INSERT arbitrates TOPICS.ID only, so a root topic
+            // (parent_id null) whose (collection, label) already lives at a
+            // DIFFERENT id must be refused before the write, not left to raise a
+            // raw 23505 on idx_topics_root_tenant_collection_label.
+            guardTopicIdentity(ctx, tenant, srcId, parentId, collection, label);
             ctx.insertInto(TOPICS,
                     TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
@@ -1154,6 +1243,11 @@ public final class TaxonomyRepository {
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
                     TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS);
             for (var r : batch) {
+                // nexus-q2ign: same guard as the single-row importTopic — the
+                // batch form is not exempt from the key its ON CONFLICT (TOPICS.ID)
+                // omits.
+                guardTopicIdentity(ctx, tenant, reqL(r, "id"), optL(r, "parent_id"),
+                                    optS(r, "collection"), optS(r, "label"));
                 insert = insert.values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
                         optS(r, "collection"), optS(r, "centroid_hash"), optI(r, "doc_count", 0),
                         parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),

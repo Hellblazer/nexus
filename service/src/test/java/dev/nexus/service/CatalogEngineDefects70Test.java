@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -457,6 +458,220 @@ class CatalogEngineDefects70Test {
         assertThat(results).containsExactly(1);
 
         assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(2);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-927mo — /update must stamp indexed_at when head_hash CHANGES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void mo927_updateStampsIndexedAtWhenHeadHashChanges() throws Exception {
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "idxat-changed", "content_type", "prose",
+            "source_uri", "file:///defects70/idxatchanged/doc.md"));
+        repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
+        String original = (String) repo.getDocument(TENANT, t).get("indexed_at");
+        assertThat(original)
+            .as("precondition: a known, controlled original value")
+            .isEqualTo("2020-01-01T00:00:00.000000+00:00");
+
+        Thread.sleep(10);
+        repo.updateDocument(TENANT, t, Map.of("head_hash", "rev2"));
+
+        String refreshed = (String) repo.getDocument(TENANT, t).get("indexed_at");
+        assertThat(refreshed)
+            .as("indexed_at must advance when update() changes head_hash")
+            .isNotEqualTo(original);
+    }
+
+    @Test
+    void mo927_updateDoesNotStampIndexedAtWhenHeadHashUnchanged() {
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "idxat-same", "content_type", "prose", "head_hash", "same-hash",
+            "source_uri", "file:///defects70/idxatsame/doc.md"));
+        repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
+        String original = (String) repo.getDocument(TENANT, t).get("indexed_at");
+
+        // Resubmitting the SAME head_hash (plus an unrelated field) must NOT stamp.
+        repo.updateDocument(TENANT, t, Map.of("head_hash", "same-hash", "title", "idxat-same-2"));
+
+        assertThat(repo.getDocument(TENANT, t).get("indexed_at"))
+            .as("an update that does not actually CHANGE head_hash must not stamp indexed_at")
+            .isEqualTo(original);
+        assertThat(repo.getDocument(TENANT, t).get("title")).isEqualTo("idxat-same-2");
+    }
+
+    @Test
+    void mo927_explicitIndexedAtStillWinsOverHeadHashChange() {
+        // Mirrors e4gel_updateRespectsCallerSuppliedChunkCount's "caller intent
+        // wins" shape: an explicit indexed_at in the SAME update as a head_hash
+        // change must not be clobbered by the auto-stamp.
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "idxat-explicit", "content_type", "prose",
+            "source_uri", "file:///defects70/idxatexplicit/doc.md"));
+
+        repo.updateDocument(TENANT, t, Map.of(
+            "head_hash", "rev-explicit", "indexed_at", "2021-06-01T00:00:00.000000+00:00"));
+
+        assertThat(repo.getDocument(TENANT, t).get("indexed_at"))
+            .isEqualTo("2021-06-01T00:00:00.000000+00:00");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-eldyi — the seven write paths bypassing the non-resurrection rule
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** Register, tombstone, and return the tumbler — shared fixture for the eldyi block. */
+    private String tombstonedDoc(String tag) {
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", tag, "content_type", "prose",
+            "source_uri", "file:///defects70/eldyi/" + tag + "/doc.md"));
+        assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
+        return t;
+    }
+
+    @Test
+    void eldyi_stampIndexedAt_rollsBackCleanlyOnTombstonedDoc() throws Exception {
+        // stampIndexedAt itself is advisory (guarded, silent no-op — no
+        // exception of its own), called from appendManifestChunks BEFORE that
+        // method's own chunk_count guard fires and throws. This proves the
+        // combination is correct end-to-end: nothing from the refused attempt
+        // survives, including a stray indexed_at stamp, because the whole
+        // transaction rolls back on the throw.
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "stampidx", "content_type", "prose",
+            "source_uri", "file:///defects70/eldyi/stampidx/doc.md"));
+        repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
+        assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
+
+        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, t, List.of(row(0, ch("defects70-eldyi-stampidx-0")))))
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+
+        // Read indexed_at directly (raw SQL, bypassing the deleted_at read
+        // filter — getDocument would just return null for a tombstoned row)
+        // and confirm it is exactly the pre-tombstone value: untouched by the
+        // refused attempt above, proving the whole transaction rolled back
+        // cleanly rather than leaving a stray indexed_at stamp behind.
+        assertThat(rawIndexedAt(t))
+            .as("a refused appendManifestChunks attempt while tombstoned must leave indexed_at untouched")
+            .isEqualTo("2020-01-01T00:00:00.000000+00:00");
+    }
+
+    /** Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi). */
+    private String rawIndexedAt(String tumbler) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
+                ps.setString(1, TENANT);
+                ps.setString(2, tumbler);
+                try (var rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new IllegalStateException("rawIndexedAt found no row for " + tumbler);
+                    }
+                    return rs.getString(1);
+                }
+            }
+        }
+    }
+
+    @Test
+    void eldyi_writeManifest_refusesTombstonedDoc() {
+        String t = tombstonedDoc("writemanifest");
+        assertThatThrownBy(() -> repo.writeManifest(TENANT, t, List.of(row(0, ch("defects70-eldyi-wm-0")))))
+            .as("writeManifest must refuse a tombstoned target, not silently write orphan chunks")
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+        assertThat(repo.getManifest(TENANT, t))
+            .as("the refused write's manifest rows must not have landed (rolled back)")
+            .isEmpty();
+    }
+
+    @Test
+    void eldyi_appendManifestChunks_refusesTombstonedDoc() {
+        String t = tombstonedDoc("appendmanifest");
+        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, t, List.of(row(0, ch("defects70-eldyi-am-0")))))
+            .as("appendManifestChunks must refuse a tombstoned target")
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+        assertThat(repo.getManifest(TENANT, t)).isEmpty();
+    }
+
+    @Test
+    void eldyi_purgeManifest_refusesTombstonedDocWithManifestRows() {
+        // Manifest rows must exist BEFORE the tombstone (soft delete does not
+        // cascade to the manifest, RDR-156 P1.2) so the purge has real work to
+        // refuse, not an incidental empty-manifest 0.
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "purgemanifest", "content_type", "prose",
+            "source_uri", "file:///defects70/eldyi/purgemanifest/doc.md"));
+        repo.appendManifestChunks(TENANT, t, List.of(row(0, ch("defects70-eldyi-pm-0"))));
+        assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
+
+        assertThatThrownBy(() -> repo.purgeManifest(TENANT, t))
+            .as("purgeManifest must refuse a tombstoned target")
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+    }
+
+    @Test
+    void eldyi_purgeManifest_missingDocStaysSilentZero() {
+        // The OTHER 0-rows case: a tumbler that was never registered at all is
+        // NOT a tombstone refusal — same long-standing silent-0 contract.
+        String owner = freshOwner();
+        String neverRegistered = owner + ".999999";
+        assertThat(repo.purgeManifest(TENANT, neverRegistered)).isZero();
+    }
+
+    @Test
+    void eldyi_updateDocumentCollection_silentZeroOnTombstonedDoc() {
+        String t = tombstonedDoc("updatecoll");
+        assertThat(repo.updateDocumentCollection(TENANT, t, "code__eldyi-newcoll__voyage-code-3__v1"))
+            .as("updateDocumentCollection returns the honest 0 rows-affected — no exception needed")
+            .isZero();
+    }
+
+    @Test
+    void eldyi_updateDocumentsCollectionBatch_silentZeroOnTombstonedDoc() {
+        String t = tombstonedDoc("updatecollbatch");
+        assertThat(repo.updateDocumentsCollectionBatch(TENANT, List.of(t), "code__eldyi-newcoll2__voyage-code-3__v1"))
+            .isZero();
+    }
+
+    @Test
+    void eldyi_setAlias_silentZeroOnTombstonedDoc() {
+        String owner = freshOwner();
+        String canonical = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "eldyi-alias-canonical", "content_type", "prose",
+            "source_uri", "file:///defects70/eldyi/aliascanon/doc.md"));
+        String t = tombstonedDoc("setalias");
+        assertThat(repo.setAlias(TENANT, t, canonical)).isZero();
+    }
+
+    @Test
+    void eldyi_upsertDocument_unTombstoneStillWorks() {
+        // The pinned exemption: upsertDocument is the ONE sanctioned
+        // un-tombstone (CatalogEngineDefects70Test mqd6t_registerUnTombstonesExplicitly
+        // above already pins this; this is the eldyi-block twin verifying the
+        // NEW guards on the other seven paths did not regress it).
+        String owner = freshOwner();
+        String tumbler = owner + ".8001";
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", tumbler, "title", "eldyi-resurrect", "content_type", "code",
+            "source_uri", "file:///defects70/eldyi/resurrect/doc.md"));
+        assertThat(repo.deleteDocument(TENANT, tumbler)).isEqualTo(1);
+        assertThat(repo.getDocument(TENANT, tumbler)).isNull();
+
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", tumbler, "title", "eldyi-resurrected", "content_type", "code",
+            "source_uri", "file:///defects70/eldyi/resurrect/doc.md"));
+
+        var doc = repo.getDocument(TENANT, tumbler);
+        assertThat(doc).as("upsertDocument must still un-tombstone after the eldyi guards").isNotNull();
+        assertThat(doc.get("title")).isEqualTo("eldyi-resurrected");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

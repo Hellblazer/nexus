@@ -6,8 +6,8 @@ package dev.nexus.service.db;
  * A write would give one IDENTITY to two different ADDRESSES (nexus-0ehwe arbiter
  * class).
  *
- * <p><strong>Why this is a refusal and not a convergence.</strong> Both catalog tables
- * in this class separate an ADDRESS key from one or more IDENTITY keys:
+ * <p><strong>Why this is a refusal and not a convergence.</strong> Every table using
+ * this exception separates an ADDRESS key from one or more IDENTITY keys:
  *
  * <ul>
  *   <li>{@code catalog_owners} — address {@code (tenant_id, tumbler_prefix)};
@@ -15,6 +15,10 @@ package dev.nexus.service.db;
  *       {@code (tenant_id, repo_hash)}.</li>
  *   <li>{@code catalog_documents} — address {@code (tenant_id, tumbler)}; identity
  *       {@code (tenant_id, source_uri)} among LIVE rows.</li>
+ *   <li>{@code nexus.topics} (nexus-q2ign, {@link TaxonomyRepository}) — address
+ *       {@code id} (caller-supplied on the fidelity-import path); identity
+ *       {@code (tenant_id, collection, label)} among ROOT topics
+ *       ({@code parent_id IS NULL}).</li>
  * </ul>
  *
  * <p>When the caller supplies the address and the identity already lives at a

@@ -223,6 +223,12 @@ public final class CatalogHandler implements HttpHandler {
             // gets the same 409 the pre-check gives, with the message that names the remedy.
             // It fell into the generic catch below for one commit and surfaced as an opaque 500.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.TombstonedDocumentException e) {
+            // nexus-eldyi: a manifest write (write/append/purge) refused a
+            // tombstoned target — the non-resurrection rule extended beyond
+            // /update. Same 409 shape as CollectionMergeRefused above: a
+            // refusal, not a server error.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
