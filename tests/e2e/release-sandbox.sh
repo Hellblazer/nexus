@@ -226,16 +226,31 @@ case "$MODE" in
         echo "  nx catalog setup (seeds plan library + initializes catalog):"
         nx catalog setup 2>&1 | tail -5 | sed 's/^/    /' || true
         echo
+        # A gate that PRINTS a failure and exits 0 is not a gate. This loop
+        # detected failures correctly (set -euo pipefail at the top makes the
+        # pipeline carry nx doctor's status into the `if`) and then dropped
+        # them on the floor: the caller saw exit 0 with "[FAIL]" in the log.
+        # Found by the 7.0.0 release dry run, where --check-taxonomy failed and
+        # the gate reported success.
+        SMOKE_FAILED=()
         for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  nx doctor $check:"
             if nx doctor "$check" 2>&1 | sed 's/^/    /'; then
                 echo "    [pass]"
             else
                 echo "    [FAIL] -- exit non-zero" >&2
+                SMOKE_FAILED+=("$check")
             fi
             echo
         done
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
+        if (( ${#SMOKE_FAILED[@]} )); then
+            echo >&2
+            echo "SMOKE FAILED: ${#SMOKE_FAILED[@]} doctor check(s) exited non-zero:" >&2
+            printf '  nx doctor %s\n' "${SMOKE_FAILED[@]}" >&2
+            exit 1
+        fi
+        echo "SMOKE PASSED: all doctor checks green."
         ;;
 
     shakedown)
