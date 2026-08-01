@@ -94,21 +94,6 @@ class TestAutoLink:
         links = cat.links_from(source_t)
         assert links == []
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-9ssih: service link_if_absent skips dangling-endpoint "
-
-        "validation, so auto_link CREATES dangling links where the local arm "
-
-        "skipped them (confirmed live 2026-07-30). Flips with the endpoint-"
-
-        "validation fix.",
-
-    )
 
     def test_nonexistent_tumbler_graceful_skip(self, tmp_path):
         """A LinkContext with valid-format-but-non-existent tumbler is counted in skipped_missing_endpoint."""
@@ -261,21 +246,6 @@ class TestAutoLinkResult:
         assert result.skipped_invalid_tumbler == 1
         assert result.skipped_missing_endpoint == 0
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-9ssih: service link_if_absent skips dangling-endpoint "
-
-        "validation, so auto_link CREATES dangling links where the local arm "
-
-        "skipped them (confirmed live 2026-07-30). Flips with the endpoint-"
-
-        "validation fix.",
-
-    )
 
     def test_mixed_invalid_and_missing_separate_counts(self, tmp_path):
         """A batch with both failure modes counts them separately."""
@@ -296,21 +266,6 @@ class TestAutoLinkResult:
         assert result.skipped_invalid_tumbler == 2
         assert result.skipped_missing_endpoint == 1
 
-    @pytest.mark.xfail(
-
-        strict=True,
-
-        raises=AssertionError,
-
-        reason="nexus-9ssih: service link_if_absent skips dangling-endpoint "
-
-        "validation, so auto_link CREATES dangling links where the local arm "
-
-        "skipped them (confirmed live 2026-07-30). Flips with the endpoint-"
-
-        "validation fix.",
-
-    )
 
     def test_partial_success_counts_correctly(self, tmp_path):
         """Mixed valid + invalid + missing in one batch: each counted in its bucket."""

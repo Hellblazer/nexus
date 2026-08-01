@@ -2007,7 +2007,12 @@ public final class CatalogRepository {
      */
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
+        boolean allowDangling = Boolean.TRUE.equals(lnk.get("allow_dangling"))
+            || "true".equalsIgnoreCase(String.valueOf(lnk.get("allow_dangling")));
         return tenantScope.withTenant(tenant, ctx -> {
+            if (!allowDangling) {
+                requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
+            }
             var rec = ctx.insertInto(CATALOG_LINKS,
                     CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                     CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
@@ -2035,6 +2040,65 @@ public final class CatalogRepository {
                .fetchOne();
             return rec != null && Boolean.TRUE.equals(rec.value1());
         });
+    }
+
+    /**
+     * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
+     *
+     * <p>Extends {@link IllegalArgumentException} so the handler's existing
+     * ladder already maps it to 400; {@link #missing()} lets the wire response
+     * name which side dangles, which is what the client needs to distinguish
+     * this from any other 400 (the auto-linker counts
+     * {@code skipped_missing_endpoint} off exactly this signal — the local
+     * {@code link_if_absent} raised {@code ValueError} for it, and the service
+     * path silently wrote the dangling edge instead).
+     */
+    public static final class DanglingEndpointException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+        private final transient List<String> missing;
+
+        DanglingEndpointException(List<String> missing, String message) {
+            super(message);
+            this.missing = List.copyOf(missing);
+        }
+
+        /** Which endpoint fields dangle: {@code from_tumbler}, {@code to_tumbler}, or both. */
+        public List<String> missing() {
+            return missing;
+        }
+    }
+
+    /**
+     * Reject a link whose {@code from}/{@code to} does not resolve to a LIVE
+     * (non-tombstoned) document in this tenant (nexus-9ssih).
+     *
+     * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
+     * path — and NOT to the {@code import*} family, which legitimately writes
+     * edges for documents whose live state the ETL leg does not control (same
+     * carve-out {@code physicalCollectionOf} already documents for the manifest
+     * write path). Callers that genuinely want an unvalidated edge pass
+     * {@code allow_dangling: true}, the parity of the local {@code link}'s own
+     * {@code allow_dangling} flag.
+     */
+    private static void requireLiveEndpoints(DSLContext ctx, String tenant, String fromT, String toT) {
+        List<String> missing = new ArrayList<>(2);
+        if (!liveDocument(ctx, tenant, fromT)) missing.add("from_tumbler");
+        if (!liveDocument(ctx, tenant, toT))   missing.add("to_tumbler");
+        if (missing.isEmpty()) return;
+        throw new DanglingEndpointException(missing,
+            "dangling link endpoint: " + String.join(", ", missing)
+            + " does not resolve to a live catalog document"
+            + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
+            + " Pass allow_dangling=true to write the edge anyway.");
+    }
+
+    private static boolean liveDocument(DSLContext ctx, String tenant, String tumbler) {
+        if (tumbler == null || tumbler.isBlank()) return false;
+        return ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */
