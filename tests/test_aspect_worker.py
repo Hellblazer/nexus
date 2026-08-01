@@ -527,7 +527,7 @@ class TestGap2SourcePathNormalization:
 
         raises=AssertionError,
 
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing filepath link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
+        reason="nexus-h77a2: engine lookupDocByCollectionAndPath lost the local arm's title-probe leg, so docs registered with title==path never resolve (previously misattributed to the closed nexus-5i864 — _canonicalize_source_path never calls resolve_path). Flips with h77a2.",
 
     )
 
@@ -666,7 +666,7 @@ class TestGap2SourcePathNormalization:
 
         raises=AssertionError,
 
-        reason="nexus-5i864: service resolve_path drops repo_root recombination, zeroing link generation (blast radius confirmed live, terminal-deletion verification 2026-07-30). Flips with 5i864.",
+        reason="nexus-h77a2: engine lookupDocByCollectionAndPath lost the local arm's title-probe leg, so docs registered with title==path never resolve (previously misattributed to the closed nexus-5i864). Flips with h77a2.",
 
     )
 

@@ -91,7 +91,7 @@ def test_owner_segment_for_tumbler_single_segment_returns_empty() -> None:
 
     raises=AssertionError,
 
-    reason="service collection_for lacks the local arm's semantics (validation + MAX-version) — recorded i711w.1 GAP candidate, nexus-cecqy conformance family. Flips with the engine/client fix.",
+    reason="nexus-fm3th: CollectionName constructor performs no content_type validation — only .parse() validates (previously mislabelled nexus-cecqy family). CLIENT fix; flips with fm3th.",
 
 )
 
@@ -117,7 +117,7 @@ def test_collection_for_rejects_unknown_content_type(catalog) -> None:
     raises=AssertionError,
 
 
-    reason="service collection_for lacks the local arm's semantics (validation + MAX-version) — recorded i711w.1 GAP candidate, nexus-cecqy conformance family. Flips with the engine/client fix.",
+    reason="nexus-fm3th: CollectionName constructor performs no embedding_model validation — only .parse() validates (previously mislabelled nexus-cecqy family). CLIENT fix; flips with fm3th.",
 
 
 )
@@ -204,7 +204,7 @@ def test_collection_for_existing_tuple_returns_same_version(catalog) -> None:
     raises=AssertionError,
 
 
-    reason="service collection_for lacks the local arm's semantics (validation + MAX-version) — recorded i711w.1 GAP candidate, nexus-cecqy conformance family. Flips with the engine/client fix.",
+    reason="nexus-pzdol: engine collectionForTuple orders by NAME lexically so v9 sorts above v10 (previously mislabelled nexus-cecqy family). ENGINE fix; flips with pzdol at merge.",
 
 
 )

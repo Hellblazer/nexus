@@ -188,22 +188,16 @@ class TestCriticalFiveTOCTOUOwnerRace:
     """CRITICAL-5, now against the ACTIVE (engine) catalog.
 
     nexus-i711w terminal deletion: the local pin died with the local
-    Catalog. The engine has its own version of this race — nexus-jq53b
-    (P1, OPEN): owner-ensure sites arbitrate ON CONFLICT on
+    Catalog. The engine had its own version of this race — nexus-jq53b:
+    owner-ensure sites arbitrated ON CONFLICT on
     ``(tenant_id, tumbler_prefix)`` while ``catalog_owners`` also carries
-    ``catalog_owners_unique_name_type``, so a concurrent register can
+    ``catalog_owners_unique_name_type``, so a concurrent register could
     raise 23505 instead of converging (surfaced as a CI flake on
-    PR #1423). The concurrent test below is therefore xfail(non-strict)
-    on that bead — it converges only when the engine wins the race or
-    once jq53b lands; the synchronous re-check and curator-exemption
-    contracts hold on the engine today.
+    PR #1423). FIXED by 5c8c978e, shipped in engine-service-v0.1.60;
+    the former non-strict xfail below xpassed on the source-built JAR
+    and the marker was removed 2026-08-01 (pins flip at merge).
     """
 
-    @pytest.mark.xfail(
-        reason="nexus-jq53b: engine owner-ensure race can 23505 instead of "
-               "converging; non-strict because the race is timing-dependent",
-        strict=False,
-    )
     def test_concurrent_ensure_owner_for_repo_no_duplicate_rows(
         self, cat: Catalog, repo: Path,
     ) -> None:
