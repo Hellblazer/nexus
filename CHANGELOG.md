@@ -57,6 +57,16 @@ identity pinned by this release is v0.1.60; the v0.1.61 floor bump follows in
   never creates the table.
 
 ### Fixed
+- Engine convergence can no longer be silently defeated by a stalled
+  supervisor: `nx upgrade`'s restart now snapshots the service stack from
+  the OS process table and sweeps survivors after `stop` (which trusts a
+  15s-TTL discovery lease and reads a stalled-but-alive supervisor as
+  "already stopped"), so the old engine cannot keep serving after a
+  "clean" restart (the GH #1402 fix-delivery lineage). Identification is
+  argv-exact (token-exact `--config-dir`, argv[0] engine) so sibling
+  profiles and operator diagnostics are never touched; works without
+  `ps` via `/proc`. The operator verb's own lease-miss hole is tracked
+  as nexus-oyo2g.
 - `resolve(follow_alias=True)` — the declared default — is now actually sent
   on the wire; `resolve_alias()` resolves the canonical target instead of
   returning its input (nexus-fguo5).

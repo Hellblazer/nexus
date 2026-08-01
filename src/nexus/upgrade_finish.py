@@ -298,9 +298,12 @@ def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]
     """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
 
     Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (nexus-cfgo9
-    follow-up — see :func:`_procfs_enumerate`). Only a box with NEITHER
-    raises, and it raises rather than reporting an empty table: a silent
-    "zero processes" is the fail-open this module exists to eliminate
+    follow-up — see :func:`_procfs_enumerate`). A box with NEITHER raises;
+    so does a box whose PRESENT ``ps`` fails or returns an empty table
+    (that is a signal worth surfacing — e.g. a hidepid-restricted or
+    corrupted procps — not a case to silently route around, review M1).
+    It raises rather than reporting an empty table: a silent "zero
+    processes" is the fail-open this module exists to eliminate
     (review 38b7db3d M5). ``ps_output`` is injectable for tests.
 
     The venv-marker-filtered view is :func:`enumerate_processes`; the
@@ -868,17 +871,40 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     always passes the flag), and the engine's argv[0] IS the well-known
     binary path under *config_dir*. Never matches this process, and never
     matches ``nx daemon restart-stale`` itself.
+
+    THE SUPERVISOR MATCH IS TOKEN-EXACT ON THE --config-dir ARGUMENT, not
+    a substring test (review Critical, 2026-08-01): ``--config-dir`` is
+    the documented multi-profile mechanism, and a bare
+    ``str(config_dir) in command`` matches ``.config/nexus`` against
+    ``.config/nexus-staging``'s command line — folding a HEALTHY sibling
+    profile's supervisor into the sweep's kill set. A wrong-kill of an
+    unrelated profile is precisely the failure class this function exists
+    to eliminate for the matching one. (The engine match has no such
+    exposure: the ``/service/nexus-service`` suffix forces a
+    path-structure match.)
     """
     engine_path = str(config_dir / "service" / "nexus-service")
+    target = str(config_dir)
     me = os.getpid()
     found: list[tuple[int, str]] = []
     for pid, _age, command in all_process_rows():
         if pid == me:
             continue
-        is_engine = engine_path in command
-        is_supervisor = (
-            "daemon service start" in command and str(config_dir) in command
-        )
+        # argv[0] EXACT for the engine (critique 21345): a substring test
+        # matched an operator's `tail .../service/nexus-service.log` or
+        # `cat <binary>` run in the stop->sweep window — an innocent
+        # diagnostic command must never enter a kill set.
+        is_engine = command.split()[:1] == [engine_path]
+        is_supervisor = False
+        if "daemon service start" in command:
+            tokens = command.split()
+            for i, tok in enumerate(tokens):
+                if tok == "--config-dir" and i + 1 < len(tokens):
+                    is_supervisor = tokens[i + 1] == target
+                    break
+                if tok.startswith("--config-dir="):
+                    is_supervisor = tok[len("--config-dir="):] == target
+                    break
         if is_engine or is_supervisor:
             found.append((pid, command))
     return found
@@ -1012,7 +1038,11 @@ def _restart_and_verify(
             ["nx", "daemon", "service", "stop"],
             capture_output=True, text=True, timeout=60,
         )
-        sweep_note = _sweep_surviving_stack(config_dir, before)
+        try:
+            sweep_note = _sweep_surviving_stack(config_dir, before)
+        except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
+            _log.warning("restart_stack_sweep_failed", error=str(exc))
+            sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
         start = subprocess.run(
             ["nx", "daemon", "service", "start"],
             capture_output=True, text=True, timeout=120,

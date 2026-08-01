@@ -383,6 +383,92 @@ class TestFailLoud:
             f"install's engine. Got: {found}"
         )
 
+    def test_prefix_colliding_sibling_profile_is_never_matched(self, tmp_path):
+        """Review Critical (2026-08-01): a bare `str(config_dir) in command`
+        substring match folded a HEALTHY sibling profile into the kill set
+        whenever one profile's path was a string-prefix of another's
+        (.config/nexus vs .config/nexus-staging — and --config-dir is the
+        DOCUMENTED multi-profile mechanism). The supervisor match must be
+        token-exact on the --config-dir argument, both flag spellings."""
+        cfg = tmp_path / "nexus"
+        sibling = tmp_path / "nexus-staging"
+        rows = [
+            (196, 60, f"/v/bin/python3 /v/bin/nx daemon service start "
+                      f"--foreground --config-dir {cfg}"),
+            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+            # The prefix-colliding SIBLING profile: alive, healthy, NOT ours.
+            (300, 60, f"/v/bin/python3 /v/bin/nx daemon service start "
+                      f"--foreground --config-dir {sibling}"),
+            (301, 60, f"{sibling}/service/nexus-service -Xmx1g"),
+            # --config-dir=<path> spelling, also a sibling.
+            (400, 60, f"/v/bin/python3 /v/bin/nx daemon service start "
+                      f"--foreground --config-dir={sibling}"),
+        ]
+        with patch("nexus.upgrade_finish.all_process_rows", return_value=rows):
+            from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — file pattern: deferred imports
+
+            found = service_stack_pids(cfg)
+            sibling_found = service_stack_pids(sibling)
+        assert sorted(p for p, _ in found) == [196, 214], (
+            f"prefix-colliding sibling must NEVER enter the kill set: {found}"
+        )
+        assert sorted(p for p, _ in sibling_found) == [300, 301, 400], (
+            "the sibling's own sweep must still find its own stack (incl. "
+            f"the --config-dir= spelling): {sibling_found}"
+        )
+
+    def test_innocent_lookalike_commands_are_never_matched(self, tmp_path):
+        """Critique 21345: substring matching swept innocent processes whose
+        command lines merely REFERENCE the paths — an operator tailing the
+        engine log or grepping the supervisor spawn line during the exact
+        incident this fix targets. Engine = argv[0] exact; supervisor =
+        token-exact --config-dir."""
+        cfg = tmp_path / "nexus"
+        rows = [
+            (196, 60, f"/v/bin/python3 /v/bin/nx daemon service start "
+                      f"--foreground --config-dir {cfg}"),
+            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+            (500, 3, f"tail -f {cfg}/service/nexus-service.log"),
+            (501, 3, f"cat {cfg}/service/nexus-service"),
+            (502, 3, f'grep "daemon service start" {cfg}/logs/storage_service.log'),
+        ]
+        with patch("nexus.upgrade_finish.all_process_rows", return_value=rows):
+            from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — file pattern: deferred imports
+
+            found = service_stack_pids(cfg)
+        assert sorted(p for p, _ in found) == [196, 214], (
+            f"diagnostic lookalikes must never be swept: {found}"
+        )
+
+    def test_restart_and_verify_wiring_reports_the_sweep(self, tmp_path):
+        """Critique 21345: the sweep's standalone units were tested but the
+        WIRING through _restart_and_verify was not — every converge-level
+        test's MagicMock made the before-snapshot silently empty. This pins
+        that survivors found by the snapshot surface as [stop-sweep] in the
+        action line, one layer up."""
+        from nexus import upgrade_finish as uf
+
+        survivors = [(196, "nx daemon service start --foreground "
+                           f"--config-dir {tmp_path}")]
+        stop_ok = MagicMock(returncode=0, stdout="", stderr="")
+        start_ok = MagicMock(returncode=0, stdout="", stderr="")
+        running = MagicMock(version="v0.1.60", pid=214)
+        with patch.object(uf, "service_stack_pids", return_value=survivors), \
+             patch.object(uf, "_pid_alive", return_value=True), \
+             patch.object(uf, "process_command",
+                          return_value=survivors[0][1]), \
+             patch.object(uf, "terminate_pids") as term, \
+             patch.object(uf.subprocess, "run",
+                          side_effect=[stop_ok, start_ok]), \
+             patch.object(uf, "_running_engine", return_value=running):
+            actions: list[str] = []
+            uf._restart_and_verify(tmp_path, actions, "v0.1.60")
+        term.assert_called()
+        joined = " ".join(actions)
+        assert "stop-sweep" in joined, (
+            f"the sweep must be visible in the reported actions: {actions}"
+        )
+
     def test_sweep_kills_a_stack_that_survived_stop(self, tmp_path):
         """THE FIX: `nx daemon service stop` reports success having signalled
         nothing when it cannot discover a live lease, and `nx daemon service

@@ -2204,6 +2204,15 @@ accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
 
+> **Known limitation (nexus-oyo2g):** `nx daemon service stop` decides what to
+> signal from the discovery lease (15s TTL). A supervisor whose heartbeat has
+> stalled is alive and serving while invisible to that check, so `stop` can
+> report "already stopped" having signalled nothing — and a following `start`
+> short-circuits once the heartbeat revives. `nx upgrade`'s engine convergence
+> is immune (it sweeps the stack from the process table, 7.0.0); if a manual
+> `stop && start` doesn't take, check `nx doctor` for a stale-supervisor
+> process-skew warning.
+
 | Flag | Description |
 |------|-------------|
 | `--autostart` | Required. Install the OS autostart unit. |
