@@ -185,19 +185,114 @@ public final class TokenStore {
             return;
         }
         String hash = TokenHashing.sha256Hex(rawToken);
-        // Scope set explicitly (not via the column default): root provisioning must
-        // never silently change if the default ever does (nexus-868dq).
-        int inserted = dsl()
-            .insertInto(SERVICE_TOKENS)
-            .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
-                     SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
-            .values(hash, tenantId, ROOT_TOKEN_LABEL, SCOPE_ROOT)
-            .onConflict(SERVICE_TOKENS.TOKEN_HASH)
-            .doNothing()
-            .execute();
-        if (inserted > 0) {
-            log.info("event=root_token_seeded tenant={}", tenantId);
+
+        // THE ROOT SLOT'S KEY IS THE LABEL, NOT THE HASH (nexus-kjjab).
+        //
+        // This used to be a bare ON CONFLICT (token_hash) DO NOTHING. That arbiter names
+        // the PK — but the table ALSO carries idx_service_tokens_single_root, a partial
+        // unique index on (label) WHERE label = 'bootstrap-legacy-token'. A ROTATED
+        // NX_SERVICE_TOKEN has a NEW hash and the SAME label, so the arbiter missed
+        // entirely and the label index fired as an unhandled 23505 — on the auth bootstrap
+        // path, outside any try in Main, taking the whole boot down with a bare stack
+        // trace. The index's own changeset comment names "a rotated NX_SERVICE_TOKEN
+        // re-seed" as the case it guards; guarding it by aborting startup was an accident,
+        // not a design.
+        //
+        // Resolve by label FIRST, then decide — the same prevent-rather-than-catch shape
+        // the arbiter class (nexus-0ehwe) settled on, and it needs no constraint-name
+        // extraction.
+        var incumbent = dsl()
+            .select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.REVOKED_AT)
+            .from(SERVICE_TOKENS)
+            .where(SERVICE_TOKENS.LABEL.eq(ROOT_TOKEN_LABEL))
+            .fetchOne();
+
+        if (incumbent == null) {
+            // Scope set explicitly (not via the column default): root provisioning must
+            // never silently change if the default ever does (nexus-868dq).
+            int inserted = dsl()
+                .insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
+                         SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
+                .values(hash, tenantId, ROOT_TOKEN_LABEL, SCOPE_ROOT)
+                .onConflict(SERVICE_TOKENS.TOKEN_HASH)
+                .doNothing()
+                .execute();
+            if (inserted > 0) {
+                log.info("event=root_token_seeded tenant={}", tenantId);
+            }
+            return;
         }
+
+        String incumbentHash = incumbent.get(SERVICE_TOKENS.TOKEN_HASH);
+        if (hash.equals(incumbentHash)) {
+            return;                                  // idempotent re-seed: the common path
+        }
+
+        // A REVOKED incumbent holds the slot (the index predicate has no revoked_at term).
+        // Neither silent option is acceptable: resurrecting it overrides a deliberate
+        // revocation, and rotating onto it mints a root token that is dead on arrival, so
+        // the service boots into an unusable state nobody is told about. Refuse, and name
+        // the remedy.
+        if (incumbent.get(SERVICE_TOKENS.REVOKED_AT) != null) {
+            throw new BootstrapTokenConflict(
+                "the root token slot (label '" + ROOT_TOKEN_LABEL + "') is held by a REVOKED "
+                + "row, so the provisioned NX_SERVICE_TOKEN cannot be seeded. Delete that row "
+                + "explicitly if the rotation is intended — this is not resolved silently "
+                + "because doing so would either override a deliberate revocation or leave a "
+                + "root token that authenticates nothing.");
+        }
+
+        // ROTATION. Replace the hash in place, which is what makes the OLD token stop
+        // working — the entire point of rotating a credential. Leaving the incumbent valid
+        // would mean a "rotated" compromised token still authenticates, silently: a worse
+        // outcome than the crash this replaces. NX_SERVICE_TOKEN is the source of truth and
+        // this row is its binding; an operator who changes the env and restarts has stated
+        // their intent, and already controls the service either way.
+        //
+        // Guarded on the incumbent hash so it is a compare-and-swap, not a check-then-write:
+        // two services booting against one database cannot both rotate and clobber.
+        int rotated = dsl()
+            .update(SERVICE_TOKENS)
+            .set(SERVICE_TOKENS.TOKEN_HASH, hash)
+            .set(SERVICE_TOKENS.TENANT_ID, tenantId)
+            .set(SERVICE_TOKENS.SCOPE, SCOPE_ROOT)
+            .where(SERVICE_TOKENS.LABEL.eq(ROOT_TOKEN_LABEL)
+                .and(SERVICE_TOKENS.TOKEN_HASH.eq(incumbentHash)))
+            .execute();
+
+        if (rotated > 0) {
+            // Loud by design. Replacing the root credential is exactly the event an
+            // operator must be able to find afterwards; the hash itself is never logged.
+            log.warn("event=root_token_rotated tenant={} reason=provisioned_token_changed",
+                     tenantId);
+            return;
+        }
+
+        // Lost the CAS: another boot rotated the slot concurrently. Converge if it landed
+        // on the same token, refuse if it landed on a different one.
+        String now = dsl()
+            .select(SERVICE_TOKENS.TOKEN_HASH).from(SERVICE_TOKENS)
+            .where(SERVICE_TOKENS.LABEL.eq(ROOT_TOKEN_LABEL))
+            .fetchOne(SERVICE_TOKENS.TOKEN_HASH);
+        if (hash.equals(now)) {
+            return;                                  // same rotation, applied by the racer
+        }
+        throw new BootstrapTokenConflict(
+            "the root token slot was rotated concurrently to a DIFFERENT token while this "
+            + "service was starting. Refusing rather than overwriting: two services are "
+            + "provisioned with different NX_SERVICE_TOKEN values against one database.");
+    }
+
+    /**
+     * Root-token seeding could not reach a defined state (nexus-kjjab).
+     *
+     * <p>TYPED so {@code Main} can report it the way it reports the other two anticipated
+     * startup failures — a logged error naming the remedy, then a non-zero exit — rather
+     * than the bare stack trace an unhandled 23505 produced from the same call site.
+     */
+    public static final class BootstrapTokenConflict extends RuntimeException {
+        public BootstrapTokenConflict(String message) { super(message); }
     }
 
     // ── Admin / lifecycle (RDR-152 bead nexus-gmiaf.32.3) ──────────────────────
