@@ -3013,15 +3013,32 @@ public final class CatalogRepository {
      * nexus-gaou3 409). This method stays a pure UPDATE.
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
+        // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
+        // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
+        Field<java.time.OffsetDateTime> stampedAt = supersededAt == null || supersededAt.isBlank()
+            ? DSL.currentOffsetDateTime()
+            : DSL.val(tsOrNull(supersededAt));
         return tenantScope.withTenant(tenant, ctx ->
-            // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
-            // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
             ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
+               // nexus-0svvu (a): the WHERE's same-target disjunct below (nexus-cecqy) is
+               // deliberately permissive — re-asserting the SAME target must match the
+               // row, or the canonical rename's paired supersede(X, Y) call would 409 on
+               // its own tombstone. That permissiveness has a cost a bare SET does not
+               // pay for: two concurrent supersedes to the SAME target both match, and an
+               // unconditional SET would re-stamp superseded_at on the SECOND (loser's)
+               // write too — moving the supersession's recorded instant on every retry,
+               // exactly what the handler's serial-path idempotence comment (guard 2,
+               // above) says must never happen. Do NOT fix this by weakening the WHERE:
+               // it is the single source of the DIFFERENT-target refusal, and
+               // renameCollectionTxn's documented emptiness/identity asymmetry
+               // (nexus-2sovp) depends on this CAS staying exactly this strict. Move the
+               // guard into the SET instead — stamp only on the transition OUT OF ''
+               // (a genuine first supersede); a row that already carries THIS target
+               // keeps whatever instant it already has.
                .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                    supersededAt == null || supersededAt.isBlank()
-                        ? DSL.currentOffsetDateTime()
-                        : DSL.val(tsOrNull(supersededAt)))
+                    DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""), stampedAt)
+                       .otherwise(CATALOG_COLLECTIONS.SUPERSEDED_AT))
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                    .and(CATALOG_COLLECTIONS.NAME.eq(name))
                    // nexus-cecqy (review): the handler's guard 2 reads the row, decides in
@@ -3031,7 +3048,11 @@ public final class CatalogRepository {
                    // later write silently wins — the unaudited chain rewrite guard 2 exists
                    // to prevent, just moved from serial to concurrent. Carrying the
                    // precondition in the WHERE closes that window: the loser matches zero
-                   // rows and the handler's rowcount check reports it.
+                   // rows and the handler's rowcount check reports it. LOAD-BEARING: do not
+                   // weaken or remove this conjunct (nexus-0svvu, nexus-2sovp) — it is what
+                   // makes renameCollectionTxn's own identity re-check (further below)
+                   // unnecessary in the common case, since superseded_by cannot move to a
+                   // THIRD value underneath an observed read once this CAS is in place.
                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
                        .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
                .execute()
@@ -3097,7 +3118,25 @@ public final class CatalogRepository {
      * rows untouched — preserving pre-RDR-164 RDR-162 behavior.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
-        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName);
+        return renameCollection(tenant, oldName, newName, null);
+    }
+
+    /**
+     * Same as {@link #renameCollection(String, String, String)}, plus an ADDITIVE identity
+     * belt (nexus-2sovp) for callers that can supply what they observed the target's
+     * {@code superseded_by} to be at their own read.
+     *
+     * <p>{@code expectedTargetSupersededBy} is the caller's OWN observation, not a value this
+     * method derives — {@link dev.nexus.service.http.CatalogHandler#handleCollectionRename}
+     * passes the value it just read (its {@code tgtSuperseded}) so the transaction verifies
+     * the SAME fact the handler's identity gate already checked, in its own snapshot, rather
+     * than trusting time to not have passed between the two. {@code null} means "no
+     * expectation to verify" (the 3-arg overload's contract, unchanged) — existing callers
+     * that never observed the target keep exactly their current behavior.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
+                                                   String expectedTargetSupersededBy) {
+        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy);
         // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
         // registry row — evict it so a later same-named collection re-registers. The
         // cross-model COPY branch leaves both registry rows untouched (no key in
@@ -3226,7 +3265,8 @@ public final class CatalogRepository {
         return true;
     }
 
-    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName) {
+    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
+                                                        String expectedTargetSupersededBy) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
@@ -3278,10 +3318,33 @@ public final class CatalogRepository {
             // If that CAS is ever weakened, this asymmetry becomes a hole and the identity
             // check has to be re-checked here too. The guard below is not self-defending;
             // it is defended by a precondition in another statement.
+            //
+            // nexus-2sovp, ADDITIVE BELT (2026-08-01, Hal-adjudicated): the paragraph above
+            // is what makes the asymmetry SAFE TODAY — there is exactly one caller
+            // (CatalogHandler.handleCollectionRename), and its identity gate cannot go stale
+            // because of the CAS. That is a fact about the CURRENT caller graph, not about
+            // this method. A future non-HTTP caller (a CLI path, a migration step, a
+            // scheduled repair) that calls renameCollection without replicating the
+            // handler's identity pre-check would inherit the emptiness protection below and
+            // NONE of the identity protection — silently. The belt below is optional
+            // (opt-in via a non-null expectedTargetSupersededBy) precisely so it can be
+            // additive: it does not change behavior for any caller that passes null, and it
+            // re-verifies — it does not replace — the emptiness check above.
             if (targetRowExists && !liveTargetExists && !collectionIsEmpty(ctx, newName)) {
                 throw new CollectionMergeRefused(
                     "target collection " + newName + " is retired but still holds data; "
                     + "renaming onto it would merge two collections. Purge or restore it first.");
+            }
+            if (targetRowExists && !liveTargetExists && expectedTargetSupersededBy != null) {
+                String actualTargetSupersededBy = ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                    .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName))
+                    .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY);
+                if (!expectedTargetSupersededBy.equals(actualTargetSupersededBy)) {
+                    throw new CollectionMergeRefused(
+                        "target collection " + newName + " is retired by " + actualTargetSupersededBy
+                        + ", not " + expectedTargetSupersededBy + " as observed at the caller's own read; "
+                        + "refusing to revive a tombstone whose identity changed underneath this rename.");
+                }
             }
 
             if (liveTargetExists) {

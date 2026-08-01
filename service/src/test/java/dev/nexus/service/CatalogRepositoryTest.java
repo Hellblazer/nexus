@@ -1141,6 +1141,81 @@ class CatalogRepositoryTest {
             .isEqualTo(1);
     }
 
+    @Test @Order(61)
+    void collection_supersede_sameTargetReassert_leavesSupersededAtByteIdentical() {
+        // nexus-0svvu (a): the WHERE's .or() disjunct above is deliberately permissive —
+        // a same-target re-assertion must MATCH (guard: the paired supersede call the
+        // canonical rename issues against its own tombstone must not 409). Matching is
+        // not the whole story: a bare SET would re-stamp superseded_at on every match,
+        // moving the recorded supersession instant on every retry — exactly what
+        // CatalogHandler's guard-2 comment says must never happen. The fix moves the
+        // guard into the SET clause (CASE WHEN superseded_by = '' THEN <new> ELSE
+        // superseded_at END), so a same-target re-assertion must be a true no-op on the
+        // timestamp, not merely idempotent on the pointer. This is the ONLY layer that
+        // proves it: the HTTP handler's OWN idempotence branch (guard 2's early return)
+        // never calls supersedeCollection a second time at all, so it cannot pin the
+        // SET clause — repo-level is the correct layer here, same lesson as the sibling
+        // pin above.
+        String name = "code__samestamp__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "samestamp", "embedding_model", "voyage-code-3"));
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+            .as("guard: the first supersession must land, or the rest proves nothing")
+            .isEqualTo(1);
+        String stamp = (String) repo.getCollection(TENANT_A, name).get("superseded_at");
+        assertThat(stamp).as("guard: the first supersede stamped an instant").isNotBlank();
+
+        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+            .as("same-target re-assertion still reports the row as marked")
+            .isEqualTo(1);
+        assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
+            .as("the SET clause must not move superseded_at on a same-target re-assertion")
+            .isEqualTo(stamp);
+    }
+
+    @Test @Order(61)
+    void collection_supersede_concurrentSameTarget_bothCallersSeeOneSurvivingStamp() throws Exception {
+        // nexus-0svvu (a), concurrency form. Two concurrent supersedes of the SAME
+        // old_name to the SAME target both call supersedeCollection directly here
+        // (bypassing the HTTP handler's guard-2 early return, which is the point — this
+        // pin is about the repo's OWN WHERE/SET, not the handler's short-circuit), and
+        // the WHERE's same-target disjunct lets BOTH match. Whichever runs second must
+        // take the CASE's ELSE branch and leave the instant exactly as the first left it.
+        String name = "code__concstamp__voyage-code-3__v1";
+        String target = "code__concstamp__voyage-code-3__v2";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code",
+            "owner_id", "concstamp", "embedding_model", "voyage-code-3"));
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Callable<Integer> task = () -> repo.supersedeCollection(TENANT_A, name, target, "");
+            var f1 = pool.submit(task);
+            var f2 = pool.submit(task);
+            int r1 = f1.get();
+            int r2 = f2.get();
+            assertThat(r1 + r2).as("both concurrent callers must see the row as marked (matched)")
+                .isEqualTo(2);
+            var row = repo.getCollection(TENANT_A, name);
+            assertThat(row.get("superseded_by")).isEqualTo(target);
+            String stampAfterRace = (String) row.get("superseded_at");
+            assertThat(stampAfterRace).isNotBlank();
+
+            // Whichever caller's write landed second necessarily saw superseded_by
+            // already equal to the target (not '') and had to take the CASE's ELSE
+            // branch, or this third, purely sequential, same-target call would move
+            // the stamp — proving the loser's write did NOT re-stamp during the race.
+            assertThat(repo.supersedeCollection(TENANT_A, name, target, "")).isEqualTo(1);
+            assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
+                .as("the recorded supersession instant must survive both the race and a "
+                    + "further same-target re-assertion")
+                .isEqualTo(stampAfterRace);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     @Test @Order(62)
     void collection_upsert_revivesASupersededRow() {
         // nexus-cecqy: a rename now RETIRES the old name as a tombstone instead of
