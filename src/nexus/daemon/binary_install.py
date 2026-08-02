@@ -400,7 +400,11 @@ def verify_installed_binary(
         )
 
     recorded = provenance.get("sha256")
-    if not isinstance(recorded, str) or not _SHA256_LINE_RE.match(recorded.strip()):
+    _sha_match = (
+        _SHA256_LINE_RE.match(recorded.strip())
+        if isinstance(recorded, str) else None
+    )
+    if _sha_match is None:
         return InstalledBinaryVerdict(
             ok=False,
             reason=(
@@ -409,7 +413,10 @@ def verify_installed_binary(
             ),
             path=dest,
         )
-    expected = recorded.strip().lower()
+    # The regex's captured group, not the whole trimmed string — a
+    # sha256sum-style decorated value ("<hex> *file") must compare by its
+    # hex alone, same as verify_sha256 (review 2026-08-02 Low).
+    expected = _sha_match.group(1).lower()
 
     if not dest.is_file():
         return InstalledBinaryVerdict(

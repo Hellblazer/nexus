@@ -103,6 +103,15 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 | Flag | Description |
 |------|-------------|
 | `--corpus NAME` | Corpus name for the `docs__` collection (default: `default`) |
+| `--source-uri URI` | Resolve catalog identity by URI (e.g. `x-devonthink-item://<UUID>`) INSTEAD of by file path (nexus-y8qtj). Use when re-indexing a document that was originally registered under an out-of-band identity — a plain path-based re-index misses it and forks a second catalog Document, leaving the original's chunks live and un-swept. **Fail-loud, no silent fallback:** a URI that resolves to no live document is an error (never registers a new document); a URI that resolves to a document in a *different* `--collection` than this run targets is also an error (a move, not a re-index — use `nx catalog update` to move it deliberately). `pdf --source-uri` is mutually exclusive with `--dir` |
+
+At the end of an index run, if the freshly-indexed document shares more than
+a quarter of its chunks with another *live* catalog document, a
+`index_possible_document_fork` WARNING is logged and a summary line is
+printed (`N possible document fork(s) detected`) — this is a heads-up, not a
+refusal: legitimate near-duplicates (a preprint vs. its camera-ready
+revision) can share a meaningful minority of chunks without being the same
+catalog identity.
 
 **`pdf`-only flags:**
 
@@ -782,12 +791,23 @@ Auto-generate typed links from metadata cross-matching. `--citations` generates 
 ### nx catalog update
 
 ```
-nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON]
+nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON] [--source-uri URI] [--file-path PATH]
 nx catalog update --owner PREFIX --corpus TEXT    # batch update all entries under an owner
 nx catalog update --search QUERY --corpus TEXT    # batch update all entries matching search
 ```
 
 Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode uses `--owner` or `--search` to update multiple entries at once.
+
+`--source-uri` sets or replaces the catalog identity URI — recovery path for
+entries whose DT-URI stamp failed during `nx dt index` (the entry carries
+`source_uri=file://…` instead of `x-devonthink-item://<UUID>`), or for
+manual reassignment of catalog identity. Validated against the same scheme
+allowlist as register-time.
+
+`--file-path` sets or replaces the `file_path` column (nexus-y8qtj) —
+repoints an entry whose recorded path is dead (moved/renamed on disk)
+*without* touching its `source_uri` identity; the two are separate columns
+updated independently.
 
 ### nx catalog gc
 

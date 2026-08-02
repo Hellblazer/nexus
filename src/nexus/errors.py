@@ -129,6 +129,32 @@ class EmbeddingDimensionMismatch(NexusError):
         )
 
 
+class SourceUriNotFoundError(NexusError):
+    """``--source-uri`` was given but resolves to no LIVE catalog document.
+
+    nexus-y8qtj: falling back to registering a brand-new Document here is
+    the exact defect this type exists to prevent — a path-based re-index
+    silently forking a second catalog row for a source whose real identity
+    is an out-of-band URI (e.g. DEVONthink's ``x-devonthink-item://<UUID>``),
+    leaving the original's chunks live, searchable, and never revisited by
+    any orphan sweep (they remain part of the original document's own
+    current manifest). No fallback registration; the caller must fix the
+    URI or index without ``--source-uri`` for a genuinely new document.
+    """
+
+
+class SourceUriCollectionMismatchError(NexusError):
+    """``--source-uri`` resolves to a document living in a DIFFERENT
+    physical collection than the one this index run targets.
+
+    Naming both a ``--source-uri`` and a ``--collection``/``--corpus`` that
+    disagree with the document's current home is a MOVE, not a re-index;
+    refusing rather than silently repointing either field keeps collection
+    membership an explicit, deliberate operation (``nx catalog update`` /
+    ``nx collection`` tooling), not a side effect of an index invocation.
+    """
+
+
 class PutOversizedError(NexusError):
     """A ``put``-path write was refused because the document exceeds the
     ChromaDB Cloud per-document byte cap.

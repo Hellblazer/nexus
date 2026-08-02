@@ -99,6 +99,84 @@ def _lookup_existing_doc_id(
         return ""
 
 
+#: nexus-y8qtj: fraction of a freshly-indexed document's OWN manifest
+#: chashes that must already appear in another LIVE document before
+#: ``_check_document_fork`` warns of a possible catalog-identity fork (two
+#: Document rows for what is really one physical source — the failure mode
+#: behind the Zoology defect, where a path-based re-index missed an
+#: out-of-band source_uri and forked a second Document while leaving the
+#: original's corrupted chunks live and searchable). 0.5 is a deliberately
+#: conservative MAJORITY-overlap bar: legitimate near-duplicates (a preprint
+#: vs. its camera-ready revision, two translations of the same paper) can
+#: share a meaningful minority of chunks without being the same catalog
+#: identity, and a bar much lower than half would make the warning noisy
+#: enough to be ignored. This is a WARNING, not a refusal — unlike
+#: --source-uri's fail-loud rules, near-duplicate content is a legitimate
+#: ingest outcome; the operator decides whether to investigate or supersede.
+_DOCUMENT_FORK_WARN_FRACTION = 0.25
+
+
+def _check_document_fork(doc_id: str, collection_name: str) -> list[tuple[str, int]]:
+    """Best-effort post-index fork check (nexus-y8qtj).
+
+    Fetches *doc_id*'s own manifest chashes and does ONE batched
+    ``docs_for_chashes`` round-trip to see whether another LIVE document
+    already carries most of the same content — the signature of the
+    y8qtj defect (a path-based re-index minting a second Document for a
+    source originally registered under a different identity, e.g.
+    DEVONthink's ``x-devonthink-item://<UUID>``). Logs a structlog
+    WARNING (``index_possible_document_fork``) for every other document
+    strictly above :data:`_DOCUMENT_FORK_WARN_FRACTION` overlap, and returns
+    the same findings as ``[(other_doc_id, shared_chunk_count), ...]``
+    sorted by shared count descending, so callers (the CLI) can fold a
+    count into the run summary without a second round-trip.
+
+    Self-contained (opens/closes its own catalog reader) so it can be
+    called from every terminal-return site in ``index_pdf`` /
+    ``index_markdown`` without threading a reader through. Best-effort:
+    any failure here must never abort or affect the indexing result that
+    already committed — chunks are already written by the time this runs.
+    """
+    if not doc_id:
+        return []
+    reader = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        manifest = reader.get_manifest(doc_id)
+        chashes = sorted({row.chash for row in manifest if getattr(row, "chash", "")})
+        if not chashes:
+            return []
+        by_chash = reader.docs_for_chashes(chashes) or {}
+    except Exception:  # noqa: BLE001 — best-effort observability; must not affect the committed index result
+        _log.debug("document_fork_check_failed", doc_id=doc_id, exc_info=True)
+        return []
+    finally:
+        if reader is not None:
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
+
+    shared_counts: dict[str, int] = {}
+    for owners in by_chash.values():
+        for other in owners or []:
+            if other and other != doc_id:
+                shared_counts[other] = shared_counts.get(other, 0) + 1
+
+    total = len(chashes)
+    forks = [
+        (other, count) for other, count in shared_counts.items()
+        if count / total > _DOCUMENT_FORK_WARN_FRACTION
+    ]
+    forks.sort(key=lambda pair: pair[1], reverse=True)
+    for other, count in forks:
+        _log.warning(
+            "index_possible_document_fork",
+            new=doc_id, existing=other, shared_chunks=count, total_chunks=total,
+            collection=collection_name,
+        )
+    return forks
+
+
 def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> dict:
     """nexus-dcym: chunk-identity where-filter for incremental sync sites.
 
@@ -227,6 +305,7 @@ def _register_or_lookup_doc_id(
     author: str = "",
     year: int = 0,
     base_path: Path | None = None,
+    source_uri: str = "",
 ) -> str:
     """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
 
@@ -254,7 +333,8 @@ def _register_or_lookup_doc_id(
     the caller falls back to the legacy identity path, which on
     Phase 5c collections will not match by source_path; the surrounding
     ``except Exception`` at the bottom of this function logs the
-    failure for diagnosis).
+    failure for diagnosis) — this best-effort contract does NOT apply
+    to the two ``source_uri`` fail-loud rules below, which propagate.
 
     Re-registration is event-idempotent via ``Catalog.register``'s
     ``by_file_path`` early-return at ``catalog.py:1218-1234``: a second
@@ -262,7 +342,34 @@ def _register_or_lookup_doc_id(
     tumbler without writing a new ``DocumentRegistered`` event. RDR-102
     R1 + the ``test_preflight_registration_idempotent_on_staleness_skip``
     test pin this invariant.
+
+    nexus-y8qtj: when *source_uri* is provided, identity resolution goes
+    through :meth:`CatalogReader.by_source_uri` FIRST instead of
+    ``by_file_path``. A path-based re-index of a document whose real
+    identity is an out-of-band URI (e.g. DEVONthink's
+    ``x-devonthink-item://<UUID>``, stamped onto the entry AFTER the
+    auto-derived ``file://`` registration by ``nx dt index``) misses the
+    file_path lookup and used to silently register a SECOND Document —
+    leaving the original's chunks live, searchable, and un-swept (they
+    remain part of the original document's own current manifest, so no
+    orphan sweep would ever remove them). Two invariants are fail-loud
+    and are NOT swallowed by the broad ``except Exception`` below (both
+    propagate to the CLI as a hard error, never a silent fallback):
+
+    - *source_uri* resolves to no LIVE document -> raises
+      :class:`~nexus.errors.SourceUriNotFoundError`. Falling back to
+      registering a brand-new Document here is exactly the y8qtj defect.
+    - the resolved document's ``physical_collection`` differs from
+      *physical_collection* -> raises
+      :class:`~nexus.errors.SourceUriCollectionMismatchError`. Naming a
+      ``--source-uri`` and a ``--collection`` that disagree with the
+      document's current home is a MOVE, not a re-index.
     """
+    from nexus.errors import (  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+        SourceUriCollectionMismatchError,
+        SourceUriNotFoundError,
+    )
+
     reader = None
     writer = None
     try:
@@ -316,6 +423,37 @@ def _register_or_lookup_doc_id(
             owner = writer.register_owner(owner_name, "curator")
 
         fp = make_relative(file_path, base_path) if base_path else str(file_path)
+
+        # nexus-y8qtj: source_uri-keyed resolution takes priority over the
+        # file_path lookup below, and is fail-loud rather than falling
+        # through to registration on a miss.
+        if source_uri:
+            existing_by_uri = reader.by_source_uri(source_uri)
+            if existing_by_uri is None:
+                raise SourceUriNotFoundError(
+                    f"--source-uri {source_uri!r} resolves to no live "
+                    f"catalog document. Refusing to register a new one "
+                    f"under {fp!r} — that fallback is the nexus-y8qtj "
+                    f"defect (a path-based re-index silently forking a "
+                    f"second Document for a source registered under a "
+                    f"different identity). If this source was never "
+                    f"indexed, index it without --source-uri first; if "
+                    f"the URI is wrong, correct it."
+                )
+            if existing_by_uri.physical_collection != physical_collection:
+                raise SourceUriCollectionMismatchError(
+                    f"--source-uri {source_uri!r} resolves to document "
+                    f"{existing_by_uri.tumbler} in collection "
+                    f"{existing_by_uri.physical_collection!r}, but this "
+                    f"index run targets {physical_collection!r}. Refusing "
+                    f"to name both — re-indexing into a different "
+                    f"collection is a move, not a re-index. Use "
+                    f"'nx catalog update' to move the document "
+                    f"deliberately, or drop --collection to target its "
+                    f"current home."
+                )
+            return str(existing_by_uri.tumbler)
+
         existing = reader.by_file_path(owner, fp)
         if existing is not None:
             return str(existing.tumbler)
@@ -335,8 +473,13 @@ def _register_or_lookup_doc_id(
             year=year,
             author=author,
             source_mtime=source_mtime,
+            source_uri=source_uri,
         )
         return str(tumbler)
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError):
+        # nexus-y8qtj: fail-loud rules propagate — never swallowed by the
+        # best-effort catch-all below.
+        raise
     except Exception:  # noqa: BLE001 — best-effort/telemetry path; must not crash caller
         # nexus-h9f1w / GH #1350 Fix C: a preflight registration failure meant a
         # new file gets no catalog node (orphan chunks) yet the ingest still
@@ -745,6 +888,8 @@ def _index_document(
     on_progress: Callable[[int, int], None] | None = None,
     source_key: str | None = None,
     hooks: "HookRegistry | None" = None,
+    doc_id: str = "",
+    source_uri: str = "",
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
@@ -769,6 +914,17 @@ def _index_document(
     ``source_path`` value used in the staleness check and stale-chunk pruning.
     Callers pass a relative path here so that T3 metadata lookups match the
     relative ``source_path`` stored in chunk metadata (RDR-060).
+
+    When *doc_id* is provided (the caller — ``index_markdown`` — already
+    resolved catalog identity, possibly via *source_uri*), it is used
+    directly for the post-store hook chains instead of re-deriving via a
+    bare ``file_path``-only ``_register_or_lookup_doc_id`` call. Mirrors
+    ``pipeline_stages.pipeline_index_pdf``'s ``if not doc_id:`` guard.
+    Re-deriving here bypassed the caller's *source_uri*-keyed resolution
+    and could mint a fork Document when the resolved path differs from
+    the registered one (nexus-y8qtj, reproduced inside its own fix).
+    *source_uri* is forwarded only when this function must register
+    fresh (``doc_id`` empty).
     """
     # GH #336: when ``nx index md/pdf`` runs in local mode we want
     # the local ONNX/fastembed embedder rather than a hard fail. The
@@ -925,12 +1081,23 @@ def _index_document(
     # chunks have no doc_id fallback so the manifest hook short-circuits and
     # the catalog document ships with chunk_count=0 / empty manifest. Routing
     # via the register-or-lookup path closes the gap idempotently.
-    _ct_for_register = (metadatas[0].get("content_type") if metadatas else "") or "prose"
-    _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
-        file_path, corpus,
-        content_type=_ct_for_register,
-        physical_collection=collection_name,
-    )
+    #
+    # nexus-y8qtj (reproduced inside its own fix): when the caller already
+    # resolved doc_id — index_markdown does this up front, possibly via a
+    # source_uri-keyed lookup — reuse it instead of re-deriving via a bare
+    # file_path-only _register_or_lookup_doc_id call. Re-deriving here
+    # bypassed the caller's source_uri resolution and could mint a fork
+    # Document when the resolved path differs from the registered one.
+    # Mirrors pipeline_stages.pipeline_index_pdf's `if not doc_id:` guard.
+    _catalog_doc_id_for_batch = doc_id
+    if not _catalog_doc_id_for_batch:
+        _ct_for_register = (metadatas[0].get("content_type") if metadatas else "") or "prose"
+        _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
+            file_path, corpus,
+            content_type=_ct_for_register,
+            physical_collection=collection_name,
+            source_uri=source_uri,
+        )
     hooks.fire_batch(
         ids, collection_name, documents, embeddings, metadatas,
         catalog_doc_id=_catalog_doc_id_for_batch,
@@ -993,6 +1160,8 @@ def _index_pdf_incremental(
     on_progress: Callable[[int, int], None] | None = None,
     hooks: "HookRegistry | None" = None,
     force: bool = False,
+    doc_id: str = "",
+    source_uri: str = "",
 ) -> int:
     """Embed and upsert chunks in batches with checkpoint support.
 
@@ -1007,6 +1176,18 @@ def _index_pdf_incremental(
     :func:`_upsert_skip_reembed` per batch so a ``--force`` reindex reaches
     the server's ``forceReEmbed`` escape here too, not just the small-document
     all-at-once path.
+
+    When *doc_id* is provided (the caller — ``index_pdf`` — already resolved
+    catalog identity, possibly via *source_uri*), it is reused directly
+    instead of re-deriving via a bare ``file_path``-only
+    ``_register_or_lookup_doc_id`` call. Mirrors
+    ``pipeline_stages.pipeline_index_pdf``'s ``if not doc_id:`` guard.
+    Re-deriving here bypassed the caller's *source_uri*-keyed resolution
+    and could mint a fork Document when the resolved path differs from
+    the registered one — the >128-chunk incremental path is the flagship
+    reproduction of nexus-y8qtj inside its own fix. *source_uri* is
+    forwarded only when this function must register fresh (``doc_id``
+    empty).
 
     Returns the total number of chunks indexed.
     """
@@ -1051,12 +1232,23 @@ def _index_pdf_incremental(
     # via the HookRegistry.fire_batch kwarg).
     # nexus-zq79 F2: register-or-lookup, not pure lookup (see _index_document
     # for the rationale — fresh indexes returned "" pre-fix).
-    _ct_for_register = (metadatas_all[0].get("content_type") if metadatas_all else "") or "pdf"
-    _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
-        Path(file_path), corpus,
-        content_type=_ct_for_register,
-        physical_collection=collection_name,
-    )
+    #
+    # nexus-y8qtj (reproduced inside its own fix): reuse the caller's
+    # already-resolved doc_id (index_pdf resolves it up front, possibly
+    # via source_uri) instead of re-deriving via a bare file_path-only
+    # _register_or_lookup_doc_id call, which bypassed source_uri
+    # resolution and could mint a fork Document for every >128-chunk
+    # PDF. Mirrors pipeline_stages.pipeline_index_pdf's `if not doc_id:`
+    # guard.
+    _catalog_doc_id_for_batch = doc_id
+    if not _catalog_doc_id_for_batch:
+        _ct_for_register = (metadatas_all[0].get("content_type") if metadatas_all else "") or "pdf"
+        _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
+            Path(file_path), corpus,
+            content_type=_ct_for_register,
+            physical_collection=collection_name,
+            source_uri=source_uri,
+        )
 
     for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
         batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
@@ -1375,6 +1567,8 @@ def index_pdf(
     on_formula_oom: str = "fail",
     streaming: str = "auto",
     hooks: "HookRegistry | None" = None,
+    source_uri: str = "",
+    on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -1401,6 +1595,24 @@ def index_pdf(
     lookup (year, venue, authors, citations).  Default is False (opt-in)
     to avoid network calls in offline/air-gapped environments.  Use
     ``nx enrich <collection>`` for deliberate backfill.
+
+    Pass *source_uri* (nexus-y8qtj) to resolve catalog identity by URI
+    (e.g. ``x-devonthink-item://<UUID>``) INSTEAD of by file path — the
+    fix for path-based re-indexing forking a second Document when the
+    original was registered under an out-of-band identity. Fail-loud: a
+    *source_uri* that resolves to no live document raises
+    :class:`~nexus.errors.SourceUriNotFoundError` (never falls back to
+    registering new); a *source_uri* resolving to a document in a
+    DIFFERENT collection than this run targets raises
+    :class:`~nexus.errors.SourceUriCollectionMismatchError`.
+
+    Pass *on_fork_detected* to receive the result of the end-of-run
+    document-fork check (see :func:`_check_document_fork`) as
+    ``[(other_doc_id, shared_chunk_count), ...]`` — empty when no fork is
+    suspected. The check always runs and always logs a structlog WARNING
+    for any hit regardless of whether a callback is given; the callback
+    exists so the CLI can fold a count into its run summary without a
+    second catalog round-trip.
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
@@ -1487,6 +1699,7 @@ def index_pdf(
         pdf_path, corpus,
         content_type="paper",
         physical_collection=col_name,
+        source_uri=source_uri,
     )
 
     # Incremental sync: skip if file is already indexed with the same hash AND model.
@@ -1536,7 +1749,14 @@ def index_pdf(
                 force=force,
                 doc_id=doc_id,
                 hooks=hooks,
+                source_uri=source_uri,
             )
+            # nexus-y8qtj: end-of-run fork check. Best-effort, always runs;
+            # the callback (if any) lets the CLI fold a count into its
+            # summary without a second catalog round-trip.
+            _forks = _check_document_fork(doc_id, col_name)
+            if on_fork_detected is not None:
+                on_fork_detected(_forks)
             if return_metadata:
                 # Query T3 for metadata after streaming upload.
                 # nexus-dcym: re-resolve doc_id since pipeline_index_pdf
@@ -1575,6 +1795,7 @@ def index_pdf(
                 year=int(meta_list[0].get("year", 0)) if meta_list else 0,
                 corpus=corpus,
                 chunk_count=chunk_count,
+                source_uri=source_uri,
             )
         except Exception:  # noqa: BLE001 — catalog registration is non-fatal; indexing continues
             pass  # catalog registration is non-fatal
@@ -1596,6 +1817,8 @@ def index_pdf(
             pdf_path, corpus, prepared, content_hash, col_name, db,
             embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
             force=force,
+            doc_id=doc_id,
+            source_uri=source_uri,
         )
         metadatas = [p[2] for p in prepared]
         _register_in_catalog(metadatas, len(metadatas))
@@ -1611,6 +1834,10 @@ def index_pdf(
             str(pdf_path), col_name, "",
             doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
         )
+        # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
+        _forks = _check_document_fork(doc_id, col_name)
+        if on_fork_detected is not None:
+            on_fork_detected(_forks)
         if return_metadata:
             return {
                 "chunks": len(metadatas),
@@ -1661,6 +1888,7 @@ def index_pdf(
         pdf_path, corpus,
         content_type=_ct_for_register,
         physical_collection=col_name,
+        source_uri=source_uri,
     )
     hooks.fire_batch(
         ids, col_name, documents, embeddings, metadatas_list,
@@ -1724,6 +1952,11 @@ def index_pdf(
 
     _register_in_catalog(metadatas_list, len(metadatas_list))
 
+    # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
+    _forks = _check_document_fork(doc_id, col_name)
+    if on_fork_detected is not None:
+        on_fork_detected(_forks)
+
     if return_metadata:
         return {
             "chunks": len(metadatas_list),
@@ -1771,7 +2004,7 @@ def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
 
 def _catalog_markdown_hook(
     md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
-    *, base_path: Path | None = None,
+    *, base_path: Path | None = None, source_uri: str = "",
 ) -> None:
     """Register markdown document in catalog after indexing. Silently skipped if absent.
 
@@ -1842,7 +2075,13 @@ def _catalog_markdown_hook(
         # cat.register() only when no row exists yet (no-pre-flight
         # branch — preserves the no-catalog ingest contract for callers
         # that bypass the public entry points).
-        existing = reader.by_file_path(owner, fp)
+        # nexus-y8qtj: when source_uri is known, resolve by IT first — see
+        # the matching comment in ``pipeline_stages._catalog_pdf_hook`` for
+        # the full rationale (by_file_path alone cannot see an out-of-band
+        # identity and would mint a second Document for the same source).
+        existing = reader.by_source_uri(source_uri) if source_uri else None
+        if existing is None:
+            existing = reader.by_file_path(owner, fp)
         if existing is not None:
             update_kwargs: dict = dict(
                 physical_collection=collection_name,
@@ -1867,6 +2106,7 @@ def _catalog_markdown_hook(
                 file_path=fp, physical_collection=collection_name,
                 chunk_count=chunk_count, year=year,
                 source_mtime=source_mtime,
+                source_uri=source_uri,
             )
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
@@ -1903,6 +2143,8 @@ def index_markdown(
     base_path: Path | None = None,
     hooks: "HookRegistry | None" = None,
     extraction_source: str = "file",
+    source_uri: str = "",
+    on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
 
@@ -1927,6 +2169,15 @@ def index_markdown(
 
     When *base_path* is provided, ``source_path`` in T3 chunk metadata is
     stored relative to *base_path* instead of absolute (RDR-060).
+
+    Pass *source_uri* (nexus-y8qtj) to resolve catalog identity by URI
+    INSTEAD of by file path — see :func:`index_pdf` for the full
+    rationale and the two fail-loud rules
+    (:class:`~nexus.errors.SourceUriNotFoundError` /
+    :class:`~nexus.errors.SourceUriCollectionMismatchError`).
+
+    Pass *on_fork_detected* to receive the end-of-run document-fork check
+    result — see :func:`index_pdf`.
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
@@ -1962,6 +2213,7 @@ def index_markdown(
         title=_fm_title,
         year=_fm_year,
         base_path=base_path,
+        source_uri=source_uri,
     )
     chunk_fn = partial(
         _markdown_chunks,
@@ -1978,19 +2230,28 @@ def index_markdown(
         force=force, return_metadata=return_metadata, on_progress=on_progress,
         source_key=source_key,
         hooks=hooks,
+        doc_id=doc_id,
+        source_uri=source_uri,
     )
     if not return_metadata:
         assert isinstance(raw, int)
         count = raw
         if count > 0:
-            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path)
+            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
+            # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
+            _forks = _check_document_fork(doc_id, col_name)
+            if on_fork_detected is not None:
+                on_fork_detected(_forks)
         return count
     if not isinstance(raw, list):
         return {"chunks": 0, "sections": 0}
     metadatas: list[dict] = raw
     sections = sum(1 for m in metadatas if m.get("section_title", ""))
     if metadatas:
-        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path)
+        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
+        _forks = _check_document_fork(doc_id, col_name)
+        if on_fork_detected is not None:
+            on_fork_detected(_forks)
     return {"chunks": len(metadatas), "sections": sections}
 
 
