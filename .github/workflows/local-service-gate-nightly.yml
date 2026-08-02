@@ -236,3 +236,52 @@ jobs:
               print(f"VACUOUS: {bad} contributed zero non-skipped tests — prereq skip sweep, gate is broken", file=sys.stderr)
               sys.exit(1)
           PY
+
+      - name: Slow-marked tests (nexus-s6dei)
+        # `-m slow` was selected by ZERO commands repo-wide before this leg —
+        # a slow-marked test was operationally deleted (no output, no skip
+        # line, nothing to notice its absence), while three docstrings
+        # falsely claimed CI or the release shakedown already ran it. This
+        # leg is the fix: it reuses the dev jar + PG bundle + bge-768 ONNX
+        # this job already built/primed above, so it costs nothing beyond
+        # the few extra minutes the tests take (CI-cost discipline: no new
+        # runner, piggyback the existing nightly schedule).
+        #
+        # test_mineru_path_preserves_formulas is DESELECTED here: MinerU's
+        # first invocation downloads ~2-3GB of model weights with no HF
+        # cache in this job, and its coverage strategy (shakedown with the
+        # indexing steps' `|| true` removed, vs. joining this weekly/nightly
+        # -m slow run) is nexus-6xkdu's decision, not this bead's. Do not
+        # fold it in here without also adding the HF cache step ci.yml
+        # already carries for it.
+        #
+        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 6 (floor=6); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
+        run: |
+          set -euo pipefail
+          uv run pytest \
+            -o addopts="" -m slow -q -rs \
+            --deselect tests/test_pdf_subsystem.py::TestFormulaPreservationOnRealPdf::test_mineru_path_preserves_formulas \
+            --junit-xml=slow-s6dei.xml
+
+      - name: Non-vacuity — slow tests actually ran (nexus-s6dei)
+        # Same shape as the nexus-5opzu guard above: a gate that skip-passes
+        # on a missing prerequisite reads as a broken gate, not a pass.
+        # Floor pinned to the 6 currently slow-marked, non-MinerU tests;
+        # bump consciously (same change that adds the new slow test) if it
+        # ever needs to move.
+        run: |
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          FLOOR = 6
+          root = ET.parse("slow-s6dei.xml").getroot()
+          ran = 0
+          for case in root.iter("testcase"):
+              if case.find("skipped") is None:
+                  ran += 1
+          print(f"non-skipped slow testcases: {ran} (floor={FLOOR})")
+          if ran < FLOOR:
+              print(f"VACUOUS: only {ran} non-skipped slow testcases ran, floor is {FLOOR} — prereq skip sweep, gate is broken", file=sys.stderr)
+              sys.exit(1)
+          PY

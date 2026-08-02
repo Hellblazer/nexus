@@ -397,8 +397,12 @@ class TestPagination:
     # _PAGE/MAX_QUERY_RESULTS boundary. Real coverage of the 300-cap
     # contract, but the boundary doesn't drift between releases — paying
     # ~53s/each on every CI push is overhead, not signal. Marked ``slow``
-    # so default ``pytest`` deselects them; run with
-    # ``uv run pytest -m slow`` or as part of the release shakedown.
+    # so default ``pytest`` deselects them; run with ``uv run pytest -m
+    # slow``, or let the nightly local-service-gate-nightly.yml gate run
+    # it (nexus-s6dei: this docstring previously claimed "or as part of
+    # the release shakedown" — nothing invokes the shakedown script, so
+    # that half of the claim was never true; corrected rather than
+    # repeated).
     @pytest.mark.slow
     def test_export_pagination(self, ephemeral_db: T3Database, tmp_path: Path):
         n = self._seed_large(ephemeral_db, "code__large", "id")

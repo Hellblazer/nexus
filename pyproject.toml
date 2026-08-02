@@ -191,12 +191,22 @@ log_level = "WARNING"
 # ``tests/integration/test_nx_answer_equivalence.py`` which calls real
 # Voyage / Chroma APIs in retry loops without credentials and hangs
 # pytest indefinitely (239+ CLOSE_WAIT TCP sockets observed locally).
-# Run them explicitly with ``pytest -m integration`` or ``-m slow``.
-addopts = "-m 'not integration and not slow and not stress'"
+# Run them explicitly with ``pytest -m integration`` or ``-m slow`` — ``slow``
+# is also run nightly by local-service-gate-nightly.yml (nexus-s6dei).
+#
+# nexus-s6dei (2026-08-02): ``stress`` REMOVED from both addopts and markers
+# below. tests/stress/ held the RDR-120 storage-substrate-split harness
+# (test_t2_daemon_stress.py, test_t3_daemon_stress.py); RDR-120 closed
+# 2026-05-27 and the T2/T3 daemons it stress-tested were deleted in the
+# subsequent daemon-retirement commits (d295a5bd, 9cfb157e). The directory
+# now holds only __init__.py — zero tests carry the marker, so there is
+# nothing left to wire up. See tests/test_marker_selection_coverage.py,
+# the mechanized check this bead added so a marker going dark again fails
+# CI instead of going unnoticed for months.
+addopts = "-m 'not integration and not slow'"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
-    "slow: expensive benchmarks (deselect with '-m not slow')",
-    "stress: RDR-120 stress harness scenarios (run with 'pytest -m stress')",
+    "slow: expensive benchmarks/pagination/cold-import tests (deselect with '-m not slow'); excluded from default addopts, runs in the nightly local-service gate leg — see .github/workflows/local-service-gate-nightly.yml",
     "no_service_jar: integration test that drives PostgreSQL directly and is exempt from the service-jar freshness gate",
     "needs_stamped_jar: integration test that constructs a vector client, so its service jar must carry a release_version (build with scripts/build-gate-jar.sh) — nexus-ao29z",
     "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
