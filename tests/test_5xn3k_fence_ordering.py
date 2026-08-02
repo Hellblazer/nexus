@@ -659,3 +659,188 @@ def test_fire_batch_threads_manifest_complete_to_declaring_hooks_only() -> None:
 
     assert seen["modern"] == {DOC_ID: CONTENT_HASH}
     assert seen["legacy"] == "called"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-dcv2k: the completion stamp must land on the PATH PRODUCTION TAKES.
+#
+# The .4 ride hangs off ``write_manifest_many``, which the production writer
+# (_ServiceCatalogWriter) does not expose — the op is on neither
+# CATALOG_WRITE_OPS nor _SERVICE_ONLY_WRITE_OPS, so
+# ``callable(getattr(cat, "write_manifest_many", None))`` is False on every
+# real run and the ride is dead code there. Every pre-existing loop test used
+# a bare MagicMock (which answers to ANY attribute), so all of them exercised
+# the branch production cannot reach: the ride was covered, the fence was
+# never stamped, and each re-index re-embedded the whole document.
+#
+# These pins drive the loop with a whitelist-HONEST double.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _WhitelistWriter:
+    """Writer double with the production writer's shape: no
+    ``write_manifest_many``, so the capability check falls to the per-doc path."""
+
+    def __init__(self, *, complete_raises: BaseException | None = None,
+                 complete_result: object = None) -> None:
+        self.complete_calls: list[tuple] = []
+        self.replaced: list[tuple] = []
+        self.appended: list[tuple] = []
+        self._complete_raises = complete_raises
+        self._complete_result = complete_result
+
+    def __getattr__(self, name):  # the closed-whitelist behaviour that matters
+        raise AttributeError(f"{name!r} is not a catalog write op")
+
+    def atomic_manifest_replace(self, doc_id, chunks):
+        self.replaced.append((doc_id, chunks))
+
+    def append_manifest_chunks(self, doc_id, chunks):
+        self.appended.append((doc_id, chunks))
+
+    def resync_chunk_count_cache(self, doc_id):
+        pass
+
+    def complete_index_run(self, doc_id, content_hash, chunk_count):
+        self.complete_calls.append((doc_id, content_hash, chunk_count))
+        if self._complete_raises is not None:
+            raise self._complete_raises
+        return self._complete_result
+
+
+def _drive_loop_per_doc(cat, *, manifest_complete=None, positions=(0, 1)):
+    from nexus.mcp_infra import (
+        _manifest_write_loop,
+        get_complete_refusals,
+        reset_complete_refusals,
+    )
+
+    reset_complete_refusals()
+    reader = MagicMock()
+    reader.get_chunk_chashes.return_value = []
+    reader.docs_for_chashes.return_value = {}
+    by_doc = {DOC_ID: [
+        (i, {"chunk_text_hash": f"{i:064d}"[-64:], "chunk_index": p})
+        for i, p in enumerate(positions)
+    ]}
+    _manifest_write_loop(cat, by_doc, COLLECTION, reader=reader,
+                         manifest_complete=manifest_complete)
+    return get_complete_refusals()
+
+
+def test_per_doc_path_stamps_completion_dcv2k() -> None:
+    """REGRESSION (nexus-dcv2k): with a writer that does NOT expose
+    write_manifest_many — i.e. every production run — the claimed doc must
+    still get its fail-closed completion stamp, with the SAME content_hash
+    the claim carried and the row count the engine's verify compares against."""
+    cat = _WhitelistWriter(complete_result={"referenced": 2, "missing": 0})
+    refusals = _drive_loop_per_doc(cat, manifest_complete={DOC_ID: CONTENT_HASH})
+
+    assert cat.replaced, "manifest rows were not written on the per-doc path"
+    assert cat.complete_calls == [(DOC_ID, CONTENT_HASH, 2)], (
+        "the completion stamp never landed on the path production takes — "
+        "the fence stays 'indexing' and every re-index re-embeds the document"
+    )
+    assert refusals == []
+
+
+def test_per_doc_path_no_stamp_when_nothing_claimed_dcv2k() -> None:
+    """No claim, no stamp: an unclaimed doc must not be stamped complete."""
+    cat = _WhitelistWriter()
+    _drive_loop_per_doc(cat)
+    assert cat.complete_calls == []
+
+
+def test_per_doc_path_records_refusal_not_a_stamp_dcv2k() -> None:
+    """A 409 refusal is recorded (over-work-never-under-work: rows are
+    correct, the doc is NOT whole) and never propagates out of the hook."""
+    cat = _WhitelistWriter(complete_raises=IndexRunVerifyRefused(
+        doc_id=DOC_ID, referenced=1, present=0, missing=1, chunk_count=2,
+        server_detail="verify failed",
+    ))
+    refusals = _drive_loop_per_doc(cat, manifest_complete={DOC_ID: CONTENT_HASH})
+    assert refusals == [DOC_ID]
+
+
+def test_per_doc_path_none_sentinel_is_not_a_refusal_dcv2k() -> None:
+    """``None`` (pre-fence engine 404) is not success — but it is not a
+    refusal either: begin 404'd the same way, so there is nothing to report."""
+    cat = _WhitelistWriter(complete_result=None)
+    refusals = _drive_loop_per_doc(cat, manifest_complete={DOC_ID: CONTENT_HASH})
+    assert cat.complete_calls, "complete was never attempted"
+    assert refusals == []
+
+
+def test_per_doc_continuation_slice_is_never_stamped_dcv2k() -> None:
+    """A batch lacking position 0 is not a whole document — the claim is a
+    contract violation and must never be stamped."""
+    cat = _WhitelistWriter()
+    _drive_loop_per_doc(cat, manifest_complete={DOC_ID: CONTENT_HASH},
+                        positions=(3, 4))
+    assert cat.appended, "continuation slice did not take the append path"
+    assert cat.replaced == []
+    assert cat.complete_calls == []
+
+
+def test_production_writer_really_lacks_write_manifest_many_dcv2k() -> None:
+    """NON-VACUITY for the pins above: the double's shape is not invented —
+    the real service writer's closed whitelist genuinely omits the op, which
+    is WHY the ride is unreachable in production. If this ever starts passing
+    a callable, the ride is live and the per-doc stamp becomes belt-and-braces
+    rather than the only stamp."""
+    from nexus.catalog.factory import _ServiceCatalogWriter
+
+    class _AnythingGoes:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    w = _ServiceCatalogWriter(_AnythingGoes())
+    assert callable(getattr(w, "complete_index_run", None))
+    assert getattr(w, "write_manifest_many", None) is None
+
+
+def test_continuation_claim_warns_exactly_once_across_fallthrough(caplog) -> None:
+    """dcv2k critique S2: the once-guard for
+    ``manifest_complete_claim_on_continuation_slice`` must derive from the
+    warning having FIRED, not from ``wrote_many`` — an all-continuation batch
+    (or a write_many 404) leaves ``wrote_many`` False while the pre-check
+    warning already fired, and the per-doc loop would re-emit it. Reverting
+    the fire-time derivation makes this test count 2 and go red."""
+    import logging
+
+    import structlog
+
+    from nexus.mcp_infra import _manifest_write_loop, reset_complete_refusals
+
+    reset_complete_refusals()
+    structlog.configure(
+        processors=[structlog.stdlib.render_to_log_kwargs],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+
+    # Writer WITH write_manifest_many exposed (the branch _WhitelistWriter
+    # can never reach), so the loop enters the write_many pre-check — but an
+    # all-continuation batch (no position 0) leaves full_docs empty and
+    # wrote_many False, falling through to the per-doc loop with the SAME
+    # docs. The claimed continuation doc must be warned about exactly once.
+    cat = MagicMock()
+    cat.write_manifest_many.return_value = {
+        "failed_doc_ids": [], "complete_refused": [], "complete_refused_count": 0,
+    }
+    reader = MagicMock()
+    reader.get_chunk_chashes.return_value = []
+    by_doc = {DOC_ID: [(0, {"chunk_text_hash": "b" * 64, "chunk_index": 3})]}
+
+    with caplog.at_level(logging.WARNING):
+        _manifest_write_loop(cat, by_doc, COLLECTION, reader=reader,
+                             manifest_complete={DOC_ID: CONTENT_HASH})
+
+    hits = [r for r in caplog.records
+            if "manifest_complete_claim_on_continuation_slice" in r.message]
+    assert len(hits) == 1, (
+        f"continuation-claim warning fired {len(hits)}x — the once-guard must "
+        "derive from warning-fire time, not wrote_many (dcv2k review)"
+    )
+    # And a claimed continuation slice is still never stamped.
+    cat.write_manifest_many.assert_not_called()
