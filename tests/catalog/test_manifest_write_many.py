@@ -37,11 +37,11 @@ class TestWriteManifestMany:
             lambda path, body: posts.append((path, body)) or {"docs": 2, "rows": 3, "failed_doc_ids": []},
             raising=False,
         )
-        failed = c.write_manifest_many([
+        result = c.write_manifest_many([
             ("1.15.1", [{"chash": "a" * 64, "position": 0}]),
             ("1.15.2", [{"chash": "b" * 64, "position": 0}, {"chash": "c" * 64, "position": 1}]),
         ])
-        assert failed == []
+        assert result["failed_doc_ids"] == []
         assert len(posts) == 1
         path, body = posts[0]
         assert path == "/manifest/write_many"
@@ -67,8 +67,8 @@ class TestWriteManifestMany:
             lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": ["1.9.7"]},
             raising=False,
         )
-        failed = c.write_manifest_many([("1.9.7", [{"chash": "a" * 64, "position": 0}])])
-        assert failed == ["1.9.7"]
+        result = c.write_manifest_many([("1.9.7", [{"chash": "a" * 64, "position": 0}])])
+        assert result["failed_doc_ids"] == ["1.9.7"]
 
     def test_failed_reasons_logged(self, monkeypatch) -> None:
         # nexus-fhhwf: engine v0.1.33+ returns {failed:[{doc_id, reason,
@@ -92,10 +92,10 @@ class TestWriteManifestMany:
             raising=False,
         )
         with structlog.testing.capture_logs() as logs:
-            failed = c.write_manifest_many(
+            result = c.write_manifest_many(
                 [("1.9.8", [{"chash": "a" * 64, "position": 0}])]
             )
-        assert failed == ["1.9.8"]
+        assert result["failed_doc_ids"] == ["1.9.8"]
         events = [l for l in logs if l["event"] == "manifest_write_many_doc_failed"]
         assert len(events) == 1
         assert events[0]["doc_id"] == "1.9.8"
@@ -113,7 +113,7 @@ class TestWriteManifestMany:
         )
         assert c.write_manifest_many(
             [("1.9.9", [{"chash": "a" * 64, "position": 0}])]
-        ) == ["1.9.9"]
+        )["failed_doc_ids"] == ["1.9.9"]
 
 
 class _FakeCat:

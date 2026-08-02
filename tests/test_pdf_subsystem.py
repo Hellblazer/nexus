@@ -209,6 +209,13 @@ class TestIndexPdfPipeline:
         set_credentials(monkeypatch)
         mock_t3, _ = self._fresh_mock_t3()
 
+        # nexus-5xn3k.4: mock_t3 never writes real chunks to the (test-scoped)
+        # real engine's T3, so the fence's fail-closed verify-then-stamp would
+        # correctly (but irrelevantly here — this test only proves extraction
+        # + upsert-call shape) refuse completion. Same stub as
+        # tests/test_doc_indexer.py::test_pdf_metadata_schema_complete; the
+        # genuine fence integration proof is nexus-5xn3k.7's job.
+        monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
         with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_fake_embed):
             count = index_pdf(simple_pdf, corpus="test", t3=mock_t3)
 

@@ -550,6 +550,13 @@ def _catalog_pdf_hook(
         # no local state exists; a local is_initialized pre-check silently
         # skipped registration on every fresh box. make_catalog_reader()
         # returns None only in the SQLite opt-out mode when uninitialised.
+        # Resolved unconditionally, first, and unrelated to reader/writer
+        # calls below — so the except handler's record_catalog_hook_failure
+        # (which reports source_path=file_path_str) always has a bound
+        # value, even when a failure occurs mid owner-resolution (a
+        # pre-existing UnboundLocalError, incidentally exposed by
+        # nexus-5xn3k.4's fence-writer test double).
+        file_path_str = str(pdf_path.resolve())
         reader = make_catalog_reader()
         if reader is None:
             _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized (sqlite opt-out mode)")
@@ -570,7 +577,6 @@ def _catalog_pdf_hook(
         # Portability across machines is now the catalog's source-mtime
         # + content_hash story — both already populated.
         from datetime import UTC, datetime  # noqa: PLC0415 - branch-local; deferred to call time
-        file_path_str = str(pdf_path.resolve())
         # nexus-y8qtj: when source_uri is known, resolve by IT first. The
         # pre-flight _register_or_lookup_doc_id call earlier in this same
         # index run already validated (fail-loud) that source_uri resolves
@@ -757,6 +763,13 @@ def pipeline_index_pdf(
                     "server-side embedding)"
                 )
 
+    # nexus-5xn3k.4 RUNFENCE C2: commit the fence BEFORE the first chunk
+    # upsert (memo §3.5 T0) — right before the executor starts the
+    # uploader stage. Gated on doc_id per the no-catalog ingest contract.
+    if doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 - deferred to avoid circular import at module load
+        _fence_begin(doc_id, content_hash, collection)
+
     cancel = threading.Event()
     extraction_done = threading.Event()
     chunking_done = threading.Event()
@@ -835,6 +848,11 @@ def pipeline_index_pdf(
                 original_error=str(first_exc),
                 exc_info=True,
             )
+        # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
+        # below cannot be masked by a fence-write failure.
+        if doc_id:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+            _fence_fail(doc_id, str(first_exc))
         raise first_exc
 
     # ── Post-passes (after all three stages complete) ────────────────────────
@@ -924,6 +942,28 @@ def pipeline_index_pdf(
         str(pdf_path), collection, "",
         doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
     )
+
+    # nexus-5xn3k.4 RUNFENCE C2: the fence tail — after every possible
+    # manifest touch (including the fire_document hook above), before
+    # returning. Gated on doc_id per the no-catalog ingest contract.
+    if doc_id:
+        from nexus.doc_indexer import _fence_complete, _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+        if total_chunks == 0:
+            # MUST: zero extraction is a FAILURE, never /complete(0) — a
+            # zero-chunk run would trivially satisfy the fail-closed gate
+            # (referenced=0 == chunk_count=0) and stamp 'complete' on a
+            # silently-failed extraction. No content-free exception exists
+            # for PDFs.
+            _fence_fail(doc_id, "zero chunks extracted")
+        elif post_pass_ok:
+            _fence_complete(doc_id, content_hash, total_chunks)
+        else:
+            _log.warning(
+                "index_run_complete_skipped_post_pass_failed",
+                doc_id=doc_id,
+                content_hash=content_hash,
+                reason="post-pass failed — fence stays 'indexing' for retry",
+            )
 
     return total_chunks
 

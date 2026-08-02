@@ -93,6 +93,25 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.pipeline_stages._POLL_INTERVAL", 0.01)
 
 
+@pytest.fixture(autouse=True)
+def _stub_fence_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-5xn3k.4: this file's ``t3``/``mock_t3`` fixtures are
+    ``create_autospec(T3Database)`` doubles — no chunk ever actually lands
+    in the REAL local-engine T3 substrate that ``_register_or_lookup_doc_id``
+    / manifest writes talk to (this suite predates RUNFENCE and was never
+    mocking the catalog). The fence's engine-side verify-then-stamp
+    (memo §3.3) correctly sees "0 chunks present" for a doc whose manifest
+    it just wrote and refuses completion — genuinely correct behavior, but
+    orthogonal to what this file's tests exercise (stage orchestration, not
+    fence/catalog integration; that is ``tests/test_5xn3k_fence_ordering.py``'s
+    job, with its own properly-scoped recording double). Stub only the
+    completion call so ``IndexRunVerifyRefused`` doesn't leak into every
+    pipeline-stage test that happens to complete; ``_fence_begin``/
+    ``_fence_fail`` still hit the real substrate unchanged.
+    """
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+
+
 @pytest.fixture()
 def done_event() -> threading.Event:
     e = threading.Event()

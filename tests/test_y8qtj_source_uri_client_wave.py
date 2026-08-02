@@ -224,8 +224,15 @@ class TestIndexPdfIncrementalDocIdReuse:
         mock_chunks = [_mock_chunk(i) for i in range(n_chunks)]
         t3 = _mock_t3()
 
+        # RUNFENCE (nexus-5xn3k.4): t3 is a MagicMock, so no chunk ever lands
+        # in the substrate the real engine's fail-closed /complete verifies
+        # against — the fence would correctly refuse (referenced=138,
+        # present=0). This test proves source_uri doc_id CONVERGENCE, not
+        # fence integration (nexus-5xn3k.7 owns the genuine proof); stub the
+        # stamp like every other decoupled-substrate test in this suite.
         with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
-             patch("nexus.doc_indexer.PDFChunker") as chk_cls:
+             patch("nexus.doc_indexer.PDFChunker") as chk_cls, \
+             patch("nexus.doc_indexer._fence_complete", lambda *a, **k: None):
             ext_cls.return_value.extract.return_value = MagicMock(
                 text="x" * 5000,
                 metadata={"extraction_method": "docling", "page_count": 50,

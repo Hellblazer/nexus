@@ -349,6 +349,77 @@ def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:
     return _manifest_is_fully_present(col, doc_id)
 
 
+def _fence_begin(doc_id: str, content_hash: str, collection: str) -> None:
+    """Advisory: stamp ``index_state='indexing'`` BEFORE the first chunk
+    upsert (memo §3.5 T0, nexus-5xn3k.4). Never raises — the fence is a
+    diagnostic record, not a lock (nexus-lcmbp non-goal); indexing must
+    proceed even when the catalog write itself fails."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from uuid import uuid4  # noqa: PLC0415 — deferred import: branch-local
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        w.begin_index_run(doc_id, content_hash, uuid4().hex, collection)
+    except Exception:
+        _log.warning("index_run_begin_failed", doc_id=doc_id, collection=collection)
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+
+
+def _fence_fail(doc_id: str, error: str) -> None:
+    """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
+    own exception (the reason this is being called) must always propagate
+    unmasked."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        w.fail_index_run(doc_id, error)
+    except Exception:
+        _log.warning("index_run_fail_write_failed", doc_id=doc_id)
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+
+
+def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
+    """The load-bearing fail-closed stamp (memo §3.3). The engine verifies
+    the manifest inside the SAME transaction as the stamp; a refusal comes
+    back as :class:`~nexus.errors.IndexRunVerifyRefused`, which PROPAGATES
+    — it is the signal this whole arc exists to surface, never swallowed
+    into a green summary.
+
+    Any other exception is advisory-only (WARNING, then return): the fence
+    stays ``'indexing'``, which means over-work (a future re-index) rather
+    than silent under-work. A ``None`` return (the client's pre-fence-engine
+    sentinel, http_catalog_client.py's ``complete_index_run`` docstring) is
+    NOT success and must never be read as a stamp having landed.
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        result = w.complete_index_run(doc_id, content_hash, chunk_count)
+    except IndexRunVerifyRefused:
+        raise
+    except Exception:
+        _log.warning("index_run_complete_write_failed", doc_id=doc_id)
+        return
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+    if result is None:
+        _log.debug("index_run_complete_pre_fence_engine", doc_id=doc_id)
+
+
 def _register_or_lookup_doc_id(
     file_path: Path,
     corpus: str,
@@ -1104,35 +1175,14 @@ def _index_document(
     documents = [p[1] for p in prepared]
     metadatas = [p[2] for p in prepared]
 
-    if embed_fn is not None:
-        embeddings, actual_model = embed_fn(documents, target_model)
-    else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
-            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
-            embeddings = [[]] * len(documents)
-            actual_model = target_model
-        else:
-            from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            voyage_key = get_credential("voyage_api_key")
-            if not voyage_key:
-                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
-    if actual_model != target_model:
-        for m in metadatas:
-            m["embedding_model"] = actual_model
-    _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force)
-
-    # Post-store hook chains (RDR-095). Both single-doc and batch chains
-    # fire from every storage event; the per-doc loop covers single-shape
-    # consumers on CLI ingest.
-    if hooks is None:
-        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        hooks = HookRegistry()
-        install_default_hooks(hooks)
+    # nexus-5xn3k.4 RUNFENCE C2: doc_id resolution HOISTED here — below the
+    # staleness gate/`if not prepared: return 0` above (a fresh-skip must
+    # NEVER register a doc_id; `_doc_id_for_path`'s read-only property on
+    # that path is deliberate) and before the embed/upsert, so the fence
+    # can be committed BEFORE the first byte of content lands (memo §3.5
+    # T0). The doc_id used to be resolved post-upsert, right before
+    # `hooks.fire_batch`; a pointer comment marks the old site.
+    #
     # nexus-zq79 F2: use _register_or_lookup_doc_id, NOT _lookup_existing_doc_id.
     # The read-only lookup returns "" for first-time indexes; post-Phase-3
     # chunks have no doc_id fallback so the manifest hook short-circuits and
@@ -1155,21 +1205,78 @@ def _index_document(
             physical_collection=collection_name,
             source_uri=source_uri,
         )
-    hooks.fire_batch(
-        ids, collection_name, documents, embeddings, metadatas,
-        catalog_doc_id=_catalog_doc_id_for_batch,
-    )
-    for _did, _doc in zip(ids, documents):
-        hooks.fire_single(_did, collection_name, _doc)
-    # RDR-089 document-grain chain — fires once per file boundary.
-    # content="" because only chunk text is in scope here; the hook
-    # reads source_path itself per the P0.1 content-sourcing contract.
-    # nexus-tdgc: pre-flight catalog lookup so the aspect-queue hook
-    # can capture the doc_id alongside source_path.
-    hooks.fire_document(
-        sp, collection_name, "",
-        doc_id=_catalog_doc_id_for_batch,
-    )
+    if _catalog_doc_id_for_batch:
+        _fence_begin(_catalog_doc_id_for_batch, content_hash, collection_name)
+
+    # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): begin was
+    # already bracketed above; this try/except adds the missing fail
+    # bracket around the embed/upsert/hook region. The skip paths (early
+    # `return 0` above) precede `begin` and stay fence-untouched by
+    # construction — they are outside this try block entirely.
+    try:
+        if embed_fn is not None:
+            embeddings, actual_model = embed_fn(documents, target_model)
+        else:
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+            if is_vector_service_mode():
+                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                embeddings = [[]] * len(documents)
+                actual_model = target_model
+            else:
+                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                voyage_key = get_credential("voyage_api_key")
+                if not voyage_key:
+                    raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        if actual_model != target_model:
+            for m in metadatas:
+                m["embedding_model"] = actual_model
+        _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force)
+
+        # Post-store hook chains (RDR-095). Both single-doc and batch chains
+        # fire from every storage event; the per-doc loop covers single-shape
+        # consumers on CLI ingest.
+        if hooks is None:
+            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+            hooks = HookRegistry()
+            install_default_hooks(hooks)
+        # doc_id resolution (and the fence `begin`) HOISTED above the
+        # embed/upsert (nexus-5xn3k.4) — see `_catalog_doc_id_for_batch` up
+        # near `metadatas = [p[2] for p in prepared]`.
+        #
+        # nexus-5xn3k.4: single-flush documents (this whole function is one
+        # upsert, one fire_batch — no streaming) ride write_manifest_many's
+        # optional `complete` map for the completion stamp, no extra round
+        # trip. Hash-once MUST: the SAME `content_hash` computed above reaches
+        # both `_fence_begin` and this map.
+        hooks.fire_batch(
+            ids, collection_name, documents, embeddings, metadatas,
+            catalog_doc_id=_catalog_doc_id_for_batch,
+            manifest_complete=(
+                {_catalog_doc_id_for_batch: content_hash}
+                if _catalog_doc_id_for_batch else None
+            ),
+        )
+        for _did, _doc in zip(ids, documents):
+            hooks.fire_single(_did, collection_name, _doc)
+        # RDR-089 document-grain chain — fires once per file boundary.
+        # content="" because only chunk text is in scope here; the hook
+        # reads source_path itself per the P0.1 content-sourcing contract.
+        # nexus-tdgc: pre-flight catalog lookup so the aspect-queue hook
+        # can capture the doc_id alongside source_path.
+        hooks.fire_document(
+            sp, collection_name, "",
+            doc_id=_catalog_doc_id_for_batch,
+        )
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked.
+        if _catalog_doc_id_for_batch:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        raise
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -1306,79 +1413,94 @@ def _index_pdf_incremental(
             physical_collection=collection_name,
             source_uri=source_uri,
         )
+    # nexus-5xn3k.4 review follow-up (code-review-expert HIGH): this path was
+    # unfenced. Resolution above already sits before the first upsert (the
+    # batch loop below), so no hoist is needed here — just the begin call.
+    if _catalog_doc_id_for_batch:
+        _fence_begin(_catalog_doc_id_for_batch, content_hash, collection_name)
 
-    for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
-        batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
-        batch_docs = documents_all[batch_start:batch_end]
-        batch_ids = ids_all[batch_start:batch_end]
-        batch_metas = metadatas_all[batch_start:batch_end]
+    try:
+        for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
+            batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
+            batch_docs = documents_all[batch_start:batch_end]
+            batch_ids = ids_all[batch_start:batch_end]
+            batch_metas = metadatas_all[batch_start:batch_end]
 
-        # Embed
-        if embed_fn is not None:
-            embeddings, actual_model = embed_fn(batch_docs, target_model)
-        else:
-            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-            if is_vector_service_mode():
-                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
-                embeddings = [[]] * len(batch_docs)
-                actual_model = target_model
+            # Embed
+            if embed_fn is not None:
+                embeddings, actual_model = embed_fn(batch_docs, target_model)
             else:
-                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-                voyage_key = get_credential("voyage_api_key")
-                if not voyage_key:
-                    raise RuntimeError("voyage_api_key required")
-                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                embeddings, actual_model = _embed_with_fallback(
-                    batch_docs, target_model, voyage_key, timeout=timeout,
-                )
+                from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+                if is_vector_service_mode():
+                    # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                    # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                    # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                    embeddings = [[]] * len(batch_docs)
+                    actual_model = target_model
+                else:
+                    from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                    voyage_key = get_credential("voyage_api_key")
+                    if not voyage_key:
+                        raise RuntimeError("voyage_api_key required")
+                    timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                    embeddings, actual_model = _embed_with_fallback(
+                        batch_docs, target_model, voyage_key, timeout=timeout,
+                    )
 
-        if actual_model != target_model:
-            for m in batch_metas:
-                m["embedding_model"] = actual_model
+            if actual_model != target_model:
+                for m in batch_metas:
+                    m["embedding_model"] = actual_model
 
-        # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
-        _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force)
+            # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
+            _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force)
 
-        # RDR-108 Phase 3: inject the global chunk_index per row before
-        # firing the batch chain. ``batch_metas`` came from
-        # ``make_chunk_metadata`` (post-Phase-3, no chunk_index); the
-        # incremental loop slices ``metadatas_all[batch_start:batch_end]``
-        # so the per-row global index is ``batch_start + i``. Without
-        # this injection the manifest hook defaults to a batch-local
-        # enumeration that resets to 0 each batch, truncating the
-        # manifest. T3 already received the post-Phase-3 metadata; the
-        # local copy mutation here only affects the hook payload.
-        for _i, _meta in enumerate(batch_metas):
-            _meta["chunk_index"] = batch_start + _i
+            # RDR-108 Phase 3: inject the global chunk_index per row before
+            # firing the batch chain. ``batch_metas`` came from
+            # ``make_chunk_metadata`` (post-Phase-3, no chunk_index); the
+            # incremental loop slices ``metadatas_all[batch_start:batch_end]``
+            # so the per-row global index is ``batch_start + i``. Without
+            # this injection the manifest hook defaults to a batch-local
+            # enumeration that resets to 0 each batch, truncating the
+            # manifest. T3 already received the post-Phase-3 metadata; the
+            # local copy mutation here only affects the hook payload.
+            for _i, _meta in enumerate(batch_metas):
+                _meta["chunk_index"] = batch_start + _i
 
-        # Post-store hook chains (RDR-095). Both single-doc and batch
-        # chains fire from every storage event; the per-doc loop covers
-        # single-shape consumers on CLI ingest.
-        if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            hooks = HookRegistry()
-            install_default_hooks(hooks)
-        hooks.fire_batch(
-            batch_ids, collection_name, batch_docs, embeddings, batch_metas,
-            catalog_doc_id=_catalog_doc_id_for_batch,
-        )
-        for _did, _doc in zip(batch_ids, batch_docs):
-            hooks.fire_single(_did, collection_name, _doc)
+            # Post-store hook chains (RDR-095). Both single-doc and batch
+            # chains fire from every storage event; the per-doc loop covers
+            # single-shape consumers on CLI ingest.
+            if hooks is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                hooks = HookRegistry()
+                install_default_hooks(hooks)
+            hooks.fire_batch(
+                batch_ids, collection_name, batch_docs, embeddings, batch_metas,
+                catalog_doc_id=_catalog_doc_id_for_batch,
+            )
+            for _did, _doc in zip(batch_ids, batch_docs):
+                hooks.fire_single(_did, collection_name, _doc)
 
-        # Checkpoint
-        write_checkpoint(CheckpointData(
-            pdf=str(file_path),
-            collection=collection_name,
-            content_hash=content_hash,
-            chunks_upserted=batch_end,
-            total_chunks=total,
-            embedding_model=target_model,
-        ))
+            # Checkpoint
+            write_checkpoint(CheckpointData(
+                pdf=str(file_path),
+                collection=collection_name,
+                content_hash=content_hash,
+                chunks_upserted=batch_end,
+                total_chunks=total,
+                embedding_model=target_model,
+            ))
 
-        if on_progress:
-            on_progress(batch_end, total)
+            if on_progress:
+                on_progress(batch_end, total)
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked (nexus-5xn3k.4 review follow-up). Over-work,
+        # never under-work: fire_batch already fired per-landed-increment
+        # above, so those manifest rows are real even though the run as a
+        # whole did not finish.
+        if _catalog_doc_id_for_batch:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        raise
 
     # Prune stale chunks from a previous (larger) version of this file.
     # nexus-dcym: prefer doc_id when the catalog already registered this
@@ -1409,6 +1531,18 @@ def _index_pdf_incremental(
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
+
+    # nexus-5xn3k.4 review follow-up: this path is multi-batch (fire_batch
+    # per increment), so completion is an explicit call with the run's
+    # total chunk count and the SAME content_hash threaded from the
+    # caller (hash-once) — never a manifest_complete ride claim, which is
+    # only sound for genuinely single-flush callers. Zero-chunks routes to
+    # fail, never a trivially-satisfied /complete(0).
+    if _catalog_doc_id_for_batch:
+        if total == 0:
+            _fence_fail(_catalog_doc_id_for_batch, "zero chunks extracted")
+        else:
+            _fence_complete(_catalog_doc_id_for_batch, content_hash, total)
     return total
 
 
@@ -1915,32 +2049,14 @@ def index_pdf(
     documents = [p[1] for p in prepared]
     metadatas_list = [p[2] for p in prepared]
 
-    if embed_fn is not None:
-        embeddings, actual_model = embed_fn(documents, target_model)
-    else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
-            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
-            embeddings = [[]] * len(documents)
-            actual_model = target_model
-        else:
-            from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            voyage_key = get_credential("voyage_api_key")
-            if not voyage_key:
-                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
-    if actual_model != target_model:
-        for m in metadatas_list:
-            m["embedding_model"] = actual_model
-    # nexus-h8rf6.4: known chashes skip the server-side embed.
-    _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force)
-
-    # Post-store hook chains (RDR-095). Both single-doc and batch chains
-    # fire from every storage event; the per-doc loop covers single-shape
-    # consumers on CLI ingest.
+    # nexus-5xn3k.4 review follow-up (code-review-expert HIGH): this branch
+    # is separate inline code, NOT routed through _index_document's
+    # machinery — verified unfenced. doc_id resolution HOISTED here (was
+    # previously post-upsert, mirroring the pre-.4 _index_document bug)
+    # so the fence can be committed before the first byte of content
+    # lands. This branch is single-flush (one upsert, one fire_batch —
+    # same shape as _index_document), so completion rides
+    # write_manifest_many's optional `complete` map, not an explicit call.
     if hooks is None:
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         hooks = HookRegistry()
@@ -1953,20 +2069,60 @@ def index_pdf(
         physical_collection=col_name,
         source_uri=source_uri,
     )
-    hooks.fire_batch(
-        ids, col_name, documents, embeddings, metadatas_list,
-        catalog_doc_id=_catalog_doc_id_for_batch,
-    )
-    for _did, _doc in zip(ids, documents):
-        hooks.fire_single(_did, col_name, _doc)
-    # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
-    # content="" (full document text not retained in this path); the hook
-    # reads source_path itself.
-    # nexus-tdgc: forward the catalog doc_id post-register.
-    hooks.fire_document(
-        str(pdf_path), col_name, "",
-        doc_id=_catalog_doc_id_for_batch,
-    )
+    if _catalog_doc_id_for_batch:
+        _fence_begin(_catalog_doc_id_for_batch, content_hash, col_name)
+
+    try:
+        if embed_fn is not None:
+            embeddings, actual_model = embed_fn(documents, target_model)
+        else:
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+            if is_vector_service_mode():
+                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                embeddings = [[]] * len(documents)
+                actual_model = target_model
+            else:
+                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                voyage_key = get_credential("voyage_api_key")
+                if not voyage_key:
+                    raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        if actual_model != target_model:
+            for m in metadatas_list:
+                m["embedding_model"] = actual_model
+        # nexus-h8rf6.4: known chashes skip the server-side embed.
+        _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force)
+
+        # Post-store hook chains (RDR-095). Both single-doc and batch chains
+        # fire from every storage event; the per-doc loop covers single-shape
+        # consumers on CLI ingest.
+        hooks.fire_batch(
+            ids, col_name, documents, embeddings, metadatas_list,
+            catalog_doc_id=_catalog_doc_id_for_batch,
+            manifest_complete=(
+                {_catalog_doc_id_for_batch: content_hash}
+                if _catalog_doc_id_for_batch else None
+            ),
+        )
+        for _did, _doc in zip(ids, documents):
+            hooks.fire_single(_did, col_name, _doc)
+        # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
+        # content="" (full document text not retained in this path); the hook
+        # reads source_path itself.
+        # nexus-tdgc: forward the catalog doc_id post-register.
+        hooks.fire_document(
+            str(pdf_path), col_name, "",
+            doc_id=_catalog_doc_id_for_batch,
+        )
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked.
+        if _catalog_doc_id_for_batch:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        raise
 
     # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the
     # entry; first-time indexes harmlessly use source_path).

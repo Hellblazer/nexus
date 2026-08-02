@@ -2664,8 +2664,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             self._post("/update", {"tumbler": doc_id, **updates})
 
     def write_manifest_many(
-        self, docs: "list[tuple[str, list[dict]]]"
-    ) -> list[str]:
+        self, docs: "list[tuple[str, list[dict]]]",
+        complete: dict[str, str] | None = None,
+    ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
 
         nexus-u2kwq: the flush-grain manifest hook writes complete files
@@ -2673,22 +2674,45 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``atomic_manifest_replace`` cost 2 POSTs per file (~205s of a
         177-file wall). ``/manifest/write_many`` (engine v0.1.24+) does
         DELETE+INSERT+chunk_count per doc in one server-side per-doc
-        transaction; docs page at 1000 (MAX_BATCH parity). Returns the
-        accumulated ``failed_doc_ids`` (per-doc isolation server-side).
-        Callers must catch HTTP 404 and fall back per-doc for older
-        engines.
+        transaction; docs page at 1000 (MAX_BATCH parity). Callers must
+        catch HTTP 404 and fall back per-doc for older engines.
+
+        *complete* (nexus-5xn3k.4, RUNFENCE) — optional ``{doc_id:
+        content_hash}``: for each entry the engine (v0.1.62+, nexus-5xn3k.2)
+        runs the SAME fail-closed verify ``/index-run/complete`` runs
+        (missing==0 AND referenced==chunk_count) inside the per-doc write
+        transaction and stamps ``index_state='complete'`` — no extra round
+        trip on the hot flush-grain path. A failed verify does NOT fail the
+        write (the rows are correct; over-work-never-under-work): the doc
+        lands in ``complete_refused`` instead, and the CALLER MUST parse it
+        — a refused doc is not fully indexed. Entries are sent with the
+        page containing their doc; a pre-fence engine ignores the unknown
+        key, so refusals simply never appear (fence unstamped, 'unknown').
+
+        Returns ``{"failed_doc_ids": [...], "complete_refused": [{doc_id,
+        referenced, missing, chunk_count}, ...], "complete_refused_count":
+        int}`` — the scalar count is carried separately so a truncated
+        refusal list is detectable (bead-amendment MUST).
         """
         failed: list[str] = []
+        refused: list[dict] = []
+        refused_count = 0
         for start in range(0, len(docs), _MANIFEST_GET_MANY_PAGE):
             page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
-            result = self._post(
-                "/manifest/write_many",
-                {"docs": [
-                    {"doc_id": d, "rows": self._manifest_rows(chunks)}
-                    for d, chunks in page
-                ]},
-            )
+            body: dict = {"docs": [
+                {"doc_id": d, "rows": self._manifest_rows(chunks)}
+                for d, chunks in page
+            ]}
+            if complete:
+                page_complete = {
+                    d: complete[d] for d, _ in page if d in complete
+                }
+                if page_complete:
+                    body["complete"] = page_complete
+            result = self._post("/manifest/write_many", body)
             failed.extend((result or {}).get("failed_doc_ids", []))
+            refused.extend((result or {}).get("complete_refused") or [])
+            refused_count += int((result or {}).get("complete_refused_count") or 0)
             # nexus-fhhwf: the engine (v0.1.33+) returns a structured
             # per-doc reason alongside the bare id list — surface it so a
             # failed doc is diagnosable from the client log instead of
@@ -2700,7 +2724,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     reason=f.get("reason", ""),
                     sqlstate=f.get("sqlstate", ""),
                 )
-        return failed
+        return {
+            "failed_doc_ids": failed,
+            "complete_refused": refused,
+            "complete_refused_count": refused_count,
+        }
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
         """Recompute ``documents.chunk_count`` from the true manifest row count.

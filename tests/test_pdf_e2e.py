@@ -50,6 +50,29 @@ def _legacy_vector_backend(monkeypatch):
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
 
 
+@pytest.fixture(autouse=True)
+def _stub_fence_complete(monkeypatch):
+    """nexus-5xn3k.4 RUNFENCE C2: this file's T3 substrate (``local_t3`` — a
+    raw ``chromadb.EphemeralClient``, per the module docstring's "Real PDF
+    extraction + chunking + local embedding + EphemeralClient") is
+    DELIBERATELY DECOUPLED from the engine's Postgres that
+    ``complete_index_run`` verifies chunk presence against — these tests
+    prove the PDF E2E pipeline (extraction, chunking, local embedding,
+    chunk-level staleness skip via ``_manifest_is_fully_present``) minus
+    fence/catalog integration. Once ``.4`` wired real begin/complete calls
+    into ``_index_document``/``pipeline_index_pdf``, the engine's genuine
+    verify-then-stamp correctly (but irrelevantly, for this file's scope)
+    finds 0 chunks present and raises ``IndexRunVerifyRefused``. Stub the
+    fence tail the same way as ``tests/test_pipeline_stages.py``'s
+    ``_stub_fence_complete``. The GENUINE fence integration proof — chunks
+    and manifest landing in the SAME substrate the engine verifies — is
+    explicitly deferred to nexus-5xn3k.7 (the falsification-gate bead); do
+    NOT rewire ``local_t3`` to the engine substrate here.
+    """
+    monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+
+
 def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
     """Local embed stub: wraps ONNX MiniLM-L6-v2 — no API keys needed.
 
