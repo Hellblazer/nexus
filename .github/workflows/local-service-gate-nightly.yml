@@ -186,3 +186,53 @@ jobs:
             exit 1
           fi
           tests/e2e/local-service-gate.sh
+
+      - name: Ungated integration files (nexus-5opzu)
+        # The four tests/db files with NO other automated gate anywhere —
+        # one of which (test_i711w_gap_xfails.py) holds the SOLE repo-wide
+        # pins on five service-catalog contracts, whose strict xfails went
+        # stale unseen for a session (6 XPASS(strict), 2026-07-31). They
+        # cannot join CI's seam job (it provisions Docker PG; these want
+        # local binaries via pg_bin_dir()), but THIS job already exports
+        # NEXUS_PG_BIN at the bundle and the gate above just built the dev
+        # jar — so they run here, sequentially (one pytest at a time).
+        # Hal call 2026-08-02 on nexus-5opzu: option (a), scheduled gate;
+        # per-contract hermetic splits stay opportunistic.
+        run: |
+          set -euo pipefail
+          uv run pytest \
+            tests/db/test_i711w_gap_xfails.py \
+            tests/db/test_http_catalog_integration.py \
+            tests/db/test_indexer_seam_b_integration.py \
+            tests/db/test_frecency_enehl_integration.py \
+            -o addopts="" -m integration -q -rs --junit-xml=ungated-5opzu.xml
+
+      - name: Non-vacuity — every ungated file actually ran (nexus-5opzu)
+        # A gate that skip-passes when its dependency is absent must carry a
+        # non-vacuity assert (CLAUDE.md § Testing). Each of the four files
+        # must contribute >= 1 non-skipped testcase; a jar/PG-prereq skip
+        # sweep reads as a broken gate, not a pass.
+        run: |
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          FILES = {
+              "test_i711w_gap_xfails",
+              "test_http_catalog_integration",
+              "test_indexer_seam_b_integration",
+              "test_frecency_enehl_integration",
+          }
+          root = ET.parse("ungated-5opzu.xml").getroot()
+          ran: dict[str, int] = {f: 0 for f in FILES}
+          for case in root.iter("testcase"):
+              for f in FILES:
+                  if f in (case.get("classname") or ""):
+                      if case.find("skipped") is None:
+                          ran[f] += 1
+          bad = [f for f, n in ran.items() if n == 0]
+          print("non-skipped testcases per file:", ran)
+          if bad:
+              print(f"VACUOUS: {bad} contributed zero non-skipped tests — prereq skip sweep, gate is broken", file=sys.stderr)
+              sys.exit(1)
+          PY
