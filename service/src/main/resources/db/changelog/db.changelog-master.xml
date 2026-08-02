@@ -327,6 +327,18 @@
          below — no new schema objects, CREATE OR REPLACE only. -->
     <include file="db/changelog/catalog-019-tombstone-aware-read-views.xml"/>
 
+    <!-- RUNFENCE E1 (bead nexus-5xn3k.1): index_state/index_content_hash/
+         index_run_id/index_started_at columns on catalog_documents (NO
+         backfill — NULL means unknown) + the partial "not complete" index,
+         plus nexus.manifest_verify(doc_id)/manifest_verify_all() — the
+         per-doc / per-tenant anti-join of catalog_document_chunks against
+         chunks_<dim>, tenant-scoped via the nexus.tenant GUC (document_text's
+         pattern). Carries manifest_orphans' two traps forward: tombstoned
+         parents excluded, collection IS NULL rows not counted as missing.
+         After catalog-019 (appended changeset); before the runAlways grants
+         below. -->
+    <include file="db/changelog/catalog-020-index-run-fence.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001
