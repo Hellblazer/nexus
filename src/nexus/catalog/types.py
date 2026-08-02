@@ -184,6 +184,17 @@ class CatalogEntry:
     bib_openalex_id: str = ""
     bib_doi: str = ""
     bib_enriched_at: str = ""
+    # nexus-5xn3k.3 (RUNFENCE): the index-run fence fields (catalog-020,
+    # landed by .1/.2). ``index_state`` is the ONLY nullable field on this
+    # dataclass by design: NULL/None means "unknown" (a legacy pre-fence
+    # row, or an engine that predates the fence entirely) -- never coerced
+    # to ``'complete'`` or to any other sentinel string. The other three
+    # mirror the engine's NOT NULL DEFAULT '' columns, same empty-string
+    # default as ``alias_of``/``source_uri`` above.
+    index_state: str | None = None
+    index_content_hash: str = ""
+    index_run_id: str = ""
+    index_started_at: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -210,6 +221,10 @@ class CatalogEntry:
             "bib_openalex_id": self.bib_openalex_id,
             "bib_doi": self.bib_doi,
             "bib_enriched_at": self.bib_enriched_at,
+            "index_state": self.index_state,
+            "index_content_hash": self.index_content_hash,
+            "index_run_id": self.index_run_id,
+            "index_started_at": self.index_started_at,
         }
 
 

@@ -301,7 +301,26 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     without that, no-catalog ingest writes chunks with neither
     source_path nor doc_id and the staleness check correctly cannot
     detect "unchanged" — re-index would proceed every time.
+
+    nexus-5xn3k.3 (RUNFENCE): the fence's "unknown state" fallback
+    (``_manifest_is_fully_present``) now asks the catalog SERVICE's own
+    ``manifest/verify`` — an engine-side SQL anti-join that only sees chunks
+    living in THAT SAME Postgres (design memo §3.2: "post-RDR-155 both
+    tables live in the same Postgres"). This test injects a raw ephemeral
+    ChromaDB client as *t3* specifically to avoid needing a full
+    pgvector-backed vector store for a local-embedder unit test — a
+    deliberately DECOUPLED T3 substrate the real production topology never
+    has. Against a real (test-scoped) service catalog, the engine's verify
+    correctly reports every chunk "missing" (it was never written to the
+    engine's own tables), which would force a spurious re-index and is
+    ORTHOGONAL to what this test actually verifies (the local-embedder
+    fallback + doc_id-keyed identity match). Bypassed here; the RUNFENCE
+    mechanism itself has its own dedicated coverage
+    (tests/test_5xn3k_staleness_three_way.py et al.).
     """
+    monkeypatch.setattr(
+        "nexus.doc_indexer._manifest_is_fully_present", lambda *a, **k: True,
+    )
     # nexus-i711w: no local catalog init — pre-flight registration goes to
     # the live catalog.
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)

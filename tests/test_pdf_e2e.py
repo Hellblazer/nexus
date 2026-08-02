@@ -107,9 +107,20 @@ class TestIndexPdfE2E:
         )
 
     def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
-        """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged."""
+        """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged.
+
+        RUNFENCE topology note (nexus-5xn3k.3): this harness writes chunks to
+        a raw EphemeralClient T3 deliberately decoupled from the engine
+        catalog's Postgres, so the engine-side manifest_verify correctly
+        reports every chunk missing and would force a re-index. The fence's
+        real coverage lives in tests/test_5xn3k_staleness_three_way.py and
+        the .7 integration gate; this test pins the chunk-level staleness
+        skip, so the verify fallthrough is pinned open here (same pattern as
+        test_doc_indexer's decoupled-T3 test).
+        """
         with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
+             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed), \
+             patch("nexus.doc_indexer._manifest_is_fully_present", return_value=True):
             first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
             second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
 

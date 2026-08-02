@@ -104,6 +104,12 @@ class CatalogReader(Protocol):
     def get_manifest(self, doc_id) -> object:  # canonical
         ...
 
+    def manifest_verify(self, doc_id) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+        ...
+
+    def manifest_verify_all(self) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+        ...
+
     def get_manifests(self, doc_ids) -> object:  # canonical
         ...
 
@@ -234,6 +240,15 @@ class CatalogWriter(Protocol):
     def resync_chunk_count_cache(self, doc_id) -> object:  # canonical
         ...
 
+    def begin_index_run(self, doc_id, content_hash, run_id, collection) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+        ...
+
+    def complete_index_run(self, doc_id, content_hash, chunk_count) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+        ...
+
+    def fail_index_run(self, doc_id, error) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+        ...
+
     def rename_collection(self, old, new) -> object:  # canonical
         ...
 
@@ -291,4 +306,11 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "sync",
     "pull",
     "compact",
+    # RUNFENCE (nexus-5xn3k.3): the nexus-kgos1 trap — _ServiceCatalogWriter
+    # is a CLOSED whitelist; omitting one of these three here would make the
+    # write silently raise AttributeError, which a bare `except Exception`
+    # upstream turns into a feature that no-ops forever.
+    "begin_index_run",
+    "complete_index_run",
+    "fail_index_run",
 )

@@ -229,70 +229,124 @@ def _doc_id_for_path(file_path: Path) -> str:
 
 
 def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:
-    """True iff EVERY chash the document's manifest names still exists in T3.
+    """True iff the engine's ``manifest/verify`` reports no missing chunks.
 
-    nexus-5xn3k AC2. The staleness gates ask ``col.get(where={"content_hash":
-    h}, limit=1)`` — "does ANY chunk with this content hash exist?" — which is
-    satisfied by a SINGLE survivor. An index that dies mid-write commits an
-    arbitrary SUBSET of the document's chunks, so from then on every re-index
-    finds one of them and returns 0: the document is permanently "up to date"
-    while most of its content is missing, and every attempt reports success.
+    nexus-5xn3k AC2 (original), reworked for RUNFENCE (nexus-5xn3k.3, design
+    memo §3.4): the client-side existence check this originally did — a
+    300-id-per-page ``col.get(ids=..., include=[])`` loop over the manifest's
+    expected chash set — is replaced by ONE engine-side ``manifest/verify``
+    call. ``nexus.manifest_verify()`` is a single SQL anti-join, so the round
+    trip this function pays drops from O(manifest size / 300) requests to 1,
+    and the *col* parameter is now UNUSED (kept so this function's signature —
+    and every existing caller/test — needs no further change; the presence
+    check moved server-side and no longer touches T3 directly).
 
-    (The bead attributed this to the gate trusting the catalog's chunk_count.
-    It does not: neither gate consults the catalog at all. The mechanism is
-    limit=1. Corollary worth keeping: PARTIAL deletion is worse than none —
-    removing 206 of 207 chunks leaves the document broken AND still skipped.)
+    (The original bead attributed the AC2 gap to the gate trusting the
+    catalog's chunk_count. It did not: neither gate consults the catalog at
+    all. The mechanism was ``limit=1`` on the staleness gates' own chunk-hash
+    query, one layer above this function. Corollary worth keeping: PARTIAL
+    deletion is worse than none — removing 206 of 207 chunks leaves the
+    document broken AND still skipped.)
 
-    The manifest is the authoritative expected set (RDR-108), so this compares
-    it against what T3 actually holds. Existence only — ``include=[]`` fetches
-    no documents, metadata or embeddings — and paged to the 300-id quota
-    (chroma_quotas.MAX_QUERY_RESULTS), so it is a cheap check, not a hydrate.
-
-    FAIL-OPEN, deliberately: an unreadable catalog or T3 returns True, i.e.
-    "no evidence of damage", preserving the pre-fix behaviour. This runs on the
-    hot path of every re-index, and a transient read failure must not force a
-    full re-embed of an intact document. The DAMAGE it detects is durable and
-    will be caught on the next pass; a false positive here is expensive.
-    An EMPTY manifest also returns True: that is the GH #1397 ghost class,
-    which `nx catalog reconcile` owns, and this gate must not silently take it.
+    FAIL-OPEN, deliberately: an unreadable catalog/engine returns True, i.e.
+    "no evidence of damage", preserving the pre-fix behaviour. This runs on
+    the hot path of every re-index (via the "unknown" branch of the RUNFENCE
+    three-way, :func:`_index_run_fresh`), and a transient read failure must
+    not force a full re-embed of an intact document. The DAMAGE it detects is
+    durable and will be caught on the next pass; a false positive here is
+    expensive. Logged at WARNING, never DEBUG — the ac4id lesson: a verify
+    that silently stops working recreates the exact bug this arc exists to
+    fix. An EMPTY manifest (``referenced=0``) also returns True: that is the
+    GH #1397 ghost class, which `nx catalog reconcile` owns, and this gate
+    must not silently take it.
     """
+    if not doc_id:
+        # Identity unresolvable (prose path, unregistered doc) — no
+        # expected set to compare against, so no evidence of damage.
+        return True
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
-        if not doc_id:
-            # Identity unresolvable (prose path, unregistered doc) — no
-            # expected set to compare against, so no evidence of damage.
-            return True
         cat = make_catalog_reader()
         if cat is None:
             return True
-        rows = cat.get_manifest(str(doc_id))
-        expected = {r.get("chash", "") for r in rows if r.get("chash")}
-        if not expected:
-            return True
-        ordered = sorted(expected)
-        present: set[str] = set()
-        page = 300  # chroma_quotas.MAX_QUERY_RESULTS
-        for i in range(0, len(ordered), page):
-            got = _vector_with_retry(
-                col.get, ids=ordered[i:i + page], include=[],
-            )
-            present.update(got.get("ids", []) or [])
-        missing = expected - present
+        result = cat.manifest_verify(str(doc_id)) or {}
+        missing = int(result.get("missing", 0) or 0)
         if missing:
             _log.warning(
                 "index_manifest_incomplete_reindexing",
                 doc_id=str(doc_id),
-                expected=len(expected),
-                missing=len(missing),
-                detail="manifest names chunks absent from T3 — a prior index "
-                       "died mid-write; re-indexing instead of skipping",
+                referenced=int(result.get("referenced", 0) or 0),
+                present=int(result.get("present", 0) or 0),
+                missing=missing,
+                detail="engine manifest/verify reports missing chunks — a "
+                       "prior index died mid-write; re-indexing instead of "
+                       "skipping",
             )
             return False
         return True
-    except Exception as exc:  # noqa: BLE001 — fail-open: a read failure must not force a re-embed
-        _log.debug("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD (ac4id lesson: never silently stop verifying)
+        _log.warning("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
         return True
+
+
+def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
+    """Read-only lookup of the RUNFENCE fields for *doc_id* (nexus-5xn3k.3,
+    design memo §3.4). Returns ``(index_state, index_content_hash)``.
+
+    ``index_state`` comes back ``None`` for an empty *doc_id*, an
+    unresolvable entry, a legacy pre-fence row (NULL column, or a field
+    absent entirely on a pre-fence engine), OR a read failure — every one of
+    these collapses to the same "the fence has nothing to say" bucket that
+    :func:`_index_run_fresh` falls through to :func:`_manifest_is_fully_present`
+    for. A read failure is logged at WARNING, never DEBUG: a fence that
+    silently stops working recreates the ac4id bug one layer up.
+    """
+    if not doc_id:
+        return None, ""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return None, ""
+        entry = cat.by_doc_id(str(doc_id))
+        if entry is None:
+            return None, ""
+        return entry.index_state, entry.index_content_hash
+    except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD (ac4id lesson)
+        _log.warning("index_fence_read_failed", doc_id=str(doc_id), error=str(exc))
+        return None, ""
+
+
+def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:
+    """The staleness three-way (RUNFENCE, nexus-5xn3k.3, design memo §3.4).
+
+    Call ONLY after the existing chunk-level match (content_hash +
+    embedding_model against ONE surviving chunk, ``limit=1``) already holds —
+    this layers the fence's document-level intent/completion record on top
+    of that per-chunk signal, closing the AC2 blind spot the memo's §1
+    describes (a consistent T3/manifest truncation that no comparison
+    between two artifacts written by the SAME broken run can ever see).
+
+    * ``index_state == 'complete'`` AND the fence's own
+      ``index_content_hash`` agrees with *content_hash* -> definitely fresh,
+      no probe.
+    * ``'indexing'`` / ``'failed'`` -> definitely stale, no probe. A partial
+      or errored run must never read as done, regardless of what T3 happens
+      to hold right now (nexus-lcmbp non-goal: this is NOT a lock — it never
+      means "someone else is running, skip").
+    * anything else (``None`` — a NULL column, a field absent on a pre-fence
+      engine, an unresolvable doc_id, or a fence read failure) -> the fence
+      has nothing to say; fall through to :func:`_manifest_is_fully_present`'s
+      one engine ``manifest/verify`` call (today's post-AC2 behaviour).
+    """
+    state, fence_hash = _index_fence_state(doc_id)
+    if state == "complete":
+        return fence_hash == content_hash
+    if state in ("indexing", "failed"):
+        return False
+    return _manifest_is_fully_present(col, doc_id)
 
 
 def _register_or_lookup_doc_id(
@@ -1027,14 +1081,17 @@ def _index_document(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        # nexus-5xn3k AC2: the match above is satisfied by ONE surviving chunk
-        # (limit=1), so a mid-write failure leaves the document permanently
-        # "fresh". Verify the manifest is whole before skipping. Identity is
-        # resolved READ-ONLY and only on the skip path; a miss fails open.
+        # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the match above is
+        # satisfied by ONE surviving chunk (limit=1), so a mid-write failure
+        # leaves the document permanently "fresh". The three-way fence check
+        # (index_state == 'complete' + hash match -> skip; 'indexing'/'failed'
+        # -> re-index; unknown -> one engine manifest/verify call) closes that
+        # gap. Identity is resolved READ-ONLY and only on the skip path; a
+        # miss fails open.
         if (
             stored_hash == content_hash
             and stored_model == target_model
-            and _manifest_is_fully_present(col, _doc_id_for_path(file_path))
+            and _index_run_fresh(col, _doc_id_for_path(file_path), content_hash)
         ):
             return 0
 
@@ -1716,14 +1773,16 @@ def index_pdf(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        # nexus-5xn3k AC2: the hash/model match above is satisfied by ONE
-        # surviving chunk (limit=1), so a mid-write failure leaves the document
-        # permanently "fresh". Verify the manifest is actually whole before
-        # taking the skip.
+        # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the hash/model match
+        # above is satisfied by ONE surviving chunk (limit=1), so a mid-write
+        # failure leaves the document permanently "fresh". The three-way
+        # fence check (index_state == 'complete' + hash match -> skip;
+        # 'indexing'/'failed' -> re-index; unknown -> one engine
+        # manifest/verify call) closes that gap.
         if (
             stored_hash == content_hash
             and stored_model == target_model
-            and _manifest_is_fully_present(col, doc_id)
+            and _index_run_fresh(col, doc_id, content_hash)
         ):
             if return_metadata:
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
