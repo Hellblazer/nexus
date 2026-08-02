@@ -349,16 +349,32 @@ GATE_PG_BIN="$SCRATCH/pg-bundle/bundle/bin"
 if [ -x "$GATE_PG_BIN/initdb" ]; then
   export NEXUS_PG_BIN="$GATE_PG_BIN"
 fi   # else: host-PG / dev mode — fall through to auto-discovery
+# --color=no: this output is PARSED, so it must not depend on whether the
+# caller has a TTY. `tee` writes to stdout as well as the file, so pytest
+# sees a terminal when a human runs the gate by hand — exactly how the
+# release checklist says to run it — and colorises. The summary line then
+# begins with an escape sequence, the ^-anchored selector below misses it,
+# and the vacuity guard trips on a run where every test passed. Observed
+# live 2026-08-01: 467 passed, gate reported FAILED (passed=0).
+#
+# -rs: name every skip. The BUDGET trip below is undiagnosable from CI logs
+# without the reasons (2026-08-02: two nightly reds could report only a
+# count, never which tests). Costs a few summary lines on a green run.
+#
+# NOTE this comment block must stay ABOVE the command, never inside the
+# backslash continuation: a continued line that lands on a comment ends the
+# logical line, turning the env prefix into plain unexported assignments —
+# pytest then runs env-less. That is NOT merely a skip: with NX_SERVICE_*
+# gone, service resolution falls through to the uid-scoped ServiceRegistry
+# lease (service_endpoint.py), so on a box with a live supervisor the
+# "hermetic" gate runs against the OPERATOR'S REAL INSTALL; only on a box
+# with no live service do the tests skip. The scratch config-dir pin
+# (3f61b851) is lost either way. That exact regression shipped in 376115c1
+# and cost nightlies 2026-08-01/02 (skipped 21 -> 28, budget 25).
+# Mechanically enforced by tests/test_shell_continuation_lint.py.
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
-  # --color=no: this output is PARSED, so it must not depend on whether the
-  # caller has a TTY. `tee` writes to stdout as well as the file, so pytest
-  # sees a terminal when a human runs the gate by hand — exactly how the
-  # release checklist says to run it — and colorises. The summary line then
-  # begins with an escape sequence, the ^-anchored selector below misses it,
-  # and the vacuity guard trips on a run where every test passed. Observed
-  # live 2026-08-01: 467 passed, gate reported FAILED (passed=0).
-  uv run pytest -m "integration and not lived_in and not cloud_mode" -q --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
+  uv run pytest -m "integration and not lived_in and not cloud_mode" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e
 
