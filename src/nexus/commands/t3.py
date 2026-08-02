@@ -243,11 +243,20 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     help="Required alongside --no-dry-run to actually delete chunks. "
     "Without --yes, the command falls back to report-only.",
 )
+@click.option(
+    "--allow-empty-manifest-set",
+    is_flag=True,
+    default=False,
+    help="Override the empty-alive-set refusal (nexus-jqrtp). DANGEROUS: "
+    "only pass this once you've confirmed the collection really is fully "
+    "orphaned, not a fresh/mis-scoped tenant or an unbackfilled manifest.",
+)
 def gc_cmd(
     collection: str,
     orphan_window: str,
     dry_run: bool,
     yes: bool,
+    allow_empty_manifest_set: bool,
 ) -> None:
     """Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4).
 
@@ -393,6 +402,31 @@ def gc_cmd(
             f"\nSummary: would delete {len(candidates)} chunk(s) from {collection}."
         )
         return
+
+    # nexus-jqrtp: the empty-alive-set guard. `cat is None` in _make_catalog()
+    # was written to stop exactly this catastrophe but only ever fired for a
+    # SQLite-only "catalog absent" condition; in service mode the factory
+    # always returns a handle, so it never fired there — and "catalog
+    # PRESENT but its manifest references NOTHING for this collection" was
+    # never guarded on either substrate. An empty `referenced` set here is
+    # reachable without anything client-visible being wrong (fresh/mis-scoped
+    # tenant, an unbackfilled manifest, a collection with no catalog
+    # projection) and makes EVERY chunk in the collection an orphan
+    # candidate — the last line of defence before --no-dry-run --yes deletes
+    # it all. Refuse unless the operator has confirmed the collection really
+    # is fully orphaned and passed --allow-empty-manifest-set.
+    if not referenced and not allow_empty_manifest_set:
+        click.echo(
+            f"\nREFUSING to delete: the catalog manifest for '{collection}' "
+            f"references ZERO chashes, but {len(candidates)} chunk(s) are "
+            f"about to be treated as orphans. This is indistinguishable from "
+            f"a fresh/mis-scoped tenant or an unbackfilled manifest without "
+            f"deciding the collection's disposition first. Investigate with "
+            f"'nx t3 backfill-manifest -c {collection}' or "
+            f"'nx catalog reconcile', or — if the collection really is "
+            f"fully orphaned — re-run with --allow-empty-manifest-set."
+        )
+        raise click.exceptions.Exit(1)
 
     # NOTE on the manifest snapshot: ``referenced`` was sampled at the
     # top of this command. A doc registered concurrently between

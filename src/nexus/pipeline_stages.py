@@ -740,7 +740,14 @@ def pipeline_index_pdf(
                 timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
                 embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
             else:
-                db.mark_failed(content_hash, error="voyage_api_key not configured")
+                try:
+                    db.mark_failed(content_hash, error="voyage_api_key not configured")
+                except Exception:  # noqa: BLE001 — boundary catch: the RuntimeError below must propagate, not a /fail transport error
+                    _log.warning(
+                        "pipeline_terminal_mark_failed",
+                        content_hash=content_hash,
+                        exc_info=True,
+                    )
                 raise RuntimeError(
                     "voyage_api_key not configured — cannot embed for streaming "
                     "pipeline (set a Voyage key, or use service mode for "
@@ -804,8 +811,27 @@ def pipeline_index_pdf(
         # forever: failed → resuming → re-fail with replayed orphans.
         # The cleared WAL means retry runs extract from scratch — same
         # RuntimeError fires immediately, which is correct.
-        db.mark_failed(content_hash, error=str(first_exc))
-        db.clear_orphan_wal(content_hash)
+        # nexus-rewgw (review of the ptctu fix): mark_failed's /fail POST can
+        # ITSELF fail (persistent app-level 500 — the gtltb doc-3 class). If
+        # that raised through here, clear_orphan_wal and `raise first_exc`
+        # would never run: the caller would see the /fail transport error
+        # instead of the ORIGINAL failure, and the row would strand
+        # 'running' with no audit trail — ptctu's both consequences, one
+        # call downstream. The terminal-state writes are best-effort;
+        # first_exc propagating is the load-bearing part. The residual (row
+        # stays 'running' when the engine's /fail endpoint is down) is
+        # covered systemically by lcmbp's young-running-row conflict
+        # semantics: the NEXT retry is loud, never a silent skip.
+        try:
+            db.mark_failed(content_hash, error=str(first_exc))
+            db.clear_orphan_wal(content_hash)
+        except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
+            _log.warning(
+                "pipeline_terminal_mark_failed",
+                content_hash=content_hash,
+                original_error=str(first_exc),
+                exc_info=True,
+            )
         raise first_exc
 
     # ── Post-passes (after all three stages complete) ────────────────────────

@@ -144,7 +144,37 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         self._post("/v1/pipeline/complete", {"content_hash": content_hash})
 
     def mark_failed(self, content_hash: str, error: str = "") -> None:
-        self.flush(content_hash)
+        """Mark *content_hash* failed with *error* as the audit record.
+
+        Flushing pending writes first is still attempted (nexus-146xx.16
+        intent: buffered pages should land before the terminal state when
+        that's possible) but is best-effort here — never load-bearing. When
+        the ORIGINAL failure came FROM a flush, flush()'s own except block
+        (the buffer-restoring BaseException handler in flush) has already
+        restored the failing pages into the buffer,
+        so this cleanup flush would otherwise re-POST the IDENTICAL payload
+        and hit the IDENTICAL error, raising before /fail is ever issued
+        (nexus-ptctu: the pipeline row strands 'running' with no error, and
+        the caller sees the cleanup failure instead of the original one).
+        The failure record is the thing that must survive; buffered pages
+        are not — so a failing cleanup flush is logged and swallowed, and
+        /fail is always ATTEMPTED with the caller's ORIGINAL error text.
+        The /fail POST itself can still fail and raises to the caller —
+        callers on an error path must wrap this call so their original
+        exception propagates regardless (pipeline_stages does; see
+        nexus-rewgw). Note the asymmetry with flush(): flush restores its
+        buffer on BaseException, while the cleanup wrapper here catches
+        only Exception — a KeyboardInterrupt during cleanup propagates
+        immediately by design (control-flow exceptions are not swallowed).
+        """
+        try:
+            self.flush(content_hash)
+        except Exception:  # noqa: BLE001 — boundary catch: the cleanup flush is best-effort, never load-bearing; swallow-and-log so /fail is always attempted with the caller's ORIGINAL error
+            _log.warning(
+                "pipeline_mark_failed_cleanup_flush_failed",
+                content_hash=content_hash,
+                exc_info=True,
+            )
         self._post("/v1/pipeline/fail", {"content_hash": content_hash, "error": error})
 
     # ── pages ───────────────────────────────────────────────────────────────

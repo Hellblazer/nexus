@@ -285,6 +285,10 @@ def test_gc_orphan_window_excludes_recent(t3_db, tmp_path, runner):
     nexus-i711w: no catalog fixture — nothing is seeded, so the active
     catalog's alive-set for this (per-test-unique) collection is empty and
     both chunks are orphans by chash. The window is what separates them.
+
+    nexus-jqrtp: an empty alive-set now refuses by default (the guard this
+    file's own xfail predicted), so this deliberately-empty-manifest
+    scenario needs the explicit override.
     """
     coll = "knowledge__test_gc_window"
     recent = _iso(datetime.now(UTC) - timedelta(hours=1))
@@ -304,7 +308,7 @@ def test_gc_orphan_window_excludes_recent(t3_db, tmp_path, runner):
             [
                 "t3", "gc", "-c", coll,
                 "--orphan-window", "30d",
-                "--no-dry-run", "--yes",
+                "--no-dry-run", "--yes", "--allow-empty-manifest-set",
             ],
         )
 
@@ -318,6 +322,9 @@ def test_gc_default_window_is_30_days(t3_db, tmp_path, runner):
 
     nexus-i711w: no catalog fixture — nothing seeded, so both chunks are
     orphans by chash and only the default window separates them.
+
+    nexus-jqrtp: an empty alive-set now refuses by default, so this
+    deliberately-empty-manifest scenario needs the explicit override.
     """
     coll = "knowledge__test_gc_default"
     twenty_days = _iso(datetime.now(UTC) - timedelta(days=20))
@@ -334,7 +341,8 @@ def test_gc_default_window_is_30_days(t3_db, tmp_path, runner):
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
-            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+             "--allow-empty-manifest-set"],
         )
 
     assert result.exit_code == 0, result.output
@@ -465,6 +473,9 @@ def test_gc_paginates_above_300_chunk_boundary(
 
     nexus-i711w: no catalog fixture — every chunk must be an orphan for the
     305-vs-300 count to mean anything, which an empty alive-set guarantees.
+
+    nexus-jqrtp: an empty alive-set now refuses by default, so this
+    deliberately-empty-manifest scenario needs the explicit override.
     """
     coll = "knowledge__test_gc_pagination"
     col = t3_db._client.get_or_create_collection(coll)
@@ -485,7 +496,8 @@ def test_gc_paginates_above_300_chunk_boundary(
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
-            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+             "--allow-empty-manifest-set"],
         )
 
     assert result.exit_code == 0, result.output
@@ -605,24 +617,6 @@ class TestGetEmbeddingsRequestOrder:
         assert result.shape[0] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "nexus-jqrtp: the empty-alive-set guard is STILL unreachable in service "
-        "mode. _make_catalog()'s init gate tests `cat is None`, a SQLite-only "
-        "condition, so the catastrophe it guards (empty alive-set -> every chunk "
-        "an orphan -> --no-dry-run --yes deletes the collection) is unguarded on "
-        "every shipping configuration. A first attempt at guarding the CONDITION "
-        "(chunks present, manifest referencing none) was REVERTED 2026-07-31: it "
-        "also refuses the LEGITIMATE fully-orphaned collection, which six gc "
-        "tests construct on purpose, and separating the two needs a "
-        "per-collection document count the client has no read for "
-        "(all_documents takes no physical_collection filter). The real fix is "
-        "that read, or an explicit opt-out that changes a DESTRUCTIVE verb's "
-        "default — Hal's call, not a rushed patch. This pin holds the gap open."
-    ),
-)
 def test_gc_refuses_when_manifest_references_nothing_but_chunks_exist(
     runner: CliRunner, t3_db
 ) -> None:
@@ -635,9 +629,14 @@ def test_gc_refuses_when_manifest_references_nothing_but_chunks_exist(
     factory always returns a handle, so the guard could never fire and the
     hazard was unguarded on every shipping configuration.
 
-    The guard now tests the CONDITION: chunks present, manifest referencing
-    none of them. That disagreement is damage (a dropped manifest-write hook),
-    not an empty collection, and GC must refuse and name the repair.
+    A first attempt at guarding the CONDITION (chunks present, manifest
+    referencing none) was reverted 2026-07-31: it also refused the
+    LEGITIMATE fully-orphaned collection several other gc tests construct on
+    purpose, and separating the two needs a per-collection document count
+    the client has no read for. The shipped fix is the other option that
+    reason left open: an explicit opt-out (--allow-empty-manifest-set) that
+    changes the destructive verb's default. Without it, GC must refuse and
+    name the repair.
     """
     from unittest.mock import MagicMock
 
@@ -665,3 +664,58 @@ def test_gc_refuses_when_manifest_references_nothing_but_chunks_exist(
     assert "nx catalog reconcile" in result.output
     # THE POINT: nothing was deleted despite --no-dry-run --yes.
     assert t3_db._client.get_collection(coll).count() == 2
+
+
+def test_gc_allow_empty_manifest_set_overrides_the_refusal(
+    runner: CliRunner, t3_db
+) -> None:
+    """nexus-jqrtp: the explicit override proceeds despite the empty
+    alive-set — the operator's own confirmation that this collection really
+    is fully orphaned."""
+    from unittest.mock import MagicMock
+
+    coll = "code__jqrtp-guard-override__stub-code-1024__v1"
+    long_ago = "2020-01-01T00:00:00Z"
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="c1", content="x",
+        chunk_text_hash="a" * 64, indexed_at=long_ago,
+    )
+
+    empty_cat = MagicMock()
+    empty_cat.chashes_for_collection.return_value = set()
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=empty_cat):
+        result = runner.invoke(
+            main,
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+             "--allow-empty-manifest-set"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "REFUSING" not in result.output
+    assert t3_db._client.get_collection(coll).count() == 0
+
+
+def test_gc_empty_collection_and_empty_alive_set_is_a_clean_noop(
+    runner: CliRunner, t3_db
+) -> None:
+    """An empty COLLECTION (no chunks at all) with an empty alive-set is not
+    the nexus-jqrtp hazard — there is nothing to mistakenly orphan. Must
+    stay a clean "0 orphan(s)" no-op, never the refusal."""
+    from unittest.mock import MagicMock
+
+    coll = "code__jqrtp-guard-empty__stub-code-1024__v1"
+
+    empty_cat = MagicMock()
+    empty_cat.chashes_for_collection.return_value = set()
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=empty_cat):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "REFUSING" not in result.output
+    assert "0 orphan(s)" in result.output

@@ -522,6 +522,22 @@ class TestPipelineIndexPdf:
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
 
+    def test_first_exc_propagates_even_when_mark_failed_raises(self, db, mock_t3) -> None:
+        """nexus-rewgw: the /fail POST's own failure must never mask the
+        ORIGINAL pipeline exception nor skip `raise first_exc`. The
+        terminal-state bookkeeping (mark_failed + clear_orphan_wal) is
+        best-effort; first_exc propagating is load-bearing. Falsified by
+        removing the try/except around the bookkeeping in
+        pipeline_stages' first_exc block."""
+        def _fail_post(*a, **k):
+            raise RuntimeError("fail endpoint down: 500")
+        db.mark_failed = _fail_post  # type: ignore[method-assign]
+        with patch(_P_EXT) as ME, patch(_P_CHK):
+            ME.return_value.extract.side_effect = RuntimeError("original boom")
+            with pytest.raises(RuntimeError, match="original boom"):
+                pipeline_index_pdf(Path("/test.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=lambda t, m: ([], m))
+
     def test_extractor_failure(self, db, mock_t3) -> None:
         with patch(_P_EXT) as ME, patch(_P_CHK):
             ME.return_value.extract.side_effect = RuntimeError("boom")

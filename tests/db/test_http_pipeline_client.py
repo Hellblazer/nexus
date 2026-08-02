@@ -38,6 +38,10 @@ class _Server:
     def __init__(self) -> None:
         self.requests: list[tuple[str, dict]] = []
         self.fail_next_post = False
+        #: Unlike fail_next_post (one-shot), this fails EVERY POST to the
+        #: named path — models a persistent/deterministic failure (e.g. a
+        #: payload the server rejects every time), not a transient blip.
+        self.fail_path: str | None = None
         self.pages_response: list[dict] = []
         self.chunks_response: list[dict] = []
         self.pipelines_response: list[dict] = []
@@ -49,6 +53,8 @@ class _Server:
         if request.method == "POST" and self.fail_next_post:
             self.fail_next_post = False
             return httpx.Response(500, json={"error": "transient"})
+        if request.method == "POST" and path == self.fail_path:
+            return httpx.Response(500, json={"error": "persistent"})
         return {
             "/v1/pipeline/create": lambda: httpx.Response(200, json={"status": "created"}),
             "/v1/pipeline/state": lambda: httpx.Response(200, json={"pipeline": None}),
@@ -219,3 +225,66 @@ def test_mark_and_lifecycle_flush_first(db: HttpPipelineDB, server: _Server) -> 
     chunks_at = paths.index("/v1/pipeline/chunks")
     mark_at = paths.index("/v1/pipeline/mark_uploaded")
     assert chunks_at < mark_at, "the chunk batch landed before mark_uploaded"
+
+
+def test_mark_failed_flushes_pending_writes_first_on_success(
+    db: HttpPipelineDB, server: _Server
+) -> None:
+    """mark_failed keeps the flush-first intent when the cleanup flush
+    actually succeeds — same ordering guarantee as the other lifecycle
+    calls."""
+    db.write_chunk(HASH, 0, "t", "id0", embedding=b"")
+    db.mark_failed(HASH, error="boom")
+
+    paths = [p for p, b in server.requests]
+    chunks_at = paths.index("/v1/pipeline/chunks")
+    fail_at = paths.index("/v1/pipeline/fail")
+    assert chunks_at < fail_at, "the chunk batch landed before /fail"
+
+
+def test_mark_failed_posts_fail_even_when_cleanup_flush_fails_identically(
+    db: HttpPipelineDB, server: _Server
+) -> None:
+    """nexus-ptctu: when the ORIGINAL failure came from a flush, the raise
+    restores the failing pages into the buffer, so mark_failed's own
+    cleanup flush hits the IDENTICAL persistent failure. The /fail POST
+    must still be attempted, carrying the caller's ORIGINAL error text —
+    never substituted by the cleanup flush's own error — and mark_failed
+    itself must not raise (that would strand the pipeline row 'running'
+    and shadow the original exception the caller is about to re-raise)."""
+    db.write_page(HASH, 0, "t")
+    server.fail_path = "/v1/pipeline/pages"
+
+    # The ORIGINAL failure: some earlier flush (e.g. triggered by a
+    # read or an eager batch) hits the persistent failure and restores
+    # the page into the buffer per flush()'s documented contract.
+    with pytest.raises(Exception):
+        db.flush(HASH)
+
+    original_error = "RuntimeError: original extraction failure"
+
+    # Cleanup: mark_failed must not raise even though its own internal
+    # flush() re-POSTs the identical restored payload and fails again.
+    db.mark_failed(HASH, error=original_error)
+
+    fail_calls = server.calls("/v1/pipeline/fail")
+    assert len(fail_calls) == 1, "the /fail POST was issued despite the cleanup flush failing"
+    assert fail_calls[0]["content_hash"] == HASH
+    assert fail_calls[0]["error"] == original_error, (
+        "the ORIGINAL error text propagated to /fail, not the cleanup flush's own failure"
+    )
+
+
+def test_mark_failed_raises_when_fail_post_itself_fails(
+    db: HttpPipelineDB, server: _Server
+) -> None:
+    """nexus-rewgw: the /fail POST's OWN failure is the residual axis the
+    cleanup-flush fix does not cover. mark_failed's contract is that it
+    RAISES in that case (the terminal state genuinely did not land) — and
+    callers on an error path must therefore wrap it so their original
+    exception propagates regardless (pipeline_stages does; pinned by
+    test_first_exc_propagates_even_when_mark_failed_raises). This test
+    makes the gap visible instead of silent."""
+    server.fail_path = "/v1/pipeline/fail"
+    with pytest.raises(Exception):
+        db.mark_failed(HASH, error="original error")
