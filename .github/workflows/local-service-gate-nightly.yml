@@ -188,7 +188,7 @@ jobs:
           tests/e2e/local-service-gate.sh
 
       - name: Ungated integration files (nexus-5opzu)
-        # The four tests/db files with NO other automated gate anywhere —
+        # The five tests/db files with NO other automated gate anywhere —
         # one of which (test_i711w_gap_xfails.py) holds the SOLE repo-wide
         # pins on five service-catalog contracts, whose strict xfails went
         # stale unseen for a session (6 XPASS(strict), 2026-07-31). They
@@ -205,6 +205,7 @@ jobs:
             tests/db/test_http_catalog_integration.py \
             tests/db/test_indexer_seam_b_integration.py \
             tests/db/test_frecency_enehl_integration.py \
+            tests/db/test_5xn3k_runfence_gate.py \
             -o addopts="" -m integration -q -rs --junit-xml=ungated-5opzu.xml
 
       - name: Non-vacuity — every ungated file actually ran (nexus-5opzu)
@@ -222,6 +223,11 @@ jobs:
               "test_http_catalog_integration",
               "test_indexer_seam_b_integration",
               "test_frecency_enehl_integration",
+              # nexus-5xn3k.7: the RUNFENCE phase-exit falsification gate —
+              # same never-otherwise-selected file shape (its own review's
+              # Critical #1, 2026-08-02). Reachability caveat nexus-5a8ic
+              # applies to this whole leg until a release promotes it.
+              "test_5xn3k_runfence_gate",
           }
           root = ET.parse("ungated-5opzu.xml").getroot()
           ran: dict[str, int] = {f: 0 for f in FILES}

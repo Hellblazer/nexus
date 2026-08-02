@@ -85,10 +85,42 @@ def extractor_loop(
     if (state and state["total_pages"] is not None
             and state["pages_extracted"] >= state["total_pages"]
             and state.get("extraction_meta")):
-        stored_meta = json.loads(state["extraction_meta"])
-        if extraction_done is not None:
-            extraction_done.set()
-        return ExtractionResult(text="", metadata=stored_meta)
+        # nexus-gl99l: the counters above are NOT proof the WAL pages
+        # backing them still exist. pipeline_index_pdf's caught-exception
+        # handler calls db.mark_failed + db.clear_orphan_wal, which wipes
+        # the pdf_pages/pdf_chunks WAL rows but never resets these
+        # progress counters (deliberately — mark_failed's audit trail is
+        # load-bearing, nexus-2fyb/nexus-rewgw). Trusting the counters
+        # alone after ANY caught pipeline exception means a retry sees a
+        # row that CLAIMS full extraction with none of the underlying
+        # data, and silently skips re-extraction. Verify the actual WAL
+        # page count agrees with the claim before trusting the fast path
+        # — this also self-heals rows stranded by any earlier code
+        # version that never checked, not just future failures.
+        # A COUNT (not an index-coverage check) is sound here only because
+        # of two coupled invariants: clear_orphan_wal deletes ALL of a
+        # content_hash's pdf_pages/pdf_chunks rows in one server-side
+        # transaction (PipelineRepository.clearOrphanWal, TenantScope
+        # single-transaction — all-or-nothing, never a partial wipe), and
+        # pages are written in strictly increasing page_index order (the
+        # on_page callback below). Together those guarantee "N pages
+        # present" means "pages [0, N) present" — a count is equivalent to
+        # a contiguous-prefix check. If either invariant changes (a
+        # partial/selective clear_orphan_wal, or out-of-order/sparse page
+        # writes), this guard must switch to actually verifying index
+        # coverage (e.g. the max page_index present), not just a count.
+        actual_pages = len(db.read_pages(content_hash))
+        if actual_pages >= state["total_pages"]:
+            stored_meta = json.loads(state["extraction_meta"])
+            if extraction_done is not None:
+                extraction_done.set()
+            return ExtractionResult(text="", metadata=stored_meta)
+        # The claimed prefix isn't backed by real WAL data — the ENTIRE
+        # claimed prefix is suspect (clear_orphan_wal is all-or-nothing
+        # per content_hash), so fall through to a full re-extraction
+        # rather than trusting pages_extracted_at_start's stale value for
+        # the on_page dedup skip below.
+        pages_extracted_at_start = actual_pages
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
