@@ -1465,6 +1465,30 @@ class TestCheckNextSeqDrift:
         )
         return h._check_next_seq_drift()[0]
 
+    def test_corpus_walked_once_regardless_of_owner_count(self, monkeypatch) -> None:
+        """The quadratic-scan tripwire (nexus-ohxzu, 2026-08-02).
+
+        The per-owner helper re-walked all_documents PER OWNER — 65 owners x
+        ~22k docs = ~1.4M records over the managed API, measured at 218s of a
+        224s doctor. The single-pass rewrite computes every owner's max in one
+        walk; this pins call-count == 1 so the loop can never regress back
+        inside the owner iteration.
+        """
+        owners = [
+            {"tumbler_prefix": f"1.{i}", "next_seq": 1} for i in range(1, 26)
+        ]
+        cat = self._cat(owners, ["1.1.1", "1.25.1"])
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        h._check_next_seq_drift()
+        assert cat.all_documents.call_count == 1, (
+            f"all_documents called {cat.all_documents.call_count}x for "
+            f"{len(owners)} owners — the O(owners x corpus) scan is back"
+        )
+
     def test_drifted_owner_is_named(self, monkeypatch) -> None:
         r = self._run(
             monkeypatch,

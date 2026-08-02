@@ -3059,6 +3059,17 @@ def _check_next_seq_drift() -> list[HealthResult]:
                    "nexus-0ehwe engine change)",
         )]
 
+    # ONE corpus pass for every owner at once. This loop called
+    # _highest_child_seq (a full all_documents walk) PER OWNER — 65 owners x
+    # ~22k documents = ~1.4M records over the managed API per doctor run,
+    # measured at 218s of a 224s doctor (nexus-ohxzu). The max-seq for every
+    # prefix falls out of a single walk.
+    try:
+        highs = _highest_child_seqs(cat)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_next_seq_scan_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
     drifted: list[tuple[str, int, int]] = []
     checked = 0
     for owner in owners:
@@ -3067,7 +3078,7 @@ def _check_next_seq_drift() -> list[HealthResult]:
             continue
         try:
             next_seq = int(owner.get("next_seq") or 0)
-            high = _highest_child_seq(cat, prefix)
+            high = highs.get(prefix, 0)
         except Exception as exc:  # noqa: BLE001 — one unreadable owner must not end the sweep
             _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
             continue
@@ -3113,16 +3124,23 @@ def _check_next_seq_drift() -> list[HealthResult]:
     )]
 
 
-def _highest_child_seq(cat: Any, prefix: str) -> int:
-    """Highest numeric child sequence under *prefix*, tombstones INCLUDED."""
-    best = 0
+def _highest_child_seqs(cat: Any) -> dict[str, int]:
+    """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
+
+    One ``all_documents`` walk for ALL owners. The predecessor
+    (``_highest_child_seq(cat, prefix)``) re-walked the full corpus per
+    owner — O(owners x documents) over the managed API (nexus-ohxzu:
+    218s of a 224s doctor on 65 owners x ~22k docs).
+    """
+    best: dict[str, int] = {}
     for entry in cat.all_documents(limit=0):
         tumbler = str(getattr(entry, "tumbler", "") or "")
-        if not tumbler.startswith(f"{prefix}."):
+        prefix, dot, tail = tumbler.rpartition(".")
+        if not dot or not tail.isdigit():
             continue
-        tail = tumbler[len(prefix) + 1:]
-        if tail.isdigit():
-            best = max(best, int(tail))
+        seq = int(tail)
+        if seq > best.get(prefix, 0):
+            best[prefix] = seq
     return best
 
 
