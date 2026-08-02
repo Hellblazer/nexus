@@ -229,70 +229,211 @@ def _doc_id_for_path(file_path: Path) -> str:
 
 
 def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:
-    """True iff EVERY chash the document's manifest names still exists in T3.
+    """True iff the engine's ``manifest/verify`` reports no missing chunks.
 
-    nexus-5xn3k AC2. The staleness gates ask ``col.get(where={"content_hash":
-    h}, limit=1)`` — "does ANY chunk with this content hash exist?" — which is
-    satisfied by a SINGLE survivor. An index that dies mid-write commits an
-    arbitrary SUBSET of the document's chunks, so from then on every re-index
-    finds one of them and returns 0: the document is permanently "up to date"
-    while most of its content is missing, and every attempt reports success.
+    nexus-5xn3k AC2 (original), reworked for RUNFENCE (nexus-5xn3k.3, design
+    memo §3.4): the client-side existence check this originally did — a
+    300-id-per-page ``col.get(ids=..., include=[])`` loop over the manifest's
+    expected chash set — is replaced by ONE engine-side ``manifest/verify``
+    call. ``nexus.manifest_verify()`` is a single SQL anti-join, so the round
+    trip this function pays drops from O(manifest size / 300) requests to 1,
+    and the *col* parameter is now UNUSED (kept so this function's signature —
+    and every existing caller/test — needs no further change; the presence
+    check moved server-side and no longer touches T3 directly).
 
-    (The bead attributed this to the gate trusting the catalog's chunk_count.
-    It does not: neither gate consults the catalog at all. The mechanism is
-    limit=1. Corollary worth keeping: PARTIAL deletion is worse than none —
-    removing 206 of 207 chunks leaves the document broken AND still skipped.)
+    (The original bead attributed the AC2 gap to the gate trusting the
+    catalog's chunk_count. It did not: neither gate consults the catalog at
+    all. The mechanism was ``limit=1`` on the staleness gates' own chunk-hash
+    query, one layer above this function. Corollary worth keeping: PARTIAL
+    deletion is worse than none — removing 206 of 207 chunks leaves the
+    document broken AND still skipped.)
 
-    The manifest is the authoritative expected set (RDR-108), so this compares
-    it against what T3 actually holds. Existence only — ``include=[]`` fetches
-    no documents, metadata or embeddings — and paged to the 300-id quota
-    (chroma_quotas.MAX_QUERY_RESULTS), so it is a cheap check, not a hydrate.
-
-    FAIL-OPEN, deliberately: an unreadable catalog or T3 returns True, i.e.
-    "no evidence of damage", preserving the pre-fix behaviour. This runs on the
-    hot path of every re-index, and a transient read failure must not force a
-    full re-embed of an intact document. The DAMAGE it detects is durable and
-    will be caught on the next pass; a false positive here is expensive.
-    An EMPTY manifest also returns True: that is the GH #1397 ghost class,
-    which `nx catalog reconcile` owns, and this gate must not silently take it.
+    FAIL-OPEN, deliberately: an unreadable catalog/engine returns True, i.e.
+    "no evidence of damage", preserving the pre-fix behaviour. This runs on
+    the hot path of every re-index (via the "unknown" branch of the RUNFENCE
+    three-way, :func:`_index_run_fresh`), and a transient read failure must
+    not force a full re-embed of an intact document. The DAMAGE it detects is
+    durable and will be caught on the next pass; a false positive here is
+    expensive. Logged at WARNING, never DEBUG — the ac4id lesson: a verify
+    that silently stops working recreates the exact bug this arc exists to
+    fix. An EMPTY manifest (``referenced=0``) also returns True: that is the
+    GH #1397 ghost class, which `nx catalog reconcile` owns, and this gate
+    must not silently take it.
     """
+    if not doc_id:
+        # Identity unresolvable (prose path, unregistered doc) — no
+        # expected set to compare against, so no evidence of damage.
+        return True
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
-        if not doc_id:
-            # Identity unresolvable (prose path, unregistered doc) — no
-            # expected set to compare against, so no evidence of damage.
-            return True
         cat = make_catalog_reader()
         if cat is None:
             return True
-        rows = cat.get_manifest(str(doc_id))
-        expected = {r.get("chash", "") for r in rows if r.get("chash")}
-        if not expected:
-            return True
-        ordered = sorted(expected)
-        present: set[str] = set()
-        page = 300  # chroma_quotas.MAX_QUERY_RESULTS
-        for i in range(0, len(ordered), page):
-            got = _vector_with_retry(
-                col.get, ids=ordered[i:i + page], include=[],
-            )
-            present.update(got.get("ids", []) or [])
-        missing = expected - present
+        result = cat.manifest_verify(str(doc_id)) or {}
+        missing = int(result.get("missing", 0) or 0)
         if missing:
             _log.warning(
                 "index_manifest_incomplete_reindexing",
                 doc_id=str(doc_id),
-                expected=len(expected),
-                missing=len(missing),
-                detail="manifest names chunks absent from T3 — a prior index "
-                       "died mid-write; re-indexing instead of skipping",
+                referenced=int(result.get("referenced", 0) or 0),
+                present=int(result.get("present", 0) or 0),
+                missing=missing,
+                detail="engine manifest/verify reports missing chunks — a "
+                       "prior index died mid-write; re-indexing instead of "
+                       "skipping",
             )
             return False
         return True
-    except Exception as exc:  # noqa: BLE001 — fail-open: a read failure must not force a re-embed
-        _log.debug("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD (ac4id lesson: never silently stop verifying)
+        _log.warning("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
         return True
+
+
+def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
+    """Read-only lookup of the RUNFENCE fields for *doc_id* (nexus-5xn3k.3,
+    design memo §3.4). Returns ``(index_state, index_content_hash)``.
+
+    ``index_state`` comes back ``None`` for an empty *doc_id*, an
+    unresolvable entry, a legacy pre-fence row (NULL column, or a field
+    absent entirely on a pre-fence engine), OR a read failure — every one of
+    these collapses to the same "the fence has nothing to say" bucket that
+    :func:`_index_run_fresh` falls through to :func:`_manifest_is_fully_present`
+    for. A read failure is logged at WARNING, never DEBUG: a fence that
+    silently stops working recreates the ac4id bug one layer up.
+    """
+    if not doc_id:
+        return None, ""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return None, ""
+        entry = cat.by_doc_id(str(doc_id))
+        if entry is None:
+            return None, ""
+        return entry.index_state, entry.index_content_hash
+    except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD (ac4id lesson)
+        _log.warning("index_fence_read_failed", doc_id=str(doc_id), error=str(exc))
+        return None, ""
+
+
+def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:
+    """The staleness three-way (RUNFENCE, nexus-5xn3k.3, design memo §3.4).
+
+    Call ONLY after the existing chunk-level match (content_hash +
+    embedding_model against ONE surviving chunk, ``limit=1``) already holds —
+    this layers the fence's document-level intent/completion record on top
+    of that per-chunk signal, closing the AC2 blind spot the memo's §1
+    describes (a consistent T3/manifest truncation that no comparison
+    between two artifacts written by the SAME broken run can ever see).
+
+    * ``index_state == 'complete'`` AND the fence's own
+      ``index_content_hash`` agrees with *content_hash* -> definitely fresh,
+      no probe.
+    * ``'indexing'`` / ``'failed'`` -> definitely stale, no probe. A partial
+      or errored run must never read as done, regardless of what T3 happens
+      to hold right now (nexus-lcmbp non-goal: this is NOT a lock — it never
+      means "someone else is running, skip").
+    * anything else (``None`` — a NULL column, a field absent on a pre-fence
+      engine, an unresolvable doc_id, or a fence read failure) -> the fence
+      has nothing to say; fall through to :func:`_manifest_is_fully_present`'s
+      one engine ``manifest/verify`` call (today's post-AC2 behaviour).
+    """
+    state, fence_hash = _index_fence_state(doc_id)
+    if state == "complete":
+        return fence_hash == content_hash
+    if state in ("indexing", "failed"):
+        return False
+    return _manifest_is_fully_present(col, doc_id)
+
+
+def _fence_begin(doc_id: str, content_hash: str, collection: str) -> None:
+    """Advisory: stamp ``index_state='indexing'`` BEFORE the first chunk
+    upsert (memo §3.5 T0, nexus-5xn3k.4). Never raises — the fence is a
+    diagnostic record, not a lock (nexus-lcmbp non-goal); indexing must
+    proceed even when the catalog write itself fails."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from uuid import uuid4  # noqa: PLC0415 — deferred import: branch-local
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        w.begin_index_run(doc_id, content_hash, uuid4().hex, collection)
+    except Exception:  # noqa: BLE001 — boundary catch: begin is an advisory write; indexing must proceed (memo §3.4 fail-open contract)
+        _log.warning("index_run_begin_failed", doc_id=doc_id, collection=collection)
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+
+
+def _fence_fail(doc_id: str, error: str) -> None:
+    """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
+    own exception (the reason this is being called) must always propagate
+    unmasked."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        w.fail_index_run(doc_id, error)
+    except Exception:  # noqa: BLE001 — boundary catch: fail is an advisory write; must never mask the original failure
+        _log.warning("index_run_fail_write_failed", doc_id=doc_id)
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+
+
+def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
+    """The load-bearing fail-closed stamp (memo §3.3). The engine verifies
+    the manifest inside the SAME transaction as the stamp; a refusal comes
+    back as :class:`~nexus.errors.IndexRunVerifyRefused`, which PROPAGATES
+    — it is the signal this whole arc exists to surface, never swallowed
+    into a green summary.
+
+    Any other exception is advisory-only (WARNING, then return): the fence
+    stays ``'indexing'``, which means over-work (a future re-index) rather
+    than silent under-work. A ``None`` return (the client's pre-fence-engine
+    sentinel, http_catalog_client.py's ``complete_index_run`` docstring) is
+    NOT success and must never be read as a stamp having landed.
+
+    nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this is the
+    multi-batch/incremental completion path (streaming PDF, prose past
+    ``_INCREMENTAL_THRESHOLD``) — distinct from ``mcp_infra``'s
+    ``_manifest_write_loop`` / ``_stamp_index_run_complete`` (the flush-grain
+    manifest-hook path, nexus-dcv2k). Both are "the completion stamp was
+    refused" and both feed the SAME ``.6`` summary consumer
+    (``get_complete_refusals()``), so both must record to the same
+    collector. Before this fix, a refusal HERE propagated (correct,
+    fail-loud) but never reached the collector — the record-level summary
+    consumer added in .6 could not see it; only a caller catching
+    ``IndexRunVerifyRefused`` itself would know. Recording here closes that
+    gap without changing the propagation contract at all: the exception
+    still raises unmasked immediately after the record.
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        result = w.complete_index_run(doc_id, content_hash, chunk_count)
+    except IndexRunVerifyRefused:
+        from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+        _record_complete_refusal(doc_id)
+        raise
+    except Exception:  # noqa: BLE001 — boundary catch: transport failure leaves the fence 'indexing' (over-work, never data loss); only the typed refusal propagates
+        _log.warning("index_run_complete_write_failed", doc_id=doc_id)
+        return
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+    if result is None:
+        _log.debug("index_run_complete_pre_fence_engine", doc_id=doc_id)
 
 
 def _register_or_lookup_doc_id(
@@ -860,11 +1001,47 @@ def _upsert_skip_reembed(
     if old_idx:
         # Metadata-only refresh — no embedding cost, preserves the
         # pre-optimization ON CONFLICT DO UPDATE metadata semantics.
-        db.update_chunks(
+        missing = db.update_chunks(
             collection_name,
             [ids[i] for i in old_idx],
             [metadatas[i] for i in old_idx],
         )
+        # nexus-5xn3k.5 (memo §3.6, AC6 client half): ``missing`` is None
+        # when the engine's response omitted the "missing" field (a
+        # pre-nexus-5xn3k.2 engine) — "cannot tell", not "zero misses".
+        # HttpVectorClient.update_chunks already logged the WARNING for
+        # that case; preserve today's behaviour here (no reroute).
+        if missing:
+            # The existing_ids probe was a STALE POSITIVE for these ids:
+            # reported present, but the row was gone by the time the
+            # metadata-only update above ran, so it silently touched
+            # nothing for them. Re-route through a full upsert (content +
+            # embeddings) so the content actually lands instead of being
+            # dropped. Service mode embeds server-side, so whatever
+            # embeddings shape the new_idx branch above already forwards
+            # (including empty passthrough) is safe to forward here too.
+            #
+            # Division of labor (nexus-5xn3k.5 vs .4): this reroute repairs
+            # a STALE-POSITIVE PROBE miss only — the row was already gone
+            # by the time update_chunks ran above. A row that vanishes
+            # AFTER this reroute's write succeeds (a post-repair race) is
+            # NOT this path's job; that window is covered by the
+            # /index-run/complete fail-closed verify (bead nexus-5xn3k.4).
+            missing_set = set(missing)
+            reroute_idx = [i for i in old_idx if ids[i] in missing_set]
+            if reroute_idx:
+                _log.warning(
+                    "update_chunks_missing_rerouted",
+                    collection=collection_name,
+                    count=len(reroute_idx),
+                )
+                db.upsert_chunks_with_embeddings(
+                    collection_name,
+                    [ids[i] for i in reroute_idx],
+                    [documents[i] for i in reroute_idx],
+                    [embeddings[i] for i in reroute_idx],
+                    [metadatas[i] for i in reroute_idx],
+                )
     _log.debug(
         "upsert_skip_reembed",
         collection=collection_name,
@@ -1027,14 +1204,17 @@ def _index_document(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        # nexus-5xn3k AC2: the match above is satisfied by ONE surviving chunk
-        # (limit=1), so a mid-write failure leaves the document permanently
-        # "fresh". Verify the manifest is whole before skipping. Identity is
-        # resolved READ-ONLY and only on the skip path; a miss fails open.
+        # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the match above is
+        # satisfied by ONE surviving chunk (limit=1), so a mid-write failure
+        # leaves the document permanently "fresh". The three-way fence check
+        # (index_state == 'complete' + hash match -> skip; 'indexing'/'failed'
+        # -> re-index; unknown -> one engine manifest/verify call) closes that
+        # gap. Identity is resolved READ-ONLY and only on the skip path; a
+        # miss fails open.
         if (
             stored_hash == content_hash
             and stored_model == target_model
-            and _manifest_is_fully_present(col, _doc_id_for_path(file_path))
+            and _index_run_fresh(col, _doc_id_for_path(file_path), content_hash)
         ):
             return 0
 
@@ -1047,35 +1227,14 @@ def _index_document(
     documents = [p[1] for p in prepared]
     metadatas = [p[2] for p in prepared]
 
-    if embed_fn is not None:
-        embeddings, actual_model = embed_fn(documents, target_model)
-    else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
-            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
-            embeddings = [[]] * len(documents)
-            actual_model = target_model
-        else:
-            from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            voyage_key = get_credential("voyage_api_key")
-            if not voyage_key:
-                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
-    if actual_model != target_model:
-        for m in metadatas:
-            m["embedding_model"] = actual_model
-    _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force)
-
-    # Post-store hook chains (RDR-095). Both single-doc and batch chains
-    # fire from every storage event; the per-doc loop covers single-shape
-    # consumers on CLI ingest.
-    if hooks is None:
-        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        hooks = HookRegistry()
-        install_default_hooks(hooks)
+    # nexus-5xn3k.4 RUNFENCE C2: doc_id resolution HOISTED here — below the
+    # staleness gate/`if not prepared: return 0` above (a fresh-skip must
+    # NEVER register a doc_id; `_doc_id_for_path`'s read-only property on
+    # that path is deliberate) and before the embed/upsert, so the fence
+    # can be committed BEFORE the first byte of content lands (memo §3.5
+    # T0). The doc_id used to be resolved post-upsert, right before
+    # `hooks.fire_batch`; a pointer comment marks the old site.
+    #
     # nexus-zq79 F2: use _register_or_lookup_doc_id, NOT _lookup_existing_doc_id.
     # The read-only lookup returns "" for first-time indexes; post-Phase-3
     # chunks have no doc_id fallback so the manifest hook short-circuits and
@@ -1098,21 +1257,78 @@ def _index_document(
             physical_collection=collection_name,
             source_uri=source_uri,
         )
-    hooks.fire_batch(
-        ids, collection_name, documents, embeddings, metadatas,
-        catalog_doc_id=_catalog_doc_id_for_batch,
-    )
-    for _did, _doc in zip(ids, documents):
-        hooks.fire_single(_did, collection_name, _doc)
-    # RDR-089 document-grain chain — fires once per file boundary.
-    # content="" because only chunk text is in scope here; the hook
-    # reads source_path itself per the P0.1 content-sourcing contract.
-    # nexus-tdgc: pre-flight catalog lookup so the aspect-queue hook
-    # can capture the doc_id alongside source_path.
-    hooks.fire_document(
-        sp, collection_name, "",
-        doc_id=_catalog_doc_id_for_batch,
-    )
+    if _catalog_doc_id_for_batch:
+        _fence_begin(_catalog_doc_id_for_batch, content_hash, collection_name)
+
+    # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): begin was
+    # already bracketed above; this try/except adds the missing fail
+    # bracket around the embed/upsert/hook region. The skip paths (early
+    # `return 0` above) precede `begin` and stay fence-untouched by
+    # construction — they are outside this try block entirely.
+    try:
+        if embed_fn is not None:
+            embeddings, actual_model = embed_fn(documents, target_model)
+        else:
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+            if is_vector_service_mode():
+                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                embeddings = [[]] * len(documents)
+                actual_model = target_model
+            else:
+                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                voyage_key = get_credential("voyage_api_key")
+                if not voyage_key:
+                    raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        if actual_model != target_model:
+            for m in metadatas:
+                m["embedding_model"] = actual_model
+        _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force)
+
+        # Post-store hook chains (RDR-095). Both single-doc and batch chains
+        # fire from every storage event; the per-doc loop covers single-shape
+        # consumers on CLI ingest.
+        if hooks is None:
+            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+            hooks = HookRegistry()
+            install_default_hooks(hooks)
+        # doc_id resolution (and the fence `begin`) HOISTED above the
+        # embed/upsert (nexus-5xn3k.4) — see `_catalog_doc_id_for_batch` up
+        # near `metadatas = [p[2] for p in prepared]`.
+        #
+        # nexus-5xn3k.4: single-flush documents (this whole function is one
+        # upsert, one fire_batch — no streaming) ride write_manifest_many's
+        # optional `complete` map for the completion stamp, no extra round
+        # trip. Hash-once MUST: the SAME `content_hash` computed above reaches
+        # both `_fence_begin` and this map.
+        hooks.fire_batch(
+            ids, collection_name, documents, embeddings, metadatas,
+            catalog_doc_id=_catalog_doc_id_for_batch,
+            manifest_complete=(
+                {_catalog_doc_id_for_batch: content_hash}
+                if _catalog_doc_id_for_batch else None
+            ),
+        )
+        for _did, _doc in zip(ids, documents):
+            hooks.fire_single(_did, collection_name, _doc)
+        # RDR-089 document-grain chain — fires once per file boundary.
+        # content="" because only chunk text is in scope here; the hook
+        # reads source_path itself per the P0.1 content-sourcing contract.
+        # nexus-tdgc: pre-flight catalog lookup so the aspect-queue hook
+        # can capture the doc_id alongside source_path.
+        hooks.fire_document(
+            sp, collection_name, "",
+            doc_id=_catalog_doc_id_for_batch,
+        )
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked.
+        if _catalog_doc_id_for_batch:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        raise
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -1249,79 +1465,94 @@ def _index_pdf_incremental(
             physical_collection=collection_name,
             source_uri=source_uri,
         )
+    # nexus-5xn3k.4 review follow-up (code-review-expert HIGH): this path was
+    # unfenced. Resolution above already sits before the first upsert (the
+    # batch loop below), so no hoist is needed here — just the begin call.
+    if _catalog_doc_id_for_batch:
+        _fence_begin(_catalog_doc_id_for_batch, content_hash, collection_name)
 
-    for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
-        batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
-        batch_docs = documents_all[batch_start:batch_end]
-        batch_ids = ids_all[batch_start:batch_end]
-        batch_metas = metadatas_all[batch_start:batch_end]
+    try:
+        for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
+            batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
+            batch_docs = documents_all[batch_start:batch_end]
+            batch_ids = ids_all[batch_start:batch_end]
+            batch_metas = metadatas_all[batch_start:batch_end]
 
-        # Embed
-        if embed_fn is not None:
-            embeddings, actual_model = embed_fn(batch_docs, target_model)
-        else:
-            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-            if is_vector_service_mode():
-                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
-                embeddings = [[]] * len(batch_docs)
-                actual_model = target_model
+            # Embed
+            if embed_fn is not None:
+                embeddings, actual_model = embed_fn(batch_docs, target_model)
             else:
-                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-                voyage_key = get_credential("voyage_api_key")
-                if not voyage_key:
-                    raise RuntimeError("voyage_api_key required")
-                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                embeddings, actual_model = _embed_with_fallback(
-                    batch_docs, target_model, voyage_key, timeout=timeout,
-                )
+                from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+                if is_vector_service_mode():
+                    # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                    # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                    # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                    embeddings = [[]] * len(batch_docs)
+                    actual_model = target_model
+                else:
+                    from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                    voyage_key = get_credential("voyage_api_key")
+                    if not voyage_key:
+                        raise RuntimeError("voyage_api_key required")
+                    timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                    embeddings, actual_model = _embed_with_fallback(
+                        batch_docs, target_model, voyage_key, timeout=timeout,
+                    )
 
-        if actual_model != target_model:
-            for m in batch_metas:
-                m["embedding_model"] = actual_model
+            if actual_model != target_model:
+                for m in batch_metas:
+                    m["embedding_model"] = actual_model
 
-        # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
-        _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force)
+            # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
+            _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force)
 
-        # RDR-108 Phase 3: inject the global chunk_index per row before
-        # firing the batch chain. ``batch_metas`` came from
-        # ``make_chunk_metadata`` (post-Phase-3, no chunk_index); the
-        # incremental loop slices ``metadatas_all[batch_start:batch_end]``
-        # so the per-row global index is ``batch_start + i``. Without
-        # this injection the manifest hook defaults to a batch-local
-        # enumeration that resets to 0 each batch, truncating the
-        # manifest. T3 already received the post-Phase-3 metadata; the
-        # local copy mutation here only affects the hook payload.
-        for _i, _meta in enumerate(batch_metas):
-            _meta["chunk_index"] = batch_start + _i
+            # RDR-108 Phase 3: inject the global chunk_index per row before
+            # firing the batch chain. ``batch_metas`` came from
+            # ``make_chunk_metadata`` (post-Phase-3, no chunk_index); the
+            # incremental loop slices ``metadatas_all[batch_start:batch_end]``
+            # so the per-row global index is ``batch_start + i``. Without
+            # this injection the manifest hook defaults to a batch-local
+            # enumeration that resets to 0 each batch, truncating the
+            # manifest. T3 already received the post-Phase-3 metadata; the
+            # local copy mutation here only affects the hook payload.
+            for _i, _meta in enumerate(batch_metas):
+                _meta["chunk_index"] = batch_start + _i
 
-        # Post-store hook chains (RDR-095). Both single-doc and batch
-        # chains fire from every storage event; the per-doc loop covers
-        # single-shape consumers on CLI ingest.
-        if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            hooks = HookRegistry()
-            install_default_hooks(hooks)
-        hooks.fire_batch(
-            batch_ids, collection_name, batch_docs, embeddings, batch_metas,
-            catalog_doc_id=_catalog_doc_id_for_batch,
-        )
-        for _did, _doc in zip(batch_ids, batch_docs):
-            hooks.fire_single(_did, collection_name, _doc)
+            # Post-store hook chains (RDR-095). Both single-doc and batch
+            # chains fire from every storage event; the per-doc loop covers
+            # single-shape consumers on CLI ingest.
+            if hooks is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                hooks = HookRegistry()
+                install_default_hooks(hooks)
+            hooks.fire_batch(
+                batch_ids, collection_name, batch_docs, embeddings, batch_metas,
+                catalog_doc_id=_catalog_doc_id_for_batch,
+            )
+            for _did, _doc in zip(batch_ids, batch_docs):
+                hooks.fire_single(_did, collection_name, _doc)
 
-        # Checkpoint
-        write_checkpoint(CheckpointData(
-            pdf=str(file_path),
-            collection=collection_name,
-            content_hash=content_hash,
-            chunks_upserted=batch_end,
-            total_chunks=total,
-            embedding_model=target_model,
-        ))
+            # Checkpoint
+            write_checkpoint(CheckpointData(
+                pdf=str(file_path),
+                collection=collection_name,
+                content_hash=content_hash,
+                chunks_upserted=batch_end,
+                total_chunks=total,
+                embedding_model=target_model,
+            ))
 
-        if on_progress:
-            on_progress(batch_end, total)
+            if on_progress:
+                on_progress(batch_end, total)
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked (nexus-5xn3k.4 review follow-up). Over-work,
+        # never under-work: fire_batch already fired per-landed-increment
+        # above, so those manifest rows are real even though the run as a
+        # whole did not finish.
+        if _catalog_doc_id_for_batch:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        raise
 
     # Prune stale chunks from a previous (larger) version of this file.
     # nexus-dcym: prefer doc_id when the catalog already registered this
@@ -1352,6 +1583,18 @@ def _index_pdf_incremental(
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
+
+    # nexus-5xn3k.4 review follow-up: this path is multi-batch (fire_batch
+    # per increment), so completion is an explicit call with the run's
+    # total chunk count and the SAME content_hash threaded from the
+    # caller (hash-once) — never a manifest_complete ride claim, which is
+    # only sound for genuinely single-flush callers. Zero-chunks routes to
+    # fail, never a trivially-satisfied /complete(0).
+    if _catalog_doc_id_for_batch:
+        if total == 0:
+            _fence_fail(_catalog_doc_id_for_batch, "zero chunks extracted")
+        else:
+            _fence_complete(_catalog_doc_id_for_batch, content_hash, total)
     return total
 
 
@@ -1462,6 +1705,7 @@ def _pdf_chunks(
             bib_authors=bib.get("authors", ""),
             bib_venue=bib.get("venue", ""),
             bib_citation_count=bib.get("citation_count", 0),
+            extraction_method=result.metadata.get("extraction_method", ""),
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -1715,14 +1959,16 @@ def index_pdf(
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
-        # nexus-5xn3k AC2: the hash/model match above is satisfied by ONE
-        # surviving chunk (limit=1), so a mid-write failure leaves the document
-        # permanently "fresh". Verify the manifest is actually whole before
-        # taking the skip.
+        # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the hash/model match
+        # above is satisfied by ONE surviving chunk (limit=1), so a mid-write
+        # failure leaves the document permanently "fresh". The three-way
+        # fence check (index_state == 'complete' + hash match -> skip;
+        # 'indexing'/'failed' -> re-index; unknown -> one engine
+        # manifest/verify call) closes that gap.
         if (
             stored_hash == content_hash
             and stored_model == target_model
-            and _manifest_is_fully_present(col, doc_id)
+            and _index_run_fresh(col, doc_id, content_hash)
         ):
             if return_metadata:
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
@@ -1739,9 +1985,12 @@ def index_pdf(
         use_streaming = streaming == "always" or (page_count >= 0 and page_count >= _STREAMING_THRESHOLD)
         if use_streaming:
             from nexus.pipeline_stages import pipeline_index_pdf  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            # Returns 0 if skipped (already running or completed by another process).
-            # The staleness check above (line 638-644) handles the "unchanged" case;
-            # a 0 here means a concurrent pipeline is active on this content_hash.
+            # Returns 0 if skipped (already completed by another process).
+            # The staleness check above (line 638-644) handles the "unchanged"
+            # case. nexus-lcmbp: a concurrent, still-fresh 'running' pipeline
+            # is NOT a 0 here — pipeline_index_pdf lets PipelineConflictRunning
+            # propagate instead, so a stranded-row retry is a loud failure,
+            # never a silent 0-chunk "success".
             count = pipeline_index_pdf(
                 pdf_path, content_hash, col_name, db,
                 embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
@@ -1852,32 +2101,14 @@ def index_pdf(
     documents = [p[1] for p in prepared]
     metadatas_list = [p[2] for p in prepared]
 
-    if embed_fn is not None:
-        embeddings, actual_model = embed_fn(documents, target_model)
-    else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
-            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
-            embeddings = [[]] * len(documents)
-            actual_model = target_model
-        else:
-            from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            voyage_key = get_credential("voyage_api_key")
-            if not voyage_key:
-                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
-    if actual_model != target_model:
-        for m in metadatas_list:
-            m["embedding_model"] = actual_model
-    # nexus-h8rf6.4: known chashes skip the server-side embed.
-    _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force)
-
-    # Post-store hook chains (RDR-095). Both single-doc and batch chains
-    # fire from every storage event; the per-doc loop covers single-shape
-    # consumers on CLI ingest.
+    # nexus-5xn3k.4 review follow-up (code-review-expert HIGH): this branch
+    # is separate inline code, NOT routed through _index_document's
+    # machinery — verified unfenced. doc_id resolution HOISTED here (was
+    # previously post-upsert, mirroring the pre-.4 _index_document bug)
+    # so the fence can be committed before the first byte of content
+    # lands. This branch is single-flush (one upsert, one fire_batch —
+    # same shape as _index_document), so completion rides
+    # write_manifest_many's optional `complete` map, not an explicit call.
     if hooks is None:
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         hooks = HookRegistry()
@@ -1890,20 +2121,60 @@ def index_pdf(
         physical_collection=col_name,
         source_uri=source_uri,
     )
-    hooks.fire_batch(
-        ids, col_name, documents, embeddings, metadatas_list,
-        catalog_doc_id=_catalog_doc_id_for_batch,
-    )
-    for _did, _doc in zip(ids, documents):
-        hooks.fire_single(_did, col_name, _doc)
-    # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
-    # content="" (full document text not retained in this path); the hook
-    # reads source_path itself.
-    # nexus-tdgc: forward the catalog doc_id post-register.
-    hooks.fire_document(
-        str(pdf_path), col_name, "",
-        doc_id=_catalog_doc_id_for_batch,
-    )
+    if _catalog_doc_id_for_batch:
+        _fence_begin(_catalog_doc_id_for_batch, content_hash, col_name)
+
+    try:
+        if embed_fn is not None:
+            embeddings, actual_model = embed_fn(documents, target_model)
+        else:
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+            if is_vector_service_mode():
+                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                embeddings = [[]] * len(documents)
+                actual_model = target_model
+            else:
+                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                voyage_key = get_credential("voyage_api_key")
+                if not voyage_key:
+                    raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        if actual_model != target_model:
+            for m in metadatas_list:
+                m["embedding_model"] = actual_model
+        # nexus-h8rf6.4: known chashes skip the server-side embed.
+        _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force)
+
+        # Post-store hook chains (RDR-095). Both single-doc and batch chains
+        # fire from every storage event; the per-doc loop covers single-shape
+        # consumers on CLI ingest.
+        hooks.fire_batch(
+            ids, col_name, documents, embeddings, metadatas_list,
+            catalog_doc_id=_catalog_doc_id_for_batch,
+            manifest_complete=(
+                {_catalog_doc_id_for_batch: content_hash}
+                if _catalog_doc_id_for_batch else None
+            ),
+        )
+        for _did, _doc in zip(ids, documents):
+            hooks.fire_single(_did, col_name, _doc)
+        # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
+        # content="" (full document text not retained in this path); the hook
+        # reads source_path itself.
+        # nexus-tdgc: forward the catalog doc_id post-register.
+        hooks.fire_document(
+            str(pdf_path), col_name, "",
+            doc_id=_catalog_doc_id_for_batch,
+        )
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked.
+        if _catalog_doc_id_for_batch:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        raise
 
     # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the
     # entry; first-time indexes harmlessly use source_path).

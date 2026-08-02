@@ -20,7 +20,7 @@ This check verifies:
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
@@ -196,3 +196,183 @@ def test_doctor_collections_drift_json_payload(t3_db, catalog, runner):
     drift = payload["collections_drift"]
     assert drift["pass"] is False
     assert "knowledge__delos" in drift["t3_not_in_projection"]
+
+
+# ── nexus-e1k14: tombstoned-vs-absent split ─────────────────────────────
+#
+# A projection row whose T3 collection is missing from list_collections()
+# is NOT automatically "gone" — on HttpVectorClient, list_collections()
+# reads the tombstone-filtered collection_vector_stats view (RDR-156 P3),
+# so a collection whose every document is trashed (deleted_at set, but the
+# physical chunk rows still present) vanishes from it exactly like one
+# that never existed. Printing the supersede recipe against a tombstoned
+# name is destructive: superseding sets superseded_by, which permanently
+# excludes the name from resolution, turning a reversible trash into an
+# unreachable orphan. These tests exercise the fix with a REAL
+# HttpVectorClient (only the network boundary -- module-level _get -- is
+# patched), matching the pattern in
+# tests/test_collection_rename_tombstone_probe.py, so the split is proven
+# against the actual three-state dispatch, not a mock standing in for it.
+
+from typing import Any as _Any  # noqa: E402 -- grouped with this section's imports
+
+from nexus.db.collection_state import CollectionState  # noqa: E402
+from nexus.db.http_vector_client import HttpVectorClient  # noqa: E402
+
+_STATS_PATH = "/v1/vectors/stats"
+_COLLECTIONS_PATH = "/v1/vectors/collections"
+
+
+def _patch_stats_and_raw(monkeypatch, *, stats_names: set[str], raw_names: set[str]) -> None:
+    def fake_get(path: str, *, tenant: str = "default") -> _Any:
+        if path == _STATS_PATH:
+            return [
+                {"name": n, "dim": 384, "count": 1, "last_write": "x"}
+                for n in stats_names
+            ]
+        if path == _COLLECTIONS_PATH:
+            return [{"name": n} for n in raw_names]
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+
+def test_doctor_collections_drift_tombstoned_gets_restore_guidance_not_supersede(
+    catalog, runner, monkeypatch,
+):
+    """A projection row whose T3 collection is TOMBSTONED (every chunk
+    belongs to a trashed document, but the raw chunk rows are still
+    present) must be reported with restore-first guidance -- never the
+    supersede recipe, whose literal execution would destroy restorability.
+    """
+    catalog.register_collection("knowledge__delos")
+    # Stats view (tombstone-filtered) is empty: no LIVE chunks.
+    # Raw /v1/vectors/collections listing still names it: chunk rows
+    # exist physically, every one just belongs to a trashed document.
+    _patch_stats_and_raw(
+        monkeypatch, stats_names=set(), raw_names={"knowledge__delos"},
+    )
+    client = HttpVectorClient()
+
+    with patch("nexus.db.make_t3", return_value=client):
+        result = runner.invoke(
+            main, ["catalog", "doctor", "--collections-drift"],
+        )
+    assert result.exit_code != 0, result.output
+    assert "knowledge__delos" in result.output
+    assert "TRASHED" in result.output or "RESTORABLE" in result.output
+    assert "restore" in result.output.lower()
+    # The destructive recipe must not be printed for this name: it must
+    # not appear under the "gone and not superseded" supersede bucket.
+    assert "gone and not" not in result.output
+    assert "supersede_collection" not in result.output
+
+
+def test_doctor_collections_drift_truly_absent_still_gets_supersede_recipe(
+    catalog, runner, monkeypatch,
+):
+    """A projection row whose T3 collection genuinely never existed (no
+    live chunks AND no raw chunk rows) is real drift -- the supersede
+    recipe remains the correct remedy for this case.
+    """
+    catalog.register_collection("knowledge__delos")
+    _patch_stats_and_raw(monkeypatch, stats_names=set(), raw_names=set())
+    client = HttpVectorClient()
+
+    with patch("nexus.db.make_t3", return_value=client):
+        result = runner.invoke(
+            main, ["catalog", "doctor", "--collections-drift"],
+        )
+    assert result.exit_code != 0, result.output
+    assert "knowledge__delos" in result.output
+    assert "gone and not" in result.output
+    assert "supersede_collection" in result.output
+    assert "TRASHED" not in result.output
+
+
+def test_doctor_collections_drift_json_payload_splits_tombstoned(
+    catalog, runner, monkeypatch,
+):
+    """``--json`` exposes the split as two distinct keys."""
+    catalog.register_collection("knowledge__delos")
+    _patch_stats_and_raw(
+        monkeypatch, stats_names=set(), raw_names={"knowledge__delos"},
+    )
+    client = HttpVectorClient()
+
+    with patch("nexus.db.make_t3", return_value=client):
+        result = runner.invoke(
+            main, ["catalog", "doctor", "--collections-drift", "--json"],
+        )
+    assert result.exit_code != 0
+    drift = json.loads(result.stdout)["collections_drift"]
+    assert drift["projection_tombstoned"] == ["knowledge__delos"]
+    assert drift["projection_not_in_t3"] == []
+
+
+def test_doctor_collections_drift_probe_failure_is_reported_not_fatal(
+    catalog, runner, monkeypatch,
+):
+    """A transient ``probe_collection_state`` failure for ONE candidate
+    name must not kill the whole check: the other candidate is still
+    classified normally, and the failing name is reported in a dedicated
+    "needs rerun" bucket -- never silently dropped, never misclassified
+    into either remedy bucket (nexus-e1k14 critique fixup).
+    """
+    catalog.register_collection("knowledge__delos")
+    catalog.register_collection("knowledge__thera")
+
+    def fake_probe(t3_db, name):
+        if name == "knowledge__delos":
+            raise RuntimeError("transient network error")
+        return CollectionState.ABSENT
+
+    monkeypatch.setattr(
+        "nexus.db.collection_state.probe_collection_state", fake_probe,
+    )
+    t3_db = MagicMock()
+    t3_db.list_collections.return_value = []
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["catalog", "doctor", "--collections-drift", "--json"],
+        )
+    assert result.exit_code != 0, result.output
+    drift = json.loads(result.stdout)["collections_drift"]
+    assert drift["projection_unprobed"] == [
+        {"name": "knowledge__delos", "error": "transient network error"},
+    ]
+    assert drift["projection_not_in_t3"] == ["knowledge__thera"]
+    assert drift["projection_tombstoned"] == []
+    assert drift["pass"] is False
+
+
+def test_doctor_collections_drift_present_mid_loop_is_skipped_entirely(
+    catalog, runner, monkeypatch,
+):
+    """TOCTOU: the collection was restored between the T3/projection
+    snapshot and the per-name probe. A live (PRESENT) collection must
+    never receive either recipe -- it is skipped entirely, not flagged
+    as drift under any bucket.
+    """
+    catalog.register_collection("knowledge__delos")
+
+    def fake_probe(t3_db, name):
+        return CollectionState.PRESENT
+
+    monkeypatch.setattr(
+        "nexus.db.collection_state.probe_collection_state", fake_probe,
+    )
+    t3_db = MagicMock()
+    t3_db.list_collections.return_value = []
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["catalog", "doctor", "--collections-drift", "--json"],
+        )
+    assert result.exit_code == 0, result.output
+    drift = json.loads(result.stdout)["collections_drift"]
+    assert drift["projection_not_in_t3"] == []
+    assert drift["projection_tombstoned"] == []
+    assert drift["projection_unprobed"] == []
+    assert drift["pass"] is True

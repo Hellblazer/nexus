@@ -85,10 +85,42 @@ def extractor_loop(
     if (state and state["total_pages"] is not None
             and state["pages_extracted"] >= state["total_pages"]
             and state.get("extraction_meta")):
-        stored_meta = json.loads(state["extraction_meta"])
-        if extraction_done is not None:
-            extraction_done.set()
-        return ExtractionResult(text="", metadata=stored_meta)
+        # nexus-gl99l: the counters above are NOT proof the WAL pages
+        # backing them still exist. pipeline_index_pdf's caught-exception
+        # handler calls db.mark_failed + db.clear_orphan_wal, which wipes
+        # the pdf_pages/pdf_chunks WAL rows but never resets these
+        # progress counters (deliberately — mark_failed's audit trail is
+        # load-bearing, nexus-2fyb/nexus-rewgw). Trusting the counters
+        # alone after ANY caught pipeline exception means a retry sees a
+        # row that CLAIMS full extraction with none of the underlying
+        # data, and silently skips re-extraction. Verify the actual WAL
+        # page count agrees with the claim before trusting the fast path
+        # — this also self-heals rows stranded by any earlier code
+        # version that never checked, not just future failures.
+        # A COUNT (not an index-coverage check) is sound here only because
+        # of two coupled invariants: clear_orphan_wal deletes ALL of a
+        # content_hash's pdf_pages/pdf_chunks rows in one server-side
+        # transaction (PipelineRepository.clearOrphanWal, TenantScope
+        # single-transaction — all-or-nothing, never a partial wipe), and
+        # pages are written in strictly increasing page_index order (the
+        # on_page callback below). Together those guarantee "N pages
+        # present" means "pages [0, N) present" — a count is equivalent to
+        # a contiguous-prefix check. If either invariant changes (a
+        # partial/selective clear_orphan_wal, or out-of-order/sparse page
+        # writes), this guard must switch to actually verifying index
+        # coverage (e.g. the max page_index present), not just a count.
+        actual_pages = len(db.read_pages(content_hash))
+        if actual_pages >= state["total_pages"]:
+            stored_meta = json.loads(state["extraction_meta"])
+            if extraction_done is not None:
+                extraction_done.set()
+            return ExtractionResult(text="", metadata=stored_meta)
+        # The claimed prefix isn't backed by real WAL data — the ENTIRE
+        # claimed prefix is suspect (clear_orphan_wal is all-or-nothing
+        # per content_hash), so fall through to a full re-extraction
+        # rather than trusting pages_extracted_at_start's stale value for
+        # the on_page dedup skip below.
+        pages_extracted_at_start = actual_pages
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
@@ -550,6 +582,13 @@ def _catalog_pdf_hook(
         # no local state exists; a local is_initialized pre-check silently
         # skipped registration on every fresh box. make_catalog_reader()
         # returns None only in the SQLite opt-out mode when uninitialised.
+        # Resolved unconditionally, first, and unrelated to reader/writer
+        # calls below — so the except handler's record_catalog_hook_failure
+        # (which reports source_path=file_path_str) always has a bound
+        # value, even when a failure occurs mid owner-resolution (a
+        # pre-existing UnboundLocalError, incidentally exposed by
+        # nexus-5xn3k.4's fence-writer test double).
+        file_path_str = str(pdf_path.resolve())
         reader = make_catalog_reader()
         if reader is None:
             _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized (sqlite opt-out mode)")
@@ -570,7 +609,6 @@ def _catalog_pdf_hook(
         # Portability across machines is now the catalog's source-mtime
         # + content_hash story — both already populated.
         from datetime import UTC, datetime  # noqa: PLC0415 - branch-local; deferred to call time
-        file_path_str = str(pdf_path.resolve())
         # nexus-y8qtj: when source_uri is known, resolve by IT first. The
         # pre-flight _register_or_lookup_doc_id call earlier in this same
         # index run already validated (fail-loud) that source_uri resolves
@@ -719,7 +757,10 @@ def pipeline_index_pdf(
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)
     if result == "skip":
-        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed or running")
+        # nexus-lcmbp: "skip" now means ONLY "already completed" — a
+        # fresh-heartbeat 'running' row raises PipelineConflictRunning
+        # from create_pipeline() above instead of reaching this branch.
+        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed")
         return 0
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
@@ -740,12 +781,26 @@ def pipeline_index_pdf(
                 timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
                 embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
             else:
-                db.mark_failed(content_hash, error="voyage_api_key not configured")
+                try:
+                    db.mark_failed(content_hash, error="voyage_api_key not configured")
+                except Exception:  # noqa: BLE001 — boundary catch: the RuntimeError below must propagate, not a /fail transport error
+                    _log.warning(
+                        "pipeline_terminal_mark_failed",
+                        content_hash=content_hash,
+                        exc_info=True,
+                    )
                 raise RuntimeError(
                     "voyage_api_key not configured — cannot embed for streaming "
                     "pipeline (set a Voyage key, or use service mode for "
                     "server-side embedding)"
                 )
+
+    # nexus-5xn3k.4 RUNFENCE C2: commit the fence BEFORE the first chunk
+    # upsert (memo §3.5 T0) — right before the executor starts the
+    # uploader stage. Gated on doc_id per the no-catalog ingest contract.
+    if doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 - deferred to avoid circular import at module load
+        _fence_begin(doc_id, content_hash, collection)
 
     cancel = threading.Event()
     extraction_done = threading.Event()
@@ -804,8 +859,32 @@ def pipeline_index_pdf(
         # forever: failed → resuming → re-fail with replayed orphans.
         # The cleared WAL means retry runs extract from scratch — same
         # RuntimeError fires immediately, which is correct.
-        db.mark_failed(content_hash, error=str(first_exc))
-        db.clear_orphan_wal(content_hash)
+        # nexus-rewgw (review of the ptctu fix): mark_failed's /fail POST can
+        # ITSELF fail (persistent app-level 500 — the gtltb doc-3 class). If
+        # that raised through here, clear_orphan_wal and `raise first_exc`
+        # would never run: the caller would see the /fail transport error
+        # instead of the ORIGINAL failure, and the row would strand
+        # 'running' with no audit trail — ptctu's both consequences, one
+        # call downstream. The terminal-state writes are best-effort;
+        # first_exc propagating is the load-bearing part. The residual (row
+        # stays 'running' when the engine's /fail endpoint is down) is
+        # covered systemically by lcmbp's young-running-row conflict
+        # semantics: the NEXT retry is loud, never a silent skip.
+        try:
+            db.mark_failed(content_hash, error=str(first_exc))
+            db.clear_orphan_wal(content_hash)
+        except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
+            _log.warning(
+                "pipeline_terminal_mark_failed",
+                content_hash=content_hash,
+                original_error=str(first_exc),
+                exc_info=True,
+            )
+        # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
+        # below cannot be masked by a fence-write failure.
+        if doc_id:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+            _fence_fail(doc_id, str(first_exc))
         raise first_exc
 
     # ── Post-passes (after all three stages complete) ────────────────────────
@@ -896,6 +975,28 @@ def pipeline_index_pdf(
         doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
     )
 
+    # nexus-5xn3k.4 RUNFENCE C2: the fence tail — after every possible
+    # manifest touch (including the fire_document hook above), before
+    # returning. Gated on doc_id per the no-catalog ingest contract.
+    if doc_id:
+        from nexus.doc_indexer import _fence_complete, _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+        if total_chunks == 0:
+            # MUST: zero extraction is a FAILURE, never /complete(0) — a
+            # zero-chunk run would trivially satisfy the fail-closed gate
+            # (referenced=0 == chunk_count=0) and stamp 'complete' on a
+            # silently-failed extraction. No content-free exception exists
+            # for PDFs.
+            _fence_fail(doc_id, "zero chunks extracted")
+        elif post_pass_ok:
+            _fence_complete(doc_id, content_hash, total_chunks)
+        else:
+            _log.warning(
+                "index_run_complete_skipped_post_pass_failed",
+                doc_id=doc_id,
+                content_hash=content_hash,
+                reason="post-pass failed — fence stays 'indexing' for retry",
+            )
+
     return total_chunks
 
 
@@ -928,15 +1029,21 @@ def _enrich_metadata_from_extraction(
         or pdf_path.stem.replace("_", " ").replace("-", " ")
     )
 
-    # Only `title` and `source_author` are in ALLOWED_TOP_LEVEL — the
-    # other fields below (source_date, extraction_method, format,
-    # page_count, pdf_subject, pdf_keywords, is_image_pdf, has_formulas)
-    # are dropped by metadata_schema.normalize() so writing them costs
-    # cycles for no payload. Keep this dict minimal.
+    # `title`, `source_author`, and (nexus-1oguj) `extraction_method` are
+    # the only extraction-dependent fields in ALLOWED_TOP_LEVEL — the
+    # other fields below (source_date, format, page_count, pdf_subject,
+    # pdf_keywords, is_image_pdf, has_formulas) are dropped by
+    # metadata_schema.normalize() so writing them costs cycles for no
+    # payload. Keep this dict minimal.
     enrichment = {
         "title": source_title,
         "source_author": meta.get("pdf_author", ""),
+        "extraction_method": meta.get("extraction_method", ""),
     }
+    # An empty extraction_method here is safe to merge as-is: t3.update_chunks
+    # re-runs metadata_schema.normalize() before writing, which is what
+    # actually drops the empty-string default — no local emptiness check
+    # needed in this dict.
 
     try:
         all_ids: list[str] = []

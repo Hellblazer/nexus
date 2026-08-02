@@ -678,6 +678,43 @@ class ArbiterCompletenessTest {
     }
 
     /**
+     * The retry budget is bounded at {@code MAX_ATTEMPTS} (2): a violation that is STILL
+     * present on the informed second attempt is a real, unresolvable conflict (not a race
+     * that the retry could ever have cleared), and must propagate loudly rather than spin
+     * or be swallowed. This is the fail-loud half of nexus-0ehwe's retry design that the
+     * two tests above never exercised together: both prior tests either resolve by attempt
+     * 2 or never retry at all.
+     */
+    @Test
+    void uniqueRaceRetry_exhaustionAfterSecondCollisionIsLoud() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
+                + "VALUES ('" + TENANT + "', '3200', 'race-seed-exhaust', 'repo', '')");
+        }
+        SQLException stillColliding = rawFailure(
+            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
+            + "VALUES ('" + TENANT + "', '3201', 'race-seed-exhaust', 'repo', '')");
+        assertThat(SqlConstraints.violated(stillColliding)).isEqualTo("catalog_owners_unique_name_type");
+
+        AtomicInteger attempts = new AtomicInteger();
+        assertThatThrownBy(() -> UniqueRaceRetry.run("test",
+                new String[]{"catalog_owners_unique_name_type"},
+                () -> {
+                    attempts.incrementAndGet();
+                    // Every attempt collides — a genuinely unresolvable conflict, unlike
+                    // the transient-race test above where attempt 2 succeeds.
+                    throw new RuntimeException("wrapped", stillColliding);
+                }))
+            .isInstanceOf(RuntimeException.class)
+            .hasCause(stillColliding);
+        assertThat(attempts.get())
+            .as("bounded at MAX_ATTEMPTS — a second collision must not spin indefinitely")
+            .isEqualTo(2);
+    }
+
+    /**
      * The concurrent shape of nexus-jq53b: N threads register the SAME owner identity with
      * no address supplied. All must converge on ONE owner and none may surface a 23505.
      */

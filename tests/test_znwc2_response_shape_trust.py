@@ -156,6 +156,115 @@ class TestManifestChashesCountReconciled:
         assert c.chashes_for_collection("code__x__stub-code-1024__v1") == set()
 
 
+# ── 3b. manifest/docs_for_chashes: count reconciled + paged (nexus-ocf52) ────
+
+
+class TestDocsForChashesCountReconciled:
+    """nexus-ocf52 client half: ``/manifest/docs_for_chashes`` is the
+    superseded-vector sweep's union guard — a chash is hard-deleted from T3
+    iff no tumbler here references it, so a partially-delivered ``tumblers``
+    list would silently destroy a live shared row. The engine emits
+    ``count`` unconditionally (floor >= v0.1.61); the client reconciles
+    ``len(tumblers) == count`` PER PAGE before any tumblers are trusted, and
+    pages the round-1 POST at 1000 chashes (nexus-uu4b9, mirrors the
+    engine's ``MAX_BATCH_DOC_IDS`` cap on ``handleDocsForChashes``)."""
+
+    def _client_with(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        post: Any,
+        get_manifests: Any = None,
+    ):
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        c = object.__new__(HttpCatalogClient)
+        if callable(post):
+            monkeypatch.setattr(c, "_post", post, raising=False)
+        else:
+            monkeypatch.setattr(
+                c, "_post", lambda path, body=None: post, raising=False,
+            )
+        if callable(get_manifests):
+            monkeypatch.setattr(c, "get_manifests", get_manifests, raising=False)
+        else:
+            monkeypatch.setattr(
+                c, "get_manifests",
+                lambda doc_ids: get_manifests if get_manifests is not None else {},
+                raising=False,
+            )
+        return c
+
+    def test_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.catalog.types import ManifestRow
+
+        chash = "a" * 64
+        c = self._client_with(
+            monkeypatch,
+            post={"tumblers": ["1.1.1"], "count": 1},
+            get_manifests={
+                "1.1.1": [ManifestRow(position=0, chash=chash)],
+            },
+        )
+        assert c.docs_for_chashes([chash]) == {chash: ["1.1.1"]}
+
+    def test_missing_count_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(monkeypatch, post={"tumblers": ["1.1.1"]})
+        with pytest.raises(RuntimeError, match="count"):
+            c.docs_for_chashes(["a" * 64])
+
+    def test_mismatched_count_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(
+            monkeypatch, post={"tumblers": ["1.1.1"], "count": 2},
+        )
+        with pytest.raises(RuntimeError, match="tumblers"):
+            c.docs_for_chashes(["a" * 64])
+
+    def test_empty_list_with_missing_count_raises(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ordering pin: the count guard runs BEFORE the ``not tumblers``
+        early-out — a stripped-field EMPTY response must fail loud, never
+        slip through indistinguishable from a genuine 'nothing found'."""
+        c = self._client_with(monkeypatch, post={"tumblers": []})
+        with pytest.raises(RuntimeError, match="count"):
+            c.docs_for_chashes(["a" * 64])
+
+    def test_paging_2500_chashes_three_posts_per_batch_reconciled(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """2500 chashes -> 3 POSTs (1000 + 1000 + 500), each page's count
+        reconciled independently, and the resulting tumblers unioned across
+        pages before the second round-trip."""
+        chashes = [f"{i:064x}" for i in range(2500)]
+        posts: list[list[str]] = []
+        manifests_calls: list[list[str]] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/manifest/docs_for_chashes"
+            batch = body["chashes"]
+            posts.append(batch)
+            base = sum(len(p) for p in posts[:-1])
+            tumblers = [f"1.1.{base + j}" for j in range(len(batch))]
+            return {"tumblers": tumblers, "count": len(tumblers)}
+
+        def _fake_get_manifests(doc_ids: list[str]) -> dict:
+            manifests_calls.append(doc_ids)
+            return {}
+
+        c = self._client_with(
+            monkeypatch, post=_fake_post, get_manifests=_fake_get_manifests,
+        )
+        c.docs_for_chashes(chashes)
+
+        assert len(posts) == 3
+        assert [len(p) for p in posts] == [1000, 1000, 500]
+        assert all(len(p) <= 1000 for p in posts)
+        assert len(manifests_calls) == 1
+        assert sorted(manifests_calls[0]) == sorted(
+            f"1.1.{i}" for i in range(2500)
+        )
+
+
 # ── 4. merge sort: missing distance sorts LAST, never first ──────────────────
 
 

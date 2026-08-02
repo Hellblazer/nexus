@@ -21,7 +21,7 @@ After a successful pipeline:
 ## Routing
 
 **Before code:**
-- About to implement → `/conexus:brainstorming-gate` (mandatory)
+- About to implement with NO design of record → `/conexus:brainstorming-gate` (mandatory; a locked T2 memo, accepted RDR, or reviewed bead IS the approved design — implement it without re-gating)
 - Multi-step → `/conexus:create-plan`
 - Needs design across modules → `/conexus:architecture` then `/conexus:create-plan`
 
@@ -85,7 +85,7 @@ Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (sur
 | Researching from scratch without checking T3 | `nx search` / `nx_answer` first — prior sessions may have already answered |
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
 | Test fails → try a different fix | `/conexus:debug` |
-| Implement without brainstorming-gate | `brainstorming-gate` first |
+| Implement undesigned work without brainstorming-gate | `brainstorming-gate` first (unless a design of record exists) |
 | Plan exists, start implementing | `/conexus:plan-audit` first |
 | Symbol callers via grep | `/conexus:serena-code-nav` |
 | Implement review feedback blindly | `/conexus:receiving-review` first |

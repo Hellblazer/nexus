@@ -52,7 +52,22 @@ public final class PipelineRepository {
 
     private static final Logger log = LoggerFactory.getLogger(PipelineRepository.class);
 
-    /** Stale heartbeat threshold — mirrors pipeline_buffer.STALE_THRESHOLD. */
+    /**
+     * Stale heartbeat threshold — nexus-lcmbp fix-list #6: the client analog is
+     * {@code STALE_THRESHOLD} in {@code src/nexus/db/http_pipeline_client.py}
+     * (Python, {@code timedelta(minutes=5)}). The two MUST stay numerically
+     * identical: this value drives {@link #create}'s running-vs-stale decision
+     * and, via {@link PipelineConflictException}, the {@code
+     * stale_threshold_seconds} field on the 409 {@code conflict_running} wire
+     * body; the Python constant drives the client's own orphan-scan staleness
+     * judgment ({@code scan_orphaned_pipelines}) against the SAME
+     * server-stamped {@code updated_at}, and is what a caller compares
+     * {@code PipelineConflictRunning.stale_threshold_seconds} against. A drift
+     * here would not fail loudly — it would silently make one side's
+     * staleness judgment disagree with the other's. Pinned by
+     * {@code tests/db/test_pipeline_fake_engine_parity.py::
+     * test_stale_threshold_agrees_across_client_and_wire}.
+     */
     public static final Duration STALE_THRESHOLD = Duration.ofMinutes(5);
 
     private static final Set<String> PROGRESS_FIELDS = Set.of(
@@ -68,14 +83,24 @@ public final class PipelineRepository {
 
     // ── pipeline lifecycle ───────────────────────────────────────────────────
 
-    /** Mirrors {@code PipelineDB.create_pipeline}: created / resuming / skip. */
+    /** Mirrors {@code PipelineDB.create_pipeline}: created / resuming / skip.
+     *
+     * <p>nexus-lcmbp: a {@code running} row with a FRESH heartbeat is a LOUD
+     * refusal ({@link PipelineConflictException}, mapped by the HTTP layer to a
+     * 409), never a {@code "skip"}. The prior "skip" here was indistinguishable
+     * on the wire from every other short-circuit (e.g. {@code completed}), so a
+     * caller checking only the return code observed silent success — zero
+     * chunks written, {@code rc=0}. The SAME retry against the SAME row returns
+     * a loud {@code "resuming"} once the heartbeat ages past
+     * {@link #STALE_THRESHOLD}; making the fresh-heartbeat branch loud too
+     * removes the time-dependent success/failure split. */
     public String create(String tenant, String contentHash, String pdfPath, String collection) {
         requireNonBlank(contentHash, "content_hash");
         requireNonBlank(pdfPath, "pdf_path");
         requireNonBlank(collection, "collection");
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.select(PDF_PIPELINE.STATUS, PDF_PIPELINE.UPDATED_AT)
+            var row = ctx.select(PDF_PIPELINE.STATUS, PDF_PIPELINE.UPDATED_AT, PDF_PIPELINE.STARTED_AT)
                          .from(PDF_PIPELINE)
                          .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                                  .and(PDF_PIPELINE.CONTENT_HASH.eq(contentHash)))
@@ -95,7 +120,8 @@ public final class PipelineRepository {
             if ("completed".equals(status)) {
                 return "skip";
             }
-            boolean stale = row.value2().isBefore(now.minus(STALE_THRESHOLD));
+            OffsetDateTime updatedAt = row.value2();
+            boolean stale = updatedAt.isBefore(now.minus(STALE_THRESHOLD));
             if ("failed".equals(status) || stale) {
                 ctx.update(PDF_PIPELINE)
                    .set(PDF_PIPELINE.STATUS, "resuming")
@@ -105,7 +131,9 @@ public final class PipelineRepository {
                    .execute();
                 return "resuming";
             }
-            return "skip";  // running with a fresh heartbeat
+            // running with a fresh heartbeat — LOUD conflict, never silent success.
+            throw new PipelineConflictException(contentHash, row.value3(),
+                Duration.between(updatedAt, now), STALE_THRESHOLD);
         });
     }
 

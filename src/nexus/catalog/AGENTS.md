@@ -26,7 +26,7 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 
 | File | Purpose |
 |---|---|
-| `http_catalog_client.py` | `HttpCatalogClient` — the catalog handle in every mode. Full read surface + whitelisted writes over the engine's `/v1/catalog/*` routes. |
+| `http_catalog_client.py` | `HttpCatalogClient` — the catalog handle in every mode. Full read surface (incl. `manifest_verify`/`manifest_verify_all`) + whitelisted writes — including the RUNFENCE index-run fence ops `begin_index_run`/`complete_index_run`/`fail_index_run` (nexus-5xn3k.3) — over the engine's `/v1/catalog/*` routes. |
 | `catalog_protocol.py` | `CatalogReader` / `CatalogWriter` Protocols + `CATALOG_WRITE_OPS` (the tooling-enforced write whitelist). Annotate consumers with these, never a concrete class. |
 | `factory.py` | `make_catalog_reader()` / `make_catalog_writer()` — the only sanctioned construction path (shared process-lifetime service client, nexus-5en9j). |
 | `types.py` | Substrate-neutral value types: `CatalogEntry`, `CatalogLink`, `ManifestRow`, `make_relative`, `_normalize_source_uri`, `_default_registry_path`. |
@@ -51,6 +51,7 @@ The bar is **register a reader first, then add to the allow-list**. New schemes 
 ## Key invariants
 
 - **The engine's Postgres catalog is canonical.** Every mutation flows through the `CATALOG_WRITE_OPS` whitelist on a `make_catalog_writer()` proxy; reads through `make_catalog_reader()`. Direct construction of catalog handles outside `factory.py` is lint-banned (`storage_boundary_lint.py`).
+- **Every new writer method MUST be added to `CATALOG_WRITE_OPS`** (`catalog_protocol.py`) or it silently raises `AttributeError` through the closed `_ServiceCatalogWriter` whitelist, which a bare `except` upstream can turn into a feature that no-ops forever (the nexus-kgos1 trap).
 - **Tumblers are append-only.** Updating an entry preserves the tumbler; deletion creates a tombstone, not a free slot. Reusing a tumbler corrupts the link graph.
 - **Owners with `owner_type='repo'` MUST carry a `repo_hash`.** Enforced in `register_owner`. The empty-hash variant produced 83 orphan owners in the wild before the guard.
 - **No `._db` / `._dir` reach-ins.** `HttpCatalogClient._db` raises by design; the boundary-lint baselines (`CATALOG_DB_ACCESS_BASELINE`, `CATALOG_DIR_ACCESS_BASELINE`) are enforced at 0.

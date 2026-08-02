@@ -113,6 +113,10 @@ def test_single_page_oom_degrades_to_docling_when_opted_in() -> None:
     # The pathological page was degraded, not failed — document survives.
     mock_degrade.assert_called_once()
     assert "DEGRADED PAGE TEXT" in result.text
+    # nexus-1oguj: the recorded extraction_method must be the honest
+    # mixed aggregate, not a bare "mineru" that overstates coverage —
+    # this page was actually docling-rendered (formulas stripped).
+    assert result.metadata["extraction_method"] == "mineru+docling-degraded"
 
 
 def test_multipage_batch_retry_degrades_only_oom_page() -> None:
@@ -149,6 +153,9 @@ def test_multipage_batch_retry_degrades_only_oom_page() -> None:
     assert "PAGE0 MINERU" in result.text
     assert "PAGE1 DEGRADED" in result.text
     mock_degrade.assert_called_once()
+    # nexus-1oguj: even one degraded page flips the whole-document value
+    # to the honest mixed aggregate.
+    assert result.metadata["extraction_method"] == "mineru+docling-degraded"
 
 
 def test_single_page_oom_fails_by_default() -> None:

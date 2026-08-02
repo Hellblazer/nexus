@@ -1,6 +1,6 @@
 # `nexus.db` — AGENTS.md
 
-T1, T2, and T3 implementations. The interesting policy lives in T2's migration registry and the vector-store routing.
+T1, T2, and T3 implementations. The interesting policy lives in the Liquibase/upgrade-ladder split (T2's client-side migration registry is deleted — see § Migration policy below) and the vector-store routing.
 
 **ChromaDB is GONE (RDR-155 P4b, 2026-07-25).** The dependency is dropped, not
 merely unused: it is absent from `uv.lock` and not importable. Serving is the
@@ -14,7 +14,7 @@ format (RDR-169 G3), not a dependency. Pinned by
 | File | Purpose |
 |---|---|
 | `t1.py` | `T1Database` — session scratch. PG-backed `HttpScratchStore` by default (RDR-152); session-id lease discovery via `daemon/t1_lease.py` (RDR-149 P4), published by the MCP lifespan. |
-| `t2/` | Package: seven domain stores + `T2Database` facade. See **T2 domain stores** below. |
+| `t2/` | Package: eight domain stores + `T2Database` facade. See **T2 domain stores** below. |
 | `t3.py` | `T3Database` — a facade retained for INJECTED clients (tests, `--dry-run`). Production `make_t3()` returns `HttpVectorClient` unconditionally and constructs no vector client of its own (RDR-155 P4a.2). |
 | `http_vector_client.py` | `HttpVectorClient` — the production T3: every vector op over `/v1/vectors`, pgvector storage, server-side embedding and rerank (RDR-188). |
 | `inmemory_vector_store.py` | `InMemoryVectorClient` — the in-process substitute for tests, the plan-match session cache, and `nx index --dry-run`. Chroma-parity semantics (cosine, `$eq`/`$in`/`$and` where-grammar, upsert/dedup, dimension pinning) are differentially verified, not assumed. |
@@ -26,12 +26,13 @@ format (RDR-169 G3), not a dependency. Pinned by
 | Store | Purpose |
 |---|---|
 | `HttpMemoryStore` | Persistent notes + full-text search (`nx memory`). |
-| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. 12 builtin templates seeded at `nx catalog setup`. |
+| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. 15 builtin templates seeded at `nx catalog setup`. |
 | `HttpTaxonomyStore` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). Pure-compute half lives in `taxonomy_compute.py`. |
 | `HttpTelemetryStore` | Relevance log + search/hook telemetry + tier writes. |
 | `HttpChashIndex` | Content-hash chunk index (RDR-086; table retired by RDR-187 — shim until the 410 flip). |
 | `HttpDocumentAspectsStore` | Structured aspect rows (RDR-089). |
 | `HttpAspectQueue` | Queue drained by the aspect-worker daemon (PG `FOR UPDATE SKIP LOCKED`). |
+| `HttpDocumentHighlightsStore` | Per-document DEVONthink highlight/mention notes, keyed by catalog tumbler (RDR-139 Layer E). Dedicated table, not `document_aspects`. |
 
 All eight are HTTP clients over the engine's PG tables. The SQLite store
 classes are DELETED (RDR-158 P4, nexus-i711w), and the
@@ -73,9 +74,8 @@ Collection registration is enforced server-side at two layers:
    content_type='' AND owner_id=''`.  A re-run never clobbers a genuinely-newer live row.
 
 **Rule (Java service surface)**: Never add a chunk write path in the Java service that bypasses
-`PgVectorRepository.upsertChunks`.  This rule governs service-mode writes only; local-mode
-Python clients write directly to Chroma (bypassing PostgreSQL) and are outside this rule's
-scope until RDR-155 P4b removes the Chroma path.
+`PgVectorRepository.upsertChunks`.  This rule now governs every mode — RDR-155 P4b (2026-07-25)
+removed the Chroma dependency entirely, so there is no local-mode client write path outside it.
 
 ## Capability-selection discipline (RDR-156 Decision 8)
 
@@ -137,7 +137,6 @@ consumers query the wrapper, never the matview.
 
 ## Hot rules
 
-- **No ORM.** SQLAlchemy etc. is banned. Direct `sqlite3` only.
-- **WAL mode on open.** Every connection opens with `PRAGMA journal_mode=WAL`. Already centralised — don't override.
-- **Never edit a shipped migration.** If you need to change earlier behaviour, add a corrective migration. Editing breaks every user past that version.
+- **No ORM, and NO new SQLite.** Raw SQL through the engine only. The SQLite substrate this module once carried is DELETED (RDR-158 P4 — see the retirement notes above); new persistent state is a Liquibase changeset in `service/src/main/resources/db/changelog/`, never client-side DDL and never a `sqlite3.connect`. A diff adding either is a review **Critical** (project AGENTS.md hot rule, Hal directive 2026-07-18).
+- **Never edit a shipped Liquibase changeset.** Schema evolution is a NEW changeset (and, for data migrations, an upgrade-ladder rung in `src/nexus/upgrade_ladder/`). Editing a shipped changeset breaks checksum validation on every installed engine past that version.
 - **Pagination must respect `_PAGE = 300`.** When walking a large collection, `offset += 300` in a loop. Same cap on writes (`MAX_RECORDS_PER_WRITE`).

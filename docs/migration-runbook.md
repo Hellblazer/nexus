@@ -2,8 +2,9 @@
 
 Operational narrative for the operator running the next T2 + T3 migration
 onto the PG17 + pgvector + nexus-service stack (RDR-152/153/155). The flag
-reference lives in [`docs/cli-reference.md` § nx storage](cli-reference.md#nx-storage);
-this document is the order of operations, the failure playbook, and how to
+reference lives in [`docs/cli-reference.md` § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives)
+(the `nx storage migrate` verb group itself was deleted by RDR-155 P4b — see
+§0 below); this document is the order of operations, the failure playbook, and how to
 read the artifacts. Precedent: the 2026-06-10 production run (115,716
 chunks, ~10:46 to 15:05 PT, zero lost, est. $4-6 Voyage; permanent record:
 T2 `nexus_rdr/155-production-migration-complete`).
@@ -160,6 +161,14 @@ process — clearing drops the banner mid-migration; only do it if the migration
 process actually crashed).
 
 ## 1. Before you start: the quiescent window
+
+> **Every `nx storage migrate ...` / `nx migrate-to-service` command block in
+> sections 1-7 below runs only on the pinned `conexus==6.18.1` migration hop**
+> (§0 above). RDR-155 P4b deleted the `nx storage` migrate group and
+> `nx migrate-to-service` from this release outright — on 7.x an operator
+> reaches this playbook via the stranded-install redirect, drives it from the
+> 6.18.1 install, then returns to current. Do not run these commands against
+> a 7.x checkout; `Error: No such command` is the expected result there.
 
 The vector ETL's post-write verification compares an exact source count
 against an exact target count per collection

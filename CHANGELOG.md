@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-08-02
+
+The RUNFENCE release: a failed index can no longer poison a document. This
+release carries the complete client half of the index-run fence (the engine
+half ships in engine-service-v0.1.62, which this release unblocks); against
+the pinned v0.1.61 engine the fence code is dormant by design and every
+behavior falls back to 7.0.1 semantics.
+
+### Fixed
+- A failed or interrupted index run can no longer leave a document
+  permanently "fresh" while silently truncated (nexus-5xn3k, the full arc):
+  the client now brackets every index path with begin/complete/fail intent
+  records, the staleness check is a three-way that treats an unfinished run
+  as definitively stale, and a stale existing-chunk probe can no longer
+  silently drop content (misses re-route through a full upsert).
+- Pipeline-buffer resume after a caught failure no longer trusts stale
+  progress counters — a retry re-extracts what the WAL actually lost
+  instead of completing at the pre-failure count (nexus-gl99l; also heals
+  rows already poisoned by earlier versions on their next retry).
+- `nx dt index` and `nx index` summaries stop lying: unchanged documents
+  report as skipped with an explicit "use --force" line instead of
+  "Indexed N record(s)", refused completions surface as their own warning
+  bucket, and a refused completion on a large DEVONthink record no longer
+  aborts the whole batch (nexus-qo84l).
+- MinerU VRAM detection no longer misreads megabytes as gigabytes
+  (nexus-xyk9o); `nx doctor`'s next_seq drift check runs in ~10s instead
+  of ~224s; count reconciliation on batched catalog reads (nexus-ocf52
+  wave); typed 409 handling for concurrent pipeline conflicts
+  (nexus-lcmbp).
+- Catalog owner allocation self-heals and is observable: the engine gains
+  an all-owners next_seq drift sweep route (nexus-0ehwe item 5; wedge
+  class of nexus-pbawi retired).
+
+### Added
+- `nx catalog manifest-verify <tumbler>` — read-only single-document
+  manifest/fence diagnostic (referenced/present/missing + index state).
+- `nx doctor`: the dangling-manifests check is re-armed engine-side
+  (one aggregate call, no client paging) and a provisional
+  stale-indexing-run age axis.
+- extraction_method provenance on chunks; `--source-uri` on `nx store put`
+  (fork-prevention, nexus-y8qtj).
+
+### Plugin (goes live at this release's pin advance)
+- brainstorming-gate scoped to work with no design of record — a locked
+  design memo, accepted RDR, or reviewed bead is the approval.
+- Review-skill model tables corrected to the enforced default (sonnet);
+  new Prompt Rigour section (suspect categories, locked-spec briefing).
+- using-nx-skills routing aligned to the scoped gate.
+
+### Internal
+- The RUNFENCE falsification gate (5 scenarios against a real engine,
+  CI-wired with non-vacuity asserts) plus 100+ new tests across the arc.
+- The local-service gate re-scoped honestly (two separate proofs) with an
+  11-assertion direct smoke leg; nightly gate env-loss regression fixed
+  with a repo-wide continuation-into-comment lint.
+- Documentation 360: 94 adversarially-verified findings fixed across 18
+  files, including a RUNFENCE architecture section and the removal of all
+  remaining Chroma/SQLite-era present-tense claims.
+
+
 ## [7.0.1] - 2026-08-02
 
 Engine identity release: pins engine-service-v0.1.61 — the 7.0.0-wave

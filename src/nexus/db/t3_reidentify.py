@@ -281,8 +281,11 @@ def reidentify_collection(
                 # rather than a narrow strip set. ``_normalize_for_write``
                 # drops the 3 RDR-108 Phase 3 fields (doc_id, chunk_index,
                 # chunk_count) plus all pre-RDR-101-Phase-5c cargo (corpus,
-                # store_type, expires_at, extraction_method, etc) and
-                # bib_* placeholders. Surfaced during the Phase 5 prod
+                # store_type, expires_at, etc — nexus-1oguj later moved
+                # extraction_method OUT of this cargo set, into canonical:
+                # a legacy chunk that already carries a real value keeps
+                # it through reidentify) and bib_* placeholders. Surfaced
+                # during the Phase 5 prod
                 # migration: 2 of 153 collections held legacy chunks with
                 # 33+ metadata keys; the prior narrow-strip path produced
                 # NumMetadataKeys quota errors on the upsert. The canonical

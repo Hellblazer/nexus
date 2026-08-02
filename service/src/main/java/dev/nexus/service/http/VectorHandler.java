@@ -705,7 +705,12 @@ public final class VectorHandler implements HttpHandler {
      * }
      * </pre>
      *
-     * <p>Response 200: {"updated": N}
+     * <p>Response 200: {"updated": N, "missing": [ids...]}. {@code missing} names the
+     * ids that had no matching row (nexus-5xn3k.2, memo §3.6, AC6 engine half): a stale
+     * {@code existing_ids} probe on the client's {@code _upsert_skip_reembed} path routes
+     * an id here believing it already has a stored vector — when that belief is wrong the
+     * client must be able to re-route the id through a full upsert instead of silently
+     * losing content. Detection lives here; the client-side reroute is a separate bead.
      */
     private void handleUpdateMetadata(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -725,8 +730,8 @@ public final class VectorHandler implements HttpHandler {
         // affected-row count rather than void — report it verbatim instead of
         // assuming every id existed (a stale/deleted id previously reported as
         // "updated" with no row actually touched).
-        int updated = repo.updateMetadata(tenant, collection, ids, metadatas);
-        HttpUtil.send(ex, 200, json(Map.of("updated", updated)));
+        var outcome = repo.updateMetadataWithMissing(tenant, collection, ids, metadatas);
+        HttpUtil.send(ex, 200, json(Map.of("updated", outcome.updated(), "missing", outcome.missing())));
     }
 
     /**

@@ -3535,11 +3535,27 @@ def _run_index(
                     })
             if not agg_ids:
                 return
+            # nexus-5xn3k.4 RUNFENCE C2: ChunkBatcher is file-atomic (every
+            # file's whole chunk set lands in one flush — see the write_many
+            # call-site comments), so the completion claim is sound here.
+            # No per-file begin call (memo's explicit design: no extra round
+            # trips on this hot path) — only the ride-along complete map.
+            _manifest_complete: dict[str, str] = {}
+            for _path, _c in _file_contexts:
+                if not isinstance(_c, dict):
+                    continue
+                _cdid = _c["catalog_doc_id"]
+                if not _cdid:
+                    continue
+                _chash = _c["metadatas"][0].get("content_hash", "") if _c["metadatas"] else ""
+                if _chash:
+                    _manifest_complete[_cdid] = _chash
             _t0 = time.monotonic()
             reg.fire_batch(
                 agg_ids, collection, agg_docs,
                 [[] for _ in agg_ids], agg_metas,
                 grain="flush",
+                manifest_complete=_manifest_complete or None,
             )
             with _hook_seconds_lock:
                 _hook_seconds["flush"] += time.monotonic() - _t0

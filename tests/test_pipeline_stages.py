@@ -16,7 +16,7 @@ from tests.conftest import fake_credentials
 from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
-from nexus.db.http_pipeline_client import HttpPipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunning
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     _enrich_metadata_from_extraction,
@@ -91,6 +91,25 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     .16); the fake engine is in-memory, so poll fast to keep the suite
     quick."""
     monkeypatch.setattr("nexus.pipeline_stages._POLL_INTERVAL", 0.01)
+
+
+@pytest.fixture(autouse=True)
+def _stub_fence_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-5xn3k.4: this file's ``t3``/``mock_t3`` fixtures are
+    ``create_autospec(T3Database)`` doubles — no chunk ever actually lands
+    in the REAL local-engine T3 substrate that ``_register_or_lookup_doc_id``
+    / manifest writes talk to (this suite predates RUNFENCE and was never
+    mocking the catalog). The fence's engine-side verify-then-stamp
+    (memo §3.3) correctly sees "0 chunks present" for a doc whose manifest
+    it just wrote and refuses completion — genuinely correct behavior, but
+    orthogonal to what this file's tests exercise (stage orchestration, not
+    fence/catalog integration; that is ``tests/test_5xn3k_fence_ordering.py``'s
+    job, with its own properly-scoped recording double). Stub only the
+    completion call so ``IndexRunVerifyRefused`` doesn't leak into every
+    pipeline-stage test that happens to complete; ``_fence_begin``/
+    ``_fence_fail`` still hit the real substrate unchanged.
+    """
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
 
 
 @pytest.fixture()
@@ -522,6 +541,22 @@ class TestPipelineIndexPdf:
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
 
+    def test_first_exc_propagates_even_when_mark_failed_raises(self, db, mock_t3) -> None:
+        """nexus-rewgw: the /fail POST's own failure must never mask the
+        ORIGINAL pipeline exception nor skip `raise first_exc`. The
+        terminal-state bookkeeping (mark_failed + clear_orphan_wal) is
+        best-effort; first_exc propagating is load-bearing. Falsified by
+        removing the try/except around the bookkeeping in
+        pipeline_stages' first_exc block."""
+        def _fail_post(*a, **k):
+            raise RuntimeError("fail endpoint down: 500")
+        db.mark_failed = _fail_post  # type: ignore[method-assign]
+        with patch(_P_EXT) as ME, patch(_P_CHK):
+            ME.return_value.extract.side_effect = RuntimeError("original boom")
+            with pytest.raises(RuntimeError, match="original boom"):
+                pipeline_index_pdf(Path("/test.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=lambda t, m: ([], m))
+
     def test_extractor_failure(self, db, mock_t3) -> None:
         with patch(_P_EXT) as ME, patch(_P_CHK):
             ME.return_value.extract.side_effect = RuntimeError("boom")
@@ -585,9 +620,10 @@ class TestPipelineIndexPdf:
                 m = a[2][0]
                 assert m["title"] == "My Paper Title"
                 assert m["source_author"] == "Jane Doe"
-                # extraction_method is dropped by normalize() — not in
-                # ALLOWED_TOP_LEVEL since no read site uses it.
-                assert "extraction_method" not in m
+                # nexus-1oguj: the post-pass also backfills the extractor
+                # identity from ExtractionResult.metadata once extraction
+                # completes — ``_er()`` defaults to "docling".
+                assert m["extraction_method"] == "docling"
                 break
         else:
             pytest.fail("metadata enrichment post-pass not called")
@@ -606,9 +642,12 @@ class TestPipelineIndexPdf:
         ids = col.delete.call_args.kwargs.get("ids", col.delete.call_args[1].get("ids", []))
         assert "old_hash_0" in ids and "abc123_0" not in ids
 
-    def test_skip_already_running(self, db, mock_t3) -> None:
+    def test_conflict_already_running(self, db, mock_t3) -> None:
+        """nexus-lcmbp: a retry against a fresh-heartbeat 'running' row is
+        a LOUD failure — never a silent 0-chunk success."""
         db.create_pipeline("h1", "/a.pdf", "docs__test")
-        assert pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db) == 0
+        with pytest.raises(PipelineConflictRunning):
+            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
     def test_embed_fn_none_resolves_credentials(self, db, mock_t3) -> None:

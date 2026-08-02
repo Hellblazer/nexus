@@ -153,8 +153,11 @@ class TestDoctorCheckSearchCli:
         ``CliRunner`` loads the complete nexus import graph (the T3
         ChromaDB client + Voyage + MinerU + FastAPI + all CLI
         command modules) from cold, which costs ~2 minutes on a dev
-        machine. Deselected from the default pytest run; nightly
-        CI and pre-release runs opt in with ``-m slow``.
+        machine. Excluded from default addopts; run explicitly with
+        ``uv run pytest -m slow``, or let the nightly
+        local-service-gate-nightly.yml gate run it for you (nexus-s6dei:
+        prior wording claimed "CI and pre-release runs opt in with -m
+        slow" — nothing did, until this gate leg).
         """
         from nexus.cli import main
 

@@ -191,3 +191,61 @@ class PutOversizedError(NexusError):
             f"{max_bytes}-byte ChromaDB cap for collection {collection!r}. "
             f"Shrink the content or chunk it before calling put()."
         )
+
+
+class IndexRunVerifyRefused(NexusError):
+    """``HttpCatalogClient.complete_index_run`` was refused by the engine's
+    fail-closed verify-then-stamp gate (RUNFENCE, nexus-5xn3k, design memo
+    §3.3, mirrors ``CatalogRepository.IndexRunVerifyRefused`` on the engine
+    side).
+
+    The engine ran ``manifest_verify(doc_id)`` inside the SAME transaction
+    as the completion stamp and found either ``missing > 0`` or
+    ``referenced != chunk_count`` (the caller's own claimed count) — the
+    document is NOT actually whole in T3, so ``index_state`` stays whatever
+    it was (``'indexing'``, most commonly) rather than being stamped
+    ``'complete'``. Surfacing this as a typed exception (never a silently
+    absorbed 500, never a bare ``ValueError``) is the whole point of the
+    fence: a run whose manifest writes ALL failed while its chunks landed
+    in T3 would otherwise report success (memo §1's empty-manifest case,
+    recreated one layer up).
+
+    Attributes:
+        doc_id: The document the completion call targeted.
+        referenced: Chunks the manifest names.
+        present: Of those, how many exist in T3.
+        missing: ``referenced - present`` (the refusal trigger when > 0).
+        chunk_count: The caller's own claimed chunk count (the OTHER
+            refusal trigger when it disagrees with ``referenced``).
+
+    The message ALWAYS carries the counts summary (``doc_id``/``referenced``/
+    ``present``/``missing``/``chunk_count``) — a caller reading the exception
+    text (a log line, a CLI error) must never lose the numbers to a
+    server-supplied string. *server_detail* (the engine's own ``error``
+    field, when present) is APPENDED as supplementary context, never a
+    replacement for the counts summary.
+    """
+
+    def __init__(
+        self,
+        *,
+        doc_id: str,
+        referenced: int,
+        present: int,
+        missing: int,
+        chunk_count: int,
+        server_detail: str = "",
+    ) -> None:
+        self.doc_id = doc_id
+        self.referenced = referenced
+        self.present = present
+        self.missing = missing
+        self.chunk_count = chunk_count
+        message = (
+            f"completeIndexRun refused for doc_id={doc_id!r}: "
+            f"referenced={referenced} present={present} missing={missing} "
+            f"claimed_chunk_count={chunk_count}"
+        )
+        if server_detail:
+            message = f"{message} (engine: {server_detail})"
+        super().__init__(message)

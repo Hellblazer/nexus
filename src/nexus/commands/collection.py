@@ -944,8 +944,10 @@ def _backfill_chunk_text_hash(
                 doc.encode()
             ).hexdigest()
             # Canonical schema funnel: drops cargo (corpus, store_type,
-            # expires_at, extraction_method, etc) so chunks with 32+
-            # keys land back under the per-row metadata quota.
+            # expires_at, etc — nexus-1oguj later promoted
+            # extraction_method OUT of this cargo set, into canonical) so
+            # chunks with 32+ keys land back under the per-row metadata
+            # quota.
             normalized = _normalize_for_write(new_meta, coll_name)
             upsert_ids.append(chunk_id)
             upsert_docs.append(doc)

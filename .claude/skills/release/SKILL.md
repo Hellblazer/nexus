@@ -76,27 +76,36 @@ PREV_ENGINE_TAG staleness FATAL, bump `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TA
 in `run.sh` to the release immediately before this one — the scenario must
 always start from a genuinely older engine.
 
-**Local-mode functional gate — self-provisioning** (2026-07-06 v6.3.6
-lesson; nexus-edwlp, 2026-07-07): the local-service round-trip family
-(the functional test of local mode) skip-gates on a reachable local
-service and deliberately never resolves the managed cloud.
-Historically it only ran when a dev-box service HAPPENED to be alive
-against a lived-in install — an ambient, irreproducible gate that
-silently degraded to 74/516 tests the day the ambient service died.
-`tests/e2e/local-service-gate.sh` self-provisions a throwaway PG +
-service (scratch NEXUS_CONFIG_DIR, isolated from ~/.config/nexus and
-prod), auto-rebuilds a stale dev jar, and pins the whole family at the
-throwaway service via the shared HOST/PORT env leg (the T3 vector
-resolver honors it since nexus-edwlp). Infra is hermetic; credentials
-are not — the voyage/CCE subset needs a real `VOYAGE_API_KEY`, sourced
-explicitly from repo-root `.env` before the service spawns. The
-`lived_in` marker excludes the handful of tests that dispatch real
-`claude -p` or need seeded lived-in corpora (carve-out size asserted
-exactly), and a vacuity guard asserts pinned passed/skipped
-FLOOR/BUDGET at the end of the run. A guard trip or any new hard
-failure is real signal — compensate with live validation of the
-release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the
-advertised claims against the real deployment).
+**Local-mode functional gate — two separate proofs, self-provisioning**
+(2026-07-06 v6.3.6 lesson; nexus-edwlp 2026-07-07; re-scoped honestly by
+nexus-x81ks, 2026-08-02): `tests/e2e/local-service-gate.sh` self-provisions a
+throwaway PG + service (scratch NEXUS_CONFIG_DIR, isolated from
+~/.config/nexus and prod) and auto-rebuilds a stale dev jar, but the pytest
+family it runs does **not** exercise that throwaway service — autouse conftest
+fixtures (`_isolate_service_endpoint_env`, `_isolate_config_dir`,
+`_pin_t2_substrate`) strip `NX_SERVICE_*` from every test body and route tests
+at self-provisioned substrates the suite manages itself; `NX_SERVICE_HOST`/
+`PORT` is harmless legacy env, not a pin. The two proofs are kept separate:
+- The pytest FLOOR/BUDGET family is the functional surface of local mode,
+  proven against those self-provisioned substrates. Historically it only ran
+  when a dev-box service HAPPENED to be alive against a lived-in install — an
+  ambient, irreproducible gate that silently degraded to 74/516 tests the day
+  the ambient service died. A vacuity guard now asserts pinned passed/skipped
+  FLOOR/BUDGET at the end of the run.
+- The **direct smoke leg** (script-driven, outside pytest, immune to the
+  autouse isolation) is what proves the shipped-shape throwaway service
+  itself boots and serves: health, version identity, catalog round-trip, the
+  RUNFENCE index-run fence, one vector round trip — exact-count non-vacuity
+  (`SMOKE_EXPECTED`), fail-loud on any mismatch or unreachable service.
+
+The gate is **bge-768-only** since nexus-w6h2m (2026-07-28): a local service
+embeds with bge-768 and nothing else, so `cloud_mode` tests are deselected and
+the gate no longer needs a `VOYAGE_API_KEY` for its own corpus. Two markers
+carve tests out, each with an exact-count guard: `lived_in` (excludes tests
+that dispatch real `claude -p` or need seeded lived-in corpora) and
+`cloud_mode`. A guard trip or any new hard failure is real signal — compensate
+with live validation of the release's changed paths (the v6.3.5/v6.3.6
+pattern: exercise the advertised claims against the real deployment).
 
 If unit-suite Py3.13 surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire here. If they DO fire locally, that's signal: investigate before proceeding.
 

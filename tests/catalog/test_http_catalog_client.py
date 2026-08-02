@@ -85,6 +85,61 @@ def _entry_dict(**kwargs: Any) -> dict:
     return base
 
 
+# ── _to_entry fence-field parsing (nexus-5xn3k.3 review item 3) ─────────────
+#
+# Pins the load-bearing None-vs-'' ASYMMETRY: ``index_state`` is the one
+# fence field that must hydrate as ``None`` (never ``''``) when absent or
+# explicitly null on the wire — that ``None`` IS the "unknown, fall through
+# to manifest/verify" signal the RUNFENCE three-way (`_index_run_fresh`)
+# branches on. A future "make it consistent with the other three" edit
+# coercing it to ``""`` would silently collapse "unknown" into a string that
+# is neither ``'complete'``/``'indexing'``/``'failed'`` NOR ``None`` — still
+# functionally "unknown" today, but a landmine for any later equality check
+# against ``None`` specifically (e.g. a straight ``is None`` probe).
+
+
+class TestToEntryFenceFields:
+    def test_missing_keys_hydrate_index_state_as_none(self) -> None:
+        from nexus.catalog.http_catalog_client import _to_entry
+
+        d = _entry_dict()
+        for key in (
+            "index_state", "index_content_hash", "index_run_id", "index_started_at",
+        ):
+            d.pop(key, None)
+        entry = _to_entry(d)
+        assert entry.index_state is None
+        assert entry.index_content_hash == ""
+        assert entry.index_run_id == ""
+        assert entry.index_started_at == ""
+
+    def test_explicit_json_null_hydrates_index_state_as_none(self) -> None:
+        from nexus.catalog.http_catalog_client import _to_entry
+
+        d = _entry_dict(
+            index_state=None, index_content_hash=None,
+            index_run_id=None, index_started_at=None,
+        )
+        entry = _to_entry(d)
+        assert entry.index_state is None
+        assert entry.index_content_hash == ""
+        assert entry.index_run_id == ""
+        assert entry.index_started_at == ""
+
+    def test_complete_state_passes_through_verbatim(self) -> None:
+        from nexus.catalog.http_catalog_client import _to_entry
+
+        d = _entry_dict(
+            index_state="complete", index_content_hash="a" * 64,
+            index_run_id="run-1", index_started_at="2026-08-02T00:00:00Z",
+        )
+        entry = _to_entry(d)
+        assert entry.index_state == "complete"
+        assert entry.index_content_hash == "a" * 64
+        assert entry.index_run_id == "run-1"
+        assert entry.index_started_at == "2026-08-02T00:00:00Z"
+
+
 class FakeCatalogHandler(BaseHTTPRequestHandler):
     """Routes matching the real CatalogHandler.java switch cases exactly."""
 
@@ -118,6 +173,19 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: not just the client-side kwarg.
     last_show_follow_alias: "bool | None" = None
 
+    #: nexus-5xn3k.3: /manifest/verify response body — override per-test to
+    #: exercise the missing>0 branch. Default mirrors a clean document.
+    manifest_verify_response: dict[str, Any] = {"referenced": 0, "present": 0, "missing": 0}
+    #: last doc_id query param /manifest/verify actually received.
+    last_manifest_verify_doc_id: str = ""
+    #: nexus-5xn3k.3: /index-run/complete response — override to exercise the
+    #: 409 IndexRunVerifyRefused branch (set complete_index_run_conflict=True).
+    complete_index_run_conflict: bool = False
+    #: last bodies POSTed to the 3 index-run routes, for call-site assertions.
+    last_begin_index_run_body: dict[str, Any] = {}
+    last_complete_index_run_body: dict[str, Any] = {}
+    last_fail_index_run_body: dict[str, Any] = {}
+
     @classmethod
     def reset_log(cls) -> None:
         cls.get_ops = []
@@ -126,6 +194,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.list_content_type_count = 0
         cls.show_alias_map = {}
         cls.last_show_follow_alias = None
+        cls.manifest_verify_response = {"referenced": 0, "present": 0, "missing": 0}
+        cls.last_manifest_verify_doc_id = ""
+        cls.complete_index_run_conflict = False
+        cls.last_begin_index_run_body = {}
+        cls.last_complete_index_run_body = {}
+        cls.last_fail_index_run_body = {}
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -281,6 +355,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     {"doc_id": "1.1.1", "position": 1, "chash": CHASH_B,
                      "collection": "knowledge__o__minilm-l6-v2-384__v1"},
                 ],
+            })
+        elif op == "/manifest/verify":
+            # nexus-5xn3k.3: mirrors CatalogRepository.manifestVerify's
+            # {referenced, present, missing} shape. Default clean (0/0/0);
+            # tests override via FakeCatalogHandler.manifest_verify_response.
+            params = self._query_params()
+            resp = dict(FakeCatalogHandler.manifest_verify_response)
+            FakeCatalogHandler.last_manifest_verify_doc_id = params.get("doc_id", "")
+            self._send_json(resp)
+        elif op == "/manifest/verify_all":
+            # nexus-ac4id part 2: mirrors CatalogRepository.manifestVerifyAll's
+            # {"collections": [...], "count": n} shape.
+            self._send_json({
+                "collections": [
+                    {"collection": "docs__o__voyage-context-3__v1",
+                     "referenced": 5, "present": 5, "missing": 0},
+                ],
+                "count": 1,
             })
         elif op == "/collections/list":
             # nexus-8y1tm: full CatalogRepository.collRow() shape (10 keys) —
@@ -503,14 +595,41 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/manifest/purge":
             self._send_json({"deleted": 1})
         elif op == "/manifest/get_many":
-            self._send_json({"manifests": {
+            manifests = {
                 "1.1.1": [{"position": 0, "chash": CHASH_A, "line_start": 1, "line_end": 9}],
-            }})
+            }
+            self._send_json({"manifests": manifests, "count": len(manifests)})
         elif op == "/manifest/docs_for_chashes":
-            # Real server: {"tumblers": [tumbler_string, ...]} (flat list, SELECT DISTINCT)
-            self._send_json({"tumblers": ["1.1.1"]})
+            # Real server: {"tumblers": [tumbler_string, ...], "count": N}
+            # (flat list, SELECT DISTINCT) — count reconciled client-side
+            # since v0.1.61 (nexus-ocf52).
+            tumblers = ["1.1.1"]
+            self._send_json({"tumblers": tumblers, "count": len(tumblers)})
         elif op == "/manifest/backfill":
             self._send_json({"stamped": 7})
+        elif op == "/index-run/begin":
+            # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunBegin.
+            FakeCatalogHandler.last_begin_index_run_body = body
+            self._send_json({"ok": True})
+        elif op == "/index-run/complete":
+            # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunComplete's
+            # 200 {referenced, present, missing, flagged} success shape and
+            # its 409 {error, doc_id, referenced, present, missing,
+            # chunk_count} fail-closed refusal (CatalogRepository.
+            # IndexRunVerifyRefused), toggled via complete_index_run_conflict.
+            FakeCatalogHandler.last_complete_index_run_body = body
+            if FakeCatalogHandler.complete_index_run_conflict:
+                self._send_json({
+                    "error": "completeIndexRun refused", "doc_id": body.get("doc_id", ""),
+                    "referenced": 3, "present": 1, "missing": 2,
+                    "chunk_count": body.get("chunk_count", 0),
+                }, 409)
+            else:
+                self._send_json({"referenced": 2, "present": 2, "missing": 0, "flagged": False})
+        elif op == "/index-run/fail":
+            # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunFail.
+            FakeCatalogHandler.last_fail_index_run_body = body
+            self._send_json({"ok": True})
         elif op == "/owners/upsert":
             self._send_json({"ok": True})
         elif op == "/owners/head_hash":
@@ -1045,11 +1164,10 @@ class TestHttpCatalogClientRoundTrip:
             assert path == "/manifest/get_many"
             batch = body["doc_ids"]
             posts.append(batch)
-            return {
-                "manifests": {
-                    did: [{"chash": CHASH_A, "position": 0}] for did in batch
-                }
+            manifests = {
+                did: [{"chash": CHASH_A, "position": 0}] for did in batch
             }
+            return {"manifests": manifests, "count": len(manifests)}
 
         client._post = _fake_post  # type: ignore[method-assign]
         merged = client.get_manifests(doc_ids)
@@ -1077,17 +1195,66 @@ class TestHttpCatalogClientRoundTrip:
             calls.append(len(body["doc_ids"]))
             if len(calls) == 2:  # second page (doc-1000..doc-1999) fails
                 raise RuntimeError("transient 502")
-            return {
-                "manifests": {
-                    did: [{"chash": CHASH_A, "position": 0}]
-                    for did in body["doc_ids"]
-                }
+            manifests = {
+                did: [{"chash": CHASH_A, "position": 0}]
+                for did in body["doc_ids"]
             }
+            return {"manifests": manifests, "count": len(manifests)}
 
         client._post = _fake_post  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="transient 502"):
             client.get_manifests(doc_ids)
         assert calls == [1000, 1000]  # stopped at the failing page
+
+    def test_get_manifests_missing_count_raises(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # nexus-b9puj: the engine emits `count` unconditionally (floor >=
+        # v0.1.61) — a response without it means a field-stripping hop
+        # interposed, so the client refuses to merge an unverifiable page.
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            return {"manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]}}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="count"):
+            client.get_manifests(["1.1.1"])
+
+    def test_get_manifests_fewer_than_requested_with_honest_count_is_legal(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # substantive-critic pin (ocf52 wave, 2026-08-02): `count` is the
+        # size of the RETURNED map (CatalogHandler.java builds it from
+        # manifests.size() at serialization), NOT the size of the requested
+        # batch — doc_ids with no manifest rows are legitimately absent.
+        # A "simplification" that compares count against len(batch) would
+        # pass every 1:1 test in this file and break six production call
+        # sites the first time a batch contains a manifest-less doc. This
+        # test is the tripwire: fewer-than-requested + honest count must
+        # NOT raise and must return exactly what the engine sent.
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            return {
+                "manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]},
+                "count": 1,
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        result = client.get_manifests(["1.1.1", "1.1.2"])
+        assert set(result) == {"1.1.1"}
+
+    def test_get_manifests_mismatched_count_raises(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # A truncated page (fewer manifests than the server's own count)
+        # must never be merged silently.
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            return {
+                "manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]},
+                "count": 2,
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="doc_ids"):
+            client.get_manifests(["1.1.1", "1.1.2"])
 
     def test_resolve_many_pages_over_1000_doc_ids(
         self, client: HttpCatalogClient
@@ -1195,6 +1362,104 @@ class TestHttpCatalogClientRoundTrip:
         import pytest as _pytest
         with _pytest.raises(ValueError, match="limit must be > 0"):
             client.manifest_orphans(384, limit=0)
+
+    # ── RUNFENCE (nexus-5xn3k.3) round trips ─────────────────────────────
+
+    def test_manifest_verify_returns_counts(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.reset_log()
+        FakeCatalogHandler.manifest_verify_response = {"referenced": 3, "present": 1, "missing": 2}
+        result = client.manifest_verify("1.1.1")
+        assert result == {"referenced": 3, "present": 1, "missing": 2}
+        assert FakeCatalogHandler.last_manifest_verify_doc_id == "1.1.1"
+
+    def test_manifest_verify_all_returns_collections_and_count(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        result = client.manifest_verify_all()
+        assert result["count"] == 1
+        assert result["collections"][0]["referenced"] == 5
+
+    def test_begin_index_run_posts_all_four_fields(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.reset_log()
+        client.begin_index_run("1.1.1", "abc123", "run-1", "docs__o__v1")
+        assert FakeCatalogHandler.last_begin_index_run_body == {
+            "doc_id": "1.1.1", "content_hash": "abc123",
+            "run_id": "run-1", "collection": "docs__o__v1",
+        }
+
+    def test_complete_index_run_returns_counts_and_flagged(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        FakeCatalogHandler.reset_log()
+        result = client.complete_index_run("1.1.1", "abc123", 2)
+        assert result == {"referenced": 2, "present": 2, "missing": 0, "flagged": False}
+
+    def test_complete_index_run_409_raises_typed_exception_with_counts(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        from nexus.errors import IndexRunVerifyRefused
+
+        FakeCatalogHandler.reset_log()
+        FakeCatalogHandler.complete_index_run_conflict = True
+        try:
+            with pytest.raises(IndexRunVerifyRefused) as excinfo:
+                client.complete_index_run("1.1.1", "abc123", 3)
+            exc = excinfo.value
+            assert exc.doc_id == "1.1.1"
+            assert exc.referenced == 3
+            assert exc.present == 1
+            assert exc.missing == 2
+            assert exc.chunk_count == 3
+            # nexus-5xn3k.3 review item 5: the counts summary is ALWAYS in
+            # the message; the fake's server-supplied "error" string is
+            # APPENDED as supplementary detail, never a replacement.
+            message = str(exc)
+            assert "referenced=3" in message
+            assert "present=1" in message
+            assert "missing=2" in message
+            assert "claimed_chunk_count=3" in message
+            assert "completeIndexRun refused" in message
+            # the fake's {"error": "completeIndexRun refused"} body is
+            # appended verbatim as supplementary engine detail, not swapped
+            # in for the counts summary above.
+            assert "(engine: completeIndexRun refused)" in message
+        finally:
+            FakeCatalogHandler.complete_index_run_conflict = False
+
+    def test_fail_index_run_posts_doc_id_and_error(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.reset_log()
+        client.fail_index_run("1.1.1", "MinerU OOM")
+        assert FakeCatalogHandler.last_fail_index_run_body == {
+            "doc_id": "1.1.1", "error": "MinerU OOM",
+        }
+
+    def test_service_catalog_writer_dispatches_index_run_ops_end_to_end(
+        self, fake_server: str,
+    ) -> None:
+        """nexus-kgos1 trap, at the call site: a REAL _ServiceCatalogWriter
+        wrapping a REAL HttpCatalogClient (never a MagicMock) must dispatch
+        the 3 new write ops through to the wire — proving both that they are
+        in the CATALOG_WRITE_OPS whitelist (an omission raises AttributeError
+        here, not in some unit test of the whitelist tuple alone) AND that
+        the whole call path (attribute resolution -> HTTP POST -> fake
+        server) actually works.
+        """
+        from nexus.catalog.factory import _ServiceCatalogWriter
+
+        FakeCatalogHandler.reset_log()
+        client = HttpCatalogClient(base_url=fake_server, _token="test_tok")
+        writer = _ServiceCatalogWriter(client)
+        try:
+            writer.begin_index_run("1.1.1", "abc123", "run-1", "docs__o__v1")
+            assert FakeCatalogHandler.last_begin_index_run_body["doc_id"] == "1.1.1"
+
+            result = writer.complete_index_run("1.1.1", "abc123", 2)
+            assert result["missing"] == 0
+
+            writer.fail_index_run("1.1.1", "boom")
+            assert FakeCatalogHandler.last_fail_index_run_body["error"] == "boom"
+        finally:
+            writer.close()
 
     def test_docs_for_chashes_returns_dict_shape(self, client: HttpCatalogClient) -> None:
         # nexus-h8rf6.3: the wire response is {"tumblers": [tumbler_string, ...]}

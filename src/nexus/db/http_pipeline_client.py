@@ -54,6 +54,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import structlog
 
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
@@ -62,9 +63,19 @@ _log = structlog.get_logger(__name__)
 
 #: A running/resuming pipeline whose heartbeat is older than this is
 #: considered crashed (create() returns "resuming"; the orphan scan flags
-#: it). Mirrors the server-side threshold in PipelineRepository — the
-#: server judges create()/staleness against its own clock; this constant
-#: serves the orphan scan's client half.
+#: it). nexus-lcmbp fix-list #6: MUST stay numerically identical to the
+#: Java analog, ``PipelineRepository.STALE_THRESHOLD``
+#: (``Duration.ofMinutes(5)``,
+#: service/src/main/java/dev/nexus/service/db/PipelineRepository.java) —
+#: the server judges create()/staleness (and stamps
+#: ``stale_threshold_seconds`` on a 409 ``conflict_running`` body) against
+#: its own clock with ITS constant; this constant serves the orphan scan's
+#: client half AND is what a caller compares
+#: ``PipelineConflictRunning.stale_threshold_seconds`` against. A drift
+#: here would not fail loudly — it would silently make one side's
+#: staleness judgment disagree with the other's. Pinned by
+#: ``tests/db/test_pipeline_fake_engine_parity.py::
+#: test_stale_threshold_agrees_across_client_and_wire``.
 STALE_THRESHOLD = timedelta(minutes=5)
 
 #: Buffered pages per content_hash before an eager flush (reads also flush).
@@ -89,6 +100,51 @@ def _decode_embedding(value: str | None) -> bytes | None:
     return base64.b64decode(value)
 
 
+class PipelineConflictRunning(RuntimeError):
+    """POST /v1/pipeline/create hit HTTP 409 ``conflict_running`` (nexus-lcmbp).
+
+    The engine refuses a ``create()`` retry against a ``running`` row whose
+    heartbeat is still fresh (younger than ``stale_threshold_seconds``) —
+    see ``PipelineRepository.create`` / ``PipelineConflictException`` on the
+    Java side. Prior client behaviour treated the matching 200 ``{"status":
+    "skip"}`` response identically to every other short-circuit (including a
+    genuinely completed run), so ``nx index`` exited ``rc=0`` having written
+    zero chunks — a silent no-op reported as success, and the SAME retry
+    would become a loud ``RuntimeError`` once the row aged past the stale
+    threshold. This type makes the fresh-heartbeat case loud too: callers
+    (``pipeline_stages.pipeline_index_pdf`` and, through it, ``nx index``)
+    let it propagate rather than translating it into a chunk count, so a
+    stranded row is never mistaken for a successful re-index.
+
+    Subclasses :class:`RuntimeError` deliberately: every ``nx index``
+    command entry point already converts an escaping ``RuntimeError`` into a
+    ``click.ClickException`` (see ``commands/index.py``), so no CLI wiring
+    is required for this to surface as a non-zero exit printing the message
+    below — no separate except clause needed there.
+    """
+
+    def __init__(
+        self,
+        error: str,
+        *,
+        content_hash: str,
+        started_at: str,
+        heartbeat_age_seconds: int,
+        stale_threshold_seconds: int,
+        remedy: str,
+    ) -> None:
+        message = error
+        if remedy and remedy not in error:
+            message = f"{error} (remedy: {remedy})"
+        super().__init__(message)
+        self.error = error
+        self.content_hash = content_hash
+        self.started_at = started_at
+        self.heartbeat_age_seconds = heartbeat_age_seconds
+        self.stale_threshold_seconds = stale_threshold_seconds
+        self.remedy = remedy
+
+
 class HttpPipelineDB(RefreshableHttpStoreMixin):
     """Thin, write-buffering HTTP client for ``/v1/pipeline``."""
 
@@ -105,11 +161,50 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
     # ── pipeline lifecycle ──────────────────────────────────────────────────
 
     def create_pipeline(self, content_hash: str, pdf_path: str, collection: str) -> str:
-        result = self._post("/v1/pipeline/create", {
-            "content_hash": content_hash,
-            "pdf_path": str(pdf_path),
-            "collection": collection,
-        })
+        """Start (or resume) a pipeline run.
+
+        Raises :class:`PipelineConflictRunning` (never returns a "skip"
+        that could be mistaken for a completed run) when the engine
+        answers 409 ``conflict_running`` — a retry against a ``running``
+        row whose heartbeat is still fresh. Not retried: 409 is a terminal
+        business-logic refusal, outside both retry axes in
+        ``RefreshableHttpStoreMixin`` (the endpoint-refresh axis only
+        treats 401 as retryable; the gateway axis only treats
+        502/503/504).
+        """
+        try:
+            result = self._post("/v1/pipeline/create", {
+                "content_hash": content_hash,
+                "pdf_path": str(pdf_path),
+                "collection": collection,
+            })
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                try:
+                    body = exc.response.json()
+                except ValueError:
+                    body = {}
+                if body.get("status") == "conflict_running":
+                    # A malformed body (e.g. an explicit JSON null on a
+                    # numeric field, tripping `int(None)`) must fall
+                    # through to the bare `raise` below — re-raising the
+                    # ORIGINAL httpx.HTTPStatusError — rather than escape
+                    # as an unrelated TypeError that hides the real 409.
+                    try:
+                        heartbeat_age_seconds = int(body.get("heartbeat_age_seconds", 0))
+                        stale_threshold_seconds = int(body.get("stale_threshold_seconds", 0))
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        raise PipelineConflictRunning(
+                            body.get("error", "pipeline is already running"),
+                            content_hash=body.get("content_hash", content_hash),
+                            started_at=body.get("started_at", ""),
+                            heartbeat_age_seconds=heartbeat_age_seconds,
+                            stale_threshold_seconds=stale_threshold_seconds,
+                            remedy=body.get("remedy", ""),
+                        ) from exc
+            raise
         return result["status"]
 
     def get_pipeline_state(self, content_hash: str) -> dict[str, Any] | None:
@@ -144,7 +239,37 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         self._post("/v1/pipeline/complete", {"content_hash": content_hash})
 
     def mark_failed(self, content_hash: str, error: str = "") -> None:
-        self.flush(content_hash)
+        """Mark *content_hash* failed with *error* as the audit record.
+
+        Flushing pending writes first is still attempted (nexus-146xx.16
+        intent: buffered pages should land before the terminal state when
+        that's possible) but is best-effort here — never load-bearing. When
+        the ORIGINAL failure came FROM a flush, flush()'s own except block
+        (the buffer-restoring BaseException handler in flush) has already
+        restored the failing pages into the buffer,
+        so this cleanup flush would otherwise re-POST the IDENTICAL payload
+        and hit the IDENTICAL error, raising before /fail is ever issued
+        (nexus-ptctu: the pipeline row strands 'running' with no error, and
+        the caller sees the cleanup failure instead of the original one).
+        The failure record is the thing that must survive; buffered pages
+        are not — so a failing cleanup flush is logged and swallowed, and
+        /fail is always ATTEMPTED with the caller's ORIGINAL error text.
+        The /fail POST itself can still fail and raises to the caller —
+        callers on an error path must wrap this call so their original
+        exception propagates regardless (pipeline_stages does; see
+        nexus-rewgw). Note the asymmetry with flush(): flush restores its
+        buffer on BaseException, while the cleanup wrapper here catches
+        only Exception — a KeyboardInterrupt during cleanup propagates
+        immediately by design (control-flow exceptions are not swallowed).
+        """
+        try:
+            self.flush(content_hash)
+        except Exception:  # noqa: BLE001 — boundary catch: the cleanup flush is best-effort, never load-bearing; swallow-and-log so /fail is always attempted with the caller's ORIGINAL error
+            _log.warning(
+                "pipeline_mark_failed_cleanup_flush_failed",
+                content_hash=content_hash,
+                exc_info=True,
+            )
         self._post("/v1/pipeline/fail", {"content_hash": content_hash, "error": error})
 
     # ── pages ───────────────────────────────────────────────────────────────

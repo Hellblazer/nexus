@@ -186,3 +186,108 @@ jobs:
             exit 1
           fi
           tests/e2e/local-service-gate.sh
+
+      - name: Ungated integration files (nexus-5opzu)
+        # The five tests/db files with NO other automated gate anywhere —
+        # one of which (test_i711w_gap_xfails.py) holds the SOLE repo-wide
+        # pins on five service-catalog contracts, whose strict xfails went
+        # stale unseen for a session (6 XPASS(strict), 2026-07-31). They
+        # cannot join CI's seam job (it provisions Docker PG; these want
+        # local binaries via pg_bin_dir()), but THIS job already exports
+        # NEXUS_PG_BIN at the bundle and the gate above just built the dev
+        # jar — so they run here, sequentially (one pytest at a time).
+        # Hal call 2026-08-02 on nexus-5opzu: option (a), scheduled gate;
+        # per-contract hermetic splits stay opportunistic.
+        run: |
+          set -euo pipefail
+          uv run pytest \
+            tests/db/test_i711w_gap_xfails.py \
+            tests/db/test_http_catalog_integration.py \
+            tests/db/test_indexer_seam_b_integration.py \
+            tests/db/test_frecency_enehl_integration.py \
+            tests/db/test_5xn3k_runfence_gate.py \
+            -o addopts="" -m integration -q -rs --junit-xml=ungated-5opzu.xml
+
+      - name: Non-vacuity — every ungated file actually ran (nexus-5opzu)
+        # A gate that skip-passes when its dependency is absent must carry a
+        # non-vacuity assert (CLAUDE.md § Testing). Each of the four files
+        # must contribute >= 1 non-skipped testcase; a jar/PG-prereq skip
+        # sweep reads as a broken gate, not a pass.
+        run: |
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          FILES = {
+              "test_i711w_gap_xfails",
+              "test_http_catalog_integration",
+              "test_indexer_seam_b_integration",
+              "test_frecency_enehl_integration",
+              # nexus-5xn3k.7: the RUNFENCE phase-exit falsification gate —
+              # same never-otherwise-selected file shape (its own review's
+              # Critical #1, 2026-08-02). Reachability caveat nexus-5a8ic
+              # applies to this whole leg until a release promotes it.
+              "test_5xn3k_runfence_gate",
+          }
+          root = ET.parse("ungated-5opzu.xml").getroot()
+          ran: dict[str, int] = {f: 0 for f in FILES}
+          for case in root.iter("testcase"):
+              for f in FILES:
+                  if f in (case.get("classname") or ""):
+                      if case.find("skipped") is None:
+                          ran[f] += 1
+          bad = [f for f, n in ran.items() if n == 0]
+          print("non-skipped testcases per file:", ran)
+          if bad:
+              print(f"VACUOUS: {bad} contributed zero non-skipped tests — prereq skip sweep, gate is broken", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Slow-marked tests (nexus-s6dei)
+        # `-m slow` was selected by ZERO commands repo-wide before this leg —
+        # a slow-marked test was operationally deleted (no output, no skip
+        # line, nothing to notice its absence), while three docstrings
+        # falsely claimed CI or the release shakedown already ran it. This
+        # leg is the fix: it reuses the dev jar + PG bundle + bge-768 ONNX
+        # this job already built/primed above, so it costs nothing beyond
+        # the few extra minutes the tests take (CI-cost discipline: no new
+        # runner, piggyback the existing nightly schedule).
+        #
+        # test_mineru_path_preserves_formulas is DESELECTED here: MinerU's
+        # first invocation downloads ~2-3GB of model weights with no HF
+        # cache in this job, and its coverage strategy (shakedown with the
+        # indexing steps' `|| true` removed, vs. joining this weekly/nightly
+        # -m slow run) is nexus-6xkdu's decision, not this bead's. Do not
+        # fold it in here without also adding the HF cache step ci.yml
+        # already carries for it.
+        #
+        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 6 (floor=6); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
+        run: |
+          set -euo pipefail
+          uv run pytest \
+            -o addopts="" -m slow -q -rs \
+            --deselect tests/test_pdf_subsystem.py::TestFormulaPreservationOnRealPdf::test_mineru_path_preserves_formulas \
+            --junit-xml=slow-s6dei.xml
+
+      - name: Non-vacuity — slow tests actually ran (nexus-s6dei)
+        # Same shape as the nexus-5opzu guard above: a gate that skip-passes
+        # on a missing prerequisite reads as a broken gate, not a pass.
+        # Floor pinned to the 6 currently slow-marked, non-MinerU tests;
+        # bump consciously (same change that adds the new slow test) if it
+        # ever needs to move.
+        run: |
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          FLOOR = 6
+          root = ET.parse("slow-s6dei.xml").getroot()
+          ran = 0
+          for case in root.iter("testcase"):
+              if case.find("skipped") is None:
+                  ran += 1
+          print(f"non-skipped slow testcases: {ran} (floor={FLOOR})")
+          if ran < FLOOR:
+              print(f"VACUOUS: only {ran} non-skipped slow testcases ran, floor is {FLOOR} — prereq skip sweep, gate is broken", file=sys.stderr)
+              sys.exit(1)
+          PY

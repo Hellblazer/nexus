@@ -214,6 +214,15 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "backs HttpCatalogClient.resync_chunk_count_cache() via raw _post "
         "— unit-tested against a mocked _post, not the live fake server"
     ),
+    "/owners/sweep_next_seq_drift": (
+        "admin one-shot converge verb (nexus-0ehwe item 5, engine commit "
+        "55615902) with NO Python client method yet — the live-cloud "
+        "invocation is an operator relay against the engine directly, and "
+        "the route is exercised by the Java-side NextSeqSweepTest + "
+        "CatalogHandlerSweepNextSeqDriftTest, not this harness; if a "
+        "Python client method is ever added, delete this entry and fake "
+        "the route"
+    ),
     "/import/chunk": (
         "ETL bulk-import path, formerly called via raw client._post() from "
         "the since-deleted src/nexus/db/t2/catalog_etl.py (nexus-i711w "

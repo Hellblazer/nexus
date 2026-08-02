@@ -1383,46 +1383,54 @@ class TestCheckDanglingManifests:
     healthy: a chunk_count, a manifest full of chashes, and nothing behind
     them. `nx catalog reconcile` covers the adjacent shape (chunk_count>0 with
     an EMPTY manifest, GH #1397) but not this one, so it was undetectable.
+
+    RE-ARMED (nexus-5xn3k.6, closes nexus-ac4id): the check no longer walks
+    T3 client-side at all (no more ``t3.list_collections()`` /
+    ``list_chunks_with_metadata``) — it is ONE ``manifest_verify_all()``
+    engine call, tenant-scoped, returning per-collection
+    referenced/present/missing aggregates directly. The prior fixtures here
+    mocked the T3-shape read that no longer exists; this class now mocks
+    the catalog reader's ``manifest_verify_all()`` return/raise instead.
     """
 
-    def _t3(self, per_collection: dict[str, list[str]]):
-        class _T3:
-            def list_collections(self):
-                return [type("C", (), {"name": n})() for n in per_collection]
+    def _cat(self, *, collections: list[dict] | None = None, raise_status: int | None = None):
+        import httpx
 
-            def list_chunks_with_metadata(self, name, *, fields=()):
-                for i, ch in enumerate(per_collection.get(name, [])):
-                    yield f"{name}-{i}", {"chunk_text_hash": ch}
-        return _T3()
-
-    def _cat(self, referenced: dict[str, set[str]]):
         class _Cat:
-            def chashes_for_collection(self, name):
-                return referenced.get(name, set())
+            def manifest_verify_all(self) -> dict:
+                if raise_status is not None:
+                    request = httpx.Request("GET", "https://engine.example/v1/catalog/manifest/verify_all")
+                    response = httpx.Response(raise_status, request=request)
+                    raise httpx.HTTPStatusError(
+                        f"{raise_status} error", request=request, response=response,
+                    )
+                rows = collections or []
+                return {"collections": rows, "count": len(rows)}
         return _Cat()
 
-    def _run(self, monkeypatch, referenced, present):
+    def _run(self, monkeypatch, cat):
         import nexus.health as h
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: self._cat(referenced), raising=False,
-        )
-        monkeypatch.setattr(
-            "nexus.db.make_t3", lambda *a, **k: self._t3(present), raising=False,
+            lambda *a, **k: cat, raising=False,
         )
         return h._check_dangling_manifests()[0]
 
     def test_dangling_chash_is_reported(self, monkeypatch) -> None:
-        live, dead = "a" * 64, "b" * 64
-        r = self._run(monkeypatch, {"code__x": {live, dead}}, {"code__x": [live]})
+        cat = self._cat(collections=[
+            {"collection": "code__x", "referenced": 2, "present": 1, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
         assert r.ok is False and r.warn is True
         assert "code__x" in r.detail
         assert "1 of 2" in r.detail, r.detail
         assert any("reconcile" in f for f in r.fix_suggestions)
 
     def test_fully_resolvable_manifest_is_clean(self, monkeypatch) -> None:
-        live = "a" * 64
-        r = self._run(monkeypatch, {"code__x": {live}}, {"code__x": [live]})
+        cat = self._cat(collections=[
+            {"collection": "code__x", "referenced": 1, "present": 1, "missing": 0},
+        ])
+        r = self._run(monkeypatch, cat)
         assert r.ok is True
         assert "none" in r.detail
 
@@ -1431,10 +1439,143 @@ class TestCheckDanglingManifests:
         never as a clean bill of health. A check whose silent-pass mode is
         'found nothing to check' is the failure mode this whole class is about.
         """
-        r = self._run(monkeypatch, {}, {})
+        cat = self._cat(collections=[])
+        r = self._run(monkeypatch, cat)
         assert r.ok is True
         assert "skipped" in r.detail, r.detail
         assert "none (" not in r.detail
+
+    def test_check_is_not_disabled_on_http_vector_client_box(self, monkeypatch) -> None:
+        """nexus-ac4id regression, direct assert: the check used to crash on
+        ``t3.list_collections()`` returning dicts (the HttpVectorClient
+        shape) and render a visible DISABLED warn. manifest_verify_all()
+        never touches T3 collection listing at all, so this class of crash
+        structurally cannot recur — assert the DISABLED/ac4id off-switch
+        text is gone from a normal run."""
+        cat = self._cat(collections=[
+            {"collection": "code__x", "referenced": 1, "present": 1, "missing": 0},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "DISABLED" not in r.detail
+        assert "ac4id" not in r.detail
+
+    def test_engine_predating_fence_renders_skipped_with_warning(self, monkeypatch) -> None:
+        """memo §3.4's fail-open+WARNING contract, applied to the doctor
+        sweep's own read: a 404 (pre-fence engine) must never crash `nx
+        doctor` and must never render as a clean pass — SKIPPED + a soft
+        warning (⚠), same shape as the old DISABLED interim."""
+        cat = self._cat(raise_status=404)
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+        # GREP-LEVEL PARITY tripwire (.6 review (d)): fresh-install-mvv.sh
+        # allowlists this warn by grepping for EXACTLY this substring —
+        # rewording health.py's detail without updating the script's
+        # ALLOWLIST_REGEX reds the MVV at battery time. This pins the pair
+        # at unit-test speed instead. Both self-destruct at the v0.1.62
+        # floor bump (the 404 branch stops firing on a virgin box).
+        assert "engine predates the index-run fence" in r.detail
+
+    def test_other_transport_failure_renders_skipped_with_warning_not_clean(self, monkeypatch) -> None:
+        cat = self._cat(raise_status=500)
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+
+    def test_catalog_unavailable_degrades_to_plain_skip(self, monkeypatch) -> None:
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: None, raising=False,
+        )
+        r = h._check_dangling_manifests()[0]
+        assert r.ok is True
+        assert "no catalog" in r.detail
+
+
+class TestCheckStaleIndexingRuns:
+    """nexus-5xn3k.6 bead-text amendment: documents stranded in
+    index_state='indexing' beyond a threshold. Distinct axis from
+    manifest_verify_all — a fence that never cleared, not a missing-chunk
+    aggregate.
+    """
+
+    def _entry(self, *, index_state, index_started_at="", source_uri="", tumbler=""):
+        return type("E", (), {
+            "index_state": index_state,
+            "index_started_at": index_started_at,
+            "source_uri": source_uri,
+            "tumbler": tumbler,
+        })()
+
+    def _cat(self, entries):
+        class _Cat:
+            def all_documents(self, limit=0):
+                return list(entries)
+        return _Cat()
+
+    def _run(self, monkeypatch, entries):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(entries), raising=False,
+        )
+        return h._check_stale_indexing_runs()[0]
+
+    def _iso_hours_ago(self, hours: float) -> str:
+        from datetime import UTC, datetime, timedelta
+        return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+
+    def test_stale_indexing_document_is_reported(self, monkeypatch) -> None:
+        entries = [self._entry(
+            index_state="indexing",
+            index_started_at=self._iso_hours_ago(10),
+            source_uri="file:///a.pdf",
+        )]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "file:///a.pdf" in r.detail
+        assert "1 document(s)" in r.detail
+
+    def test_recent_indexing_document_is_not_stale(self, monkeypatch) -> None:
+        entries = [self._entry(
+            index_state="indexing",
+            index_started_at=self._iso_hours_ago(0.5),
+            source_uri="file:///a.pdf",
+        )]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "none" in r.detail
+
+    def test_complete_document_is_never_flagged(self, monkeypatch) -> None:
+        entries = [self._entry(
+            index_state="complete",
+            index_started_at=self._iso_hours_ago(1000),
+            source_uri="file:///a.pdf",
+        )]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "none" in r.detail
+
+    def test_checked_zero_is_skipped_not_clean(self, monkeypatch) -> None:
+        """NON-VACUITY: an engine that predates the fence reports
+        index_state=None on every row; that must never render as a clean
+        'none (0 checked)' pass."""
+        entries = [self._entry(index_state=None)]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "skipped" in r.detail
+        assert "none (" not in r.detail
+
+    def test_catalog_unavailable_degrades_to_skip(self, monkeypatch) -> None:
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: None, raising=False,
+        )
+        r = h._check_stale_indexing_runs()[0]
+        assert r.ok is True
+        assert "no catalog" in r.detail
 
 
 # ── nexus-0ehwe item 4: tumbler allocator drift ──────────────────────────────
@@ -1464,6 +1605,70 @@ class TestCheckNextSeqDrift:
             lambda *a, **k: self._cat(owners, tumblers), raising=False,
         )
         return h._check_next_seq_drift()[0]
+
+    def test_corpus_walked_once_regardless_of_owner_count(self, monkeypatch) -> None:
+        """The quadratic-scan tripwire (nexus-ohxzu, 2026-08-02).
+
+        The per-owner helper re-walked all_documents PER OWNER — 65 owners x
+        ~22k docs = ~1.4M records over the managed API, measured at 218s of a
+        224s doctor. The single-pass rewrite computes every owner's max in one
+        walk; this pins call-count == 1 so the loop can never regress back
+        inside the owner iteration.
+        """
+        owners = [
+            {"tumbler_prefix": f"1.{i}", "next_seq": 1} for i in range(1, 26)
+        ]
+        cat = self._cat(owners, ["1.1.1", "1.25.1"])
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        h._check_next_seq_drift()
+        assert cat.all_documents.call_count == 1, (
+            f"all_documents called {cat.all_documents.call_count}x for "
+            f"{len(owners)} owners — the O(owners x corpus) scan is back"
+        )
+
+    def test_multiple_owners_disambiguated_in_one_shared_walk(self, monkeypatch) -> None:
+        """Cross-owner correctness under the shared-dict pass (critic,
+        e265d1b8 review): one drifted owner and one clean owner computed from
+        the SAME walk must each report correctly — bucket contamination
+        between owners is the regression class the per-owner architecture
+        could not have and this one can.
+        """
+        import nexus.health as h
+        r = self._run(
+            monkeypatch,
+            [
+                {"tumbler_prefix": "1.12", "next_seq": 3},   # drifted (high=7)
+                {"tumbler_prefix": "1.14", "next_seq": 9},   # clean  (high=9)
+            ],
+            ["1.12.1", "1.12.7", "1.14.2", "1.14.9"],
+        )
+        assert r.ok is False and r.warn is True
+        assert "1.12" in r.detail and "highest child=7" in r.detail
+        assert "1.14" not in r.detail, (
+            f"clean owner leaked into the drift report: {r.detail}"
+        )
+
+    def test_scan_failure_retries_once_then_skips_loudly(self, monkeypatch) -> None:
+        """The shared walk's blast radius (reviewer Important, e265d1b8): a
+        mid-walk failure blanks drift visibility for EVERY owner, so the
+        check retries once and the concession names the scope. Pins
+        call_count == 2 (exactly one retry) and the all-owners detail text.
+        """
+        import nexus.health as h
+        cat = MagicMock()
+        cat.list_owners.return_value = [{"tumbler_prefix": "1.12", "next_seq": 3}]
+        cat.all_documents.side_effect = RuntimeError("mid-walk blip")
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        r = h._check_next_seq_drift()[0]
+        assert r.ok is True and "ANY owner" in r.detail
+        assert cat.all_documents.call_count == 2
 
     def test_drifted_owner_is_named(self, monkeypatch) -> None:
         r = self._run(

@@ -4,6 +4,8 @@ Project guidance for AI coding agents working in this repository. `CLAUDE.md` is
 
 Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledge management. Published on PyPI as `conexus`; the CLI entry point is `nx` (`src/nexus/` is the package).
 
+**Guidance precedence:** workflow routing — skills-first, agent dispatch, storage-tier checks, review paths, orchestration — is owned by the conexus plugin's injected guidance (`using-nx-skills` at SessionStart, the subagent-start preflight, the orchestration skill). This file and any personal CLAUDE.md yield to the plugin on workflow; they carry repo facts, hot rules, and durable authorizations. A restriction here that contradicts the plugin's workflow layer is a defect to surface, not a tiebreak to silently win.
+
 ## Quick start
 
 ```bash
@@ -14,25 +16,25 @@ uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
 
-Unit tests use `chromadb.EphemeralClient` + bundled ONNX MiniLM — no API keys or network.
+Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/conftest.py`) or skip.
 
 ## Architecture at a glance
 
-Three storage tiers, by lifetime:
+Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode** (RDR-155 P4b, 2026-07-25 — dependency dropped, absent from `uv.lock`):
 
-- **T1** — `chromadb` Ephemeral or per-session HTTP server. Session scratch (`nx scratch`).
-- **T2** — seven domain stores behind a `T2Database` facade. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue. **Substrate: MIGRATING SQLite → PG (directive 2026-07-18, see Hot rules). The SQLite+FTS5 implementation is the migration SOURCE, not the architecture.**
-- **T3** — `chromadb.PersistentClient` + local ONNX (local mode) **or** `chromadb.CloudClient` + Voyage (cloud mode). Permanent knowledge (`nx store`, `nx search`).
+- **T1** — service-backed session scratch (`HttpScratchStore`; `nx scratch`). `NX_T1_ISOLATED=1` runs an in-process `InMemoryVectorClient` instead.
+- **T2** — eight domain stores behind a `T2Database` facade, all HTTP clients over the engine's PG tables. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue, DEVONthink highlights.
+- **T3** — `HttpVectorClient` over the nexus-service `/v1/vectors` (pgvector) in both modes: local = bundled PG17+pgvector, cloud = managed service + Voyage. Permanent knowledge (`nx store`, `nx search`).
 
 ### T1 sub-agent contract (RDR-105)
 
-T1 is the per-MCP-process "working memory" tier. T2 is the cross-process shared bus. Discovery is hybrid: env passdown for MCP-dispatched subprocesses, single-writer `~/.config/nexus/t1_addr.<claude_pid>` for Claude-Code-spawned siblings.
+T1 is service-backed and session-id scoped (`resolve_active_session_id()` / `current_session()`), leased through `daemon/t1_lease.py` (RDR-149 P4) and published by the MCP lifespan. T2 is the cross-process shared bus, over PG via the engine (multi-process-safe by construction, not SQLite+WAL).
 
 - **Agent-tool sub-agents** (in-process Task dispatches) share T1 with their parent via the parent's MCP scratch tool. No separate T1 instance.
-- **`claude -p` sub-processes default to `owned`** mode: their MCP spawns its own session-scoped chroma + writes its own `~/.config/nexus/t1_addr.<own_claude_pid>` file. Sealed from the parent; internally consistent for the subprocess's own Bash tools and sub-agents.
-- **`claude -p` sub-processes that genuinely need parent-T1 visibility** opt in via `share_t1=True` at dispatch time. Subprocess inherits `NX_T1_HOST` / `NX_T1_PORT` and connects to the parent's chroma via HTTP.
-- **Stateless one-shot operators** (`ephemeral=True`) get an in-process `EphemeralClient` only (no chroma spawn). The operator-dispatch default (`nx_answer`, `nx_tidy`, plan-runner inline planning).
-- **Cross-process findings between sibling sub-processes go to T2** (`memory_put`). T1 is process-local by design; T2 is the shared bus (SQLite + WAL is multi-process-safe).
+- **`claude -p` sub-processes default to `owned`** mode: their MCP resolves its own session and leases its own T1 scope. Sealed from the parent; internally consistent for the subprocess's own Bash tools and sub-agents.
+- **`claude -p` sub-processes that genuinely need parent-T1 visibility** opt in via `share_t1=True` at dispatch time. Subprocess inherits `NX_T1_HOST` / `NX_T1_PORT` and connects to the parent's `HttpScratchStore` over HTTP.
+- **Stateless one-shot operators** (`ephemeral=True`) get an in-process `InMemoryVectorClient` only (no service lease). The operator-dispatch default (`nx_answer`, `nx_tidy`, plan-runner inline planning).
+- **Cross-process findings between sibling sub-processes go to T2** (`memory_put`). T1 is process-local by design; T2 is the shared bus (PG over the engine, multi-process-safe).
 - **Removed env name:** the legacy `NEXUS_SKIP_T1=1` alias was REMOVED at 6.5.2 (promised gone in 5.0). It is recognized-but-IGNORED with a one-shot warning; use `NX_T1_ISOLATED=1`.
 
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
@@ -60,18 +62,18 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 
 ## External service limits — check before every call
 
-The single source of truth is `src/nexus/db/chroma_quotas.py` (the `QUOTAS` dataclass and `QuotaValidator`). Violating any of these at runtime produces `ChromaError: Quota exceeded`.
+The single source of truth is `src/nexus/db/limits.py` (`QUOTAS: ServiceLimits`). `chroma_quotas.py` and its `QuotaValidator`/`ChromaError` were DELETED at RDR-155 P4b P3 with no replacement — these are generic PG-serving-path ceilings now, Chroma provenance historical only (see the module's own docstring). Only `SAFE_CHUNK_BYTES` and `MAX_QUERY_RESULTS` got module-level aliases; the rest are `QUOTAS.<FIELD>`.
 
 | Operation | Limit | Constant |
 |---|---|---|
-| `coll.get(limit=N)` | N ≤ 300 | `_PAGE` |
-| `coll.query(n_results=N)` | N ≤ 300 | `MAX_QUERY_RESULTS` |
-| `coll.upsert/add(ids=[...])` | ≤ 300 records | `MAX_RECORDS_PER_WRITE` |
-| Concurrent reads / writes per coll | ≤ 10 each | `MAX_CONCURRENT_READS/WRITES` |
-| Document size | ≤ 16384 bytes | `MAX_DOCUMENT_BYTES` (use `SAFE_CHUNK_BYTES = 12288`) |
-| Query string | ≤ 256 chars | `MAX_QUERY_STRING_CHARS` |
-| `where` predicates | ≤ 8 top-level | `MAX_WHERE_PREDICATES` |
-| Embedding dims | ≤ 4096 | `MAX_EMBEDDING_DIMENSIONS` |
+| paging (`limit=N`) | N ≤ 300 | `MAX_QUERY_RESULTS` |
+| query (`n_results=N`) | N ≤ 300 | `MAX_QUERY_RESULTS` |
+| batch write (`ids=[...]`) | ≤ 300 records | `QUOTAS.MAX_RECORDS_PER_WRITE` |
+| Concurrent reads / writes per collection | ≤ 10 each | `QUOTAS.MAX_CONCURRENT_READS/WRITES` |
+| Document size | ≤ 16384 bytes | `QUOTAS.MAX_DOCUMENT_BYTES` (use `SAFE_CHUNK_BYTES = 12288`) |
+| Query string | ≤ 256 chars | `QUOTAS.MAX_QUERY_STRING_CHARS` |
+| `where` predicates | ≤ 8 top-level | `QUOTAS.MAX_WHERE_PREDICATES` |
+| Embedding dims | ≤ 4096 | `QUOTAS.MAX_EMBEDDING_DIMENSIONS` |
 
 Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 128 inputs/batch. Use `nexus.retry._voyage_with_retry` for transient failures.
 
@@ -81,30 +83,21 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 
 - **⛔ NO new SQLite — nexus is MIGRATING from SQLite TO PG, in EVERY mode. There is NO SQLite hybrid mode** (Hal directive 2026-07-18; record: T2 `nexus/directive-no-sqlite-pg-everywhere`). SQLite is a migration SOURCE only, never a destination. Never add a SQLite table, database file, or `CREATE TABLE` bootstrap in Python; new persistent state goes to PG through Liquibase via the engine (every install ships the PG bundle — local mode's endpoint is the bundled local PG, same shape as service mode). The retirement itself is essentially complete (RDR-158 P4: the SQLite stores, local catalog, and client migration chain are deleted); any straggler SQLite artifact found in review is debt to delete, never a home for new columns/tables/features. In review, a diff adding SQLite DDL or a new `sqlite3.connect` substrate is a **Critical**. Exemptions are Hal's explicit decisions, never code comments.
 - **Never `print()` in library code.** Use `structlog.get_logger(__name__).info(event=..., **fields)`.
-- **`develop` release boundary LIFTED 2026-06-29** — release-blocker bead `nexus-luxe6` closed; conexus 6.0.0 (the migration-capable release) published from develop, and `develop` is releasable again. `nx guided-upgrade` carries an existing install across (Chroma → PG17+pgvector, copy-not-move). **⛔ What's still blocked: RDR-155 P4b (the FINAL Chroma deletion, which also deletes the migration tool itself) — DO NOT START.** This is the two-release deprecation window's second half: 6.0.0 shipped both the new substrate AND the migration tool; Chroma stays intact as the migration source until the release AFTER this deprecation window closes. Authoritative record: T2 `nexus/release-boundary-since-p4a` (updated). Engine-side production migration is complete (`nexus_rdr/155-production-migration-complete`); Chroma sources remain untouched rollback targets in the interim.
-- **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge. The only direct-to-`main` commit allowed is the version-bump during a release (`docs/contributing.md` § Release Process).
+- **`develop` release boundary LIFTED 2026-06-29** — release-blocker bead `nexus-luxe6` closed; conexus 6.0.0 (the migration-capable release) published from develop, and `develop` is releasable again. **RDR-155 P4b (the FINAL Chroma deletion) SHIPPED 2026-07-25** — the dependency is dropped (absent from `uv.lock`), `guided_upgrade_cmd.py`/`migrate_cmd.py` are deleted outright, and `nx guided-upgrade` no longer exists. Pre-PG installs redirect through a two-hop path: pin to the last migration-capable release, `conexus==6.18.1`, where `nx guided-upgrade` still runs (Chroma → PG17+pgvector, copy-not-move), then upgrade normally from there. Frozen Chroma directories on disk remain untouched rollback artifacts, not a live migration source in this version. Authoritative record: T2 `nexus/release-boundary-since-p4a` (updated).
+- **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via a PR-gated release branch (nexus-mkj6u) — there are NO direct-to-`main` commits at all; the push guard enforces it (`docs/contributing.md` § Release Process).
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
-- **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h). Two consecutive sessions concluded the ledger was unavailable and skipped the declaration on that basis — it was available both times.
+- **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h).
   ```bash
   source tests/e2e/lib/expectations.sh                    # in this checkout
   source ~/.claude/plugins/marketplaces/*/conexus/hooks/scripts/expectations.sh   # anywhere else
-  expectations_expect "$SESSION_ID" <subagent-type> background   # BEFORE the dispatch, while the hook is inert
   expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
   expectations_undeclared "$SESSION_ID"  # exit 1 + BLINDSPOT = false-clean, not a pass
   ```
   The two copies are kept byte-identical by `tests/hooks/test_subagent_stop_hook.py`; edit `tests/e2e/lib/expectations.sh` and copy it over, never the reverse.
-  **`nexus-qc4p1` MECHANIZED the EXPECT row** — a PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`, so no agent has to remember any of this. **It is MERGED but INERT**: files under `conexus/` load from the pinned release tag, so it does nothing until the next plugin release (`conexus/PENDING_RELEASE.md`). Check `nexus-qc4p1` for status rather than trusting this paragraph — whether to hand-write changes over time, which is exactly the kind of state a checked-in doc holds badly.
-  While it is inert, keep hand-writing rows, and key them on the **subagent type** — never on an invented name. The Agent tool has NO `name` parameter, so a name-keyed row cannot pair with the `agent_type` that SubagentStart records and is worth nothing (`nexus-nu7fo`: 25 dispatches, zero recognised). **Which copy you source decides the charset, and the two currently disagree.** The colon rule is not one rule:
-
-- **Installed plugin copy** (`~/.claude/plugins/.../conexus/hooks/scripts/expectations.sh`, pinned at the release tag): validator is `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. A colon is REJECTED with rc=2. Verified 2026-07-31 against the live v6.18.1 install.
-- **This checkout** (`tests/e2e/lib/expectations.sh:137` and the `conexus/` copy): `^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$`. The colon is accepted and written verbatim.
-
-At the pinned tag `recognized=0` is therefore PINNED BY CONSTRUCTION, and no dispatch-time discipline can lift it: the start stamp records `agent_type` WITH the colon, while the installed recogniser rejects colon-bearing types outright. Sanitizing gets the row written but it cannot pair; not sanitizing gets the row refused. That is `nexus-nu7fo`'s "structurally unfalsifiable", and it is an accurate description of the shipped state, not a misreading.
-
-The fix is merged on develop and INERT — declared in `conexus/PENDING_RELEASE.md` under `nexus-mk3tw` / `nexus-qc4p1`. Once a release ships it, pass the `subagent_type` **VERBATIM, colon included**, and pairing works: two-arm control against the repo lib, colon EXPECT + colon START → `recognized=1`; dash EXPECT + colon START → `recognized=0 unrecognized=1`. Until then, expect `recognized=0` from the installed copy regardless of what you do, and do not read it as evidence about your own compliance. Once the hook is live, STOP hand-writing: the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable, which is what two sessions failed to find.
+  **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
 ## Workflows
@@ -125,14 +118,14 @@ Six rules borrowed from the global `marketplace-pinned-source-playbook`:
 3. **One channel until proven otherwise.** No `-dev` / `-rc` / `-canary` suffix variants. If a beta channel becomes necessary, file an RDR.
 4. **Bump cadence matches user-visible impact, not commit volume.** Many internal PRs can land on develop and then on main without bumping the version. The version bumps when users would see something change.
 5. **Releaser is human. AI prepares; human cuts.** AI can draft the release PR, bump manifests, write the CHANGELOG entry. The human runs `gh pr merge` + `git tag` + `git push origin vX.Y.Z`.
-6. **Parity tests stay strict.** Any drift between `pyproject.toml` version and the four other manifests (plus `source.ref` in marketplace.json) fails CI. No `# noqa` escape hatches.
+6. **Parity tests stay strict.** Any drift between `pyproject.toml` version and the other six version surfaces (`mcpb/pyproject.toml`, `mcpb/manifest.json`, marketplace.json's two `plugins[].version` fields, `conexus/.claude-plugin/plugin.json`, `sn/.claude-plugin/plugin.json`) — plus `source.ref` in marketplace.json and `uv.lock` — fails CI. No `# noqa` escape hatches.
 
 ### Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 
 The Java **engine-service** binary is a separate release artifact with its own cadence. Conflating it with the PyPI/marketplace release is how the cloud engine silently drifts behind develop (2026-06-26: 22 `service/` commits / 4 days un-deployed, un-cloud-tested).
 
-- **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 4 native binaries. It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.
-- **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is purely: full engine suite green on the tagged commit → human pushes `engine-service-vX.Y.Z`.
+- **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 3 native binaries (linux-amd64, linux-arm64, mac-arm64 — mac-arm64 unsmoked, no Docker on GH macOS, nexus-4xf5m; mac-amd64/Intel is not a supported target). It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.
+- **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is NOT just suite-green-then-tag: the `engine-release` skill (Authority: this section) enforces a full pre-tag battery — full engine suite green on the tagged commit, `tests/e2e/migration-rehearsal/run.sh --shakeout` (must end `CANDIDATE SHAKEOUT PASSED`), and the BLOCKING `scripts/check_client_release_precondition.py --engine-tag engine-service-vX.Y.Z` (a red exit means a conexus PyPI release carrying the required client commit must ship first) — then human pushes `engine-service-vX.Y.Z`, followed by a post-publish `--acquire` gate against the published bytes. Use the `engine-release` skill as the executable checklist, not this summary.
 - **Cut from develop tip; don't let it drift.** Cloud-relevant engine work (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints) lands on develop continuously. Cut + deploy + cloud-gate the engine on its own cadence. Rule of thumb: if `git log <last-engine-tag>..HEAD -- service/` is non-trivial AND cloud-relevant, cut a fresh engine **before** relying on cloud test results or pinning it into a PyPI release.
 - **Prep (AI) vs cut (human).** AI preps: confirm the `service/` tree at the target commit equals a green-`service-ci` commit (the Java CI is advisory — it does not block auto-merge — so verify the full `./mvnw test` + native build actually passed on that exact tree). The human pushes the tag.
 - **Deploy + cloud-gate is conexus-side (passive bus).** After the tag publishes + signs, conexus deploys the signed binary and re-runs the cloud gate (recall + hybrid parity, xr7.8.9-style). Surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal — never frame the cross-instance deploy as autonomous.
@@ -153,19 +146,27 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deplo
 
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.
-1b. **Run the fresh-install MVV.** `./tests/e2e/fresh-install-mvv.sh` (nexus-nolqs). The VIRGIN-journey gate — every other E2E gate tests the upgrade axis from a populated install, and the unit suite pins the SQLite opt-out backend, which is how the 2026-07-21 fresh-box defect class (f1itv/e9ru2/kmo9h/r5f3c/9xfx5) shipped unseen. Builds the wheel under test, then on a scrubbed-env virgin HOME: local init (engine + portable PG + bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG registration asserted (not just T3 chunks), semantic search returns both, doctor with zero ✗ and an empty warnings allowlist. Must end `FRESH-INSTALL MVV PASSED`.
+1b. **Run the fresh-install MVV.** `./tests/e2e/fresh-install-mvv.sh` (nexus-nolqs). The VIRGIN-journey gate — every other E2E gate tests the upgrade axis from a populated install. The unit suite then pinned the SQLite opt-out backend (since retired at RDR-158), which is how the 2026-07-21 fresh-box defect class (f1itv/e9ru2/kmo9h/r5f3c/9xfx5) shipped unseen; today the suite pins the engine substrate instead, and the MVV still covers the virgin journey no unit test walks. Builds the wheel under test, then on a scrubbed-env virgin HOME: local init (engine + portable PG + bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG registration asserted (not just T3 chunks), semantic search returns both, doctor with zero ✗ and an empty warnings allowlist. Must end `FRESH-INSTALL MVV PASSED`.
 2. **Audit docs against changes since last tag.** `git log --oneline v<prev>..HEAD` then check `docs/cli-reference.md`, `docs/architecture.md`, `README.md` for user-visible drift.
-3. **Bump version in all four manifests AND both `source.ref` fields** (CI enforces parity):
+3. **Bump version in all seven version surfaces AND both `source.ref` fields** (CI enforces parity — see `docs/contributing.md` § Release Process step 7 for the canonical list):
    - `pyproject.toml` — `version = "X.Y.Z"`
+   - `mcpb/pyproject.toml` — `version` (plus its `conexus[local]>=X.Y.Z` dependency pin; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version)
+   - `mcpb/manifest.json` — `version` (`tests/test_plugin_structure.py::test_mcpb_manifest_version_matches_pyproject`)
    - `.claude-plugin/marketplace.json` — both `version` fields AND both `plugins[].source.ref` fields (must be `"vX.Y.Z"` — the tag form). The `source.ref` is what decouples installed users from main HEAD: plugins are fetched from the pinned tag, not from whatever main currently is. CI test `TestMarketplaceVersion::test_marketplace_source_ref_matches_pyproject` enforces this.
    - `conexus/.claude-plugin/plugin.json` — `version`
    - `sn/.claude-plugin/plugin.json` — `version`
+   - `conexus/PENDING_RELEASE.md` — cleared (`tests/test_plugin_release_drift_ledger.py` fails on a stale entry)
 4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `conexus/CHANGELOG.md` with the date and the changes since last release.
 5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
 6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`. The reinstall this drives is genuinely isolated (fixed 2026-07-01, `137d2688`) — it runs cleanly with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses again with a live-holder error, suspect a step-ordering regression (the sandbox `HOME` must be activated *before* the reinstall runs, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
 7. **Commit on a release branch + PR to main** (nexus-mkj6u: replaces direct-to-main convention).
+   Base on **develop** (a release promotes develop to main — hot rule above; a main-based
+   branch releases main's stale tree), then pre-merge `origin/main` to resolve the
+   release-only conflicts on the branch (a conflicting release PR gets NO CI checks —
+   release skill Step 7).
    ```
-   git checkout main && git pull && git checkout -b release/vX.Y.Z
+   git checkout develop && git pull && git checkout -b release/vX.Y.Z
+   git merge origin/main
    <bump all manifests, refresh uv.lock, update CHANGELOGs>
    git commit -m "chore(release): conexus X.Y.Z"
    git push -u origin release/vX.Y.Z
@@ -179,6 +180,13 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deplo
    git push origin vX.Y.Z
    ```
    Tag-push triggers the Release workflow → PyPI auto-publish via OIDC. Order matters: marketplace.json's `source.ref` points at `vX.Y.Z`, which must exist on origin before any user runs `/plugin install`. Push commit (via PR merge), then push tag, in tight succession.
+8b. **Back-merge `main` into `develop` (MANDATORY, zero-change releases included).**
+   ```
+   git checkout develop && git pull
+   git merge origin/main --no-edit   # trivially clean right after a release
+   git push origin develop
+   ```
+   Skipping this is how develop drifts behind the release-only commits and the next release branch conflicts (2026-07-23 incident; `docs/contributing.md` step 11b).
 9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped but the local `nx` shim still points at the old wheel until reinstall.
 
 Full checklist with rollback / one-time setup steps lives in [`docs/contributing.md` § Release Process](docs/contributing.md#release-process).

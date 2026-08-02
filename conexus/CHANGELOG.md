@@ -4,6 +4,22 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.1.0] - 2026-08-02
+
+Pin advance activates the alignment-wave skill changes that were merged
+inert under the v7.0.1 pin:
+
+- brainstorming-gate: HARD-GATE scoped to work with NO design of record —
+  a locked T2 memo, accepted RDR, or reviewed bead IS the approval;
+  re-gating designed work is the named inverse anti-pattern.
+- using-nx-skills: routing + Common Mistakes aligned to the scoped gate.
+- code-review: model table corrected to the enforced sonnet default (the
+  documented haiku default was unreachable); new "Prompt Rigour" section
+  (per-diff-class suspect categories, locked-spec briefing, explicit
+  non-goals) — the section phase-review-gate references.
+- substantive-critique: model table corrected to sonnet default / opus
+  escalation.
+
 ## [7.0.1] - 2026-08-02
 
 Plugin version aligned with conexus 7.0.1. No plugin-side changes

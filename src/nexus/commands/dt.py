@@ -74,7 +74,7 @@ def _index_record(
     corpus: str,
     dry_run: bool,
     extractor: str = "auto",
-) -> bool:
+) -> tuple[bool, int]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
     The caller (``index_cmd``) is responsible for filtering unsupported
@@ -90,10 +90,17 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
-    Returns the stamp's success status (``True`` when the catalog entry
-    now carries the DT identity, ``False`` otherwise) so the caller can
-    surface stamp misses in the summary line. Indexing itself is
-    treated as a precondition: an indexer exception will propagate.
+    Returns ``(stamped, chunks)`` (nexus-5xn3k.6 AC4 — before this, the
+    indexer's chunk count was discarded and the caller could only do
+    ``indexed += 1`` unconditionally, so a no-op re-index of an unchanged
+    document reported "Indexed 1 record(s)" identically to a real write).
+    ``stamped`` is the stamp's success status (``True`` when the catalog
+    entry now carries the DT identity, ``False`` otherwise) so the caller
+    can surface stamp misses in the summary line. ``chunks`` is the
+    indexer's own return (0 means the staleness gate short-circuited —
+    the document is unchanged — or the indexer produced no content).
+    Indexing itself is treated as a precondition: an indexer exception
+    will propagate.
 
     Tests monkeypatch this single function rather than the heavyweight
     ``doc_indexer`` machinery so the CLI surface is exercised
@@ -103,7 +110,7 @@ def _index_record(
         # Dry-run is handled in the command body before this function
         # is reached. If a caller invokes us with dry_run=True anyway,
         # treat it as a no-op rather than a silent indexing run.
-        return True
+        return True, 0
 
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
@@ -113,11 +120,13 @@ def _index_record(
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
         # is actionable on the DT path. Markdown has no extractor backend.
-        index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor)
+        raw = index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor)
     else:  # .md — extension filtering happens in index_cmd
-        index_markdown(file_path, corpus=corpus, collection_name=collection)
+        raw = index_markdown(file_path, corpus=corpus, collection_name=collection)
+    chunks = raw if isinstance(raw, int) else 0
 
-    return _stamp_dt_uri_on_entry(file_path, uuid)
+    stamped = _stamp_dt_uri_on_entry(file_path, uuid)
+    return stamped, chunks
 
 
 def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
@@ -427,6 +436,10 @@ def _index_dt_content_record(
             # indexed and unchanged. That is a benign idempotent no-op (the
             # catalog row is not duplicated), not a failure — log at debug.
             _log.debug("dt_content_unchanged", uuid=uuid)
+            # nexus-5xn3k.6 AC4: this was debug-only and invisible at normal
+            # verbosity — the same silent-skip gap _index_record had. The
+            # caller's "skipped" bucket already counts it; this line says WHY.
+            click.echo(f"  skipped: index fresh (use --force)  {uuid}")
             return False
         return _stamp_dt_uri_on_entry(cache_path, uuid)
     except (RuntimeError, ImportError, OSError) as exc:
@@ -658,6 +671,7 @@ def index_cmd(
         return
 
     indexed = 0
+    unchanged = 0
     skipped = 0
     stamp_failed = 0
     written_back = 0
@@ -666,6 +680,16 @@ def index_cmd(
     highlighted = 0
     touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
+
+    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note): zero the completion-
+    # refusal collector so the end-of-run summary reflects only this run's
+    # refusals — mirrors nx index repo's reset_manifest_write_failures().
+    from nexus.mcp_infra import reset_complete_refusals  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+    reset_complete_refusals()
+    # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l): must be bound
+    # before the per-record try/except below reaches its `except
+    # IndexRunVerifyRefused` clause.
+    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
 
     # RDR-139 Layer D: only probe DT availability once, and only when the
     # opt-in flag is set. Flag off -> the unsupported-extension skip path is
@@ -709,7 +733,7 @@ def index_cmd(
             continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
         try:
-            stamped = _index_record(
+            stamped, chunks = _index_record(
                 uuid,
                 path,
                 collection=resolved_collection,
@@ -717,6 +741,32 @@ def index_cmd(
                 dry_run=False,
                 extractor=extractor,
             )
+        except IndexRunVerifyRefused as exc:
+            # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l,
+            # 2026-08-02): NOT an (ImportError, RuntimeError) — IndexRunVerifyRefused
+            # is a NexusError. Any DT record large enough to hit the
+            # streaming or incremental path (index_pdf -> pipeline_index_pdf
+            # / _index_pdf_incremental -> _fence_complete) propagates this
+            # exception by contract (the fail-loud completion verify), and
+            # pre-fix it fell through this except tuple entirely, escaping
+            # the loop and aborting the WHOLE `nx dt index` batch — exactly
+            # the nexus-2fyb regression this catch exists to prevent, just
+            # for a failure mode this bead introduced. Convert to a failed-
+            # record entry with the SAME wording commands/index.py renders
+            # for the CLI pdf/md commands (imported, not duplicated) so a
+            # refusal here reads identically wherever it surfaces.
+            from nexus.commands.index import _index_run_refused_message  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import between commands/dt.py and commands/index.py
+            _log.error(
+                "dt_index_completion_refused",
+                uuid=uuid,
+                path=path,
+                doc_id=exc.doc_id,
+                referenced=exc.referenced,
+                present=exc.present,
+                missing=exc.missing,
+            )
+            failed.append((uuid, path, _index_run_refused_message(exc)))
+            continue
         except (RuntimeError, ImportError) as exc:
             # nexus-2fyb code-review R4-I2: a single indexing failure must
             # NOT kill the whole DT batch. Pre-fix, formula PDFs silently
@@ -735,8 +785,16 @@ def index_cmd(
             )
             failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
             continue
-        indexed += 1
-        touched_collections.add(resolved_collection)
+        # nexus-5xn3k.6 AC4: bucket on the indexer's OWN chunk count, not on
+        # unconditional success — a chunks==0 return is the staleness gate's
+        # skip (or a genuinely empty document), never a write, so it must
+        # never inflate "Indexed N record(s)."
+        if chunks:
+            indexed += 1
+            touched_collections.add(resolved_collection)
+        else:
+            unchanged += 1
+            click.echo(f"  skipped: index fresh (use --force)  {uuid}\t{path}")
         if not stamped:
             stamp_failed += 1
             continue
@@ -758,6 +816,8 @@ def index_cmd(
             run_bib_enrichment(coll, source="dt")
 
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if unchanged:
+        summary += f", {unchanged} unchanged"
     if content_extracted:
         summary += f", {content_extracted} from DT content"
     if link_semantic:
@@ -787,6 +847,39 @@ def index_cmd(
             "<UUID>. Inspect ~/Library/Logs (or your structlog sink) "
             "for 'dt_stamp_failed' events and recover with "
             "'nx catalog update <tumbler> --source-uri x-devonthink-item://<UUID>'.",
+        )
+
+    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34): a
+    # completion stamp REFUSED by the engine's fail-closed verify means the
+    # manifest was written but the document is NOT actually whole in T3 —
+    # index_state stays 'indexing'. Silently folding this into a clean
+    # "Indexed N record(s)." summary reproduces, one layer up, the exact
+    # silent-success shape the fence exists to close. Mirrors
+    # _emit_manifest_write_failure_summary in commands/index.py.
+    #
+    # substantive-critic SIGNIFICANT (2026-08-02, T2
+    # nexus/5xn3k6-critique-2026-08-02 [21355]): a refused record still has
+    # a non-zero chunk count (over-work-never-under-work — the rows
+    # genuinely landed), so it was ALREADY counted in the "Indexed N
+    # record(s)" headline above — deliberately NOT restructured, the
+    # chunks are real. dt.py cannot correlate a specific uuid to the
+    # doc_id the engine refused (mcp_infra's collector is process-global,
+    # keyed on doc_id, not per-record uuid), so this states the overlap as
+    # a count relationship rather than naming which of the indexed records
+    # it is.
+    from nexus.mcp_infra import get_complete_refusals  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal)
+    refused = get_complete_refusals()
+    if refused:
+        click.echo(
+            f"  WARNING: {len(refused)} of the {indexed} indexed above had "
+            f"completion refused by the engine's fail-closed verify (fence "
+            f"left at 'indexing') — NOT fully indexed. Re-index or --force "
+            f"to retry.",
+            # nexus-5xn3k.6 code-review-expert NIT (2026-08-02): matches
+            # commands/index.py's _emit_manifest_write_failure_summary
+            # stream placement — all WARNING-level summary lines go to
+            # stderr, not stdout.
+            err=True,
         )
 
 

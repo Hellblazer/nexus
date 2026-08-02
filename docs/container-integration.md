@@ -282,9 +282,9 @@ session:
   scratch entries live in the shared service but under its own
   session, invisible to the host session's `nx scratch list`.
 - **`NX_T1_ISOLATED=1`** forces an in-process ephemeral scratch
-  (ChromaDB `EphemeralClient`), touching the service not at all. This
-  is the documented escape hatch when a process must not (or cannot)
-  mint a session.
+  (`InMemoryVectorClient`, not chromadb — RDR-155 P4b P0a), touching the
+  service not at all. This is the documented escape hatch when a process
+  must not (or cannot) mint a session.
 
 Rule of thumb unchanged from RDR-105: **cross-process findings go to
 T2** (`nx memory put` / `memory_put`), which is shared by everything
@@ -401,7 +401,7 @@ the nexus-service since 6.0.
 
 ## Related
 
-- `docs/architecture.md` § Storage tiers — the one-service convergence diagram
+- `docs/architecture.md` § How It Fits Together — the one-service convergence diagram
 - `docs/rdr/rdr-152-postgres-java-storage-service.md` — T2/T1 onto the Postgres service; SQLite daemon retirement
 - `docs/rdr/rdr-155-pgvector-t3-consolidation.md` — T3 onto pgvector via the service
 - `docs/rdr/rdr-149-unified-service-registry-substrate.md` — the shared lease/discovery lifecycle substrate

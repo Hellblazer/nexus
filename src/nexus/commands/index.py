@@ -507,11 +507,16 @@ def index_repo_cmd(
         # identity-drop collectors so the end-of-run summary reflects only
         # this run's gaps.
         from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+            reset_complete_refusals,
             reset_manifest_identity_drops,
             reset_manifest_write_failures,
         )
         reset_manifest_write_failures()
         reset_manifest_identity_drops()
+        # nexus-5xn3k.6 (RUNFENCE C4, bead scope note): zero the completion-
+        # refusal collector so the end-of-run summary reflects only this
+        # run's refusals.
+        reset_complete_refusals()
 
         bar: tqdm | None = None
         n = 0
@@ -605,6 +610,7 @@ def index_repo_cmd(
             # structlog WARNING — invisible without log capture wired up.
             # Silent on zero failures (the common case).
             from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+                get_complete_refusals,
                 get_manifest_identity_drops,
                 get_manifest_write_failures,
             )
@@ -630,6 +636,34 @@ def index_repo_cmd(
                     f"written and the documents will not appear in "
                     f"catalog-aware queries. Run 'nx catalog reconcile' to "
                     f"repair.",
+                    err=True,
+                )
+            # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34):
+            # the manifest write SUCCEEDED but the engine's fail-closed
+            # completion verify REFUSED the stamp — index_state stays
+            # 'indexing', the document is NOT fully indexed. Distinct from
+            # both collectors above (this is a refusal, not a write
+            # failure or an identity drop); folding it into a clean summary
+            # would reproduce the silent-success shape the fence exists to
+            # close.
+            #
+            # substantive-critic SIGNIFICANT (2026-08-02, T2
+            # nexus/5xn3k6-critique-2026-08-02 [21355]): a refused document
+            # still has a non-zero chunk count (over-work-never-under-work
+            # — the rows genuinely landed), so it was ALREADY counted in
+            # the "skipped: index fresh" complement above (i.e. among the
+            # files this run actually embedded) — deliberately NOT
+            # restructured, the chunks are real. What was missing is
+            # stating that overlap out loud instead of leaving two
+            # unconnected numbers for the operator to reconcile by hand.
+            refused = get_complete_refusals()
+            if refused:
+                indexed_files = n - skipped_files
+                click.echo(
+                    f"  WARNING: {len(refused)} of the {indexed_files} "
+                    f"indexed above had completion refused by the engine's "
+                    f"fail-closed verify (fence left at 'indexing') — NOT "
+                    f"fully indexed. Re-index or --force to retry.",
                     err=True,
                 )
 
@@ -664,6 +698,16 @@ def index_repo_cmd(
             _emit_retry_summary()
             _emit_manifest_write_failure_summary()
             _emit_debug_timing()
+        # nexus-5xn3k.6 AC4: the per-file "skipped" label already exists on
+        # the on_file callback's console line (above, monitor/non-tty only)
+        # but was never surfaced in the end-of-run summary — a TTY run with
+        # the progress bar closed had NO record that any file was a
+        # staleness no-op rather than genuinely up-to-date-and-reindexed.
+        if skipped_files:
+            click.echo(
+                f"  skipped: index fresh (use --force) — {skipped_files} of "
+                f"{n} file(s) unchanged"
+            )
         if not frecency_only and stats:
             rdr_indexed = stats.get("rdr_indexed", 0)
             rdr_current = stats.get("rdr_current", 0)
@@ -1138,6 +1182,31 @@ def run_collection_postprocessing(
         _log.debug("taxonomy_discover_failed", exc_info=True)
 
 
+def _index_run_refused_message(exc) -> str:
+    """Render a :class:`~nexus.errors.IndexRunVerifyRefused` as the clean,
+    fail-loud wording nexus-5xn3k.6's summary contract requires (code-
+    review-expert IMPORTANT, 2026-08-02).
+
+    The manifest wrote successfully — the rows are correct, no data was
+    lost — but the engine's fail-closed completion verify refused the
+    stamp, so ``index_state`` is still ``'indexing'`` and the document is
+    NOT fully indexed. This must never render as a raw traceback (the
+    pre-fix behaviour: the exception isn't an ``ImportError``/
+    ``RuntimeError``, so it fell through every existing catch clause) and
+    must never be folded into a success summary line. Shared by
+    ``index_pdf_cmd``'s two single-file branches and the ``--dir`` batch
+    loop's failure entry so the wording (and the counts it carries) stays
+    identical everywhere a refusal surfaces. Duck-typed (no import of
+    ``nexus.errors`` at module scope) — callers pass the caught exception,
+    which carries ``.referenced``/``.present``/``.missing``.
+    """
+    return (
+        f"completion REFUSED — document is NOT fully indexed "
+        f"(referenced={exc.referenced} present={exc.present} "
+        f"missing={exc.missing})"
+    )
+
+
 @index.command("pdf")
 @click.argument("path", type=click.Path(exists=True, path_type=Path), required=False, default=None)
 @click.option("--dir", "dir_path", type=click.Path(exists=True, file_okay=False, path_type=Path),
@@ -1229,6 +1298,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,
+        IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
     )
@@ -1345,8 +1415,17 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 click.echo(f" — {n} chunks, {elapsed:.1f}s")
             except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
                 elapsed = _time.monotonic() - t0
-                failures.append((pdf, str(exc)))
-                _log.warning("batch_index_failed", path=str(pdf), error=str(exc))
+                # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02):
+                # a completion-stamp refusal already lands here (Exception
+                # covers it) and is never folded into a success line — but
+                # give it the same dedicated wording as the single-file
+                # branches instead of the raw exception text.
+                msg = (
+                    _index_run_refused_message(exc)
+                    if isinstance(exc, IndexRunVerifyRefused) else str(exc)
+                )
+                failures.append((pdf, msg))
+                _log.warning("batch_index_failed", path=str(pdf), error=msg)
                 click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
 
         batch_elapsed = _time.monotonic() - batch_start
@@ -1492,6 +1571,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
                              source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+        except IndexRunVerifyRefused as e:
+            # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this
+            # is NOT an (ImportError, RuntimeError) — it fell through the
+            # catch below as a raw traceback pre-fix. The manifest wrote
+            # (no data loss); the engine's fail-closed verify refused the
+            # completion stamp. Clean fail-loud ClickException, never
+            # folded into a success summary.
+            raise click.ClickException(_index_run_refused_message(e)) from e
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1514,6 +1601,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         try:
             n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
                           source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+        except IndexRunVerifyRefused as e:
+            # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
+            # the identical rationale on the monitor branch above.
+            raise click.ClickException(_index_run_refused_message(e)) from e
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1521,7 +1612,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # sees a raw Python traceback instead of an actionable message.
             raise click.ClickException(str(e)) from e
     result_label = "Force re-indexed" if force else "Indexed"
-    click.echo(f"{result_label} {n} chunk(s).")
+    # nexus-5xn3k.6 AC4: n==0 without --force is the staleness gate's skip
+    # (or a genuinely empty extraction, in which case --force surfaces the
+    # real problem instead of a silent "Indexed 0 chunk(s)."). With --force
+    # the staleness gate never runs, so a 0 here is unconditionally real.
+    if n == 0 and not force:
+        click.echo("skipped: index fresh (use --force)")
+    else:
+        click.echo(f"{result_label} {n} chunk(s).")
     if fork_holder:
         # nexus-y8qtj: WARNING, not refusal — legitimate near-duplicates
         # exist. Full detail (other doc_id, shared_chunks) is in the log
@@ -1636,7 +1734,11 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         # nexus-y8qtj: fail-loud identity errors surface the same way.
         raise click.ClickException(str(exc)) from exc
     result_label = "Force re-indexed" if force else "Indexed"
-    click.echo(f"{result_label} {n} chunk(s).")
+    # nexus-5xn3k.6 AC4: see the identical rationale on the pdf command.
+    if n == 0 and not force:
+        click.echo("skipped: index fresh (use --force)")
+    else:
+        click.echo(f"{result_label} {n} chunk(s).")
     if fork_holder:
         click.echo(
             f"  {len(fork_holder)} possible document fork(s) detected — "
@@ -1756,6 +1858,17 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
                                     content_type="rdr", force=force, on_file=on_file,
                                     base_path=repo_root, embed_fn=_embed_fn)
     bar.close()
+    # nexus-5xn3k.6 AC4: batch_index_markdowns already distinguishes
+    # indexed/skipped/failed per file (doc_indexer.py) — the gap was that
+    # only "indexed" ever reached this summary line, so an all-unchanged
+    # RDR pass reported "Indexed 0 of N" with no indication that N-0 were
+    # a truthful staleness skip rather than N silent failures.
     indexed = sum(1 for s in results.values() if s == "indexed")
+    unchanged = sum(1 for s in results.values() if s == "skipped")
+    rdr_failed = sum(1 for s in results.values() if s == "failed")
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {indexed} of {len(rdr_files)} RDR document(s).")
+    if unchanged:
+        click.echo(f"  skipped: index fresh (use --force) — {unchanged} document(s)")
+    if rdr_failed:
+        click.echo(f"  {rdr_failed} document(s) failed — see structured logs")

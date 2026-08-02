@@ -107,10 +107,11 @@ class _ExactMatchCatalogHandler(BaseHTTPRequestHandler):
             requested = body.get("chashes", [])
             # EXACT string match only — mirrors F_CHK_CHASH.in(chashes)
             # against the 32-char stored column. No substr/normalization.
+            # `count` is reconciled client-side since v0.1.61 (nexus-ocf52).
             if _STORED_CHASH in requested:
-                self._send_json({"tumblers": [_TUMBLER]})
+                self._send_json({"tumblers": [_TUMBLER], "count": 1})
             else:
-                self._send_json({"tumblers": []})
+                self._send_json({"tumblers": [], "count": 0})
         elif op == "/manifest/get_many":
             doc_ids = body.get("doc_ids", [])
             manifests = {}
@@ -118,7 +119,7 @@ class _ExactMatchCatalogHandler(BaseHTTPRequestHandler):
                 manifests[_TUMBLER] = [
                     {"position": 0, "chash": _STORED_CHASH, "line_start": 1, "line_end": 3}
                 ]
-            self._send_json({"manifests": manifests})
+            self._send_json({"manifests": manifests, "count": len(manifests)})
         else:
             self._send_json({"error": f"unhandled op in test fake: {op}"}, 404)
 

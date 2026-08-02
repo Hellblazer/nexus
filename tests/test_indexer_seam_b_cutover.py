@@ -452,7 +452,15 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
          patch("nexus.doc_indexer.write_checkpoint"), \
          patch("nexus.doc_indexer.delete_checkpoint"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)):
+        # RUNFENCE (nexus-5xn3k.4): the mocked t3 never lands chunks in the
+        # substrate the real engine's fail-closed /complete verifies against —
+        # unstubbed, _fence_complete correctly raises IndexRunVerifyRefused.
+        # This test proves the service-mode embed guard, not fence integration
+        # (nexus-5xn3k.7 owns the genuine proof); stub the fence like every
+        # other decoupled-substrate test in the suite.
         _index_pdf_incremental(
             tmp_path / "test.pdf",
             corpus="test-corpus",

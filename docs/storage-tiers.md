@@ -104,15 +104,15 @@ process into a private, dependency-free in-process `InMemoryVectorClient`;
 otherwise a process outside service-mode routing raises
 `T1ServerNotFoundError` rather than silently inventing a private store.
 
-Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
+Everything is wiped at session end: the `SessionEnd` hook flushes flagged entries to T2 and the session's scratch rows expire against the service (isolated mode: the in-process `InMemoryVectorClient` is simply discarded with the process). Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 
-**Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as ChromaDB metadata — schemaless, no migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end regardless).
+**Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as row metadata in the service's Postgres backing store — schemaless-shaped, no client migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end regardless).
 
 **Use for**: working hypotheses, temporary notes, in-flight analysis shared across spawned agents.
 
 ## T2 -- Memory Bank
 
-A local SQLite database. Every entry has a project, a title, and content — like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. FTS5 provides keyword search with no API call. Stored at `~/.config/nexus/memory.db`.
+Every entry has a project, a title, and content — like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. Keyword search is server-side full-text search over the engine's Postgres. Served through `HttpMemoryStore` over the one `nexus-service` (the only backend since RDR-158 — the historical direct-`sqlite3` `~/.config/nexus/memory.db` was the migration source, deleted at RDR-158 P4).
 
 T2 is the persistent local layer that bridges sessions. Notes, project state, and agent relay context survive restarts here. Different usage patterns share the same simple model:
 
@@ -127,7 +127,7 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))` — frequently-accessed entries survive longer. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 
-> **Note (RDR-063 interaction)**: Under sustained concurrent cross-domain write load (e.g. a large `nx index repo` run generating dense telemetry writes while an agent is actively using memory), the access-count increment inside `memory.search` and `memory.get` is a best-effort side-effect. If the write leg cannot acquire the SQLite write lock immediately, the counter update is skipped and logged at warning as `memory.access_tracking.skipped`. In practice this drops roughly 5–10% of increments during heavy indexing. Heat-weighted TTL is therefore approximate: heavily-accessed entries may accumulate slightly lower `access_count` values than their true read frequency would suggest, which modestly compresses their effective TTL. The trade-off is an intentional Phase 2 choice — keeping search/get latency stable under load is worth the loss of a fraction of statistical signal.
+> **Note (RDR-063 interaction) — HISTORICAL.** Under the retired SQLite substrate, the access-count increment inside `memory.search` and `memory.get` was a best-effort side-effect: a write leg that could not acquire the SQLite write lock immediately skipped the counter update (`memory.access_tracking.skipped`), dropping roughly 5–10% of increments during heavy indexing. `HttpMemoryStore` (the service-backed client, RDR-158) does not carry that skip path — the increment rides the same server-side transaction as the row fetch, arbitrated by Postgres rather than a client-held file lock. `search()` does expose an explicit opt-out (`access="silent"`, used by internal consolidation scans) that intentionally skips the increment; that is a deliberate policy choice, not the load-shedding behavior described above.
 
 **Consolidation (RDR-061 E6)**: `memory_consolidate` MCP tool provides three hygiene operations to manage T2 growth over time:
 
@@ -152,7 +152,7 @@ memory_consolidate(action="merge", project="myrepo",
     confirm_destructive=True)
 ```
 
-Merges use SQLite's write lock via `with self.conn:` to ensure UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent `expire()` call, the merge raises `KeyError` and `delete_ids` survive, preventing silent data loss when the consolidation scan races with TTL expiry. `nx_tidy` and `nx_answer` both invoke these operations during periodic hygiene.
+Merges run as a single transaction against the engine so UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent `expire()` call, the merge raises `KeyError` and `delete_ids` survive, preventing silent data loss when the consolidation scan races with TTL expiry. `nx_tidy` and `nx_answer` both invoke these operations during periodic hygiene.
 
 **Taxonomy cascade on delete**: When a memory entry is deleted, the T2 facade also calls `CatalogTaxonomy.purge_assignments_for_doc(project, title)`, removing any topic assignments that reference the deleted entry and dropping any topics left empty by the deletion.
 

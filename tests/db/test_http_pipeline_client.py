@@ -26,6 +26,7 @@ from nexus.db.http_pipeline_client import (
     CHUNK_FLUSH_BATCH,
     PAGE_FLUSH_BATCH,
     HttpPipelineDB,
+    PipelineConflictRunning,
 )
 
 TOKEN = "fake-pipeline-token"
@@ -38,9 +39,24 @@ class _Server:
     def __init__(self) -> None:
         self.requests: list[tuple[str, dict]] = []
         self.fail_next_post = False
+        #: Unlike fail_next_post (one-shot), this fails EVERY POST to the
+        #: named path — models a persistent/deterministic failure (e.g. a
+        #: payload the server rejects every time), not a transient blip.
+        self.fail_path: str | None = None
         self.pages_response: list[dict] = []
         self.chunks_response: list[dict] = []
         self.pipelines_response: list[dict] = []
+        #: nexus-lcmbp: when set, every POST /v1/pipeline/create returns
+        #: HTTP 409 conflict_running with this body (merged over defaults)
+        #: instead of the usual 200 {"status": "created"}.
+        self.create_conflict: dict | None = None
+        #: nexus-lcmbp fix-list #3/#4: like create_conflict, but sent
+        #: VERBATIM (no default merge) — for scripting malformed or
+        #: non-conflict 409 bodies (e.g. an explicit-null numeric field, or
+        #: a same-status-code-different-shape body like the class-23
+        #: identity-conflict response) that create_conflict's always-valid
+        #: defaults can't represent.
+        self.create_409_raw: dict | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -49,6 +65,25 @@ class _Server:
         if request.method == "POST" and self.fail_next_post:
             self.fail_next_post = False
             return httpx.Response(500, json={"error": "transient"})
+        if request.method == "POST" and path == self.fail_path:
+            return httpx.Response(500, json={"error": "persistent"})
+        if request.method == "POST" and path == "/v1/pipeline/create" and self.create_409_raw is not None:
+            return httpx.Response(409, json=self.create_409_raw)
+        if request.method == "POST" and path == "/v1/pipeline/create" and self.create_conflict is not None:
+            conflict_body = {
+                "error": "pipeline is already running",
+                "status": "conflict_running",
+                "content_hash": body.get("content_hash", ""),
+                "started_at": "2026-08-01T00:00:00+00:00",
+                "heartbeat_age_seconds": 5,
+                "stale_threshold_seconds": 300,
+                "remedy": "wait for the resume window (retry after the "
+                          "heartbeat exceeds the stale threshold) or inspect "
+                          "the pipeline row via GET /v1/pipeline/state "
+                          "(engine route; requires service auth)",
+                **self.create_conflict,
+            }
+            return httpx.Response(409, json=conflict_body)
         return {
             "/v1/pipeline/create": lambda: httpx.Response(200, json={"status": "created"}),
             "/v1/pipeline/state": lambda: httpx.Response(200, json={"pipeline": None}),
@@ -219,3 +254,157 @@ def test_mark_and_lifecycle_flush_first(db: HttpPipelineDB, server: _Server) -> 
     chunks_at = paths.index("/v1/pipeline/chunks")
     mark_at = paths.index("/v1/pipeline/mark_uploaded")
     assert chunks_at < mark_at, "the chunk batch landed before mark_uploaded"
+
+
+def test_mark_failed_flushes_pending_writes_first_on_success(
+    db: HttpPipelineDB, server: _Server
+) -> None:
+    """mark_failed keeps the flush-first intent when the cleanup flush
+    actually succeeds — same ordering guarantee as the other lifecycle
+    calls."""
+    db.write_chunk(HASH, 0, "t", "id0", embedding=b"")
+    db.mark_failed(HASH, error="boom")
+
+    paths = [p for p, b in server.requests]
+    chunks_at = paths.index("/v1/pipeline/chunks")
+    fail_at = paths.index("/v1/pipeline/fail")
+    assert chunks_at < fail_at, "the chunk batch landed before /fail"
+
+
+def test_mark_failed_posts_fail_even_when_cleanup_flush_fails_identically(
+    db: HttpPipelineDB, server: _Server
+) -> None:
+    """nexus-ptctu: when the ORIGINAL failure came from a flush, the raise
+    restores the failing pages into the buffer, so mark_failed's own
+    cleanup flush hits the IDENTICAL persistent failure. The /fail POST
+    must still be attempted, carrying the caller's ORIGINAL error text —
+    never substituted by the cleanup flush's own error — and mark_failed
+    itself must not raise (that would strand the pipeline row 'running'
+    and shadow the original exception the caller is about to re-raise)."""
+    db.write_page(HASH, 0, "t")
+    server.fail_path = "/v1/pipeline/pages"
+
+    # The ORIGINAL failure: some earlier flush (e.g. triggered by a
+    # read or an eager batch) hits the persistent failure and restores
+    # the page into the buffer per flush()'s documented contract.
+    with pytest.raises(Exception):
+        db.flush(HASH)
+
+    original_error = "RuntimeError: original extraction failure"
+
+    # Cleanup: mark_failed must not raise even though its own internal
+    # flush() re-POSTs the identical restored payload and fails again.
+    db.mark_failed(HASH, error=original_error)
+
+    fail_calls = server.calls("/v1/pipeline/fail")
+    assert len(fail_calls) == 1, "the /fail POST was issued despite the cleanup flush failing"
+    assert fail_calls[0]["content_hash"] == HASH
+    assert fail_calls[0]["error"] == original_error, (
+        "the ORIGINAL error text propagated to /fail, not the cleanup flush's own failure"
+    )
+
+
+def test_mark_failed_raises_when_fail_post_itself_fails(
+    db: HttpPipelineDB, server: _Server
+) -> None:
+    """nexus-rewgw: the /fail POST's OWN failure is the residual axis the
+    cleanup-flush fix does not cover. mark_failed's contract is that it
+    RAISES in that case (the terminal state genuinely did not land) — and
+    callers on an error path must therefore wrap it so their original
+    exception propagates regardless (pipeline_stages does; pinned by
+    test_first_exc_propagates_even_when_mark_failed_raises). This test
+    makes the gap visible instead of silent."""
+    server.fail_path = "/v1/pipeline/fail"
+    with pytest.raises(Exception):
+        db.mark_failed(HASH, error="original error")
+
+
+# ── nexus-lcmbp: 409 conflict_running ───────────────────────────────────────
+
+
+def test_create_pipeline_409_raises_typed_conflict(db: HttpPipelineDB, server: _Server) -> None:
+    """A 409 conflict_running response must raise PipelineConflictRunning
+    with the wire body's fields parsed onto it — never return a "skip"
+    a caller could mistake for a completed, no-op-safe run."""
+    server.create_conflict = {
+        "error": f"pipeline for content_hash={HASH} is already running",
+        "content_hash": HASH,
+        "started_at": "2026-08-01T12:00:00+00:00",
+        "heartbeat_age_seconds": 42,
+        "stale_threshold_seconds": 300,
+        "remedy": "wait for the resume window (retry after the heartbeat "
+                  "exceeds the stale threshold) or inspect the pipeline row "
+                  "via GET /v1/pipeline/state (engine route; requires "
+                  "service auth)",
+    }
+    with pytest.raises(PipelineConflictRunning) as exc_info:
+        db.create_pipeline(HASH, "/a.pdf", "docs__test")
+
+    err = exc_info.value
+    assert err.content_hash == HASH
+    assert err.started_at == "2026-08-01T12:00:00+00:00"
+    assert err.heartbeat_age_seconds == 42
+    assert err.stale_threshold_seconds == 300
+    assert "resume window" in err.remedy
+    # The message printed to the user must carry BOTH the error and the
+    # remedy — never just a bare "409" or a status code.
+    assert "already running" in str(err)
+    assert "resume window" in str(err)
+
+
+def test_create_pipeline_409_is_not_retried(db: HttpPipelineDB, server: _Server) -> None:
+    """409 is a terminal business-logic refusal, not a transient/gateway
+    error — it must not enter either RefreshableHttpStoreMixin retry axis
+    (endpoint-refresh retries only 401; the gateway axis only retries
+    502/503/504). Exactly one POST should reach the server."""
+    server.create_conflict = {"content_hash": HASH}
+    with pytest.raises(PipelineConflictRunning):
+        db.create_pipeline(HASH, "/a.pdf", "docs__test")
+
+    create_calls = server.calls("/v1/pipeline/create")
+    assert len(create_calls) == 1, "409 must not be retried"
+
+
+def test_create_pipeline_409_malformed_numeric_field_reraises_original(
+    db: HttpPipelineDB, server: _Server,
+) -> None:
+    """An explicit JSON null on a numeric field (heartbeat_age_seconds)
+    trips `int(None)` -> TypeError. That must NOT escape as a bare
+    TypeError masking the real 409 — it must fall through to re-raising
+    the ORIGINAL httpx.HTTPStatusError, exactly like any other malformed
+    body."""
+    server.create_409_raw = {
+        "error": f"pipeline for content_hash={HASH} is already running",
+        "status": "conflict_running",
+        "content_hash": HASH,
+        "started_at": "2026-08-01T12:00:00+00:00",
+        "heartbeat_age_seconds": None,
+        "stale_threshold_seconds": 300,
+        "remedy": "wait for the resume window (retry after the heartbeat "
+                  "exceeds the stale threshold) or inspect the pipeline row "
+                  "via GET /v1/pipeline/state (engine route; requires "
+                  "service auth)",
+    }
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        db.create_pipeline(HASH, "/a.pdf", "docs__test")
+    assert exc_info.value.response.status_code == 409
+
+
+def test_create_pipeline_409_non_conflict_shape_reraises_original(
+    db: HttpPipelineDB, server: _Server,
+) -> None:
+    """A 409 that is NOT the conflict_running shape (e.g. the identity-
+    conflict body class-23 handling produces — no "status" field at all)
+    must re-raise the original httpx.HTTPStatusError unchanged, never a
+    PipelineConflictRunning."""
+    server.create_409_raw = {
+        "error": "identity conflict: e-mail already claims a different address",
+        "constraint": "unique_email",
+        "identity": "e-mail",
+        "existing": "addr-1",
+        "attempted": "addr-2",
+    }
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        db.create_pipeline(HASH, "/a.pdf", "docs__test")
+    assert exc_info.value.response.status_code == 409
+    assert exc_info.value.response.json()["constraint"] == "unique_email"

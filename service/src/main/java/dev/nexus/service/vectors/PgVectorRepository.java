@@ -2053,14 +2053,42 @@ public final class PgVectorRepository {
      * callers (the HTTP {@code update-metadata} endpoint) can use the summed count as
      * a coarser "how many actually existed" signal.
      *
+     * <p>Delegates to {@link #updateMetadataWithMissing} — kept as the {@code int}-returning
+     * entry point so existing callers (and their tests) are unaffected by nexus-5xn3k.2's
+     * addition of the missing-ids report.
+     *
      * @param metadatas replacement metadata maps aligned with {@code ids}
      * @return total rows affected across all {@code ids} (0 to {@code ids.size()})
      */
     public int updateMetadata(String tenant, String collection,
                                List<String> ids,
                                List<Map<String, Object>> metadatas) {
+        return updateMetadataWithMissing(tenant, collection, ids, metadatas).updated();
+    }
+
+    /** {@link #updateMetadata}'s outcome, naming WHICH ids had no matching row. */
+    public record MetadataUpdateOutcome(int updated, List<String> missing) {}
+
+    /**
+     * nexus-5xn3k.2 (memo §3.6, AC6 engine half): {@link #updateMetadata}'s underlying
+     * per-row loop, reporting the SUBSET of {@code ids} that had no matching row (rather
+     * than only the summed count). {@code _upsert_skip_reembed}'s stale {@code existing_ids}
+     * probe routes ids to this metadata-only path assuming they already have a stored
+     * vector; when the probe is stale (the row was deleted between the probe and this call)
+     * the metadata-only UPDATE silently drops content that was never actually embedded. The
+     * client-side reroute (a full upsert for the missing ids) is a separate bead — this
+     * method only makes the misses REPORTABLE via the HTTP {@code /v1/vectors/update-metadata}
+     * response's {@code "missing"} field.
+     *
+     * @param metadatas replacement metadata maps aligned with {@code ids}
+     * @return updated count (same as {@link #updateMetadata}) plus the missing id subset,
+     *         in {@code ids} order (never null; empty when every id existed)
+     */
+    public MetadataUpdateOutcome updateMetadataWithMissing(String tenant, String collection,
+                                                            List<String> ids,
+                                                            List<Map<String, Object>> metadatas) {
         int dim = dimForCollection(collection);
-        if (ids == null || ids.isEmpty()) return 0;
+        if (ids == null || ids.isEmpty()) return new MetadataUpdateOutcome(0, List.of());
         if (ids.size() != metadatas.size()) {
             throw new IllegalArgumentException(
                 "ids (" + ids.size() + ") and metadatas (" + metadatas.size()
@@ -2069,10 +2097,13 @@ public final class PgVectorRepository {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
             int affected = 0;
+            List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                affected += updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i));
+                int rows = updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i));
+                affected += rows;
+                if (rows == 0) missing.add(ids.get(i));
             }
-            return affected;
+            return new MetadataUpdateOutcome(affected, missing);
         });
     }
 

@@ -50,6 +50,29 @@ def _legacy_vector_backend(monkeypatch):
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
 
 
+@pytest.fixture(autouse=True)
+def _stub_fence_complete(monkeypatch):
+    """nexus-5xn3k.4 RUNFENCE C2: this file's T3 substrate (``local_t3`` — a
+    raw ``chromadb.EphemeralClient``, per the module docstring's "Real PDF
+    extraction + chunking + local embedding + EphemeralClient") is
+    DELIBERATELY DECOUPLED from the engine's Postgres that
+    ``complete_index_run`` verifies chunk presence against — these tests
+    prove the PDF E2E pipeline (extraction, chunking, local embedding,
+    chunk-level staleness skip via ``_manifest_is_fully_present``) minus
+    fence/catalog integration. Once ``.4`` wired real begin/complete calls
+    into ``_index_document``/``pipeline_index_pdf``, the engine's genuine
+    verify-then-stamp correctly (but irrelevantly, for this file's scope)
+    finds 0 chunks present and raises ``IndexRunVerifyRefused``. Stub the
+    fence tail the same way as ``tests/test_pipeline_stages.py``'s
+    ``_stub_fence_complete``. The GENUINE fence integration proof — chunks
+    and manifest landing in the SAME substrate the engine verifies — is
+    explicitly deferred to nexus-5xn3k.7 (the falsification-gate bead); do
+    NOT rewire ``local_t3`` to the engine substrate here.
+    """
+    monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+
+
 def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
     """Local embed stub: wraps ONNX MiniLM-L6-v2 — no API keys needed.
 
@@ -107,9 +130,20 @@ class TestIndexPdfE2E:
         )
 
     def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
-        """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged."""
+        """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged.
+
+        RUNFENCE topology note (nexus-5xn3k.3): this harness writes chunks to
+        a raw EphemeralClient T3 deliberately decoupled from the engine
+        catalog's Postgres, so the engine-side manifest_verify correctly
+        reports every chunk missing and would force a re-index. The fence's
+        real coverage lives in tests/test_5xn3k_staleness_three_way.py and
+        the .7 integration gate; this test pins the chunk-level staleness
+        skip, so the verify fallthrough is pinned open here (same pattern as
+        test_doc_indexer's decoupled-T3 test).
+        """
         with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
+             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed), \
+             patch("nexus.doc_indexer._manifest_is_fully_present", return_value=True):
             first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
             second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
 

@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-5xn3k.1 (RUNFENCE E1, engine half step 1 of 2). Design of record:
+    T2 nexus memory "5xn3k-design-2026-08-02" (§3.1 + §3.2).
+
+    Core finding this arc exists to fix: no comparison of two artifacts BOTH
+    written by the same run can detect that the run did not finish. A death
+    mid-index leaves T3 chunks == manifest rows, both truncated — a
+    CONSISTENT truncation that "manifest minus T3" (the AC2 check already on
+    develop) returns clean on. Only a record of intent vs completion sees it.
+    That record is the run fence added here.
+
+    1. Four columns on nexus.catalog_documents:
+         index_state        TEXT             (NULL | 'indexing' | 'complete' | 'failed')
+         index_content_hash TEXT NOT NULL DEFAULT ''
+         index_run_id       TEXT NOT NULL DEFAULT ''
+         index_started_at   TEXT NOT NULL DEFAULT ''
+       index_state defaults NULL = unknown, and there is NO backfill.
+       Backfilling the legacy corpus to 'complete' would assert a fact
+       nobody measured; backfilling to 'indexing' would force a corpus-wide
+       re-embed. NULL means "the fence has nothing to say — fall through to
+       manifest_verify", i.e. exactly today's post-AC2 behaviour; the NULL
+       population drains naturally as documents are re-indexed.
+
+       Partial index idx_catalog_documents_index_state is deliberately
+       WHERE index_state <> 'complete' (note: this also excludes NULL rows,
+       since NULL <> 'complete' is UNKNOWN, not TRUE — the untouched legacy
+       corpus is exactly the population this index does NOT need to cover;
+       the interesting set is 'indexing' / 'failed', the small one).
+
+    2. nexus.manifest_verify(p_doc_id text) / nexus.manifest_verify_all():
+       structurally nexus.manifest_orphans(dim) (catalog-004-manifest-functions.xml,
+       re-declared for bytea in rdr180-002-hex-boundary-functions.xml) narrowed to
+       one document (or all documents, grouped by collection) and aggregated into
+       referenced/present/missing counts instead of an orphan-row list.
+
+       Both documented manifest_orphans traps are carried forward, or the check
+       reads FALSE:
+         (a) tombstoned parents are EXCLUDED (d.deleted_at IS NULL) — a
+             soft-deleted document's manifest is not damage.
+         (b) rows with collection IS NULL are pre-backfill state, NOT missing —
+             they are excluded from "referenced" entirely (matching
+             manifest_orphans' `WHERE c.collection IS NOT NULL` guard), so an
+             un-backfilled document never reads as damaged.
+
+       Unlike manifest_orphans(dim) (an admin/superuser, cross-tenant,
+       dim-routed maintenance function with no GUC scoping), these two are
+       tenant-scoped via the nexus.tenant GUC under SECURITY INVOKER + FORCE
+       RLS — the nexus.document_text(doc_id text) pattern (catalog-004),
+       because these are per-request engine-service reads (single doc verify,
+       and the doctor verify_all sweep) called in an established tenant
+       context, not a cross-tenant migration/maintenance tool. Missing GUC
+       therefore returns the reader-contract empty/zero result (diverges from
+       purge_trash's RAISE pattern deliberately, same as document_text).
+
+       Presence is checked across all three chunks_<dim> tables directly
+       (tenant_id + collection + chash) rather than routing by
+       split_part(collection,'__',3) model token the way manifest_orphans
+       does: a given (tenant, collection) pair only ever lives in one dim
+       table by construction (the model segment of the collection name fixes
+       the dimension), so an OR across three EXISTS checks is equivalent to
+       the token-routed branch and does not duplicate the _MODEL_DIMS token
+       list in a second place.
+
+       There is no FK from catalog_document_chunks.chash to chunks_<dim>
+       (fk-001-catalog-cross-store.xml FKs only doc_id -> catalog_documents.tumbler)
+       and there must not be — a chash is shared across documents and the
+       chunk tables are dim-sharded, so chunk deletion structurally cannot
+       cascade the manifest. This is why detection has to be explicit, and
+       why it is a single-database query now: post-RDR-155 chunks_<dim> and
+       catalog_document_chunks are tables in the SAME Postgres, so no data
+       crosses the wire and doctor stops paging chunk metadata rows client-side
+       (the nexus-ac4id part-2 fix — ac4id closes on this work, see the bead).
+
+    No engine HTTP routes yet (CatalogRepository/CatalogHandler wiring is
+    nexus-5xn3k.2). This changeset is schema + SQL primitive only.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: index-run fence columns on catalog_documents ─────────── -->
+    <changeSet id="catalog-020-1" author="nexus-5xn3k.1">
+        <comment>catalog_documents: index_state/index_content_hash/index_run_id/index_started_at — the RUNFENCE. index_state has NO default and NO backfill: NULL means unknown, never a fact nobody measured.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN index_state        TEXT;
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN index_content_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN index_run_id       TEXT NOT NULL DEFAULT '';
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN index_started_at   TEXT NOT NULL DEFAULT '';
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.catalog_documents DROP COLUMN IF EXISTS index_started_at;
+ALTER TABLE nexus.catalog_documents DROP COLUMN IF EXISTS index_run_id;
+ALTER TABLE nexus.catalog_documents DROP COLUMN IF EXISTS index_content_hash;
+ALTER TABLE nexus.catalog_documents DROP COLUMN IF EXISTS index_state;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: partial index on the small "not complete" set ─────────── -->
+    <changeSet id="catalog-020-2" author="nexus-5xn3k.1">
+        <comment>idx_catalog_documents_index_state: partial index WHERE index_state &lt;&gt; 'complete' — the interesting set (indexing/failed) is the small one; NULL rows fall outside the predicate (NULL &lt;&gt; 'complete' is UNKNOWN) so the untouched legacy corpus never bloats this index</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE INDEX idx_catalog_documents_index_state
+    ON nexus.catalog_documents (tenant_id, index_state)
+    WHERE index_state &lt;&gt; 'complete';
+        </sql>
+        <rollback>
+            <sql splitStatements="false">
+DROP INDEX IF EXISTS nexus.idx_catalog_documents_index_state;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: nexus.manifest_verify(p_doc_id text) ──────────────────── -->
+    <changeSet id="catalog-020-3" author="nexus-5xn3k.1">
+        <comment>
+            nexus.manifest_verify(p_doc_id text) RETURNS TABLE(referenced bigint,
+              present bigint, missing bigint) — the per-document anti-join of
+              catalog_document_chunks against the dim-sharded chunks_&lt;dim&gt; tables,
+              aggregated into counts instead of an orphan-row list.
+
+            SECURITY INVOKER, tenant-scoped via the nexus.tenant GUC (document_text's
+            pattern, not manifest_orphans' cross-tenant admin pattern) — this is a
+            per-request engine-service read (single-doc verify), called under an
+            established tenant context.
+
+            TOMBSTONE-AWARE: a tombstoned parent document (deleted_at IS NOT NULL) is
+            EXCLUDED — its manifest contributes nothing, so referenced=present=missing=0.
+            A soft-deleted document's manifest is not damage.
+
+            NULL-COLLECTION CAVEAT: manifest rows with collection IS NULL are
+            pre-backfill state and are excluded from "referenced" entirely (mirrors
+            manifest_orphans' `WHERE c.collection IS NOT NULL` guard) — an
+            un-backfilled document must never read as damaged.
+
+            Presence is an OR across chunks_384/768/1024 keyed on (tenant_id,
+            collection, chash) rather than split_part(collection,'__',3) model
+            routing: a given (tenant, collection) pair lives in exactly one dim
+            table by construction, so the OR is equivalent without duplicating the
+            _MODEL_DIMS token list.
+
+            Reader contract: no nexus.tenant GUC set -&gt; current_setting(...,true)
+            is NULL -&gt; the doc/manifest CTEs match nothing -&gt; a single row of
+            (0, 0, 0) is returned (aggregates over an empty set, not zero rows).
+            Diverges from purge_trash's RAISE pattern deliberately: readers return
+            nothing/zero, destructive operations raise.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_verify(p_doc_id text)
+RETURNS TABLE(
+    referenced bigint,
+    present    bigint,
+    missing    bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH manifest AS (
+        SELECT c.chash, c.collection
+          FROM nexus.catalog_document_chunks c
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = c.tenant_id
+           AND d.tumbler   = c.doc_id
+           AND d.deleted_at IS NULL
+         WHERE c.tenant_id  = current_setting('nexus.tenant', true)
+           AND c.doc_id     = p_doc_id
+           AND c.collection IS NOT NULL
+    ),
+    checked AS (
+        SELECT
+            (EXISTS (
+                 SELECT 1 FROM nexus.chunks_384 k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             ) OR EXISTS (
+                 SELECT 1 FROM nexus.chunks_768 k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             ) OR EXISTS (
+                 SELECT 1 FROM nexus.chunks_1024 k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             )) AS is_present
+          FROM manifest m
+    )
+    SELECT
+        count(*)::bigint                                AS referenced,
+        count(*) FILTER (WHERE is_present)::bigint       AS present,
+        count(*) FILTER (WHERE NOT is_present)::bigint   AS missing
+      FROM checked
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.manifest_verify(text)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: nexus.manifest_verify_all() ───────────────────────────── -->
+    <changeSet id="catalog-020-4" author="nexus-5xn3k.1">
+        <comment>
+            nexus.manifest_verify_all() RETURNS TABLE(collection text, referenced
+              bigint, present bigint, missing bigint) — manifest_verify(doc_id)
+              widened to every live document in the caller's tenant, grouped by
+              collection. The doctor verify-sweep primitive (nexus-ac4id part 2):
+              replaces client-side per-collection T3 paging entirely with one
+              engine-side anti-join.
+
+            SECURITY INVOKER, tenant-scoped via the nexus.tenant GUC — same
+            reader contract as manifest_verify(text): no GUC set means the
+            manifest CTE matches nothing, so GROUP BY yields zero rows (there is
+            no "total" row; an empty result is the correct "no data / no tenant"
+            answer for a grouped read).
+
+            Carries the same two traps as manifest_verify(text): tombstoned
+            parent documents excluded (d.deleted_at IS NULL); collection IS NULL
+            rows excluded from "referenced" (pre-backfill state, not missing).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_verify_all()
+RETURNS TABLE(
+    collection text,
+    referenced bigint,
+    present    bigint,
+    missing    bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH manifest AS (
+        SELECT c.chash, c.collection
+          FROM nexus.catalog_document_chunks c
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = c.tenant_id
+           AND d.tumbler   = c.doc_id
+           AND d.deleted_at IS NULL
+         WHERE c.tenant_id  = current_setting('nexus.tenant', true)
+           AND c.collection IS NOT NULL
+    ),
+    checked AS (
+        SELECT
+            m.collection,
+            (EXISTS (
+                 SELECT 1 FROM nexus.chunks_384 k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             ) OR EXISTS (
+                 SELECT 1 FROM nexus.chunks_768 k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             ) OR EXISTS (
+                 SELECT 1 FROM nexus.chunks_1024 k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             )) AS is_present
+          FROM manifest m
+    )
+    SELECT
+        collection,
+        count(*)::bigint                                AS referenced,
+        count(*) FILTER (WHERE is_present)::bigint       AS present,
+        count(*) FILTER (WHERE NOT is_present)::bigint   AS missing
+      FROM checked
+     GROUP BY collection
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.manifest_verify_all()</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: GRANT EXECUTE on both functions to nexus_svc ──────────── -->
+    <changeSet id="catalog-020-5" author="nexus-5xn3k.1">
+        <comment>Grant nexus_svc EXECUTE on manifest_verify/manifest_verify_all — consistent with catalog-004-4's grant pattern for the manifest functions.</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.manifest_verify(text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.manifest_verify_all() TO nexus_svc;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                REVOKE EXECUTE ON FUNCTION nexus.manifest_verify_all() FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.manifest_verify(text) FROM nexus_svc;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -51,9 +51,15 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
+ *   GET   /v1/catalog/manifest/verify_all per-collection referenced/present/missing, every live doc
+ *   POST  /v1/catalog/index-run/begin    stamp index_state='indexing' (idempotent, NOT a lock)
+ *   POST  /v1/catalog/index-run/complete FAIL-CLOSED verify-then-stamp index_state='complete'
+ *   POST  /v1/catalog/index-run/fail     stamp index_state='failed'
  *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
+ *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
  *   GET   /v1/catalog/collections/list   list collections
@@ -150,9 +156,17 @@ public final class CatalogHandler implements HttpHandler {
                 // which is why the client could not build a doctor check.
                 case "/links/orphaned"        -> handleLinksOrphaned(exchange, tenant, method);
 
+                // ── Index run fence (RUNFENCE, nexus-5xn3k.2) ─────────────────
+                case "/manifest/verify"       -> handleManifestVerify(exchange, tenant, method);
+                case "/manifest/verify_all"   -> handleManifestVerifyAll(exchange, tenant, method);
+                case "/index-run/begin"       -> handleIndexRunBegin(exchange, tenant, method);
+                case "/index-run/complete"    -> handleIndexRunComplete(exchange, tenant, method);
+                case "/index-run/fail"        -> handleIndexRunFail(exchange, tenant, method);
+
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
                 case "/owners/list"           -> handleOwnerList(exchange, tenant, method);
+                case "/owners/sweep_next_seq_drift" -> handleOwnersSweepNextSeqDrift(exchange, tenant, method);
                 case "/owners/by_repo"        -> handleOwnerByRepo(exchange, tenant, method);
                 case "/owners/by_name"        -> handleOwnerByName(exchange, tenant, method);
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
@@ -227,6 +241,19 @@ public final class CatalogHandler implements HttpHandler {
             // /update. Same 409 shape as CollectionMergeRefused above: a
             // refusal, not a server error.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.IndexRunVerifyRefused e) {
+            // nexus-5xn3k.2: /complete's fail-closed gate (memo §3.3, HARD spec
+            // amendment T2 21350) — missing>0 OR referenced!=claimed chunk_count.
+            // 409 carrying the counts so the client can log/retry rather than a
+            // bare message string.
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("error", e.getMessage());
+            body.put("doc_id", e.docId);
+            body.put("referenced", e.referenced);
+            body.put("present", e.present);
+            body.put("missing", e.missing);
+            body.put("chunk_count", e.chunkCount);
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(body));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -731,7 +758,25 @@ public final class CatalogHandler implements HttpHandler {
                 throw new IllegalArgumentException("docs[" + d + "]." + e.getMessage());
             }
         }
-        var result = repo.writeManifestMany(tenant, docs);
+        // nexus-5xn3k.2 (memo §3.3): optional {"complete": {doc_id: content_hash}}
+        // stamps completion inside the SAME per-doc transaction — no extra
+        // round trip on the hot flush-grain repo path.
+        Map<String, String> complete = null;
+        Object rawComplete = body.get("complete");
+        if (rawComplete instanceof Map<?, ?> m) {
+            complete = new LinkedHashMap<>();
+            for (var e : m.entrySet()) {
+                // stacked-review item 4: a JSON null value (e.g. {"doc_id": null})
+                // must NOT become the 4-character string "null" via
+                // String.valueOf(e.getValue()) — that would silently stamp a
+                // bogus literal content_hash. Treat a null value as ABSENT: the
+                // doc_id is simply not in the completion set, same as if the
+                // caller had omitted the key entirely.
+                if (e.getValue() == null) continue;
+                complete.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+            }
+        }
+        var result = repo.writeManifestMany(tenant, docs, complete);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
@@ -1014,6 +1059,21 @@ public final class CatalogHandler implements HttpHandler {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         var owners = repo.listOwners(tenant);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    /**
+     * POST /v1/catalog/owners/sweep_next_seq_drift — the nexus-0ehwe item 5 converge verb.
+     *
+     * <p>Floors every drifted owner's {@code next_seq} in the tenant to its own high-water
+     * mark in one pass and reports which owners were actually below it, so a drift
+     * incident's blast radius is KNOWN rather than guessed (nexus-pbawi's owner 1.12 was
+     * found only because an operator happened to suspect it). No request body is read; the
+     * sweep always covers the whole tenant.
+     */
+    private void handleOwnersSweepNextSeqDrift(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var report = repo.sweepNextSeqDrift(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(report));
     }
 
     private void handleOwnerByRepo(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1765,6 +1825,88 @@ public final class CatalogHandler implements HttpHandler {
             Map.of("dim", dim,
                    "count", report.get("count"),
                    "orphans", report.get("orphans"))));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.2) — memo §3.3
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** GET /v1/catalog/manifest/verify?doc_id=X — referenced/present/missing for one document. */
+    private void handleManifestVerify(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String docId = queryParam(exchange, "doc_id");
+        if (docId == null || docId.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"doc_id query param required\"}"); return;
+        }
+        var counts = repo.manifestVerify(tenant, docId);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of(
+            "referenced", counts.referenced(),
+            "present",    counts.present(),
+            "missing",    counts.missing())));
+    }
+
+    /**
+     * GET /v1/catalog/manifest/verify_all — the doctor sweep primitive
+     * (nexus-ac4id part 2): every live document in the tenant, grouped by
+     * collection, in ONE engine-side anti-join.
+     */
+    private void handleManifestVerifyAll(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var rows = repo.manifestVerifyAll(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("collections", rows, "count", rows.size())));
+    }
+
+    /**
+     * POST /v1/catalog/index-run/begin  {doc_id, content_hash, run_id, collection}
+     * Idempotent. Stamps index_state='indexing' before any chunk work.
+     */
+    private void handleIndexRunBegin(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String docId = (String) body.get("doc_id");
+        if (docId == null || docId.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
+        }
+        String contentHash = (String) body.get("content_hash");
+        String runId       = (String) body.get("run_id");
+        String collection  = (String) body.get("collection");
+        repo.beginIndexRun(tenant, docId, contentHash, runId, collection);
+        HttpUtil.send(exchange, 200, "{\"ok\":true}");
+    }
+
+    /**
+     * POST /v1/catalog/index-run/complete  {doc_id, content_hash, chunk_count}
+     * FAIL-CLOSED verify-then-stamp — see {@link CatalogRepository#completeIndexRun}.
+     * A refusal is caught in {@link #handle} ({@code IndexRunVerifyRefused}) and
+     * mapped to 409 with the counts.
+     */
+    private void handleIndexRunComplete(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String docId = (String) body.get("doc_id");
+        if (docId == null || docId.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
+        }
+        String contentHash = (String) body.get("content_hash");
+        if (!(body.get("chunk_count") instanceof Number)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'chunk_count' (integer) required\"}"); return;
+        }
+        int chunkCount = ((Number) body.get("chunk_count")).intValue();
+        var result = repo.completeIndexRun(tenant, docId, contentHash, chunkCount);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /** POST /v1/catalog/index-run/fail  {doc_id, error} */
+    private void handleIndexRunFail(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String docId = (String) body.get("doc_id");
+        if (docId == null || docId.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
+        }
+        String error = (String) body.get("error");
+        repo.failIndexRun(tenant, docId, error);
+        HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

@@ -191,6 +191,37 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // nexus-lcmbp: a create() retry against a 'running' row with a fresh heartbeat
+        // is a business-logic refusal (no SQLSTATE — the repository throws before any
+        // statement conflicts), mapped ahead of the generic class-23 branch for the
+        // same reason as the identity-conflict branch above: a diagnosable typed body
+        // instead of falling through to an opaque 500, and — the defect this exists to
+        // close — never a 200 "skip" the caller can mistake for success.
+        //
+        // nexus-lcmbp fix-list #5: the "remedy" literal below must stay TEXTUALLY
+        // IDENTICAL to PipelineConflictException's message tail — the client
+        // (HttpPipelineDB.create_pipeline / PipelineConflictRunning) dedups by
+        // checking `remedy in error` before appending it to the exception message; a
+        // drift here makes the user-facing text double up the remedy.
+        var pipelineConflict = pipelineConflict(e);
+        if (pipelineConflict != null) {
+            log.warn("event={}_pipeline_conflict {} content_hash={} heartbeat_age_s={} "
+                    + "stale_threshold_s={}",
+                event, context, pipelineConflict.contentHash(),
+                pipelineConflict.heartbeatAgeSeconds(), pipelineConflict.staleThresholdSeconds());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(pipelineConflict.getMessage())
+                + ",\"status\":\"conflict_running\""
+                + ",\"content_hash\":" + jsonString(pipelineConflict.contentHash())
+                + ",\"started_at\":" + jsonString(pipelineConflict.startedAt().toString())
+                + ",\"heartbeat_age_seconds\":" + pipelineConflict.heartbeatAgeSeconds()
+                + ",\"stale_threshold_seconds\":" + pipelineConflict.staleThresholdSeconds()
+                + ",\"remedy\":\"wait for the resume window (retry after the heartbeat "
+                + "exceeds the stale threshold) or inspect the pipeline row via "
+                + "GET /v1/pipeline/state (engine route; requires service auth)\""
+                + "}");
+            return true;
+        }
         String sqlState = sqlState23(e);
         if (sqlState != null) {
             // nexus-7e057: class-23 integrity violations are caller errors (bad FK id
@@ -257,6 +288,22 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.CatalogIdentityConflictException ce) {
                 return ce;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The {@link dev.nexus.service.db.PipelineConflictException} in {@code t}'s cause
+     * chain, or null. {@code TenantScope} propagates a {@code RuntimeException} thrown
+     * from inside {@code withTenant}'s work lambda UNCHANGED (no wrapping), so this
+     * exception is typically the top-level throwable itself — the walk still covers the
+     * general case for symmetry with {@link #identityConflict}.
+     */
+    static dev.nexus.service.db.PipelineConflictException pipelineConflict(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.PipelineConflictException pe) {
+                return pe;
             }
         }
         return null;

@@ -2,22 +2,51 @@
 # Local-service functional gate (2026-07-06, born from the v6.3.6 release).
 #
 # WHY THIS EXISTS: the integration suite's local-service round-trip family
-# (tests/test_integration.py T3 round-trips, scratch/MCP round-trips — ~370
-# tests) is the FUNCTIONAL TEST of local mode, one of the two shipped modes.
-# Its skip-gate resolves a service via env vars or a local lease — never the
-# managed cloud (deliberate: integration tests must not write junk into
-# production). Before this script, the gate ran only when a local service
-# HAPPENED to be running, so it silently degraded to 74/516 tests the day the
-# ambient dev service died (v6.3.6 release, 2026-07-06). A functional gate
-# must be self-provisioning, not a side quest.
+# (tests/test_integration.py T3 round-trips, scratch/MCP round-trips — several
+# hundred tests) is the FUNCTIONAL TEST of local mode, one of the two shipped
+# modes. Its skip-gate resolves a service via env vars or a local lease —
+# never the managed cloud (deliberate: integration tests must not write junk
+# into production). Before this script, the gate ran only when a local
+# service HAPPENED to be running, so it silently degraded to 74/516 tests the
+# day the ambient dev service died (v6.3.6 release, 2026-07-06). A functional
+# gate must be self-provisioning, not a side quest.
 #
 # SELF-PROVISIONING (nexus-edwlp, 2026-07-07): infra is hermetic — the gate
-# provisions its own PG + service, auto-rebuilds a stale dev jar, and the T3
-# vector resolver honors the same HOST/PORT env leg as the T2 stores. Two
+# provisions its own PG + service and auto-rebuilds a stale dev jar. Two
 # markers carve tests out, each with an exact-count guard below: `lived_in`
 # (dispatches real `claude -p` or needs seeded lived-in corpora) and
 # `cloud_mode`. A vacuity guard asserts passed/skipped stay within the pinned
 # FLOOR/BUDGET. A guard trip means real regression, not ambient drift.
+#
+# TWO SEPARATE PROOFS, RE-SCOPED HONESTLY (nexus-x81ks, 2026-08-02, decision
+# (b)-with-teeth). nexus-tmsnz found that the pytest family below is NOT
+# actually exercising the throwaway service this script provisions: autouse
+# conftest fixtures (_isolate_service_endpoint_env, _isolate_config_dir,
+# _pin_t2_substrate — conftest.py) strip NX_SERVICE_* from every test body
+# and route it at a SEPARATE substrate the suite boots ITSELF, session-scoped.
+# A full re-wire (making the fixtures honor this gate's env instead) is
+# structurally infeasible: the deep integration tests need superuser access
+# to their OWN substrate PG for Liquibase/seeding/tenant-minting, which a
+# foreign service cannot grant, and a partial re-wire would punch conditional
+# holes in the isolation fixtures that exist to prevent tests from leaking
+# into a live install. So the two proofs are kept SEPARATE and both honest:
+#   - The pytest family (FLOOR/BUDGET below) is the functional surface of
+#     local mode, proven against SELF-PROVISIONED substrates the suite
+#     manages itself. It says nothing about whether the throwaway service
+#     THIS SCRIPT boots actually works — see the next line.
+#   - The DIRECT SMOKE LEG (step 5 below, before the pytest family runs) is
+#     a counted, script-driven probe against THIS script's own throwaway
+#     service — outside pytest, so immune to the autouse isolation. It is
+#     what proves the shipped-shape service (native/stamped binary, real
+#     daemon machinery) actually boots and serves: health, version identity,
+#     catalog read/write, the RUNFENCE index-run fence, one vector round
+#     trip. Exact-count non-vacuity (SMOKE_EXPECTED), fail-loud on any
+#     mismatch or unreachable service — never silently skipped. NOTE: the
+#     version-identity assertion cannot discriminate WHICH artifact is
+#     running (pinned release and stamped dev jar bake the identical
+#     release_version) — the fence round-trip is the actual discriminator
+#     today, and only until a pinned release ships RUNFENCE; see the step
+#     (b)/(d) comments below and nexus-308ph.
 #
 # THIS GATE IS BGE-768 ONLY (nexus-w6h2m, 2026-07-28). A local service embeds
 # with bge-768 and nothing else — RDR-160 makes that the only valid value in
@@ -46,15 +75,20 @@
 #   3. Starts the storage service against it (NX_LOCAL=1), preferring an
 #      installed native binary, falling back to the dev jar
 #      (service/target/nexus-service-1.0-SNAPSHOT.jar).
-#   4. Sources .env (repo root) for cloud API keys, then runs
-#      `pytest -m "integration and not lived_in"` with
-#      NX_SERVICE_HOST/PORT/TOKEN + NX_SERVICE_URL pointed at the
-#      throwaway service (both the T2 and T3 resolver env legs), so the
-#      whole local-service family runs deterministically.
-#   5. Parses the pytest summary and asserts passed >= FLOOR and
+#   4. Reads back its lease.
+#   5. Runs the direct smoke leg (nexus-x81ks) against THIS throwaway
+#      service — health, version identity, catalog round-trip, RUNFENCE
+#      fence round-trip, one vector round trip. Counted, fail-loud; see the
+#      "TWO SEPARATE PROOFS" note above.
+#   6. Sources .env (repo root) for cloud API keys, then runs
+#      `pytest -m "integration and not lived_in"` with NX_SERVICE_HOST/
+#      PORT/TOKEN set (harmless legacy env — the autouse isolation fixtures
+#      strip it for every test body; see the re-scope note above), so the
+#      self-provisioned-substrate local-service family runs deterministically.
+#   7. Parses the pytest summary and asserts passed >= FLOOR and
 #      skipped <= BUDGET (the vacuity guard) — see the numbers pinned
 #      below.
-#   6. Tears everything down (service, PG, scratch dir), even on failure.
+#   8. Tears everything down (service, PG, scratch dir), even on failure.
 #
 # Usage:
 #   tests/e2e/local-service-gate.sh            # full integration gate
@@ -91,6 +125,26 @@ select_summary_line() {
   sed $'s/\033\[[0-9;]*m//g' "$1" \
     | grep -E '^(=+ )?[0-9]+ (failed|passed|skipped|deselected|error|xfailed|xpassed|warning)[a-z]*(,.*)? in [0-9.]+s' \
     | tail -1 || true
+}
+
+# ── Smoke-leg non-vacuity guard (nexus-x81ks) ───────────────────────────────
+# smoke_verify_count PASSED EXPECTED — the direct-smoke leg's tail check
+# (called for real after the live sequence, step 5 below). Defined up here,
+# alongside the summary-line parser above, so NX_GATE_SELFTEST can exercise
+# the guard logic itself with no live service: every smoke_fail call in the
+# live sequence already exits 1 immediately on a failed assertion, so by the
+# time this runs PASSED should always equal EXPECTED — this is the belt-and-
+# suspenders check for a bug where an assertion path silently never
+# incremented SMOKE_PASSED without erroring (same discipline as the pytest
+# FLOOR/BUDGET guard further down). Returns 1 (does not exit) so callers choose.
+smoke_verify_count() {
+  local passed="$1" expected="$2"
+  if [ "$passed" -ne "$expected" ]; then
+    echo "[gate] SMOKE LEG VACUITY GUARD TRIPPED: passed=$passed expected=$expected" >&2
+    return 1
+  fi
+  echo "[gate] SMOKE LEG: passed=$passed expected=$expected"
+  return 0
 }
 
 # ── Self-test (NX_GATE_SELFTEST=1): exercise the parser against synthetic
@@ -143,6 +197,24 @@ if [ "${NX_GATE_SELFTEST:-0}" = "1" ]; then
   else
     echo "[gate-selftest] FAIL (decoy selection): got '$selected'" >&2
     selftest_failed=1
+  fi
+
+  # smoke_verify_count (nexus-x81ks): the smoke leg's own non-vacuity guard,
+  # exercised directly since it needs no live service — a match must pass
+  # (rc 0), a mismatch must fail (rc 1). Output is suppressed (>/dev/null):
+  # only the mismatch case prints to stderr, which the selftest deliberately
+  # provokes and does not want mistaken for a real trip in CI logs.
+  if smoke_verify_count 11 11 >/dev/null 2>&1; then
+    echo "[gate-selftest] ok (smoke_verify_count: match passes)"
+  else
+    echo "[gate-selftest] FAIL (smoke_verify_count: 11/11 should pass)" >&2
+    selftest_failed=1
+  fi
+  if smoke_verify_count 9 11 >/dev/null 2>&1; then
+    echo "[gate-selftest] FAIL (smoke_verify_count: 9/11 mismatch should fail)" >&2
+    selftest_failed=1
+  else
+    echo "[gate-selftest] ok (smoke_verify_count: mismatch fails)"
   fi
 
   if [ "$selftest_failed" -ne 0 ]; then
@@ -202,6 +274,22 @@ trap cleanup EXIT
 
 # 1. Provision the throwaway PG cluster.
 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx init --service
+
+# `nx init --service` does not stop at provisioning: it also installs the
+# CURRENT PINNED RELEASE native binary (REQUIRED_ENGINE_VERSION) and starts
+# it (commands/init.py -> ensure_storage_supervisor), publishing a live
+# lease. Left running, that lease makes step 3 below a NO-OP: daemon start
+# is idempotent on an existing lease (storage_service_daemon.py
+# _start_locked short-circuits without inspecting NEXUS_SERVICE_JAR/BIN at
+# all) — found live 2026-08-02 while adding the nexus-x81ks smoke leg: the
+# RUNFENCE routes (unreleased, post-v0.1.61) 404'd even though step 2 had
+# just rebuilt a jar containing them, because the ACTUAL running process the
+# whole time was the pinned release binary init installed, never the fresh
+# build (nexus-4e96a). Stop it here so step 3's launch-artifact selection
+# (native override / dev jar / re-installed pinned binary) is what actually
+# runs — PG is left up (`stop` never touches it, by design).
+echo "[gate] stopping the pinned-release service nx init auto-started (nexus-4e96a)"
+NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 
 # 2. Rebuild the dev jar if stale, missing, or WRONG-STAMPED (rebuild-on-
 #    key-miss only; a fresh, correctly-stamped jar re-run is a no-op).
@@ -268,11 +356,169 @@ else
 fi
 env "${START_ENV[@]}" uv run nx daemon service start
 
-# 4. Read the lease and run the gate through the env leg.
+# 4. Read the lease.
 LEASE_JSON="$(cat "$SCRATCH"/storage_service_addr.*)"
 SERVICE_PORT="$(printf '%s' "$LEASE_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['port'])")"
 SERVICE_TOKEN="$(printf '%s' "$LEASE_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['token'])")"
 echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
+
+# ── 5. Direct smoke leg (nexus-x81ks) ───────────────────────────────────────
+# A counted, script-driven probe of THIS throwaway service — outside pytest,
+# so immune to the autouse isolation fixtures that route every pytest test
+# body at its own self-provisioned substrate (see the "TWO SEPARATE PROOFS"
+# header note). This is what proves the shipped-shape service (native/
+# stamped binary, real daemon machinery) actually boots and serves: health,
+# version identity, catalog read/write, the RUNFENCE index-run fence, and one
+# vector round trip. Exact-count non-vacuity, same discipline as
+# LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
+# SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
+# unreachable service or a malformed response fails loud, never skips.
+SMOKE_EXPECTED=11
+SMOKE_PASSED=0
+SMOKE_BASE="http://127.0.0.1:$SERVICE_PORT"
+SMOKE_DIR="$SCRATCH/smoke"
+mkdir -p "$SMOKE_DIR"
+SMOKE_AUTH=(-H "Authorization: Bearer $SERVICE_TOKEN")
+
+# smoke_request METHOD PATH [JSON_BODY] — writes the response body to
+# $SMOKE_DIR/resp.json and sets SMOKE_CODE to the HTTP status ("000" on a
+# connection-level failure, e.g. connection refused — curl exits nonzero
+# before any status line is available; never silently treated as any other
+# code).
+smoke_request() {
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-sS -o "$SMOKE_DIR/resp.json" -w '%{http_code}' -X "$method" "${SMOKE_AUTH[@]}")
+  if [ -n "$body" ]; then
+    args+=(-H 'Content-Type: application/json' -d "$body")
+  fi
+  SMOKE_CODE="$(curl "${args[@]}" "$SMOKE_BASE$path" 2>"$SMOKE_DIR/curl.err")" || true
+  [ -n "$SMOKE_CODE" ] || SMOKE_CODE="000"
+}
+
+smoke_fail() {
+  echo "[gate] SMOKE LEG FAILED: $1 (code=${SMOKE_CODE:-n/a})" >&2
+  [ -f "$SMOKE_DIR/resp.json" ] && echo "[gate]   body: $(cat "$SMOKE_DIR/resp.json")" >&2
+  # Connection-refused / connection-level failures leave resp.json empty (or
+  # absent) — curl's own error text (curl.err) is the only diagnostic in
+  # that case, so surface it too.
+  [ -s "$SMOKE_DIR/curl.err" ] && echo "[gate]   curl: $(cat "$SMOKE_DIR/curl.err" 2>/dev/null)" >&2
+  exit 1
+}
+
+# smoke_check DESC PYTHON_EXPR — PYTHON_EXPR is a python expression over `d`,
+# the JSON-decoded $SMOKE_DIR/resp.json (dict or list, whatever the endpoint
+# returns). A falsy expression or a JSON-decode failure fails the leg loud.
+smoke_check() {
+  local desc="$1" expr="$2"
+  python3 -c "
+import json, sys
+d = json.load(open('$SMOKE_DIR/resp.json'))
+sys.exit(0 if bool($expr) else 1)
+" || smoke_fail "$desc"
+  SMOKE_PASSED=$((SMOKE_PASSED + 1))
+  echo "[gate] smoke ok ($SMOKE_PASSED/$SMOKE_EXPECTED): $desc"
+}
+
+SMOKE_UID="$$"
+
+# a. GET /health -> 200 + {"status":"ok","db":"up"}.
+smoke_request GET /health
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /health"
+smoke_check "GET /health -> status=ok db=up" "d.get('status')=='ok' and d.get('db')=='up'"
+
+# b. Version identity — this throwaway is a STAMPED rebuild (step 2 above),
+# so this is an exact match against GATE_STAMP, not a floor comparison. NOTE:
+# this cannot discriminate WHICH artifact is actually running — a pinned
+# release binary and a freshly-stamped dev jar both bake the identical
+# release_version by construction — see step (d) below.
+#
+# NOTE (all smoke_check calls below that splice a shell var into their
+# PYTHON_EXPR arg, starting with $GATE_STAMP here): unlike the REQUEST side
+# (smoke_request bodies are always built through python3 json.dumps, which
+# escapes for JSON), the ASSERTION side is spliced into raw python SOURCE
+# with no escaping. Every value used here (GATE_STAMP, SMOKE_UID and its
+# derivatives) is script-controlled and shell-safe today — keep it that way;
+# never splice untrusted or free-form text into a PYTHON_EXPR.
+smoke_request GET /version
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /version"
+smoke_check "GET /version -> release_version==$GATE_STAMP" "d.get('release_version')=='$GATE_STAMP'"
+
+# c. Catalog round-trip: owner upsert -> doc/register -> show, title round-trips.
+SMOKE_OWNER_PREFIX="9.$SMOKE_UID"
+smoke_request POST /v1/catalog/owners/upsert \
+  "$(python3 -c "import json;print(json.dumps({'tumbler_prefix':'$SMOKE_OWNER_PREFIX','name':'gate-smoke-owner','owner_type':'gate_smoke'}))")"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/owners/upsert"
+smoke_check "POST /v1/catalog/owners/upsert -> ok" "d.get('ok') is True"
+
+SMOKE_TITLE="gate-smoke-doc-$SMOKE_UID"
+smoke_request POST /v1/catalog/doc/register \
+  "$(python3 -c "import json;print(json.dumps({'owner_prefix':'$SMOKE_OWNER_PREFIX','title':'$SMOKE_TITLE','content_type':'knowledge','file_path':'/gate-smoke/$SMOKE_UID.md'}))")"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/doc/register"
+smoke_check "POST /v1/catalog/doc/register -> tumbler under $SMOKE_OWNER_PREFIX" \
+  "isinstance(d.get('tumbler'), str) and d['tumbler'].startswith('$SMOKE_OWNER_PREFIX.')"
+SMOKE_DOC_TUMBLER="$(python3 -c "import json;print(json.load(open('$SMOKE_DIR/resp.json'))['tumbler'])")"
+
+smoke_request GET "/v1/catalog/show?tumbler=$SMOKE_DOC_TUMBLER"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /v1/catalog/show"
+smoke_check "GET /v1/catalog/show -> title round-trips" "d.get('title')=='$SMOKE_TITLE'"
+
+# d. Fence round-trip (RUNFENCE routes, free coverage on a shipped-shape
+# service): begin -> fail -> a subsequent show reflects index_state='failed'.
+# Deliberately NOT begin -> complete(chunk_count=0): the client must never
+# claim completion with zero chunks, so exercising that call shape here would
+# smoke-test a request no honest client makes.
+#
+# THIS is the artifact-identity discriminator until nexus-308ph lands a
+# per-run build nonce — RUNFENCE is unreleased (post-v0.1.61), so it 404s
+# against the pinned release binary and 200s only against a fresh dev
+# build, unlike step (b)'s version check above. It silently loses that
+# power the moment a pinned release ships the fence routes. Revisit
+# trigger: REQUIRED_ENGINE_VERSION >= 0.1.62.
+smoke_request POST /v1/catalog/index-run/begin \
+  "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','run_id':'gate-smoke-$SMOKE_UID','collection':'knowledge__gate-smoke__bge-base-en-v15-768__v1'}))")"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/begin"
+smoke_check "POST /v1/catalog/index-run/begin -> ok" "d.get('ok') is True"
+
+smoke_request GET "/v1/catalog/manifest/verify?doc_id=$SMOKE_DOC_TUMBLER"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /v1/catalog/manifest/verify"
+smoke_check "GET /v1/catalog/manifest/verify -> referenced=0 missing=0 (no chunks written)" \
+  "d.get('referenced')==0 and d.get('missing')==0"
+
+smoke_request POST /v1/catalog/index-run/fail \
+  "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','error':'gate-smoke synthetic failure'}))")"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/fail"
+smoke_check "POST /v1/catalog/index-run/fail -> ok" "d.get('ok') is True"
+
+smoke_request GET "/v1/catalog/show?tumbler=$SMOKE_DOC_TUMBLER"
+[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /v1/catalog/show (post-fail)"
+smoke_check "GET /v1/catalog/show -> index_state==failed (fence round-trip)" "d.get('index_state')=='failed'"
+
+# e. Vector leg: one tiny doc, upsert then search-returns-it. Safe to include
+# unconditionally — the bge-768 ONNX model lives in the machine-wide
+# ~/.cache/nexus/onnx_models/ cache, not scratch-isolated, so a box with any
+# prior local-mode use already has it (verified present on this box; no
+# download is triggered by this leg). NEXUS_GATE_NO_VECTOR_SMOKE=1 drops the
+# leg (and SMOKE_EXPECTED with it) if that assumption stops holding somewhere.
+if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
+  SMOKE_CHASH="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
+  SMOKE_VEC_COLLECTION="knowledge__gate-smoke__bge-base-en-v15-768__v1"
+  SMOKE_CHUNK_TEXT="gate smoke vector round-trip probe $SMOKE_UID"
+  smoke_request POST /v1/vectors/upsert-chunks \
+    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks"
+  smoke_check "POST /v1/vectors/upsert-chunks -> upserted=1" "d.get('upserted')==1"
+
+  smoke_request POST /v1/vectors/search \
+    "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/search"
+  smoke_check "POST /v1/vectors/search -> returns the upserted chunk" \
+    "any(r.get('id')=='$SMOKE_CHASH' for r in d)"
+else
+  echo "[gate] NEXUS_GATE_NO_VECTOR_SMOKE=1 — vector leg skipped; SMOKE_EXPECTED lowered"
+  SMOKE_EXPECTED=9
+fi
+
+smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 
 # The NX_SERVICE_* env leg below pins the SERVICE at the throwaway
 # instance (.env was sourced up top, before the service spawned). HOST/PORT
@@ -349,20 +595,36 @@ GATE_PG_BIN="$SCRATCH/pg-bundle/bundle/bin"
 if [ -x "$GATE_PG_BIN/initdb" ]; then
   export NEXUS_PG_BIN="$GATE_PG_BIN"
 fi   # else: host-PG / dev mode — fall through to auto-discovery
+# --color=no: this output is PARSED, so it must not depend on whether the
+# caller has a TTY. `tee` writes to stdout as well as the file, so pytest
+# sees a terminal when a human runs the gate by hand — exactly how the
+# release checklist says to run it — and colorises. The summary line then
+# begins with an escape sequence, the ^-anchored selector below misses it,
+# and the vacuity guard trips on a run where every test passed. Observed
+# live 2026-08-01: 467 passed, gate reported FAILED (passed=0).
+#
+# -rs: name every skip. The BUDGET trip below is undiagnosable from CI logs
+# without the reasons (2026-08-02: two nightly reds could report only a
+# count, never which tests). Costs a few summary lines on a green run.
+#
+# NOTE this comment block must stay ABOVE the command, never inside the
+# backslash continuation: a continued line that lands on a comment ends the
+# logical line, turning the env prefix into plain unexported assignments —
+# pytest then runs env-less. That is NOT merely a skip: with NX_SERVICE_*
+# gone, service resolution falls through to the uid-scoped ServiceRegistry
+# lease (service_endpoint.py), so on a box with a live supervisor the
+# "hermetic" gate runs against the OPERATOR'S REAL INSTALL; only on a box
+# with no live service do the tests skip. The scratch config-dir pin
+# (3f61b851) is lost either way. That exact regression shipped in 376115c1
+# and cost nightlies 2026-08-01/02 (skipped 21 -> 28, budget 25).
+# Mechanically enforced by tests/test_shell_continuation_lint.py.
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
-  # --color=no: this output is PARSED, so it must not depend on whether the
-  # caller has a TTY. `tee` writes to stdout as well as the file, so pytest
-  # sees a terminal when a human runs the gate by hand — exactly how the
-  # release checklist says to run it — and colorises. The summary line then
-  # begins with an escape sequence, the ^-anchored selector below misses it,
-  # and the vacuity guard trips on a run where every test passed. Observed
-  # live 2026-08-01: 467 passed, gate reported FAILED (passed=0).
-  uv run pytest -m "integration and not lived_in and not cloud_mode" -q --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
+  uv run pytest -m "integration and not lived_in and not cloud_mode" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e
 
-# 5. Vacuity guard (nexus-edwlp Task 6): pinned from the post-fix empirical
+# 7. Vacuity guard (nexus-edwlp Task 6): pinned from the post-fix empirical
 # full-gate run (2026-07-07, macOS: 446 passed / 31 skipped / 0 failed; the
 # 31 = 24 CA-3-bundle-conditional + ~7 platform one-offs). A trip means real
 # regression -- either fewer tests are actually executing (silent coverage

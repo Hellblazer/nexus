@@ -13,12 +13,12 @@ Turn ideas into designs through collaborative dialogue before writing code.
 **Core principle:** No implementation without an approved design. Every project, regardless of perceived simplicity.
 
 <HARD-GATE>
-Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
+Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until a design exists and the user has approved it. A DESIGN OF RECORD counts as that approval: a locked T2 design memo, an accepted RDR, or a bead whose description carries reviewed acceptance criteria (including MUSTs amended by review) IS the approved design — implement it without re-gating. This gate fires for work with NO design of record, regardless of perceived simplicity.
 </HARD-GATE>
 
 ## Anti-Pattern: "This Is Too Simple To Need A Design"
 
-Every project goes through this process. A utility function, a config change, a single-file script — all of them. "Simple" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.
+Undesigned work goes through this process. A utility function, a config change, a single-file script — all of them. "Simple" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval. The inverse anti-pattern is equally real: re-gating work whose design is already locked (T2 memo, accepted RDR, reviewed bead) re-litigates settled decisions and stalls execution — check for a design of record FIRST.
 
 ## Process Flow
 

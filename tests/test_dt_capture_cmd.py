@@ -32,7 +32,7 @@ def _patch_index(monkeypatch):
     monkeypatch.setattr("nexus.commands.dt._index_dt_content_record",
                         lambda uuid, **kw: dt_calls.append(uuid) or True)
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, **kw: file_calls.append(uuid) or True)
+                        lambda uuid, path, **kw: (file_calls.append(uuid) or True, 1))
     return dt_calls, file_calls
 
 
@@ -68,7 +68,7 @@ def test_pdf_capture_is_file_backed(runner, monkeypatch) -> None:
                         lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
     file_calls: list[str] = []
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, **kw: file_calls.append(uuid) or True)
+                        lambda uuid, path, **kw: (file_calls.append(uuid) or True, 1))
     monkeypatch.setattr("nexus.commands.dt._index_dt_content_record",
                         lambda uuid, **kw: (_ for _ in ()).throw(AssertionError("should not route to dt_content")))
     result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "pdf"])
@@ -87,7 +87,7 @@ def test_markdown_capture_is_file_backed(runner, monkeypatch) -> None:
                         lambda **kw: [(kw["uuids"][0], "/captured.md")])
     file_calls: list[str] = []
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, **kw: file_calls.append(uuid) or True)
+                        lambda uuid, path, **kw: (file_calls.append(uuid) or True, 1))
     monkeypatch.setattr("nexus.commands.dt._index_dt_content_record",
                         lambda uuid, **kw: (_ for _ in ()).throw(AssertionError("markdown must not route to dt_content")))
     result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "markdown"])
@@ -106,7 +106,7 @@ def test_doi_capture_downloads_pdf_and_indexes(runner, monkeypatch) -> None:
                         lambda **kw: [(kw["uuids"][0], "/p.pdf")])
     indexed: list[str] = []
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, **kw: indexed.append(uuid) or True)
+                        lambda uuid, path, **kw: (indexed.append(uuid) or True, 1))
     result = runner.invoke(main, ["dt", "capture", "--doi", "10.1/x",
                                   "--contact-email", "me@x.co"])
     assert result.exit_code == 0, result.output
@@ -125,7 +125,7 @@ def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
                         lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
     seen = {}
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, **kw: seen.update(kw) or True)
+                        lambda uuid, path, **kw: (seen.update(kw) or True, 1))
     result = runner.invoke(main, ["dt", "capture", "https://e.com",
                                   "--type", "pdf", "--extractor", "docling"])
     assert result.exit_code == 0, result.output
@@ -140,7 +140,7 @@ def test_doi_without_email_warns(runner, monkeypatch) -> None:
                         lambda doi, **kw: "U")
     monkeypatch.setattr("nexus.commands.dt._gather_records",
                         lambda **kw: [(kw["uuids"][0], "/p.pdf")])
-    monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: True)
+    monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: (True, 1))
     result = runner.invoke(main, ["dt", "capture", "--doi", "10.1/x"])
     assert result.exit_code == 0, result.output
     assert "Unpaywall open-access PDF discovery is disabled" in result.output

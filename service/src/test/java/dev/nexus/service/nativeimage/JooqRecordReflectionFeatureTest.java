@@ -65,7 +65,13 @@ class JooqRecordReflectionFeatureTest {
     // native-image reflection by construction — this is the deliberate bump.
     // It matters: recordGcAudit uses INSERT ... RETURNING, which is exactly the
     // shape that hit MissingReflectionRegistrationError in the native image.
-    private static final int EXPECTED_RECORD_TYPES = 61;
+    // 61 -> 63: nexus-5xn3k.1 added nexus.manifest_verify(text) and
+    // nexus.manifest_verify_all() (catalog-020-index-run-fence.xml) — both
+    // RETURNS TABLE, and jOOQ generates a Record type per table-returning
+    // function. The fence COLUMNS on catalog_documents change no record
+    // count; the two function-return records are the whole delta. This is
+    // the deliberate bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 63;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

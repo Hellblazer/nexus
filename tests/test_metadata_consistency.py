@@ -47,7 +47,12 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
     }
     # RDR-139 Layer D: ``extraction_source`` defaults to ``file`` and is
     # dropped by normalize (absent == file); only DT-sourced chunks carry it.
-    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta", "extraction_source"}
+    # nexus-1oguj: ``extraction_method`` follows the same drop-when-empty
+    # contract — only PDF chunks that went through an extractor carry it,
+    # and the pinned population is tests/test_metadata_extraction_method.py.
+    return ALLOWED_TOP_LEVEL - bib_keys - {
+        "git_meta", "extraction_source", "extraction_method",
+    }
 
 
 def test_factory_emits_full_keyset_for_code() -> None:
@@ -178,6 +183,8 @@ def _full_keyset_minus_optional() -> set[str]:
         # RDR-139 Layer D: extraction_source defaults to ``file`` and is
         # dropped by normalize (absent == file); only DT chunks carry it.
         "extraction_source",
+        # nexus-1oguj: same drop-when-empty contract as extraction_source.
+        "extraction_method",
     }
 
 

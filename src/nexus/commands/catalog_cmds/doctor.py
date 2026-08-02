@@ -33,7 +33,9 @@ import os
 from pathlib import Path
 
 import click
+import structlog
 
+_log = structlog.get_logger(__name__)
 
 
 @click.command("doctor")
@@ -226,14 +228,46 @@ def _run_collections_drift() -> dict:
     """Phase 6 check: collections projection vs T3 + documents.physical_collection.
 
     Returns ``{"pass": bool, "t3_not_in_projection": list,
-    "doc_collections_not_in_projection": list, "projection_not_in_t3": list}``.
+    "doc_collections_not_in_projection": list, "projection_not_in_t3": list,
+    "projection_tombstoned": list, "projection_unprobed": list}``.
 
     A projection row whose ``superseded_by`` is set is allowed to be
     absent from T3 (post-rename state). Bypass-schema collections
     (``taxonomy__*``) are out of scope for this check.
+
+    nexus-e1k14: a projection row missing from ``t3_names`` is NOT
+    automatically "gone" — ``t3_names`` comes from ``list_collections()``,
+    which on :class:`~nexus.db.http_vector_client.HttpVectorClient` reads
+    the tombstone-filtered ``collection_vector_stats`` view (RDR-156 P3
+    Decision 6). A collection whose every document is trashed (soft-deleted,
+    ``deleted_at`` set) vanishes from that view even though its chunk rows
+    are still physically present. :func:`~nexus.db.collection_state.probe_collection_state`
+    is used to split the candidate set three ways:
+
+      - ABSENT -> ``projection_not_in_t3`` (the supersede recipe remains
+        correct there — the data really is gone).
+      - TOMBSTONED -> ``projection_tombstoned`` (never the supersede
+        recipe; see nexus-xavu7 for the current lack of a restore path).
+        Superseding a tombstoned name would set ``superseded_by`` and
+        permanently exclude it from name resolution before the operator
+        gets a chance to restore, turning a reversible trash into an
+        unreachable orphan (the bug this split exists to prevent).
+      - PRESENT -> skipped entirely, logged only. This is a TOCTOU case:
+        the collection was restored between the T3/projection snapshot
+        above and this per-name probe. A live collection must never
+        receive either recipe.
+
+    The probe itself is a second network round trip per candidate name and
+    can fail transiently (nexus-e1k14 critique fixup): a raised exception
+    from ``probe_collection_state`` is caught PER NAME, logged, and the
+    name goes to ``projection_unprobed`` (needs a rerun) rather than
+    either remedy bucket or, worse, aborting the whole check for every
+    other candidate. The check's established contract is best-effort-
+    with-report, not all-or-nothing.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — command-local import (nexus.db.collection_state)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     cat = _cat_cmd._get_catalog()
@@ -249,6 +283,8 @@ def _run_collections_drift() -> dict:
             "t3_not_in_projection": [],
             "doc_collections_not_in_projection": [],
             "projection_not_in_t3": [],
+            "projection_tombstoned": [],
+            "projection_unprobed": [],
             "error": f"Failed to list T3 collections: {exc}",
         }
 
@@ -263,20 +299,49 @@ def _run_collections_drift() -> dict:
 
     t3_not_in_projection = sorted(t3_names - projection_names)
     doc_not_in_projection = sorted(doc_collections - projection_names)
-    projection_not_in_t3 = sorted(
+
+    # nexus-e1k14: candidates for "T3 collection is gone" -- split by
+    # probed state before deciding which remedy is safe to print.
+    projection_maybe_gone = sorted(
         projection_names - t3_names - superseded_names
     )
+    projection_not_in_t3: list[str] = []
+    projection_tombstoned: list[str] = []
+    projection_unprobed: list[dict] = []
+    for name in projection_maybe_gone:
+        try:
+            state = probe_collection_state(t3_db, name)
+        except Exception as exc:  # noqa: BLE001 — a transient probe failure must be reported (needs-rerun), never silently misclassified into either remedy bucket
+            _log.warning(
+                "collections_drift_probe_failed", collection=name, error=str(exc),
+            )
+            projection_unprobed.append({"name": name, "error": str(exc)})
+            continue
+        if state is CollectionState.TOMBSTONED:
+            projection_tombstoned.append(name)
+        elif state is CollectionState.ABSENT:
+            projection_not_in_t3.append(name)
+        else:
+            # PRESENT: TOCTOU -- the collection was restored between the
+            # T3/projection snapshot above and this probe. A live
+            # collection must never receive either recipe; skip it
+            # entirely rather than risk printing one against live data.
+            _log.info("collections_drift_probe_toctou_present", collection=name)
 
     passed = (
         not t3_not_in_projection
         and not doc_not_in_projection
         and not projection_not_in_t3
+        and not projection_tombstoned
+        and not projection_unprobed
     )
     return {
         "pass": passed,
         "t3_not_in_projection": t3_not_in_projection,
         "doc_collections_not_in_projection": doc_not_in_projection,
         "projection_not_in_t3": projection_not_in_t3,
+        "projection_tombstoned": projection_tombstoned,
+        "projection_unprobed": projection_unprobed,
     }
 
 
@@ -306,6 +371,39 @@ def _print_collections_drift_text(report: dict) -> None:
         click.echo(
             "  Remediate: nx catalog backfill-collections"
         )
+    if report.get("projection_tombstoned"):
+        click.echo(
+            f"  Projection rows whose T3 collection is TRASHED but "
+            f"RESTORABLE ({len(report['projection_tombstoned'])}):"
+        )
+        for n in report["projection_tombstoned"]:
+            click.echo(f"    {n}")
+        # nexus-e1k14: the chunks are NOT gone -- every one belongs to a
+        # soft-deleted (trashed) document, still physically present. DO
+        # NOT supersede: supersede sets superseded_by, which permanently
+        # excludes the name from name resolution, and the revive path is
+        # identity-gated (only the collection a row was superseded FROM
+        # may revive it) -- so superseding here turns a reversible trash
+        # into an unreachable orphan.
+        #
+        # nexus-xavu7: there is currently NO CLI/MCP/REST verb that
+        # restores a trashed document -- document_restore is a PG
+        # function (catalog-003-soft-delete.xml) with zero operator-
+        # facing callers anywhere in the codebase. Do not dangle a verb
+        # that doesn't exist; say so plainly instead.
+        click.echo(
+            "  Remediate: do NOT supersede this name -- every chunk here "
+            "belongs to a soft-deleted (trashed) document, not to real "
+            "data loss. There is currently no CLI/MCP/REST verb to "
+            "restore a trashed document (nexus-xavu7); until one exists, "
+            "recovery means a direct SQL UPDATE against "
+            "catalog_documents.deleted_at, scoped to the correct "
+            "tenant_id -- do not run that without an explicit WHERE "
+            "tenant_id = <this tenant> AND collection = <this name> "
+            "scope, and only with production DB access. Once restored, "
+            "the chunks reappear in the live T3 view and this "
+            "collection drops out of this report on its own."
+        )
     if report["projection_not_in_t3"]:
         click.echo(
             f"  Projection rows whose T3 collection is gone and not "
@@ -327,6 +425,20 @@ def _print_collections_drift_text(report: dict) -> None:
             "w = make_catalog_writer(); "
             "w.register_collection('<TARGET>'); "
             "w.supersede_collection('<OLD>', '<TARGET>'); w.close()\""
+        )
+    if report.get("projection_unprobed"):
+        click.echo(
+            f"  Projection rows whose T3 state could not be probed "
+            f"({len(report['projection_unprobed'])}) -- NEEDS RERUN:"
+        )
+        for u in report["projection_unprobed"]:
+            click.echo(f"    {u['name']}  ERROR: {u['error']}")
+        click.echo(
+            "  Remediate: transient probe failure (network/service). "
+            "These names were NOT classified as tombstoned or gone -- "
+            "neither remedy above applies until re-probed successfully. "
+            "Re-run 'nx catalog doctor --collections-drift' once the "
+            "vector service is reachable."
         )
 
 

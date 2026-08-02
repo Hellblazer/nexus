@@ -100,6 +100,13 @@ class RawSqlGateTest {
         Map.entry("TaxonomyCentroidRepository.java", java.util.Set.of(
             // Same pgvector `<=>` category as PgVectorRepository.rawVectorFetch.
             "annQuery")),
+        Map.entry("CatalogRepository.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-5xn3k.2): pg_advisory_xact_lock over a
+            // hashtext'd (tenant, doc_id) key — a session-scoped lock
+            // primitive with no jOOQ DSL form, same category as RekeyOps'
+            // advisory lock. Single-homed: every manifest-mutation and
+            // verify-then-stamp path calls this one method.
+            "acquireIndexRunLock")),
         Map.entry("PoolerModeCheck.java", java.util.Set.of(
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).

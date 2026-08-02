@@ -176,6 +176,35 @@ def test_write_only_proxy_really_does_block_the_reads() -> None:
             getattr(writer, op)
 
 
+def test_sweep_is_skipped_loudly_when_docs_for_chashes_raises() -> None:
+    """nexus-ocf52/b9puj real-shape follow-on: docs_for_chashes now raises
+    RuntimeError on a count-reconciliation failure (a field-stripping hop
+    on the reverse-lookup round-trip), not just on a transport-level
+    exception. The sweep's fail-open contract must cover that raise
+    identically to any other reverse-lookup failure — delete nothing, log
+    the same skip event, never guess."""
+    from nexus.mcp_infra import _manifest_write_loop
+
+    class _NoReverseLookup(_FakeCatalogHTTP):
+        def docs_for_chashes(self, chashes):
+            raise RuntimeError(
+                "manifest/docs_for_chashes truncated: page carries 0 "
+                "tumblers but count says 1 — refusing"
+            )
+
+    fake = _NoReverseLookup(before=["old1", "old2", "keep"], refs={})
+    col = MagicMock()
+    with patch("nexus.db.make_t3", return_value=MagicMock(
+            get_collection=MagicMock(return_value=col))), \
+            patch("structlog.get_logger") as log:
+        _manifest_write_loop(fake, {"doc-A": _metas("keep", "new1")}, "coll",
+                             reader=fake)
+
+    col.delete.assert_not_called()          # fail-open: nothing deleted
+    events = [c.args[0] for c in log.return_value.warning.call_args_list if c.args]
+    assert "superseded_sweep_skipped_no_reverse_lookup" in events, events
+
+
 def test_sweep_is_skipped_loudly_when_the_before_read_fails() -> None:
     """Fail-open is right; failing SILENTLY is what hid this for the whole
     life of the feature."""

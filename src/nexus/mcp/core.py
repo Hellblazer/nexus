@@ -2470,9 +2470,13 @@ def query(
                         )
                         or meta.get("chunk_count", "")
                     ),
-                    # page_count / extraction_method / has_formulas are not in
-                    # ALLOWED_TOP_LEVEL: normalize() drops them, so the read
-                    # always returned "". Removed in nexus-59j0 cleanup.
+                    # page_count / has_formulas are not in ALLOWED_TOP_LEVEL:
+                    # normalize() drops them, so the read always returned "".
+                    # Removed in nexus-59j0 cleanup. nexus-1oguj later
+                    # promoted extraction_method to canonical (it IS in
+                    # ALLOWED_TOP_LEVEL for PDF chunks now) — it was not
+                    # re-added here since this grouped-doc summary wasn't in
+                    # that fix's scope, not because it's still dropped.
                     # nexus-1qed: prefer catalog-resolved _display_path so
                     # the response survives after source_path is pruned.
                     "source_path": (
@@ -2793,8 +2797,13 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
-        # extraction_method dropped — never made it past normalize() so the
-        # display always read empty. Cleaned up in nexus-59j0.
+        # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
+        # chunks now (docling/mineru/pymupdf_normalized, or the honest
+        # mixed aggregate mineru+docling-degraded) — display it when
+        # present. Absent for non-PDF chunks and for chunks indexed
+        # before the fix shipped (new-writes-only, no backfill;
+        # nexus-0qc4b — absence is "unknown", not "not mineru").
+        extraction_method = entry.get("extraction_method", "")
         lines: list[str] = [f"ID:         {entry['id']}", f"Collection: {col_name}"]
         if title:
             lines.append(f"Title:      {title}")
@@ -2802,6 +2811,8 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
             lines.append(f"Tags:       {tags}")
         if indexed_at:
             lines.append(f"Indexed:    {indexed_at}")
+        if extraction_method:
+            lines.append(f"Extractor:  {extraction_method}")
         lines.append("")
         lines.append(entry.get("content", ""))
         return "\n".join(lines)
@@ -3092,8 +3103,11 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         return f"No documents in {col_name}."
 
     docs = sorted(seen.items(), key=lambda kv: kv[1].get("title") or "")
-    # extraction_method / page_count not in ALLOWED_TOP_LEVEL — dropped by
-    # normalize() so the read always returned empty. Removed in nexus-59j0.
+    # page_count is not in ALLOWED_TOP_LEVEL — dropped by normalize() so
+    # the read always returned empty; removed in nexus-59j0. nexus-1oguj
+    # later promoted extraction_method to canonical, but this compact
+    # list table wasn't extended to show it (store_get's single-document
+    # display is; see there for the per-chunk value).
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
     for i, (h, d) in enumerate(docs, 1):
         # The full content-hash (RDR-180) is the doc_id that store_get

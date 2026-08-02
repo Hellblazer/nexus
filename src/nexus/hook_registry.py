@@ -78,6 +78,7 @@ class HookRegistry:
         self._single: list[Callable[..., None]] = []
         self._batch: list[Callable[..., None]] = []
         self._batch_with_catalog_doc_id: set[int] = set()
+        self._batch_with_manifest_complete: set[int] = set()
         self._document: list[Callable[..., None]] = []
         self._document_with_doc_id: set[int] = set()
 
@@ -88,6 +89,7 @@ class HookRegistry:
         self._single.clear()
         self._batch.clear()
         self._batch_with_catalog_doc_id.clear()
+        self._batch_with_manifest_complete.clear()
         self._document.clear()
         self._document_with_doc_id.clear()
 
@@ -131,11 +133,17 @@ class HookRegistry:
         try:
             sig = inspect.signature(fn)
             params = sig.parameters
-            if "catalog_doc_id" in params or any(
+            has_var_kw = any(
                 p.kind == inspect.Parameter.VAR_KEYWORD
                 for p in params.values()
-            ):
+            )
+            if "catalog_doc_id" in params or has_var_kw:
                 self._batch_with_catalog_doc_id.add(id(fn))
+            # nexus-5xn3k.4 (RUNFENCE): hooks declaring ``manifest_complete``
+            # receive the producer's per-doc completeness assertion — same
+            # registration-time classification as catalog_doc_id above.
+            if "manifest_complete" in params or has_var_kw:
+                self._batch_with_manifest_complete.add(id(fn))
         except (TypeError, ValueError):
             # Builtin/C-extension callable with no introspectable
             # signature. Treat as legacy shape so the dispatcher does not
@@ -155,6 +163,7 @@ class HookRegistry:
         *,
         catalog_doc_id: str = "",
         grain: str = "all",
+        manifest_complete: dict[str, str] | None = None,
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -180,6 +189,17 @@ class HookRegistry:
         is round-trip-dominated). ``grain="all"`` (default) fires every
         hook regardless — every pre-existing caller (MCP store_put,
         legacy per-file indexing) is behaviorally unchanged.
+
+        *manifest_complete* (nexus-5xn3k.4, RUNFENCE) — ``{doc_id:
+        content_hash}`` for documents the PRODUCER asserts are WHOLLY
+        contained in this batch (file-atomic). The manifest hook uses it
+        to ride ``write_manifest_many``'s fail-closed completion stamp in
+        the same round trip. A producer that fires a document across
+        multiple batches (the streaming PDF pipeline) must NOT claim it
+        here — a partial batch stamped 'complete' rebuilds the exact
+        silent-truncation bug the fence exists to close; multi-batch
+        documents use the explicit ``/index-run/complete`` call instead.
+        Threaded only to hooks that declare the parameter.
         """
         if not doc_ids:
             return
@@ -187,11 +207,15 @@ class HookRegistry:
             if grain != "all" and getattr(hook, "batch_grain", "file") != grain:
                 continue
             try:
+                kwargs: dict = {}
                 if id(hook) in self._batch_with_catalog_doc_id:
-                    hook(
-                        doc_ids, collection, contents, embeddings, metadatas,
-                        catalog_doc_id=catalog_doc_id,
-                    )
+                    kwargs["catalog_doc_id"] = catalog_doc_id
+                if (manifest_complete is not None
+                        and id(hook) in self._batch_with_manifest_complete):
+                    kwargs["manifest_complete"] = manifest_complete
+                if kwargs:
+                    hook(doc_ids, collection, contents, embeddings, metadatas,
+                         **kwargs)
                 else:
                     hook(doc_ids, collection, contents, embeddings, metadatas)
             except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller

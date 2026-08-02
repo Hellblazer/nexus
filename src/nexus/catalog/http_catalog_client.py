@@ -89,6 +89,7 @@ from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+from nexus.errors import IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
@@ -152,6 +153,14 @@ _REGISTER_MANY_PAGE = 1000
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
+#: Page size for /manifest/docs_for_chashes POSTs — mirrors the engine's
+#: CatalogHandler.MAX_BATCH_DOC_IDS cap on handleDocsForChashes (nexus-uu4b9):
+#: the endpoint had NO client-side cap, so an unbounded chash list (a
+#: superseded-vector sweep or GC pass over a large collection) went straight
+#: into a jOOQ IN toward the 32767 bind-parameter limit and now gets a hard
+#: HTTP 400 instead. Paged and unioned client-side, same shape as the other
+#: *_MANY_PAGE constants above.
+_DOCS_FOR_CHASHES_PAGE = 1000
 
 
 def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
@@ -222,6 +231,17 @@ def _to_entry(d: dict) -> CatalogEntry:
         bib_openalex_id=d.get("bib_openalex_id") or "",
         bib_doi=d.get("bib_doi") or "",
         bib_enriched_at=d.get("bib_enriched_at") or "",
+        # nexus-5xn3k.3 (RUNFENCE): index_state is deliberately NOT coerced
+        # with `or ""` — None/absent (a pre-fence engine, or a legacy row
+        # that predates catalog-020) must hydrate as None ("unknown"),
+        # never as the empty string or any other value that could be
+        # mistaken for a real state. The other three fence fields mirror
+        # the engine's NOT NULL DEFAULT '' columns, same treatment as
+        # alias_of/source_uri above.
+        index_state=d.get("index_state"),
+        index_content_hash=d.get("index_content_hash") or "",
+        index_run_id=d.get("index_run_id") or "",
+        index_started_at=d.get("index_started_at") or "",
     )
 
 
@@ -609,6 +629,160 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "count": int(result["count"]),
             "orphans": result.get("orphans", []),
         }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.3) — design memo §3.3/§3.4
+    #
+    # Engine-floor tolerance (memo §6, the bead's explicit ship-order
+    # ruling): this client ships WITHOUT waiting on REQUIRED_ENGINE_VERSION.
+    # A pre-fence engine (built before catalog-020/021 landed) 404s every
+    # route in this section — CatalogHandler's switch has no matching
+    # `case`, so it falls to the generic `default -> 404`. The floor bump
+    # rides the NEXT engine tag per AGENTS.md, never a tag cut for this
+    # arc alone.
+    #
+    # begin/complete/fail are advisory WRITES with no meaningful fallback
+    # value a caller could act on, so a 404 here is swallowed (logged at
+    # WARNING, method returns normally) rather than raised — an old engine
+    # simply never records intent/completion, and indexing must proceed
+    # unaffected. manifest_verify/manifest_verify_all are READS whose
+    # result other callers (the doctor sweep, `nx catalog verify`) need to
+    # tell apart from a real "verified clean" 200, so they raise like any
+    # other read method; the ONE caller that must fail open on an
+    # unreachable verify (_manifest_is_fully_present, doc_indexer.py) owns
+    # that fail-open+WARNING contract itself.
+    # ══════════════════════════════════════════════════════════════════════
+
+    def begin_index_run(
+        self, doc_id: str, content_hash: str, run_id: str, collection: str,
+    ) -> None:
+        """POST /v1/catalog/index-run/begin — stamp ``index_state='indexing'``
+        BEFORE the first chunk upsert (memo §3.5 T0: the fence is committed
+        before the first byte of content and cleared only after the last).
+
+        Idempotent; NOT a lock (nexus-lcmbp non-goal, memo §5) — a retry or a
+        second concurrent run simply re-stamps the same shape.
+        """
+        try:
+            self._post("/index-run/begin", {
+                "doc_id": doc_id, "content_hash": content_hash,
+                "run_id": run_id, "collection": collection,
+            })
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                _log.warning("index_run_begin_engine_floor", doc_id=doc_id)
+                return
+            raise
+
+    def complete_index_run(
+        self, doc_id: str, content_hash: str, chunk_count: int,
+    ) -> dict | None:
+        """POST /v1/catalog/index-run/complete — the load-bearing FAIL-CLOSED
+        verify-then-stamp (memo §3.3). Returns
+        ``{referenced, present, missing, flagged}`` on success (200).
+
+        Raises :class:`~nexus.errors.IndexRunVerifyRefused` on the engine's
+        409 refusal (``missing > 0`` or ``referenced != chunk_count`` — the
+        document is not actually whole in T3, so ``index_state`` was left
+        untouched rather than stamped ``'complete'``).
+
+        Returns ``None`` — NOT ``{}`` — on a 404 (pre-fence engine,
+        engine-floor-tolerated: logged at WARNING). The two are
+        deliberately distinguishable: ``None`` means "this call never
+        reached a fence-aware engine at all" (the route doesn't exist),
+        while ``{}`` would mean "the engine answered with an empty body" —
+        a real, if degenerate, 200 response. A caller bracketing an index
+        run (nexus-5xn3k.4) MUST be able to tell those apart: the first
+        means the fence recorded nothing and there is nothing to act on;
+        conflating it with an empty success dict risks reading absent
+        fields as zero counts instead of "unknown."
+        """
+        try:
+            result = self._post("/index-run/complete", {
+                "doc_id": doc_id, "content_hash": content_hash,
+                "chunk_count": chunk_count,
+            })
+            return result or {}
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 404:
+                _log.warning("index_run_complete_engine_floor", doc_id=doc_id)
+                return None
+            if status == 409:
+                body: dict = {}
+                with contextlib.suppress(Exception):
+                    body = exc.response.json() or {}
+                raw_referenced = body.get("referenced")
+                raw_present = body.get("present")
+                raw_missing = body.get("missing")
+                raw_chunk_count = body.get("chunk_count")
+                raise IndexRunVerifyRefused(
+                    doc_id=str(body.get("doc_id", doc_id)),
+                    referenced=int(raw_referenced) if raw_referenced is not None else 0,
+                    present=int(raw_present) if raw_present is not None else 0,
+                    missing=int(raw_missing) if raw_missing is not None else 0,
+                    # nexus-5xn3k.3 review: `or chunk_count` is a falsy-0 trap
+                    # — a genuine server-reported chunk_count=0 would fall
+                    # through to the caller's claimed value instead of the
+                    # engine's actual (zero) count. Explicit presence check.
+                    chunk_count=int(raw_chunk_count) if raw_chunk_count is not None else chunk_count,
+                    server_detail=body.get("error") or _engine_error_detail(exc),
+                ) from exc
+            raise
+
+    def fail_index_run(self, doc_id: str, error: str) -> None:
+        """POST /v1/catalog/index-run/fail — stamps ``index_state='failed'``.
+
+        A 404 (pre-fence engine) is engine-floor-tolerated: logged at
+        WARNING, returns normally.
+        """
+        try:
+            self._post("/index-run/fail", {"doc_id": doc_id, "error": error})
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                _log.warning("index_run_fail_engine_floor", doc_id=doc_id)
+                return
+            raise
+
+    def manifest_verify(self, doc_id: str) -> dict:
+        """GET /v1/catalog/manifest/verify?doc_id=X — one-document
+        ``{referenced, present, missing}`` (memo §3.2's SQL primitive,
+        narrowed to a single document).
+
+        This is a READ: unlike begin/complete/fail above, a 404 or any
+        other transport failure PROPAGATES — callers that need to
+        distinguish "the engine doesn't support this route yet" from "the
+        engine says the document is clean" (the doctor sweep, `nx catalog
+        verify`) must be able to tell the two apart. The ONE caller that
+        must fail open on ANY failure here
+        (:func:`nexus.doc_indexer._manifest_is_fully_present`) implements
+        that fail-open+WARNING contract itself, around this call.
+
+        CALLER TRAP: an empty *doc_id* is silently DROPPED by ``_get``'s
+        falsy-param filter (``{k: v for k, v in params.items() if v is not
+        None and v != ""}``) — the request goes out with NO ``doc_id`` query
+        param at all, which the engine's ``doc_id.isBlank()`` guard answers
+        with a 400, not a per-document result. This method does not guard
+        against it; callers must pass a non-empty *doc_id* (the only current
+        caller, ``_manifest_is_fully_present``, already short-circuits on an
+        empty ``doc_id`` before ever reaching here).
+        """
+        result = self._get("/manifest/verify", doc_id=doc_id)
+        return result or {}
+
+    def manifest_verify_all(self) -> dict:
+        """GET /v1/catalog/manifest/verify_all — every live document in the
+        tenant, grouped by collection: ``{"collections": [...], "count": n}``
+        (nexus-ac4id part 2 — the doctor sweep primitive; supersedes the
+        client-side per-collection T3 paging that check used to do).
+
+        A READ; propagates on failure like :meth:`manifest_verify` — the
+        doctor's own non-vacuity discipline (``checked == 0`` renders
+        SKIPPED, never a false-clean pass) needs to see a 404 as a real
+        error, not a silently-empty "0 collections checked."
+        """
+        result = self._get("/manifest/verify_all")
+        return result or {}
 
     def relation_counts(self, relations: list[str]) -> dict[str, int]:
         """Tenant-scoped row counts for migration-verify relations.
@@ -2244,6 +2418,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         embed_migrate blocks its destructive re-index, and catalog
         doctor must see a hard error rather than a silent partial that
         reads as data corruption.
+
+        nexus-b9puj: same union-guard chain as nexus-ocf52
+        (``docs_for_chashes``), one hop deeper — a page FAILURE (exception)
+        already fails loud, but a silently TRUNCATED page would not, since
+        the fan-out consumers (search_engine, ``docs_for_chashes`` itself)
+        can't otherwise tell "no rows for this doc" apart from "a hop
+        stripped rows off the response". The engine emits ``count``
+        unconditionally (floor >= v0.1.61); the client reconciles
+        ``len(manifests) == count`` per page before merging it in.
         """
         if not doc_ids:
             return {}
@@ -2251,7 +2434,36 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
             batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
             result = self._post("/manifest/get_many", {"doc_ids": batch})
+            result = result if isinstance(result, dict) else {}
             manifests = result.get("manifests", {}) if result else {}
+            manifests = manifests if isinstance(manifests, dict) else {}
+            if "count" not in result:
+                _log.error(
+                    "manifest_get_many_count_missing",
+                    requested=len(batch),
+                    received=len(manifests),
+                    response_keys=sorted(result),
+                )
+                raise RuntimeError(
+                    "manifest/get_many response carried no `count` field — "
+                    "the engine emits it unconditionally (floor >= v0.1.61), "
+                    "so something interposed on the read path; refusing to "
+                    "merge an unverifiable page "
+                    f"(response keys: {sorted(result)})"
+                )
+            count = int(result["count"])
+            if len(manifests) != count:
+                _log.error(
+                    "manifest_get_many_count_mismatch",
+                    requested=len(batch),
+                    received=len(manifests),
+                    count=count,
+                )
+                raise RuntimeError(
+                    f"manifest/get_many truncated: page carries "
+                    f"{len(manifests)} doc_ids but count says {count} — "
+                    "refusing to merge a partial page"
+                )
             for did, rows in manifests.items():
                 merged[did] = [_manifest_row_from_dict(r) for r in rows]
         return merged
@@ -2299,6 +2511,24 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         established that the wire values must match the engine's EXACT-match
         ``F_CHK_CHASH.in(chashes)`` semantics — that now means full width,
         the same width the manifest stores.)
+
+        nexus-ocf52: the round-1 response is count-reconciled BEFORE any
+        early-out — this is the superseded-vector sweep's union guard (a
+        chash is hard-deleted from T3 iff no tumbler here references it), so
+        a partially-delivered ``tumblers`` list would silently destroy a
+        live shared row. A missing ``count`` field (floor >= v0.1.61, which
+        emits it unconditionally) means a field-stripping hop interposed —
+        refuse rather than hand the sweep an unverifiable reference set. The
+        guard runs per PAGE, before any tumblers accumulate into the return
+        value, so a stripped-field EMPTY response fails loud rather than
+        slipping through indistinguishable from a genuine "nothing found".
+
+        nexus-uu4b9: paged at :data:`_DOCS_FOR_CHASHES_PAGE` — the engine
+        caps this endpoint at the same ``MAX_BATCH_DOC_IDS`` = 1000 as the
+        other batch endpoints (it previously had no cap at all). Each page
+        is reconciled independently; the resulting tumblers are unioned
+        (deduplicated, no particular order — every consumer treats this as
+        a set of doc ids that reference the chash).
         """
         if not chashes:
             return {}
@@ -2308,14 +2538,51 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 prefix_to_inputs[c].append(c)
         if not prefix_to_inputs:
             return {}
-        result = self._post(
-            "/manifest/docs_for_chashes", {"chashes": list(prefix_to_inputs.keys())}
-        )
-        # Handler returns {"tumblers": [tumbler_string, ...]} — flat, not per-chash.
-        tumblers = result.get("tumblers", []) if result else []
+        unique_chashes = list(prefix_to_inputs.keys())
+        tumblers: set[str] = set()
+        for start in range(0, len(unique_chashes), _DOCS_FOR_CHASHES_PAGE):
+            batch = unique_chashes[start : start + _DOCS_FOR_CHASHES_PAGE]
+            result = self._post("/manifest/docs_for_chashes", {"chashes": batch})
+            result = result if isinstance(result, dict) else {}
+            # Handler returns {"tumblers": [tumbler_string, ...], "count": N}
+            # — flat, not per-chash.
+            batch_tumblers = result.get("tumblers", []) if result else []
+            batch_tumblers = (
+                batch_tumblers if isinstance(batch_tumblers, list) else []
+            )
+            if "count" not in result:
+                _log.error(
+                    "manifest_docs_for_chashes_count_missing",
+                    requested=len(batch),
+                    received=len(batch_tumblers),
+                    response_keys=sorted(result),
+                )
+                raise RuntimeError(
+                    "manifest/docs_for_chashes response carried no `count` "
+                    "field — the engine emits it unconditionally (floor >= "
+                    "v0.1.61), so something interposed on the read path; "
+                    "refusing to hand the superseded-vector sweep an "
+                    f"unverifiable reference set (response keys: {sorted(result)})"
+                )
+            count = int(result["count"])
+            if len(batch_tumblers) != count:
+                _log.error(
+                    "manifest_docs_for_chashes_count_mismatch",
+                    requested=len(batch),
+                    received=len(batch_tumblers),
+                    count=count,
+                )
+                raise RuntimeError(
+                    f"manifest/docs_for_chashes truncated: page carries "
+                    f"{len(batch_tumblers)} tumblers but count says {count} "
+                    "— a partial reference set could make the "
+                    "superseded-vector sweep delete a still-referenced "
+                    "chunk; refusing"
+                )
+            tumblers.update(batch_tumblers)
         if not tumblers:
             return {}
-        manifests = self.get_manifests(tumblers)  # {doc_id: [ManifestRow, ...]}
+        manifests = self.get_manifests(list(tumblers))  # {doc_id: [ManifestRow, ...]}
         wanted_prefixes = set(prefix_to_inputs.keys())
         prefix_to_docs: dict[str, list[str]] = defaultdict(list)
         for doc_id, rows in manifests.items():
@@ -2397,8 +2664,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             self._post("/update", {"tumbler": doc_id, **updates})
 
     def write_manifest_many(
-        self, docs: "list[tuple[str, list[dict]]]"
-    ) -> list[str]:
+        self, docs: "list[tuple[str, list[dict]]]",
+        complete: dict[str, str] | None = None,
+    ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
 
         nexus-u2kwq: the flush-grain manifest hook writes complete files
@@ -2406,22 +2674,45 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``atomic_manifest_replace`` cost 2 POSTs per file (~205s of a
         177-file wall). ``/manifest/write_many`` (engine v0.1.24+) does
         DELETE+INSERT+chunk_count per doc in one server-side per-doc
-        transaction; docs page at 1000 (MAX_BATCH parity). Returns the
-        accumulated ``failed_doc_ids`` (per-doc isolation server-side).
-        Callers must catch HTTP 404 and fall back per-doc for older
-        engines.
+        transaction; docs page at 1000 (MAX_BATCH parity). Callers must
+        catch HTTP 404 and fall back per-doc for older engines.
+
+        *complete* (nexus-5xn3k.4, RUNFENCE) — optional ``{doc_id:
+        content_hash}``: for each entry the engine (v0.1.62+, nexus-5xn3k.2)
+        runs the SAME fail-closed verify ``/index-run/complete`` runs
+        (missing==0 AND referenced==chunk_count) inside the per-doc write
+        transaction and stamps ``index_state='complete'`` — no extra round
+        trip on the hot flush-grain path. A failed verify does NOT fail the
+        write (the rows are correct; over-work-never-under-work): the doc
+        lands in ``complete_refused`` instead, and the CALLER MUST parse it
+        — a refused doc is not fully indexed. Entries are sent with the
+        page containing their doc; a pre-fence engine ignores the unknown
+        key, so refusals simply never appear (fence unstamped, 'unknown').
+
+        Returns ``{"failed_doc_ids": [...], "complete_refused": [{doc_id,
+        referenced, missing, chunk_count}, ...], "complete_refused_count":
+        int}`` — the scalar count is carried separately so a truncated
+        refusal list is detectable (bead-amendment MUST).
         """
         failed: list[str] = []
+        refused: list[dict] = []
+        refused_count = 0
         for start in range(0, len(docs), _MANIFEST_GET_MANY_PAGE):
             page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
-            result = self._post(
-                "/manifest/write_many",
-                {"docs": [
-                    {"doc_id": d, "rows": self._manifest_rows(chunks)}
-                    for d, chunks in page
-                ]},
-            )
+            body: dict = {"docs": [
+                {"doc_id": d, "rows": self._manifest_rows(chunks)}
+                for d, chunks in page
+            ]}
+            if complete:
+                page_complete = {
+                    d: complete[d] for d, _ in page if d in complete
+                }
+                if page_complete:
+                    body["complete"] = page_complete
+            result = self._post("/manifest/write_many", body)
             failed.extend((result or {}).get("failed_doc_ids", []))
+            refused.extend((result or {}).get("complete_refused") or [])
+            refused_count += int((result or {}).get("complete_refused_count") or 0)
             # nexus-fhhwf: the engine (v0.1.33+) returns a structured
             # per-doc reason alongside the bare id list — surface it so a
             # failed doc is diagnosable from the client log instead of
@@ -2433,7 +2724,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     reason=f.get("reason", ""),
                     sqlstate=f.get("sqlstate", ""),
                 )
-        return failed
+        return {
+            "failed_doc_ids": failed,
+            "complete_refused": refused,
+            "complete_refused_count": refused_count,
+        }
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
         """Recompute ``documents.chunk_count`` from the true manifest row count.

@@ -50,6 +50,55 @@ _VECTORS_BACKEND_ENV = "NX_STORAGE_BACKEND_VECTORS"
 #: (module attribute, not a public API).
 _skip_existing_deprecation_logged: bool = False
 
+#: nexus-5xn3k.5 (substantive-critic follow-up): log ``update_chunks``'s
+#: "engine omitted the missing field" notice once per process rather than
+#: once per call. Without this, a full-repo reindex against a pre-fence
+#: engine (a rolling deploy window, or an un-upgraded install) would emit
+#: this WARNING once per file — drowning the rarer, more actionable
+#: ``update_chunks_missing_reported`` / ``update_chunks_missing_rerouted``
+#: signals in the same log stream. Tests reset this directly (module
+#: attribute, not a public API) — same shape as
+#: ``_skip_existing_deprecation_logged`` above.
+_update_chunks_missing_unreported_logged: bool = False
+
+
+def _warn_update_chunks_missing_unreported(collection: str, count: int) -> None:
+    """Log-once notice: the engine's update-metadata response omitted
+    "missing" — cannot tell whether a stale ``existing_ids`` probe hit was
+    silently left un-repaired. See ``_skip_existing_deprecation_logged``
+    above for the identical once-per-process shape.
+    """
+    global _update_chunks_missing_unreported_logged
+    if _update_chunks_missing_unreported_logged:
+        _log.debug(
+            "update_chunks_missing_unreported",
+            collection=collection,
+            count=count,
+        )
+        return
+    _update_chunks_missing_unreported_logged = True
+    _log.warning(
+        "update_chunks_missing_unreported",
+        collection=collection,
+        count=count,
+        # NOTE: kwarg is "detail", not "message" — stdlib logging's
+        # LogRecord reserves the "message" attribute name (set internally
+        # by getMessage()); passing message= as an extra kwarg raises
+        # KeyError("Attempt to overwrite 'message' in LogRecord") the
+        # moment structlog is configured to render through stdlib logging
+        # (structlog.stdlib.render_to_log_kwargs), which production
+        # configs and this bead's own tests both do.
+        detail=(
+            "the engine's /v1/vectors/update-metadata response omitted the "
+            '"missing" field — a pre-nexus-5xn3k.2 engine, or a rolling '
+            "deploy window straddling the version boundary. Cannot tell "
+            "whether a stale existing_ids probe hit was silently left "
+            "un-repaired; today's (pre-fence) behaviour is preserved rather "
+            "than assuming zero misses. Logged once per process — further "
+            "occurrences in this run are DEBUG."
+        ),
+    )
+
 
 def _warn_skip_existing_deprecated() -> None:
     """Log-once notice: ``skip_existing`` no longer filters the batch.
@@ -1684,7 +1733,7 @@ class HttpVectorClient:
         collection: str,
         ids: list[str],
         metadatas: list[dict],
-    ) -> None:
+    ) -> list[str] | None:
         """Metadata-only update on existing chunks — no re-embedding.
 
         RDR-152 bead nexus-enehl: the frecency-only reindex path calls
@@ -1701,25 +1750,82 @@ class HttpVectorClient:
         ``PgVectorRepository.upsertChunksInternal`` (first-wins in-batch dedup +
         ``ON CONFLICT DO UPDATE``); clients need not pre-dedup or quota-check.
         The constant is reused only to keep a sane per-request size.
+
+        nexus-5xn3k.5 (memo §3.6, AC6 client half): the engine's response is
+        ``{"updated": N, "missing": [ids...]}`` (nexus-5xn3k.2). Returns the
+        UNION of ``missing`` across all pages — the subset of *ids* that had
+        no matching row, i.e. the caller's ``existing_ids`` probe was a stale
+        positive for them. Returns ``None`` — never an assumed-empty list —
+        when ANY page's response omits the ``"missing"`` key. This is an
+        ALL-PAGES-REPORTED requirement, not "at least one page reported":
+        a mixed-version engine fleet (rolling deploy mid-request) can have
+        page 1 report ``missing`` and page 2 omit it, and page 2's ids must
+        NOT be silently assumed zero-miss just because an earlier page had
+        the field — cannot-tell dominates. Logged at WARNING (log-once per
+        process — see :func:`_warn_update_chunks_missing_unreported`) so a
+        silently-degraded engine (in full, or on just one page) is never
+        mistaken for a clean report. Returns ``[]`` when EVERY page reported
+        the field and it was genuinely empty (no misses, no warning).
+
+        A genuinely non-empty ``missing`` (every page reported, at least one
+        id was actually stale) ALSO logs a WARNING — ``update_chunks_missing_
+        reported`` — from THIS method, unconditionally, regardless of what
+        the caller does with the return value. Every call site (the
+        frecency-only reindex path, ``pipeline_stages.py``, ``indexer.py``,
+        and ``doc_indexer.py``'s repair reroute below) gets the anomaly
+        signal for free, not just the one caller that happens to act on it.
+        ``doc_indexer._upsert_skip_reembed`` additionally logs its own
+        ``update_chunks_missing_rerouted`` when it re-routes — that is the
+        separate CALLER-SIDE repair log, not a duplicate of this one.
+
+        Division of labor (nexus-5xn3k.5 vs .4): this method — and its one
+        reroute caller — repairs a STALE-POSITIVE PROBE miss: the id was
+        reported present by ``existing_ids`` but was already gone by the
+        time this metadata-only update ran. It does NOT protect against a
+        row vanishing AFTER a successful write (a post-repair race) — that
+        window is the ``/index-run/complete`` fail-closed verify's job
+        (bead nexus-5xn3k.4, RUNFENCE verify-then-stamp). Do not treat this
+        path as covering that later window.
         """
         if not ids:
-            return
+            return []
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         # Request-size chunk only (see docstring) — not a backend quota.
         size = QUOTAS.MAX_RECORDS_PER_WRITE
+        missing: list[str] = []
+        all_pages_reported = True
         for start in range(0, len(ids), size):
             batch_ids  = ids[start : start + size]
             batch_meta = metadatas[start : start + size]
-            _post(
+            result = _post(
                 "/v1/vectors/update-metadata",
                 {"collection": collection, "ids": batch_ids, "metadatas": batch_meta},
                 tenant=self._tenant,
             )
+            if isinstance(result, dict) and "missing" in result:
+                missing.extend(result.get("missing") or [])
+            else:
+                all_pages_reported = False
         _log.debug(
             "http_vector_update_chunks",
             collection=collection,
             count=len(ids),
         )
+        if not all_pages_reported:
+            _warn_update_chunks_missing_unreported(collection, len(ids))
+            return None
+        if missing:
+            # In-method anomaly signal (substantive-critic follow-up): fires
+            # for EVERY caller, not just doc_indexer's reroute — a stale-
+            # positive probe result is worth surfacing even when the caller
+            # ignores the return value.
+            _log.warning(
+                "update_chunks_missing_reported",
+                collection=collection,
+                count=len(missing),
+                total=len(ids),
+            )
+        return missing
 
     # ── Collection-handle stub for doc_indexer staleness + prune paths ─────────
 

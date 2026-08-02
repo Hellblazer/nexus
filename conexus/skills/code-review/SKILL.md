@@ -10,12 +10,23 @@ Delegates to the **code-review-expert** agent.
 
 ## Model Selection
 
-Default: **haiku**. Escalate via `model` parameter on the Agent tool:
+Default: **sonnet** (the agent's frontmatter pins it; omitting `model` gets sonnet). Escalate via the `model` parameter on the Agent tool:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| Small diff, routine review | haiku (default) | <200 LOC, no security concerns |
-| Security-sensitive, >500 LOC, or architectural | sonnet | Auth code, crypto, API boundaries |
+| Routine or security-sensitive review | sonnet (default) | Most diffs, auth/crypto, API boundaries |
+| Cycle-level or architectural | opus | System-wide design diffs, multi-RDR surface |
+
+Model choice is secondary to prompt rigour (below): a named-suspect sonnet review outperforms an unbriefed opus one.
+
+## Prompt Rigour
+
+Referenced by `/conexus:phase-review-gate` as "§ Prompt rigour". Friendly relays return friendly reviews — the relay MUST name what to suspect:
+
+- **Explicit suspect categories**, per diff class: ordering/race for concurrency diffs, lock scope for transaction diffs, vacuity for test diffs, handshake/boundary shapes for API diffs, silent-fallback for error-path diffs.
+- **The locked spec** (RDR `## Decision`, design memo, bead MUSTs) so the reviewer checks implementation-vs-spec, not style.
+- **What was NOT changed on purpose** (explicit non-goals), so the reviewer flags scope creep instead of recommending it.
+- **Verification already run**, so the reviewer verifies claims instead of re-running suites.
 
 ## When This Skill Activates
 

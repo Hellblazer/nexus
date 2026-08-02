@@ -68,7 +68,15 @@ def _server_env(output_root: Path) -> dict[str, str]:
     env.update({
         "MINERU_TABLE_ENABLE": str(get_mineru_table_enable()).lower(),
         "MINERU_PROCESSING_WINDOW_SIZE": "8",
-        "MINERU_VIRTUAL_VRAM_SIZE": "8192",
+        # UNIT IS GB, not MB: mineru's get_vram() returns this value raw and
+        # its auto-detect paths all convert bytes -> GB before comparing
+        # against the batch-ratio ladder (>=8 -> 4, >=16 -> 8, higher -> 16).
+        # "8192" read as 8192 GB selected ratio 16, whose MFR batches blow
+        # unified memory on Apple Silicon and get the server silently killed
+        # mid-batch (nexus-xyk9o, 2026-08-02: two server generations died at
+        # 'MFR Predict 0/65'). 8 GB -> ratio 4, which survives formula-dense
+        # windows on a 128 GB M-series box.
+        "MINERU_VIRTUAL_VRAM_SIZE": "8",
         "MINERU_API_OUTPUT_ROOT": str(output_root),
         "MINERU_API_TASK_RETENTION_SECONDS": "300",
     })

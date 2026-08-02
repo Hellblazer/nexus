@@ -301,7 +301,39 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     without that, no-catalog ingest writes chunks with neither
     source_path nor doc_id and the staleness check correctly cannot
     detect "unchanged" — re-index would proceed every time.
+
+    nexus-5xn3k.3 (RUNFENCE): the fence's "unknown state" fallback
+    (``_manifest_is_fully_present``) now asks the catalog SERVICE's own
+    ``manifest/verify`` — an engine-side SQL anti-join that only sees chunks
+    living in THAT SAME Postgres (design memo §3.2: "post-RDR-155 both
+    tables live in the same Postgres"). This test injects a raw ephemeral
+    ChromaDB client as *t3* specifically to avoid needing a full
+    pgvector-backed vector store for a local-embedder unit test — a
+    deliberately DECOUPLED T3 substrate the real production topology never
+    has. Against a real (test-scoped) service catalog, the engine's verify
+    correctly reports every chunk "missing" (it was never written to the
+    engine's own tables), which would force a spurious re-index and is
+    ORTHOGONAL to what this test actually verifies (the local-embedder
+    fallback + doc_id-keyed identity match). Bypassed here; the RUNFENCE
+    mechanism itself has its own dedicated coverage
+    (tests/test_5xn3k_staleness_three_way.py et al.).
+
+    nexus-5xn3k.4: the ``_manifest_is_fully_present`` bypass above is only
+    reached via ``_index_run_fresh``'s "unknown state" fallback — but since
+    .4 wires up a REAL ``_fence_begin``/``_fence_complete`` call against the
+    live catalog, the fence state for this doc_id would genuinely become
+    "indexing" (begin succeeds; complete is refused against this same
+    decoupled T3 for the same reason as the paragraph above) and
+    ``_index_run_fresh`` would short-circuit via its "indexing" branch
+    BEFORE ever consulting ``_manifest_is_fully_present``. Stub both fence
+    calls too so the fence stays "unknown" here, matching this test's
+    stated intent of bypassing RUNFENCE entirely.
     """
+    monkeypatch.setattr(
+        "nexus.doc_indexer._manifest_is_fully_present", lambda *a, **k: True,
+    )
+    monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
     # nexus-i711w: no local catalog init — pre-flight registration goes to
     # the live catalog.
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
@@ -532,11 +564,26 @@ _BASE_REQUIRED_FIELDS = {
     "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
 }
 # pdf_subject / pdf_keywords / is_image_pdf / has_formulas / format /
-# extraction_method / page_count / source_date are intentionally NOT in
-# ALLOWED_TOP_LEVEL — normalize() drops them. They were never stored
-# in T3 even before the factory refactor; the old test asserted on the
-# pre-normalize dict shape. After the factory, normalize runs inside
-# the indexer so the dropped fields are visible-as-missing.
+# page_count / source_date are intentionally NOT in ALLOWED_TOP_LEVEL —
+# normalize() drops them. They were never stored in T3 even before the
+# factory refactor; the old test asserted on the pre-normalize dict
+# shape. After the factory, normalize runs inside the indexer so the
+# dropped fields are visible-as-missing.
+#
+# extraction_method (nexus-1oguj) IS in ALLOWED_TOP_LEVEL, but is
+# deliberately NOT asserted here: with _STREAMING_THRESHOLD=0 every
+# openable PDF (like this test's simple_pdf) routes through
+# pipeline_stages.pipeline_index_pdf, which writes chunks with
+# extraction_method empty at initial-upload time (dropped by
+# normalize()) and backfills the real value via the
+# _enrich_metadata_from_extraction POST-PASS (a separate
+# ``t3.update_chunks`` call this test's bare-MagicMock ``mock_col.get``
+# does not simulate). Asserting the field here would require faithfully
+# modelling that round-trip; the field's presence is instead verified
+# end-to-end by test_pipeline_stages.py::test_metadata_enrichment_postpass
+# (streaming path, real fake-engine round-trip) and
+# test_index_sets_content_type below (the batch-path fallback, which
+# sets it at initial-write time via _pdf_chunks).
 _PDF_EXTRA_FIELDS: set[str] = set()
 
 
@@ -570,6 +617,12 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     mock_t3.upsert_chunks_with_embeddings.side_effect = (
         lambda collection, ids, documents, embeddings, metadatas: captured.extend(metadatas)
     )
+    # nexus-5xn3k.4: mock_t3 never actually writes chunks to the real
+    # (test-scoped) engine's T3, so the fence's fail-closed verify-then-stamp
+    # would correctly (but irrelevantly here) refuse completion. This test
+    # only cares about chunk metadata shape; stub the fence tail like
+    # tests/test_pipeline_stages.py's ``_stub_fence_complete`` fixture.
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
     with patch("nexus.doc_indexer._embed_with_fallback",
                side_effect=lambda chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None:
                ([[0.1] * 5] * len(chunks), "test-local")):
@@ -634,6 +687,13 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
     # RDR-101 Phase 5c: ``store_type`` dropped from chunk schema;
     # ``content_type`` is the canonical routing field.
     assert captured[0]["content_type"] == expected_type
+    # nexus-1oguj: the extractor identity from ExtractionResult.metadata
+    # is threaded through to the written chunk for PDFs; markdown never
+    # sets it (no extractor involved), so normalize() drops the key.
+    if indexer == "pdf":
+        assert captured[0]["extraction_method"] == "x"
+    else:
+        assert "extraction_method" not in captured[0]
 
 
 @pytest.mark.parametrize("has_fm,fm_text,body,expected_start,expected_end", [
@@ -1350,6 +1410,14 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode):
     ckpt_dir = sample_pdf.parent / "ckpt"
     monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
     monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+    # nexus-5xn3k.4 review follow-up: _index_pdf_incremental now brackets a
+    # real _fence_complete call. This fixture's t3 is a MagicMock — no
+    # chunk ever lands in the real (test-scoped) engine's T3 — so the
+    # fence's genuine verify-then-stamp would correctly (but irrelevantly
+    # for these tests, which only assert chunk/checkpoint bookkeeping)
+    # refuse completion. Same stub as test_pipeline_stages.py's
+    # _stub_fence_complete / test_pdf_subsystem.py's per-test monkeypatch.
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
 
     class _Setup:
         threshold = _INCREMENTAL_THRESHOLD
@@ -1421,6 +1489,8 @@ def test_index_pdf_incremental_writes_checkpoints_per_batch(sample_pdf, monkeypa
     ckpt_dir = sample_pdf.parent / "ckpt"
     monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
     monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
+    # nexus-5xn3k.4 review follow-up: see incr_setup's identical stub above.
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
     n_chunks = _INCREMENTAL_BATCH_SIZE * 3 + 10
     mock_chunks = _make_n_chunks(n_chunks)
     checkpoint_writes = []

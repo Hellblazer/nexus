@@ -2915,8 +2915,9 @@ def _check_dimension_orphans() -> list[HealthResult]:
 
 
 def _check_dangling_manifests() -> list[HealthResult]:
-    """Name documents whose manifest references chashes that no longer exist
-    in T3 (nexus-5xn3k AC5).
+    """Name collections whose manifest references chashes that no longer
+    exist in T3 (nexus-5xn3k AC5, RE-ARMED by nexus-5xn3k.6 on
+    ``manifest_verify_all()`` — closes nexus-ac4id).
 
     THE UNDETECTABLE CLASS. A partial index commits chunks and a manifest
     without a transaction spanning them, so an interrupted run can leave a
@@ -2927,55 +2928,75 @@ def _check_dangling_manifests() -> list[HealthResult]:
     but NOT a POPULATED manifest full of dead chashes, which is the state a
     failed index actually leaves behind.
 
-    This is the exact INVERSE of the ``nx t3 gc`` orphan scan, and reuses the
-    same two reads so doctor and gc can never disagree about what is real:
+    PRE-nexus-5xn3k.6, this check paged T3 chunk metadata client-side per
+    collection (``t3.list_collections()`` + ``list_chunks_with_metadata``) —
+    a multi-minute scan on managed boxes, deliberately left DISABLED via an
+    unfixed dict-shape crash (nexus-ac4id) rather than revived at that cost.
+    ``manifest_verify_all()`` (design memo §3.2/§4) replaces both: ONE
+    engine-side SQL anti-join, tenant-scoped, no chunk metadata crosses the
+    wire. The dict-shape off-switch is gone because there is no more
+    client-side T3 enumeration to accidentally revive — ac4id part (1)
+    becomes moot, not fixed.
 
-        gc:     present_in_T3 - referenced_by_manifest  -> orphan chunks
-        doctor: referenced_by_manifest - present_in_T3  -> dangling manifest
+    Fence unreadable (pre-fence engine, 404) => fail open, but LOUD: renders
+    SKIPPED with a WARNING (⚠), never a clean pass — a check that silently
+    stops working recreates the exact ac4id bug this re-arm closes (memo
+    §3.4's fail-open+WARNING contract, applied here to the doctor sweep).
 
-    Reports per collection rather than per document: the alive-set read is
-    collection-scoped, and naming the collection plus a count is enough to act
-    on. Degrades to a skip — a doctor check must never crash the command it
-    is diagnosing, and never guess.
+    Degrades to a skip — a doctor check must never crash the command it is
+    diagnosing, and never guess.
     """
     label = "dangling manifest chashes"
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
 
         cat = make_catalog_reader()
         if cat is None:
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        t3 = make_t3()
-        collections = [c.name for c in t3.list_collections()]
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_dangling_manifest_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
 
-    dangling: list[tuple[str, int, int]] = []  # (collection, n_dangling, n_referenced)
-    checked = 0
-    for name in collections:
-        try:
-            referenced = cat.chashes_for_collection(name)
-            if not referenced:
-                continue
-            present = {
-                meta.get("chunk_text_hash", "")
-                for _cid, meta in t3.list_chunks_with_metadata(
-                    name, fields=("chunk_text_hash",),
-                )
-            }
-            checked += 1
-            missing = {c for c in referenced if c and c not in present}
-            if missing:
-                dangling.append((name, len(missing), len(referenced)))
-        except Exception as exc:  # noqa: BLE001 — one unreadable collection must not end the sweep
-            _log.debug(
-                "doctor_dangling_manifest_collection_skipped",
-                collection=name, error=str(exc),
-            )
-            continue
+    import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
 
+    try:
+        result = cat.manifest_verify_all() or {}
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status == 404:
+            # memo §3.4 / §6: a pre-fence engine 404s every route this arc
+            # added. Fail OPEN (never crash `nx doctor`) but LOUD — this is
+            # the exact ac4id lesson, applied to the fence's own read.
+            #
+            # GREP-LEVEL PARITY (nexus-5xn3k.6 code-review-expert CRITICAL,
+            # 2026-08-02): the detail string below is allowlisted VERBATIM
+            # by tests/e2e/fresh-install-mvv.sh's ALLOWLIST_REGEX — the
+            # pinned engine (REQUIRED_ENGINE_VERSION v0.1.61) predates
+            # 3cf64d48, so this branch fires on every virgin box until the
+            # floor moves to a tag >= v0.1.62. Changing this text requires
+            # changing that regex in lockstep, or the MVV gate reds.
+            # MECHANIZED removal trigger (substantive-critic SIGNIFICANT,
+            # 2026-08-02): tests/test_engine_version.py::
+            # TestMvvAllowlistDoesNotOutliveItsTrigger reds at the v0.1.62
+            # floor bump unless that allowlist line is deleted with it.
+            _log.warning("doctor_dangling_manifest_engine_floor", status=status)
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail="SKIPPED (engine predates the index-run fence — "
+                       "manifest_verify_all 404'd; re-run after the next "
+                       "engine tag lands)",
+            )]
+        _log.warning("doctor_dangling_manifest_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"SKIPPED (manifest_verify_all failed: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_dangling_manifest_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog or engine unavailable)")]
+
+    collections = result.get("collections") or []
+    checked = len(collections)
     if checked == 0:
         # NON-VACUITY: zero collections actually compared is not a clean bill
         # of health, and must not render as one.
@@ -2983,6 +3004,21 @@ def _check_dangling_manifests() -> list[HealthResult]:
             label=label, ok=True,
             detail="skipped (no collection had a readable manifest to compare)",
         )]
+
+    dangling: list[tuple[str, int, int]] = []  # (collection, n_dangling, n_referenced)
+    for row in collections:
+        try:
+            name = str(row.get("collection", "?"))
+            referenced = int(row.get("referenced", 0) or 0)
+            missing = int(row.get("missing", 0) or 0)
+        except (AttributeError, TypeError, ValueError) as exc:
+            _log.debug(
+                "doctor_dangling_manifest_row_skipped", row=row, error=str(exc),
+            )
+            continue
+        if missing:
+            dangling.append((name, missing, referenced))
+
     if not dangling:
         return [HealthResult(
             label=label, ok=True,
@@ -3003,8 +3039,147 @@ def _check_dangling_manifests() -> list[HealthResult]:
             "returns nothing; re-indexing may silently no-op (nexus-5xn3k)."
         ),
         fix_suggestions=[
+            "nx catalog manifest-verify <tumbler>   (name the specific document)",
             "nx catalog reconcile          (rebuild manifests from T3)",
             "nx index <path> --force       (discard the staleness decision and re-index)",
+        ],
+    )]
+
+
+#: Threshold beyond which a document stranded in ``index_state='indexing'``
+#: is worth flagging (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
+#: substantive-critic on .3's client diff). Generous by design: 'indexing'
+#: is the SAFE state (nexus-lcmbp non-goal — it always means re-index, never
+#: skip), so this check exists purely to bound how long a stuck/rolling-
+#: deploy-split run sits unnoticed, not to police normal in-flight runs.
+#:
+#: PROVISIONAL (substantive-critic OBSERVATION, 2026-08-02, T2
+#: nexus/5xn3k6-critique-2026-08-02 [21355]): 6h is not tied to any
+#: measured p95/p99 MinerU extraction ceiling — no such data exists yet —
+#: and the design memo does not name a number at all; this was picked ad
+#: hoc from the bead-text amendment's "e.g. N hours" placeholder. Low
+#: blast radius if wrong: this is a WARN-level doctor advisory, never a
+#: gate, and its remedy (``nx index <path> --force``) is the same
+#: idempotent, safe-to-over-run operation the fence design relies on
+#: elsewhere — a false positive on a genuinely slow extraction costs one
+#: unnecessary WARNING, not a wrong action taken automatically. Revisit
+#: once a real extraction-time ceiling is observed. Not made
+#: env-overridable: every existing numeric env-override in this codebase
+#: (``NX_GC_FLOOR_FRACTION``, ``NX_INDEX_CONCURRENCY``, ...) is a
+#: multi-line parse/clamp/log-on-invalid function, never a bare one-liner
+#: cast — matching that idiom here would be new machinery for a
+#: low-stakes advisory threshold, not a one-liner, so it's deferred with
+#: this comment instead.
+_STALE_INDEXING_THRESHOLD_HOURS = 6.0
+
+
+def _check_stale_indexing_runs() -> list[HealthResult]:
+    """Name documents stranded in ``index_state='indexing'`` beyond a
+    threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
+    substantive-critic on .3's client diff, T2 nexus/5xn3k3-critique-2026-08-02).
+
+    DISTINCT AXIS from :func:`_check_dangling_manifests`. That check
+    (memo §3.2/§4, ``manifest_verify_all``) finds MISSING-CHUNK aggregates —
+    it says nothing about a document whose fence was never cleared.
+    ``'indexing'`` is the correct, SAFE state for an in-flight or crashed run
+    (memo §3.5 / nexus-lcmbp non-goal: a document in ``'indexing'`` always
+    re-indexes, never silently skips) but nothing bounds how LONG it can sit
+    there. A rolling engine deploy that straddles one multi-batch run's
+    begin/complete pair (begin lands on an upgraded pod, complete 404s
+    against a not-yet-upgraded pod) strands a document in ``'indexing'``
+    until a FUTURE full re-index happens to route both calls through
+    upgraded pods; every intervening ``nx index`` pass re-chunks and
+    re-embeds it at full cost with no signal distinguishing "still catching
+    up" from "stuck."
+
+    Surfaced ALONGSIDE the manifest_verify_all check, not folded into it —
+    they detect different failure classes (missing chunks vs. a fence that
+    never cleared).
+
+    Walks the full corpus once (``all_documents(limit=0)``) — the same cost
+    class doctor already pays in ``_check_next_seq_drift`` (nexus-ohxzu).
+    Read-only; degrades to a skip; never crashes the command it diagnoses.
+    """
+    label = "stale index-run fences"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_stale_indexing_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
+    now = datetime.now(UTC)
+    stale: list[tuple[str, str]] = []  # (identifier, age)
+    checked = 0
+    try:
+        # nexus-ft7eg: share this walk with _check_next_seq_drift
+        # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
+        # doctor currently pays for the full-corpus walk TWICE per run.
+        for entry in cat.all_documents(limit=0):
+            state = getattr(entry, "index_state", None)
+            if state is None:
+                # Legacy row or a pre-fence engine (memo §6) — unknown, not
+                # evidence either way. Excluded from `checked` too: it must
+                # not count as "one document this check actually assessed."
+                continue
+            checked += 1
+            if state != "indexing":
+                continue
+            started = getattr(entry, "index_started_at", "") or ""
+            if not started:
+                continue
+            try:
+                started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            age_hours = (now - started_dt).total_seconds() / 3600.0
+            if age_hours >= _STALE_INDEXING_THRESHOLD_HOURS:
+                ident = (
+                    str(getattr(entry, "source_uri", "") or "")
+                    or str(getattr(entry, "tumbler", "") or "")
+                    or "?"
+                )
+                stale.append((ident, f"{age_hours:.1f}h"))
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
+
+    if checked == 0:
+        # NON-VACUITY: an engine that predates the fence (memo §6) omits
+        # index_state entirely on every row, so nothing above ever
+        # increments `checked`. Say so rather than render an all-clear
+        # this check cannot actually support.
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (engine does not report index_state — predates "
+                   "the index-run fence)",
+        )]
+    if not stale:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none ({checked} fenced document(s) checked)",
+        )]
+
+    names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
+    if len(stale) > 10:
+        names += f"; +{len(stale) - 10} more"
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(stale)} document(s) stranded in index_state='indexing' "
+            f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
+            "SAFE (re-indexing never skips an 'indexing' document, "
+            "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
+            "intervening run — check for a stuck run or a rolling deploy "
+            "that split a begin/complete pair across engine versions."
+        ),
+        fix_suggestions=[
+            "nx index <path> --force   (clears the fence on a clean run)",
         ],
     )]
 
@@ -3059,6 +3234,32 @@ def _check_next_seq_drift() -> list[HealthResult]:
                    "nexus-0ehwe engine change)",
         )]
 
+    # ONE corpus pass for every owner at once. This loop called
+    # _highest_child_seq (a full all_documents walk) PER OWNER — 65 owners x
+    # ~22k documents = ~1.4M records over the managed API per doctor run,
+    # measured at 218s of a 224s doctor (nexus-ohxzu). The max-seq for every
+    # prefix falls out of a single walk.
+    # One shared walk serves all owners, which also means one mid-walk
+    # failure would blank drift visibility for EVERY owner (the old
+    # per-owner walks failed independently). Retry once before conceding,
+    # and say so at WARNING — a check with a total-outage history
+    # (nexus-pbawi) must not vanish at debug level.
+    highs: dict[str, int] | None = None
+    for attempt in (1, 2):
+        try:
+            highs = _highest_child_seqs(cat)
+            break
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+            _log.warning(
+                "doctor_next_seq_scan_failed", attempt=attempt, error=str(exc),
+            )
+    if highs is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (corpus scan failed twice — drift not assessed "
+                   "for ANY owner this run)",
+        )]
+
     drifted: list[tuple[str, int, int]] = []
     checked = 0
     for owner in owners:
@@ -3067,7 +3268,7 @@ def _check_next_seq_drift() -> list[HealthResult]:
             continue
         try:
             next_seq = int(owner.get("next_seq") or 0)
-            high = _highest_child_seq(cat, prefix)
+            high = highs.get(prefix, 0)
         except Exception as exc:  # noqa: BLE001 — one unreadable owner must not end the sweep
             _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
             continue
@@ -3113,16 +3314,23 @@ def _check_next_seq_drift() -> list[HealthResult]:
     )]
 
 
-def _highest_child_seq(cat: Any, prefix: str) -> int:
-    """Highest numeric child sequence under *prefix*, tombstones INCLUDED."""
-    best = 0
+def _highest_child_seqs(cat: Any) -> dict[str, int]:
+    """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
+
+    One ``all_documents`` walk for ALL owners. The predecessor
+    (``_highest_child_seq(cat, prefix)``) re-walked the full corpus per
+    owner — O(owners x documents) over the managed API (nexus-ohxzu:
+    218s of a 224s doctor on 65 owners x ~22k docs).
+    """
+    best: dict[str, int] = {}
     for entry in cat.all_documents(limit=0):
         tumbler = str(getattr(entry, "tumbler", "") or "")
-        if not tumbler.startswith(f"{prefix}."):
+        prefix, dot, tail = tumbler.rpartition(".")
+        if not dot or not tail.isdigit():
             continue
-        tail = tumbler[len(prefix) + 1:]
-        if tail.isdigit():
-            best = max(best, int(tail))
+        seq = int(tail)
+        if seq > best.get(prefix, 0):
+            best[prefix] = seq
     return best
 
 
@@ -3157,6 +3365,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # resolve in T3 — the class `nx catalog reconcile` does not cover
     # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
     results.extend(_check_dangling_manifests())
+    # nexus-5xn3k.6 (bead-text amendment): a document's fence never
+    # cleared — a different failure class from the missing-chunk aggregates
+    # above (surfaced ALONGSIDE, not folded in).
+    results.extend(_check_stale_indexing_runs())
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.

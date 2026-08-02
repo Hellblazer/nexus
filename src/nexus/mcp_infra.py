@@ -798,6 +798,41 @@ def _record_manifest_identity_drop(collection: str, batch_size: int) -> None:
         )
 
 
+# nexus-5xn3k.4 (RUNFENCE): docs whose manifest rows were written correctly but
+# whose completion stamp was REFUSED by the engine's fail-closed verify
+# (missing > 0 or referenced != chunk_count). Distinct from both collectors
+# above: the write SUCCEEDED (over-work-never-under-work holds — no data lost),
+# but the document is not actually whole in T3, index_state stays 'indexing',
+# and the run MUST NOT report it as fully indexed. Silently discarding these
+# while reporting the batch successful reproduces, one layer up, the exact
+# "Indexed N record(s)" silent-success shape the fence exists to close.
+_complete_refusals_lock = threading.Lock()
+_COMPLETE_REFUSALS: list[str] = []
+
+
+def get_complete_refusals() -> list[str]:
+    """doc_ids whose fail-closed completion stamp was refused this
+    process/run. Snapshot copy."""
+    with _complete_refusals_lock:
+        return list(_COMPLETE_REFUSALS)
+
+
+def reset_complete_refusals() -> None:
+    """Clear the collector (CLI callers reset at the start of an indexing
+    run, mirroring ``reset_manifest_write_failures``)."""
+    with _complete_refusals_lock:
+        _COMPLETE_REFUSALS.clear()
+
+
+def _record_complete_refusal(doc_id: str) -> None:
+    # Idempotent per doc_id: a duplicated engine response row (or the
+    # count-mismatch conservative branch overlapping the listed refusals)
+    # must not double-count once .6 wires a count-based consumer.
+    with _complete_refusals_lock:
+        if doc_id not in _COMPLETE_REFUSALS:
+            _COMPLETE_REFUSALS.append(doc_id)
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -806,6 +841,7 @@ def manifest_write_batch_hook(
     metadatas: list[dict] | None,
     *,
     catalog_doc_id: str = "",
+    manifest_complete: dict[str, str] | None = None,
 ) -> None:
     """Registered batch hook (nexus-572g OBS-3): UPSERT document_chunks
     manifest rows after every T3 upsert so the catalog manifest stays
@@ -895,7 +931,8 @@ def manifest_write_batch_hook(
     try:
         # nexus-kgos1: `_gate` is the READER, already resolved above. The sweep's
         # two reads must use it — `cat` is write-only and raises on both.
-        _manifest_write_loop(cat, by_doc, collection, reader=_gate)
+        _manifest_write_loop(cat, by_doc, collection, reader=_gate,
+                             manifest_complete=manifest_complete)
     finally:
         # Production get_catalog_writer() returns a CatalogWriter (has close);
         # tests may patch it to a raw Catalog (no close). Guard so the hot
@@ -989,12 +1026,79 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
         deleted=len(orphaned), kept_shared=shared)
 
 
-def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader) -> None:
+def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
+                              chunk_count: int) -> None:
+    """Fail-closed completion stamp on the PER-DOC manifest path (nexus-dcv2k).
+
+    ``write_manifest_many``'s ``complete`` map (nexus-5xn3k.4) rides the batch
+    POST and is the zero-extra-round-trip form — but it is only reachable when
+    the writer actually exposes ``write_manifest_many``, and the production
+    writer (``_ServiceCatalogWriter``) does NOT: the op is absent from both
+    ``CATALOG_WRITE_OPS`` and ``_SERVICE_ONLY_WRITE_OPS``, so the capability
+    check one frame up is False on every real run and the ride never fires.
+    The per-doc branch below is the path production takes, so the stamp has to
+    land there too or the fence stays ``'indexing'`` forever and every
+    subsequent index re-embeds the document (the .3 three-way reads
+    ``'indexing'`` as stale-definitively, by design).
+
+    Contract parity with ``stampCompleteIfVerified``'s ride, deliberately:
+
+    * *chunk_count* is the number of manifest rows just written, matching the
+      engine's ``rows.size()`` in the ride — the verify predicate is
+      ``missing == 0 AND referenced == chunk_count``.
+    * A 409 refusal is NOT an error of this write: the rows are correct
+      (over-work-never-under-work). It is recorded via
+      :func:`_record_complete_refusal` and logged at WARNING under the SAME
+      event name the ride uses, so the .6 consumer and the log-grep surface
+      are identical whichever path stamped.
+    * ``None`` (pre-fence engine 404) is NOT success and is NOT a refusal —
+      the fence recorded nothing at all on that engine, ``begin`` 404'd the
+      same way, and the staleness three-way falls through to its verify
+      fallback. Recording a refusal there would cry wolf on every doc.
+    * Never propagates: the manifest hook is non-propagating by contract, and
+      an unstamped fence is over-work (a future re-index), never data loss.
+    """
+    import structlog  # noqa: PLC0415 — deferred (lazy logger)
+
+    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred: import cycle at module load
+    from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module)
+
+    try:
+        result = _manifest_write_with_retry(
+            cat.complete_index_run, doc_id, content_hash, chunk_count)
+    except IndexRunVerifyRefused as refused:
+        structlog.get_logger().warning(
+            "write_manifest_many_complete_refused",
+            doc_id=doc_id,
+            referenced=refused.referenced,
+            missing=refused.missing,
+            chunk_count=refused.chunk_count,
+            path="per_doc",
+            note="manifest rows written; completion stamp refused — "
+                 "doc is NOT fully indexed, index_state left as-was",
+        )
+        _record_complete_refusal(doc_id)
+        return
+    except Exception as exc:  # noqa: BLE001 — advisory: leave 'indexing' (over-work), never fail the write
+        structlog.get_logger().warning(
+            "index_run_complete_write_failed", doc_id=doc_id, error=str(exc),
+        )
+        return
+    if result is None:
+        structlog.get_logger().debug(
+            "index_run_complete_engine_floor", doc_id=doc_id,
+            note="pre-fence engine — no stamp landed and none was possible",
+        )
+
+
+def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
+                         manifest_complete: dict[str, str] | None = None) -> None:
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc
     # loop below. Flush-grain batches always carry complete files
     # (position 0 present), matching write_many's replace semantics.
+    _warned_partial_claims = False
     if callable(getattr(cat, "write_manifest_many", None)):
         # No len(by_doc) gate (critique Critical, nexus-u2kwq): write_many
         # handles N=1 fine, and single-doc batches MUST take it — the
@@ -1025,13 +1129,83 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader) 
                 count=len(continuation),
                 note="continuation slices routed to per-doc append path",
             )
+            # nexus-5xn3k.4: a doc the producer claimed COMPLETE landing in
+            # the continuation bucket is a contract violation — its batch
+            # lacks position 0, so it cannot be the whole file. Never stamp
+            # it; the claim was wrong, say so loudly.
+            _claimed_partial = [d for d in continuation if d in (manifest_complete or {})]
+            if _claimed_partial:
+                structlog.get_logger().warning(
+                    "manifest_complete_claim_on_continuation_slice",
+                    doc_ids=_claimed_partial,
+                )
+                # dcv2k review: derive the once-guard from the warning having
+                # FIRED, not from wrote_many — an all-continuation batch or a
+                # write_many 404 leaves wrote_many False while this warning
+                # already fired, and the per-doc loop would re-emit it.
+                _warned_partial_claims = True
         wrote_many = False
         if full_docs:
             from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
 
+            # nexus-5xn3k.4 (RUNFENCE): completion stamps ride the same POST
+            # for docs the producer asserted file-atomic — restricted to docs
+            # actually in THIS write.
+            _full_ids = {d for d, _ in full_docs}
+            _complete_map = {
+                d: h for d, h in (manifest_complete or {}).items() if d in _full_ids
+            }
             try:
-                failed = _manifest_write_with_retry(cat.write_manifest_many, full_docs)
+                if _complete_map:
+                    res = _manifest_write_with_retry(
+                        cat.write_manifest_many, full_docs, complete=_complete_map)
+                else:
+                    # Positional-only legacy call shape: keeps patched/older
+                    # writer doubles working when no stamp is requested.
+                    res = _manifest_write_with_retry(cat.write_manifest_many, full_docs)
                 wrote_many = True
+                # Dual return shape: dict (current client — carries the
+                # complete_refused contract) or bare failed-ids list (legacy
+                # doubles). The COUNT field MUST be parsed alongside the list
+                # (bead amendment): a truncated/absent list with a non-zero
+                # scalar must never read as zero refusals.
+                if isinstance(res, dict):
+                    failed = res.get("failed_doc_ids") or []
+                    _refused = res.get("complete_refused") or []
+                    _refused_count = int(res.get("complete_refused_count") or 0)
+                else:
+                    failed = res or []
+                    _refused, _refused_count = [], 0
+                if _refused_count != len(_refused):
+                    import structlog  # noqa: PLC0415 — deferred (lazy logger)
+                    structlog.get_logger().warning(
+                        "complete_refused_count_mismatch",
+                        count_field=_refused_count,
+                        list_len=len(_refused),
+                        note="refusal list truncated or shape drift — treating "
+                             "every claimed doc as unstamped",
+                    )
+                    # Conservative direction (over-work, never under-report):
+                    # a stamp we cannot CONFIRM is a stamp we do not claim.
+                    _listed = {str(r.get("doc_id", "")) for r in _refused}
+                    for _cid in _complete_map:
+                        if _cid not in _listed:
+                            _record_complete_refusal(_cid)
+                for _r in _refused:
+                    import structlog  # noqa: PLC0415 — deferred (lazy logger)
+                    _rid = str(_r.get("doc_id", ""))
+                    structlog.get_logger().warning(
+                        "write_manifest_many_complete_refused",
+                        doc_id=_rid,
+                        path="write_many",
+                        referenced=_r.get("referenced"),
+                        missing=_r.get("missing"),
+                        chunk_count=_r.get("chunk_count"),
+                        note="manifest rows written; completion stamp refused — "
+                             "doc is NOT fully indexed, index_state left as-was",
+                    )
+                    if _rid:
+                        _record_complete_refusal(_rid)
                 if failed:
                     import structlog  # noqa: PLC0415 — deferred (lazy logger)
                     structlog.get_logger().warning(
@@ -1067,6 +1241,7 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader) 
             # be empty). Critique Significant: an all-continuation batch
             # must fall through to the loop, never early-return.
             by_doc = continuation
+            # (_warned_partial_claims is set at warning-fire time above.)
         # else: 404 or nothing eligible — per-doc loop covers everything.
         if not by_doc:
             return
@@ -1124,8 +1299,29 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader) 
                 _resync = getattr(cat, "resync_chunk_count_cache", None)
                 if callable(_resync):
                     _manifest_write_with_retry(_resync, doc_id)
+                # nexus-dcv2k (RUNFENCE .4 regression): the completion stamp
+                # rides write_manifest_many — which the production writer does
+                # not expose, so on every real run control reaches HERE with the
+                # claim unstamped. Stamp after the rows, the sweep and the
+                # chunk_count resync have settled: the engine's verify reads the
+                # manifest this doc just wrote. Position-0 only — a continuation
+                # slice is not a whole document (handled in the else branch).
+                _claimed_hash = (manifest_complete or {}).get(doc_id)
+                if _claimed_hash:
+                    _stamp_index_run_complete(
+                        cat, doc_id, _claimed_hash, len(chunks))
             else:
                 _manifest_write_with_retry(cat.append_manifest_chunks, doc_id, chunks)
+                # Same contract violation the write_many branch flags: a doc
+                # claimed COMPLETE whose batch lacks position 0 cannot be the
+                # whole file. Never stamp it; say so loudly (once — the
+                # write_many branch already warned for docs it routed here).
+                if not _warned_partial_claims and doc_id in (manifest_complete or {}):
+                    import structlog  # noqa: PLC0415 — deferred (lazy logger)
+                    structlog.get_logger().warning(
+                        "manifest_complete_claim_on_continuation_slice",
+                        doc_ids=[doc_id],
+                    )
                 # nexus-zq79: documents.chunk_count is a denormalised cache of
                 # COUNT(*) document_chunks. The catalog-register hook runs BEFORE
                 # per-file indexing (tumbler injection requires it), so chunk_count

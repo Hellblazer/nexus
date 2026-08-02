@@ -21,7 +21,7 @@ Three arrows cross downward from the Planning band into the third band: a dashed
 
 The third band (green, "Unified Execution Layer") contains, left to right: a cluster of four colored hexagons connected by lines representing the Execution Plan DAG; an Execution Engine subgroup containing a `plan_run` panel (with a miniature DAG glyph) and a Result Cache cylinder labeled T1, connected by a bidirectional arrow; and a Defined Operator Set box divided into three labeled columns — RETRIEVAL (Search, Query, Traverse, FindNode, Filter, GroupBy), SYNTHESIS (Extract, Summarize, Compare, Rank, Generate, Aggregate), and STATE (`memory_*`, `store_*`, `plan_*`, `scratch_*`, `catalog_link`, `operator_*`).
 
-The fourth band (purple, "Knowledge Representation Layer") flows left to right: a stack-of-documents icon labeled "Source Documents" feeds an Inner-document Content Extractor (classifier, chunker via tree-sitter across 31 languages, `code_indexer`, `prose_indexer`, `pdf_extractor` routing Docling → MinerU → PyMuPDF, `bib_enricher`). An arrow labeled "Scholarly Document Knowledge" continues into Problem/Method Taxonomy Construction (`CatalogTaxonomy`, BERTopic plus HDBSCAN). Below Taxonomy, a Progressive Update box (`auto_linker`, `taxonomy_assign_hook`, `link_generator`) connects bidirectionally upward and receives a dashed "new documents" arrow from Source Documents. A "construct" arrow leads right from Taxonomy to the Nexus Knowledge Graph — rendered as a node-link cluster of orange and white circles — representing the three-tier store (T1 session scratch, T2 SQLite+FTS5 migrating to PG, T3 Postgres 17 + pgvector behind the native nexus-service) with tumbler addresses and typed links (`cites`, `implements`, `supersedes`, `relates`).
+The fourth band (purple, "Knowledge Representation Layer") flows left to right: a stack-of-documents icon labeled "Source Documents" feeds an Inner-document Content Extractor (classifier, chunker via tree-sitter across 31 languages, `code_indexer`, `prose_indexer`, `pdf_extractor` routing Docling → MinerU → PyMuPDF, `bib_enricher`). An arrow labeled "Scholarly Document Knowledge" continues into Problem/Method Taxonomy Construction (`CatalogTaxonomy`, BERTopic plus HDBSCAN). Below Taxonomy, a Progressive Update box (`auto_linker`, `taxonomy_assign_hook`, `link_generator`) connects bidirectionally upward and receives a dashed "new documents" arrow from Source Documents. A "construct" arrow leads right from Taxonomy to the Nexus Knowledge Graph — rendered as a node-link cluster of orange and white circles — representing the three-tier store (T1 session scratch, T2 Postgres via the native nexus-service, T3 Postgres 17 + pgvector behind the same nexus-service) with tumbler addresses and typed links (`cites`, `implements`, `supersedes`, `relates`).
 </details>
 
 Source: [`architecture-diagram.svg`](architecture-diagram.svg) — edit the SVG directly, then re-render the PNG with `rsvg-convert -z 1.5 docs/architecture-diagram.svg -o docs/architecture-diagram.png`.
@@ -57,17 +57,17 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     assign: taxonomy_assign_hook fires on every store_put
     │     boost+group: search_engine.py reads db.taxonomy per search call
     │
-    ├── Catalog: JSONL truth → SQLite cache → typed link graph
-    │     documents: tumbler addressing (1.owner.doc), FTS5 search
+    ├── Catalog: engine Postgres truth (Liquibase schema, RLS) → HttpCatalogClient → typed link graph
+    │     documents: tumbler addressing (1.owner.doc)
     │     links: cites, implements-heuristic, supersedes, relates, formalizes
     │     auto-generate: citation links (bib metadata), code-RDR (heuristic)
     │     surfaces: MCP nexus-catalog server (10 tools) + nx catalog CLI
     │
 
     └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
-          T1: ChromaDB HTTP server (session scratch, shared across agent processes)
+          T1: nexus-service HTTP (HttpScratchStore; session scratch, shared across agent processes; NX_T1_ISOLATED=1 -> private in-process InMemoryVectorClient)
           T2: nexus-service over Postgres (the write arbiter)
-                Nine domain stores (eight share nexus.db + catalog) behind T2Database
+                Eight domain stores + the catalog, all HTTP clients behind T2Database
                 Transport: HTTP to the nexus-service
                 (the SQLite + FTS5 `nx daemon t2` daemon is RETIRED — it
                  arbitrated a single SQLite writer; Postgres does that now)
@@ -137,8 +137,8 @@ table) see [`docs/container-integration.md`](container-integration.md).
 Data flows upward (T1 → T2 → T3).
 
 **Unified daemon-lifecycle substrate ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md)).** The three tiers
-differ in storage engine and scope (T1 session-scoped chroma, T2 uid-scoped
-SQLite+FTS5, T3 uid-scoped pgvector behind the nexus-service) but share
+differ in storage engine and scope (T1 uid-scoped HttpScratchStore, T2
+uid-scoped Postgres, T3 uid-scoped pgvector, all behind the nexus-service) but share
 **one** lifecycle substrate: the leased / fenced / atomic service registry in
 [`src/nexus/daemon/service_registry.py`](../src/nexus/daemon/service_registry.py)
 (`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
@@ -188,10 +188,25 @@ which T3 collection a document lives in (`catalog_search` → `physical_collecti
 traverse typed links (`catalog_links`, e.g. `link_type="cites"`), and scope
 semantic search to relevant collections instead of searching everything.
 
-**See [docs/catalog.md](catalog.md) for the full catalog data model** — tumbler
-addressing, the `document_chunks` manifest schema, span formats (`chash:<hex>`
-content-addressed spans vs. positional line/char spans), link types, the
-migration runbook, and admin/maintenance CLI surface.
+**See [docs/catalog.md](catalog.md) for the catalog data model** — tumbler
+addressing, span formats (`chash:<hex>` content-addressed spans vs.
+positional line/char spans), link types, and the admin/maintenance CLI
+surface. The `document_chunks` manifest itself — one row per
+`(doc_id, position, chash)`, atomic-REPLACE per document — is described
+inline below and in [Index-run fence](#index-run-fence-runfence) below; it
+is not separately documented in catalog.md.
+
+**Tumbler allocation and next_seq.** A tumbler's trailing segment is a
+sequential number allocated per owner via `SELECT ... FOR UPDATE` on
+`catalog_owners.next_seq` (`CatalogHandler.java`); the column tracks the
+*last-claimed* value, not the *next* one. WAN round-trip cost on
+high-volume single-doc allocation motivated the `register_many` batch path
+(`http_catalog_client.py`). `nx doctor` ships a drift check
+(`health.py` `_check_next_seq_drift`) that compares each owner's stored
+`next_seq` against the highest child tumbler actually observed; the
+converge route `POST /v1/catalog/owners/sweep_next_seq_drift`
+(`CatalogHandler.java`) floors every drifted owner's `next_seq` back to a
+safe value across all owners in one call.
 
 ### Chunk identity: the canonical chash ([RDR-180](rdr/rdr-180-content-address-chash-binary-32byte.md))
 
@@ -241,7 +256,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 
 | Metadata field | Level | Keyed on | Set by | Used for |
 |---|---|---|---|---|
-| `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison; backup-snapshot identity |
+| `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison — paired with the index-run fence's three-way state, see [Index-run fence (RUNFENCE)](#index-run-fence-runfence) below; backup-snapshot identity |
 | `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
 | `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired (legacy 32-hex references resolve via `chash_alias`) |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
@@ -249,29 +264,154 @@ Two hash fields look similar but mean very different things. Confusing them prod
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
 | `section_title` / `section_type` | chunk | tree-sitter / Markdown section header | code/prose chunkers | search-time filtering (`section_type!=references`) |
 | `embedding_model` | document | model id string | every write through `T3Database` | `voyage-code-3` vs `voyage-context-3` routing; quota validation |
+| `extraction_method` | chunk | PDF-extractor identity string | PDF chunks only, via `pipeline_stages._enrich_metadata_from_extraction` post-pass (streaming) / `doc_indexer._pdf_chunks` (legacy batch path) | retroactively scoping extractor regressions — `docling` \| `mineru` \| `pymupdf_normalized`, or the honest mixed aggregate `mineru+docling-degraded` when an `--on-formula-oom docling` per-page degrade fired (nexus-1oguj, new-writes-only — see epistemic-hole note below) |
 
 `doc_id`, `chunk_index`, and `chunk_count` were ALSO chunk-level metadata pre-[RDR-108](rdr/rdr-108-graph-identity-normalization.md). [RDR-108](rdr/rdr-108-graph-identity-normalization.md) Phase 3 retired them; the catalog `document_chunks` manifest is the single source of truth for chunk position within a document. Read paths that need chunk order consult `Catalog.get_manifest(doc_id)` (see `_attach_doc_ids_from_catalog` in `search_engine.py` for the standard fallback).
 
-Legacy fields (`corpus`, `store_type`, `extraction_method`, `expires_at`) were dropped in [RDR-101](rdr/rdr-101-catalog-t3-metadata-design.md) Phase 5c. They are not present in current writes; older collections still carry them as cargo until `nx t3 reidentify` runs the canonical-schema funnel and normalizes them away.
+Legacy fields (`corpus`, `store_type`, `expires_at`) were dropped in [RDR-101](rdr/rdr-101-catalog-t3-metadata-design.md) Phase 5c. They are not present in current writes; older collections still carry them as cargo until `nx t3 reidentify` runs the canonical-schema funnel and normalizes them away. **`extraction_method` is NOT one of these** — nexus-1oguj (2026-08) promoted it from dropped-cargo to canonical; the field existed at extraction time long before that fix but was discarded before storage, which is exactly the gap nexus-1oguj closed.
+
+**Epistemic hole (nexus-0qc4b): `extraction_method` is new-writes-only, with no backfill.** Chunks indexed before nexus-1oguj carry no `extraction_method` key at all — not an empty string, absent entirely. A query that treats "key absent" as "not mineru" (or as any other negative extractor claim) silently conflates *unknown provenance* with a *known answer*. Re-extraction would be required to recover the value honestly for old chunks, so there is no cheap backfill; scoping "all mineru-extracted documents" is correct only as of the fix's ship date, and only for chunks written after it. Treat absence as unknown, never as evidence.
 
 For operator runbooks built on this vocabulary see [`docs/operations/t3-health.md`](operations/t3-health.md) (when `nx catalog doctor` reports X) and [`docs/operations/audit-membership-interpretation.md`](operations/audit-membership-interpretation.md) (the 3 contamination axes).
 
+### Index-run fence (RUNFENCE)
+
+(nexus-5xn3k). Chunk-level `content_hash` matching (the metadata-table row above) has one
+blind spot: a run that dies partway through leaves T3 and the catalog
+manifest *consistently* truncated — every artifact the staleness check
+could compare agrees with every other, because all of them were written by
+the same broken run. No amount of comparing two truncated artifacts to
+each other reveals the truncation. The index-run fence adds a
+document-level record of *intent* (a run started) and *verified
+completion* (a run finished and was checked whole), orthogonal to whether
+the content itself changed.
+
+**Fence fields** on `catalog_documents`, all nullable/empty-default —
+absent on rows written by a pre-fence engine or before a document's first
+fenced index:
+
+| Field | Meaning |
+|---|---|
+| `index_state` | `NULL` (unknown/legacy) \| `'indexing'` \| `'complete'` \| `'failed'` |
+| `index_content_hash` | the `content_hash` the last **completed** run verified |
+| `index_run_id` | opaque id for the run that last touched the fence |
+| `index_started_at` | timestamp the current `'indexing'` state began |
+
+**Not a lock.** `index_state='indexing'` is advisory only (nexus-lcmbp
+non-goal) — it never means "someone else is running, skip." A retry or a
+second concurrent run simply re-stamps the same shape. What it guarantees
+is the opposite of a lock: a document can never read as done while a run
+against it is in flight or has failed.
+
+**Lifecycle**, driven client-side (`src/nexus/doc_indexer.py`:
+`_fence_begin` / `_fence_complete` / `_fence_fail`) against three engine
+routes (`CatalogHandler.java`):
+
+| Route | Client call | Effect |
+|---|---|---|
+| `POST /v1/catalog/index-run/begin` | `_fence_begin` | Stamps `index_state='indexing'` BEFORE the first chunk upsert. Idempotent; advisory-only — a 404 (pre-fence engine) is swallowed with a WARNING and indexing proceeds unaffected |
+| `POST /v1/catalog/index-run/complete` | `_fence_complete` | **Fail-closed.** The engine re-runs the manifest-verify predicate (`missing == 0 AND referenced == chunk_count`) inside the SAME transaction as the stamp — an advisory lock (`CatalogRepository`) serializes this against concurrent manifest writes for the same doc. Only on success does `index_state` flip to `'complete'` with `index_content_hash` set. On refusal the engine returns HTTP 409 and the client raises `IndexRunVerifyRefused`; `index_state` is left untouched (still whatever it was), never silently marked done |
+| `POST /v1/catalog/index-run/fail` | `_fence_fail` | Stamps `index_state='failed'` from the caller's own exception handler; never raises itself, so a fence-write problem can't mask the original indexing error |
+
+All three routes refuse against a tombstoned document.
+
+**The three-way staleness gate** (`doc_indexer._index_run_fresh`) layers on
+top of the pre-existing chunk-level `content_hash` + `embedding_model`
+match (a `limit=1` probe against one surviving chunk) — it never replaces
+that check, it closes the blind spot on top of it:
+
+1. `index_state == 'complete'` AND `index_content_hash == content_hash` →
+   definitely fresh, no further probe.
+2. `index_state in ('indexing', 'failed')` → definitely stale, no probe —
+   a partial or errored run must never read as done regardless of what T3
+   happens to hold right now.
+3. Anything else (`NULL` — legacy row, pre-fence engine, unresolvable
+   `doc_id`, or a fence-read failure) → the fence has nothing to say; fall
+   through to the pre-RUNFENCE behavior, one `manifest_verify` call against
+   the engine (`_manifest_is_fully_present`).
+
+**Completion riding the manifest write (nexus-5xn3k.4).** The hot indexing
+path rarely calls `/index-run/complete` directly — completion instead
+rides the existing flush-grain manifest write, at zero extra round trips:
+
+- `hook_registry.HookRegistry.fire_batch` accepts an optional
+  `manifest_complete: dict[doc_id, content_hash]` — the producer's
+  file-atomic assertion that a document is WHOLLY contained in this batch.
+  It is threaded only to hooks that declare a `manifest_complete`
+  parameter (a registration-time signature classification, mirroring the
+  existing `catalog_doc_id` dispatch — see [Post-Store Hooks](#post-store-hooks)
+  below).
+- `manifest_write_batch_hook` (the sole declaring consumer) forwards the
+  map to `HttpCatalogClient.write_manifest_many(docs, complete=...)`. On an
+  engine that supports it (v0.1.62+), each doc's `complete` entry runs the
+  identical fail-closed verify inside the per-doc write transaction — no
+  second POST. A refusal does not fail the write (the manifest rows are
+  correct; the contract is over-work-never-under-work): the refused doc
+  lands in the response's `complete_refused` list instead, alongside a
+  `complete_refused_count` scalar carried separately so a truncated list
+  is detectable — **callers must parse both**, since a refused doc is not
+  fully indexed.
+- **Production takes the per-doc path, not the batch ride** (nexus-dcv2k):
+  the deployed writer, `_ServiceCatalogWriter`, does not expose
+  `write_manifest_many` (the op is absent from both its write-op
+  allowlists), so `mcp_infra._manifest_write_loop`'s capability check for
+  the batched ride is always False in production. The completion stamp
+  instead lands via `mcp_infra._stamp_index_run_complete`, which calls
+  `complete_index_run` per document with the same fail-closed contract and
+  records the same refusal shape — both paths feed one collector,
+  `mcp_infra.get_complete_refusals()`, so the summary consumer sees a
+  refusal regardless of which branch stamped it.
+- A document the producer claims complete that turns out NOT to start at
+  chunk position 0 (a continuation slice, not the whole file) is a
+  contract violation the client refuses to stamp — logged loudly
+  (`manifest_complete_claim_on_continuation_slice`), never silently
+  accepted.
+
+**Reads.** `HttpCatalogClient.manifest_verify(doc_id)` (one document — also
+`nx catalog manifest-verify`) and `manifest_verify_all()` (every live
+document, grouped by collection — the `nx doctor` sweep primitive) are
+plain reads that PROPAGATE on failure, unlike the advisory begin/fail
+calls above; the one caller that must fail open on any verify failure
+(`doc_indexer._manifest_is_fully_present`) implements that fail-open
+contract itself, around the call.
+
+**Doctor axis.** `nx doctor` separately flags documents stranded in
+`index_state='indexing'` past a threshold (`health.py
+_check_stale_indexing_runs`) — a distinct failure class from a
+manifest-verify miss: missing chunks vs. a fence that never cleared (e.g.
+a rolling engine deploy that straddles one multi-batch run's begin/complete
+pair, stranding the document in `'indexing'` until a future full re-index
+happens to route both calls through upgraded pods).
+
+**CLI.** `nx catalog manifest-verify TUMBLER_OR_TITLE` reports one
+document's `referenced`/`present`/`missing` chunk counts plus its fence
+state without a full corpus scan; see
+[cli-reference.md § nx catalog manifest-verify](cli-reference.md#nx-catalog-manifest-verify).
+
 ### Catalog manifest and migration
 
-The `document_chunks` manifest schema, the ChashIndex routing table, the
-ChromaDB-era `nx t3 reidentify` migration runbook, tumbler comparison
-semantics, and the two graph-traversal views (`catalog_links` vs
-`catalog_link_query`) are documented in
+Tumbler comparison semantics and the two graph-traversal views
+(`catalog_links` vs `catalog_link_query`) are documented in
 [docs/catalog.md](catalog.md#how-its-stored) and
 [docs/catalog.md § Admin and maintenance](catalog.md#admin-and-maintenance).
-Post-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md), T3 serves through
-pgvector + `nexus-service`, and the upgrade path is `nx upgrade` — the single
-trigger that walks the [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md)
-ladder, whose substrate rung carries Chroma onto pgvector (see
+The `document_chunks` manifest schema is covered above (§ Metadata field
+semantics, § Index-run fence), not separately in catalog.md. The
+`ChashIndex` routing table is **retired** (RDR-187): the PG table
+`nexus.chash_index` was dropped as of engine v0.1.51, and `chash_alias` is
+the surviving legacy-reference resolver (see
+[Chunk identity](#chunk-identity-the-canonical-chash-rdr-180) above) —
+catalog.md's own ChashIndex/migration-runbook material predates the drop.
+`nx t3 reidentify` (still a live command, `commands/t3.py`) walks a
+collection's chunks to backfill/normalize legacy chunk ids; it is retained
+for the chunk-identity history
+([RDR-053](rdr/rdr-053-xanadu-fidelity.md)/[RDR-108](rdr/rdr-108-graph-identity-normalization.md))
+rather than as a routine operator step. Post-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md),
+T3 serves through pgvector + `nexus-service`, and the upgrade path is
+`nx upgrade` — the single trigger that walks the
+[RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md) ladder, whose
+substrate rung carries Chroma onto pgvector (see
 [migration-runbook.md](migration-runbook.md) for the operator's manual order of
-operations); the `nx t3 reidentify` runbook
-is retained in catalog.md for the chunk-identity history
-([RDR-053](rdr/rdr-053-xanadu-fidelity.md)/[RDR-108](rdr/rdr-108-graph-identity-normalization.md)).
+operations).
 
 **CCE single-chunk note**: For CCE collections (`docs__*`, `rdr__*`, `knowledge__*`), documents with only one chunk are embedded via `contextualized_embed(inputs=[[chunk]])`.
 
@@ -294,7 +434,7 @@ discover_for_collection()          # taxonomy_cmd.py
 CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
   │  sklearn HDBSCAN on N×D float32
   │  c-TF-IDF labels (CountVectorizer + TfidfTransformer)
-  │  persist: topics, topic_assignments → T2 SQLite
+  │  persist: topics, topic_assignments → T2 (engine Postgres via HttpTaxonomyStore)
   │  upsert cluster centroids → pgvector via nexus-service (HttpCentroidStore)
   ▼
 taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
@@ -311,7 +451,7 @@ search_cross_corpus()              # search_engine.py
 
 ### Storage
 
-**T2 SQLite tables** (owned by `CatalogTaxonomy`):
+**T2 tables** (engine Postgres via `HttpTaxonomyStore`, owned by `CatalogTaxonomy`):
 
 | Table | Purpose |
 |-------|---------|
@@ -371,15 +511,15 @@ threshold calibration, ICF rationale, upsert semantics, troubleshooting.
 
 ## Post-Store Hooks
 
-Three parallel hook contracts in `src/nexus/mcp_infra.py` cover the three real workload shapes for per-document enrichment that fires after a write. All three chains fire from every storage event, MCP `store_put` and CLI bulk ingest alike; consumers register in exactly one shape based on the grain of work and whether the work benefits from batched dependency calls. All use the same per-hook failure-isolation pattern (capture, persist to T2 `hook_failures` with a `chain` column distinguishing the source, never propagate).
+Three parallel hook contracts, implemented by the `HookRegistry` class in `src/nexus/hook_registry.py`, cover the three real workload shapes for per-document enrichment that fires after a write. All three chains fire from every storage event, MCP `store_put` and CLI bulk ingest alike; consumers register in exactly one shape based on the grain of work and whether the work benefits from batched dependency calls. Registration happens in one place, `hook_registry.install_default_hooks`, called once per entry point (constructor-injected, not module-load self-registration). All use the same per-hook failure-isolation pattern (capture, persist to T2 `hook_failures` with a `chain` column distinguishing the source, never propagate).
 
 | Shape | Register | Fire | Where it fires from | Current consumers |
 |-------|----------|------|---------------------|-------------------|
-| Single-document ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) | `register_post_store_hook(fn)` | `fire_post_store_hooks(doc_id, collection, content)` | MCP `store_put` (once per call) and every CLI ingest path (once per doc in the batch) | empty by default; reserved for future per-doc consumers that key on `doc_id` |
-| Batch ([RDR-095](rdr/rdr-095-post-store-hook-batch-contract.md)) | `register_post_store_batch_hook(fn)` | `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` | every CLI ingest path with the full batch; MCP `store_put` with a 1-element batch | `chash_dual_write_batch_hook` ([RDR-086](rdr/rdr-086-chash-span-resolution.md)), `taxonomy_assign_batch_hook` ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
-| Document-grain ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)) | `register_post_document_hook(fn)` | `fire_post_document_hooks(source_path, collection, content)` | MCP `store_put` (once per call) and every CLI ingest path (once per source document) | `aspect_extraction_enqueue_hook` ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md): enqueues to `aspect_extraction_queue`, async worker drains) |
+| Single-document ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) | `HookRegistry.register_single(fn)` | `fire_single(doc_id, collection, content)` | MCP `store_put` (once per call) and every CLI ingest path (once per doc in the batch) | empty by default; reserved for future per-doc consumers that key on `doc_id` |
+| Batch ([RDR-095](rdr/rdr-095-post-store-hook-batch-contract.md)) | `HookRegistry.register_batch(fn)` | `fire_batch(doc_ids, collection, contents, embeddings, metadatas)` | every CLI ingest path with the full batch; MCP `store_put` with a 1-element batch | `taxonomy_assign_batch_hook` ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)), `manifest_write_batch_hook` (GH #1371 retry/repair, RUNFENCE completion-stamp coupling — see [Index-run fence](#index-run-fence-runfence) above). Both are flush-grain (`batch_grain = "flush"`). The chash dual-write hook that used to sit here is **retired** (RDR-187): the chunks tables are the chash-keyed store now, so there is no derived copy to dual-write; the name is guarded from ever reappearing (see Drift guard below) |
+| Document-grain ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)) | `HookRegistry.register_document(fn)` | `fire_document(source_path, collection, content)` | MCP `store_put` (once per call) and every CLI ingest path (once per source document) | `aspect_extraction_enqueue_hook` ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md): enqueues to `aspect_extraction_queue`, async worker drains) |
 
-The batch contract exists because some enrichments collapse N dependency calls into one batched call (e.g. `taxonomy.assign_batch` issues one ChromaDB Cloud `query()` for N nearest-centroid lookups; the per-doc path issues N sequential queries). For corpus-scale ingest the difference is roughly 1000x. The single-document chain serves work that does not benefit from batching but keys on `doc_id`. The document-grain chain serves work that needs the source document boundary as a stable identity ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) aspect extraction, where each paper is one extraction regardless of chunk count) — its key is `source_path`, not `doc_id`, and the chain fires once per source document at every CLI ingest entry point as well as at MCP `store_put`.
+The batch contract exists because some enrichments collapse N dependency calls into one batched call (e.g. `taxonomy.assign_batch` issues one batched pgvector ANN query via `nexus-service` for N nearest-centroid lookups; the per-doc path issues N sequential queries). For corpus-scale ingest the difference is roughly 1000x. The single-document chain serves work that does not benefit from batching but keys on `doc_id`. The document-grain chain serves work that needs the source document boundary as a stable identity ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) aspect extraction, where each paper is one extraction regardless of chunk count) — its key is `source_path`, not `doc_id`, and the chain fires once per source document at every CLI ingest entry point as well as at MCP `store_put`.
 
 `taxonomy_assign_batch_hook` accepts `embeddings=None` from the MCP path and fetches them from T3 inline (with a local bge-768 ONNX fallback when the T3 row is unavailable). One hook body covers both the bulk path and the single-document path; there is no separate single-doc taxonomy hook to keep in sync.
 
@@ -391,13 +531,13 @@ The ChunkBatcher-driven `nx index repo` path (nexus-nj4ch) is the one exception 
 
 **Enqueue identity & loud-failure contract ([RDR-172](rdr/rdr-172-service-mode-aspect-enqueue-silent-failure.md)).** The `doc_id` the hook forwards to the enqueue is the **catalog document id (tumbler)**, not the chunk hash. `store_put` forwards `catalog_doc_id` — the tumbler `catalog_store_hook` returns when it registers the note-backed document (`mcp/core.py`). Forwarding the chunk hash was the silent-failure bug `nexus-ov0sw`: in service mode the chunk hash is not a registered `catalog_documents` tumbler, so the queue's `doc_id` foreign key rejected it and the best-effort hook swallowed the 500. Three rules now hold. (1) **Blank `doc_id` → NULL**: the no-catalog case forwards `''`, which the service `nullIfBlank`s to SQL `NULL` (a legitimate "no reference" sentinel) and lands a `pending` row with HTTP 200. (2) **Non-blank *unregistered* `doc_id` → typed 4xx, never silent**: a non-blank id that is not a registered tumbler is a client bug (RF-8: no race); the service maps the SQLSTATE class-23 integrity violation to a typed **409** (`{"error","sqlstate"}`, body sanitised) ahead of the generic 500 (`AspectHandler.sqlState23`) — never a silent NULL coercion, never an opaque 500. (3) **Tripwire**: the enqueue stays best-effort (never blocks ingest), but the hook's internal swallow would otherwise hide a failure from `hook_registry`; it therefore persists its own `hook_failures` row (`hook_name='aspect_extraction_enqueue_hook'`, `chain='document'`) and logs `aspect_extraction_enqueue_failed`, and the `--fullstack` ingest E2E asserts **zero** such rows so the silent-total-failure class cannot regress unobserved.
 
-**Registration order is load-bearing within the batch chain.** In `mcp/core.py`, `chash_dual_write_batch_hook` is registered before `taxonomy_assign_batch_hook`. This mirrors the legacy CLI call-site ordering (chash dual-write always preceded taxonomy assignment at every site) and preserves the invariant that chash rows exist before topic assignment runs. The single-document and document-grain chains have no inter-hook ordering constraint at present.
+**Registration order.** Pre-RDR-187, `chash_dual_write_batch_hook` was registered before `taxonomy_assign_batch_hook` — load-bearing, because chash rows had to exist before topic assignment ran. That hook is retired; `install_default_hooks` now registers `taxonomy_assign_batch_hook` before `manifest_write_batch_hook`, but the two are independent (taxonomy reads T3 embeddings, the manifest hook reads chunk metadata from the batch's own `indexed_metas`) — no ordering constraint remains in the batch chain, nor in the single-document or document-grain chains.
 
 **Failure capture.** Per-hook exceptions are caught in the fire function, logged via structlog, and persisted to T2 `hook_failures`. The `chain` column (T2 4.14.2 migration, [RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)) carries an enum value of `'single'`, `'batch'`, or `'document'` distinguishing the chain that fired. Single-document failures store the scalar `doc_id` in the legacy column. Batch failures store a representative scalar (first id) in `doc_id`, the JSON-encoded list in `batch_doc_ids`, and dual-write `is_batch=1` for back-compat with pre-4.14.2 readers. Document-grain failures store the `source_path` in the legacy `doc_id` column (the column carries 'subject of failure' regardless of chain shape). The `nx taxonomy status` reader surfaces all three shapes and reports `affecting M document(s)` whenever a batch row is present (M > scalar count).
 
-**Manifest-write retry and repair (GH #1371).** The catalog manifest write (`document_chunks` linkage + the `chunk_count` cache) is a file-grain hook, decoupled from the batch/single/document chains above and best-effort by the same never-propagate contract. A connection-class failure to the catalog engine-service (transient `httpx` transport/timeout errors, including chained causes) retries with a short bounded backoff (`nexus.retry._manifest_write_with_retry`: up to 3 retries, 0.5s/1s/2s, ~3.5s worst case) before falling back to the swallow-and-log path; a real 4xx or application error still fails on the first attempt. Failures that exhaust the retry are recorded in a process-local collector (`mcp_infra.get_manifest_write_failures`) instead of only reaching a structlog WARNING, so `nx index`'s end-of-run summary can surface `WARNING: catalog manifest write failed for N document(s)` with a pointer to `nx catalog reconcile`, which rebuilds the missing manifest rows from T3 chunk metadata (`content_hash` match, char/line-span ordering). Before this fix a persistent connection blip during indexing left `chunk_count > 0` documents with zero manifest rows, silently invisible to catalog-aware retrieval.
+**Manifest-write retry and repair (GH #1371).** `manifest_write_batch_hook` is a batch-chain consumer (flush-grain), best-effort by the same never-propagate contract as every other hook — not a separate file-grain mechanism outside the chains above. It writes the `document_chunks` linkage + the `chunk_count` cache, and since nexus-5xn3k.4 it also carries the RUNFENCE completion stamp when the batch's producer asserts file-atomic completeness (`manifest_complete` kwarg — see [Index-run fence](#index-run-fence-runfence) above). A connection-class failure to the catalog engine-service (transient `httpx` transport/timeout errors, including chained causes) retries with a short bounded backoff (`nexus.retry._manifest_write_with_retry`: up to 3 retries, 0.5s/1s/2s, ~3.5s worst case) before falling back to the swallow-and-log path; a real 4xx or application error still fails on the first attempt. Failures that exhaust the retry are recorded in a process-local collector (`mcp_infra.get_manifest_write_failures`) instead of only reaching a structlog WARNING, so `nx index`'s end-of-run summary can surface `WARNING: catalog manifest write failed for N document(s)` with a pointer to `nx catalog reconcile`, which rebuilds the missing manifest rows from T3 chunk metadata (`content_hash` match, char/line-span ordering). A separate collector, `mcp_infra.get_complete_refusals()`, tracks the RUNFENCE-specific case — manifest rows written correctly but the fail-closed completion stamp refused — fed from both the batched-ride path and the per-doc `_stamp_index_run_complete` fallback production actually takes. Before the GH #1371 fix a persistent connection blip during indexing left `chunk_count > 0` documents with zero manifest rows, silently invisible to catalog-aware retrieval.
 
-**Drift guard.** `tests/test_hook_drift_guard.py` uses `ast.walk` to detect any ImportFrom, Attribute, or bare-Name reference to a guarded hook outside the explicit allowlist. Two guards: `GUARDED_NAMES = {taxonomy_assign_batch_hook, chash_dual_write_batch_hook}` (allowlist `mcp_infra.py` + `mcp/core.py`); `DOCUMENT_HOOK_GUARDED_NAMES = {aspect_extraction_enqueue_hook}` (allowlist `aspect_worker.py` + `mcp/core.py`). String literals, comments, and docstrings are ignored. Adding a new per-document or batch enrichment registers through the appropriate `register_post_*_hook` entry point; a regression where a new module imports a hook directly fails CI. A separate runtime test `test_index_pdf_fires_document_hook_exactly_once` (in `tests/test_doc_indexer.py`) drives a sample PDF through `index_pdf` with a counting probe hook registered, asserting the document-chain fires exactly once per source document — pinning the runtime invariant the AST count guard alone cannot.
+**Drift guard.** `tests/test_hook_drift_guard.py` uses `ast.walk` to detect any ImportFrom, Attribute, or bare-Name reference to a guarded hook outside the explicit allowlist. Two guards: `GUARDED_NAMES = {taxonomy_assign_batch_hook}` (allowlist `mcp_infra.py` + `hook_registry.py`); `DOCUMENT_HOOK_GUARDED_NAMES = {aspect_extraction_enqueue_hook}` (allowlist `aspect_worker.py` + `hook_registry.py`). A third, separate check (`RETIRED_HOOK_NAMES = {chash_dual_write_batch_hook}`) asserts the RDR-187-retired chash dual-write hook never reappears anywhere in `src/` at all — no allowlist, because the chunks tables are the chash-keyed store and there is no derived copy left to dual-write. String literals, comments, and docstrings are ignored by all three checks. Adding a new per-document or batch enrichment registers through the appropriate `HookRegistry.register_batch` / `register_document` entry point (wired at `install_default_hooks`); a regression where a new module imports a hook directly fails CI. A separate runtime test `test_index_pdf_fires_document_hook_exactly_once` (in `tests/test_doc_indexer.py`) drives a sample PDF through `index_pdf` with a counting probe hook registered, asserting the document-chain fires exactly once per source document — pinning the runtime invariant the AST count guard alone cannot.
 
 **Out of scope by design** ([RDR-095](rdr/rdr-095-post-store-hook-batch-contract.md) Decision Rationale, intentional non-twins of the batch-hook pattern):
 
@@ -600,12 +740,6 @@ migration-capable 6.x release (the two-hop redirect).
 converging pending ladder rungs and preconditions silently (there are no
 local T2 migrations — RDR-158 P4 Stage 4).
 
-**In-memory SQLite**: Tests that want an ephemeral database should use
-a temp file path, not `":memory:"` -- `:memory:` databases are
-per-connection, so the eight stores would each see a distinct empty
-database and `test_t2_concurrency.py` would no longer exercise the
-cross-domain WAL path.
-
 See `src/nexus/db/t2/__init__.py` for the facade source and
 `tests/test_t2_concurrency.py` for the concurrency test suite.
 
@@ -617,7 +751,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Command preambles** | `commands/rdr.py` (`preamble` subgroup), `commands/command_context.py`, `conexus/commands/*.md` | [RDR-130](rdr/rdr-130-command-preambles-via-nx-cli.md): slash-command context preambles. Each of the 25 conexus slash commands injects its preamble via a single-line `` !`nx <subcommand> -- "$ARGUMENTS"` `` call — the 9 RDR-lifecycle commands use `nx rdr preamble <name>`, the 16 agent-relay commands use `nx command-context <name>`. Preamble logic lives in the tested `nx` CLI (normal Python, unit-covered) and prints markdown; Claude Code injects that stdout as plain text and does NOT re-parse it, so emitted tables/fences are safe. No command inlines bash, no command depends on `$CLAUDE_PLUGIN_ROOT` (empty in command-bash context); a static guard (`test_migrated_command_uses_single_line_nx`) enforces the single-line form across all 25. Replaced the inlined-bash approach whose fenced-block truncation caused the 5.1.2 regression class |
 | **Catalog** | `catalog/http_catalog_client.py`, `catalog/catalog_protocol.py`, `catalog/factory.py`, `catalog/types.py`, `catalog/tumbler.py`, `catalog/link_generator.py`, `catalog/auto_linker.py`, `catalog/store_hook.py`, `catalog/collection_name.py` | Service-owned document registry + typed link graph (the engine's Postgres tables, reached through `HttpCatalogClient` via the `make_catalog_reader`/`make_catalog_writer` factories — the local JSONL+SQLite catalog was deleted in the nexus-i711w terminal deletion, RDR-158 P4). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put`. `store_hook.py` is the shared `store_put`-origin primitive: `catalog_store_hook`/`catalog_store_hook_tracked` register the catalog row at write time, and `resolve_knowledge_doc_for_chash` (nexus-5axey) is the chash-keyed dedup/delete/reap lookup — `content_type == "knowledge"` with no `file_path`, unambiguous match only, ambiguous candidates deliberately left for `nx catalog gc` rather than guessed. `collection_name.py` validates conformant collection-name shape (`<content_type>__<owner_id>__<embedding_model>__v<n>`, RDR-103) at construction time |
 | **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py`, `db/http_vector_client.py`, `db/managed_endpoint.py`, `db/service_endpoint.py`, `db/pg_provision.py`, `db/limits.py`, `db/local_ef.py`, `db/inmemory_vector_store.py`, `db/minilm_direct.py`, `db/voyage_ef.py` | Tier implementations. T2 is a package split into domain stores (see § T2 Domain Stores). `make_t3()` (`db/__init__.py`) returns `HttpVectorClient` (T3 over the nexus-service `/v1/vectors`) by default; `db/t3.py` is the retired serving path, now chroma-free and kept only as the test facade + ETL wrapper (RDR-155 P4b P3). `managed_endpoint.py` / `service_endpoint.py` resolve the service URL/token (T3 reads `NX_SERVICE_URL`; the T2-stores/catalog resolver uses `NX_SERVICE_HOST`/`PORT`); `pg_provision.py` provisions the local PG17 cluster + writes `pg_credentials`. `limits.py` is the single source of truth for size/batch/concurrency ceilings (`chroma_quotas.py` was DELETED at RDR-155 P4b P3; its `QuotaValidator` died with no replacement). `inmemory_vector_store.py` is the dependency-free in-process substrate the tests and the T1 isolated path use; `minilm_direct.py` / `voyage_ef.py` are the nexus-owned embedding functions that replaced chromadb's. `local_ef.py` provides the local ONNX embedding function |
-| **Service stack** | `daemon/storage_service_daemon.py`, `daemon/aspect_worker_daemon.py`, `daemon/binary_install.py`, `commands/uninstall.py`, `db/storage_mode.py` | Native nexus-service lifecycle ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)/161): `storage_service_daemon.py` supervises the PG17+pgvector+service binary; `binary_install.py` fetches/installs the engine-service binary (`PINNED_SERVICE_TAG` — build-time pin, bumped per release as the compatible engine-service version advances; `None` pre-6.0). `aspect_worker_daemon.py` (`nx daemon aspect-worker start`, [RDR-173](rdr/rdr-173-service-mode-aspect-worker-hosting.md)) is a leased, per-tenant host for the aspect-extraction loop + `reclaim_stale`, one more tier on the [RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) service-registry substrate — spawned automatically (spawn-if-absent, single-flight) by the `store_put` enqueue hook so extraction no longer depends on the storing process's lifetime. `commands/guided_upgrade_cmd.py` (`nx guided-upgrade`) and `commands/migrate_cmd.py` (`nx migrate-to-service`) were the [RDR-159](rdr/rdr-159-guided-upgrade-migration.md) provision-then-ETL pair (cross-model mode [RDR-162](rdr/rdr-162-truthful-post-rdr160-upgrade-path.md)); [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md) folded their ETL/verify/report engine into the ladder's substrate rung that `nx upgrade` walks (see **Upgrade ladder** below), and RDR-155 P4b then **deleted both files outright** along with the rest of the Chroma read path — they are not present in this release. A pre-PG install is redirected to the pinned last migration-capable release (`nx guided-upgrade` there) rather than calling anything in this tree; the true demoted-not-deleted survivors are `nx migration`, `nx collection backfill-hash`, and `nx hooks update-all` (see [cli-reference.md § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives)). `uninstall.py` (`nx uninstall`, [RDR-165](rdr/rdr-165-agent-lifecycle-and-operations.md)) is the first-class teardown for both local-service and managed-only installs. `storage_mode.py` routes each T2/T1 store to the service backend, the only backend since RDR-158 — `NX_STORAGE_BACKEND=sqlite` hard-errors with the stranded-install redirect rather than selecting anything ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)) |
+| **Service stack** | `daemon/storage_service_daemon.py`, `daemon/aspect_worker_daemon.py`, `daemon/binary_install.py`, `commands/uninstall.py`, `db/storage_mode.py` | Native nexus-service lifecycle ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)/161): `storage_service_daemon.py` supervises the PG17+pgvector+service binary; `binary_install.py` fetches/installs the engine-service binary (`PINNED_SERVICE_TAG` — DERIVED from `REQUIRED_ENGINE_VERSION` in `engine_version.py`, never an independent literal — the single engine identity per release; `None` pre-6.0). `aspect_worker_daemon.py` (`nx daemon aspect-worker start`, [RDR-173](rdr/rdr-173-service-mode-aspect-worker-hosting.md)) is a leased, per-tenant host for the aspect-extraction loop + `reclaim_stale`, one more tier on the [RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) service-registry substrate — spawned automatically (spawn-if-absent, single-flight) by the `store_put` enqueue hook so extraction no longer depends on the storing process's lifetime. `commands/guided_upgrade_cmd.py` (`nx guided-upgrade`) and `commands/migrate_cmd.py` (`nx migrate-to-service`) were the [RDR-159](rdr/rdr-159-guided-upgrade-migration.md) provision-then-ETL pair (cross-model mode [RDR-162](rdr/rdr-162-truthful-post-rdr160-upgrade-path.md)); [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md) folded their ETL/verify/report engine into the ladder's substrate rung that `nx upgrade` walks (see **Upgrade ladder** below), and RDR-155 P4b then **deleted both files outright** along with the rest of the Chroma read path — they are not present in this release. A pre-PG install is redirected to the pinned last migration-capable release (`nx guided-upgrade` there) rather than calling anything in this tree; the true demoted-not-deleted survivors are `nx migration`, `nx collection backfill-hash`, and `nx hooks update-all` (see [cli-reference.md § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives)). `uninstall.py` (`nx uninstall`, [RDR-165](rdr/rdr-165-agent-lifecycle-and-operations.md)) is the first-class teardown for both local-service and managed-only installs. `storage_mode.py` routes each T2/T1 store to the service backend, the only backend since RDR-158 — `NX_STORAGE_BACKEND=sqlite` hard-errors with the stranded-install redirect rather than selecting anything ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)) |
 | **Upgrade ladder** | `upgrade_ladder/protocol.py`, `upgrade_ladder/registry.py`, `upgrade_ladder/completion.py`, `upgrade_ladder/runner.py`, `upgrade_ladder/preconditions.py`, `upgrade_ladder/census.py`, `upgrade_ladder/rungs/`, `commands/upgrade.py` | [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md): every DATA transition is a rung on ONE ordered ladder, auto-applied when newer code meets older data — extending the proven T2 `apply_pending` model to all axes. `registry.py` holds the walk order with RQ2's hard edges validated as data (chunk-identity and embedder-era are CO-RESIDENT inside the substrate rung — in-flight wire transforms, never sequenced rungs). `runner.py` walks it under the [RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md) verify-before-record guard; `completion.py` is the ladder-local completion store from which the position is DERIVED (max contiguous verified prefix — never stored, no setter). `preconditions.py` converges the non-data axes (package, engine, process, provisioning) STATELESSLY before the walk: re-derived from on-disk state every invocation (provenance sidecar, lease, package metadata), never recorded — crash-loop-safe by construction. `census.py` surfaces era debt (pre-[RDR-108](rdr/rdr-108-graph-identity-normalization.md) chunk ids) from the release that ships the detector, not on migration day. `commands/upgrade.py` (`nx upgrade`) is the single trigger; `nx doctor` reports pending rungs read-only |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per [RDR-032](rdr/rdr-032-indexer-decomposition.md)). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (default-installed since nexus-2fyb) for LaTeX extraction; non-math PDFs use Docling. MinerU absence at runtime raises a `RuntimeError` rather than silently falling back to formula-stripped Docling — the prior silent fallback wiped formulas from every PDF indexed for weeks. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. the three-stage streaming pipeline ([RDR-048](rdr/rdr-048-streaming-pdf-pipeline.md)) buffers through the engine's `nexus.pdf_pipeline`/`pdf_pages`/`pdf_chunks` tables via `db/http_pipeline_client.py` (RDR-186 retired the local `pipeline.db` SQLite buffer); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents ([RDR-047](rdr/rdr-047-large-pdf-extraction-resilience.md)) |
 | **Export** | `exporter.py` | Collection export/import for T3 backup and migration (.nxexp format) |
@@ -629,7 +763,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py`, `taxonomy.py` (shim) | HDBSCAN topic discovery from T3 embeddings ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. Centroids on pgvector (`taxonomy_centroids_{384,768,1024}`) via nexus-service (`HttpCentroidStore`) for centroid ANN, since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment. `taxonomy.py` is a backward-compatibility shim that forwards old call sites to `db.taxonomy` |
 | **Hooks** | `commands/hooks.py`, `commands/hook.py` | `hooks.py`: Git hook install/uninstall/status, sentinel-bounded stanza management. `hook.py`: Claude Code SessionStart/SessionEnd lifecycle runners |
 | **Verification** | `config.py` (verification section), `conexus/hooks/scripts/stop_verification_hook.sh`, `conexus/hooks/scripts/pre_close_verification_hook.sh`, `conexus/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Verification config](configuration.md#verification) |
-| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture ([RDR-062](rdr/rdr-062-mcp-interface-tiering.md), [RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md)). `nexus` core server (26 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). (The RDR-139 Layer A' `nx-mcp-devonthink` proxy was retired 2026-07-07, nexus-goypg — clients connect to DEVONthink's own MCP server directly; its `dt_incorporate` composite lives on as `nx dt incorporate`.) Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
+| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture ([RDR-062](rdr/rdr-062-mcp-interface-tiering.md), [RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md)). `nexus` core server (38 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). (The RDR-139 Layer A' `nx-mcp-devonthink` proxy was retired 2026-07-07, nexus-goypg — clients connect to DEVONthink's own MCP server directly; its `dt_incorporate` composite lives on as `nx dt incorporate`.) Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
 | **Enrichment** | `bib_enricher.py`, `aspect_extractor.py`, `aspect_worker.py`, `commands/enrich.py` | Two enrichment surfaces. (1) Bibliographic via Semantic Scholar (`bib_enricher.py` lookup + `nx enrich bib` CLI). (2) Structured aspects via Claude CLI (`aspect_extractor.py` synchronous extractor + `aspect_worker.py` async-queue daemon worker registered as the document-grain post-store hook + `nx enrich aspects` CLI). Aspect extraction is `knowledge__*` only in Phase 1 ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)); the worker drains `aspect_extraction_queue` and writes to `document_aspects` |
 | **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). (`_provision.py` — ChromaDB Cloud database provisioning — was DELETED at RDR-155 P4b P2; it had zero src callers.) |
@@ -669,10 +803,10 @@ Grouped by verb:
 ## Design Decisions
 
 1. **Protocols over ABCs** -- `typing.Protocol` for structural subtyping, no inheritance coupling.
-2. **No ORM** -- Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
+2. **No ORM client-side** -- Python T2/T3/catalog clients speak HTTP to the engine, never SQL; the engine owns schema via Liquibase-managed Postgres (with a jOOQ-generated codegen layer server-side, `service/pom.xml`). The historical direct-`sqlite3` T2 (WAL + FTS5, stdlib) was the migration source, retired at RDR-158 P4.
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **Session-id leased T1 discovery** -- The MCP server's chroma lifespan starts a per-session ChromaDB HTTP server (the `chroma` entry-point co-installed with the package) and publishes a leased registry record at `~/.config/nexus/t1_addr.<session_id>` ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4, `daemon/t1_lease.py`), keyed on the Claude session-id. Child agents and Bash-tool siblings resolve the same session-id from `current_session` and discover the live lease, sharing T1 scratch across the agent tree. Liveness is lease freshness (TTL), not pid. Concurrent independent windows stay isolated via distinct session-ids. Falls back to a process-scoped `InMemoryVectorClient` only under `NX_T1_ISOLATED=1` (RDR-155 P4b P0a replaced the former `EphemeralClient` leg); otherwise an unresolvable session raises `T1ServerNotFoundError`.
+5. **Session-id-scoped T1, service-backed** -- Historically ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4) the MCP server's chroma lifespan started a per-session ChromaDB HTTP server and published a leased registry record at `~/.config/nexus/t1_addr.<session_id>`; that discovery mechanism retired with the chroma substrate ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b). Today `get_t1_database` routes T1 to `HttpScratchStore` over the one `nexus-service`, scoped by the same Claude session-id (resolved from `~/.config/nexus/current_session`) — child agents and Bash-tool siblings resolve the same session-id and share T1 scratch across the agent tree; concurrent independent windows stay isolated via distinct session-ids. `NX_T1_ISOLATED=1` opts a process into a private, dependency-free in-process `InMemoryVectorClient` instead; otherwise a process outside service-mode routing raises `T1ServerNotFoundError` rather than inventing a private store.
 6. **MCP tools over agent-spawns for utility operations** ([RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md)) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. Agent files are retained as stubs that redirect to the MCP tool.
 
    **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.

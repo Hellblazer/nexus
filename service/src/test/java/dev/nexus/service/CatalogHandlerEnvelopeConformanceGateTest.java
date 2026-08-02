@@ -208,9 +208,17 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionOk("/manifest/orphans", "handleManifestOrphans"),
         collectionOk("/links/orphaned", "handleLinksOrphaned"),
 
+        // ── Index run fence (RUNFENCE, nexus-5xn3k.2) ──────────────────────
+        neither("/manifest/verify", "handleManifestVerify"),
+        collectionOk("/manifest/verify_all", "handleManifestVerifyAll"),
+        neither("/index-run/begin", "handleIndexRunBegin"),
+        neither("/index-run/complete", "handleIndexRunComplete"),
+        neither("/index-run/fail", "handleIndexRunFail"),
+
         // ── Owners ────────────────────────────────────────────────────────
         neither("/owners/upsert", "handleOwnerUpsert"),
         collectionExempt("/owners/list", "handleOwnerList", ADMIN_SCALE),
+        collectionExempt("/owners/sweep_next_seq_drift", "handleOwnersSweepNextSeqDrift", ADMIN_SCALE),
         neither("/owners/by_repo", "handleOwnerByRepo"),
         collectionExempt("/owners/by_name", "handleOwnerByName", ADMIN_SCALE),
         neither("/owners/head_hash", "handleOwnerHeadHash"),

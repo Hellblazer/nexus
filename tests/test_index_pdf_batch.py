@@ -167,6 +167,47 @@ class TestBatchIndexErrors:
         # Failure mentioned in output
         assert "fail" in result.output.lower() or "error" in result.output.lower()
 
+    def test_conflict_running_lands_in_failures_bucket(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """nexus-lcmbp fix-list #1 (accepted design): --dir batch mode
+        does NOT get special-cased CLI wiring for PipelineConflictRunning —
+        it's a RuntimeError subclass, so the batch loop's existing generic
+        `except Exception` catches it exactly like any other per-file
+        failure, isolates it to that one file, and continues the batch.
+        The FAILED line must carry the error + remedy text, not just a
+        bare exception repr."""
+        from nexus.db.http_pipeline_client import PipelineConflictRunning
+
+        call_count = 0
+
+        def conflict_on_second(path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise PipelineConflictRunning(
+                    "pipeline for content_hash=abc123 is already running",
+                    content_hash="abc123",
+                    started_at="2026-08-01T12:00:00+00:00",
+                    heartbeat_age_seconds=42,
+                    stale_threshold_seconds=300,
+                    remedy="wait for the resume window (retry after the "
+                           "heartbeat exceeds the stale threshold) or "
+                           "inspect the pipeline row via GET "
+                           "/v1/pipeline/state (engine route; requires "
+                           "service auth)",
+                )
+            return 5
+
+        with patch("nexus.doc_indexer.index_pdf", side_effect=conflict_on_second):
+            result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
+
+        # All 3 attempted — one file's conflict does not abort the batch.
+        assert call_count == 3
+        assert "1 failure(s)" in result.output
+        assert "already running" in result.output
+        assert "resume window" in result.output
+
     def test_empty_directory(
         self, runner: CliRunner, empty_dir: Path,
     ) -> None:
