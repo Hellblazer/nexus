@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from nexus.db.http_pipeline_client import PipelineConflictRunning
 from tests.pipeline_fake_engine import FakePipelineEngine, make_fake_engine_db
 
 _T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
@@ -56,7 +57,6 @@ def engine(rig) -> FakePipelineEngine:
 class TestPipeline:
     @pytest.mark.parametrize("setup,expected", [
         ("new", "created"),
-        ("running_recent", "skip"),
         ("running_stale", "resuming"),
         ("failed", "resuming"),
         ("completed", "skip"),
@@ -73,6 +73,41 @@ class TestPipeline:
         elif setup == "completed":
             db.mark_completed("h1")
         assert db.create_pipeline("h1", "/a.pdf", "docs__test") == expected
+
+    def test_create_pipeline_running_recent_raises_conflict(self, db, clock):
+        """nexus-lcmbp: a retry against a 'running' row with a FRESH
+        heartbeat must be a loud PipelineConflictRunning, never the silent
+        200 'skip' that let a stranded-row retry exit rc=0 with 0 chunks."""
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with pytest.raises(PipelineConflictRunning) as exc_info:
+            db.create_pipeline("h1", "/a.pdf", "docs__test")
+        err = exc_info.value
+        assert err.content_hash == "h1"
+        assert err.stale_threshold_seconds == 300
+        assert err.heartbeat_age_seconds >= 0
+        assert "resume window" in err.remedy
+        # The refused attempt must not touch the row.
+        state = db.get_pipeline_state("h1")
+        assert state["status"] == "running"
+
+    def test_stale_threshold_agrees_across_client_and_wire(self, db, clock):
+        """nexus-lcmbp fix-list #6: the fake engine's staleness rule, the
+        client's own STALE_THRESHOLD constant, and the literal
+        stale_threshold_seconds parsed off a REAL 409 wire body must all
+        agree at 300s — the value pinned server-side (Java) by
+        PipelineRepository.STALE_THRESHOLD / PipelineHandlerTest. A drift
+        here would silently desync the client's orphan-scan staleness
+        judgment from the server's create() staleness judgment."""
+        from nexus.db.http_pipeline_client import STALE_THRESHOLD
+
+        assert int(STALE_THRESHOLD.total_seconds()) == 300
+
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with pytest.raises(PipelineConflictRunning) as exc_info:
+            db.create_pipeline("h1", "/a.pdf", "docs__test")
+
+        assert exc_info.value.stale_threshold_seconds == int(STALE_THRESHOLD.total_seconds())
+        assert exc_info.value.stale_threshold_seconds == 300
 
     def test_get_pipeline_state(self, db):
         db.create_pipeline("h1", "/a.pdf", "docs__test")

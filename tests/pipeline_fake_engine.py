@@ -29,6 +29,33 @@ _PROGRESS_FIELDS = {
 }
 
 
+class _ConflictRunning(Exception):
+    """Fake-engine twin of ``PipelineConflictException`` (nexus-lcmbp).
+
+    Carries the exact fields the Java ``HttpUtil.sendTypedDbError`` 409
+    body puts on the wire, so :meth:`FakePipelineEngine.handler` can mirror
+    the real engine's response shape.
+    """
+
+    def __init__(self, content_hash: str, started_at: str, heartbeat_age_seconds: int, stale_threshold_seconds: int) -> None:
+        self.content_hash = content_hash
+        self.started_at = started_at
+        self.heartbeat_age_seconds = heartbeat_age_seconds
+        self.stale_threshold_seconds = stale_threshold_seconds
+        # nexus-lcmbp fix-list #5: this tail must stay textually identical to
+        # the "remedy" field FakePipelineEngine.handler puts on the wire below
+        # (mirrors PipelineConflictException.java / HttpUtil.java staying in
+        # sync on the real engine side).
+        super().__init__(
+            f"pipeline for content_hash={content_hash} is already running "
+            f"(last heartbeat {heartbeat_age_seconds}s ago; resumable once "
+            f"the heartbeat exceeds {stale_threshold_seconds}s) — "
+            "wait for the resume window (retry after the heartbeat exceeds "
+            "the stale threshold) or inspect the pipeline row via "
+            "GET /v1/pipeline/state (engine route; requires service auth)"
+        )
+
+
 class FakePipelineEngine:
     """Dict-backed twin of the three ``nexus.pdf_*`` tables."""
 
@@ -42,7 +69,8 @@ class FakePipelineEngine:
 
     def create(self, body: dict) -> dict:
         h = body["content_hash"]
-        now = self.clock().isoformat()
+        now_dt = self.clock()
+        now = now_dt.isoformat()
         row = self.pipelines.get(h)
         if row is None:
             self.pipelines[h] = {
@@ -59,11 +87,17 @@ class FakePipelineEngine:
         if row["status"] == "failed":
             row.update(status="resuming", updated_at=now)
             return {"status": "resuming"}
-        stale = self.clock() - datetime.fromisoformat(row["updated_at"]) > STALE_THRESHOLD
+        age = now_dt - datetime.fromisoformat(row["updated_at"])
+        stale = age > STALE_THRESHOLD
         if stale:
             row.update(status="resuming", updated_at=now)
             return {"status": "resuming"}
-        return {"status": "skip"}
+        # running with a fresh heartbeat — nexus-lcmbp: LOUD conflict, never
+        # a silent "skip" (mirrors PipelineRepository.create's Java twin).
+        raise _ConflictRunning(
+            h, row["started_at"],
+            int(age.total_seconds()), int(STALE_THRESHOLD.total_seconds()),
+        )
 
     def state(self, params: dict) -> dict:
         row = self.pipelines.get(params["content_hash"])
@@ -237,6 +271,19 @@ class FakePipelineEngine:
             return httpx.Response(200, json=getattr(self, method_name)(payload))
         except ValueError as exc:
             return httpx.Response(400, json={"error": str(exc)})
+        except _ConflictRunning as exc:
+            return httpx.Response(409, json={
+                "error": str(exc),
+                "status": "conflict_running",
+                "content_hash": exc.content_hash,
+                "started_at": exc.started_at,
+                "heartbeat_age_seconds": exc.heartbeat_age_seconds,
+                "stale_threshold_seconds": exc.stale_threshold_seconds,
+                "remedy": "wait for the resume window (retry after the "
+                          "heartbeat exceeds the stale threshold) or inspect "
+                          "the pipeline row via GET /v1/pipeline/state "
+                          "(engine route; requires service auth)",
+            })
 
 
 def make_fake_engine_db(

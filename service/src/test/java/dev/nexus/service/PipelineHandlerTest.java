@@ -123,20 +123,34 @@ class PipelineHandlerTest {
         if (pg != null)      pg.stop();
     }
 
-    // ── Test 1: create → created / skip-when-running / resume-when-failed ────
+    // ── Test 1: create → created / 409 conflict-when-running / resume-when-failed ─
 
     @Test
-    void create_created_thenSkipWhileRunning_thenResumeAfterFail() throws Exception {
+    void create_created_thenConflictWhileRunning_thenResumeAfterFail() throws Exception {
         String hash = "h1-" + "0".repeat(28);
         var r1 = post("/v1/pipeline/create", TOKEN, TENANT,
             "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"/tmp/a.pdf\",\"collection\":\"knowledge__t\"}");
         assertThat(mapper.readValue(r1.body(), MAP_T).get("status")).isEqualTo("created");
 
+        // nexus-lcmbp: a retry against a 'running' row with a FRESH heartbeat must be a
+        // loud 409, never a 200 "skip" the caller could mistake for success.
         var r2 = post("/v1/pipeline/create", TOKEN, TENANT,
             "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"/tmp/a.pdf\",\"collection\":\"knowledge__t\"}");
-        assertThat(mapper.readValue(r2.body(), MAP_T).get("status"))
-            .as("fresh heartbeat + running = skip")
-            .isEqualTo("skip");
+        assertThat(r2.statusCode())
+            .as("fresh heartbeat + running must be a loud conflict, never a silent-success 200")
+            .isEqualTo(409);
+        var body2 = mapper.readValue(r2.body(), MAP_T);
+        assertThat(body2.get("status")).isEqualTo("conflict_running");
+        assertThat(body2.get("content_hash")).isEqualTo(hash);
+        assertThat(body2.get("started_at")).isNotNull();
+        assertThat(((Number) body2.get("heartbeat_age_seconds")).longValue()).isGreaterThanOrEqualTo(0);
+        assertThat(((Number) body2.get("stale_threshold_seconds")).longValue()).isEqualTo(300);
+        assertThat((String) body2.get("remedy")).contains("resume window");
+        assertThat((String) body2.get("error")).contains(hash);
+
+        // The row is untouched by the refused attempt — still 'running'.
+        var state1 = pipelineState(hash);
+        assertThat(state1.get("status")).isEqualTo("running");
 
         post("/v1/pipeline/fail", TOKEN, TENANT,
             "{\"content_hash\":\"" + hash + "\",\"error\":\"extractor died\"}");

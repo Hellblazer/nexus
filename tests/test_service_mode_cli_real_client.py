@@ -197,7 +197,13 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         patch("nexus.commands.t3._make_catalog", return_value=fake_cat),
     ):
         result = runner.invoke(
-            main, ["t3", "gc", "-c", _KNOWLEDGE, "--no-dry-run", "--yes"],
+            main,
+            # --allow-empty-manifest-set: this fixture's manifest references
+            # zero chashes by construction (the test pins the real-client
+            # wiring, not manifest semantics), which the nexus-jqrtp guard
+            # otherwise refuses — same override as the test_t3_gc.py siblings.
+            ["t3", "gc", "-c", _KNOWLEDGE, "--no-dry-run", "--yes",
+             "--allow-empty-manifest-set"],
         )
     assert result.exit_code == 0, result.output
     assert "deleted 1 chunk(s)" in result.output

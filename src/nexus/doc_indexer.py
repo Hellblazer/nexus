@@ -1739,9 +1739,12 @@ def index_pdf(
         use_streaming = streaming == "always" or (page_count >= 0 and page_count >= _STREAMING_THRESHOLD)
         if use_streaming:
             from nexus.pipeline_stages import pipeline_index_pdf  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            # Returns 0 if skipped (already running or completed by another process).
-            # The staleness check above (line 638-644) handles the "unchanged" case;
-            # a 0 here means a concurrent pipeline is active on this content_hash.
+            # Returns 0 if skipped (already completed by another process).
+            # The staleness check above (line 638-644) handles the "unchanged"
+            # case. nexus-lcmbp: a concurrent, still-fresh 'running' pipeline
+            # is NOT a 0 here — pipeline_index_pdf lets PipelineConflictRunning
+            # propagate instead, so a stranded-row retry is a loud failure,
+            # never a silent 0-chunk "success".
             count = pipeline_index_pdf(
                 pdf_path, content_hash, col_name, db,
                 embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,

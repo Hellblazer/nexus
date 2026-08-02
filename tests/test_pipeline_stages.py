@@ -16,7 +16,7 @@ from tests.conftest import fake_credentials
 from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
-from nexus.db.http_pipeline_client import HttpPipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunning
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     _enrich_metadata_from_extraction,
@@ -622,9 +622,12 @@ class TestPipelineIndexPdf:
         ids = col.delete.call_args.kwargs.get("ids", col.delete.call_args[1].get("ids", []))
         assert "old_hash_0" in ids and "abc123_0" not in ids
 
-    def test_skip_already_running(self, db, mock_t3) -> None:
+    def test_conflict_already_running(self, db, mock_t3) -> None:
+        """nexus-lcmbp: a retry against a fresh-heartbeat 'running' row is
+        a LOUD failure — never a silent 0-chunk success."""
         db.create_pipeline("h1", "/a.pdf", "docs__test")
-        assert pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db) == 0
+        with pytest.raises(PipelineConflictRunning):
+            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
     def test_embed_fn_none_resolves_credentials(self, db, mock_t3) -> None:

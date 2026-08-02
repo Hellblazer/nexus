@@ -182,6 +182,36 @@ def test_index_credentials_missing_exits_nonzero_with_message(
     assert "Set via" in result.output or "config set" in result.output
 
 
+def test_index_pdf_conflict_running_exits_nonzero_with_remedy(runner, fake_pdf):
+    """nexus-lcmbp: a retry against a stranded 'running' pipeline row must
+    exit non-zero and print the error + remedy — never rc=0 with 0 chunks.
+    PipelineConflictRunning subclasses RuntimeError, so it is caught by the
+    same except clause CredentialsMissingError etc. route through
+    (commands/index.py's `except (ImportError, RuntimeError)`), with no
+    extra CLI wiring needed."""
+    from nexus.db.http_pipeline_client import PipelineConflictRunning
+
+    def _raise(*args, **kwargs):
+        raise PipelineConflictRunning(
+            "pipeline for content_hash=abc123 is already running",
+            content_hash="abc123",
+            started_at="2026-08-01T12:00:00+00:00",
+            heartbeat_age_seconds=42,
+            stale_threshold_seconds=300,
+            remedy="wait for the resume window (retry after the heartbeat "
+                   "exceeds the stale threshold) or inspect the pipeline "
+                   "row via GET /v1/pipeline/state (engine route; requires "
+                   "service auth)",
+        )
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+
+    assert result.exit_code != 0, result.output
+    assert "already running" in result.output
+    assert "resume window" in result.output
+
+
 # ── --frecency-only flag ─────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("flag,expected", [

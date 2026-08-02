@@ -25,6 +25,9 @@ import java.util.Map;
  * {@code PipelineDB} surface 1:1 so {@code HttpPipelineDB} is a drop-in:
  * <pre>
  *   POST /v1/pipeline/create             {content_hash, pdf_path, collection} → {status: created|resuming|skip}
+ *                                         (409 conflict_running — nexus-lcmbp — when an
+ *                                         existing 'running' row's heartbeat is still fresh;
+ *                                         see {@link dev.nexus.service.db.PipelineConflictException})
  *   GET  /v1/pipeline/state              ?content_hash= → {pipeline: {...}|null}
  *   GET  /v1/pipeline/list               → {pipelines: [...]} (client-side orphan scan input)
  *   POST /v1/pipeline/progress           {content_hash, fields: {...}} (allowlisted counters)

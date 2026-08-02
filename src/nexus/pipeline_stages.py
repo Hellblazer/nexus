@@ -719,7 +719,10 @@ def pipeline_index_pdf(
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)
     if result == "skip":
-        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed or running")
+        # nexus-lcmbp: "skip" now means ONLY "already completed" — a
+        # fresh-heartbeat 'running' row raises PipelineConflictRunning
+        # from create_pipeline() above instead of reaching this branch.
+        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed")
         return 0
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
