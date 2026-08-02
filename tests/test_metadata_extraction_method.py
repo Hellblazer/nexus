@@ -66,7 +66,7 @@ def test_make_chunk_metadata_defaults_to_empty_and_drops_it() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-08-01T00:00:00Z",
-        embedding_model="voyage-code-3",
+        embedding_model="bge-768",
     )
     assert "extraction_method" not in meta
 
@@ -77,7 +77,7 @@ def test_make_chunk_metadata_stamps_extractor_identity() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-08-01T00:00:00Z",
-        embedding_model="voyage-context-3",
+        embedding_model="bge-768",
         extraction_method="mineru",
     )
     assert meta["extraction_method"] == "mineru"
@@ -92,7 +92,7 @@ def test_make_chunk_metadata_stamps_degraded_aggregate() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-08-01T00:00:00Z",
-        embedding_model="voyage-context-3",
+        embedding_model="bge-768",
         extraction_method="mineru+docling-degraded",
     )
     assert meta["extraction_method"] == "mineru+docling-degraded"
