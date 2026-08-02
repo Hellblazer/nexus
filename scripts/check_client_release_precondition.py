@@ -48,6 +48,13 @@ ENGINE_CLIENT_PRECONDITIONS: dict[str, dict[str, str]] = {
         "clients surface it as an unhandled HTTP error on every "
         "auto-link against a missing endpoint",
     },
+    "engine-service-v0.1.62": {
+        "9ba82a3b": "nexus-lcmbp client half: create_pipeline translates "
+        "the engine's new 409 conflict_running into typed "
+        "PipelineConflictRunning (clean non-zero exit with remedy); older "
+        "clients surface the 409 as an uncaught httpx.HTTPStatusError "
+        "traceback on every retry inside the 5-minute window",
+    },
 }
 
 _REMEDY = (
