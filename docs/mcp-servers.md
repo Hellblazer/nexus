@@ -13,7 +13,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
-**Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started](getting-started.md#first-time-setup-the-storage-backend) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
+**Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
 ## `nexus` — retrieval + storage (38 tools)
 
@@ -64,7 +64,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
 Each operator spawns a `claude -p --output-format json --json-schema …` subprocess with a task-specific system prompt. Structured output is unwrapped from the wrapper.
 
-Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a single subprocess via operator bundling (55–72% latency savings). Direct MCP-tool calls still spawn per-operator subprocesses. See [Querying Guide § Operator bundling](querying-guide.md#operator-bundling).
+Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a single subprocess via operator bundling (55–72% latency savings). Direct MCP-tool calls still spawn per-operator subprocesses. See [Plan-Centric Retrieval § Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
 
 | Tool | Purpose |
 |---|---|
@@ -139,7 +139,7 @@ Some operations are intentionally not exposed as MCP tools — they are destruct
 | CLI command | Why not MCP |
 |---|---|
 | `nx store delete` | Destructive T3 document deletion |
-| `nx collection info` | Expensive ChromaDB introspection, human-debugging shape |
+| `nx collection info` | Expensive engine-side collection introspection, human-debugging shape |
 | `nx collection verify` | Full-collection scan; rarely needed by agents |
 | `nx catalog unlink` | Destructive edge removal |
 | `nx catalog link-audit` | Full-graph scan, operator-oriented |

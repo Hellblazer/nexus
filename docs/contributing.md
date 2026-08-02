@@ -12,8 +12,9 @@ nx hooks install                     # auto-index this repo on every commit
 ```
 
 The unit suite is self-contained — `uv run pytest` uses an in-process
-`chromadb.EphemeralClient` and a tmp-path SQLite, so it needs **no** running
-daemon or service. `nx init` is only required for shell CLI usage
+`InMemoryVectorClient` (chromadb is not a dependency) over the suite's
+self-provisioned engine substrate, so it needs **no** running daemon or
+service. `nx init` is only required for shell CLI usage
 (`nx memory`, `nx index`, `nx search`) against persistent state; it provisions
 and starts the nexus-service that serves every tier in the default config, and
 offers to register the OS autostart unit (accept it, or use `--no-autostart`
@@ -33,7 +34,7 @@ uv run pytest tests/test_indexer.py   # single file
 uv run pytest -k "test_frecency"      # by name pattern
 ```
 
-Unit tests use `chromadb.EphemeralClient` + bundled ONNX MiniLM model — no accounts needed.
+Unit tests use `InMemoryVectorClient` + bundled ONNX MiniLM model — no accounts needed.
 
 For integration tests: copy `.env.example` to `.env`, fill in your keys, then:
 
@@ -175,7 +176,7 @@ Do not bump these without testing the full chunking pipeline.
 
 - Branch naming: `feature/<bead-id>-<short-description>`
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
-- Direct pushes to `main` are reserved for the version-bump commit during a release. See Release Process below.
+- `main` is fully PR-gated, release version-bumps included (nexus-mkj6u replaced the prior direct-to-main carve-out). See Release Process below.
 - Use `bd` (beads, **≥ 1.0.0**: `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
 - **Code review**: Plans include review tasks after implementation phases. Use `/conexus:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
@@ -231,13 +232,20 @@ Every step below is **required**. Missing any one of them has caused problems in
    run from the `engine-release` skill before a new `engine-service-v*` tag
    deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
 
-1. **Verify the full test suite passes (unit + integration)**
+1. **Verify the full release test battery passes**
    ```bash
-   uv run pytest tests/                    # unit tests (no API keys needed)
-   uv run pytest -m integration            # E2E tests (requires real API keys)
+   uv run pytest                                             # unit suite (no API keys)
+   tests/e2e/local-service-gate.sh                           # integration incl. the local-service functional gate
+   tests/e2e/migration-rehearsal/run.sh --package-upgrade    # ONE-engine convergence MVV (nexus-cfgo9)
+   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs)
    ```
-   Both must pass. Integration tests are excluded from CI — they are your last
-   line of defense before release. Do not skip them.
+   All must pass. Bare `uv run pytest -m integration` is not enough on its
+   own: the local-service round-trip family self-provisions inside
+   `local-service-gate.sh` and otherwise skip-gates silently on an absent
+   service (the 74/516 ambient-degradation class the gate was built to end).
+   Integration is excluded from CI — this battery is your last line of
+   defense before tag-push. See `.claude/skills/release/SKILL.md` Step 1 for
+   the authoritative, up-to-date version of this list.
 
 2. **Audit docs against changes since last release**
    Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:
@@ -351,6 +359,21 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 11. **Yank pre-release versions** (if applicable)
     Go to https://pypi.org/manage/project/conexus/releases/ and yank any `rcN`, `alpha`, or `beta` versions that should not be resolved by `pip install conexus`.
+
+11b. **Back-merge `main` into `develop` (MANDATORY, zero-change releases included)**
+    ```bash
+    git checkout develop && git pull
+    git merge origin/main --no-edit    # trivially clean right after a release:
+                                       # the release branch just CONTAINED develop
+    git push origin develop
+    ```
+    Earned by the 2026-07-23 incident: from 6.12.0 through 6.17.0 no release
+    was ever merged back, so develop's seven manifests froze at 6.11.0 — all
+    stale TOGETHER, so the parity tests stayed green on a coherent lie. Every
+    dev-tree install self-identified as 6.11.0, doctor nagged, and the
+    downgrade guard misfired on reinstalls. Running this step immediately
+    after tag-push is the moment the merge is conflict-free by construction
+    (see `.claude/skills/release/SKILL.md` Step 11b).
 
 ### Quick reference — files that change every release
 

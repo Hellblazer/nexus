@@ -22,19 +22,21 @@ A reviewer seeing a lifecycle change that edits one tier's file without a corres
 
 | File | Purpose |
 |---|---|
-| `service_registry.py` | **The primitive.** `LeaseRecord`, `ServiceRegistry` (publish / heartbeat / discover / mark_shutting_down / relinquish, per-scope election flock, generation fencing), `ServiceSupervisor` (heartbeat cadence + version-skew cycle), `mint_owner_token`. Tier-parameterized by `tier=` + per-call `scope_key`. |
-| `t1_lease.py` | T1 consumer. `T1LeasePublisher` (MCP-lifespan-owned, NOT a supervised daemon) + `discover_t1_lease`. Publishes under a transient `server_pid` key and re-keys to the session-id (RF-2 / CA-3). Session-scoped (N owners per uid). |
-| `storage_service_daemon.py` | Storage-service supervisor. Consumes `ServiceRegistry(tier="storage_service")`; supervises the native engine binary + Postgres. uid-scoped. |
+| `service_registry.py` | **The primitive.** `LeaseRecord`, `ServiceRegistry` (publish / heartbeat / discover / mark_shutting_down / relinquish, per-scope election flock, generation fencing), `ServiceSupervisor` (heartbeat cadence + version-skew cycle), `mint_owner_token`. Tier-parameterized by `tier=` + per-call `scope_key`, and **directory-scoped first**: leases live at `<dir>/<tier>_addr.<scope_key>` where `dir=nexus_config_dir()` — a `NEXUS_CONFIG_DIR` sandbox gets an independent lease from `~/.config/nexus` for the same uid (the nexus-tmsnz confusion). |
+| `t1_lease.py` | T1 consumer. `T1LeasePublisher` (MCP-lifespan-owned, NOT a supervised daemon) + `discover_t1_lease`. Publishes under a transient `server_pid` key and re-keys to the session-id (RF-2 / CA-3). `scope_key` is the session-id; directory-scoped per the primitive above. |
+| `storage_service_daemon.py` | Storage-service supervisor. Consumes `ServiceRegistry(tier="storage_service")`; supervises the native engine binary + Postgres. `scope_key=str(os.getuid())`; directory-scoped per the primitive above. |
 | `aspect_worker_daemon.py` | Aspect-worker consumer. Leased, per-tenant host for the aspect queue. |
 | `binary_install.py` / `binary_lifecycle.py` | Engine-binary download, pin verification, and version-cycle wiring. |
 | `mineru_lifecycle.py` | MinerU sidecar lifecycle. |
-| `catalog_write_shim.py` | Catalog write dispatch (RDR-146). It hosted the T2 daemon's writes originally; `CATALOG_WRITE_OPS` is still load-bearing for `catalog/factory.py` and `catalog/catalog_protocol.py`, so it OUTLIVED the daemon (nexus-2tdkx). |
 | `installer.py` | Daemon install / autostart wiring. INSTALL is service-tier only; UNINSTALL still knows the legacy `t2` unit, because removal machinery outlives what it removes. |
 
 **Deleted, and deliberately absent from this table:** `t2_daemon.py`, `t2_client.py`,
-`discovery.py`, `spin_guard.py` (nexus-i711w Stage 2 sub-stage B) and `t3_daemon.py`,
-`t3_client.py` (RDR-155 P4b). `discovery.py`'s helpers had no surviving consumer once
-the T3 arm went; the module died whole rather than being folded into the primitive.
+`discovery.py`, `spin_guard.py`, `catalog_write_shim.py` (nexus-i711w Stage 2 sub-stage B)
+and `t3_daemon.py`, `t3_client.py` (RDR-155 P4b). `discovery.py`'s helpers had no surviving
+consumer once the T3 arm went; the module died whole rather than being folded into the
+primitive. `CATALOG_WRITE_OPS` is still load-bearing (`catalog/factory.py`,
+`catalog/catalog_protocol.py`) but relocated there directly (commit `004fafa4`) — it does
+not live in this package (nexus-2tdkx).
 
 ## The two flocks (do NOT conflate) — HISTORICAL as of sub-stage B
 

@@ -38,6 +38,32 @@ The per-name tombstoned-vs-absent probe (`probe_collection_state`) raised for th
 
 **Action**: re-run `nx catalog doctor --collections-drift` once the vector service is reachable. A name in this bucket has NOT been classified as tombstoned or gone — neither of the two remedies above applies until it re-probes cleanly.
 
+## Manifest damage (RUNFENCE)
+
+### Symptom: `nx doctor` names collection(s) with dangling manifest chashes
+
+`nx doctor`'s corpus-wide sweep (`manifest_verify_all`) reports one or more
+collections where a document's RUNFENCE manifest references chunk chashes
+that no longer exist in T3.
+
+**Cause**: a document's indexed chunks were removed or superseded (GC,
+partial re-index failure, manual T3 surgery) without the manifest being
+updated to match.
+
+**Triage**: `nx catalog manifest-verify TUMBLER_OR_TITLE` against the
+specific document(s) named — it checks that one document's manifest against
+T3 (referenced/present/missing chash counts, plus `index_state`) without a
+full corpus scan. A `missing > 0` result prints a DAMAGED verdict.
+
+**Action**: `nx index <path> --force` to repair — this re-runs extraction and
+writes a fresh manifest for the document.
+
+**False-positive note**: a **pre-fence engine** (one built before the
+RUNFENCE fence routes shipped) answers the per-document check with a 404,
+which `nx doctor` renders as a LOUD SKIP warning, not a DAMAGED verdict — this
+is an engine-freshness gap, not manifest corruption. Confirm the engine
+version before treating a SKIPPED+WARNING row as real damage.
+
 ## Removed checks: `--t3-doc-id-coverage` and `--replay-equality`
 
 Both were deleted in 7.0.0 (nexus-i711w) along with the local catalog, and
