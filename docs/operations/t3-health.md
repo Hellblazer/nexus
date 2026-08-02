@@ -22,6 +22,22 @@ The catalog has a collection row, but T3 doesn't have a matching collection.
 
 **Action**: operator decision. If the documents that referenced this collection are still real, re-create the T3 collection by re-indexing the source files. If they're stale, either delete the catalog rows (`nx catalog delete <tumbler>`) or supersede the collection projection row to a known target via the manual Python snippet the doctor prints. There is no automated fix for this class because the right answer depends on whether the source data still exists.
 
+### Symptom: `Projection rows whose T3 collection is TRASHED but RESTORABLE (N)`
+
+The catalog has a collection row, and T3 has NO live chunks under that name — but the chunks are not gone. Every one belongs to a soft-deleted (trashed) document (`catalog_documents.deleted_at` set); trashing never touches the physical `chunks_<dim>` rows (that is `purge_trash`'s job, a separate later step). `list_collections()` reads the tombstone-filtered `collection_vector_stats` view, so a fully-trashed collection reads exactly like one that never existed unless the doctor specifically probes for it (`probe_collection_state`, nexus-9n485).
+
+**Cause**: every document that ever wrote into this collection has since been trashed, but nothing purged the underlying chunk rows.
+
+**Action**: do **NOT** supersede this name — superseding sets `superseded_by`, which permanently excludes the name from resolution, and the revive path is identity-gated (only the collection a row was superseded FROM may revive it), so superseding a tombstoned name turns a reversible trash into an unreachable orphan (nexus-e1k14, the bug this symptom class exists to prevent). There is currently no CLI/MCP/REST verb that restores a trashed document — `document_restore` is a PG function (`catalog-003-soft-delete.xml`) with zero operator-facing callers anywhere in the codebase (nexus-xavu7, open). Until that verb exists, recovery means a direct SQL `UPDATE` against `catalog_documents.deleted_at`, scoped with an explicit `WHERE tenant_id = <this tenant> AND collection = <this name>` clause, run only by someone with production DB access. Once restored, the chunks reappear in the live T3 view and the collection drops out of this report on its own.
+
+### Symptom: `Projection rows whose T3 state could not be probed (N) -- NEEDS RERUN`
+
+The per-name tombstoned-vs-absent probe (`probe_collection_state`) raised for this name — a transient network/service failure, not a classification. The check reports it separately rather than either guessing a bucket or aborting the whole run for every other candidate: the established contract here is best-effort-with-report, not all-or-nothing.
+
+**Cause**: the vector service was briefly unreachable during the per-name probe round trip (a second network call per candidate, made after the bulk T3 listing already succeeded).
+
+**Action**: re-run `nx catalog doctor --collections-drift` once the vector service is reachable. A name in this bucket has NOT been classified as tombstoned or gone — neither of the two remedies above applies until it re-probes cleanly.
+
 ## Removed checks: `--t3-doc-id-coverage` and `--replay-equality`
 
 Both were deleted in 7.0.0 (nexus-i711w) along with the local catalog, and
