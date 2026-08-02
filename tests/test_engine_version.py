@@ -299,3 +299,44 @@ class TestDownstreamConsumersTrackTheFloor:
             f"guided-upgrade floor {REQUIRED_ENGINE_VERSION} — bump it "
             "with the floor (AGENTS.md § Engine-service release)"
         )
+
+
+class TestSmokeLegDiscriminatorDoesNotOutliveItsPower:
+    """nexus-308ph tripwire (mechanizing the x81ks critique's Significant-1).
+
+    The local-service gate's smoke leg currently discriminates WHICH artifact
+    is serving (freshly-stamped dev jar vs the pinned release binary that
+    nx init --service auto-starts, nexus-4e96a) only ACCIDENTALLY: the
+    RUNFENCE index-run routes 404 on pre-fence releases and 200 on the fresh
+    jar. The moment the pinned floor reaches an engine that SHIPS those
+    routes (v0.1.62+), both artifacts answer identically and the smoke leg
+    silently loses its discriminating power — the third
+    assertion-passes-because-it-cannot-discriminate instance of 2026-08-02
+    (tmsnz, 4e96a, this). nexus-308ph is the durable fix: a per-run build
+    nonce stamped into release.properties and asserted by the smoke leg.
+
+    This test rather than an eyeballed bead comment IS the revisit trigger
+    (nexus-i5c2u: eyeball steps get skipped): it stays green while the floor
+    is pre-fence, and goes RED at the floor bump unless the gate script
+    carries the nonce assertion by then.
+    """
+
+    def test_floor_below_fence_or_nonce_discriminator_present(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION < (0, 1, 62):
+            return  # pre-fence floor: the 404-vs-200 discriminator still works
+
+        gate = Path(__file__).resolve().parent / "e2e" / "local-service-gate.sh"
+        text = gate.read_text(encoding="utf-8")
+        assert "build_ref" in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} ships the "
+            "RUNFENCE routes, so the smoke leg's fence-round-trip no longer "
+            "discriminates the serving artifact (pinned release vs stamped "
+            "jar answer identically) — land nexus-308ph (per-run build_ref "
+            "nonce in release.properties, asserted by the smoke leg) before "
+            "bumping the floor past 0.1.61, or the gate reverts to the "
+            "4e96a vacuity class with nothing to catch it."
+        )
