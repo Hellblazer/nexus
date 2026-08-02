@@ -985,11 +985,47 @@ def _upsert_skip_reembed(
     if old_idx:
         # Metadata-only refresh — no embedding cost, preserves the
         # pre-optimization ON CONFLICT DO UPDATE metadata semantics.
-        db.update_chunks(
+        missing = db.update_chunks(
             collection_name,
             [ids[i] for i in old_idx],
             [metadatas[i] for i in old_idx],
         )
+        # nexus-5xn3k.5 (memo §3.6, AC6 client half): ``missing`` is None
+        # when the engine's response omitted the "missing" field (a
+        # pre-nexus-5xn3k.2 engine) — "cannot tell", not "zero misses".
+        # HttpVectorClient.update_chunks already logged the WARNING for
+        # that case; preserve today's behaviour here (no reroute).
+        if missing:
+            # The existing_ids probe was a STALE POSITIVE for these ids:
+            # reported present, but the row was gone by the time the
+            # metadata-only update above ran, so it silently touched
+            # nothing for them. Re-route through a full upsert (content +
+            # embeddings) so the content actually lands instead of being
+            # dropped. Service mode embeds server-side, so whatever
+            # embeddings shape the new_idx branch above already forwards
+            # (including empty passthrough) is safe to forward here too.
+            #
+            # Division of labor (nexus-5xn3k.5 vs .4): this reroute repairs
+            # a STALE-POSITIVE PROBE miss only — the row was already gone
+            # by the time update_chunks ran above. A row that vanishes
+            # AFTER this reroute's write succeeds (a post-repair race) is
+            # NOT this path's job; that window is covered by the
+            # /index-run/complete fail-closed verify (bead nexus-5xn3k.4).
+            missing_set = set(missing)
+            reroute_idx = [i for i in old_idx if ids[i] in missing_set]
+            if reroute_idx:
+                _log.warning(
+                    "update_chunks_missing_rerouted",
+                    collection=collection_name,
+                    count=len(reroute_idx),
+                )
+                db.upsert_chunks_with_embeddings(
+                    collection_name,
+                    [ids[i] for i in reroute_idx],
+                    [documents[i] for i in reroute_idx],
+                    [embeddings[i] for i in reroute_idx],
+                    [metadatas[i] for i in reroute_idx],
+                )
     _log.debug(
         "upsert_skip_reembed",
         collection=collection_name,
