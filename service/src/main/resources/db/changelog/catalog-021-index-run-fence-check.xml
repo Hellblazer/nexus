@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-5xn3k.2 (RUNFENCE E2, engine half step 2 of 2). Design of record:
+    T2 nexus memory "5xn3k-design-2026-08-02" §3.3, per the bead's HARD spec
+    amendment comment (substantive-critic on .1, T2 21350).
+
+    CHECK constraint on catalog_documents.index_state: NULL (unknown, the
+    no-backfill default from catalog-020-1) or one of 'indexing' / 'complete'
+    / 'failed'. Landed as its OWN changelog file rather than appended to
+    catalog-020-index-run-fence.xml — that file's five changesets are already
+    applied (nexus-5xn3k.1, committed), and Liquibase checksums applied
+    changesets by content; a NEW changeset needs a NEW file+id, never an edit
+    to an already-run one.
+
+    Deliberately permissive of NULL: existing rows (and any future row a
+    caller inserts without setting index_state) must keep reading as
+    "unknown", not fail a CHECK — the constraint exists to reject a TYPO
+    state (e.g. 'indexed', 'Indexing'), not to force every row through the
+    fence's three named states.
+
+    NOT VALID (stacked-review item 6): deliberately NOT used, unlike the
+    fk-002/fk-003 collection-registry FKs (fk-003-collection-registry-extra.xml).
+    Those FKs use NOT VALID because their target tables accumulate DERIVED rows
+    (aspects, queue, topics, taxonomy_meta) written by pipelines that run BEFORE
+    the owning collection is ETL-registered, so pre-existing violating rows are
+    an expected, known-tolerated condition at deploy time on tables with real
+    production history — validating immediately would fail the deploy. Neither
+    condition holds here: catalog_documents.index_state has carried ONLY NULL
+    since catalog-020-1 added the column (no application write path existed
+    before THIS bead's CatalogRepository methods), so there is no possible
+    pre-existing violating value for this CHECK to encounter, and at ~22k rows
+    (current corpus size) a full-table CHECK scan under the ACCESS EXCLUSIVE
+    lock ADD CONSTRAINT takes is a sub-second cost, not the multi-minute/table
+    lock risk NOT VALID + a deferred VALIDATE CONSTRAINT exists to avoid on a
+    large or actively-written table. Immediate validation is strictly simpler
+    here and leaves nothing to schedule as a P1b follow-up.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: CHECK constraint on index_state ───────────────────────── -->
+    <changeSet id="catalog-021-1" author="nexus-5xn3k.2">
+        <comment>catalog_documents.index_state CHECK: NULL (unknown, no backfill) or IN ('indexing','complete','failed') — rejects a typo state at the write paths where one would originate, per the substantive-critic spec amendment on nexus-5xn3k.1 (T2 21350).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_documents
+    ADD CONSTRAINT chk_catalog_documents_index_state
+    CHECK (index_state IS NULL OR index_state IN ('indexing', 'complete', 'failed'));
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.catalog_documents DROP CONSTRAINT IF EXISTS chk_catalog_documents_index_state;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

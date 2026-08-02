@@ -54,7 +54,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   store-get       {"ids": [...], "documents": [...], "metadatas": [...]}
  *   store-list      {"ids": [...], "metadatas": [...]}
  *   store-delete    {"deleted": N}
- *   update-metadata {"updated": N}
+ *   update-metadata {"updated": N, "missing": [ids...]}
  *   collections     [{"name": "..."}, ...]
  *   count           {"count": N}
  * </pre>

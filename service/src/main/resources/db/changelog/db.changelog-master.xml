@@ -339,6 +339,13 @@
          below. -->
     <include file="db/changelog/catalog-020-index-run-fence.xml"/>
 
+    <!-- RUNFENCE E2 (bead nexus-5xn3k.2): CHECK constraint on index_state —
+         NULL (unknown) or IN ('indexing','complete','failed'). A NEW file
+         (not an edit to catalog-020, whose changesets are already applied)
+         per the substantive-critic spec amendment on .1 (T2 21350). After
+         catalog-020, before the runAlways grants below. -->
+    <include file="db/changelog/catalog-021-index-run-fence-check.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001

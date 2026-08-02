@@ -22,6 +22,8 @@ import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY_ALL;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
@@ -2805,6 +2807,12 @@ public final class CatalogRepository {
 
     private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           List<Map<String, Object>> rows) {
+        // nexus-5xn3k.2 (stacked-review item 1): the WRITE side of the
+        // completeIndexRun/writeManifestRows advisory-lock pair — see
+        // acquireIndexRunLock's javadoc. Acquired BEFORE the delete+insert below
+        // so a concurrent completeIndexRun for the same doc either runs entirely
+        // before or entirely after this manifest mutation, never interleaved.
+        acquireIndexRunLock(ctx, tenant, docId);
         ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
         if (!rows.isEmpty()) {
             stampIndexedAt(ctx, tenant, docId);
@@ -2856,10 +2864,34 @@ public final class CatalogRepository {
      * @return {@code {docs: <int ok>, rows: <int total written>, failed_doc_ids: [...]}}.
      */
     public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs) {
+        return writeManifestMany(tenant, docs, null);
+    }
+
+    /**
+     * Overload adding the optional {@code complete} map (nexus-5xn3k.2, memo
+     * §3.3): {@code {doc_id: content_hash}} for docs whose manifest write in
+     * THIS call is also the run's completion — the flush-grain repo path
+     * ({@code ChunkBatcher}, file-atomic, position 0 always present) so the
+     * hot path stamps completion inside the transaction it already runs, no
+     * extra round trip. Docs not present in {@code complete} (or when
+     * {@code complete} is null) behave exactly as the two-arg overload.
+     *
+     * <p>A doc whose completion stamp is refused (fail-closed verify:
+     * missing&gt;0 or referenced!=rows.size()) does NOT fail the doc's
+     * manifest write — that write already succeeded and is correct
+     * (over-work-never-under-work, memo §3.5). It is reported in the
+     * response's {@code complete_refused} list instead of
+     * {@code failed_doc_ids}.
+     *
+     * @return {@code {docs, rows, failed_doc_ids, failed, complete_refused, complete_refused_count}}
+     */
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
+                                                  Map<String, String> complete) {
         int okDocs = 0;
         int totalRows = 0;
         List<String> failed = new ArrayList<>();
         List<Map<String, Object>> failedDetail = new ArrayList<>();
+        List<Map<String, Object>> completeRefused = new ArrayList<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -2868,6 +2900,7 @@ public final class CatalogRepository {
                 List<Map<String, Object>> rows = rawRows instanceof List<?> l
                     ? (List<Map<String, Object>>) l
                     : List.of();
+                String completeHash = (complete != null && docId != null) ? complete.get(docId) : null;
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
@@ -2876,6 +2909,9 @@ public final class CatalogRepository {
                     // F5 unified the fold for the single-doc and batch paths.)
                     tenantScope.withTenant(tenant, ctx -> {
                         writeManifestRows(ctx, tenant, docId, rows);
+                        if (completeHash != null) {
+                            stampCompleteIfVerified(ctx, tenant, docId, completeHash, rows.size(), completeRefused);
+                        }
                         return null;
                     });
                     okDocs++;
@@ -2906,6 +2942,12 @@ public final class CatalogRepository {
         result.put("rows", totalRows);
         result.put("failed_doc_ids", failed);   // back-compat
         result.put("failed", failedDetail);     // nexus-fhhwf: the diagnosable form
+        result.put("complete_refused", completeRefused); // nexus-5xn3k.2: fail-closed stamp refusals
+        // stacked-review item 2: a scalar sibling to the list — the ocf52-style
+        // "ignorable list" problem (a caller that only checks docs/rows success
+        // counts can silently never look at complete_refused; a non-zero scalar
+        // is harder to miss in a log line or a quick response-shape glance).
+        result.put("complete_refused_count", completeRefused.size());
         return result;
     }
 
@@ -2957,6 +2999,11 @@ public final class CatalogRepository {
     /** Append manifest rows (upsert by position). */
     public void appendManifestChunks(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
+            // Same manifest-mutation class as writeManifestRows: serialize
+            // against completeIndexRun's verify-then-stamp (see
+            // acquireIndexRunLock's javadoc) — this was the one mutation path
+            // left outside the lock when it landed.
+            acquireIndexRunLock(ctx, tenant, docId);
             if (!rows.isEmpty()) {
                 stampIndexedAt(ctx, tenant, docId);
             }
@@ -3075,6 +3122,320 @@ public final class CatalogRepository {
             }
             return deleted;
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.2) — engine half step 2 of 2.
+    //
+    // Design of record: T2 nexus memory "5xn3k-design-2026-08-02" §3.3 + §3.5,
+    // schema/SQL primitive landed in step 1 (nexus-5xn3k.1, catalog-020). Core
+    // finding: no comparison of two artifacts BOTH written by the same run can
+    // detect that the run did not finish (manifest == T3, both truncated, is a
+    // CONSISTENT truncation every derived diff reads clean on). The fence is a
+    // record of intent (index_state='indexing', stamped BEFORE the first chunk
+    // upsert) vs completion (index_state='complete', stamped AFTER the last
+    // manifest write and ONLY once verified) that a derived comparison cannot
+    // fake.
+    //
+    // FENCE IS NOT A LOCK (memo §5, nexus-lcmbp non-goal): 'indexing' always
+    // means "re-index"; concurrency remains the pipeline row's job. Nothing
+    // here refuses a /begin against an already-'indexing' doc.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** {@code nexus.manifest_verify}/{@code manifest_verify_all} result — see catalog-020-3/-4. */
+    public record ManifestVerifyCounts(long referenced, long present, long missing) {}
+
+    /**
+     * Refused completion (nexus-5xn3k.2, HARD spec amendment T2 21350 —
+     * substantive-critic on .1): {@code completeIndexRun} refuses when EITHER
+     * {@code missing > 0} OR {@code referenced != chunkCount} (the run's own
+     * claimed count). {@code missing > 0} alone is fail-OPEN: a run whose
+     * manifest writes ALL failed while chunks landed in T3 yields
+     * referenced=0/missing=0 — the memo's own §1 empty-manifest case
+     * recreated one layer up — and would stamp a zero-content document
+     * 'complete' if only {@code missing} were checked.
+     */
+    public static final class IndexRunVerifyRefused extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+        public final String docId;
+        public final long referenced;
+        public final long present;
+        public final long missing;
+        public final int chunkCount;
+
+        IndexRunVerifyRefused(String docId, long referenced, long present, long missing, int chunkCount) {
+            super("completeIndexRun refused: doc_id=" + docId + " referenced=" + referenced
+                  + " present=" + present + " missing=" + missing + " claimed_chunk_count=" + chunkCount);
+            this.docId = docId;
+            this.referenced = referenced;
+            this.present = present;
+            this.missing = missing;
+            this.chunkCount = chunkCount;
+        }
+    }
+
+    /** Ctx-level {@code nexus.manifest_verify(docId)} call — shared by {@link #manifestVerify},
+     *  {@link #completeIndexRun}, and {@code writeManifestMany}'s complete-map stamp so all
+     *  three read the SAME SQL primitive under the SAME transaction semantics. */
+    private static ManifestVerifyCounts manifestVerifyCtx(DSLContext ctx, String docId) {
+        var r = ctx.selectFrom(MANIFEST_VERIFY.call(docId)).fetchOne();
+        return new ManifestVerifyCounts(
+            r.get(MANIFEST_VERIFY.REFERENCED), r.get(MANIFEST_VERIFY.PRESENT), r.get(MANIFEST_VERIFY.MISSING));
+    }
+
+    /**
+     * nexus-5xn3k.2 (stacked-review item 1): per-(tenant, doc_id) advisory xact
+     * lock serializing the index-run fence's verify-then-stamp
+     * ({@link #completeIndexRun}, {@link #stampCompleteIfVerified}) against a
+     * CONCURRENT manifest write ({@link #writeManifestRows}, hence {@link
+     * #writeManifest}/{@link #writeManifestMany}/{@link #appendManifestChunks})
+     * for the SAME document. Follows the {@code pg_advisory_xact_lock(hashtext(...))}
+     * idiom in {@code RekeyOps.rekey}/{@code StagingPromoteOps.promoteCollection}
+     * (RekeyOps.java:101, StagingPromoteOps.java:126) — xact-scoped (auto-released
+     * at commit/rollback, no explicit unlock needed) and safely re-entrant: two
+     * acquisitions of the same key by the SAME transaction never self-deadlock.
+     *
+     * <p><strong>What this protects against.</strong> {@code manifest_verify()}'s
+     * SELECT and {@code completeIndexRun}'s final UPDATE run under READ COMMITTED,
+     * so a concurrent manifest write that commits BETWEEN the verify read and the
+     * stamp is invisible to the verify count that the stamp is conditioned on —
+     * without this lock, {@code completeIndexRun} could stamp {@code 'complete'}
+     * against a manifest state a concurrent write has already superseded.
+     * Acquiring this lock BEFORE the verify read on BOTH sides forces total
+     * ordering: whichever side gets there first runs its entire critical section
+     * (read + write) to completion (transaction commit releases the lock) before
+     * the other side's acquisition succeeds — so the loser's verify read always
+     * reflects the winner's fully-committed effect. This is defense-in-depth: the
+     * client's begin-before-first-upsert / complete-after-last-write ordering
+     * (memo §3.5) already closes the window in the intended single-writer-per-doc
+     * pipeline; this lock is the belt for a MIS-sequenced or out-of-band writer.
+     */
+    private static void acquireIndexRunLock(DSLContext ctx, String tenant, String docId) {
+        // SANCTIONED RAW (nexus-5xn3k.2): advisory-lock primitive, no jOOQ
+        // DSL form — registered in RawSqlGateTest.SANCTIONED_METHODS.
+        ctx.execute("SELECT pg_advisory_xact_lock(hashtext('indexrun:' || ? || ':' || ?))",
+                    tenant, docId);
+    }
+
+    /** GET /v1/catalog/manifest/verify?doc_id=X primitive — per-document referenced/present/missing. */
+    public ManifestVerifyCounts manifestVerify(String tenant, String docId) {
+        return tenantScope.withTenant(tenant, ctx -> manifestVerifyCtx(ctx, docId));
+    }
+
+    /**
+     * GET /v1/catalog/manifest/verify_all primitive — every live document in the
+     * tenant, grouped by collection (nexus-ac4id part 2: replaces client-side
+     * per-collection T3 paging with one engine-side anti-join).
+     */
+    public List<Map<String, Object>> manifestVerifyAll(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(MANIFEST_VERIFY_ALL.call()).fetch().map(r -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("collection", r.get(MANIFEST_VERIFY_ALL.COLLECTION));
+                m.put("referenced", r.get(MANIFEST_VERIFY_ALL.REFERENCED));
+                m.put("present",    r.get(MANIFEST_VERIFY_ALL.PRESENT));
+                m.put("missing",    r.get(MANIFEST_VERIFY_ALL.MISSING));
+                return m;
+            }));
+    }
+
+    /**
+     * POST /v1/catalog/index-run/begin — idempotent. Stamps
+     * {@code index_state='indexing'} BEFORE any chunk work (memo §3.5 T0):
+     * the client calls this first, so the fence is committed before the
+     * first byte of content and cleared only after the last (§3.5's
+     * "no gap" argument). Calling it again (retry, or a second concurrent
+     * run — the fence is NOT a lock) simply re-stamps the same shape; there
+     * is no conflict/skip behaviour here by design (nexus-lcmbp non-goal).
+     *
+     * <p>{@code collection} is accepted for observability only — the fence
+     * columns (catalog-020) carry no collection of their own (that lives on
+     * {@code physical_collection}, set by the register/update path); it is
+     * logged so a begin/complete/fail triple can be correlated in the logs
+     * without a DB round-trip.
+     */
+    public void beginIndexRun(String tenant, String docId, String contentHash, String runId, String collection) {
+        log.debug("event=index_run_begin tenant={} doc_id={} run_id={} collection={}",
+                   tenant, docId, runId, collection);
+        tenantScope.withTenant(tenant, ctx -> {
+            int updated = ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.INDEX_STATE, "indexing")
+               .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, nne(contentHash))
+               .set(CATALOG_DOCUMENTS.INDEX_RUN_ID, nne(runId))
+               .set(CATALOG_DOCUMENTS.INDEX_STARTED_AT,
+                    java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT))
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .execute();
+            if (updated == 0) {
+                if (isTombstonedDocument(ctx, tenant, docId)) {
+                    throw new TombstonedDocumentException(docId,
+                        "beginIndexRun refused: document is tombstoned: " + docId);
+                }
+                // nexus-5xn3k.2 (stacked-review item 3, the critic's identity-mismatch
+                // class): a 0-row update that is NOT a tombstone refusal means doc_id
+                // was never registered — a silent no-op here would hide a client/engine
+                // doc_id mismatch. Signal it; still a no-op (the long-standing contract
+                // for an unknown tumbler stays a no-op, not a thrown exception).
+                log.warn("event=index_run_begin_unknown_doc tenant={} doc_id={}", tenant, docId);
+            }
+            return null;
+        });
+    }
+
+    /**
+     * POST /v1/catalog/index-run/complete — the load-bearing FAIL-CLOSED
+     * verify-then-stamp (memo §3.3, amended by the .1 critique, T2 21350).
+     * In ONE transaction: run {@code nexus.manifest_verify(docId)}; refuse
+     * ({@link IndexRunVerifyRefused}, mapped to HTTP 409) leaving
+     * {@code index_state} UNTOUCHED when {@code missing > 0} OR
+     * {@code referenced != chunkCount} (the caller's claimed count). Only
+     * when BOTH hold does the UPDATE stamp
+     * {@code index_state='complete', index_content_hash, chunk_count}.
+     *
+     * <p>A {@code /complete} with no prior {@code /begin} is ACCEPTED but
+     * FLAGGED (memo §3.3 / bead): legacy documents and out-of-band writers
+     * must be able to converge. Flagged means the prior {@code index_state}
+     * was not {@code 'indexing'} (NULL/unknown, 'complete', or 'failed') —
+     * logged at WARNING and surfaced in the response as {@code "flagged"}.
+     *
+     * @return {@code {referenced, present, missing, flagged}} on success
+     * @throws IndexRunVerifyRefused on the fail-closed refusal (409)
+     */
+    public Map<String, Object> completeIndexRun(String tenant, String docId, String contentHash, int chunkCount) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-5xn3k.2 (stacked-review item 1): serialize against a concurrent
+            // manifest write for the SAME doc BEFORE the verify read — see
+            // acquireIndexRunLock's javadoc for the exact race this closes.
+            acquireIndexRunLock(ctx, tenant, docId);
+
+            // nexus-mqd6t-class tombstone read guard (TombstoneFilterGateTest): a
+            // tombstoned doc reads priorState=null here (same as "not found") — the
+            // guarded UPDATE below still refuses the whole call for a tombstoned
+            // target via TombstonedDocumentException, so this filter changes no
+            // observable outcome, only satisfies the read-guard invariant.
+            String priorState = ctx.select(CATALOG_DOCUMENTS.INDEX_STATE)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetchOne(CATALOG_DOCUMENTS.INDEX_STATE);
+            ManifestVerifyCounts counts = manifestVerifyCtx(ctx, docId);
+            if (counts.missing() > 0 || counts.referenced() != chunkCount) {
+                throw new IndexRunVerifyRefused(docId, counts.referenced(), counts.present(), counts.missing(), chunkCount);
+            }
+            boolean flagged = !"indexing".equals(priorState);
+            if (flagged) {
+                log.warn("event=index_run_complete_without_begin tenant={} doc_id={} prior_state={}",
+                          tenant, docId, priorState);
+            }
+            int updated = ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.INDEX_STATE, "complete")
+               .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, nne(contentHash))
+               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, chunkCount)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .execute();
+            if (updated == 0) {
+                if (isTombstonedDocument(ctx, tenant, docId)) {
+                    throw new TombstonedDocumentException(docId,
+                        "completeIndexRun refused: document is tombstoned: " + docId);
+                }
+                // nexus-5xn3k.2 (stacked-review item 3): doc_id was never registered
+                // (priorState read above was also null for the same reason) — signal
+                // the identity mismatch rather than silently reporting success.
+                log.warn("event=index_run_complete_unknown_doc tenant={} doc_id={}", tenant, docId);
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("referenced", counts.referenced());
+            out.put("present",    counts.present());
+            out.put("missing",    counts.missing());
+            out.put("flagged",    flagged);
+            return out;
+        });
+    }
+
+    /**
+     * POST /v1/catalog/index-run/fail — stamps {@code index_state='failed'}.
+     * The error string is NOT persisted on the row (catalog-020 added no
+     * error column — the fence's four columns are state/hash/run_id/started_at
+     * only); house style for this is a structured log line, recorded
+     * unconditionally (even if the DB stamp itself is refused below) so the
+     * failure reason is never silently dropped.
+     */
+    public void failIndexRun(String tenant, String docId, String error) {
+        log.warn("event=index_run_failed tenant={} doc_id={} error={}", tenant, docId, nne(error));
+        tenantScope.withTenant(tenant, ctx -> {
+            int updated = ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.INDEX_STATE, "failed")
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .execute();
+            if (updated == 0) {
+                if (isTombstonedDocument(ctx, tenant, docId)) {
+                    throw new TombstonedDocumentException(docId,
+                        "failIndexRun refused: document is tombstoned: " + docId);
+                }
+                // nexus-5xn3k.2 (stacked-review item 3): identity-mismatch signal,
+                // same reasoning as beginIndexRun/completeIndexRun above.
+                log.warn("event=index_run_fail_unknown_doc tenant={} doc_id={}", tenant, docId);
+            }
+            return null;
+        });
+    }
+
+    /**
+     * {@code writeManifestMany}'s optional per-doc completion stamp (memo
+     * §3.3): the SAME fail-closed check {@link #completeIndexRun} runs
+     * (missing==0 AND referenced==chunkCount), but run INSIDE the per-doc
+     * transaction {@code writeManifestRows} already opened for the hot
+     * flush-grain repo path — no extra round trip. Unlike
+     * {@code completeIndexRun}, a failed verify here does NOT throw (which
+     * would roll back the manifest rows just written, which ARE correct —
+     * over-work-never-under-work, memo §3.5): it logs a WARNING, skips the
+     * stamp (index_state is left whatever it was), and the caller collects
+     * it into the response's {@code complete_refused} list.
+     */
+    private static void stampCompleteIfVerified(DSLContext ctx, String tenant, String docId,
+                                                 String contentHash, int chunkCount,
+                                                 List<Map<String, Object>> refusedOut) {
+        // nexus-5xn3k.2 (stacked-review item 1): same lock as completeIndexRun.
+        // Redundant in the ONLY current call site (writeManifestMany calls this
+        // in the SAME ctx/transaction as writeManifestRows, which acquires the
+        // same key first — re-acquiring within one transaction is a safe no-op),
+        // but self-contained here so this method stays correct if ever called
+        // from a path that does not run writeManifestRows first.
+        acquireIndexRunLock(ctx, tenant, docId);
+        ManifestVerifyCounts counts = manifestVerifyCtx(ctx, docId);
+        if (counts.missing() > 0 || counts.referenced() != chunkCount) {
+            log.warn("event=write_manifest_many_complete_refused tenant={} doc_id={} referenced={} "
+                      + "present={} missing={} chunk_count={}",
+                      tenant, docId, counts.referenced(), counts.present(), counts.missing(), chunkCount);
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("doc_id", docId);
+            r.put("referenced", counts.referenced());
+            r.put("missing", counts.missing());
+            r.put("chunk_count", chunkCount);
+            refusedOut.add(r);
+            return;
+        }
+        int updated = ctx.update(CATALOG_DOCUMENTS)
+           .set(CATALOG_DOCUMENTS.INDEX_STATE, "complete")
+           .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, nne(contentHash))
+           .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+           .execute();
+        // DEFENSIVE / UNREACHABLE in practice (stacked-review item 7): the ONLY
+        // caller (writeManifestMany) always runs writeManifestRows in this SAME
+        // transaction FIRST, and writeManifestRows's own eldyi guard already
+        // throws TombstonedDocumentException for a tombstoned docId before
+        // control ever reaches here — so `updated == 0` from a tombstoned target
+        // cannot actually occur at this call site. Kept for safety in case a
+        // future caller invokes this method without writeManifestRows preceding
+        // it in the same transaction.
+        if (updated == 0 && isTombstonedDocument(ctx, tenant, docId)) {
+            throw new TombstonedDocumentException(docId,
+                "writeManifestMany complete-map refused: document is tombstoned: " + docId);
+        }
     }
 
     /**
@@ -5034,7 +5395,14 @@ public final class CatalogRepository {
             CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
             CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
             CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
-            CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT
+            CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT,
+            // nexus-5xn3k.2 (RUNFENCE): the fence fields, so /show, /list, /search,
+            // /resolve, /resolve_many, /traverse (every documentFields() reader) all
+            // surface index_state/index_content_hash/index_run_id/index_started_at —
+            // the wire contract the client half (nexus-5xn3k.3) reads its 4 new
+            // CatalogEntry fields from. No separate "get fence state" route needed.
+            CATALOG_DOCUMENTS.INDEX_STATE, CATALOG_DOCUMENTS.INDEX_CONTENT_HASH,
+            CATALOG_DOCUMENTS.INDEX_RUN_ID, CATALOG_DOCUMENTS.INDEX_STARTED_AT
         };
     }
 
@@ -5074,6 +5442,14 @@ public final class CatalogRepository {
         m.put("bib_openalex_id",         nne((String) raw.getOrDefault("bib_openalex_id", null)));
         m.put("bib_doi",                 nne((String) raw.getOrDefault("bib_doi", null)));
         m.put("bib_enriched_at",         nne((String) raw.getOrDefault("bib_enriched_at", null)));
+        // nexus-5xn3k.2 (RUNFENCE): index_state stays NULL-able (NULL = unknown,
+        // catalog-020's deliberate no-backfill default) — do NOT nne() it, unlike
+        // the other three (NOT NULL DEFAULT '' columns, same nne() treatment as
+        // alias_of/source_uri above).
+        m.put("index_state",        raw.getOrDefault("index_state", null));
+        m.put("index_content_hash", nne((String) raw.getOrDefault("index_content_hash", null)));
+        m.put("index_run_id",       nne((String) raw.getOrDefault("index_run_id", null)));
+        m.put("index_started_at",   nne((String) raw.getOrDefault("index_started_at", null)));
         return m;
     }
 
