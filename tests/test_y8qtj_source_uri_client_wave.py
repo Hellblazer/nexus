@@ -67,7 +67,7 @@ class TestSourceUriConvergence:
         corpus_name = f"dt-papers-{_next_seq()}"
         owner = cat.register_owner(corpus_name, "curator")
         dt_uri = f"x-devonthink-item://{_next_seq():0>8}-CAFE-BABE-0000-000000000000"
-        collection = "knowledge__dt-papers__voyage-context-3__v1"
+        collection = "knowledge__dt-papers__bge-768__v1"
         original_tumbler = cat.register(
             owner, "Zoology Paper",
             content_type="paper",
@@ -114,7 +114,7 @@ class TestSourceUriConvergence:
             _register_or_lookup_doc_id(
                 path, "dt-papers-orphan",
                 content_type="paper",
-                physical_collection="knowledge__dt-papers__voyage-context-3__v1",
+                physical_collection="knowledge__dt-papers__bge-768__v1",
                 source_uri="x-devonthink-item://NEVER-REGISTERED-0000",
             )
 
@@ -131,7 +131,7 @@ class TestSourceUriConvergence:
         cat = ActiveCatalog()
         owner = cat.register_owner(f"dt-papers-mismatch-{_next_seq()}", "curator")
         dt_uri = f"x-devonthink-item://MISMATCH-{_next_seq():0>8}"
-        home_collection = "knowledge__dt-papers__voyage-context-3__v1"
+        home_collection = "knowledge__dt-papers__bge-768__v1"
         cat.register(
             owner, "Mismatch Paper",
             content_type="paper",
@@ -147,7 +147,7 @@ class TestSourceUriConvergence:
             _register_or_lookup_doc_id(
                 path, "dt-papers-mismatch",
                 content_type="paper",
-                physical_collection="docs__default__voyage-context-3__v1",
+                physical_collection="docs__default__bge-768__v1",
                 source_uri=dt_uri,
             )
 
@@ -208,7 +208,7 @@ class TestIndexPdfIncrementalDocIdReuse:
         corpus_name = f"dt-incr-{_next_seq()}"
         owner = cat.register_owner(corpus_name, "curator")
         dt_uri = f"x-devonthink-item://{_next_seq():0>8}-INCR-0000-0000-000000000000"
-        collection = f"docs__{corpus_name.replace('_', '-')}__voyage-context-3__v1"
+        collection = f"docs__{corpus_name.replace('_', '-')}__bge-768__v1"
         original_tumbler = cat.register(
             owner, "Zoology Class",
             content_type="paper",
@@ -277,7 +277,7 @@ class TestIndexMarkdownDocIdReuse:
         corpus_name = f"dt-md-{_next_seq()}"
         owner = cat.register_owner(corpus_name, "curator")
         dt_uri = f"x-devonthink-item://{_next_seq():0>8}-MD00-0000-0000-000000000000"
-        collection = f"docs__{corpus_name.replace('_', '-')}__voyage-context-3__v1"
+        collection = f"docs__{corpus_name.replace('_', '-')}__bge-768__v1"
         original_tumbler = cat.register(
             owner, "Zoology Notes",
             content_type="prose",
@@ -331,7 +331,7 @@ class TestDocumentForkCheck:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-test-{_next_seq()}", "curator")
-        coll = "knowledge__fork-test__voyage-context-3__v1"
+        coll = "knowledge__fork-test__bge-768__v1"
         old_doc = cat.register(
             owner, "Old Doc", content_type="paper",
             file_path=f"old-{_next_seq()}.pdf", physical_collection=coll,
@@ -374,7 +374,7 @@ class TestDocumentForkCheck:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-disjoint-{_next_seq()}", "curator")
-        coll = "knowledge__fork-disjoint__voyage-context-3__v1"
+        coll = "knowledge__fork-disjoint__bge-768__v1"
         doc_a = cat.register(
             owner, "Doc A", content_type="paper",
             file_path=f"a-{_next_seq()}.pdf", physical_collection=coll,
@@ -404,7 +404,7 @@ class TestDocumentForkCheck:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-belowthresh-{_next_seq()}", "curator")
-        coll = "knowledge__fork-belowthresh__voyage-context-3__v1"
+        coll = "knowledge__fork-belowthresh__bge-768__v1"
         old_doc = cat.register(
             owner, "Old Doc", content_type="paper",
             file_path=f"old-bt-{_next_seq()}.pdf", physical_collection=coll,
@@ -444,7 +444,7 @@ class TestCatalogUpdateFilePath:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-hist-{_next_seq()}", "curator")
-        coll = "knowledge__fork-hist__voyage-context-3__v1"
+        coll = "knowledge__fork-hist__bge-768__v1"
         old_doc = cat.register(
             owner, "Old Doc", content_type="paper",
             file_path=f"old-h-{_next_seq()}.pdf", physical_collection=coll,
