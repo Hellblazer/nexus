@@ -361,7 +361,7 @@ def _fence_begin(doc_id: str, content_hash: str, collection: str) -> None:
     try:
         w = make_catalog_writer()
         w.begin_index_run(doc_id, content_hash, uuid4().hex, collection)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch: begin is an advisory write; indexing must proceed (memo §3.4 fail-open contract)
         _log.warning("index_run_begin_failed", doc_id=doc_id, collection=collection)
     finally:
         close = getattr(w, "close", None)
@@ -379,7 +379,7 @@ def _fence_fail(doc_id: str, error: str) -> None:
     try:
         w = make_catalog_writer()
         w.fail_index_run(doc_id, error)
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch: fail is an advisory write; must never mask the original failure
         _log.warning("index_run_fail_write_failed", doc_id=doc_id)
     finally:
         close = getattr(w, "close", None)
@@ -425,7 +425,7 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
         from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
         _record_complete_refusal(doc_id)
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 — boundary catch: transport failure leaves the fence 'indexing' (over-work, never data loss); only the typed refusal propagates
         _log.warning("index_run_complete_write_failed", doc_id=doc_id)
         return
     finally:
