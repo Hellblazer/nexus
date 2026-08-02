@@ -340,3 +340,60 @@ class TestSmokeLegDiscriminatorDoesNotOutliveItsPower:
             "bumping the floor past 0.1.61, or the gate reverts to the "
             "4e96a vacuity class with nothing to catch it."
         )
+
+
+class TestMvvAllowlistDoesNotOutliveItsTrigger:
+    """nexus-5xn3k.6 substantive-critic SIGNIFICANT (T2
+    nexus/5xn3k6-critique-2026-08-02 [21355]).
+
+    ``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX`` for the
+    "engine predates the index-run fence" doctor warning (a pre-fence
+    engine 404s ``manifest_verify_all()`` on a virgin box, so
+    ``_check_dangling_manifests`` renders a soft-warn instead of a clean
+    pass) carries a prose "REMOVAL TRIGGER" comment — delete once
+    ``REQUIRED_ENGINE_VERSION`` names a tag containing 3cf64d48 (v0.1.62 or
+    later) — but nothing MECHANICALLY enforced it. When the floor crosses
+    that line, the 404 branch simply stops firing: the allowlist regex
+    then matches nothing, the MVV gate passes green whether or not the now
+    -dead entry is removed, and the entry silently outlives its own
+    trigger — the exact "stale interim exception nobody notices" shape
+    nexus-ac4id itself was.
+
+    Mirrors ``TestSmokeLegDiscriminatorDoesNotOutliveItsPower`` directly
+    above (same tripwire idiom, different fence-gated artifact): THIS
+    test, not an eyeballed bead comment, IS the revisit trigger
+    (nexus-i5c2u: eyeball steps get skipped). It stays green while the
+    floor predates the fence and goes RED the moment
+    ``REQUIRED_ENGINE_VERSION`` crosses v0.1.62 unless the allowlist entry
+    has already been deleted from ``fresh-install-mvv.sh`` in the SAME
+    change that bumps the floor.
+
+    GREP-LEVEL PARITY (comment both sides): the matching comment lives at
+    ``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX`` definition and
+    at ``health.py::_check_dangling_manifests``'s ``status == 404`` branch
+    — all three must name each other so an edit to any one is legible
+    against the others.
+    """
+
+    def test_floor_below_fence_or_allowlist_entry_removed(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION < (0, 1, 62):
+            return  # pre-fence floor: a virgin box still 404s manifest_verify_all()
+
+        gate = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+        text = gate.read_text(encoding="utf-8")
+        assert "engine predates the index-run fence" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} ships "
+            "3cf64d48's manifest/verify routes, so a virgin box's doctor no "
+            "longer takes the pre-fence 404 branch in "
+            "_check_dangling_manifests — delete the ALLOWLIST_REGEX entry "
+            "for 'engine predates the index-run fence' in "
+            "tests/e2e/fresh-install-mvv.sh (nexus-5xn3k.6 "
+            "code-review-expert CRITICAL / substantive-critic SIGNIFICANT, "
+            "2026-08-02) in the SAME change that bumps the floor past "
+            "v0.1.61, or the entry silently outlives its own removal "
+            "trigger — the ac4id vacuity class recurring one arc later."
+        )

@@ -399,6 +399,20 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
     than silent under-work. A ``None`` return (the client's pre-fence-engine
     sentinel, http_catalog_client.py's ``complete_index_run`` docstring) is
     NOT success and must never be read as a stamp having landed.
+
+    nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this is the
+    multi-batch/incremental completion path (streaming PDF, prose past
+    ``_INCREMENTAL_THRESHOLD``) — distinct from ``mcp_infra``'s
+    ``_manifest_write_loop`` / ``_stamp_index_run_complete`` (the flush-grain
+    manifest-hook path, nexus-dcv2k). Both are "the completion stamp was
+    refused" and both feed the SAME ``.6`` summary consumer
+    (``get_complete_refusals()``), so both must record to the same
+    collector. Before this fix, a refusal HERE propagated (correct,
+    fail-loud) but never reached the collector — the record-level summary
+    consumer added in .6 could not see it; only a caller catching
+    ``IndexRunVerifyRefused`` itself would know. Recording here closes that
+    gap without changing the propagation contract at all: the exception
+    still raises unmasked immediately after the record.
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred import: avoids import cycle at module load
@@ -408,6 +422,8 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
         w = make_catalog_writer()
         result = w.complete_index_run(doc_id, content_hash, chunk_count)
     except IndexRunVerifyRefused:
+        from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+        _record_complete_refusal(doc_id)
         raise
     except Exception:
         _log.warning("index_run_complete_write_failed", doc_id=doc_id)

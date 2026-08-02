@@ -155,12 +155,40 @@ fi
 # (level='warning') AND doctor's human-facing soft-warn rows (⚠ — the
 # format_health_for_cli warn=True render, which contains no literal
 # "warning" text and was invisible to the structlog grep alone).
-# nexus-ac4id (2026-08-02): the dangling-manifests check is deliberately
-# DISABLED (its dict-shape crash is the off-switch that keeps its
-# multi-minute full-T3 scan from reviving) and now says so as a visible
-# warn instead of a clean-looking skip. Allowed until the engine-side
-# anti-join redesign lands; remove this entry when ac4id closes.
-ALLOWLIST_REGEX='DISABLED \(nexus-ac4id|doctor_dangling_manifest_check_disabled'
+#
+# nexus-ac4id CLOSED by nexus-5xn3k.6: the dangling-manifests check is
+# re-armed on manifest_verify_all() (one engine call, no client-side T3
+# enumeration) and no longer carries a deliberate DISABLED off-switch.
+#
+# nexus-5xn3k.6 code-review-expert CRITICAL (2026-08-02): the FIRST attempt
+# to remove this allowlist entirely was premature. The PINNED engine
+# (REQUIRED_ENGINE_VERSION = v0.1.61, src/nexus/engine_version.py) PREDATES
+# 3cf64d48 (RUNFENCE .2 — the manifest/verify* engine routes), so a virgin
+# box's freshly-provisioned engine 404s manifest_verify_all() and the
+# re-armed check takes its own fail-open branch: SKIPPED + a soft warning
+# (⚠), not a clean pass. Re-added, scoped to ONLY that detail string — this
+# is the "engine unreachable/pre-fence" fail-open path (health.py's
+# _check_dangling_manifests, memo §3.4 fail-open+WARNING contract), not a
+# revival of the old ac4id off-switch (that text was "DISABLED
+# (nexus-ac4id...", gone for good).
+#
+# GREP-LEVEL PARITY: this pattern must match health.py's literal detail
+# string verbatim (see the matching comment at
+# health.py::_check_dangling_manifests, the `status == 404` branch).
+#
+# REMOVAL TRIGGER: delete this entry once REQUIRED_ENGINE_VERSION names a
+# tag containing 3cf64d48 (v0.1.62 or later) — at that point a virgin box's
+# bundled engine is fence-aware and the check reads clean, not
+# SKIPPED+WARNING. (The 404 fail-open path itself stays exercised forever
+# in tests/test_health_service_checks.py; only THIS journey's allowlist
+# entry for it goes away.)
+#
+# MECHANIZED (substantive-critic SIGNIFICANT, 2026-08-02, T2
+# nexus/5xn3k6-critique-2026-08-02 [21355]): this trigger is no longer
+# prose-only — tests/test_engine_version.py::
+# TestMvvAllowlistDoesNotOutliveItsTrigger reds the moment
+# REQUIRED_ENGINE_VERSION crosses v0.1.62 unless this line is gone.
+ALLOWLIST_REGEX="engine predates the index-run fence"
 if grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" \
         | grep -Ev "$ALLOWLIST_REGEX" | grep -q .; then
     grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" >&2

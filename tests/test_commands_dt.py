@@ -86,7 +86,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         corpus: str,
         dry_run: bool,
         extractor: str = "auto",
-    ) -> bool:
+    ) -> tuple[bool, int]:
         calls.append({
             "uuid": uuid,
             "path": path,
@@ -95,10 +95,10 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "dry_run": dry_run,
             "extractor": extractor,
         })
-        # Default success — tests that want to exercise the
-        # stamp-failed summary path replace the dispatcher with
-        # their own fake.
-        return True
+        # Default success (stamped, chunks=1) — tests that want to exercise
+        # the stamp-failed / unchanged summary paths replace the dispatcher
+        # with their own fake.
+        return True, 1
 
     monkeypatch.setattr("nexus.commands.dt._index_record", record)
     return calls
@@ -558,7 +558,7 @@ class TestStampFailedSummary:
 
         # Dispatcher returns False for the two that should fail to stamp.
         def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto"):
-            return uuid == "U-OK"
+            return uuid == "U-OK", 1
 
         monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
 
@@ -1171,7 +1171,7 @@ class TestLinkSemantic:
         wb_calls: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.dt._index_record",
-            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": uuid == "U-OK",
+            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (uuid == "U-OK", 1),
         )
         monkeypatch.setattr(
             "nexus.commands.dt._link_semantic_record",

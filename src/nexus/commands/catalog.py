@@ -445,6 +445,73 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
 
 
+@catalog.command("manifest-verify")
+@click.argument("tumbler_or_title")
+@click.option("--json", "as_json", is_flag=True)
+def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
+    """Verify one document's RUNFENCE manifest against T3 (nexus-5xn3k.6, design memo §4).
+
+    Checks ``manifest_verify(doc_id)`` — the engine's per-document
+    referenced/present/missing chash aggregate — and reports the document's
+    index-run fence state (``index_state``) alongside it. Unlike `nx
+    doctor`'s corpus-wide sweep (`manifest_verify_all`), this checks ONE
+    document without a full scan — the diagnostic verb for "is THIS
+    document okay," e.g. after `nx doctor` names it as damaged.
+
+    NOT to be confused with ``nx catalog verify`` (nexus-whh61.4, a
+    different, pre-existing command) — that one sweeps the whole catalog
+    for *ghost* tumblers (entries with no matching T3 row) and can
+    ``--heal`` them. This one checks a single document's RUNFENCE
+    manifest completeness; the two verbs are unrelated axes that happen
+    to share the word "verify."
+
+    Read-only: it rewrites nothing. Errors PROPAGATE rather than degrading
+    to a skip — this is a diagnostic tool, not a background health check,
+    so an unreachable engine or a pre-fence 404 must be visible as a
+    failure, never reported as a false-clean result.
+    """
+    cat = _get_catalog()
+    t = _resolve_tumbler(cat, tumbler_or_title)
+    entry = cat.resolve(t)
+    if entry is None:
+        raise click.ClickException(f"Not found: {tumbler_or_title}")
+
+    try:
+        counts = cat.manifest_verify(str(entry.tumbler))
+    except Exception as exc:  # noqa: BLE001 — diagnostic verb: surface the raw failure verbatim, never fail open
+        raise click.ClickException(f"manifest_verify failed: {exc}") from exc
+
+    referenced = int(counts.get("referenced", 0) or 0)
+    present = int(counts.get("present", 0) or 0)
+    missing = int(counts.get("missing", 0) or 0)
+
+    if as_json:
+        click.echo(json.dumps({
+            "tumbler": str(entry.tumbler),
+            "referenced": referenced,
+            "present": present,
+            "missing": missing,
+            "index_state": entry.index_state,
+            "index_content_hash": entry.index_content_hash,
+        }, indent=2))
+        return
+
+    click.echo(f"Tumbler:     {entry.tumbler}")
+    click.echo(f"Title:       {entry.title}")
+    click.echo(f"Index state: {entry.index_state or 'unknown'}")
+    click.echo(f"Referenced:  {referenced}")
+    click.echo(f"Present:     {present}")
+    click.echo(f"Missing:     {missing}")
+    if missing:
+        click.echo(
+            f"\n{missing} of {referenced} manifest chash(es) missing from "
+            f"T3 — this document is DAMAGED."
+        )
+        click.echo("Repair: nx index <path> --force")
+    else:
+        click.echo("\nOK — manifest fully present in T3.")
+
+
 @catalog.command("search")
 @click.argument("query")
 @click.option("--limit", "-n", default=20)

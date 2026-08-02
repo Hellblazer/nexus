@@ -664,6 +664,18 @@ nx catalog show TUMBLER_OR_TITLE [--json]
 
 Full document metadata, physical collection, and all links in and out. Accepts tumblers or titles.
 
+### nx catalog manifest-verify
+
+```
+nx catalog manifest-verify TUMBLER_OR_TITLE [--json]
+```
+
+Verify one document's RUNFENCE manifest against T3 (nexus-5xn3k.6, design memo §4) — a single-document `manifest_verify` call reporting referenced/present/missing chash counts plus the document's index-run fence state (`index_state`). Unlike `nx doctor`'s corpus-wide `manifest_verify_all` sweep, this checks ONE document without a full scan — use it after `nx doctor` names a document as damaged, or any time you want to confirm a specific document's manifest is intact.
+
+Not to be confused with [`nx catalog verify`](#nx-catalog-verify) below (nexus-whh61.4, a pre-existing and unrelated command) — that one sweeps the whole catalog for *ghost* tumblers (entries with no matching T3 row); this one checks a single document's RUNFENCE fence state.
+
+Read-only — it rewrites nothing. Errors propagate rather than degrading to a skip: this is a diagnostic verb, so an unreachable engine or a pre-fence 404 surfaces as a failure, never a false-clean result. On `missing > 0` it prints a DAMAGED verdict and points at `nx index <path> --force` to repair.
+
 ### nx catalog links
 
 ```
