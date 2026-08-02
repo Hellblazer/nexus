@@ -24,15 +24,14 @@ If the critique targets an RDR or architectural artifact, seed link-context so c
 
 ## Model Selection
 
-The substantive-critic agent defaults to **haiku** (fast, cheap). Escalate at dispatch time via the Agent tool's `model` parameter:
+The substantive-critic agent defaults to **sonnet** (its frontmatter pins it; omitting `model` gets sonnet). Escalate at dispatch time via the Agent tool's `model` parameter:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| Single file, focused critique | haiku (default) | README review, small doc, single function |
-| Multi-file or cross-RDR | sonnet | >3 files, plan critique, implementation vs spec |
+| Focused or multi-file critique | sonnet (default) | Docs, plans, implementation vs spec |
 | Cycle-level or architectural | opus | Multi-RDR assessment, system-wide design review |
 
-Pass `model: "sonnet"` or `model: "opus"` on the Agent tool call to override.
+Pass `model: "opus"` on the Agent tool call to escalate. Briefing rigour beats model choice — see `/conexus:code-review` § Prompt Rigour.
 
 ## Agent Invocation
 

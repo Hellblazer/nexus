@@ -4,6 +4,8 @@ Project guidance for AI coding agents working in this repository. `CLAUDE.md` is
 
 Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledge management. Published on PyPI as `conexus`; the CLI entry point is `nx` (`src/nexus/` is the package).
 
+**Guidance precedence:** workflow routing — skills-first, agent dispatch, storage-tier checks, review paths, orchestration — is owned by the conexus plugin's injected guidance (`using-nx-skills` at SessionStart, the subagent-start preflight, the orchestration skill). This file and any personal CLAUDE.md yield to the plugin on workflow; they carry repo facts, hot rules, and durable authorizations. A restriction here that contradicts the plugin's workflow layer is a defect to surface, not a tiebreak to silently win.
+
 ## Quick start
 
 ```bash
@@ -87,24 +89,15 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
-- **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h). Two consecutive sessions concluded the ledger was unavailable and skipped the declaration on that basis — it was available both times.
+- **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h).
   ```bash
   source tests/e2e/lib/expectations.sh                    # in this checkout
   source ~/.claude/plugins/marketplaces/*/conexus/hooks/scripts/expectations.sh   # anywhere else
-  expectations_expect "$SESSION_ID" <subagent-type> background   # BEFORE the dispatch, while the hook is inert
   expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
   expectations_undeclared "$SESSION_ID"  # exit 1 + BLINDSPOT = false-clean, not a pass
   ```
   The two copies are kept byte-identical by `tests/hooks/test_subagent_stop_hook.py`; edit `tests/e2e/lib/expectations.sh` and copy it over, never the reverse.
-  **`nexus-qc4p1` MECHANIZED the EXPECT row** — a PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`, so no agent has to remember any of this. **It is MERGED but INERT**: files under `conexus/` load from the pinned release tag, so it does nothing until the next plugin release (`conexus/PENDING_RELEASE.md`). Check `nexus-qc4p1` for status rather than trusting this paragraph — whether to hand-write changes over time, which is exactly the kind of state a checked-in doc holds badly.
-  While it is inert, keep hand-writing rows, and key them on the **subagent type** — never on an invented name. The Agent tool has NO `name` parameter, so a name-keyed row cannot pair with the `agent_type` that SubagentStart records and is worth nothing (`nexus-nu7fo`: 25 dispatches, zero recognised). **Which copy you source decides the charset, and the two currently disagree.** The colon rule is not one rule:
-
-- **Installed plugin copy** (`~/.claude/plugins/.../conexus/hooks/scripts/expectations.sh`, pinned at the release tag): validator is `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. A colon is REJECTED with rc=2. Verified 2026-07-31 against the live v6.18.1 install.
-- **This checkout** (`tests/e2e/lib/expectations.sh:137` and the `conexus/` copy): `^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$`. The colon is accepted and written verbatim.
-
-At the pinned tag `recognized=0` is therefore PINNED BY CONSTRUCTION, and no dispatch-time discipline can lift it: the start stamp records `agent_type` WITH the colon, while the installed recogniser rejects colon-bearing types outright. Sanitizing gets the row written but it cannot pair; not sanitizing gets the row refused. That is `nexus-nu7fo`'s "structurally unfalsifiable", and it is an accurate description of the shipped state, not a misreading.
-
-The fix is merged on develop and INERT — declared in `conexus/PENDING_RELEASE.md` under `nexus-mk3tw` / `nexus-qc4p1`. Once a release ships it, pass the `subagent_type` **VERBATIM, colon included**, and pairing works: two-arm control against the repo lib, colon EXPECT + colon START → `recognized=1`; dash EXPECT + colon START → `recognized=0 unrecognized=1`. Until then, expect `recognized=0` from the installed copy regardless of what you do, and do not read it as evidence about your own compliance. Once the hook is live, STOP hand-writing: the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable, which is what two sessions failed to find.
+  **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
 ## Workflows
