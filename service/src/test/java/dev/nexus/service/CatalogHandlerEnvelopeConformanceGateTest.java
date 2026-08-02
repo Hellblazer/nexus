@@ -218,6 +218,7 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // ── Owners ────────────────────────────────────────────────────────
         neither("/owners/upsert", "handleOwnerUpsert"),
         collectionExempt("/owners/list", "handleOwnerList", ADMIN_SCALE),
+        collectionExempt("/owners/sweep_next_seq_drift", "handleOwnersSweepNextSeqDrift", ADMIN_SCALE),
         neither("/owners/by_repo", "handleOwnerByRepo"),
         collectionExempt("/owners/by_name", "handleOwnerByName", ADMIN_SCALE),
         neither("/owners/head_hash", "handleOwnerHeadHash"),

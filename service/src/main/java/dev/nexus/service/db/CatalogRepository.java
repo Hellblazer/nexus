@@ -1348,6 +1348,106 @@ public final class CatalogRepository {
     }
 
     /**
+     * One-shot sweep: floor {@code next_seq} for EVERY owner in *tenant* to at least its
+     * own high-water mark (nexus-0ehwe item 5).
+     *
+     * <p><strong>Why this exists on top of the claim-time self-heal.</strong>
+     * {@link #claimNextSeq} floors a drifted owner the moment it is next WRITTEN to — but
+     * an owner that is never registered into again stays drifted forever, invisibly. The
+     * doctor check ({@code _check_next_seq_drift} in {@code src/nexus/health.py}) can only
+     * ever REPORT that; nothing converged it. This sweep is the converge verb: same floor
+     * primitive ({@code max(next_seq, high_water)}, monotonic, tombstone-inclusive,
+     * matching {@code EX_OWN_SEQ_GREATEST}'s guarantee on the ETL path), applied to every
+     * owner in one pass, reporting exactly which owners were actually below their
+     * high-water mark — so the blast radius of a drift incident is KNOWN rather than
+     * guessed (nexus-pbawi's owner 1.12 was found only because an operator happened to
+     * suspect it).
+     *
+     * <p><strong>Concurrency.</strong> The owner list is read in one transaction, then each
+     * owner is probed and floored in its OWN short transaction under {@code SELECT ... FOR
+     * UPDATE} on that owner's row (the same locking discipline as the registration claim
+     * path), so the lock never accumulates across the sweep and a live
+     * {@code registerDocument} blocked on that row waits out one single-owner probe+floor,
+     * not the remainder of the sweep. The floor
+     * itself is the atomic {@code UPDATE ... SET next_seq = GREATEST(next_seq, ?) WHERE
+     * next_seq < ?}: PostgreSQL evaluates both against the row's value AT UPDATE TIME, so a
+     * concurrent {@link #claimNextSeq} that has already advanced {@code next_seq} past the
+     * computed high-water mark makes this a no-op rather than a regression — monotonic,
+     * can-only-raise. Atomicity ACROSS owners is deliberately not provided: each owner's
+     * floor is independently idempotent, and a sweep interrupted midway simply leaves the
+     * owners it already reached healed.
+     *
+     * @return {@code {"checked": int, "healed": int, "owners": [{"tumbler_prefix",
+     *         "next_seq", "high_water", "floored_to"}, ...]}} — {@code owners} lists ONLY
+     *         the owners that were actually drifted (and successfully floored);
+     *         {@code checked} counts owners actually examined (one deleted between the
+     *         list and its probe is skipped and not counted).
+     */
+    public Map<String, Object> sweepNextSeqDrift(String tenant) {
+        List<String> prefixes = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX)
+               .from(CATALOG_OWNERS)
+               .where(CATALOG_OWNERS.TENANT_ID.eq(tenant))
+               .fetch(CATALOG_OWNERS.TUMBLER_PREFIX));
+
+        int checked = 0;
+        List<Map<String, Object>> healed = new ArrayList<>();
+        for (String prefix : prefixes) {
+            Map<String, Object> h = tenantScope.withTenant(tenant,
+                ctx -> sweepOneOwner(ctx, tenant, prefix));
+            if (h == null) continue;   // deleted between the list and its probe — not examined
+            checked++;
+            if (!h.isEmpty()) healed.add(h);
+        }
+
+        log.info("event=next_seq_drift_sweep_summary tenant={} checked={} healed={}",
+            tenant, checked, healed.size());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("checked", checked);
+        result.put("healed", healed.size());
+        result.put("owners", healed);
+        return result;
+    }
+
+    /**
+     * Probe ONE owner and floor it if drifted, inside the caller's (short) transaction.
+     * Returns {@code null} if the owner vanished since it was listed, an empty map if it
+     * was examined and healthy (or lost the floor race to a concurrent claim — no longer
+     * drifted either way), or the healed-owner report row.
+     */
+    private static Map<String, Object> sweepOneOwner(DSLContext ctx, String tenant, String prefix) {
+        // FOR UPDATE before computing high water — the same locking discipline as
+        // registerDocument's claim path, so a concurrent registration cannot land a new
+        // child between the high-water scan and the floor and leave the report stale.
+        Long beforeSeq = ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
+                             .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                    .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(prefix)))
+                             .forUpdate()
+                             .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
+        if (beforeSeq == null) return null;
+
+        long highWater = highestChildSeq(ctx, tenant, prefix);
+        if (highWater <= beforeSeq) return Map.of();   // healthy: not drifted
+
+        int updated = ctx.update(CATALOG_OWNERS)
+            .set(CATALOG_OWNERS.NEXT_SEQ, DSL.greatest(CATALOG_OWNERS.NEXT_SEQ, DSL.val(highWater)))
+            .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(prefix))
+                   .and(CATALOG_OWNERS.NEXT_SEQ.lt(highWater)))
+            .execute();
+        if (updated == 0) return Map.of();   // lost the race to a concurrent claim
+
+        log.warn("event=next_seq_drift_healed_sweep tenant={} owner={} next_seq={} high_water={} floored_to={}",
+            tenant, prefix, beforeSeq, highWater, highWater);
+        Map<String, Object> h = new LinkedHashMap<>();
+        h.put("tumbler_prefix", prefix);
+        h.put("next_seq", beforeSeq);
+        h.put("high_water", highWater);
+        h.put("floored_to", highWater);
+        return h;
+    }
+
+    /**
      * Walk {@code alias_of} from *tumbler* to the canonical document tumbler
      * (nexus-ekaxn). Bounded at {@value #MAX_ALIAS_HOPS} hops and cycle-safe
      * (a visited set, so A→B→A terminates on the row it started from rather

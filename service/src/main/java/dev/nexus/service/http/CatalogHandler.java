@@ -59,6 +59,7 @@ import java.util.*;
  *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
+ *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
  *   GET   /v1/catalog/collections/list   list collections
@@ -165,6 +166,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
                 case "/owners/list"           -> handleOwnerList(exchange, tenant, method);
+                case "/owners/sweep_next_seq_drift" -> handleOwnersSweepNextSeqDrift(exchange, tenant, method);
                 case "/owners/by_repo"        -> handleOwnerByRepo(exchange, tenant, method);
                 case "/owners/by_name"        -> handleOwnerByName(exchange, tenant, method);
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
@@ -1057,6 +1059,21 @@ public final class CatalogHandler implements HttpHandler {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         var owners = repo.listOwners(tenant);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    /**
+     * POST /v1/catalog/owners/sweep_next_seq_drift — the nexus-0ehwe item 5 converge verb.
+     *
+     * <p>Floors every drifted owner's {@code next_seq} in the tenant to its own high-water
+     * mark in one pass and reports which owners were actually below it, so a drift
+     * incident's blast radius is KNOWN rather than guessed (nexus-pbawi's owner 1.12 was
+     * found only because an operator happened to suspect it). No request body is read; the
+     * sweep always covers the whole tenant.
+     */
+    private void handleOwnersSweepNextSeqDrift(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var report = repo.sweepNextSeqDrift(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(report));
     }
 
     private void handleOwnerByRepo(HttpExchange exchange, String tenant, String method) throws IOException {
