@@ -308,9 +308,16 @@ Every step below is **required**. Missing any one of them has caused problems in
    suspect a step-ordering regression before reaching for `--force`
    (AGENTS.md § Cutting a release, step 6).
 
-8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push)
+8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
+   Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
+   state to main (§ Git Workflow above); branching off main would release main's stale tree with
+   new version numbers, omitting everything on develop. Then pre-merge `origin/main` so the
+   always-conflicting release-only files (CHANGELOGs, manifests) are resolved on the branch —
+   a release PR that still conflicts gets NO CI checks (see `.claude/skills/release/SKILL.md`
+   Step 7 for the changelog-union conflict resolution).
    ```bash
-   git checkout main && git pull && git checkout -b release/vX.Y.Z
+   git checkout develop && git pull && git checkout -b release/vX.Y.Z
+   git merge origin/main   # resolve release-only conflicts here, not in the PR
    git add pyproject.toml mcpb/pyproject.toml mcpb/manifest.json uv.lock \
            CHANGELOG.md conexus/CHANGELOG.md \
            conexus/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json \

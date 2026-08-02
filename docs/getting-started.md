@@ -19,7 +19,7 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 
 See the [CLI quick-start in README.md](https://github.com/Hellblazer/nexus/blob/main/README.md#cli-quick-start) for the full install walkthrough: `uv tool install conexus`, `nx init` (embedder choice, **nexus-service** provisioning — the native Postgres + pgvector backend that serves every persistent tier), updating, and verifying with `nx doctor`.
 
-Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document.
+Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document — pre-PG installs need a **two-hop** upgrade via `conexus==6.18.1` (the last migration-capable release); a direct jump to current migrates nothing.
 
 ## Use it (no API keys needed)
 
@@ -210,17 +210,32 @@ nx upgrade                    # 2. converge the data — walks the upgrade ladde
 ```
 
 `nx upgrade` is the single trigger that converges everything else — it brings the
-package, engine, and process preconditions current (provisioning and starting the
-service stack if a legacy footprint needs one to migrate into), then walks one
-ordered ladder that auto-applies whichever data migrations your install actually
-needs: the T2 schema, the ChromaDB → Postgres+pgvector substrate move that 6.0
-introduced, pre-RDR-108 chunk identity, and embedder era. Each rung detects,
-converges, and verifies before recording completion; the walk is resumable and
-idempotent, and your ChromaDB store is left **byte-untouched** as the rollback
-source (copy-not-move). There is nothing to sequence by hand and no era to know —
-an install dormant since 5.x converges the same way a current one no-ops. Use
+package, engine, and process preconditions current, then walks the upgrade
+ladder's remaining data rung (chunk-identity rekey) plus schema convergence via
+the engine's Liquibase changesets. The walk is resumable and idempotent; use
 `nx doctor` to see what is pending, and `nx upgrade --dry-run` to preview without
 changing anything.
+
+**Upgrading from a pre-PG install (5.x, or 6.x that never migrated off
+ChromaDB) is a two-hop path** — the Chroma-era migration machinery was retired
+after its two-release deprecation window (RDR-155/158), and releases past
+6.18.1 no longer carry it. Current releases detect a stranded pre-PG footprint
+at startup and print this exact path, but do NOT block on it, so know it up
+front:
+
+```bash
+uv tool install conexus==6.18.1   # 1. hop to the last migration-capable release
+nx upgrade                        # 2. migrate there: ChromaDB → Postgres+pgvector
+                                  #    (copy-not-move; Chroma left byte-untouched
+                                  #    as the rollback source)
+uv tool upgrade conexus           # 3. hop forward to current and converge the rest
+nx upgrade
+```
+
+Running plain `nx upgrade` on a current release over a pre-PG store migrates
+nothing — searches then look empty because reads target the (empty) PG
+substrate, not your untouched Chroma data. If that happens, nothing is lost:
+follow the two-hop above.
 
 You are asked to decide only what the product cannot derive: **billed
 re-embedding** (an estimate-and-confirm prompt before anything charges — silent

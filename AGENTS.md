@@ -157,8 +157,13 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deplo
 5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
 6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`. The reinstall this drives is genuinely isolated (fixed 2026-07-01, `137d2688`) — it runs cleanly with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses again with a live-holder error, suspect a step-ordering regression (the sandbox `HOME` must be activated *before* the reinstall runs, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
 7. **Commit on a release branch + PR to main** (nexus-mkj6u: replaces direct-to-main convention).
+   Base on **develop** (a release promotes develop to main — hot rule above; a main-based
+   branch releases main's stale tree), then pre-merge `origin/main` to resolve the
+   release-only conflicts on the branch (a conflicting release PR gets NO CI checks —
+   release skill Step 7).
    ```
-   git checkout main && git pull && git checkout -b release/vX.Y.Z
+   git checkout develop && git pull && git checkout -b release/vX.Y.Z
+   git merge origin/main
    <bump all manifests, refresh uv.lock, update CHANGELOGs>
    git commit -m "chore(release): conexus X.Y.Z"
    git push -u origin release/vX.Y.Z

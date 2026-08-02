@@ -137,7 +137,6 @@ consumers query the wrapper, never the matview.
 
 ## Hot rules
 
-- **No ORM.** SQLAlchemy etc. is banned. Direct `sqlite3` only.
-- **WAL mode on open.** Every connection opens with `PRAGMA journal_mode=WAL`. Already centralised — don't override.
-- **Never edit a shipped migration.** If you need to change earlier behaviour, add a corrective migration. Editing breaks every user past that version.
+- **No ORM, and NO new SQLite.** Raw SQL through the engine only. The SQLite substrate this module once carried is DELETED (RDR-158 P4 — see the retirement notes above); new persistent state is a Liquibase changeset in `service/src/main/resources/db/changelog/`, never client-side DDL and never a `sqlite3.connect`. A diff adding either is a review **Critical** (project AGENTS.md hot rule, Hal directive 2026-07-18).
+- **Never edit a shipped Liquibase changeset.** Schema evolution is a NEW changeset (and, for data migrations, an upgrade-ladder rung in `src/nexus/upgrade_ladder/`). Editing a shipped changeset breaks checksum validation on every installed engine past that version.
 - **Pagination must respect `_PAGE = 300`.** When walking a large collection, `offset += 300` in a loop. Same cap on writes (`MAX_RECORDS_PER_WRITE`).
