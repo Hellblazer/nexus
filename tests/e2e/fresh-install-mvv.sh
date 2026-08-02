@@ -188,7 +188,11 @@ fi
 # prose-only — tests/test_engine_version.py::
 # TestMvvAllowlistDoesNotOutliveItsTrigger reds the moment
 # REQUIRED_ENGINE_VERSION crosses v0.1.62 unless this line is gone.
-ALLOWLIST_REGEX="engine predates the index-run fence"
+# TWO surfaces per occurrence: the rendered "⚠ ... SKIPPED (engine predates...)"
+# detail line AND the structlog event line (doctor_dangling_manifest_engine_floor,
+# level=warning) health.py emits alongside it — the 2026-08-02 battery run failed
+# on the event line alone. Both alternatives share the same removal trigger.
+ALLOWLIST_REGEX="engine predates the index-run fence|doctor_dangling_manifest_engine_floor"
 if grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" \
         | grep -Ev "$ALLOWLIST_REGEX" | grep -q .; then
     grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" >&2
