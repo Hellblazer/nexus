@@ -81,7 +81,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # stale default fail-closes the --cold MVV at the version gate. Kept literal (it
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.60}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.61}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -94,8 +94,8 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.60}"
 # happened — so this was a missed trigger being caught up, not fresh debt.
 # Must stay ONE release behind the current identity or the --package-upgrade
 # convergence leg stops testing a realistic hop (nexus-cfgo9).
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.18.0}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.52}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.0.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.60}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product

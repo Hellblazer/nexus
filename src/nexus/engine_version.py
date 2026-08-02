@@ -286,7 +286,7 @@ from __future__ import annotations
 #: NOT EXERCISED: no token rotation was performed on this deploy, so kjjab's
 #: ordering hazard was not tested in production. Rotation is safe from here
 #: because the host now runs 0.1.60; it was NOT safe before it.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 60)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 61)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
