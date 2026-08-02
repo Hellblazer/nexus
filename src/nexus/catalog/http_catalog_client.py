@@ -152,6 +152,14 @@ _REGISTER_MANY_PAGE = 1000
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
+#: Page size for /manifest/docs_for_chashes POSTs — mirrors the engine's
+#: CatalogHandler.MAX_BATCH_DOC_IDS cap on handleDocsForChashes (nexus-uu4b9):
+#: the endpoint had NO client-side cap, so an unbounded chash list (a
+#: superseded-vector sweep or GC pass over a large collection) went straight
+#: into a jOOQ IN toward the 32767 bind-parameter limit and now gets a hard
+#: HTTP 400 instead. Paged and unioned client-side, same shape as the other
+#: *_MANY_PAGE constants above.
+_DOCS_FOR_CHASHES_PAGE = 1000
 
 
 def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
@@ -2244,6 +2252,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         embed_migrate blocks its destructive re-index, and catalog
         doctor must see a hard error rather than a silent partial that
         reads as data corruption.
+
+        nexus-b9puj: same union-guard chain as nexus-ocf52
+        (``docs_for_chashes``), one hop deeper — a page FAILURE (exception)
+        already fails loud, but a silently TRUNCATED page would not, since
+        the fan-out consumers (search_engine, ``docs_for_chashes`` itself)
+        can't otherwise tell "no rows for this doc" apart from "a hop
+        stripped rows off the response". The engine emits ``count``
+        unconditionally (floor >= v0.1.61); the client reconciles
+        ``len(manifests) == count`` per page before merging it in.
         """
         if not doc_ids:
             return {}
@@ -2251,7 +2268,36 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
             batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
             result = self._post("/manifest/get_many", {"doc_ids": batch})
+            result = result if isinstance(result, dict) else {}
             manifests = result.get("manifests", {}) if result else {}
+            manifests = manifests if isinstance(manifests, dict) else {}
+            if "count" not in result:
+                _log.error(
+                    "manifest_get_many_count_missing",
+                    requested=len(batch),
+                    received=len(manifests),
+                    response_keys=sorted(result),
+                )
+                raise RuntimeError(
+                    "manifest/get_many response carried no `count` field — "
+                    "the engine emits it unconditionally (floor >= v0.1.61), "
+                    "so something interposed on the read path; refusing to "
+                    "merge an unverifiable page "
+                    f"(response keys: {sorted(result)})"
+                )
+            count = int(result["count"])
+            if len(manifests) != count:
+                _log.error(
+                    "manifest_get_many_count_mismatch",
+                    requested=len(batch),
+                    received=len(manifests),
+                    count=count,
+                )
+                raise RuntimeError(
+                    f"manifest/get_many truncated: page carries "
+                    f"{len(manifests)} doc_ids but count says {count} — "
+                    "refusing to merge a partial page"
+                )
             for did, rows in manifests.items():
                 merged[did] = [_manifest_row_from_dict(r) for r in rows]
         return merged
@@ -2299,6 +2345,24 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         established that the wire values must match the engine's EXACT-match
         ``F_CHK_CHASH.in(chashes)`` semantics — that now means full width,
         the same width the manifest stores.)
+
+        nexus-ocf52: the round-1 response is count-reconciled BEFORE any
+        early-out — this is the superseded-vector sweep's union guard (a
+        chash is hard-deleted from T3 iff no tumbler here references it), so
+        a partially-delivered ``tumblers`` list would silently destroy a
+        live shared row. A missing ``count`` field (floor >= v0.1.61, which
+        emits it unconditionally) means a field-stripping hop interposed —
+        refuse rather than hand the sweep an unverifiable reference set. The
+        guard runs per PAGE, before any tumblers accumulate into the return
+        value, so a stripped-field EMPTY response fails loud rather than
+        slipping through indistinguishable from a genuine "nothing found".
+
+        nexus-uu4b9: paged at :data:`_DOCS_FOR_CHASHES_PAGE` — the engine
+        caps this endpoint at the same ``MAX_BATCH_DOC_IDS`` = 1000 as the
+        other batch endpoints (it previously had no cap at all). Each page
+        is reconciled independently; the resulting tumblers are unioned
+        (deduplicated, no particular order — every consumer treats this as
+        a set of doc ids that reference the chash).
         """
         if not chashes:
             return {}
@@ -2308,14 +2372,51 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 prefix_to_inputs[c].append(c)
         if not prefix_to_inputs:
             return {}
-        result = self._post(
-            "/manifest/docs_for_chashes", {"chashes": list(prefix_to_inputs.keys())}
-        )
-        # Handler returns {"tumblers": [tumbler_string, ...]} — flat, not per-chash.
-        tumblers = result.get("tumblers", []) if result else []
+        unique_chashes = list(prefix_to_inputs.keys())
+        tumblers: set[str] = set()
+        for start in range(0, len(unique_chashes), _DOCS_FOR_CHASHES_PAGE):
+            batch = unique_chashes[start : start + _DOCS_FOR_CHASHES_PAGE]
+            result = self._post("/manifest/docs_for_chashes", {"chashes": batch})
+            result = result if isinstance(result, dict) else {}
+            # Handler returns {"tumblers": [tumbler_string, ...], "count": N}
+            # — flat, not per-chash.
+            batch_tumblers = result.get("tumblers", []) if result else []
+            batch_tumblers = (
+                batch_tumblers if isinstance(batch_tumblers, list) else []
+            )
+            if "count" not in result:
+                _log.error(
+                    "manifest_docs_for_chashes_count_missing",
+                    requested=len(batch),
+                    received=len(batch_tumblers),
+                    response_keys=sorted(result),
+                )
+                raise RuntimeError(
+                    "manifest/docs_for_chashes response carried no `count` "
+                    "field — the engine emits it unconditionally (floor >= "
+                    "v0.1.61), so something interposed on the read path; "
+                    "refusing to hand the superseded-vector sweep an "
+                    f"unverifiable reference set (response keys: {sorted(result)})"
+                )
+            count = int(result["count"])
+            if len(batch_tumblers) != count:
+                _log.error(
+                    "manifest_docs_for_chashes_count_mismatch",
+                    requested=len(batch),
+                    received=len(batch_tumblers),
+                    count=count,
+                )
+                raise RuntimeError(
+                    f"manifest/docs_for_chashes truncated: page carries "
+                    f"{len(batch_tumblers)} tumblers but count says {count} "
+                    "— a partial reference set could make the "
+                    "superseded-vector sweep delete a still-referenced "
+                    "chunk; refusing"
+                )
+            tumblers.update(batch_tumblers)
         if not tumblers:
             return {}
-        manifests = self.get_manifests(tumblers)  # {doc_id: [ManifestRow, ...]}
+        manifests = self.get_manifests(list(tumblers))  # {doc_id: [ManifestRow, ...]}
         wanted_prefixes = set(prefix_to_inputs.keys())
         prefix_to_docs: dict[str, list[str]] = defaultdict(list)
         for doc_id, rows in manifests.items():

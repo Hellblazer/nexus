@@ -503,12 +503,16 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/manifest/purge":
             self._send_json({"deleted": 1})
         elif op == "/manifest/get_many":
-            self._send_json({"manifests": {
+            manifests = {
                 "1.1.1": [{"position": 0, "chash": CHASH_A, "line_start": 1, "line_end": 9}],
-            }})
+            }
+            self._send_json({"manifests": manifests, "count": len(manifests)})
         elif op == "/manifest/docs_for_chashes":
-            # Real server: {"tumblers": [tumbler_string, ...]} (flat list, SELECT DISTINCT)
-            self._send_json({"tumblers": ["1.1.1"]})
+            # Real server: {"tumblers": [tumbler_string, ...], "count": N}
+            # (flat list, SELECT DISTINCT) — count reconciled client-side
+            # since v0.1.61 (nexus-ocf52).
+            tumblers = ["1.1.1"]
+            self._send_json({"tumblers": tumblers, "count": len(tumblers)})
         elif op == "/manifest/backfill":
             self._send_json({"stamped": 7})
         elif op == "/owners/upsert":
@@ -1045,11 +1049,10 @@ class TestHttpCatalogClientRoundTrip:
             assert path == "/manifest/get_many"
             batch = body["doc_ids"]
             posts.append(batch)
-            return {
-                "manifests": {
-                    did: [{"chash": CHASH_A, "position": 0}] for did in batch
-                }
+            manifests = {
+                did: [{"chash": CHASH_A, "position": 0}] for did in batch
             }
+            return {"manifests": manifests, "count": len(manifests)}
 
         client._post = _fake_post  # type: ignore[method-assign]
         merged = client.get_manifests(doc_ids)
@@ -1077,17 +1080,66 @@ class TestHttpCatalogClientRoundTrip:
             calls.append(len(body["doc_ids"]))
             if len(calls) == 2:  # second page (doc-1000..doc-1999) fails
                 raise RuntimeError("transient 502")
-            return {
-                "manifests": {
-                    did: [{"chash": CHASH_A, "position": 0}]
-                    for did in body["doc_ids"]
-                }
+            manifests = {
+                did: [{"chash": CHASH_A, "position": 0}]
+                for did in body["doc_ids"]
             }
+            return {"manifests": manifests, "count": len(manifests)}
 
         client._post = _fake_post  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="transient 502"):
             client.get_manifests(doc_ids)
         assert calls == [1000, 1000]  # stopped at the failing page
+
+    def test_get_manifests_missing_count_raises(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # nexus-b9puj: the engine emits `count` unconditionally (floor >=
+        # v0.1.61) — a response without it means a field-stripping hop
+        # interposed, so the client refuses to merge an unverifiable page.
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            return {"manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]}}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="count"):
+            client.get_manifests(["1.1.1"])
+
+    def test_get_manifests_fewer_than_requested_with_honest_count_is_legal(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # substantive-critic pin (ocf52 wave, 2026-08-02): `count` is the
+        # size of the RETURNED map (CatalogHandler.java builds it from
+        # manifests.size() at serialization), NOT the size of the requested
+        # batch — doc_ids with no manifest rows are legitimately absent.
+        # A "simplification" that compares count against len(batch) would
+        # pass every 1:1 test in this file and break six production call
+        # sites the first time a batch contains a manifest-less doc. This
+        # test is the tripwire: fewer-than-requested + honest count must
+        # NOT raise and must return exactly what the engine sent.
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            return {
+                "manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]},
+                "count": 1,
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        result = client.get_manifests(["1.1.1", "1.1.2"])
+        assert set(result) == {"1.1.1"}
+
+    def test_get_manifests_mismatched_count_raises(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # A truncated page (fewer manifests than the server's own count)
+        # must never be merged silently.
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            return {
+                "manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]},
+                "count": 2,
+            }
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="doc_ids"):
+            client.get_manifests(["1.1.1", "1.1.2"])
 
     def test_resolve_many_pages_over_1000_doc_ids(
         self, client: HttpCatalogClient
