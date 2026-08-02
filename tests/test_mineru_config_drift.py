@@ -334,3 +334,24 @@ def test_spawn_records_version_and_interpreter(tmp_path: Path) -> None:
     src = inspect.getsource(_mineru_spawn)
     assert '"mineru_version"' in src, "spawn must stamp the mineru version"
     assert '"python": sys.executable' in src, "spawn must stamp the interpreter"
+
+
+def test_virtual_vram_unit_is_gb_and_sane() -> None:
+    """MINERU_VIRTUAL_VRAM_SIZE is in GB — mineru's get_vram() returns it raw
+    and compares against a GB batch-ratio ladder (>=8 -> 4, >=16 -> 8, ...).
+
+    nexus-xyk9o (2026-08-02): the value "8192" (an MB-looking figure) read as
+    8192 GB, selected the maximum MFR batch ratio, and every server generation
+    was silently memory-killed mid formula batch — the whole election/
+    rediscovery ladder then worked as designed while every server it spawned
+    died on the first formula-dense window. Pin the value to a figure that is
+    only plausible as GB so a unit regression cannot re-ship quietly.
+    """
+    from nexus._mineru_spawn import _server_env
+
+    vram = int(_server_env(Path("/tmp"))["MINERU_VIRTUAL_VRAM_SIZE"])
+    assert 1 <= vram <= 64, (
+        f"MINERU_VIRTUAL_VRAM_SIZE={vram}: not plausible as a GB budget — "
+        "mineru reads this raw in GB; an MB-unit value maxes the MFR batch "
+        "ratio and gets the server OOM-killed (nexus-xyk9o)"
+    )
