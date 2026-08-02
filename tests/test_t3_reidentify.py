@@ -188,6 +188,9 @@ class TestReidentifyCollection:
                 "corpus": "knowledge",
                 "store_type": "knowledge",
                 "expires_at": "",
+                # nexus-1oguj: extraction_method is now canonical (not
+                # cargo) — asserted preserved below, not in the
+                # cargo-dropped loop.
                 "extraction_method": "docling",
                 "format": "markdown",
                 "is_image_pdf": False,
@@ -206,7 +209,7 @@ class TestReidentifyCollection:
         assert meta["chunk_text_hash"] == "c" * 64
         # Cargo dropped by canonical normalize.
         for cargo_key in (
-            "corpus", "store_type", "expires_at", "extraction_method",
+            "corpus", "store_type", "expires_at",
             "format", "is_image_pdf", "has_formulas", "page_count",
             "chunk_type", "source_path",
             "doc_id", "chunk_index", "chunk_count",
@@ -218,6 +221,7 @@ class TestReidentifyCollection:
         # Canonical fields preserved.
         assert meta.get("title") == "old-paper"
         assert meta.get("content_type") == "pdf"
+        assert meta.get("extraction_method") == "docling"
         # nexus-2exh review caveat #3: lock the per-row metadata
         # quota bound. ChromaDB Cloud rejects records whose metadata
         # has more than 32 keys (NumMetadataKeys quota); the canonical

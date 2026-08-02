@@ -601,9 +601,10 @@ class TestPipelineIndexPdf:
                 m = a[2][0]
                 assert m["title"] == "My Paper Title"
                 assert m["source_author"] == "Jane Doe"
-                # extraction_method is dropped by normalize() — not in
-                # ALLOWED_TOP_LEVEL since no read site uses it.
-                assert "extraction_method" not in m
+                # nexus-1oguj: the post-pass also backfills the extractor
+                # identity from ExtractionResult.metadata once extraction
+                # completes — ``_er()`` defaults to "docling".
+                assert m["extraction_method"] == "docling"
                 break
         else:
             pytest.fail("metadata enrichment post-pass not called")

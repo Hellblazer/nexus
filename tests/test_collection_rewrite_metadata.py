@@ -40,7 +40,7 @@ def _legacy_meta(**overrides):
         "store_type": "pdf",
         "indexed_at": "2026-01-01T00:00:00+00:00",  # cargo
         "format": "pdf",                             # cargo
-        "extraction_method": "docling",              # cargo
+        "extraction_method": "docling",              # nexus-1oguj: canonical, kept
         "page_count": 5,                             # cargo
         "git_project_name": "myproj",                # → git_meta
         "git_branch": "main",                        # → git_meta
@@ -136,7 +136,8 @@ def test_rewrite_drops_cargo_and_legacy_git_keys() -> None:
     # indexed_at is canonical (paired with ttl_days for derived expiry).
     assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
     assert "format" not in written
-    assert "extraction_method" not in written
+    # nexus-1oguj: extraction_method is canonical (not cargo) — preserved.
+    assert written["extraction_method"] == "docling"
     assert written["content_type"]
 
 

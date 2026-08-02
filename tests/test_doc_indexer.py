@@ -532,11 +532,26 @@ _BASE_REQUIRED_FIELDS = {
     "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
 }
 # pdf_subject / pdf_keywords / is_image_pdf / has_formulas / format /
-# extraction_method / page_count / source_date are intentionally NOT in
-# ALLOWED_TOP_LEVEL — normalize() drops them. They were never stored
-# in T3 even before the factory refactor; the old test asserted on the
-# pre-normalize dict shape. After the factory, normalize runs inside
-# the indexer so the dropped fields are visible-as-missing.
+# page_count / source_date are intentionally NOT in ALLOWED_TOP_LEVEL —
+# normalize() drops them. They were never stored in T3 even before the
+# factory refactor; the old test asserted on the pre-normalize dict
+# shape. After the factory, normalize runs inside the indexer so the
+# dropped fields are visible-as-missing.
+#
+# extraction_method (nexus-1oguj) IS in ALLOWED_TOP_LEVEL, but is
+# deliberately NOT asserted here: with _STREAMING_THRESHOLD=0 every
+# openable PDF (like this test's simple_pdf) routes through
+# pipeline_stages.pipeline_index_pdf, which writes chunks with
+# extraction_method empty at initial-upload time (dropped by
+# normalize()) and backfills the real value via the
+# _enrich_metadata_from_extraction POST-PASS (a separate
+# ``t3.update_chunks`` call this test's bare-MagicMock ``mock_col.get``
+# does not simulate). Asserting the field here would require faithfully
+# modelling that round-trip; the field's presence is instead verified
+# end-to-end by test_pipeline_stages.py::test_metadata_enrichment_postpass
+# (streaming path, real fake-engine round-trip) and
+# test_index_sets_content_type below (the batch-path fallback, which
+# sets it at initial-write time via _pdf_chunks).
 _PDF_EXTRA_FIELDS: set[str] = set()
 
 
@@ -634,6 +649,13 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
     # RDR-101 Phase 5c: ``store_type`` dropped from chunk schema;
     # ``content_type`` is the canonical routing field.
     assert captured[0]["content_type"] == expected_type
+    # nexus-1oguj: the extractor identity from ExtractionResult.metadata
+    # is threaded through to the written chunk for PDFs; markdown never
+    # sets it (no extractor involved), so normalize() drops the key.
+    if indexer == "pdf":
+        assert captured[0]["extraction_method"] == "x"
+    else:
+        assert "extraction_method" not in captured[0]
 
 
 @pytest.mark.parametrize("has_fm,fm_text,body,expected_start,expected_end", [

@@ -124,10 +124,13 @@ class TestPdfChunksMetadata:
             assert "corpus" not in meta
             assert "git_meta" not in meta
             assert meta["content_hash"] == content_hash
-            # page_count + extraction_method are dropped by normalize() —
-            # not in ALLOWED_TOP_LEVEL.
+            # page_count is dropped by normalize() — not in ALLOWED_TOP_LEVEL.
             assert "page_count" not in meta
-            assert "extraction_method" not in meta
+            # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL and is
+            # threaded from ExtractionResult.metadata — simple_pdf is
+            # docling-extracted (or falls back to pymupdf_normalized on a
+            # cold docling model cache).
+            assert meta["extraction_method"] in ("docling", "pymupdf_normalized")
             # RDR-108 Phase 3 (nexus-bdag): chunk_count / chunk_index /
             # doc_id retired from chunk metadata. Catalog manifest carries
             # the document-to-chunk binding instead.

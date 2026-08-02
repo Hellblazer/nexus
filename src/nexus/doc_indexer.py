@@ -1462,6 +1462,7 @@ def _pdf_chunks(
             bib_authors=bib.get("authors", ""),
             bib_venue=bib.get("venue", ""),
             bib_citation_count=bib.get("citation_count", 0),
+            extraction_method=result.metadata.get("extraction_method", ""),
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared

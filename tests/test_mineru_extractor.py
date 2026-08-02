@@ -39,6 +39,26 @@ class TestMineruBuildResult:
         assert isinstance(result, ExtractionResult)
         assert result.metadata["extraction_method"] == "mineru"
 
+    def test_extraction_method_is_pure_mineru_with_zero_degraded_pages(self, dummy_pdf):
+        """nexus-1oguj: an explicit degraded_page_count=0 (the default)
+        still reports the bare 'mineru' value — no false-positive
+        degradation flag."""
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "# Title", [], [{"page_idx": 0, "para_blocks": []}],
+            degraded_page_count=0,
+        )
+        assert result.metadata["extraction_method"] == "mineru"
+
+    def test_extraction_method_reflects_docling_degradation(self, dummy_pdf):
+        """nexus-1oguj: when RDR-148 Gap 5's per-page OOM-degrade fired at
+        least once, the recorded extraction_method must be the honest
+        mixed aggregate, not a bare 'mineru' that overstates coverage."""
+        result = PDFExtractor._mineru_build_result(
+            dummy_pdf, "# Title", [], [{"page_idx": 0, "para_blocks": []}],
+            degraded_page_count=1,
+        )
+        assert result.metadata["extraction_method"] == "mineru+docling-degraded"
+
     def test_text_passed_through(self, dummy_pdf):
         md = "# My Paper\n\nBody text."
         result = PDFExtractor._mineru_build_result(

@@ -282,8 +282,11 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 
     docs = sorted(seen.values(), key=lambda d: d.get("title") or "")
     click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
-    # extraction_method / page_count not in ALLOWED_TOP_LEVEL — normalize()
-    # drops them so the reads always returned empty. Removed in nexus-59j0.
+    # page_count is not in ALLOWED_TOP_LEVEL — normalize() drops it so the
+    # read always returned empty; removed in nexus-59j0. nexus-1oguj later
+    # promoted extraction_method to canonical, but this compact list table
+    # wasn't extended to show it (`nx store get` displays the per-chunk
+    # value — see its display path).
     for i, d in enumerate(docs, 1):
         title = (d.get("title") or "untitled")[:60]
         chunks = d.get("chunk_count", "?")
@@ -323,6 +326,11 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
+        # nexus-1oguj: mirrors the MCP store_get display (mcp/core.py) —
+        # extraction_method is canonical for PDF chunks now; absent for
+        # non-PDF chunks and for chunks indexed before the fix shipped
+        # (new-writes-only, no backfill; nexus-0qc4b).
+        extraction_method = entry.get("extraction_method", "")
         click.echo(f"ID:         {entry['id']}")
         click.echo(f"Collection: {col_name}")
         if title:
@@ -331,6 +339,8 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
             click.echo(f"Tags:       {tags}")
         if indexed_at:
             click.echo(f"Indexed:    {indexed_at}")
+        if extraction_method:
+            click.echo(f"Extractor:  {extraction_method}")
         click.echo(f"\n{entry.get('content', '')}")
 
 

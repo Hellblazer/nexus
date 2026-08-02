@@ -74,7 +74,6 @@ def test_cargo_keys_not_allowed() -> None:
         "pdf_keywords",
         "source_date",
         "format",
-        "extraction_method",
         "chunk_type",
         "filename",
         "file_extension",
@@ -109,12 +108,10 @@ def test_normalize_drops_unknown_keys() -> None:
         "content_hash": "abc",
         "chunk_text_hash": "def",
         "pdf_subject": "should drop",
-        "extraction_method": "should drop",
         "ast_chunked": True,
     }
     out = normalize(raw, content_type="pdf")
     assert "pdf_subject" not in out
-    assert "extraction_method" not in out
     assert "ast_chunked" not in out
     assert "source_path" not in out, (
         "RDR-102 D2: source_path is no longer in ALLOWED_TOP_LEVEL; "

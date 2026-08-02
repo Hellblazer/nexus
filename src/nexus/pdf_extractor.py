@@ -848,6 +848,12 @@ class PDFExtractor:
         # OOM retry loop appends per-page entries directly; batch-mode
         # appends one entry covering the batch span.
         per_page_lengths: list[tuple[int, int]] = []
+        # nexus-1oguj: pages that fell back to docling via the Gap 5
+        # degrade-to-docling path (formula-OOM). Non-empty means the
+        # document's extraction_method is the honest mixed aggregate
+        # "mineru+docling-degraded" rather than a bare "mineru" that
+        # would silently overstate MinerU's actual coverage.
+        degraded_pages: list[int] = []
 
         def _append_page(
             page: int, md: str, content_list: list[dict], pdf_info: list[dict],
@@ -902,6 +908,7 @@ class PDFExtractor:
                             pdf_path, s, total_pages, fname,
                         )
                         _append_page(s, d_md, d_cl, d_pi)
+                        degraded_pages.append(s)
                         return
                     raise
                 mid = s + span // 2
@@ -941,6 +948,7 @@ class PDFExtractor:
             pdf_path, md_text, all_content_list, all_pdf_info,
             per_page_lengths=per_page_lengths,
             formula_count_floor=formula_count,
+            degraded_page_count=len(degraded_pages),
         )
 
     def _probe_mineru_health(self, base_url: str) -> tuple[bool, str]:
@@ -1412,6 +1420,7 @@ class PDFExtractor:
         *,
         per_page_lengths: list[tuple[int, int]] | None = None,
         formula_count_floor: int = 0,
+        degraded_page_count: int = 0,
     ) -> ExtractionResult:
         """Assemble an ExtractionResult from (merged) MinerU outputs.
 
@@ -1429,6 +1438,13 @@ class PDFExtractor:
         returned content_list=[] under degraded conditions), the
         recomputed formula_count would otherwise be 0, breaking the
         ``has_formulas`` flag downstream for confirmed math papers.
+
+        *degraded_page_count* (nexus-1oguj): number of pages that fell
+        back to docling via the Gap 5 per-page OOM-degrade path. A bare
+        ``extraction_method="mineru"`` would overstate coverage when even
+        one page was actually docling-rendered (formulas stripped), so
+        any degradation flips the recorded value to the honest aggregate
+        ``"mineru+docling-degraded"``.
         """
         display_count = sum(1 for e in content_list if e.get("type") == "equation")
 
@@ -1491,10 +1507,13 @@ class PDFExtractor:
                 path=str(pdf_path),
             )
 
+        extraction_method = (
+            "mineru+docling-degraded" if degraded_page_count > 0 else "mineru"
+        )
         return ExtractionResult(
             text=md_text,
             metadata={
-                "extraction_method": "mineru",
+                "extraction_method": extraction_method,
                 "page_count": page_count,
                 "format": "markdown",
                 "formula_count": formula_count,

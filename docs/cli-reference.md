@@ -21,7 +21,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead). Reranking runs SERVER-side (RDR-188): the engine scores candidates (Voyage rerank-2.5, or the local ms-marco cross-encoder without a Voyage key); a degraded rerank is reported on stderr and results fall back to distance order |
-| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Range operators (`>=`, `<=`, `>`, `<`) auto-coerce an unambiguous numeric literal to a number for ANY field (numeric compare; JSON-string metadata values will not match a numeric operand); quote the value (`--where "created>='2026-01-01'"`) to force an ordered-STRING compare (correct for ISO dates; beware `'9' > '10'` lexically). Equality/`!=` coerce only the known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`). Example: `--where bib_year>=2024 --where section_type!=references` |
+| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Range operators (`>=`, `<=`, `>`, `<`) auto-coerce an unambiguous numeric literal to a number for ANY field (numeric compare; JSON-string metadata values will not match a numeric operand); quote the value (`--where "created>='2026-01-01'"`) to force an ordered-STRING compare (correct for ISO dates; beware `'9' > '10'` lexically). Equality/`!=` coerce only the known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`). Example: `--where bib_year>=2024 --where section_type!=references`. Repeating the same key with `=` for two DIFFERENT values (`--where k=a --where k=b`) is a caller error, not an OR — no record can equal both — and raises loudly instead of silently keeping the last value; scope "any of several exact values" as two queries unioned client-side (single-key `$in` tracked as nexus-4gzc8; see [PDF Extraction Backends](#pdf-extraction-backends) for a worked `extraction_method` example) |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
 | `-A N` | Show N lines of context after each matching line (within chunk) |
@@ -184,6 +184,35 @@ aggressively, so set it generously (several GB).
 nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)
 nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not installed)
 ```
+
+**Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
+PDF chunk's metadata carries which backend actually produced its text:
+`docling` | `mineru` | `pymupdf_normalized`, or the honest mixed aggregate
+`mineru+docling-degraded` when `--on-formula-oom docling` degraded at least
+one page of an otherwise-MinerU document. This is what makes an extractor
+regression scopeable after the fact (e.g. "which documents did MinerU
+extract, so I can re-index just those").
+
+```bash
+nx search "" --corpus knowledge --where extraction_method=mineru --files
+```
+
+- **Scoping "any mineru-touched document" is two queries today, not one.**
+  `--where` equality has no single-key OR/`$in` yet (repeating the same key
+  with different values is a caller error and now raises loudly — see
+  `--where` above) — `mineru` and `mineru+docling-degraded` are two distinct
+  exact values. Run one query per value and union the results client-side:
+  `--where extraction_method=mineru` and
+  `--where extraction_method=mineru+docling-degraded` separately. Single-key
+  `$in` support is tracked as nexus-4gzc8.
+- **Absence of the key is not evidence of "not mineru."** `extraction_method`
+  is a NEW-WRITES-ONLY field — chunks indexed before this fix carry no such
+  key at all, so `--where extraction_method!=mineru` (or any filter that
+  relies on the key's absence meaning "some other extractor") silently
+  conflates "known non-mineru" with "indexed before this field existed."
+  There is no backfill for pre-fix chunks (re-extraction would be required
+  to recover the value honestly); treat a missing key as *unknown*, never as
+  a negative result. Tracked as nexus-0qc4b.
 
 ---
 

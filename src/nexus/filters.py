@@ -83,7 +83,11 @@ def parse_where(
     or merged into a flat dict for simple equality filters.
     Returns ``None`` when *pairs* is empty.
 
-    Raises ``ValueError`` on invalid format or empty values.
+    Raises ``ValueError`` on invalid format, empty values, or a repeated
+    equality key (``k=a`` + ``k=b``) — no record can equal two different
+    values, so this is never a legitimate AND; scope "any of several
+    exact values" as two queries unioned client-side (single-key ``$in``
+    support tracked as nexus-4gzc8).
     """
     if not pairs:
         return None
@@ -112,9 +116,38 @@ def parse_where(
     if len(parts) == 1:
         return parts[0]
     if all(not isinstance(v, dict) for p in parts for v in p.values()):
+        # nexus-1oguj review / nexus-4gzc8: a naive dict.update() here
+        # silently overwrites on a repeated equality key — `--where k=a
+        # --where k=b` used to land on k=b with zero signal that k=a was
+        # ever requested (e.g. scoping extraction_method=mineru AND
+        # extraction_method=mineru+docling-degraded, which is not an AND
+        # at all — no chunk can equal both). ChromaDB's equality filter
+        # has no single-key OR/$in at this layer yet (tracked as
+        # nexus-4gzc8); today the correct way to scope "any of several
+        # exact values for one key" is two separate queries unioned
+        # client-side. Fail loud instead of silently keeping the last
+        # value.
         merged: dict = {}
         for p in parts:
-            merged.update(p)
+            for key, value in p.items():
+                if key in merged and merged[key] != value:
+                    raise ValueError(
+                        f"duplicate --where key {key!r} with different "
+                        f"values: {merged[key]!r} and {value!r}. "
+                        "A single equality filter can only match one "
+                        "value per key — this is not an AND (no record "
+                        "can equal both). To scope 'any of several exact "
+                        f"values for {key!r}', run two queries (one per "
+                        "value) and union the results client-side; "
+                        "single-key $in support is tracked as nexus-4gzc8."
+                    )
+                if key in merged:
+                    raise ValueError(
+                        f"duplicate --where key {key!r} repeated with "
+                        f"the same value {value!r} — remove the "
+                        "redundant --where clause."
+                    )
+                merged[key] = value
         return merged
     return {"$and": parts}
 

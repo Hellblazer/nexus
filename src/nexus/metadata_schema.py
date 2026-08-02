@@ -105,12 +105,23 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # provenance JSON blob): zero non-self-referential readers in
     # src/. Catalog Document carries source git provenance at the
     # document level.
-    # Provenance (1) — RDR-139 Layer D. How the chunk's text was sourced:
+    # Provenance (2) — RDR-139 Layer D. How the chunk's text was sourced:
     # ``file`` (on-disk file, the default) | ``dt_content`` | ``dt_ocr`` |
     # ``dt_transcribe`` (DEVONthink-extracted, for non-file-backed records).
     # ``normalize`` drops the ``file`` default (absent == file) so only
     # DT-sourced chunks spend the extra key — file chunks stay under the cap.
     "extraction_source",
+    # nexus-1oguj: which PDF-extraction BACKEND actually produced this
+    # chunk's text (``docling`` | ``mineru`` | ``pymupdf_normalized``, or
+    # the honest degraded-aggregate ``mineru+docling-degraded`` when
+    # RDR-148 Gap 5's per-page OOM-degrade fired at least once for this
+    # document). Load-bearing for retroactively scoping extractor
+    # regressions (e.g. nexus-gtltb's mineru-corruption blast radius) —
+    # previously produced at extraction time and asserted in tests but
+    # discarded before storage. Empty for non-PDF content_types
+    # (markdown/code/prose never pass this kwarg); ``normalize`` drops
+    # the empty default so those chunks stay under the cap.
+    "extraction_method",
 })
 
 #: Allowed content_type values. Replaces the old overlapping pair
@@ -121,10 +132,15 @@ CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 #: QUOTAS.MAX_RECORD_METADATA_KEYS`). Any write producing more than this
 #: many keys raises :class:`MetadataSchemaError`. RDR-101 Phase 3 PR δ
 #: bumped this to 32 to admit the new ``doc_id`` field; RDR-102 D2 then
-#: dropped ``source_path`` from the schema (one-key headroom restored,
-#: schema sits at 31 of 32). The ``bib_*`` placeholder-drop and
-#: ``git_meta``-omitted-when-empty filters in :func:`normalize` keep
-#: typical chunks well under the cap (no-bib + no-git ≈ 25 keys).
+#: dropped ``source_path``, and RDR-101 Phase 5c / RDR-108 Phase 3 dropped
+#: ``corpus``, ``store_type``, ``git_meta``, ``doc_id``, ``chunk_index``,
+#: ``chunk_count`` — nexus-1oguj then ADDED ``extraction_method`` back in
+#: as canonical (not cargo). ``ALLOWED_TOP_LEVEL`` sits at 27 of 32 today
+#: (verify via ``len(ALLOWED_TOP_LEVEL)`` — this comment drifts, the code
+#: doesn't). The ``bib_*`` placeholder-drop and ``extraction_source`` /
+#: ``extraction_method`` omitted-when-empty filters in :func:`normalize`
+#: keep typical chunks well under the cap (no-bib + no-git + no-DT-source
+#: + non-PDF ≈ 20 keys).
 MAX_SAFE_TOP_LEVEL_KEYS: int = 32
 
 #: Git provenance sub-keys — packed into ``git_meta`` as a JSON string.
@@ -213,6 +229,13 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
     # common file-backed chunk stays one key under the cap.
     if normalised.get("extraction_source", "file") in ("", "file"):
         normalised.pop("extraction_source", None)
+
+    # Step 2d: drop the nexus-1oguj extraction_method key when empty.
+    # Only PDF chunks pass a real value (docling / mineru /
+    # pymupdf_normalized / mineru+docling-degraded); markdown/code/prose
+    # chunks never set it and must not spend a metadata slot on "".
+    if not normalised.get("extraction_method", ""):
+        normalised.pop("extraction_method", None)
 
     # Step 3: stamp content_type.
     normalised["content_type"] = content_type
@@ -304,6 +327,10 @@ def make_chunk_metadata(
     session_id: str = "",
     # Provenance — RDR-139 Layer D. ``file`` default is dropped by normalize.
     extraction_source: str = "file",
+    # Provenance — nexus-1oguj. Which PDF extractor produced the chunk's
+    # text. Empty default is dropped by normalize; only PDF callers pass
+    # a real value.
+    extraction_method: str = "",
 ) -> dict[str, Any]:
     """Build a complete chunk metadata dict and route through
     :func:`normalize` so it's safe to write directly to T3.
@@ -342,6 +369,7 @@ def make_chunk_metadata(
         "source_agent": source_agent,
         "session_id": session_id,
         "extraction_source": extraction_source,
+        "extraction_method": extraction_method,
     }
     return normalize(raw, content_type=content_type)
 

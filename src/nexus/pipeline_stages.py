@@ -957,15 +957,21 @@ def _enrich_metadata_from_extraction(
         or pdf_path.stem.replace("_", " ").replace("-", " ")
     )
 
-    # Only `title` and `source_author` are in ALLOWED_TOP_LEVEL — the
-    # other fields below (source_date, extraction_method, format,
-    # page_count, pdf_subject, pdf_keywords, is_image_pdf, has_formulas)
-    # are dropped by metadata_schema.normalize() so writing them costs
-    # cycles for no payload. Keep this dict minimal.
+    # `title`, `source_author`, and (nexus-1oguj) `extraction_method` are
+    # the only extraction-dependent fields in ALLOWED_TOP_LEVEL — the
+    # other fields below (source_date, format, page_count, pdf_subject,
+    # pdf_keywords, is_image_pdf, has_formulas) are dropped by
+    # metadata_schema.normalize() so writing them costs cycles for no
+    # payload. Keep this dict minimal.
     enrichment = {
         "title": source_title,
         "source_author": meta.get("pdf_author", ""),
+        "extraction_method": meta.get("extraction_method", ""),
     }
+    # An empty extraction_method here is safe to merge as-is: t3.update_chunks
+    # re-runs metadata_schema.normalize() before writing, which is what
+    # actually drops the empty-string default — no local emptiness check
+    # needed in this dict.
 
     try:
         all_ids: list[str] = []
