@@ -21,10 +21,10 @@ uv run python scripts/check_engine_release_floor.py
 
 If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fails in TWO directions and the remedy differs:
 
-- **cloud BEHIND the pinned identity** → conexus has not deployed it yet. Surface the deploy relay and wait.
-- **a gated engine tag was never pinned** (`REQUIRED_ENGINE_VERSION` behind the newest published tag) → bump `REQUIRED_ENGINE_VERSION` to that tag (this alone also moves `PINNED_SERVICE_TAG`). This is the local-install delivery failure: cloud users get the deployed engine regardless, local-mode users get ONLY what this constant names, so an unpinned tag reaches nobody.
+- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see AGENTS.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state: document the armed deploy in the release PR body, treat this red as acknowledged-paired, and VERIFY post-tag that cloud `/version` reaches the floor within the deploy window. Mechanized paired-mode for this script is nexus-k1c08; until it lands the acknowledgment is manual and explicit — never silent.
+- **a gated engine tag was never pinned** (`REQUIRED_ENGINE_VERSION` behind the newest published tag) → bump `REQUIRED_ENGINE_VERSION` to that tag (this alone also moves `PINNED_SERVICE_TAG`). This is the local-install delivery failure: cloud users get the deployed engine regardless, local-mode users get ONLY what this constant names, so an unpinned tag reaches nobody. When the unpinned tag carries engine halves of features whose CLIENT halves ship in THIS release, the bump into this release is mandatory, not optional — floor-lag ships a client whose pinned engine lacks the engine halves of its own features (the 7.1.0/v0.1.62 inversion).
 
-Re-run until it exits 0.
+Re-run until it exits 0 (or the paired-release acknowledgment above is recorded).
 
 Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 
@@ -34,7 +34,7 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 ```
 
 1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
-2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — have conexus deploy + re-gate it (passive bus: surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal), THEN bump `REQUIRED_ENGINE_VERSION` here (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump) and re-run `scripts/check_engine_release_floor.py` to confirm. The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary.
+2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — bump `REQUIRED_ENGINE_VERSION` to it IN THIS release (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump), gate the release battery against that engine, and arm the deploy relay to fire at client-tag push, parallel with the PyPI publish (paired-release choreography; passive bus: the relay itself goes through Hal, never autonomous). The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary, and it is never blocked by client-release preconditions either — those gate the DEPLOY, and pairing satisfies them the instant the client tag exists.
 3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.

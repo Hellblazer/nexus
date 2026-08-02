@@ -74,7 +74,7 @@ Notes:
   the acceptance journey that replaced the retired guided legs; add it here
   then, alongside `--shakeout` rather than instead of it.
 
-### 3b. PRE-TAG gate: client-release preconditions (BLOCKING)
+### 3b. Client-release preconditions — a DEPLOY gate, NOT a tag gate
 
 ```bash
 uv run python scripts/check_client_release_precondition.py --engine-tag engine-service-vX.Y.Z
@@ -84,11 +84,21 @@ Some engine changes BREAK clients that predate a specific client commit (the
 nexus-9ssih dangling-endpoint 400 is the canonical case — its first landing
 was REMOVED by 6714e70e to wait for the client half). This script refuses
 (exit 1) until every client commit the tag requires is an ancestor of the
-latest RELEASED `v*` tag. Non-zero exit = STOP: cut the conexus PyPI release
-carrying the listed commits first, then re-run. Register new preconditions in
-the script's `ENGINE_CLIENT_PRECONDITIONS` whenever an engine change ships a
-wire behavior old clients mishandle. Prose deploy-gates get skipped; this one
-does not — do not tag past a red exit.
+latest RELEASED `v*` tag. Register new preconditions in the script's
+`ENGINE_CLIENT_PRECONDITIONS` whenever an engine change ships a wire behavior
+old clients mishandle. Prose deploy-gates get skipped; this one does not.
+
+**A red exit blocks the DEPLOY, never the tag cut** (Hal directive
+2026-08-02; the pre-tag wiring of this check is what forced conexus 7.1.0 to
+ship pinned to a pre-fence engine — its own flagship feature inert on fresh
+local installs). A tag gates DELIVERY, not work, and not even publication:
+cut the engine tag whenever the tree is green. On a red exit here, the tag
+still cuts; the DEPLOY waits for the client tag that carries the listed
+commits. The paired-release choreography (AGENTS.md § Engine-service
+release) closes the gap: the client release bumps the floor to this tag IN
+the same release, and the deploy fires at client-tag push, in parallel with
+the PyPI publish — satisfied the instant the client tag exists, live before
+any user can install the client that requires it.
 
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
@@ -181,6 +191,8 @@ Deploy and cloud-validation are **conexus-side operations** — the bus is passi
 
 > relay: deploy `engine-service-vX.Y.Z` to `api.conexus-nexus.com` + re-run the cloud gate (recall + hybrid parity, xr7.8.9-style).
 
+**THIS is where 3b's precondition check blocks.** Re-run `check_client_release_precondition.py --engine-tag <tag>` before surfacing the relay: a red exit means the deploy waits for the client tag carrying the listed commits. In the paired-release choreography that is not a long wait — the deploy relay fires at client-tag push, in parallel with the client's PyPI publish, so the precondition is satisfied the instant the client tag exists and the engine is live before any user can install the client that requires it.
+
 The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → cloud Voyage journey) requires the candidate to be **deployed on conexus** first — it runs as part of this cloud-gate, once the deploy lands, not in Step 5. For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
 
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
@@ -189,7 +201,7 @@ The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → c
 - When the NEXT PyPI release bumps `REQUIRED_ENGINE_VERSION` to this tag, also rotate `run.sh`'s `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG` defaults (the `--package-upgrade` convergence leg's starting point — must stay one release BEHIND the new dependency or its staleness guard fails loud; nexus-cfgo9). The `--package-upgrade` leg itself runs in the PyPI `release` skill's Step 1, not here — this skill only keeps its inputs fresh.
 - `SchemaUpgradeRehearsalIntegrationTest.OLD_TAG` (`service/src/test/java/dev/nexus/service/`) → the PREVIOUSLY-deployed tag (nexus-7z6s7 rotation policy: the old→HEAD rehearsal's "real aged box" realism rots as the fleet moves on; re-verify the two structural preconditions documented on the constant when bumping) OLD_TAG rotation is a THREE-part edit (nexus-gm38i): regenerate the changeset snapshot (`uv run python scripts/gen_rehearsal_hop_manifest.py`), re-derive the new hop's row-DML seed coverage, and re-point the data leg's seeding + its SEED-COVERAGE block + the lint's `DECLARED_SEED_COVERAGE` together — `tests/test_rehearsal_seed_coverage_lint.py` fails loudly until all three agree.
 - **`REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) MUST move to this tag** — unconditionally, not "only if the release needs the features". There is ONE engine identity per release: the engine it was built and gated with, on EVERY install path (Hal directive 2026-07-15, after the 14h GH #1402 incident). It is NOT a compatibility minimum. For local-mode installs this constant is the ONLY delivery vehicle — an engine tag that is cut, gated, and never pinned reaches nobody. `PINNED_SERVICE_TAG` is DERIVED from it, so the one edit moves both.
-  Sequencing: the bump lands with the NEXT PyPI release, AFTER conexus deploys this tag (Step 6). Bumping before the deploy makes every cloud client refuse the managed service as below-identity — GH #1402 inverted. Until then the owed bump is tracked, not applied; `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned.
+  Sequencing — PAIRED release (Hal directive 2026-08-02, supersedes "bump lands with the NEXT release AFTER deploy"): the bump rides the client release PAIRED with this engine's deploy — same release, not the next one (floor-lag ships a client whose pinned engine lacks the engine halves of its own features: the 7.1.0/v0.1.62 inversion). The deploy relay fires at client-tag push, parallel with the PyPI publish (Step 6), so the engine is live before any user can install the floor-bumped client. GH #1402's lesson stands as: never publish a floor-bumped client with NO deploy armed — the deploy fires at tag push, not "eventually". `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned.
 
 ### 8. Record state (T2) — guarded by a live /version read (DO NOT SKIP)
 

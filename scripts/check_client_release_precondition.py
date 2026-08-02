@@ -58,9 +58,13 @@ ENGINE_CLIENT_PRECONDITIONS: dict[str, dict[str, str]] = {
 }
 
 _REMEDY = (
-    "Remedy: cut the conexus PyPI release carrying the listed commit(s) "
-    "(release skill; AGENTS.md § Cutting a release) BEFORE tagging/deploying "
-    "this engine. Then re-run this check."
+    "Remedy: this blocks the DEPLOY only — the engine tag cuts whenever the "
+    "tree is green (a tag gates delivery, not work; Hal directive "
+    "2026-08-02). Pair the deploy with the conexus release that carries the "
+    "listed commit(s) AND bumps the floor to this tag: deploy fires at "
+    "client-tag push, in parallel with the PyPI publish (AGENTS.md "
+    "§ Engine-service release, paired-release choreography). Then re-run "
+    "this check."
 )
 
 

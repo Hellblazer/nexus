@@ -108,11 +108,21 @@ class TestWiring:
     def test_engine_release_skill_invokes_the_gate(self):
         skill = (REPO_ROOT / ".claude" / "skills" / "engine-release" / "SKILL.md").read_text()
         assert "check_client_release_precondition.py" in skill, (
-            "the engine-release skill must run the client-precondition gate "
-            "before the tag push — without the invocation step this script "
-            "is exactly as skippable as the prose gate it replaced"
+            "the engine-release skill must surface the client-precondition "
+            "check — without the invocation step this script is exactly as "
+            "skippable as the prose gate it replaced"
         )
-        # The invocation must come BEFORE the tag-push step, not after.
+        # The check surfaces early (pre-tag) so a red is KNOWN while planning
+        # the paired release — but it gates the DEPLOY, never the tag cut
+        # (Hal directive 2026-08-02: the pre-tag-blocking wiring forced
+        # conexus 7.1.0 to ship pinned to a pre-fence engine).
         gate_pos = skill.index("check_client_release_precondition.py")
         push_pos = skill.index("git push origin engine-service-v")
-        assert gate_pos < push_pos, "the gate must run before the tag push"
+        assert gate_pos < push_pos, (
+            "the check must surface before the tag-push step (advisory at "
+            "tag time, blocking at deploy time)"
+        )
+        assert "never the tag cut" in skill, (
+            "the skill must state the deploy-not-tag scoping explicitly — "
+            "the 7.1.0/v0.1.62 inversion came from this wording"
+        )
