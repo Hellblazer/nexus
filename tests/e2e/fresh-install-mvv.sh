@@ -155,7 +155,12 @@ fi
 # (level='warning') AND doctor's human-facing soft-warn rows (⚠ — the
 # format_health_for_cli warn=True render, which contains no literal
 # "warning" text and was invisible to the structlog grep alone).
-ALLOWLIST_REGEX='^$'  # no allowed warnings
+# nexus-ac4id (2026-08-02): the dangling-manifests check is deliberately
+# DISABLED (its dict-shape crash is the off-switch that keeps its
+# multi-minute full-T3 scan from reviving) and now says so as a visible
+# warn instead of a clean-looking skip. Allowed until the engine-side
+# anti-join redesign lands; remove this entry when ac4id closes.
+ALLOWLIST_REGEX='DISABLED \(nexus-ac4id|doctor_dangling_manifest_check_disabled'
 if grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" \
         | grep -Ev "$ALLOWLIST_REGEX" | grep -q .; then
     grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" >&2

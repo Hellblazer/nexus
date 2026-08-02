@@ -1489,6 +1489,46 @@ class TestCheckNextSeqDrift:
             f"{len(owners)} owners — the O(owners x corpus) scan is back"
         )
 
+    def test_multiple_owners_disambiguated_in_one_shared_walk(self, monkeypatch) -> None:
+        """Cross-owner correctness under the shared-dict pass (critic,
+        e265d1b8 review): one drifted owner and one clean owner computed from
+        the SAME walk must each report correctly — bucket contamination
+        between owners is the regression class the per-owner architecture
+        could not have and this one can.
+        """
+        import nexus.health as h
+        r = self._run(
+            monkeypatch,
+            [
+                {"tumbler_prefix": "1.12", "next_seq": 3},   # drifted (high=7)
+                {"tumbler_prefix": "1.14", "next_seq": 9},   # clean  (high=9)
+            ],
+            ["1.12.1", "1.12.7", "1.14.2", "1.14.9"],
+        )
+        assert r.ok is False and r.warn is True
+        assert "1.12" in r.detail and "highest child=7" in r.detail
+        assert "1.14" not in r.detail, (
+            f"clean owner leaked into the drift report: {r.detail}"
+        )
+
+    def test_scan_failure_retries_once_then_skips_loudly(self, monkeypatch) -> None:
+        """The shared walk's blast radius (reviewer Important, e265d1b8): a
+        mid-walk failure blanks drift visibility for EVERY owner, so the
+        check retries once and the concession names the scope. Pins
+        call_count == 2 (exactly one retry) and the all-owners detail text.
+        """
+        import nexus.health as h
+        cat = MagicMock()
+        cat.list_owners.return_value = [{"tumbler_prefix": "1.12", "next_seq": 3}]
+        cat.all_documents.side_effect = RuntimeError("mid-walk blip")
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        r = h._check_next_seq_drift()[0]
+        assert r.ok is True and "ANY owner" in r.detail
+        assert cat.all_documents.call_count == 2
+
     def test_drifted_owner_is_named(self, monkeypatch) -> None:
         r = self._run(
             monkeypatch,

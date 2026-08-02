@@ -2947,7 +2947,22 @@ def _check_dangling_manifests() -> list[HealthResult]:
         if cat is None:
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
         t3 = make_t3()
+        # Deliberately UNFIXED dict-shape access (nexus-ac4id): making this
+        # comprehension shape-tolerant would silently revive the check's own
+        # multi-minute full-T3 metadata scan on managed boxes. Until the
+        # engine-side anti-join redesign lands, the shape crash below is the
+        # OFF SWITCH — the except turns it into a visible DISABLED warn
+        # instead of a clean-looking skip.
         collections = [c.name for c in t3.list_collections()]
+    except (AttributeError, KeyError, TypeError) as exc:
+        # A SHAPE error is a code defect in this check, not an unavailable
+        # substrate — rendering it as a clean skip is how this detector sat
+        # dead for weeks at debug level (nexus-ac4id). Say DISABLED, loudly.
+        _log.warning("doctor_dangling_manifest_check_disabled", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"DISABLED (nexus-ac4id — shape error, not unavailability: {exc})",
+        )]
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_dangling_manifest_check_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
@@ -3064,11 +3079,26 @@ def _check_next_seq_drift() -> list[HealthResult]:
     # ~22k documents = ~1.4M records over the managed API per doctor run,
     # measured at 218s of a 224s doctor (nexus-ohxzu). The max-seq for every
     # prefix falls out of a single walk.
-    try:
-        highs = _highest_child_seqs(cat)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_next_seq_scan_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+    # One shared walk serves all owners, which also means one mid-walk
+    # failure would blank drift visibility for EVERY owner (the old
+    # per-owner walks failed independently). Retry once before conceding,
+    # and say so at WARNING — a check with a total-outage history
+    # (nexus-pbawi) must not vanish at debug level.
+    highs: dict[str, int] | None = None
+    for attempt in (1, 2):
+        try:
+            highs = _highest_child_seqs(cat)
+            break
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+            _log.warning(
+                "doctor_next_seq_scan_failed", attempt=attempt, error=str(exc),
+            )
+    if highs is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (corpus scan failed twice — drift not assessed "
+                   "for ANY owner this run)",
+        )]
 
     drifted: list[tuple[str, int, int]] = []
     checked = 0
