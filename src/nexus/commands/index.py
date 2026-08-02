@@ -1201,7 +1201,22 @@ def run_collection_postprocessing(
     default="auto",
     help="Streaming pipeline mode: auto (default, all PDFs), always, never.",
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str) -> None:
+@click.option(
+    "--source-uri",
+    "source_uri",
+    default=None,
+    help=(
+        "Resolve catalog identity by URI (e.g. x-devonthink-item://<UUID>) "
+        "INSTEAD of by file path (nexus-y8qtj). Use this to re-index a "
+        "document that was originally registered under an out-of-band "
+        "identity — a plain path-based re-index misses it and forks a "
+        "second catalog Document, leaving the original's chunks live and "
+        "un-swept. Fails loudly (never registers a new document) if the "
+        "URI resolves to no live document, or if it resolves to a "
+        "document in a different --collection than this run targets."
+    ),
+)
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -1212,21 +1227,29 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.config import get_pdf_extractor  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
-    from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        CredentialsMissingError,
+        SourceUriCollectionMismatchError,
+        SourceUriNotFoundError,
+    )
 
-    # Local wrapper: convert the typed credential error into a Click
-    # exception so the CLI shows a friendly message + exits non-zero
-    # rather than dumping a Python traceback to stderr (GH #336).
+    # Local wrapper: convert the typed credential/identity errors into a
+    # Click exception so the CLI shows a friendly message + exits non-zero
+    # rather than dumping a Python traceback to stderr (GH #336, nexus-y8qtj).
     def index_pdf(*args, **kwargs):
         try:
             return _index_pdf_raw(*args, **kwargs)
         except CredentialsMissingError as e:
+            raise click.ClickException(str(e)) from e
+        except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as e:
             raise click.ClickException(str(e)) from e
 
     if path is not None and dir_path is not None:
         raise click.UsageError("PATH and --dir are mutually exclusive.")
     if path is None and dir_path is None:
         raise click.UsageError("Provide either PATH or --dir.")
+    if source_uri and dir_path is not None:
+        raise click.UsageError("--source-uri and --dir are mutually exclusive.")
 
     if extractor is None:
         extractor = get_pdf_extractor()
@@ -1401,7 +1424,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "")
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1456,6 +1479,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
+    fork_holder: list[tuple[str, int]] = []
     if monitor or not sys.stdout.isatty():
         chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
 
@@ -1466,7 +1490,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
-                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
+                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
+                             source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1487,7 +1512,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"\n  {'  '.join(parts)}")
     else:
         try:
-            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming)
+            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
+                          source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
         except (ImportError, RuntimeError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1496,6 +1522,15 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             raise click.ClickException(str(e)) from e
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
+    if fork_holder:
+        # nexus-y8qtj: WARNING, not refusal — legitimate near-duplicates
+        # exist. Full detail (other doc_id, shared_chunks) is in the log
+        # event `index_possible_document_fork`; the summary line is a
+        # heads-up to check it, not a diagnosis.
+        click.echo(
+            f"  {len(fork_holder)} possible document fork(s) detected — "
+            f"see log event 'index_possible_document_fork' for details."
+        )
 
 
 @index.command("md")
@@ -1523,11 +1558,30 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
-def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool) -> None:
+@click.option(
+    "--source-uri",
+    "source_uri",
+    default=None,
+    help=(
+        "Resolve catalog identity by URI (e.g. x-devonthink-item://<UUID>) "
+        "INSTEAD of by file path (nexus-y8qtj). Use this to re-index a "
+        "document that was originally registered under an out-of-band "
+        "identity — a plain path-based re-index misses it and forks a "
+        "second catalog Document, leaving the original's chunks live and "
+        "un-swept. Fails loudly (never registers a new document) if the "
+        "URI resolves to no live document, or if it resolves to a "
+        "document in a different --collection than this run targets."
+    ),
+)
+def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool, source_uri: str | None) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
-    from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        CredentialsMissingError,
+        SourceUriCollectionMismatchError,
+        SourceUriNotFoundError,
+    )
 
     # Normalize --collection through t3_collection_name() so bare names like
     # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
@@ -1554,6 +1608,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
+    fork_holder: list[tuple[str, int]] = []
     try:
         if monitor or not sys.stdout.isatty():
             chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
@@ -1564,19 +1619,29 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
                 chunk_bar.refresh()
 
             meta = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
-                                  return_metadata=True, on_progress=on_chunk_progress)
+                                  return_metadata=True, on_progress=on_chunk_progress,
+                                  source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
             chunk_bar.close()
             n = meta["chunks"]  # type: ignore[index]
             sections = meta.get("sections", 0)  # type: ignore[union-attr]
             click.echo(f"\n  Chunks: {n}  Sections: {sections}")
         else:
-            n = index_markdown(path, corpus=corpus, collection_name=collection, force=force)
+            n = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
+                               source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
     except CredentialsMissingError as exc:
         # GH #336: surface the silent failure visibly. Click maps
         # ClickException to stderr + non-zero exit.
         raise click.ClickException(str(exc)) from exc
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as exc:
+        # nexus-y8qtj: fail-loud identity errors surface the same way.
+        raise click.ClickException(str(exc)) from exc
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
+    if fork_holder:
+        click.echo(
+            f"  {len(fork_holder)} possible document fork(s) detected — "
+            f"see log event 'index_possible_document_fork' for details."
+        )
 
 
 _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}

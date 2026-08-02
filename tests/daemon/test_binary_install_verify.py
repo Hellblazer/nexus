@@ -466,3 +466,80 @@ def test_install_binary_gate_warns_unverified_on_fatal_health_result(
     assert result.exit_code == 0, result.output
     assert "UNVERIFIED" in result.output
     assert "Cannot query databasechangelog" in result.output
+
+
+class TestVerifyInstalledBinary:
+    """nexus-8eaeg: "is the installed engine the one its receipt describes?"
+    must be answerable from LOCAL bytes only.
+
+    The bug this closes had two halves that share one cause — convergence was
+    decided from the provenance sidecar ALONE. Reading the receipt as gospel
+    made a box with a missing/corrupt engine look green forever; and because
+    the receipt could not be *checked*, the only way the code knew how to
+    re-establish trust was to re-download the ~190 MB asset. Verification
+    against the receipt's own recorded digest is what makes both go away
+    without ever opening a socket.
+    """
+
+    def _install(self, tmp_path, payload: bytes, *, sha: str | None = None):
+        import json
+
+        svc = tmp_path / "service"
+        svc.mkdir(parents=True, exist_ok=True)
+        binary = svc / "nexus-service"
+        binary.write_bytes(payload)
+        digest = sha if sha is not None else hashlib.sha256(payload).hexdigest()
+        (svc / "nexus-service.meta.json").write_text(
+            json.dumps({"version": "0.1.60", "tag": "engine-service-v0.1.60",
+                        "sha256": digest})
+        )
+        return binary
+
+    def test_matching_digest_is_ok(self, tmp_path):
+        binary = self._install(tmp_path, b"engine-bytes")
+        verdict = binstall.verify_installed_binary(tmp_path)
+        assert verdict.ok is True
+        assert verdict.reason is None
+        assert verdict.path == binary
+
+    def test_missing_binary_is_not_ok(self, tmp_path):
+        binary = self._install(tmp_path, b"engine-bytes")
+        binary.unlink()
+        verdict = binstall.verify_installed_binary(tmp_path)
+        assert verdict.ok is False
+        assert "missing" in verdict.reason
+
+    def test_corrupt_binary_is_not_ok(self, tmp_path):
+        binary = self._install(tmp_path, b"engine-bytes")
+        binary.write_bytes(b"tampered-bytes")
+        verdict = binstall.verify_installed_binary(tmp_path)
+        assert verdict.ok is False
+        assert "does not match its receipt" in verdict.reason
+
+    def test_absent_receipt_is_not_ok(self, tmp_path):
+        verdict = binstall.verify_installed_binary(tmp_path)
+        assert verdict.ok is False
+        assert "no install receipt" in verdict.reason
+
+    def test_receipt_without_sha_is_not_ok_never_assumed_fine(self, tmp_path):
+        """FAIL LOUD: a receipt that records no digest cannot vouch for
+        anything. It must NOT degrade to 'probably fine'."""
+        import json
+
+        svc = tmp_path / "service"
+        svc.mkdir(parents=True)
+        (svc / "nexus-service").write_bytes(b"engine-bytes")
+        (svc / "nexus-service.meta.json").write_text(json.dumps({"version": "0.1.60"}))
+        verdict = binstall.verify_installed_binary(tmp_path)
+        assert verdict.ok is False
+        assert "no usable sha256" in verdict.reason
+
+    def test_verification_opens_no_network(self, tmp_path, monkeypatch):
+        """The whole point: re-establishing trust in the installed binary is
+        a LOCAL operation. Any download here would be the defect returning."""
+        def _boom(*a, **kw):
+            raise AssertionError("verify_installed_binary must not download")
+
+        monkeypatch.setattr(binstall, "_download", _boom)
+        self._install(tmp_path, b"engine-bytes")
+        assert binstall.verify_installed_binary(tmp_path).ok is True

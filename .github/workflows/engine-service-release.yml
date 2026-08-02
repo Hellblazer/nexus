@@ -77,10 +77,109 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  # nexus-84ki0: create the GitHub Release in a dedicated, fast, tag-only job
+  # that BOTH publish jobs below `needs:` — decoupling "does the release
+  # exist yet" from the (up to 65-minute) native-binary matrix and from
+  # jooq-codegen. The prior structure had build-publish-pg-bundle `needs:
+  # build-publish` only; that is correct ONLY while build-publish actually
+  # RUNS. On engine-service-v0.1.61 (2026-08-01, run 30722685942) jooq-codegen
+  # hit its timeout and was killed (cancelled) after 25m, so build-publish
+  # (needs: jooq-codegen, no override) was SKIPPED without ever reaching its
+  # inline release-create step — but build-publish-pg-bundle's `if:
+  # !cancelled()` (added to tolerate a PARTIAL build-publish matrix failure,
+  # substantive-critic S2) also bypasses a full SKIP of build-publish, so all
+  # three PG-bundle matrix legs raced ahead of a release that was never
+  # created and failed "release not found" (confirmed in the job logs).
+  #
+  # This job needs nothing but the tag itself, typically completes in
+  # seconds, and both matrices below `needs:` it instead of each other —
+  # which *improves* parallelism (the PG-bundle matrix no longer waits on
+  # the native-binary matrix at all) while closing the race.
+  #
+  # TRADEOFF (documented, not accidental): this gives up the old incidental
+  # property that a TOTAL native-binary failure left no release for the
+  # PG-bundle job to upload to (S2's "worse state than a clean failure").
+  # A release can now carry PG bundles with zero native binaries attached if
+  # every build-publish matrix leg fails. Both matrices already run
+  # fail-fast: false, so a release with a partial asset set is already an
+  # accepted characteristic of this workflow — asset-completeness was not
+  # verified before this change either.
+  create-release:
+    name: Create GitHub Release (engine-service-v* tag only)
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/engine-service-v')
+    timeout-minutes: 5
+    steps:
+      - name: Create GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # printf (not a heredoc): immune to YAML run-block indentation.
+          printf '%s\n' \
+            "Native nexus-service binaries for the RDR-157 cloud + local habitats:" \
+            "run with no embedded PG, pointed at a managed Postgres via NX_DB_URL" \
+            "(skips pg_provision). Consumed by conexus deploy/engine (build the" \
+            "runtime image FROM the linux-amd64 binary). Per-platform assets +" \
+            "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64," \
+            "nexus-service-mac-arm64." \
+            "" \
+            "NOTE: the mac-arm64 binary is UNSMOKED (GH macOS runners have no Docker" \
+            "for native-smoke.sh). Its runtime correctness rests on the mac-arm64" \
+            "CA-3 gate + the lp2qo native-serving spike, not a per-build smoke —" \
+            "treat it as experimental. The linux binaries ARE smoke-tested." \
+            "mac-arm64 signing: Developer-ID signed + notarized WHEN the APPLE_*" \
+            "secrets are provisioned (see the build job summary for this run's" \
+            "actual status); otherwise ad-hoc-signed — browser downloads are then" \
+            "Gatekeeper-blocked, but 'nx daemon service install-binary' (urllib" \
+            "fetch, no quarantine xattr) works either way. Ticket is checked" \
+            "online; bare Mach-O cannot be stapled." \
+            "" \
+            "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
+            "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
+            "deploy/engine/build-image.sh enforces this via objdump." \
+            "" \
+            "ONNX model NOT bundled (RDR-160) — in local mode the binary loads the" \
+            "STANDARD fp32 bge-base-en-v1.5 ONNX from the filesystem at runtime." \
+            "Before building the runtime image, stage it (or run nx init --service):" \
+            "  MODEL_DIR=~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx; mkdir -p \$MODEL_DIR" \
+            "  base=https://github.com/${GITHUB_REPOSITORY}/releases/download/ci-assets-bge-768-v1" \
+            "  curl -fL --retry 5 --retry-all-errors \$base/model.onnx -o \$MODEL_DIR/model.onnx" \
+            "  curl -fL --retry 5 --retry-all-errors \$base/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
+            "" \
+            "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
+            "signature in TWO bundle formats — <asset>.cosign.bundle (old JSON) and" \
+            "<asset>.sigstore.json (new protobuf). Verify before use, either path:" \
+            "  cosign verify-blob <asset> --bundle <asset>.cosign.bundle \\" \
+            "    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\" \
+            "    --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'" \
+            "conexus deploy verifies the .cosign.bundle before docker run (ECR_PUSH.md)." \
+            "The local 'nx daemon service install-binary' path verifies the protobuf" \
+            ".sigstore.json offline via sigstore-python (no cosign binary required)." \
+            > notes.md
+          # Idempotent: a rerun of this job (e.g. `gh run rerun --failed`) must
+          # not fail when the tag's release already exists from a prior attempt.
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "nexus-service (native) ${tag}" --notes-file notes.md
+          fi
+
   build-publish:
     name: Build + smoke + publish native nexus-service (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
-    needs: jooq-codegen
+    needs: [jooq-codegen, create-release]
+    # Job-level if (replaces the implicit success()-on-needs default): must
+    # still run on workflow_dispatch, where create-release is SKIPPED by its
+    # own tag-only `if:` (no release to create off-tag) — success() alone
+    # would treat that skip as "not satisfied" and skip this job too, which
+    # would break the workflow_dispatch dev/smoke path entirely. Require
+    # jooq-codegen to have actually SUCCEEDED (unchanged from before: no
+    # jOOQ sources, no build), and require create-release to not have
+    # FAILED outright (tolerates its skip on non-tag runs, blocks on tag
+    # runs where release creation itself errored — no point burning a
+    # 40-65m native build with nowhere to publish it).
+    if: ${{ !cancelled() && needs.jooq-codegen.result == 'success' && needs.create-release.result != 'failure' }}
     # APPLE SIGNING SECRETS ARE ENVIRONMENT-SCOPED, NOT REPO-SCOPED (nexus-2oh5q).
     #
     # The six APPLE_* secrets live in the `apple-signing` environment. Repo-level
@@ -508,74 +607,19 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      - name: Publish GitHub Release (engine-service-v* tag only)
+      - name: Upload native binary assets to Release (engine-service-v* tag only)
+        # The release is created by the dedicated create-release job (this job
+        # `needs` it — nexus-84ki0); here we only attach this arch's assets.
         if: startsWith(github.ref, 'refs/tags/engine-service-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          # printf (not a heredoc): immune to YAML run-block indentation.
-          printf '%s\n' \
-            "Native nexus-service binaries for the RDR-157 cloud + local habitats:" \
-            "run with no embedded PG, pointed at a managed Postgres via NX_DB_URL" \
-            "(skips pg_provision). Consumed by conexus deploy/engine (build the" \
-            "runtime image FROM the linux-amd64 binary). Per-platform assets +" \
-            "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64," \
-            "nexus-service-mac-arm64." \
-            "" \
-            "NOTE: the mac-arm64 binary is UNSMOKED (GH macOS runners have no Docker" \
-            "for native-smoke.sh). Its runtime correctness rests on the mac-arm64" \
-            "CA-3 gate + the lp2qo native-serving spike, not a per-build smoke —" \
-            "treat it as experimental. The linux binaries ARE smoke-tested." \
-            "mac-arm64 signing: Developer-ID signed + notarized WHEN the APPLE_*" \
-            "secrets are provisioned (see the build job summary for this run's" \
-            "actual status); otherwise ad-hoc-signed — browser downloads are then" \
-            "Gatekeeper-blocked, but 'nx daemon service install-binary' (urllib" \
-            "fetch, no quarantine xattr) works either way. Ticket is checked" \
-            "online; bare Mach-O cannot be stapled." \
-            "" \
-            "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
-            "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
-            "deploy/engine/build-image.sh enforces this via objdump." \
-            "" \
-            "ONNX model NOT bundled (RDR-160) — in local mode the binary loads the" \
-            "STANDARD fp32 bge-base-en-v1.5 ONNX from the filesystem at runtime." \
-            "Before building the runtime image, stage it (or run nx init --service):" \
-            "  MODEL_DIR=~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx; mkdir -p \$MODEL_DIR" \
-            "  base=https://github.com/${GITHUB_REPOSITORY}/releases/download/ci-assets-bge-768-v1" \
-            "  curl -fL --retry 5 --retry-all-errors \$base/model.onnx -o \$MODEL_DIR/model.onnx" \
-            "  curl -fL --retry 5 --retry-all-errors \$base/tokenizer.json -o \$MODEL_DIR/tokenizer.json" \
-            "" \
-            "Provenance: each asset carries a sha256 AND a keyless cosign/Sigstore" \
-            "signature in TWO bundle formats — <asset>.cosign.bundle (old JSON) and" \
-            "<asset>.sigstore.json (new protobuf). Verify before use, either path:" \
-            "  cosign verify-blob <asset> --bundle <asset>.cosign.bundle \\" \
-            "    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\" \
-            "    --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@refs/tags/engine-service-v.*'" \
-            "conexus deploy verifies the .cosign.bundle before docker run (ECR_PUSH.md)." \
-            "The local 'nx daemon service install-binary' path verifies the protobuf" \
-            ".sigstore.json offline via sigstore-python (no cosign binary required)." \
-            > notes.md
           # CAUTION (critique 96677bf7 observation): once APPLE_* signing is
           # provisioned, do NOT re-run an already-published tag's job to
           # "backfill" signing — --clobber would silently change the asset
           # bytes + sha256 under the same download URL. Cut a fresh tag.
-          # Matrix-safe: create the release once (whichever arch job wins), then
-          # each job uploads its OWN arch assets (--clobber for re-runs). Use
-          # view-then-create rather than `create ... 2>/dev/null || true`: the old
-          # idiom swallowed auth/network/rate-limit failures identically to the
-          # expected 'already exists', then fell through to `upload` which failed
-          # with a confusing 'release not found' (code-review H1).
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            # Tolerate ONLY the matrix race (another arch job created it between the
-            # view and this create); surface auth/network/anything else.
-            if ! gh release create "$tag" --title "nexus-service (native) ${tag}" \
-                   --notes-file notes.md 2>create_err.txt; then
-              grep -qi "already exists" create_err.txt \
-                || { echo "release create failed:" >&2; cat create_err.txt >&2; exit 1; }
-            fi
-          fi
           gh release upload "$tag" --clobber \
             "dist/$ASSET" "dist/$ASSET.sha256" \
             "dist/$ASSET.cosign.bundle" "dist/$ASSET.sigstore.json"
@@ -590,18 +634,20 @@ jobs:
   build-publish-pg-bundle:
     name: Build + sign + publish PG bundle (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
-    # The native-binary job creates the GitHub Release (with the rich notes);
-    # this job uploads the PG-bundle assets onto it. `needs` orders us AFTER it
-    # (release exists, no create-race on notes). `if: !cancelled()` decouples us
-    # from build-publish SUCCESS: build-publish is a 3-arch matrix, and a `needs`
-    # alone would skip ALL PG-bundle publishes if any single arch (e.g. the
-    # unsmoked mac-arm64) failed — leaving the surviving arches with a binary on
-    # the release but no PG bundle (install-binary then 404s on the bundle, a
-    # worse state than a clean failure). With !cancelled() the surviving arches
-    # still get their PG bundle; a TOTAL binary failure means no release exists
-    # and the upload below fails loud, which is correct (substantive-critic S2).
-    needs: build-publish
-    if: ${{ !cancelled() }}
+    # nexus-84ki0: needs the dedicated create-release job directly, NOT
+    # build-publish. This artifact is fully independent of the native-binary
+    # build (no jOOQ/Maven involved), so gating it behind the up-to-65-minute
+    # native matrix bought nothing but latency — and, when build-publish was
+    # SKIPPED outright (its own needs, jooq-codegen, failed/timed out), the
+    # old `if: !cancelled()` bypassed that skip too and raced a fast
+    # cache-hit build into a release that never got created ("release not
+    # found", engine-service-v0.1.61, 2026-08-01). create-release is a
+    # single fast job with no matrix, so plain `needs:` semantics are enough:
+    # if it's skipped (workflow_dispatch, no tag) this job still runs (for
+    # the Actions-artifact dev path); if it fails outright, this job's `if:`
+    # below blocks rather than uploading into a void.
+    needs: create-release
+    if: ${{ !cancelled() && needs.create-release.result != 'failure' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -813,7 +859,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          # The release already exists (this job `needs` build-publish). Attach the
-          # PG-bundle assets; --clobber makes re-runs idempotent.
+          # The release already exists (this job `needs` create-release). Attach
+          # the PG-bundle assets; --clobber makes re-runs idempotent.
           gh release upload "$tag" --clobber \
             "dist/$ASSET.txz" "dist/$ASSET.txz.sha256" "dist/$ASSET.txz.sigstore.json"

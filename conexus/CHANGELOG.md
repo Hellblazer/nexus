@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.0.1] - 2026-08-02
+
+Plugin version aligned with conexus 7.0.1. No plugin-side changes
+(the PENDING_RELEASE ledger is empty; the pin advance carries no new
+behavioural surface).
+
 ## [7.0.0] - 2026-08-01
 
 The pin advance that empties the PENDING_RELEASE ledger — everything below was

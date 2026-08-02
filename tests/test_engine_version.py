@@ -186,16 +186,26 @@ class TestRequiredEngineVersion:
         # Pre-60 engines carry all three. An install left below this floor is
         # exposed to two silent data-corruption paths, which is the strongest
         # fix-delivery case the rule has had.
-        # THE v0.1.59 HONEST LIMIT ABOVE IS RESOLVED: conexus reports the
-        # client-path gate at TRUE EXIT 0, all four legs, on this deploy.
-        # Deployed + gated 2026-08-01: STEP-6 exit 0, parity 104/113 identical
-        # to the v0.1.59 baseline with zero per-query jaccard movement, recall
-        # 12/12 local == cloud, hybrid p95 1950.8ms < 2376ms bound; boot
-        # Liquibase 5 changesets ALL grant-class (no table rewrite, so the
-        # RDR-180 stale-planner-stats trap did not apply). Live /version
-        # independently confirmed UNAUTHENTICATED from a dev box. Relay
-        # [21320], reply [21321].
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 60)
+        # v0.1.61 (2026-08-02, relay [21347]): the 7.0.0-wave residue tag —
+        # count/cap guards on the manifest reverse-lookup chain (ocf52/
+        # uu4b9/b9puj: the union guard for a sweep that DELETES since
+        # 43b7932d), NUL sanitization + typed 422s (yvzhz/dmrkm), the 9ssih
+        # dangling-link validation (client half released in 7.0.0 — the
+        # check_client_release_precondition gate enforced the ordering),
+        # tombstone semantics end-to-end (graphBFS relays, four views via
+        # catalog-019, seven write guards), 4j80w link timestamps, pzdol/
+        # h77a2 lookup legs, supersede/rename guards, list pagination.
+        # Deployed ~2026-08-02T00:15Z, cosign+SBOM verified on host;
+        # Liquibase 209->216 all CREATE OR REPLACE + grants (no rewrite).
+        # Gated: parity 103/112 p50_jaccard 1.0 ZERO per-query regressions,
+        # recall@20 12/12 cloud==local, hybrid p95 in the 0.1.60 baseline
+        # band, nexus-bwulw client-path gate TRUE EXIT 0 all four legs.
+        # HONEST LIMIT: the /v1/vectors/search p95 tail leg was red in the
+        # step-6 aggregate (1539-1922ms vs 1302 bound) — evidenced as a
+        # pre-existing DB-side stochastic tail (p50 flat across versions,
+        # tail already widening in 0.1.59/60), tracked as conexus-5moe;
+        # Hal called the gate green 2026-08-02 on that evidence.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 61)
 
 
 class TestParseEngineVersion:

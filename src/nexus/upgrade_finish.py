@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,35 @@ def running_from_tool_install() -> bool:
 
 #: Filename of the version stamp inside the nexus config dir.
 STAMP_FILENAME = "last_seen_version"
+
+#: The argv token by which an invocation declares itself a PREVIEW.
+PREVIEW_ARGV_FLAG = "--dry-run"
+
+
+def invocation_is_preview(argv: list[str] | None = None) -> bool:
+    """True when THIS process was invoked as a preview (``--dry-run``).
+
+    nexus-8eaeg. ``--dry-run`` is a SUBCOMMAND flag, so the root ``nx`` group
+    — where the finish-the-upgrade trigger fires (``nexus/cli.py``) — cannot
+    see it through Click: the group callback runs before the subcommand is
+    parsed. The finish pass therefore ran WET under ``nx upgrade --dry-run``,
+    and its engine leg opened a ~190 MB release-asset download that a dry-run
+    then threw away (fetch-and-discard, 4-5 minutes, nothing persisted).
+
+    Reading argv directly is the honest fix: "--dry-run promises this process
+    mutates nothing" is a PROCESS-wide promise, and the process's own argv is
+    where that promise is stated. It is deliberately a bare token test — no
+    subcommand allow-list — because a preview of ANY command is still a
+    caller saying "do not change my machine on this invocation", and the
+    cost of being wrong is one deferred finish pass (the version stamp is NOT
+    consumed in preview mode, so the next ordinary invocation still finishes
+    the job), never a missed convergence.
+
+    MCP hosts (``nexus.mcp.core`` / ``nexus.mcp.catalog``) call the same
+    trigger with a server argv that carries no ``--dry-run``, so they are
+    unaffected.
+    """
+    return PREVIEW_ARGV_FLAG in (sys.argv[1:] if argv is None else argv)
 
 
 @dataclass
@@ -1219,7 +1249,30 @@ def converge_engine(
         ".".join(str(p) for p in status.installed_version)
         if status.installed_version else "unknown"
     )
+
+    # nexus-8eaeg: "converged" was answered from the RECEIPT alone. The
+    # receipt is a claim about bytes; verify it against the bytes — locally,
+    # against the receipt's own recorded digest, NEVER by re-downloading the
+    # asset to compare. A receipt that the on-disk binary does not back is
+    # not a converged box: it is a box whose engine is missing or corrupt,
+    # which must re-acquire on a WET run and be REPORTED as a planned
+    # acquisition on a dry one. Only computed when the receipt otherwise
+    # says converged (a version mismatch already decides the question, and
+    # this costs a streaming sha256 of a ~190 MB file).
+    integrity = None
     if status.converged:
+        from nexus.daemon.binary_install import verify_installed_binary  # noqa: PLC0415 — deferred, CLI startup cost
+
+        integrity = verify_installed_binary(config_dir)
+        if not integrity.ok:
+            _log.warning(
+                "engine_receipt_unbacked",
+                config_dir=str(config_dir),
+                reason=integrity.reason,
+            )
+            got_s = f"{got_s} unverified"
+
+    if status.converged and integrity is not None and integrity.ok:
         # nexus-4yf4u: the DISK is right — is the PROCESS? A correct on-disk
         # binary with a stale live service needs a RESTART, not a reinstall,
         # and the predecessor returned [] here ("already converged"), which
@@ -1388,10 +1441,20 @@ def converge_engine(
             "(warns UNVERIFIED when it cannot probe the store)."
         ]
 
+    # nexus-8eaeg: the acquisition seam. EVERY path that opens the network
+    # for asset bytes is below this line, and this early return is what makes
+    # a preview a preview — `nx upgrade --dry-run` reached
+    # ``install_binary`` through the root-group finish trigger (which passed
+    # no ``dry_run`` at all) and spent 4-5 minutes pulling ~190 MB it then
+    # discarded. A dry run PLANS; it never acquires.
     if dry_run:
+        why = (
+            f" — {integrity.reason}"
+            if integrity is not None and not integrity.ok else ""
+        )
         return [
             f"would converge engine ({got_s} -> {req_s}): install the "
-            "pinned tag and restart the storage service"
+            f"pinned tag and restart the storage service{why}"
         ]
 
     from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred, CLI startup cost
@@ -1660,13 +1723,27 @@ def pending_data_rung_callout() -> list[str]:
     return lines
 
 
-def check_version_transition(config_dir: Path) -> str | None:
+def check_version_transition(
+    config_dir: Path, *, preview: bool | None = None,
+) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
     version transition was detected and the safe finish pass ran; None
     when the stamp is current (the overwhelmingly common case).
 
     uv offers no post-install hook, so the first invocation after an
     upgrade is the earliest the product can finish the job itself.
+
+    PREVIEW MODE (nexus-8eaeg): this trigger fires from the ROOT ``nx``
+    group, before Click has parsed the subcommand, so a ``--dry-run``
+    invocation used to run the finish pass WET — including an engine
+    convergence that opened a ~190 MB release-asset download and threw it
+    away. ``preview`` (defaulted from :func:`invocation_is_preview`) makes
+    the pass PLAN instead: no acquisition, no restarts, and — critically —
+    the version stamp is NOT consumed, so the next ordinary invocation still
+    finishes the job for real. The two legs that mutate and have no plan-only
+    form (the diag-view grant heal and the stale-launchagent unloads) are
+    skipped and said to be skipped, rather than performed under a flag that
+    promised they would not be.
 
     TOPOLOGY GAP (inherited from nexus-4xgfy, same posture as MCP-host
     process-skew): this trigger fires on the first ``nx`` CLI invocation
@@ -1693,27 +1770,33 @@ def check_version_transition(config_dir: Path) -> str | None:
         seen = ""
     if seen == version:
         return None
-    try:
-        config_dir.mkdir(parents=True, exist_ok=True)
-        # Review 38b7db3d M4: two concurrent nx invocations right after an
-        # upgrade must not BOTH run the finish pass (a doubled MinerU
-        # stop/start can race itself broken). O_EXCL claim: exactly one
-        # transitioner; losers skip (the winner's pass covers them).
-        lock = config_dir / (STAMP_FILENAME + ".lock")
+    if preview is None:
+        preview = invocation_is_preview()
+    if not preview:
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-        except FileExistsError:
-            return None
-        try:
-            stamp.write_text(version + "\n")
-        finally:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            # Review 38b7db3d M4: two concurrent nx invocations right after an
+            # upgrade must not BOTH run the finish pass (a doubled MinerU
+            # stop/start can race itself broken). O_EXCL claim: exactly one
+            # transitioner; losers skip (the winner's pass covers them).
+            lock = config_dir / (STAMP_FILENAME + ".lock")
             try:
-                lock.unlink()
-            except OSError:
-                pass
-    except OSError:
-        return None  # unwritable config dir: skip silently, retry next run
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+            except FileExistsError:
+                return None
+            try:
+                stamp.write_text(version + "\n")
+            finally:
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            return None  # unwritable config dir: skip silently, retry next run
+    # nexus-8eaeg: a preview claims NOTHING — not even the one-shot stamp.
+    # Consuming it here would let `nx upgrade --dry-run` silently burn the
+    # transition, so the real finish pass would never run automatically.
     if not seen:
         return None  # first-ever run: nothing stale to finish
     if not running_from_tool_install():
@@ -1723,7 +1806,7 @@ def check_version_transition(config_dir: Path) -> str | None:
         return None
     try:
         report = detect_stale_processes()
-        actions = restart_stale(report)
+        actions = restart_stale(report, dry_run=preview)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         # nexus-p78a0 rehearsal catch: this leg used to `return None`,
         # silently aborting the WHOLE finish pass — on a ps-less box
@@ -1741,18 +1824,30 @@ def check_version_transition(config_dir: Path) -> str | None:
     # one leg's failure never swallows the actions already computed by the
     # others.
     try:
-        actions = actions + converge_engine(config_dir, unattended=True)
+        actions = actions + converge_engine(
+            config_dir, unattended=True, dry_run=preview,
+        )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("engine_convergence_failed", exc_info=True)
-    try:
-        actions = actions + heal_diag_view(config_dir)
-    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
-        _log.warning("diag_view_heal_failed", exc_info=True)
-    try:
-        actions = actions + unload_stale_t2_launchagent(config_dir)
-        actions = actions + unload_stale_service_launchagent(config_dir)
-    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
-        _log.warning("t2_launchagent_unload_failed", exc_info=True)
+    if preview:
+        # These two legs REMEDIATE (PG grant/ownership repair, launchd unit
+        # removal) and have no plan-only form. Under `--dry-run` they are not
+        # run — and that omission is stated rather than left as silence.
+        actions = actions + [
+            "not evaluated on a --dry-run invocation: the diag-view grant "
+            "heal and the stale-launchagent unloads (both remediate; run "
+            "`nx doctor` or any ordinary `nx` command to finish for real)"
+        ]
+    else:
+        try:
+            actions = actions + heal_diag_view(config_dir)
+        except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+            _log.warning("diag_view_heal_failed", exc_info=True)
+        try:
+            actions = actions + unload_stale_t2_launchagent(config_dir)
+            actions = actions + unload_stale_service_launchagent(config_dir)
+        except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+            _log.warning("t2_launchagent_unload_failed", exc_info=True)
     # critic-180-cohort finding 2: engine convergence swaps the binary (and
     # boot applies the RDR-180 schema) but does NOT walk the ladder — a box
     # can sit engine-converged-but-never-rekeyed, with citations for
@@ -1766,7 +1861,15 @@ def check_version_transition(config_dir: Path) -> str | None:
     _log.info(
         "upgrade_finish_ran",
         from_version=seen, to_version=version, actions=actions,
+        preview=preview,
     )
+    if preview:
+        # NOTHING was done and the stamp is untouched — say both, so the line
+        # cannot be mistaken for a finished pass.
+        return (
+            f"PREVIEW ONLY (nothing changed): finishing {seen} -> {version} "
+            "is still pending; " + "; ".join(actions)
+        )
     if not actions:
         return f"upgraded {seen} -> {version}; no stale processes"
     return (

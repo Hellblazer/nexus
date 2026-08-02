@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.0.1] - 2026-08-02
+
+Engine identity release: pins engine-service-v0.1.61 — the 7.0.0-wave
+engine-defect slate, deployed and cloud-gated 2026-08-02 (functional gates
+green and byte-stable; the search-p95 tail leg tracked separately as a
+pre-existing DB-side tail, conexus-5moe).
+
+### Changed
+- `REQUIRED_ENGINE_VERSION` → 0.1.61 (`PINNED_SERVICE_TAG` follows by
+  derivation): count/cap guards on the manifest reverse-lookup chain,
+  NUL sanitization with typed 422s, dangling-link validation on
+  `POST /v1/catalog/links` (400 instead of a silently-planted dangling
+  edge), tombstone-aware stats/list/traverse views (catalog-019), link
+  `created_at` timestamps, numeric version ordering, title-probe
+  fallback, supersede/rename identity guards, list pagination, and the
+  in-transaction identity belt. The `/v1/catalog/by_doc_id` route is
+  removed (dead since the RDR-108 catalog split).
+
+### Added
+- `nx index pdf|md --source-uri URI` (nexus-y8qtj): re-index a document
+  registered under an out-of-band identity (e.g. `x-devonthink-item://`)
+  without forking a second catalog Document. Fail-loud on a URI that
+  resolves to no live document or to a different collection. Fork
+  detection warns at ≥25% chunk-overlap between distinct Documents.
+- `nx catalog update --file-path PATH`: set or repair a Document's
+  `file_path` deliberately.
+
+### Fixed
+- `nx upgrade --dry-run` never acquires: preview runs plan the engine
+  convergence instead of downloading it, and "converged" claims are
+  receipt-backed (digest verified against the installed binary) rather
+  than receipt-claimed (nexus-8eaeg).
+- Engine-release workflow: release creation is a fast tag-only job, so
+  multi-platform asset publishes no longer race it (nexus-84ki0).
+- `nx doctor` process-freshness check degrades loud on probe failure
+  instead of reporting a silent pass (nexus-bawvu).
+- RDR-109 mode-lint conformance in the y8qtj test wave (local-model
+  collection naming).
+
 ## [7.0.0] - 2026-08-01
 
 The post-migration MAJOR: the substrate retirements land, the stranded-install

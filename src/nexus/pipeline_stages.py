@@ -537,6 +537,7 @@ def _catalog_pdf_hook(
     year: int = 0,
     corpus: str = "",
     chunk_count: int = 0,
+    source_uri: str = "",
 ) -> None:
     """Register PDF document in catalog after successful indexing. Silently skipped if absent."""
     reader = None
@@ -570,7 +571,18 @@ def _catalog_pdf_hook(
         # + content_hash story — both already populated.
         from datetime import UTC, datetime  # noqa: PLC0415 - branch-local; deferred to call time
         file_path_str = str(pdf_path.resolve())
-        existing = reader.by_file_path(owner, file_path_str)
+        # nexus-y8qtj: when source_uri is known, resolve by IT first. The
+        # pre-flight _register_or_lookup_doc_id call earlier in this same
+        # index run already validated (fail-loud) that source_uri resolves
+        # to a live document (or freshly registered one under it), so
+        # by_file_path here — which does NOT know about an out-of-band
+        # identity like x-devonthink-item://<UUID> — must not be allowed
+        # to miss and mint a SECOND Document for the same source. Falling
+        # through to the plain by_file_path lookup only when source_uri is
+        # absent preserves prior behaviour for every non-DT ingest path.
+        existing = reader.by_source_uri(source_uri) if source_uri else None
+        if existing is None:
+            existing = reader.by_file_path(owner, file_path_str)
 
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER
         # the PDF was extracted + chunked earlier in the pipeline. A
@@ -599,6 +611,7 @@ def _catalog_pdf_hook(
                 chunk_count=chunk_count,
                 file_path=file_path_str,
                 source_mtime=source_mtime,
+                source_uri=source_uri,
             )
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
@@ -633,6 +646,7 @@ def pipeline_index_pdf(
     force: bool = False,
     doc_id: str = "",
     hooks: "HookRegistry | None" = None,
+    source_uri: str = "",
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -866,6 +880,7 @@ def pipeline_index_pdf(
         year=int(year_raw) if year_raw else 0,
         corpus=corpus,
         chunk_count=total_chunks,
+        source_uri=source_uri,
     )
 
     # RDR-089 document-grain chain — once per PDF boundary at the streaming

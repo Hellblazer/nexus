@@ -546,11 +546,20 @@ def register_cmd(
          "Recovery path for entries whose DT-URI stamp failed during "
          "nx dt index, or for manual reassignment of catalog identity.",
 )
+@click.option(
+    "--file-path",
+    "file_path",
+    default="",
+    help="Catalog file_path column (nexus-y8qtj). Recovery path for entries "
+         "whose recorded path no longer matches disk (e.g. a moved DEVONthink "
+         "export) — the engine's UPDATABLE_DOC_COLUMNS already accepted this "
+         "column; this flag exposes it on the CLI.",
+)
 @click.option("--owner", default="", help="Batch: update all entries for this owner")
 @click.option("--search", "search_query", default="", help="Batch: update all entries matching this search")
 def update_cmd(
     tumbler: str, title: str, author: str, year: int, corpus: str, meta: str,
-    source_uri: str, owner: str, search_query: str,
+    source_uri: str, file_path: str, owner: str, search_query: str,
 ) -> None:
     """Update catalog entry metadata. TUMBLER can be a tumbler or title.
 
@@ -562,6 +571,10 @@ def update_cmd(
     (the entry will carry source_uri=file://… instead of x-devonthink-
     item://<UUID>). The URI is validated against the same scheme allowlist
     as register-time.
+
+    --file-path sets or replaces the catalog file_path column. Use this to
+    repoint an entry whose recorded path is dead (moved/renamed on disk)
+    without touching its source_uri identity.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -578,6 +591,8 @@ def update_cmd(
         fields["meta"] = json.loads(meta)
     if source_uri:
         fields["source_uri"] = source_uri
+    if file_path:
+        fields["file_path"] = file_path
     if not fields:
         raise click.ClickException("No fields to update")
 

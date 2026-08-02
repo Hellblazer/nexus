@@ -32,6 +32,7 @@ import os
 import re
 import tempfile
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -55,6 +56,8 @@ __all__ = [
     "identity_matches",
     "install_binary",
     "install_pg_bundle",
+    "InstalledBinaryVerdict",
+    "verify_installed_binary",
     "pg_bundle_asset_name",
     "pg_bundle_dest",
     "release_asset_url",
@@ -339,6 +342,109 @@ def resolve_service_tag() -> str | None:
 def binary_sidecar_path(config_dir: Path) -> Path:
     """Provenance sidecar next to the well-known native binary."""
     return config_dir / "service" / _BINARY_SIDECAR_NAME
+
+
+# ── installed-binary integrity (nexus-8eaeg) ────────────────────────────────
+
+
+@dataclass(frozen=True)
+class InstalledBinaryVerdict:
+    """Does the engine binary ON DISK match the receipt that describes it?
+
+    nexus-8eaeg: convergence used to be answered from the provenance sidecar
+    ALONE — a receipt claiming v0.1.60 made the box "converged" whether or not
+    the bytes it describes were still there, or still those bytes. That is
+    fail-SILENT in the one direction that matters (a missing or corrupt engine
+    is reported green and never re-acquired), and it is also what makes
+    "should we re-acquire?" answerable WITHOUT the network: the installed
+    file's digest is compared against the RECEIPT, never against a fresh
+    download.
+
+    ``ok`` is True only when the receipt records a sha256 AND the file at the
+    well-known location hashes to it. Everything else — no receipt, a receipt
+    with no/short digest, an absent file, an unreadable file, a digest
+    disagreement — is ``ok=False`` with an operator-facing ``reason``. There
+    is deliberately no "probably fine" state: an unverifiable receipt is a
+    re-acquisition trigger on a wet run and a PLANNED action on a dry run.
+    """
+
+    ok: bool
+    reason: str | None = None
+    path: Path | None = None
+    sha256: str | None = None
+
+
+def verify_installed_binary(
+    config_dir: Path, *, provenance: dict | None = None,
+) -> InstalledBinaryVerdict:
+    """Verify the installed engine binary against its own install receipt.
+
+    Costs one stat + one streaming sha256 of the on-disk binary (~0.1 s for
+    the ~190 MB native image on an M-series box) and NO network at all. Never
+    raises: an unreadable file is a not-ok verdict, not a traceback.
+
+    ``provenance`` is an injection seam — callers that already read the
+    sidecar pass it rather than reading it twice.
+    """
+    dest = well_known_binary_path(config_dir)
+    if provenance is None:
+        from nexus.daemon.binary_lifecycle import read_installed_provenance  # noqa: PLC0415 — deferred to avoid import cycle
+
+        provenance = read_installed_provenance(config_dir)
+
+    if not provenance:
+        return InstalledBinaryVerdict(
+            ok=False,
+            reason=f"no install receipt at {binary_sidecar_path(config_dir)}",
+            path=dest,
+        )
+
+    recorded = provenance.get("sha256")
+    _sha_match = (
+        _SHA256_LINE_RE.match(recorded.strip())
+        if isinstance(recorded, str) else None
+    )
+    if _sha_match is None:
+        return InstalledBinaryVerdict(
+            ok=False,
+            reason=(
+                "install receipt records no usable sha256, so the installed "
+                "engine binary cannot be verified against it"
+            ),
+            path=dest,
+        )
+    # The regex's captured group, not the whole trimmed string — a
+    # sha256sum-style decorated value ("<hex> *file") must compare by its
+    # hex alone, same as verify_sha256 (review 2026-08-02 Low).
+    expected = _sha_match.group(1).lower()
+
+    if not dest.is_file():
+        return InstalledBinaryVerdict(
+            ok=False,
+            reason=f"installed engine binary is missing at {dest}",
+            path=dest,
+            sha256=expected,
+        )
+    try:
+        actual = compute_sha256(dest)
+    except OSError as exc:
+        return InstalledBinaryVerdict(
+            ok=False,
+            reason=f"installed engine binary at {dest} is unreadable: {exc}",
+            path=dest,
+            sha256=expected,
+        )
+    if actual != expected:
+        return InstalledBinaryVerdict(
+            ok=False,
+            reason=(
+                f"installed engine binary at {dest} does not match its "
+                f"receipt (receipt {expected[:12]}, on disk {actual[:12]})"
+            ),
+            path=dest,
+            sha256=actual,
+        )
+    return InstalledBinaryVerdict(ok=True, path=dest, sha256=actual)
 
 
 def _validate_tag(tag: str) -> None:
