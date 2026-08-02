@@ -30,7 +30,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.0.0)
 
-- `skills/brainstorming-gate/SKILL.md` — HARD-GATE scoped to work with NO design of record (a locked T2 memo, accepted RDR, or reviewed bead IS the approval; Hal directive 2026-08-02, plugin-intent alignment). Until released, sessions load the unscoped every-project gate from the pin.
-- `skills/using-nx-skills/SKILL.md` — routing + Common Mistakes lines aligned to the scoped brainstorming-gate (same directive).
-- `skills/code-review/SKILL.md` — model table corrected to the agent frontmatter truth (sonnet default, opus escalation; the haiku default was unreachable) + new `## Prompt Rigour` section that `/conexus:phase-review-gate` § references (was dangling).
-- `skills/substantive-critique/SKILL.md` — model table corrected to sonnet default / opus escalation (same unreachable-haiku fix).
+- `conexus/skills/brainstorming-gate/SKILL.md` — HARD-GATE scoped to work with NO design of record (a locked T2 memo, accepted RDR, or reviewed bead IS the approval; Hal directive 2026-08-02, plugin-intent alignment). Until released, sessions load the unscoped every-project gate from the pin.
+- `conexus/skills/using-nx-skills/SKILL.md` — routing + Common Mistakes lines aligned to the scoped brainstorming-gate (same directive).
+- `conexus/skills/code-review/SKILL.md` — model table corrected to the agent frontmatter truth (sonnet default, opus escalation; the haiku default was unreachable) + new `## Prompt Rigour` section that `/conexus:phase-review-gate` § references (was dangling).
+- `conexus/skills/substantive-critique/SKILL.md` — model table corrected to sonnet default / opus escalation (same unreachable-haiku fix).
