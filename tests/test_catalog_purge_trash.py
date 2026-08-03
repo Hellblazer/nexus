@@ -193,7 +193,7 @@ class TestJsonOutput:
         result = runner.invoke(main, ["catalog", "purge-trash", "--json"])
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["documents_purged"] == 3
         assert data["chunks_384_stranded"] == 0
         assert data["chunks_768_stranded"] == 12

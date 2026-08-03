@@ -413,6 +413,65 @@ class TestClassification:
         assert "INCOMPLETE" in result.output
 
 
+# ── Worktree/tempdir classifier (platform-independence pin) ──────────────
+
+
+class TestIsWorktreeOrTempdirPath:
+    """Pure string-based pins for ``_is_worktree_or_tempdir_path``.
+
+    Deliberately touches NO filesystem and uses only literal strings, so
+    this is the mechanism in this file that is guaranteed
+    platform-independent: it never depends on wherever pytest's own
+    ``tmp_path`` fixture happens to physically live (system temp under
+    ``/tmp`` by default on Linux CI vs ``/private/var/folders/...`` on
+    macOS — see ``_TEMP_DIR_PREFIXES``'s own comment in
+    ``reconcile_stale.py``). ``TestJsonOutput`` and ``TestHumanReport``
+    below derive their expected worktree/tempdir *counts* from calling
+    this same production function against the fixture's actual
+    ``resolved_path`` values rather than hardcoding a platform-dependent
+    literal count; this class is what pins the function's own behavior
+    (the previously-red assertions were pinning a number that silently
+    depended on where the CI runner's ``/tmp`` happened to place
+    ``tmp_path`` — 1 on macOS, 3 on Linux — nexus-cdypx CI fix wave).
+    """
+
+    def test_worktree_marker_matches(self):
+        assert reconcile_stale_mod._is_worktree_or_tempdir_path(
+            "/Users/hal/.claude/worktrees/wt1/src/gone.py"
+        )
+
+    def test_linux_system_tmp_matches(self):
+        assert reconcile_stale_mod._is_worktree_or_tempdir_path(
+            "/tmp/pytest-of-runner/pytest-0/test_foo0/src/missing.py"
+        )
+
+    def test_private_tmp_matches(self):
+        assert reconcile_stale_mod._is_worktree_or_tempdir_path(
+            "/private/tmp/scratch/src/missing.py"
+        )
+
+    def test_macos_pytest_tmp_does_not_match(self):
+        # Deliberately excluded (reconcile_stale.py's own comment):
+        # /var/folders/ is macOS's broad per-user cache root and also
+        # where pytest's tmp_path fixture lives there — too noisy a
+        # signal to count as "confirmed-safe".
+        assert not reconcile_stale_mod._is_worktree_or_tempdir_path(
+            "/private/var/folders/57/xyz/T/pytest-of-hal/pytest-0/"
+            "test_foo0/src/missing.py"
+        )
+
+    def test_ci_workspace_path_does_not_match(self):
+        assert not reconcile_stale_mod._is_worktree_or_tempdir_path(
+            "/home/runner/work/nexus/nexus/src/real.py"
+        )
+
+    def test_relative_path_does_not_match(self):
+        assert not reconcile_stale_mod._is_worktree_or_tempdir_path("src/real.py")
+
+    def test_empty_string_does_not_match(self):
+        assert not reconcile_stale_mod._is_worktree_or_tempdir_path("")
+
+
 # ── JSON shape ──────────────────────────────────────────────────────────
 
 
@@ -425,7 +484,7 @@ class TestJsonOutput:
         result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
 
         assert data["summary"]["total_docs"] == 15
         assert data["summary"]["vanished_empty_manifest"] == 1
@@ -450,7 +509,21 @@ class TestJsonOutput:
         assert data["zero_count_live"]["orphaned_path_by_reason"] == {
             "file_missing": 2, "owner_root_gone": 1,
         }
-        assert data["zero_count_live"]["orphaned_path_worktree_count"] == 1
+        # The worktree/tempdir signal depends on where pytest's own
+        # tmp_path physically lives (system /tmp on Linux CI vs
+        # /private/var/folders on macOS — TestIsWorktreeOrTempdirPath
+        # above pins the classifier itself on literal, platform-
+        # independent strings). Derive the expected count from the SAME
+        # production function applied to this fixture's actual
+        # resolved_path values rather than a platform-dependent literal.
+        expected_worktree_count = sum(
+            1 for r in data["zero_count_live"]["orphaned_path"]
+            if reconcile_stale_mod._is_worktree_or_tempdir_path(r["resolved_path"])
+        )
+        # non-vacuity: the literal /.claude/worktrees/ row (1.12.30) is
+        # never platform-dependent and always counts.
+        assert expected_worktree_count >= 1
+        assert data["zero_count_live"]["orphaned_path_worktree_count"] == expected_worktree_count
         assert {r["tumbler"] for r in data["zero_count_live"]["unresolvable_provenance"]} == {
             "1.50.1", "42", "1.12.20", "1.12.21",
         }
@@ -496,11 +569,29 @@ class TestHumanReport:
         cat, t3 = _mixed_cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
 
+        # Derive the expected worktree/tempdir count from the same
+        # production classifier applied to the fixture's actual
+        # resolved_path values (see TestIsWorktreeOrTempdirPath and the
+        # matching comment in TestJsonOutput.test_json_shape) — pytest's
+        # own tmp_path lives under system /tmp on Linux CI but not on
+        # macOS, so "1 of 3" is not a platform-independent literal.
+        report, _ = reconcile_stale_mod._classify(cat, t3)
+        zc_orphaned = report["zero_count_orphaned_path"]
+        assert len(zc_orphaned) == 3
+        expected_worktree_n = sum(
+            1 for r in zc_orphaned
+            if reconcile_stale_mod._is_worktree_or_tempdir_path(r.get("resolved_path", ""))
+        )
+        assert expected_worktree_n >= 1  # the literal /.claude/worktrees/ row always counts
+
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "reconcile-stale"])
 
         assert result.exit_code == 0, result.output
-        assert "1 of 3 orphaned-path row(s) are worktree/temp-dir" in result.output
+        assert (
+            f"{expected_worktree_n} of 3 orphaned-path row(s) are worktree/temp-dir"
+            in result.output
+        )
 
     def test_unresolvable_provenance_reasons_reported(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)

@@ -746,7 +746,7 @@ class TestOwnersCommand:
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "owners", "--json"])
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data, "expected at least one registered owner"
         for owner in data:
             assert "next_seq" in owner
