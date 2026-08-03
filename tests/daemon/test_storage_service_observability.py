@@ -310,7 +310,13 @@ class TestSupervisorLifecycleLog:
 
 class _FakeLeaseRecord:
     def __init__(self) -> None:
-        self.endpoint = {"host": "127.0.0.1", "port": 1234, "pid": 4321}
+        # nexus-4e96a: mirror the real _publish() endpoint shape (host, port,
+        # pid, token, artifact, launch_kind) so fakes in this file don't drift
+        # from what a live lease actually carries.
+        self.endpoint = {
+            "host": "127.0.0.1", "port": 1234, "pid": 4321,
+            "artifact": "/fake/nexus-service", "launch_kind": "native",
+        }
         self.generation = 7
         self.version = "5.10.6"
         self.heartbeat_epoch = time.time()

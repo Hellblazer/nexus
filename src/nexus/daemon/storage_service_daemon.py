@@ -257,7 +257,16 @@ def _find_service_binary(config_dir: Path) -> Path | None:
     if env_override:
         p = Path(env_override)
         if p.is_file():
-            return _require_executable(p, "NEXUS_SERVICE_BIN")
+            # nexus-4e96a fix round: canonicalize BEFORE returning. The
+            # nexus-4e96a artifact-mismatch check compares this value
+            # cross-process; an unresolved relative/symlinked spelling from
+            # process A's CWD would either false-positive-block process B's
+            # differently-spelled-but-identical path, or (worse) silently
+            # MATCH two different files whose relative spelling coincides —
+            # exactly the silent-misattachment class this bead exists to
+            # kill. strict=False defensively: the file was just confirmed to
+            # exist above, but resolve() must never raise here.
+            return _require_executable(p.resolve(strict=False), "NEXUS_SERVICE_BIN")
         raise StorageServiceStartError(
             f"NEXUS_SERVICE_BIN is set to {env_override!r} but the file does not "
             "exist. Point it at a built native nexus-service binary, or unset it "
@@ -300,7 +309,10 @@ def _find_service_jar() -> Path | None:
         return None
     p = Path(override)
     if p.is_file():
-        return p
+        # nexus-4e96a fix round: canonicalize — see the matching comment in
+        # _find_service_binary; same cross-process comparison hazard applies
+        # to the JAR opt-in.
+        return p.resolve(strict=False)
     raise StorageServiceStartError(
         f"NEXUS_SERVICE_JAR is set to {override!r} but the file does not exist. "
         "Point it at a built nexus-service-*.jar, or unset it to use the "
@@ -360,6 +372,98 @@ def _resolve_launch_artifact(config_dir: Path) -> tuple[Path, str]:
             "nexus-service-*.jar (unverified; requires a JVM)."
         )
     return binary, "native"
+
+
+def requested_launch_artifact_if_explicit(config_dir: Path) -> tuple[Path, str] | None:
+    """Return the launch artifact THIS process explicitly requested, or None.
+
+    "Explicit" means ``NEXUS_SERVICE_JAR`` or ``NEXUS_SERVICE_BIN`` is set in
+    this process's environment. Neither set -> ``None``: the well-known
+    installed binary that :func:`_resolve_launch_artifact` would otherwise
+    fall back to is an AMBIENT default, not a request worth enforcing against
+    a live lease (nexus-4e96a: the mismatch check below must never fire on
+    ordinary well-known-path drift or production flows, which set neither
+    var — only on an operator/gate that named a specific artifact).
+
+    When either var IS set, resolution (including the set-but-missing LOUD
+    failure) is delegated to :func:`_resolve_launch_artifact` — one source of
+    truth for what "the requested artifact" resolves to, shared with the
+    actual spawn path.
+
+    Exists so callers outside this module (``commands/daemon.py``'s
+    ``ensure_storage_supervisor``, the load-bearing short-circuit) can ask
+    "did the CALLER ask for a specific artifact" without importing
+    ``_find_service_jar`` directly — RDR-161's inverse-grep gate
+    (``test_rdr161_native_only_gate.py``) confines JAR-launch identifiers to
+    this module.
+    """
+    jar_env = os.environ.get("NEXUS_SERVICE_JAR", "").strip()
+    bin_env = os.environ.get("NEXUS_SERVICE_BIN", "").strip()
+    if not jar_env and not bin_env:
+        return None
+    return _resolve_launch_artifact(config_dir)
+
+
+def _raise_or_warn_on_artifact_mismatch(config_dir: Path, endpoint: dict[str, Any]) -> None:
+    """Shared mismatch check (nexus-4e96a) for BOTH short-circuit layers:
+    :meth:`StorageServiceSupervisor._start_locked` (the ``--foreground`` /
+    OS-unit path) and ``commands.daemon.ensure_storage_supervisor`` (the
+    load-bearing CLI-level short-circuit, ``commands/daemon.py:597-633``).
+    ONE implementation so the two layers cannot drift on what "mismatch"
+    means.
+
+    No-op when this process made no explicit request — see
+    :func:`requested_launch_artifact_if_explicit`. Never fires on ordinary
+    well-known-path drift or ambient production flows (neither env var set
+    there — sweep-proven, see the nexus-4e96a design record). When it DOES
+    fire:
+
+    COMPARISON CONTRACT (fix round, nexus-4e96a round-1 critique): equality
+    is CANONICAL-ABSOLUTE path equality, never raw string equality. Both
+    sides are resolved before this function ever sees them —
+    ``requested_launch_artifact_if_explicit`` canonicalizes at the source
+    (``_find_service_jar`` / ``_find_service_binary``), and ``_publish``
+    canonicalizes defensively on the way into the lease — so a relative or
+    symlinked spelling of the SAME file from a different CWD compares equal,
+    and two files that happen to share a relative spelling from different
+    CWDs are correctly told apart. Comparing unnormalized strings was the
+    original round-1 gap: it could either false-positive-block an identical
+    file or, worse, silently match two different ones — the exact silent-
+    misattachment class this bead exists to kill.
+
+    - Lease endpoint carries ``"artifact"`` and it differs from the
+      requested path -> LOUD :class:`StorageServiceStartError` naming both
+      artifacts + the remedy.
+    - Lease endpoint lacks ``"artifact"`` (a pre-fix supervisor's lease) ->
+      ALLOW, logged as ``storage_service_artifact_unverifiable`` (a
+      one-release degrade window — the field only started being published
+      once this fix landed).
+    - Same artifact (or no explicit request) -> silent; the ordinary
+      idempotent short-circuit proceeds unchanged.
+    """
+    requested = requested_launch_artifact_if_explicit(config_dir)
+    if requested is None:
+        return
+    requested_path, requested_kind = requested
+    lease_artifact = endpoint.get("artifact")
+    if lease_artifact is None:
+        _log.warning(
+            "storage_service_artifact_unverifiable",
+            requested_artifact=str(requested_path),
+            requested_kind=requested_kind,
+            msg="the live lease predates artifact-identity tracking "
+                "(nexus-4e96a); cannot verify it matches the explicitly "
+                "requested artifact — allowing the short-circuit.",
+        )
+        return
+    if lease_artifact != str(requested_path):
+        raise StorageServiceStartError(
+            "An explicit storage-service launch artifact was requested "
+            f"({requested_path}, kind={requested_kind}) but a live lease is "
+            f"already serving a DIFFERENT artifact ({lease_artifact}). "
+            "Refusing to silently attach to a mismatched process. Remedy: "
+            "nx daemon service stop, then nx daemon service start."
+        )
 
 
 # ── Port helpers ───────────────────────────────────────────────────────────────
@@ -838,6 +942,24 @@ class StorageServiceSupervisor:
             "port": port,
             "pid": self._proc.pid,
             "token": self._service_token,
+            # nexus-4e96a: identity of the artifact THIS process is actually
+            # serving. Opaque endpoint payload (service_registry.py:113-115 —
+            # no LeaseRecord/format_version change): consumed only by the
+            # explicit-mismatch check in _start_locked / ensure_storage_supervisor.
+            # A pre-fix lease lacks these keys entirely; readers must treat
+            # absence as "unverifiable", never as "no artifact".
+            #
+            # Fix round: resolve() DEFENSIVELY here too, not only at the
+            # request side (_find_service_jar / _find_service_binary) — those
+            # already canonicalize self._binary_path when it flowed through
+            # _resolve_launch_artifact, but a Supervisor can also be
+            # constructed directly with an arbitrary (possibly relative or
+            # symlinked) binary_path, e.g. in tests or a future caller. The
+            # comparison contract (_raise_or_warn_on_artifact_mismatch) is
+            # canonical-absolute equality on BOTH sides; publishing anything
+            # less defeats it regardless of how the value got here.
+            "artifact": str(Path(self._binary_path).resolve(strict=False)),
+            "launch_kind": self._launch_kind,
         }
         self._service_port = port
         self._registry = ServiceRegistry(
@@ -926,6 +1048,7 @@ class StorageServiceSupervisor:
         existing = registry.discover(self._scope)
         if existing is not None:
             ep = existing.endpoint
+            _raise_or_warn_on_artifact_mismatch(self._config_dir, ep)
             _log.info(
                 "storage_service_already_running",
                 host=ep.get("host"),

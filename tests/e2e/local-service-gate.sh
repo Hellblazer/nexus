@@ -284,9 +284,12 @@ NEXUS_CONFIG_DIR="$SCRATCH" uv run nx init --service
 # CURRENT PINNED RELEASE native binary (REQUIRED_ENGINE_VERSION) and starts
 # it (commands/init.py -> ensure_storage_supervisor), publishing a live
 # lease. Left running, that lease makes step 3 below a NO-OP: daemon start
-# is idempotent on an existing lease (storage_service_daemon.py
-# _start_locked short-circuits without inspecting NEXUS_SERVICE_JAR/BIN at
-# all) — found live 2026-08-02 while adding the nexus-x81ks smoke leg: the
+# is idempotent on an existing lease (commands/daemon.py
+# ensure_storage_supervisor — the LOAD-BEARING short-circuit, at
+# commands/daemon.py:597-633 — returns the live lease without ever
+# inspecting NEXUS_SERVICE_JAR/BIN or even spawning a subprocess, so
+# storage_service_daemon.py's own _start_locked copy of the check is never
+# reached either) — found live 2026-08-02 while adding the nexus-x81ks smoke leg: the
 # RUNFENCE routes (unreleased, post-v0.1.61) 404'd even though step 2 had
 # just rebuilt a jar containing them, because the ACTUAL running process the
 # whole time was the pinned release binary init installed, never the fresh
