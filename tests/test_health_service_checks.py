@@ -163,19 +163,48 @@ class TestCheckStorageServiceHealth:
         assert r.warn is False
 
     def test_no_pg_credentials_skips_with_soft_warn(self, tmp_path):
-        """No pg_credentials file -> soft warn, not fatal."""
+        """No pg_credentials file, LOCAL mode (pinned explicitly, per repo
+        directive "pin is_local_mode in cloud-path tests" — never let
+        ambient machine state decide) -> soft warn, not fatal, existing
+        message."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
-        results = _check_storage_service_health(
-            creds_path=missing_creds,
-            endpoint=None,
-            http_get=None,  # should never be called
-        )
+        with patch("nexus.config.is_local_mode", return_value=True):
+            results = _check_storage_service_health(
+                creds_path=missing_creds,
+                endpoint=None,
+                http_get=None,  # should never be called
+            )
         assert len(results) == 1
         r = results[0]
         assert r.ok is False
         assert r.warn is True  # soft warn
         assert r.fatal is False
+        assert "pg_credentials absent" in r.detail
+
+    def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
+        """nexus-g7ijj: a managed deployment has no local pg_credentials by
+        design (the store operator holds those, nexus-y3wuu) — the skip
+        detail must say so, not the misleading "not configured" message.
+        Still ok=False/warn=True: a managed box's check was NOT performed
+        from this client, and doctor's checkmark must never render for an
+        unperformed check."""
+        missing_creds = tmp_path / "pg_credentials"  # does not exist
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            results = _check_storage_service_health(
+                creds_path=missing_creds,
+                endpoint=None,
+                http_get=None,  # should never be called
+            )
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert r.fatal is False
+        assert "server-side" in r.detail
+        assert "y3wuu" in r.detail
+        assert "not configured" not in r.detail
 
     def test_endpoint_undiscoverable_soft_warn(self, tmp_path):
         """pg_credentials present but endpoint=None -> soft warn, not fatal."""
@@ -528,6 +557,39 @@ def _psql_runner_no_table():
 
 class TestCheckMigrationState:
     """Unit tests for _check_migration_state — injected psql runner."""
+
+    def test_no_pg_credentials_local_mode_keeps_existing_message(self, tmp_path):
+        """nexus-g7ijj: fills a coverage gap — this check had NO missing-
+        creds skip test at all before this bead. LOCAL mode pinned
+        explicitly (never ambient) -> the original "not configured"
+        message, soft warn, not fatal."""
+        missing_creds = tmp_path / "pg_credentials"  # does not exist
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            results = _check_migration_state(creds_path=missing_creds)
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert not r.fatal
+        assert "pg_credentials absent" in r.detail
+
+    def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
+        """nexus-g7ijj: managed deployment -> server-side contract detail
+        (nexus-y3wuu), never the misleading "not configured" message.
+        ok=False/warn=True preserved — the check still was not performed."""
+        missing_creds = tmp_path / "pg_credentials"  # does not exist
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            results = _check_migration_state(creds_path=missing_creds)
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert not r.fatal
+        assert "server-side" in r.detail
+        assert "y3wuu" in r.detail
+        assert "not configured" not in r.detail
 
     def test_all_executed_returns_ok(self, tmp_path):
         """All EXECUTED rows + a clean (0-poison) chash probe -> ok result."""
@@ -900,6 +962,39 @@ class TestCheckRlsPresent:
     The negative tests are NON-VACUOUS: they produce fatal results when
     specific RLS conditions are violated.
     """
+
+    def test_no_pg_credentials_local_mode_keeps_existing_message(self, tmp_path):
+        """nexus-g7ijj: fills a coverage gap — this check had NO missing-
+        creds skip test at all before this bead. LOCAL mode pinned
+        explicitly (never ambient) -> the original "not configured"
+        message, soft warn, not fatal."""
+        missing_creds = tmp_path / "pg_credentials"  # does not exist
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            results = _check_rls_present(creds_path=missing_creds)
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert not r.fatal
+        assert "pg_credentials absent" in r.detail
+
+    def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
+        """nexus-g7ijj: managed deployment -> server-side contract detail
+        (nexus-y3wuu), never the misleading "not configured" message.
+        ok=False/warn=True preserved — the check still was not performed."""
+        missing_creds = tmp_path / "pg_credentials"  # does not exist
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            results = _check_rls_present(creds_path=missing_creds)
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert not r.fatal
+        assert "server-side" in r.detail
+        assert "y3wuu" in r.detail
+        assert "not configured" not in r.detail
 
     def test_all_tables_rls_ok(self, tmp_path):
         """All tables have RLS enabled, forced, and policies -> ok."""

@@ -658,6 +658,96 @@ def is_local_mode() -> bool:
     return True
 
 
+def backfill_install_mode_record() -> str | None:
+    """Backfill a missing ``install.mode`` record (nexus-g7ijj).
+
+    ``set_config_value("install.mode", ...)`` is written only at ``nx init``
+    time — local provisioning stamps ``"local"``, managed onboarding stamps
+    ``"managed"``. An install that reached its current state purely via
+    ``nx upgrade`` (never re-running ``nx init``) never gets the record, so
+    :func:`is_local_mode` falls through to ``pg_credentials`` artifact
+    inference forever, and ``nx doctor``'s service checks report a
+    misleading "pg_credentials absent" skip on a genuinely managed box.
+
+    Precedence mirrors :func:`is_local_mode`'s own reading of the record,
+    with two deliberate divergences because this is a DURABLE, PERMANENT
+    stamp rather than a per-invocation read:
+
+    - ``NX_LOCAL`` (``"1"`` or ``"0"``) SKIPS stamping entirely (returns
+      ``None``). ``is_local_mode`` gives it top precedence for the current
+      session, but an env override is session-scoped evidence of nothing
+      durable — stamping from it would permanently contradict the record
+      the moment the operator unsets the env var. Known residual: a box
+      whose every ``nx upgrade`` runs under a durable ``NX_LOCAL`` wrapper
+      (shell profile, e2e scripts) never backfills — that population keeps
+      the artifact-inference behavior until ``nx init`` re-stamps.
+    - ``service_url`` evidence is read from the PERSISTED config.yml
+      credentials section only (never the ``NX_SERVICE_URL`` env overlay
+      that :func:`get_credential` applies). A transiently-exported
+      ``NX_SERVICE_URL`` at upgrade time is session-scoped, not durable
+      intent; stamping "managed" from it would break T3 ops on a genuinely
+      local box the next time the env var is absent. ``is_local_mode``'s
+      own runtime read is UNCHANGED — the env var still wins for that
+      session; only the STAMP requires file-backed evidence.
+
+    Otherwise: a valid ``local``/``managed`` record already present is left
+    untouched (no-op) — this is a backfill, not a re-stamp of a live
+    record. A garbage/invalid recorded value is treated as unrecorded and
+    re-stamped, the same fall-through :func:`is_local_mode` applies. A
+    virgin box (neither signal present) is left unstamped — ``nx init``
+    owns first stamping.
+
+    Returns the mode that was stamped (``"local"`` or ``"managed"``), or
+    ``None`` when nothing was written (already recorded, env-overridden
+    session, or a virgin box). Never raises: the entire body is
+    exception-safe — an unwritable config dir, or a malformed config.yml
+    (``yaml.YAMLError`` from ``load_config``/credential reads), must not
+    break an upgrade (same tolerance as ``upgrade_finish.py``'s finish-pass
+    legs) even when the caller does not wrap the call itself.
+    """
+    try:
+        nx_local = os.environ.get("NX_LOCAL", "").strip()
+        if nx_local in ("1", "0"):
+            return None  # session override; not durable intent, do not stamp
+
+        recorded = str(
+            load_config().get("install", {}).get("mode", "") or ""
+        ).strip().lower()
+        if recorded in ("local", "managed"):
+            return None
+
+        if _persisted_service_url().strip():
+            mode = "managed"
+        else:
+            from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — leaf constant, deferred to keep config import-light
+
+            if not (nexus_config_dir() / CREDENTIALS_FILENAME).is_file():
+                return None  # virgin box; nx init owns first stamping
+            mode = "local"
+
+        set_config_value("install.mode", mode)
+    except Exception:  # noqa: BLE001 — the docstring's "never raises" contract must hold from THIS function, not a caller wrapper (nexus-g7ijj); malformed config.yml (yaml.YAMLError) or an unwritable dir must not break an upgrade
+        _log.warning("install_mode_backfill_failed", exc_info=True)
+        return None
+    _log.info("install_mode_backfilled", mode=mode, source="upgrade-convergence")
+    return mode
+
+
+def _persisted_service_url() -> str:
+    """Read ``service_url`` from the PERSISTED ``config.yml`` only.
+
+    Unlike :func:`get_credential`, this bypasses the ``NX_SERVICE_URL`` env
+    overlay entirely. Used solely by :func:`backfill_install_mode_record`:
+    a durable stamp needs durable (file-backed) evidence, never a
+    transient env override for the current session.
+    """
+    path = _global_config_path()
+    if not path.exists():
+        return ""
+    data = yaml.safe_load(path.read_text()) or {}
+    return str(data.get("credentials", {}).get("service_url", "") or "")
+
+
 _mode_record_contradiction_warned: bool = False
 
 

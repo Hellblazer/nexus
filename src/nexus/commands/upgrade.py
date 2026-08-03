@@ -79,6 +79,22 @@ def upgrade(
         with _standing_consent(assume_yes):
             _run_ladder(dry_run=dry_run, auto_mode=auto_mode)
 
+        # nexus-g7ijj: an install that converged purely via `nx upgrade`
+        # (never re-running `nx init`) never got install.mode stamped —
+        # is_local_mode() fell through to pg_credentials artifact inference
+        # forever. Backfill it here, on the ladder-succeeded path only
+        # (a hard ladder failure raises before this line); --dry-run must
+        # write nothing.
+        if not dry_run:
+            # nexus-g7ijj fix round: no actual import cycle between
+            # nexus.config and nexus.commands.upgrade — deferred to match
+            # this file's convention of keeping imports off the CLI's
+            # cold-start path, and because backfill_install_mode_record()
+            # is genuinely exception-safe (see its docstring): this call
+            # site does not need its own try/except.
+            from nexus.config import backfill_install_mode_record  # noqa: PLC0415 — deferred, keeps config import off the CLI's cold-start path
+            backfill_install_mode_record()
+
         # RE-WIRED (Hal decision, 2026-07-30): these three post-upgrade
         # steps lost their caller when Stage 4 deleted _run_upgrade's
         # local-SQLite leg — collateral, not a decision. Same gating as

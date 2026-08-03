@@ -307,6 +307,89 @@ class TestVersionTransition:
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
 
 
+class TestCheckVersionTransitionBackfillsInstallMode:
+    """nexus-g7ijj: the real (non-preview) path best-effort backfills a
+    missing ``install.mode`` record, gated on the one-shot stamp claim
+    having already won the race and NEVER on the preview path. Verified
+    via the call itself (patched at its ``nexus.config`` home, the
+    deferred-import call site's resolution point) rather than end-to-end
+    file assertions — the surrounding finish-pass legs (engine convergence,
+    diag-view heal, launchagent unloads) are exercised for real against a
+    bare tmp_path elsewhere in this file and are orthogonal to this hook.
+    """
+
+    def test_real_run_calls_the_backfill(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
+            "nexus.config.backfill_install_mode_record",
+        ) as backfill:
+            line = check_version_transition(tmp_path)
+        backfill.assert_called_once_with()
+        assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
+
+    def test_first_ever_run_also_calls_the_backfill(self, tmp_path):
+        """No prior stamp at all: ``check_version_transition`` returns
+        early ("nothing stale to finish") right after the stamp claim —
+        but an ancient install that upgraded through several releases
+        before this stamp mechanism ever existed hits exactly this
+        branch on its first post-upgrade invocation, which is precisely
+        the never-recorded install.mode case nexus-g7ijj closes. The
+        backfill must fire here too, not only on a real version
+        transition."""
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.config.backfill_install_mode_record",
+        ) as backfill:
+            line = check_version_transition(tmp_path)
+        assert line is None
+        backfill.assert_called_once_with()
+
+    def test_preview_never_calls_the_backfill(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.config.backfill_install_mode_record",
+        ) as backfill:
+            check_version_transition(tmp_path, preview=True)
+        backfill.assert_not_called()
+
+    def test_backfill_failure_never_breaks_the_finish_pass(self, tmp_path):
+        """Best-effort posture: a raising backfill degrades quietly and the
+        rest of the finish pass still completes and reports normally."""
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
+            "nexus.config.backfill_install_mode_record",
+            side_effect=RuntimeError("boom"),
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+
 class TestRecycledPid:
     def test_recycled_pid_is_never_signaled(self):
         """High-3: the pid re-verification sees a DIFFERENT command at the

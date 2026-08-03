@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.config import is_local_mode
+from nexus.config import backfill_install_mode_record, is_local_mode
 from nexus.stranded_install import legacy_chroma_dir
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t3 import T3Database
@@ -190,6 +190,134 @@ class TestIsLocalMode:
         with_key_no_chroma = is_local_mode()
         monkeypatch.delenv("VOYAGE_API_KEY")
         assert is_local_mode() is with_key_no_chroma
+
+
+class TestBackfillInstallModeRecord:
+    """nexus-g7ijj: ``set_config_value("install.mode", ...)`` is written only
+    at ``nx init`` (local provisioning or managed onboarding) — an install
+    that reached its current state purely via ``nx upgrade`` never got the
+    record, so ``is_local_mode()`` fell through to ``pg_credentials``
+    artifact inference forever. ``backfill_install_mode_record()`` closes
+    that gap; precedence mirrors ``is_local_mode()``'s own reading of the
+    record (service_url beats pg_credentials; a valid record is untouched;
+    a garbage record is treated as unrecorded)."""
+
+    def _cfg(self, tmp_path, monkeypatch, *, pg_creds: bool):
+        cfg = tmp_path / "cfg"
+        cfg.mkdir(exist_ok=True)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for var in ("NX_LOCAL", "CHROMA_API_KEY", "VOYAGE_API_KEY", "NX_SERVICE_URL"):
+            monkeypatch.delenv(var, raising=False)
+        if pg_creds:
+            from nexus.db.pg_provision import CREDENTIALS_FILENAME
+            (cfg / CREDENTIALS_FILENAME).write_text("PGHOST=127.0.0.1\n")
+        return cfg
+
+    def _record(self, tmp_path, monkeypatch, mode, *, pg_creds=False):
+        cfg = self._cfg(tmp_path, monkeypatch, pg_creds=pg_creds)
+        import yaml
+        (cfg / "config.yml").write_text(yaml.safe_dump({"install": {"mode": mode}}))
+        return cfg
+
+    def _persist_service_url(self, cfg, url="https://m.example"):
+        """Write ``credentials.service_url`` into config.yml directly (the
+        FILE-backed evidence path), never via env — used to distinguish
+        durable (file) evidence from a transient env override."""
+        import yaml
+        p = cfg / "config.yml"
+        data = yaml.safe_load(p.read_text()) if p.exists() else {}
+        data = data or {}
+        data.setdefault("credentials", {})["service_url"] = url
+        p.write_text(yaml.safe_dump(data))
+
+    def test_recorded_local_is_a_noop(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "local")
+        assert backfill_install_mode_record() is None
+
+    def test_recorded_managed_is_a_noop(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "managed")
+        assert backfill_install_mode_record() is None
+
+    def test_no_record_with_persisted_service_url_stamps_managed(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, pg_creds=False)
+        self._persist_service_url(cfg)
+        assert backfill_install_mode_record() == "managed"
+        assert is_local_mode() is False  # integration: the record now resolves it
+
+    def test_no_record_with_pg_credentials_stamps_local(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        assert backfill_install_mode_record() == "local"
+        assert is_local_mode() is True
+
+    def test_virgin_box_stamps_nothing(self, tmp_path, monkeypatch):
+        """Neither signal present: nx init owns first stamping, not this
+        backfill."""
+        self._cfg(tmp_path, monkeypatch, pg_creds=False)
+        assert backfill_install_mode_record() is None
+
+    def test_garbage_record_with_pg_credentials_restamps_local(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "purple", pg_creds=True)
+        assert backfill_install_mode_record() == "local"
+        assert is_local_mode() is True
+
+    def test_persisted_service_url_beats_pg_credentials_when_both_present(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        self._persist_service_url(cfg)
+        assert backfill_install_mode_record() == "managed"
+        assert is_local_mode() is False
+
+    def test_unwritable_config_dir_returns_none_without_raising(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        with patch("nexus.config.set_config_value", side_effect=OSError("readonly fs")):
+            assert backfill_install_mode_record() is None
+
+    # ── nexus-g7ijj fix round: malformed config.yml must never raise ────────
+
+    def test_malformed_config_yml_returns_none_without_raising(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        # Unclosed flow sequence: yaml.safe_load raises yaml.parser.ParserError.
+        (cfg / "config.yml").write_text("foo: [1, 2\n")
+        assert backfill_install_mode_record() is None
+
+    # ── nexus-g7ijj fix round: NX_LOCAL takes precedence, same as is_local_mode ──
+
+    def test_nx_local_1_skips_stamping_even_with_pg_credentials(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        monkeypatch.setenv("NX_LOCAL", "1")
+        assert backfill_install_mode_record() is None
+        assert not (cfg / "config.yml").exists()
+
+    def test_nx_local_0_skips_stamping_even_with_service_url(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, pg_creds=False)
+        self._persist_service_url(cfg)
+        monkeypatch.setenv("NX_LOCAL", "0")
+        import yaml
+        before = yaml.safe_load((cfg / "config.yml").read_text())
+        assert backfill_install_mode_record() is None
+        after = yaml.safe_load((cfg / "config.yml").read_text())
+        assert "install" not in after
+        assert before == after  # untouched, not just "no install key added"
+
+    # ── nexus-g7ijj fix round: only FILE-backed service_url counts as durable
+    # evidence for the stamp; a transient NX_SERVICE_URL env var must not
+    # permanently stamp "managed" onto a genuinely local box.
+
+    def test_transient_service_url_env_with_pg_credentials_stamps_local(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        monkeypatch.setenv("NX_SERVICE_URL", "https://transient.example")
+        assert backfill_install_mode_record() == "local"
+        # is_local_mode()'s own runtime read is UNCHANGED: the env override
+        # still wins for THIS session.
+        assert is_local_mode() is False
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        # once the transient env is gone, the durable "local" record resolves it.
+        assert is_local_mode() is True
+
+    def test_transient_service_url_env_without_pg_credentials_stamps_nothing(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, pg_creds=False)
+        monkeypatch.setenv("NX_SERVICE_URL", "https://transient.example")
+        assert backfill_install_mode_record() is None
 
 
 class TestLegacyChromaDir:

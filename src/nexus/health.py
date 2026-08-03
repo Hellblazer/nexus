@@ -32,6 +32,18 @@ _WARN = "✗"
 # marks the run as failed.
 _SOFT_WARN = "⚠"
 
+# nexus-g7ijj fix round: the managed/local "not probeable from here" detail
+# strings were duplicated verbatim across the three service-check skip
+# sites (_check_storage_service_health, _check_migration_state,
+# _check_rls_present) — extracted once so a future wording change can't
+# drift between them.
+_MANAGED_DEPLOYMENT_SKIP_DETAIL = (
+    "managed deployment — this check runs server-side with the "
+    "store operator's credentials (nexus-y3wuu); not probeable "
+    "from this client; skipping"
+)
+_LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
+
 
 @dataclass
 class HealthResult:
@@ -1878,10 +1890,20 @@ def _check_storage_service_health(
 
     # Gate: service/PG mode configured?
     if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        if not is_local_mode():
+            # nexus-y3wuu: a managed deployment has no local pg_credentials
+            # by design — the store operator holds those. Never claim "not
+            # configured" for a box that IS configured, just not probeable
+            # from here.
+            detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL
+        else:
+            detail = _LOCAL_MODE_NOT_CONFIGURED_DETAIL
         return [HealthResult(
             label="Storage service health",
             ok=False,
-            detail="service mode not configured (pg_credentials absent); skipping",
+            detail=detail,
             warn=True,
         )]
 
@@ -2234,10 +2256,16 @@ def _check_migration_state(
         creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
 
     if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        if not is_local_mode():
+            detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL
+        else:
+            detail = _LOCAL_MODE_NOT_CONFIGURED_DETAIL
         return [HealthResult(
             label="Schema migrations",
             ok=False,
-            detail="service mode not configured (pg_credentials absent); skipping",
+            detail=detail,
             warn=True,
         )]
 
@@ -2691,10 +2719,16 @@ def _check_rls_present(
         creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
 
     if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        if not is_local_mode():
+            detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL
+        else:
+            detail = _LOCAL_MODE_NOT_CONFIGURED_DETAIL
         return [HealthResult(
             label="RLS policies",
             ok=False,
-            detail="service mode not configured (pg_credentials absent); skipping",
+            detail=detail,
             warn=True,
         )]
 
