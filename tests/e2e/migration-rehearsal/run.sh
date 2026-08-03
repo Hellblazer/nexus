@@ -312,7 +312,18 @@ elif [ "$DO_BUILD" = 1 ]; then
     exit 1
   fi
   echo "[2/3] Building the LINUX native nexus-service binary (GraalVM container, ~2-3m)…"
-  if [ ! -x service/target/nexus-service ]; then
+  # nexus-ndve9: EXISTENCE IS NOT FRESHNESS. `mvn package` leaves
+  # service/target/nexus-service on disk and nothing here removes it, so an
+  # existence-only guard reuses whatever artifact happens to be there —
+  # forever. The 2026-08-03 v0.1.63 pre-tag shakeout validated a binary dated
+  # 2026-07-22 while reporting on abbcf1bd: 34 newer service/src/main files,
+  # and four count-emitting endpoints (store-get, manifest/get_many,
+  # manifest/chashes, manifest/docs_for_chashes) missing purely because the
+  # artifact predated the commits that added them. Every JVM suite was green
+  # on the tree under test — nothing below this layer could have caught it.
+  # Rebuild whenever ANY service source (or the pom) is newer than the binary.
+  if [ ! -x service/target/nexus-service ] \
+     || [ -n "$(find service/src service/pom.xml -newer service/target/nexus-service -print -quit 2>/dev/null)" ]; then
     # Native build in a linux GraalVM container. The mounted Docker socket lets
     # -Pnative's Testcontainers jOOQ codegen reach the host daemon (DooD);
     # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
@@ -335,7 +346,11 @@ elif [ "$DO_BUILD" = 1 ]; then
       "$GRAAL_IMAGE" \
       -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
   else
-    echo "      (native binary already built — reusing service/target/nexus-service)"
+    # nexus-ndve9: when we DO reuse, say how old the artifact is — the failing
+    # shakeout's log recorded only "candidate native binary present", which
+    # reads as a pass while a 12-day-stale binary is under test.
+    _bin_mtime="$(date -r service/target/nexus-service '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    echo "      (native binary up to date — reusing service/target/nexus-service, built $_bin_mtime)"
   fi
 else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
