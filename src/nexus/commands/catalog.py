@@ -261,6 +261,7 @@ from nexus.commands.catalog_cmds import report as _report_cmds  # noqa: E402 —
 from nexus.commands.catalog_cmds import integrity as _integrity_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import doctor as _doctor_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import orphan_backfill as _orphan_backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import reconcile_stale as _reconcile_stale_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -273,6 +274,7 @@ _report_cmds.register(catalog)
 _integrity_cmds.register(catalog)
 _doctor_cmds.register(catalog)
 _orphan_backfill_cmds.register(catalog)
+_reconcile_stale_cmds.register(catalog)
 
 
 @catalog.command("init")
