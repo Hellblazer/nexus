@@ -296,6 +296,50 @@ class TestPut:
         assert returned_id == expected_doc_id
 
 
+class TestExistingIdsAndGetByIdStayTruncationSafe:
+    """nexus-hdx2u: existing_ids and get_by_id call ``_post`` directly
+    (not through ``_ServiceCollectionStub.get``) and were ALREADY safe
+    before this bead's fix — existing_ids explicitly sends
+    ``limit=len(batch)`` per 300-id page, and get_by_id only ever
+    requests a single id. Regression-pin that neither regressed while
+    fixing the stub's shared default."""
+
+    def test_existing_ids_pages_at_300_with_limit_matching_batch(self, monkeypatch):
+        client = HttpVectorClient()
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": body["ids"]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        ids = [f"id{i:04d}" for i in range(350)]
+        found = client.existing_ids("col", ids)
+        assert len(calls) == 2
+        assert calls[0][1]["limit"] == 300 == len(calls[0][1]["ids"])
+        assert calls[1][1]["limit"] == 50 == len(calls[1][1]["ids"])
+        assert found == set(ids)
+
+    def test_existing_ids_partial_hit_is_not_mistaken_for_truncation(self, monkeypatch):
+        """A batch of 157 ids where only 5 actually exist must return
+        exactly those 5 — no truncation warning, no assertion failure."""
+        client = HttpVectorClient()
+        def fake_post(path, body, **kw):
+            return {"ids": body["ids"][:5]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        ids = [f"id{i:04d}" for i in range(157)]
+        found = client.existing_ids("col", ids)
+        assert found == set(ids[:5])
+
+    def test_get_by_id_requests_a_single_id(self, monkeypatch):
+        client = HttpVectorClient()
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            return {"ids": ["id1"], "documents": ["text"], "metadatas": [{}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client.get_by_id("col", "id1")
+        assert calls[0]["ids"] == ["id1"]
+
+
 class TestGetById:
     def test_returns_flat_t3database_shape_when_found(self, monkeypatch):
         # nexus-ij9hg: get_by_id must return T3Database's FLAT shape
@@ -504,7 +548,21 @@ class TestGetCollection:
 
 
 class TestServiceCollectionStubGetWithIds:
-    """RDR-152 nexus-enehl: _ServiceCollectionStub.get(ids=...) routes to store-get."""
+    """RDR-152 nexus-enehl: _ServiceCollectionStub.get(ids=...) routes to store-get.
+
+    nexus-hdx2u: the stub's own ``limit: int = 10`` signature default was
+    forwarded verbatim to ``POST /v1/vectors/store-get`` and silently
+    truncated every >10-id batch (aspect extraction fed 10-of-157
+    fragments; taxonomy centroid rebuilds saw ~4% of a collection). These
+    cases pin the fix: ``limit=None`` resolves to the batch's own size on
+    the ids path, oversized id lists page at QUOTAS.MAX_RECORDS_PER_WRITE,
+    and the where-branch keeps its historical default untouched.
+    """
+
+    def _reset_truncation_flag(self, monkeypatch):
+        import nexus.db.http_vector_client as hvc
+
+        monkeypatch.setattr(hvc, "_store_get_truncated_logged", False)
 
     def test_ids_routes_to_store_get(self, monkeypatch):
         from nexus.db.http_vector_client import _ServiceCollectionStub
@@ -543,6 +601,248 @@ class TestServiceCollectionStubGetWithIds:
         stub = _ServiceCollectionStub("col__test__m__v1")
         stub.get(limit=5, offset=0)
         assert calls[0][0] == "/v1/vectors/get"
+
+    def test_default_limit_none_resolves_to_len_ids(self, monkeypatch):
+        """The historical bug: no limit passed by the caller must NOT
+        silently cap the batch at 10 — the wire body's limit must cover
+        every requested id."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            ids = body["ids"]
+            return {
+                "ids": ids,
+                "documents": [f"doc-{i}" for i in ids],
+                "metadatas": [{} for _ in ids],
+            }
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i:03d}" for i in range(37)]
+        result = stub.get(ids=ids)
+        assert len(calls) == 1
+        assert calls[0][1]["limit"] == 37
+        assert result["ids"] == ids
+
+    def test_positive_wire_body_limit_covers_all_requested_ids(self, monkeypatch):
+        """Direct regression pin for the bead's headline defect: for ANY
+        id batch, the outgoing body's limit must be >= the number of ids
+        in that request."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": [], "documents": [], "metadatas": []}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i:03d}" for i in range(157)]
+        stub.get(ids=ids)
+        assert calls, "expected at least one store-get POST"
+        for path, body in calls:
+            assert path == "/v1/vectors/store-get"
+            assert body["limit"] >= len(body["ids"])
+
+    def test_oversized_ids_batch_pages_at_max_records_per_write(self, monkeypatch):
+        """157 ids with the service's 300-record page size: one request,
+        limit == len(ids) since it fits in a single page."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.db.limits import QUOTAS
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            ids = body["ids"]
+            return {"ids": ids, "documents": [f"d-{i}" for i in ids], "metadatas": [{} for _ in ids]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i:04d}" for i in range(157)]
+        result = stub.get(ids=ids)
+        assert len(calls) == 1
+        assert calls[0][1]["limit"] == 157
+        assert calls[0][1]["ids"] == ids
+        assert result["ids"] == ids
+        assert 157 < QUOTAS.MAX_RECORDS_PER_WRITE  # sanity: single-page case
+
+    def test_ids_batch_larger_than_page_size_pages_one_request_per_page(self, monkeypatch):
+        """A batch exceeding QUOTAS.MAX_RECORDS_PER_WRITE (300) must go out
+        as multiple requests, each page's limit sized to its own batch —
+        never one unbounded POST, never a silently truncated one."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.db.limits import QUOTAS
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            ids = body["ids"]
+            return {"ids": ids, "documents": [f"d-{i}" for i in ids], "metadatas": [{} for _ in ids]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        page = QUOTAS.MAX_RECORDS_PER_WRITE
+        ids = [f"id{i:05d}" for i in range(page + 50)]
+        result = stub.get(ids=ids)
+        assert len(calls) == 2, f"expected 2 paged POSTs for {len(ids)} ids, got {len(calls)}"
+        assert len(calls[0][1]["ids"]) == page
+        assert calls[0][1]["limit"] == page
+        assert len(calls[1][1]["ids"]) == 50
+        assert calls[1][1]["limit"] == 50
+        all_sent = calls[0][1]["ids"] + calls[1][1]["ids"]
+        assert all_sent == ids
+        assert result["ids"] == ids
+
+    def test_explicit_limit_on_ids_branch_is_honored_verbatim(self, monkeypatch):
+        """A caller that DOES pass an explicit limit alongside ids keeps
+        the old single-request behaviour unchanged."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": ["a", "b"], "documents": ["x", "y"], "metadatas": [{}, {}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(ids=["a", "b", "c"], limit=2)
+        assert len(calls) == 1
+        assert calls[0][1]["limit"] == 2
+
+    def test_nonzero_offset_on_ids_branch_raises(self, monkeypatch):
+        """nexus-hdx2u round-2 (probed empirically in the critique):
+        offset has no sane meaning on the ids branch — forwarding it
+        verbatim to every internal page is undefined (skip N of each
+        page? of the whole list, which is already sliced by paging?).
+        Fail loud rather than silently do something ill-defined."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        def fake_post(path, body, **kw):
+            raise AssertionError("must not reach the service")
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with pytest.raises(ValueError, match="offset"):
+            stub.get(ids=["a", "b"], offset=5)
+
+    def test_zero_or_none_offset_on_ids_branch_is_fine(self, monkeypatch):
+        """offset=0 (the default) and offset=None are both accepted on
+        the ids branch — only a genuinely non-default offset is
+        rejected."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            return {"ids": ["a"], "documents": ["x"], "metadatas": [{}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(ids=["a"], offset=0)
+        stub.get(ids=["a"], offset=None)
+        assert len(calls) == 2
+
+    def test_explicit_limit_with_multipage_ids_raises(self, monkeypatch):
+        """nexus-hdx2u round-2 (probed: limit=50 over 350 ids -> 100 rows
+        returned, since limit was applied per-page across 2 pages). An
+        explicit limit combined with an ids batch spanning more than one
+        internal page has no sane global-cap semantics — fail loud
+        naming the two valid alternatives (omit limit, or pre-chunk)
+        rather than silently returning up to limit * page_count rows."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.db.limits import QUOTAS
+        def fake_post(path, body, **kw):
+            raise AssertionError("must not reach the service")
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i:04d}" for i in range(QUOTAS.MAX_RECORDS_PER_WRITE + 50)]
+        with pytest.raises(ValueError, match="limit"):
+            stub.get(ids=ids, limit=50)
+
+    def test_explicit_limit_with_single_page_ids_still_works(self, monkeypatch):
+        """The multi-page + explicit-limit boundary is the only thing
+        rejected — a single-page batch (<= page size) with an explicit
+        limit is unaffected."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.db.limits import QUOTAS
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            return {"ids": body["ids"][:5], "documents": [], "metadatas": []}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i:04d}" for i in range(QUOTAS.MAX_RECORDS_PER_WRITE)]
+        stub.get(ids=ids, limit=5)
+        assert len(calls) == 1
+        assert calls[0]["limit"] == 5
+
+    def test_where_branch_default_limit_unchanged(self, monkeypatch):
+        """The where-filter (staleness-check) branch keeps its historical
+        default of 10 when no limit is passed — untouched by the ids-branch
+        fix."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": [], "documents": [], "metadatas": []}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(where={"source_path": "/foo.py"})
+        assert calls[0][1]["limit"] == 10
+
+    def test_truncation_warning_fires_when_page_returns_exactly_limit(self, monkeypatch):
+        """The invariant the design pins: len(returned) == limit_sent <
+        len(requested batch) is a genuine truncation signal. This is the
+        explicit-limit path (the auto-default path always sends
+        limit_sent == len(batch), so limit_sent < len(batch) cannot occur
+        there) — e.g. a caller regression that reintroduces a hardcoded
+        small limit alongside a much larger id list, and the engine
+        actually honors it exactly."""
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_truncation_flag(monkeypatch)
+        ids = [f"id{i:03d}" for i in range(20)]
+        def fake_post(path, body, **kw):
+            # Engine honors the client's own (too-small) limit exactly.
+            capped = body["ids"][: body["limit"]]
+            return {"ids": capped, "documents": [f"d-{i}" for i in capped], "metadatas": [{} for _ in capped]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with capture_logs() as logs:
+            result = stub.get(ids=ids, limit=5)
+        events = [e for e in logs if e["event"] == "store_get_truncated_at_limit"]
+        assert len(events) == 1
+        assert events[0]["limit_sent"] == 5
+        assert events[0]["requested"] == 20
+        assert result["ids"] == ids[:5]
+
+    def test_truncation_warning_does_not_fire_on_legitimate_partial_hit(self, monkeypatch):
+        """Absent ids are legitimate — a store-get for 20 ids where only 5
+        actually exist must NOT be flagged as truncation. The wrong
+        invariant here is len(returned) == len(requested); the right one
+        is len(returned) == limit_sent < len(requested)."""
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_truncation_flag(monkeypatch)
+        ids = [f"id{i:03d}" for i in range(20)]
+        def fake_post(path, body, **kw):
+            # Only 5 of the 20 requested ids actually exist; the engine's
+            # limit was sent as len(ids)=20, so 5 < limit_sent — a
+            # legitimate partial hit, not a truncation.
+            present = body["ids"][:5]
+            return {"ids": present, "documents": [f"d-{i}" for i in present], "metadatas": [{} for _ in present]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with capture_logs() as logs:
+            stub.get(ids=ids)
+        events = [e for e in logs if e["event"] == "store_get_truncated_at_limit"]
+        assert events == []
+
+    def test_truncation_warning_logs_once_per_process(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_truncation_flag(monkeypatch)
+        def fake_post(path, body, **kw):
+            capped = body["ids"][: body["limit"]]
+            return {"ids": capped, "documents": [f"d-{i}" for i in capped], "metadatas": [{} for _ in capped]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with capture_logs() as logs:
+            stub.get(ids=[f"id{i}" for i in range(10)], limit=3)
+            stub.get(ids=[f"id{i}" for i in range(10)], limit=3)
+        events = [e for e in logs if e["event"] == "store_get_truncated_at_limit"]
+        assert len(events) == 1
 
 
 class TestNotImplementedMethods:

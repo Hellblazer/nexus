@@ -291,12 +291,37 @@ def _gather_chroma_chunks_by_field(
         if use_manifest_ids:
             ids = list(chash_position)  # RDR-180: the full chash IS the id
             for batch_start in range(0, len(ids), page_limit):
+                requested_batch = ids[batch_start : batch_start + page_limit]
                 page = coll.get(
-                    ids=ids[batch_start : batch_start + page_limit],
+                    ids=requested_batch,
                     include=["documents", "metadatas"],
                 )
+                page_ids = page.get("ids") or []
                 docs = page.get("documents") or []
                 mds = page.get("metadatas") or []
+                # nexus-hdx2u: a store-get can legitimately return FEWER
+                # rows than requested (absent/deleted ids), never more —
+                # len(returned) == len(requested) is the wrong invariant
+                # here, but len(returned) <= len(requested) always holds.
+                # Check ids/documents/metadatas independently (round-2
+                # hardening): the zip() below silently truncates to the
+                # SHORTEST of the three, so checking only len(docs) would
+                # miss an overreturn confined to ids or metadatas alone.
+                assert len(page_ids) <= len(requested_batch), (
+                    f"coll.get(ids=...) returned {len(page_ids)} ids for "
+                    f"{len(requested_batch)} requested ids — a store-get "
+                    "response can never exceed its request size"
+                )
+                assert len(docs) <= len(requested_batch), (
+                    f"coll.get(ids=...) returned {len(docs)} documents for "
+                    f"{len(requested_batch)} requested ids — a store-get "
+                    "response can never exceed its request size"
+                )
+                assert len(mds) <= len(requested_batch), (
+                    f"coll.get(ids=...) returned {len(mds)} metadatas for "
+                    f"{len(requested_batch)} requested ids — a store-get "
+                    "response can never exceed its request size"
+                )
                 for md, doc in zip(mds, docs):
                     if not doc:
                         continue

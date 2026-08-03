@@ -100,6 +100,63 @@ def _warn_update_chunks_missing_unreported(collection: str, count: int) -> None:
     )
 
 
+#: nexus-hdx2u: log ``_ServiceCollectionStub.get``'s self-truncation
+#: tripwire once per process, not once per call — a full-repo aspect
+#: extraction or taxonomy rebuild against an engine that caps
+#: ``store-get`` independently of the client's own paging would
+#: otherwise emit this WARNING once per oversized batch.
+_store_get_truncated_logged: bool = False
+
+#: Historical default for the ``where``-filter branch of
+#: :meth:`_ServiceCollectionStub.get` (the incremental-sync staleness
+#: check). Every in-repo caller of that branch already passes an
+#: explicit ``limit``, so this is a fallback of last resort, not a load-
+#: bearing default. The ``ids`` branch has NO analogous default — see
+#: ``_ServiceCollectionStub.get`` docstring (nexus-hdx2u).
+_WHERE_GET_DEFAULT_LIMIT = 10
+
+
+def _warn_store_get_truncated_at_limit(collection: str, limit_sent: int, requested: int) -> None:
+    """Log-once notice: a ``store-get`` page came back with EXACTLY
+    ``limit_sent`` rows for a batch that asked for more ids than that —
+    the response was silently truncated.
+
+    nexus-hdx2u: this is the only truncation signal available on an
+    engine that reports no total-match count. ``len(returned) ==
+    len(requested)`` is NOT the right invariant to check here — absent
+    ids are legitimate (a store-get for ids that were never written, or
+    were since deleted, is expected to come back short). Truncation is
+    detectable exactly when the page came back AT the limit that was
+    sent while FEWER ids than that were requested in the batch.
+    """
+    global _store_get_truncated_logged
+    if _store_get_truncated_logged:
+        _log.debug(
+            "store_get_truncated_at_limit",
+            collection=collection,
+            limit_sent=limit_sent,
+            requested=requested,
+        )
+        return
+    _store_get_truncated_logged = True
+    _log.warning(
+        "store_get_truncated_at_limit",
+        collection=collection,
+        limit_sent=limit_sent,
+        requested=requested,
+        detail=(
+            "a store-get batch returned exactly limit_sent rows while "
+            "requesting more ids than that — the response was silently "
+            "truncated. This client pages ids-branch requests at "
+            "QUOTAS.MAX_RECORDS_PER_WRITE internally, so a truncation at "
+            "a smaller limit than that page size means an intermediate "
+            "proxy or an engine that caps store-get independently of the "
+            "requested limit. Logged once per process — further "
+            "occurrences in this run are DEBUG."
+        ),
+    )
+
+
 def _warn_skip_existing_deprecated() -> None:
     """Log-once notice: ``skip_existing`` no longer filters the batch.
 
@@ -732,7 +789,7 @@ class _ServiceCollectionStub:
         ids: list[str] | None = None,
         where: dict | None = None,
         include: list[str] | None = None,
-        limit: int = 10,
+        limit: int | None = None,
         offset: int = 0,
         *,
         include_source_uri: bool = False,
@@ -753,23 +810,122 @@ class _ServiceCollectionStub:
         :meth:`count` and :meth:`get_all_metadata` already document in this
         same class ("the caller owns the boundary"); those two named ``get``
         and ``delete`` as the inconsistent holdouts, and this closes that.
+
+        nexus-hdx2u: ``limit`` carries NO meaningful default on the ``ids``
+        branch. A caller fetching N specific ids means "give me all N I
+        have", not an implicit page size — this stub's own former
+        ``limit: int = 10`` signature default was silently forwarded to
+        ``POST /v1/vectors/store-get`` and truncated every >10-id batch
+        (aspect extraction fed 10-of-157 fragments to the summarizer;
+        taxonomy centroid rebuilds saw ~4% of a collection) with no
+        signal that anything had been dropped. ``limit=None`` on the
+        ``ids`` branch now resolves PER PAGE to that page's own batch
+        size — the request is paged internally at
+        ``QUOTAS.MAX_RECORDS_PER_WRITE`` (mirrors
+        :meth:`HttpVectorClient.existing_ids`), so a huge id list still
+        goes out in request-sized batches instead of one unbounded POST.
+        The ``where`` branch keeps the historical default of
+        :data:`_WHERE_GET_DEFAULT_LIMIT` (``10``) — every in-repo caller
+        of that branch already passes an explicit ``limit``, so this
+        default is a fallback of last resort, not load-bearing. An
+        explicit non-``None`` ``limit`` on the ``ids`` branch is honored
+        verbatim on every page (unchanged single-request behaviour for
+        the common case of a batch that already fits in one page).
+
+        A self-truncation tripwire (:func:`_warn_store_get_truncated_at_limit`)
+        fires when a page comes back with EXACTLY as many rows as were
+        sent as its limit while FEWER ids were requested in that batch —
+        the only signal available on an engine that reports no total
+        match count. ``len(returned) == len(requested)`` is NOT the
+        right invariant for store-get: absent ids are legitimate (e.g.
+        :meth:`HttpVectorClient.existing_ids` depends on partial
+        returns), so truncation is only inferable from ``len(returned)
+        == limit_sent < len(requested_batch)``.
+
+        nexus-hdx2u round-2 (two fail-loud boundaries, both probed
+        empirically against the round-1 fix — no caller exercises
+        either, and defining working-but-surprising semantics for them
+        is scope creep this bead does not need):
+
+        * ``offset`` is ``where``-branch-only. On the ``ids`` branch it
+          would be forwarded VERBATIM to every internal page, which has
+          no sane meaning for a get-these-specific-rows fetch (skip the
+          first N of EACH page? of the whole list, but paging already
+          slices the list?). Any non-default ``offset`` on the ``ids``
+          branch raises :class:`ValueError` rather than silently doing
+          something ill-defined.
+        * An explicit ``limit`` combined with an ``ids`` batch spanning
+          MORE THAN ONE internal page also raises :class:`ValueError`.
+          Applying that limit per-page (the natural reading of "honor it
+          verbatim on every page") returns up to ``limit * page_count``
+          rows, not a global cap — e.g. ``limit=50`` over 350 ids (2
+          pages) would return up to 100. A single-page explicit
+          ``limit`` is unaffected and stays honored verbatim. Callers
+          that need this: omit ``limit`` (resolves to each page's own
+          batch size), or pre-chunk ``ids`` into ``<= page_size``
+          batches themselves.
         """
         if ids is not None:
-            # Manifest-based lookup: fetch specific chunk IDs
-            body: dict[str, Any] = {
-                "collection": self._name,
-                "ids": ids,
-                "limit": limit,
-                "offset": offset,
+            from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
+            page_size = QUOTAS.MAX_RECORDS_PER_WRITE
+            if offset not in (0, None):
+                raise ValueError(
+                    "_ServiceCollectionStub.get: offset is not supported on "
+                    "the ids branch (offset paginates a where-filtered "
+                    "scan; ids is a get-these-specific-rows fetch — "
+                    "forwarding it verbatim to every internal page has "
+                    "undefined semantics). Pass offset=0 (or omit it) and "
+                    "slice the ids list yourself if you need to skip some."
+                )
+            if limit is not None and len(ids) > page_size:
+                raise ValueError(
+                    f"_ServiceCollectionStub.get: an explicit limit ({limit}) "
+                    f"cannot be combined with an ids batch spanning more than "
+                    f"one internal page (len(ids)={len(ids)} > "
+                    f"QUOTAS.MAX_RECORDS_PER_WRITE={page_size}) — applying it "
+                    "per-page would return up to limit * page_count rows, not "
+                    "a global cap. Omit limit (resolves to each page's own "
+                    "batch size), or pre-chunk ids into <= page_size batches "
+                    "yourself."
+                )
+            out_ids: list[Any] = []
+            out_docs: list[Any] = []
+            out_metas: list[Any] = []
+            extra: dict[str, list[Any]] = {}
+            for start in range(0, len(ids), page_size):
+                batch = ids[start : start + page_size]
+                limit_sent = len(batch) if limit is None else limit
+                body: dict[str, Any] = {
+                    "collection": self._name,
+                    "ids": batch,
+                    "limit": limit_sent,
+                    "offset": offset,
+                }
+                if include_source_uri:
+                    body["include_source_uri"] = True
+                page = _post("/v1/vectors/store-get", body, tenant=self._tenant)
+                page_ids = page.get("ids", []) or []
+                if len(page_ids) == limit_sent and limit_sent < len(batch):
+                    _warn_store_get_truncated_at_limit(self._name, limit_sent, len(batch))
+                out_ids.extend(page_ids)
+                out_docs.extend(page.get("documents", []) or [])
+                out_metas.extend(page.get("metadatas", []) or [])
+                for key in ("chashes", "source_uris", "spans"):
+                    if key in page:
+                        extra.setdefault(key, []).extend(page[key] or [])
+            out: dict[str, Any] = {
+                "ids": out_ids,
+                "documents": out_docs,
+                "metadatas": out_metas,
             }
-            if include_source_uri:
-                body["include_source_uri"] = True
-            result = _post("/v1/vectors/store-get", body, tenant=self._tenant)
+            out.update(extra)
+            return out
         else:
             # Where-filter lookup (incremental-sync staleness check)
+            resolved_limit = _WHERE_GET_DEFAULT_LIMIT if limit is None else limit
             body = {
                 "collection": self._name,
-                "limit": limit,
+                "limit": resolved_limit,
                 "offset": offset,
             }
             if where:
@@ -779,18 +935,18 @@ class _ServiceCollectionStub:
             if include_source_uri:
                 body["include_source_uri"] = True
             result = _post("/v1/vectors/get", body, tenant=self._tenant)
-        # Normalise to Chroma shape: {ids, documents, metadatas}.
-        # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
-        # source_uris present only when include_source_uri=True was forwarded.
-        out: dict[str, Any] = {
-            "ids":       result.get("ids", []),
-            "documents": result.get("documents", []),
-            "metadatas": result.get("metadatas", []),
-        }
-        for key in ("chashes", "source_uris", "spans"):
-            if key in result:
-                out[key] = result[key]
-        return out
+            # Normalise to Chroma shape: {ids, documents, metadatas}.
+            # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
+            # source_uris present only when include_source_uri=True was forwarded.
+            out = {
+                "ids":       result.get("ids", []),
+                "documents": result.get("documents", []),
+                "metadatas": result.get("metadatas", []),
+            }
+            for key in ("chashes", "source_uris", "spans"):
+                if key in result:
+                    out[key] = result[key]
+            return out
 
 
     @property
