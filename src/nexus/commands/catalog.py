@@ -607,6 +607,35 @@ def register_cmd(
                 fp = rel
                 break
 
+    # nexus-u8n4r: single-doc, user-explicit registration — refuse loudly
+    # rather than skip silently, mirroring the MCP catalog_register tool.
+    # Same owner-root exception as the bulk index hooks. Review fix C1
+    # (code-review-expert): test the ABSOLUTE registered identity, never
+    # the post-relativization ``fp`` — see
+    # ``reconstruct_absolute_registered_path``'s docstring for why the
+    # naive ``fp or file_path`` was silently inert for a worktree nested
+    # inside an already-registered repo.
+    from nexus.repo_identity import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+        owner_repo_root_best_effort,
+        reconstruct_absolute_registered_path,
+        should_skip_ephemeral_registration,
+    )
+
+    _owner_repo_root = owner_repo_root_best_effort(cat, owner)
+    _registered_path = reconstruct_absolute_registered_path(
+        file_path, fp, _owner_repo_root,
+    )
+    if should_skip_ephemeral_registration(_registered_path, _owner_repo_root):
+        raise click.ClickException(
+            f"refusing to register {_registered_path!r}: it sits under an "
+            f"agent worktree or system temp dir (nexus-u8n4r) and owner "
+            f"{owner!r}'s repo_root is not itself rooted there — the "
+            f"ephemeral checkout will vanish and leave a permanent orphan. "
+            f"If this is a deliberate throwaway owner rooted in a "
+            f"worktree/tempdir, register the owner with that repo_root "
+            f"first so the exception applies."
+        )
+
     try:
         tumbler = writer.register(
             Tumbler.parse(owner), title,

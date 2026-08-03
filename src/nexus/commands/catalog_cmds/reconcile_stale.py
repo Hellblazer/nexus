@@ -127,6 +127,15 @@ from nexus.commands.catalog_cmds.integrity import (
     _classify_never_chunked,
 )
 
+# nexus-u8n4r: the worktree/tempdir predicate moved to nexus.repo_identity
+# so the index-time registration guard can share it instead of forking a
+# second copy. Alias kept so existing imports (this module's own
+# `_is_worktree_or_tempdir_path` call sites below, and
+# `tests/test_catalog_reconcile_stale.py`'s
+# `reconcile_stale_mod._is_worktree_or_tempdir_path`) keep working
+# unchanged.
+from nexus.repo_identity import is_worktree_or_tempdir_path
+
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
@@ -149,29 +158,14 @@ _UNRESOLVABLE_REASONS = ("no_repo_root", "malformed_tumbler", "source_uri_only",
 # nexus-wq1e4: paths under a Claude Code worktree, or shaped like a system
 # temp directory, are the "confirmed-safe" population an operator asked to
 # see called out explicitly before any tombstone run (1,798 of the original
-# 7,142-doc evidence set were worktree paths).
-_WORKTREE_MARKER = "/.claude/worktrees/"
-# Deliberately NOT "/var/folders/" (macOS's broad per-user cache root — also
-# where pytest's own tmp_path fixture lives, so it is too noisy a signal):
-# only the canonical, explicitly-a-scratch-dir roots count here.
-_TEMP_DIR_PREFIXES = ("/tmp/", "/private/tmp/")
+# 7,142-doc evidence set were worktree paths). Predicate itself now lives in
+# nexus.repo_identity (nexus-u8n4r) — see the import above.
+_is_worktree_or_tempdir_path = is_worktree_or_tempdir_path
 
 
 def _owner_id_of(tumbler_str: str) -> str:
     parts = tumbler_str.split(".")
     return ".".join(parts[:2]) if len(parts) >= 2 else ""
-
-
-def _is_worktree_or_tempdir_path(path_str: str) -> bool:
-    """True when *path_str* looks like a worktree or system temp-dir path.
-
-    nexus-wq1e4's operator-visible "safe to tombstone" signal for
-    ``orphaned_path`` — a deleted worktree or scratch checkout is corroborated
-    evidence the source is genuinely gone, not merely unresolved.
-    """
-    if _WORKTREE_MARKER in path_str:
-        return True
-    return path_str.startswith(_TEMP_DIR_PREFIXES)
 
 
 def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Path | None, str]:

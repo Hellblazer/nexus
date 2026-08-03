@@ -59,6 +59,150 @@ def _resolve_main_repo_cached(repo_str: str) -> str:
     return repo_str
 
 
+# nexus-u8n4r: worktree/tempdir path classifier + write-time registration
+# guard, moved here from commands/catalog_cmds/reconcile_stale.py
+# (nexus-wq1e4's read-only "safe to tombstone" signal) so BOTH the
+# reconcile-stale census AND the index-time hooks below share ONE
+# predicate instead of a forkable second copy.
+#
+# A Claude Code worktree lives at ``<repo>/.claude/worktrees/<agent>/`` —
+# a subdirectory INSIDE the repo it was spun from. An index run over the
+# PRIMARY repo that does not exclude that subtree walks straight into an
+# agent's ephemeral checkout and registers its files under the primary
+# owner; once the worktree is torn down those catalog rows point at
+# nothing (nexus-u8n4r evidence: 4,002 of 4,014 orphaned-path docs in the
+# 2026-08-03 production cleanup).
+_WORKTREE_MARKER = "/.claude/worktrees/"
+# Deliberately NOT "/var/folders/" (macOS's broad per-user cache root —
+# also where pytest's own tmp_path fixture lives, so it is too noisy a
+# signal): only the canonical, explicitly-a-scratch-dir roots count here.
+_TEMP_DIR_PREFIXES = ("/tmp/", "/private/tmp/")
+
+
+def is_worktree_or_tempdir_path(path_str: str) -> bool:
+    """True when *path_str* looks like a worktree or system temp-dir path.
+
+    Shared by ``nx catalog reconcile-stale`` (nexus-wq1e4's operator-
+    visible "safe to tombstone" signal for ``orphaned_path`` — a deleted
+    worktree or scratch checkout is corroborated evidence the source is
+    genuinely gone, not merely unresolved) and
+    :func:`should_skip_ephemeral_registration` below (nexus-u8n4r's
+    write-time prevention of the same pollution class).
+    """
+    if _WORKTREE_MARKER in path_str:
+        return True
+    return path_str.startswith(_TEMP_DIR_PREFIXES)
+
+
+def owner_repo_root_best_effort(reader: Any, owner: Any) -> str:
+    """Best-effort fetch of *owner*'s ``repo_root`` from *reader*.
+
+    Returns ``""`` when *reader* lacks ``get_owner_by_prefix`` (several
+    lightweight test doubles across the suite implement only the
+    read/write surface the hook under test exercises, not the full
+    ``CatalogReader`` protocol) or the lookup otherwise raises. This
+    degrades exactly like an owner with no ``repo_root`` — see
+    :func:`should_skip_ephemeral_registration`'s own "empty repo_root
+    never fires" contract — so a reader that cannot answer the question
+    never turns a working (if unguarded) call site into a crash.
+    """
+    getter = getattr(reader, "get_owner_by_prefix", None)
+    if getter is None:
+        return ""
+    try:
+        info = getter(str(owner)) or {}
+    except Exception:  # noqa: BLE001 — best-effort: a broken lookup must not crash the caller
+        # nexus-u8n4r review fix (code-review-expert M1): this branch is a
+        # BROKEN reader (raised), not the by-design "curator owner has no
+        # repo_root" case (``getter`` returning ``{}``/``None`` cleanly,
+        # which reaches the return below without logging). Both degrade to
+        # the same "" — the guard never fires either way — but an operator
+        # diagnosing "why didn't the guard catch this" needs to be able to
+        # tell them apart.
+        _log.warning(
+            "owner_repo_root_lookup_failed_guard_inert",
+            owner=str(owner),
+            exc_info=True,
+        )
+        return ""
+    return info.get("repo_root", "") if isinstance(info, dict) else ""
+
+
+def reconstruct_absolute_registered_path(
+    original_file_path: str, relativized_fp: str, owner_repo_root: str,
+) -> str:
+    """Rebuild the ABSOLUTE registered identity for the ephemeral-path
+    guard, undoing a caller-side relativization step.
+
+    nexus-u8n4r review fix (code-review-expert C1): ``nx catalog
+    register`` (CLI) and the ``catalog_register`` MCP tool both
+    relativize an absolute ``file_path`` against a matching KNOWN repo
+    root before storing it (``make_relative`` strips the leading ``/``).
+    Testing that post-relativization string against
+    :func:`is_worktree_or_tempdir_path` — whose marker requires a
+    leading ``/`` — was silently inert for exactly the common shape: a
+    worktree nested inside an already-registered repo. This mirrors the
+    reconstruction the bulk ``_catalog_hook`` performs
+    (``main_repo / rel_path``) for these single-doc registration sites.
+
+    Resolution order:
+
+    * *original_file_path* is absolute -> return it VERBATIM (the
+      pre-relativization identity — unaffected by whatever relativizing
+      the caller did afterward).
+    * else, *relativized_fp* and *owner_repo_root* are both non-empty ->
+      ``owner_repo_root / relativized_fp``.
+    * else -> whichever of *relativized_fp* / *original_file_path* is
+      non-empty (unresolvable either way; same fallback the call sites
+      used pre-fix).
+    """
+    if original_file_path and Path(original_file_path).is_absolute():
+        return original_file_path
+    if relativized_fp and owner_repo_root:
+        return str(Path(owner_repo_root) / relativized_fp)
+    return relativized_fp or original_file_path
+
+
+def should_skip_ephemeral_registration(
+    registered_path: str, owner_repo_root: str | None,
+) -> bool:
+    """True when *registered_path* must be REFUSED catalog registration.
+
+    nexus-u8n4r. The guard tests the REGISTERED identity — the path as it
+    will be STORED (owner ``repo_root`` + relative path for repo owners;
+    the stored absolute ``file_path`` for hook call sites that store
+    paths verbatim) — NEVER the on-disk ``abs_path`` alone. Post-
+    nexus-zr2ie, ``nx index repo <worktree>`` legally registers main-
+    repo-anchored paths (the on-disk absolute path is inside the
+    worktree, but the derived registered identity is clean) —
+    ``tests/test_index_cmd.py::test_index_repo_accepts_git_worktree`` and
+    the ``TestCatalogHookForeignCwd`` family pin that worktrees stay
+    accepted. The pollution class this guards against is registered
+    paths that THEMSELVES contain a worktree or temp-dir marker.
+
+    Skip (return True) when: *registered_path* matches
+    :func:`is_worktree_or_tempdir_path` AND *owner_repo_root* is
+    non-empty AND *owner_repo_root* does NOT itself match the predicate.
+    The owner-root exception keeps two legal populations working:
+
+    * throwaway owners explicitly rooted in a worktree/tempdir (gate
+      sandboxes with their own config dirs) — population (a);
+    * the entire unit/e2e suite, which indexes repos under pytest's own
+      tmp dirs — population (b).
+
+    KNOWN RESIDUAL: curator owners (the default owner for ``nx index
+    md`` / ``nx index rdr`` / ``nx index pdf``) normally carry an EMPTY
+    ``repo_root`` — passing ``""`` or ``None`` here always returns
+    ``False``, so the guard never fires for them. Out of scope for
+    nexus-u8n4r; documented here rather than silently gapped.
+    """
+    if not registered_path or not is_worktree_or_tempdir_path(registered_path):
+        return False
+    if not owner_repo_root:
+        return False
+    return not is_worktree_or_tempdir_path(owner_repo_root)
+
+
 def _resolve_main_repo(repo: Path) -> Path:
     """Return the canonical main-repo Path for *repo*.
 
@@ -259,5 +403,9 @@ __all__ = (
     "_resolve_repo_collection",
     "_safe_collection",
     "_sanitise_owner_segment",
+    "is_worktree_or_tempdir_path",
     "list_sibling_collections",
+    "owner_repo_root_best_effort",
+    "reconstruct_absolute_registered_path",
+    "should_skip_ephemeral_registration",
 )

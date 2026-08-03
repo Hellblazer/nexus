@@ -266,6 +266,92 @@ class TestRegisterAndShow:
         assert "Citations:" not in result.output
 
 
+class TestRegisterEphemeralPathGuard:
+    """nexus-u8n4r review fix C1 (code-review-expert Critical): ``nx
+    catalog register`` must refuse a worktree/tempdir path using the
+    ABSOLUTE registered identity — the pre-relativization ``file_path``
+    when absolute, or ``owner_repo_root / fp`` when the caller passed a
+    relative path — never the post-relativization ``fp`` alone, which
+    silently drops the leading ``/`` the worktree marker requires
+    whenever the path matches an already-registered repo root.
+    """
+
+    def test_absolute_worktree_path_under_known_repo_is_refused(
+        self, tmp_path, catalog_env,
+    ):
+        """Reproduces the exact C1 shape: file_path is absolute AND
+        falls under a repo root that's already registered, so
+        register_cmd's own relativization step strips the leading
+        ``/`` before the old check ever ran."""
+        cat = ActiveCatalog()
+        repo_root = tmp_path / "wt-repo-a"
+        repo_root.mkdir()
+        cat.register_owner(
+            "wt-repo-a", "repo", repo_hash="wta00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wta00001")
+        assert owner is not None
+
+        worktree_path = (
+            repo_root / ".claude" / "worktrees" / "agent-x" / "docs" / "foo.md"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Ephemeral",
+            "--owner", str(owner),
+            "--file-path", str(worktree_path),
+        ])
+        assert result.exit_code != 0
+        assert "nexus-u8n4r" in result.output
+
+    def test_bare_relative_worktree_shaped_path_is_refused(
+        self, tmp_path, catalog_env,
+    ):
+        """The caller passes an already-relative, worktree-shaped
+        file_path directly (no absolute-path relativization step at
+        all) — the guard must still reconstruct the absolute identity
+        via ``owner_repo_root / fp`` and refuse."""
+        cat = ActiveCatalog()
+        repo_root = tmp_path / "wt-repo-b"
+        repo_root.mkdir()
+        cat.register_owner(
+            "wt-repo-b", "repo", repo_hash="wtb00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wtb00001")
+        assert owner is not None
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Ephemeral relative",
+            "--owner", str(owner),
+            "--file-path", ".claude/worktrees/agent-y/docs/bar.md",
+        ])
+        assert result.exit_code != 0
+        assert "nexus-u8n4r" in result.output
+
+    def test_clean_path_still_registers(self, tmp_path, catalog_env):
+        cat = ActiveCatalog()
+        repo_root = tmp_path / "wt-repo-c"
+        repo_root.mkdir()
+        cat.register_owner(
+            "wt-repo-c", "repo", repo_hash="wtc00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wtc00001")
+        assert owner is not None
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Clean",
+            "--owner", str(owner),
+            "--file-path", str(repo_root / "docs" / "clean.md"),
+        ])
+        assert result.exit_code == 0, result.output
+
+
 class TestListCommand:
     def test_list_entries(self, initialized_catalog, catalog_env):
         runner = CliRunner()

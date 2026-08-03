@@ -824,6 +824,44 @@ def reset_complete_refusals() -> None:
         _COMPLETE_REFUSALS.clear()
 
 
+# nexus-u8n4r: files whose REGISTERED path (owner repo_root + relative
+# path, or the stored absolute file_path) sits under an agent worktree or
+# a system temp dir, and were refused registration rather than silently
+# polluting the primary owner's collections (the 4,002-doc rdr__1-1
+# orphan class, 2026-08-03 production cleanup). A structlog WARNING
+# already fires per file at each guard call site
+# (``ephemeral_path_registration_skipped``); this collector backs the
+# end-of-run CLI summary, mirroring ``_MANIFEST_WRITE_FAILURES``.
+_ephemeral_registration_skips_lock = threading.Lock()
+_EPHEMERAL_REGISTRATION_SKIPS: list[dict] = []
+
+
+def get_ephemeral_registration_skips() -> list[dict]:
+    """Paths refused registration this process/run under the nexus-u8n4r
+    worktree/tempdir guard. Each entry: ``{"path": str, "owner": str,
+    "reason": str}`` — ``reason`` is one of ``"worktree_or_tempdir"``
+    (structurally under a worktree/tempdir marker) or
+    ``"worktree_unique_no_main_mirror"`` (worktree-invoked indexing of a
+    file with no mirror in the main repo — an uncommitted draft that
+    didn't make it into the index). Snapshot copy."""
+    with _ephemeral_registration_skips_lock:
+        return [dict(d) for d in _EPHEMERAL_REGISTRATION_SKIPS]
+
+
+def reset_ephemeral_registration_skips() -> None:
+    """Clear the collector (CLI callers reset at the start of an indexing
+    run, mirroring ``reset_manifest_write_failures``)."""
+    with _ephemeral_registration_skips_lock:
+        _EPHEMERAL_REGISTRATION_SKIPS.clear()
+
+
+def _record_ephemeral_registration_skip(path: str, owner: str, reason: str = "") -> None:
+    with _ephemeral_registration_skips_lock:
+        _EPHEMERAL_REGISTRATION_SKIPS.append(
+            {"path": path, "owner": owner, "reason": reason}
+        )
+
+
 def _record_complete_refusal(doc_id: str) -> None:
     # Idempotent per doc_id: a duplicated engine response row (or the
     # count-mismatch conservative branch overlapping the listed refusals)

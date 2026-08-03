@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests._catalog_fixture_ops import (
+    ActiveCatalog,
+    active_reader,
+    count_documents,
+    documents_by_file_path,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -946,6 +951,319 @@ class TestCatalogHookForeignCwd:
         # the foreign CWD.
         assert str(repo) in entry.source_uri
         assert str(foreign_cwd) not in entry.source_uri
+
+
+class TestCatalogHookEphemeralPathGuard:
+    """nexus-u8n4r: ``_catalog_hook``'s per-file loop refuses registration
+    when the REGISTERED identity (owner's main-repo root + rel_path)
+    sits under an agent worktree marker or system temp dir, unless the
+    owner's own repo_root is itself rooted there. See
+    ``nexus.repo_identity.should_skip_ephemeral_registration``.
+    """
+
+    def test_worktree_marker_file_swept_by_main_repo_run_is_not_registered(
+        self, tmp_path, monkeypatch,
+    ):
+        """A Claude Code worktree lives INSIDE the primary repo's tree at
+        ``.claude/worktrees/<agent>/`` — an unfiltered walk over the
+        primary repo sweeps the agent's ephemeral checkout in too. That
+        file must be refused; a sibling clean file in the same run must
+        still register (nexus-u8n4r's 4,002-doc production evidence)."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        main_repo = tmp_path / "primary"
+        polluted = main_repo / ".claude" / "worktrees" / "agent-x" / "docs" / "foo.md"
+        polluted.parent.mkdir(parents=True)
+        polluted.write_text("# ephemeral")
+        good = main_repo / "src" / "good.py"
+        good.parent.mkdir(parents=True)
+        good.write_text("print('good')")
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _catalog_hook(
+                repo=main_repo, repo_name="primary", repo_hash="u8n4r0001",
+                head_hash="h1",
+                indexed_files=[
+                    (polluted, "rdr", "rdr__test-u8n4r-1"),
+                    (good, "code", "code__test-u8n4r-1"),
+                ],
+                skip_housekeeping=True,
+            )
+
+        assert count_documents() == 1
+        assert documents_by_file_path("src/good.py")
+        assert not documents_by_file_path(
+            ".claude/worktrees/agent-x/docs/foo.md"
+        )
+        skipped_events = [
+            log_entry for log_entry in logs
+            if log_entry.get("event") == "ephemeral_path_registration_skipped"
+        ]
+        assert len(skipped_events) == 1
+        assert "agent-x" in skipped_events[0]["path"]
+
+    def test_indexing_from_worktree_checkout_still_registers_clean_paths(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-zr2ie precedent (must stay green): ``nx index repo``
+        invoked FROM a worktree checkout resolves the SAME main-repo
+        owner (git-worktree-stable identity) and registers a clean,
+        main-repo-anchored relative path — this is legal and must NOT be
+        refused by the nexus-u8n4r guard.
+
+        Review fix FIX3 (both reviewers, 2026-08-03): the pre-fix version
+        of this test never created ``main_repo/src/main.py`` — it only
+        created the WORKTREE copy — so it exercised the FALSE-clean shape
+        FIX2 closes (a worktree-unique file whose reconstructed main-repo
+        path doesn't exist) and asserted that shape was legal. The
+        legitimate zr2ie case is a file that IS mirrored at the same
+        relative path in the main repo (e.g. checked out from a shared
+        commit); this test now creates that mirror so it actually pins
+        the case its docstring claims. The false-clean shape has its own
+        dedicated test below
+        (``test_worktree_unique_file_with_no_main_mirror_is_skipped``).
+        """
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        main_repo = tmp_path / "primary"
+        main_repo.mkdir()
+        worktree = main_repo / ".claude" / "worktrees" / "agent-y"
+        worktree.mkdir(parents=True)
+        src = worktree / "src" / "main.py"
+        src.parent.mkdir(parents=True)
+        src.write_text("print('hi')")
+        # The mirror: same relative path, present in the MAIN repo too
+        # (as it would be for a file checked out from a shared commit).
+        mirror = main_repo / "src" / "main.py"
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        mirror.write_text("print('hi')")
+
+        # Simulate the real `git rev-parse --git-common-dir` worktree-to-
+        # main resolution: indexing FROM the worktree path resolves to
+        # the SAME main-repo owner as the primary checkout.
+        monkeypatch.setattr(
+            "nexus.repo_identity._repo_identity_with_main",
+            lambda r: ("primary", "u8n4r0002", main_repo),
+        )
+
+        _catalog_hook(
+            repo=worktree, repo_name="primary", repo_hash="u8n4r0002",
+            head_hash="h1",
+            indexed_files=[(src, "code", "code__test-u8n4r-2")],
+            skip_housekeeping=True,
+        )
+
+        assert count_documents() == 1
+        assert documents_by_file_path("src/main.py")
+
+    def test_worktree_unique_file_with_no_main_mirror_is_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-u8n4r FIX2 (substantive-critic Critical, empirically
+        reproduced): indexing FROM a worktree checkout over a file that
+        is WORKTREE-UNIQUE — no mirror at the same relative path in the
+        main repo, e.g. a new/uncommitted session draft — reconstructs a
+        clean-shaped main-repo-anchored path the marker predicate never
+        flags. The existence check (only consulted when ``repo !=
+        main_repo``) is the second signal that catches it."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        main_repo = tmp_path / "primary"
+        main_repo.mkdir()
+        worktree = main_repo / ".claude" / "worktrees" / "agent-y"
+        worktree.mkdir(parents=True)
+        # Worktree-unique: exists ONLY in the worktree, no mirror at
+        # main_repo/docs/rdr/rdr-999-draft.md.
+        draft = worktree / "docs" / "rdr" / "rdr-999-draft.md"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("# uncommitted agent draft\n")
+
+        monkeypatch.setattr(
+            "nexus.repo_identity._repo_identity_with_main",
+            lambda r: ("primary", "u8n4r0004", main_repo),
+        )
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _catalog_hook(
+                repo=worktree, repo_name="primary", repo_hash="u8n4r0004",
+                head_hash="h1",
+                indexed_files=[(draft, "rdr", "rdr__test-u8n4r-4")],
+                skip_housekeeping=True,
+            )
+
+        assert count_documents() == 0
+        assert not documents_by_file_path("docs/rdr/rdr-999-draft.md")
+        skipped_events = [
+            log_entry for log_entry in logs
+            if log_entry.get("event") == "ephemeral_path_registration_skipped"
+        ]
+        assert len(skipped_events) == 1
+        assert skipped_events[0]["reason"] == "worktree_unique_no_main_mirror"
+
+    def test_worktree_file_whose_reconstructed_main_path_is_a_directory_is_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-u8n4r review fix Minor #2: ``Path.exists()`` is true for
+        a DIRECTORY too — a same-named directory in the main repo (e.g.
+        ``docs/rdr/`` existing as a dir while the worktree has a FILE at
+        that exact path, an unlikely but possible shape) must not count
+        as a mirror. ``.is_file()`` closes this."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        main_repo = tmp_path / "primary"
+        main_repo.mkdir()
+        worktree = main_repo / ".claude" / "worktrees" / "agent-y"
+        worktree.mkdir(parents=True)
+
+        # The reconstructed main-repo path is a DIRECTORY, not a file.
+        (main_repo / "docs" / "rdr" / "rdr-999-draft.md").mkdir(parents=True)
+
+        draft = worktree / "docs" / "rdr" / "rdr-999-draft.md"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("# uncommitted agent draft\n")
+
+        monkeypatch.setattr(
+            "nexus.repo_identity._repo_identity_with_main",
+            lambda r: ("primary", "u8n4r0006", main_repo),
+        )
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _catalog_hook(
+                repo=worktree, repo_name="primary", repo_hash="u8n4r0006",
+                head_hash="h1",
+                indexed_files=[(draft, "rdr", "rdr__test-u8n4r-6")],
+                skip_housekeeping=True,
+            )
+
+        assert count_documents() == 0
+        assert not documents_by_file_path("docs/rdr/rdr-999-draft.md")
+        skipped_events = [
+            log_entry for log_entry in logs
+            if log_entry.get("event") == "ephemeral_path_registration_skipped"
+        ]
+        assert len(skipped_events) == 1
+        assert skipped_events[0]["reason"] == "worktree_unique_no_main_mirror"
+
+    def test_owner_rooted_under_tmp_registers_tmp_paths(
+        self, tmp_path, monkeypatch,
+    ):
+        """Population (b): a throwaway owner whose repo_root is ITSELF a
+        temp-dir path (e.g. the pytest tmp-dir suite, or a gate sandbox
+        with its own config dir) must stay fully registrable — the
+        owner-root exception."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        sandbox_root = Path("/tmp/nexus-u8n4r-sandbox-test")
+        monkeypatch.setattr(
+            "nexus.repo_identity._repo_identity_with_main",
+            lambda r: ("sandbox", "u8n4r0003", sandbox_root),
+        )
+        # Need not physically exist: rel_path derivation and the OSError-
+        # tolerant mtime/hash reads both degrade gracefully.
+        fake_file = sandbox_root / "src" / "foo.py"
+
+        _catalog_hook(
+            repo=sandbox_root, repo_name="sandbox", repo_hash="u8n4r0003",
+            head_hash="h1",
+            indexed_files=[(fake_file, "code", "code__test-u8n4r-3")],
+            skip_housekeeping=True,
+        )
+
+        assert count_documents() == 1
+        assert documents_by_file_path("src/foo.py")
+
+    def test_real_git_worktree_discovery_mirrored_registers_unique_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        """FIX3 (both reviewers): the hand-built ``indexed_files`` lists
+        in the tests above prove the guard's own logic, but the critic's
+        probe showed real ``git`` discovery (``_git_ls_files`` over an
+        actual ``git worktree add`` checkout) can differ from a
+        synthetic list. This drives the REAL discovery helper over a
+        REAL git worktree — no ``_repo_identity_with_main`` mock — and
+        asserts the two-file split end to end: the file mirrored in the
+        main repo registers; the worktree-unique file is skipped.
+        """
+        import subprocess
+
+        from nexus.indexer import _catalog_hook, _git_ls_files
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        main_repo = tmp_path / "primary"
+        main_repo.mkdir()
+        subprocess.run(
+            ["git", "init", "--quiet"], cwd=main_repo, check=True,
+            capture_output=True,
+        )
+        mirrored = main_repo / "src" / "main.py"
+        mirrored.parent.mkdir(parents=True)
+        mirrored.write_text("print('hi')\n")
+        subprocess.run(["git", "add", "-A"], cwd=main_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--quiet", "-m", "initial"], cwd=main_repo,
+            check=True, capture_output=True,
+        )
+
+        worktree = main_repo / ".claude" / "worktrees" / "agent-real"
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "worktree", "add", "--quiet", str(worktree), "-b", "agent-real-branch"],
+            cwd=main_repo, check=True, capture_output=True,
+        )
+        # Worktree-unique untracked draft — no mirror in main_repo.
+        draft = worktree / "docs" / "rdr" / "rdr-real-draft.md"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("# real git worktree-unique draft\n")
+
+        # Real discovery — respects git, not a Python-literal list.
+        discovered = _git_ls_files(worktree, include_untracked=True)
+        discovered_rel = {str(p.relative_to(worktree)) for p in discovered}
+        assert discovered_rel == {"src/main.py", "docs/rdr/rdr-real-draft.md"}
+
+        indexed_files = [
+            (p, "code" if p.suffix == ".py" else "rdr", "code__test-u8n4r-real")
+            for p in discovered
+        ]
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _catalog_hook(
+                repo=worktree, repo_name="primary", repo_hash="u8n4r-real-0005",
+                head_hash="h1",
+                indexed_files=indexed_files,
+                skip_housekeeping=True,
+            )
+
+        assert count_documents() == 1
+        assert documents_by_file_path("src/main.py")
+        assert not documents_by_file_path("docs/rdr/rdr-real-draft.md")
+        skipped_events = [
+            log_entry for log_entry in logs
+            if log_entry.get("event") == "ephemeral_path_registration_skipped"
+        ]
+        assert len(skipped_events) == 1
+        assert skipped_events[0]["reason"] == "worktree_unique_no_main_mirror"
+        assert "rdr-real-draft.md" in skipped_events[0]["path"]
 
 
 def test_indexed_relpaths_tolerates_symlinked_repo(tmp_path: Path) -> None:

@@ -642,6 +642,26 @@ def _catalog_pdf_hook(
                 source_mtime=source_mtime,
             )
         else:
+            # nexus-u8n4r: refuse a brand-new registration when
+            # ``file_path_str`` (always absolute — see the resolve()
+            # above) sits under an agent worktree or system temp dir,
+            # unless this owner's own repo_root is itself rooted there.
+            # See ``nexus.repo_identity.should_skip_ephemeral_registration``.
+            from nexus.repo_identity import (  # noqa: PLC0415 - circular-dep avoidance (nexus.repo_identity)
+                owner_repo_root_best_effort,
+                should_skip_ephemeral_registration,
+            )
+            _owner_repo_root = owner_repo_root_best_effort(reader, owner)
+            if should_skip_ephemeral_registration(file_path_str, _owner_repo_root):
+                _log.warning(
+                    "ephemeral_path_registration_skipped",
+                    path=file_path_str, owner=str(owner), reason="worktree_or_tempdir",
+                )
+                from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 - circular-dep avoidance (nexus.mcp_infra)
+                _record_ephemeral_registration_skip(
+                    file_path_str, str(owner), reason="worktree_or_tempdir",
+                )
+                return
             writer.register(
                 owner=owner, title=effective_title, content_type="paper",
                 author=author, year=year, corpus=corpus,
