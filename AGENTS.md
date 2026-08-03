@@ -28,7 +28,7 @@ Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode
 
 ### T1 sub-agent contract (RDR-105)
 
-T1 is service-backed and session-id scoped (`resolve_active_session_id()` / `current_session()`), leased through `daemon/t1_lease.py` (RDR-149 P4) and published by the MCP lifespan. T2 is the cross-process shared bus, over PG via the engine (multi-process-safe by construction, not SQLite+WAL).
+T1 is service-backed and session-id scoped (`resolve_active_session_id()`, whose tier-4 fallback reads the flat file `~/.config/nexus/current_session`), leased through `daemon/t1_lease.py` (RDR-149 P4) and published by the MCP lifespan. T2 is the cross-process shared bus, over PG via the engine (multi-process-safe by construction, not SQLite+WAL).
 
 - **Agent-tool sub-agents** (in-process Task dispatches) share T1 with their parent via the parent's MCP scratch tool. No separate T1 instance.
 - **`claude -p` sub-processes default to `owned`** mode: their MCP resolves its own session and leases its own T1 scope. Sealed from the parent; internally consistent for the subprocess's own Bash tools and sub-agents.
@@ -36,6 +36,8 @@ T1 is service-backed and session-id scoped (`resolve_active_session_id()` / `cur
 - **Stateless one-shot operators** (`ephemeral=True`) get an in-process `InMemoryVectorClient` only (no service lease). The operator-dispatch default (`nx_answer`, `nx_tidy`, plan-runner inline planning).
 - **Cross-process findings between sibling sub-processes go to T2** (`memory_put`). T1 is process-local by design; T2 is the shared bus (PG over the engine, multi-process-safe).
 - **Removed env name:** the legacy `NEXUS_SKIP_T1=1` alias was REMOVED at 6.5.2 (promised gone in 5.0). It is recognized-but-IGNORED with a one-shot warning; use `NX_T1_ISOLATED=1`.
+- **Three T1 scopes exist simultaneously** (probe-proven 2026-08-03, nexus-aj564; detail: `docs/architecture.md` § T1's three scopes and the CLI/MCP split-brain): MCP-tool T1 is frozen to the session id at MCP-server spawn (survives `/clear`/`/resume`, lost only on MCP restart); `nx` CLI T1 leases the current transcript session, or falls back to a shared CLI scope only on a **bare** invocation — an explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no live lease fails loud (`T1ServerNotFoundError`) since nexus-f7xyq (commit c0568bcd); `~/.config/nexus/current_session` is a machine-wide last-writer-wins file a concurrent session can own. Measured split-brain: `nx scratch list` = 2 entries vs MCP scratch list = 39, same instant, same conversation.
+- **CORRECTED lesson:** "prior-session T1 is never searchable" is true **only for the CLI path** — the MCP scope survives `/clear` for the life of the MCP process, so prior-conversation T1 is readable via MCP tools in the same app process. `review-completed` markers go through the CLI (what the pre-push hook reads); durable cross-session write-back belongs in T2, never MCP-only T1. The false lesson traced back to a **timing race** (search ran before the agent terminated), not scope confusion — confirm agent termination before declaring a write-back lost.
 
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
 
