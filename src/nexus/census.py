@@ -73,6 +73,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
@@ -484,15 +485,26 @@ class CorpusCensus:
 def default_project_dir() -> pathlib.Path:
     """Transcript dir for the current working directory.
 
-    Claude Code slugifies the absolute cwd by replacing every ``/`` with
-    ``-``, so ``/Users/x/git/nexus`` becomes ``-Users-x-git-nexus``.
+    Claude Code slugifies the absolute cwd by replacing every character
+    that is not alphanumeric with ``-`` — not just ``/``. A dotted username
+    (``/Users/hal.hildebrand/git/nexus``) is empirical proof: the on-disk
+    directory is ``-Users-hal-hildebrand-git-nexus``, i.e. the ``.`` in
+    ``hal.hildebrand`` becomes a ``-`` exactly like every ``/`` does
+    (verified via ``ls ~/.claude/projects/``, nexus-bieuw). A prior
+    implementation that only replaced ``/`` silently produced the wrong,
+    nonexistent path for every dotted-username box, and the pytest-tmp-path
+    fixture used to assert this behavior happened to route through
+    ``pytest-of-<user>`` on the same dotted username, so it never caught it.
     ``NX_CENSUS_PROJECT_DIR`` overrides, which is what makes the CLI
     testable without touching the real ``~/.claude``.
     """
     override = os.environ.get("NX_CENSUS_PROJECT_DIR")
     if override:
         return pathlib.Path(override)
-    slug = str(pathlib.Path.cwd().resolve()).replace("/", "-")
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(pathlib.Path.cwd().resolve()))
+    # KNOWN GAP (nexus-6we44): Claude Code additionally truncates slugs over
+    # 200 chars to slug[:200] + "-" + base36-hash(original path). Paths that
+    # long will still compute a nonexistent dir here.
     return pathlib.Path.home() / ".claude" / "projects" / slug
 
 

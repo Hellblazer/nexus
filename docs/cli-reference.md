@@ -1446,10 +1446,10 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `search QUERY` | Search scratch notes |
 | `list` | List all notes |
 | `delete ID` | Delete one entry by ID prefix (no prompt) |
-| `flag ID` | Mark for auto-flush to T2 at session end |
-| `unflag ID` | Remove flush mark |
+| `flag ID` | Mark for auto-flush to T2 at session end (accepts the 8-char ID prefix `list` shows) |
+| `unflag ID` | Remove flush mark (accepts the 8-char ID prefix) |
 | `promote ID --project NAME --title NAME` | Promote to T2, report `action=new` or `overlap_detected` |
-| `clear` | Delete all scratch notes |
+| `clear` | Delete all scratch notes — prompts with an entry/flagged count unless `-y`/`--yes` (scripts must pass `-y`) |
 
 **`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
