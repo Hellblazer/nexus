@@ -57,6 +57,15 @@ except Exception:
 
 if [[ -n "$HOOK_SESSION_ID" ]]; then
     export NX_SESSION_ID="$HOOK_SESSION_ID"
+    # nexus-6a19f / nexus-f7xyq: since f7xyq, `nx scratch list` fails loud
+    # (T1ServerNotFoundError) for an explicit NX_SESSION_ID with no live T1
+    # lease -- which this hook's own forced NX_SESSION_ID above routinely
+    # triggers (this hook runs detached, with no lease published for the
+    # transcript session it read from stdin). Pre-f7xyq that case silently
+    # fell through to the shared CLI-dedicated scope, which is exactly
+    # where this hook's review-completed markers live -- so opt back into
+    # that fallback explicitly rather than losing the advisory signal.
+    export NX_T1_ALLOW_SHARED_FALLBACK=1
 fi
 
 # ---------------------------------------------------------------------------

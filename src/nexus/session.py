@@ -146,6 +146,42 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     return None
 
 
+def resolve_explicit_session_id() -> str | None:
+    """Return the session id ONLY when the caller explicitly named one.
+
+    "Explicit" means tiers 2-3 of :func:`resolve_active_session_id`'s chain
+    -- ``NX_SESSION_ID`` or ``CLAUDE_CODE_SESSION_ID`` env vars -- and
+    nothing else. Unlike :func:`resolve_active_session_id`, this does
+    **not** fall through to the machine-wide
+    ``~/.config/nexus/current_session`` file (tier 4): that file has
+    always meant "shared CLI identity, whoever last wrote it", never a
+    caller naming a specific session.
+
+    Why this distinction matters (nexus-f7xyq): a caller that sets
+    ``NX_SESSION_ID=<some-id>`` is asking for THAT session's scope,
+    specifically. If no usable T1 lease exists for it, silently
+    substituting the shared CLI-dedicated identity means the caller reads
+    or writes a DIFFERENT session's data while believing it addressed the
+    one it named -- a session-isolation violation this codebase already
+    treats as security-relevant on the MCP side (see
+    :mod:`nexus.daemon.t1_lease`'s locked RF-2 protocol and
+    ``mcp/core.py``'s ``t1_session_unresolved`` branch). The bare
+    invocation with nothing set in env -- including when
+    ``current_session`` happens to resolve something -- is not making
+    that claim, so it is exempt and keeps the existing shared-identity
+    fallback (:func:`nexus.db.t1.get_t1_database`'s CLI-dedicated tier).
+
+    Returns ``None`` when neither env var is set (non-empty after strip).
+    """
+    env = os.environ.get("NX_SESSION_ID", "").strip()
+    if env:
+        return env
+    claude_code_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if claude_code_env:
+        return claude_code_env
+    return None
+
+
 # ── Orphan multiprocessing-tracker sweep (nexus-9h1s) ────────────────────────
 #
 # RDR-155 P4b: the chroma-backed T1 server management (start/stop, tmpdir
