@@ -82,7 +82,10 @@ class _FakeHttpCatalogClient:
         self.owners.append((name, owner_type))
         return f"owner:{name}"
 
-    def register(self, *, owner, title, content_type, physical_collection, meta, source_uri=""):
+    def register(
+        self, *, owner, title, content_type, physical_collection, meta,
+        source_uri="", with_created=False,
+    ):
         self.registered.append(
             {
                 "owner": owner,
@@ -93,6 +96,10 @@ class _FakeHttpCatalogClient:
                 "source_uri": source_uri,
             }
         )
+        # nexus-vfef0: mirrors HttpCatalogClient.register's with_created
+        # contract — a fresh mint on this fake always reports created=True.
+        if with_created:
+            return "1.1.42", True
         return "1.1.42"
 
     def update(self, tumbler, *, physical_collection=None, meta=None):

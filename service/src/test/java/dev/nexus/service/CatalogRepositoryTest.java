@@ -3704,6 +3704,134 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // nexus-vfef0 — register wire response created-vs-matched signal
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(311)
+    void registerDocumentWithOutcome_freshInsert_reportsCreatedTrue() {
+        final String prefix = "vfef0-fresh";
+        var outcome = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("fresh", "fresh.py"));
+        assertThat(outcome.tumbler()).isEqualTo(prefix + ".1");
+        assertThat(outcome.created()).isTrue();
+    }
+
+    @Test @Order(312)
+    void registerDocumentWithOutcome_sourceUriIdempotencyHit_reportsCreatedFalse() {
+        final String prefix = "vfef0-srcuri";
+        final String uri = "file:///tmp/vfef0-srcuri/doc.md";
+        var first = repo.registerDocumentWithOutcome(TENANT_A, prefix, Map.of(
+            "title", "srcuri doc", "content_type", "rdr", "corpus", "rdr",
+            "file_path", "orig.md", "source_uri", uri));
+        assertThat(first.created()).isTrue();
+        // Re-registering the SAME source_uri (different file_path, matching the
+        // leg's precedence order) must hand back the existing row untouched.
+        var second = repo.registerDocumentWithOutcome(TENANT_A, prefix, Map.of(
+            "title", "srcuri doc renamed", "content_type", "rdr", "corpus", "rdr",
+            "file_path", "renamed.md", "source_uri", uri));
+        assertThat(second.tumbler()).isEqualTo(first.tumbler());
+        assertThat(second.created()).isFalse();
+    }
+
+    @Test @Order(313)
+    void registerDocumentWithOutcome_filePathIdempotencyHit_reportsCreatedFalse() {
+        final String prefix = "vfef0-fpath";
+        var first = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        assertThat(first.created()).isTrue();
+        // Re-registering the same file_path (no source_uri) must hit the
+        // file_path idempotency leg, not mint a second row.
+        var second = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("keep-again", "keep.py"));
+        assertThat(second.tumbler()).isEqualTo(first.tumbler());
+        assertThat(second.created()).isFalse();
+    }
+
+    @Test @Order(314)
+    void registerDocumentWithOutcome_concurrentFirstPutRace_exactlyOneWinnerReportsCreated() throws Exception {
+        // nexus-vfef0's core scenario: two callers race a genuinely NEW
+        // (owner, source_uri) with no precheck between them. Pre-fix, BOTH
+        // legs looked identical to the caller (a bare tumbler); the wire now
+        // must tell the winner (created=true) from the loser (created=false)
+        // so a caller's rollback-on-failure compensation never deletes the
+        // winner's row out from under it.
+        repo.upsertOwner(TENANT_A, Map.of(
+            "tumbler_prefix", "vfef0-race", "name", "vfef0-race-owner", "owner_type", "repo",
+            "repo_hash", "vfef0", "description", "", "repo_root", "",
+            "head_hash", "", "next_seq", 0L));
+        final String uri = "file:///tmp/vfef0-race/doc.md";
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var start = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.Callable<CatalogRepository.RegisterOutcome> task = () -> {
+                start.await();
+                return repo.registerDocumentWithOutcome(TENANT_A, "vfef0-race", Map.of(
+                    "title", "race", "source_uri", uri, "file_path", "race.md"));
+            };
+            var f1 = pool.submit(task);
+            var f2 = pool.submit(task);
+            start.countDown();
+            var a = f1.get();
+            var b = f2.get();
+
+            assertThat(a.tumbler()).as("both racers converge on one tumbler").isEqualTo(b.tumbler());
+            assertThat(a.created() ^ b.created())
+                .as("EXACTLY one of the two racers must report created=true (the winner) "
+                    + "and the other created=false (the loser) — never both true (would let a "
+                    + "caller's rollback delete the winner's live row) and never both false "
+                    + "(the row would be unaccounted for)")
+                .isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test @Order(315)
+    void registerDocumentManyWithOutcome_mixedNewAndExisting_perEntryCreatedFlag() {
+        final String prefix = "vfef0-batch";
+        // Pre-register one doc via the single-doc path.
+        var pre = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        assertThat(pre.created()).isTrue();
+
+        var outcomes = repo.registerDocumentManyWithOutcome(TENANT_A, prefix, List.of(
+            regDoc("keep-again", "keep.py"),   // existing (file_path hit) -> created=false
+            regDoc("new1", "n1.py"),            // genuinely new -> created=true
+            regDoc("new2", "n2.py")));          // genuinely new -> created=true
+        assertThat(outcomes).hasSize(3);
+        assertThat(outcomes.get(0).tumbler()).isEqualTo(pre.tumbler());
+        assertThat(outcomes.get(0).created()).isFalse();
+        assertThat(outcomes.get(1).created()).isTrue();
+        assertThat(outcomes.get(2).created()).isTrue();
+        assertThat(outcomes.get(1).tumbler()).isNotEqualTo(outcomes.get(2).tumbler());
+    }
+
+    @Test @Order(316)
+    void registerDocumentManyWithOutcome_intraBatchAlias_mirrorsFirstOccurrenceCreatedFlag() {
+        final String prefix = "vfef0-batch-alias";
+        var outcomes = repo.registerDocumentManyWithOutcome(TENANT_A, prefix, List.of(
+            Map.of("title", "b1", "source_uri", "file:///vfef0-batch-alias/dup.md", "file_path", "dup.md"),
+            Map.of("title", "b2", "source_uri", "file:///vfef0-batch-alias/dup.md", "file_path", "dup.md")));
+        assertThat(outcomes).hasSize(2);
+        assertThat(outcomes.get(0).tumbler()).isEqualTo(outcomes.get(1).tumbler());
+        // The first occurrence's own INSERT lands (created=true); the
+        // intra-batch alias never runs its own INSERT, so it mirrors that
+        // same outcome rather than independently reporting false.
+        assertThat(outcomes.get(0).created()).isTrue();
+        assertThat(outcomes.get(1).created()).isTrue();
+    }
+
+    @Test @Order(317)
+    void registerDocument_backCompatWrapper_unaffectedByOutcomeVariant() {
+        // The bare-tumbler registerDocument/registerDocumentMany (the ~90
+        // pre-existing call sites) must remain byte-for-byte unchanged by
+        // the addition of the *WithOutcome variants.
+        final String prefix = "vfef0-compat";
+        String t1 = repo.registerDocument(TENANT_A, prefix, regDoc("a", "a.py"));
+        String t2 = repo.registerDocument(TENANT_A, prefix, regDoc("a-again", "a.py"));
+        assertThat(t1).isEqualTo(prefix + ".1");
+        assertThat(t2).isEqualTo(t1);
+        var many = repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("b", "b.py")));
+        assertThat(many).containsExactly(prefix + ".2");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // nexus-23wlw — tombstone visibility parity contract
     // ══════════════════════════════════════════════════════════════════════════
 

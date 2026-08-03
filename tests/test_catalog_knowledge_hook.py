@@ -510,7 +510,9 @@ class TestStorePutHook:
 
         writer = MagicMock()
         writer.register_owner.return_value = Tumbler.parse("1.1")
-        writer.register.return_value = Tumbler.parse("1.1.1")
+        # nexus-vfef0: the hook now calls writer.register(..., with_created=True)
+        # and unpacks (tumbler, created).
+        writer.register.return_value = (Tumbler.parse("1.1.1"), True)
 
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader

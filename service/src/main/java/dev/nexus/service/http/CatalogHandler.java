@@ -1610,10 +1610,13 @@ public final class CatalogHandler implements HttpHandler {
      * POST /v1/catalog/doc/register — assign a new tumbler and register the document.
      *
      * <p>Body: {"owner_prefix": "1.1", "title": "...", "content_type": "paper", ...}
-     * Response: {"tumbler": "1.1.3"}
+     * Response: {"tumbler": "1.1.3", "created": true}
      *
      * <p>Uses SELECT ... FOR UPDATE on catalog_owners.next_seq to atomically claim
-     * the next sequence number.  Returns the assigned tumbler string.
+     * the next sequence number. {@code created} (nexus-vfef0, additive) is {@code
+     * true} only when THIS call's INSERT minted the row; {@code false} for an
+     * idempotency-leg hit or a concurrent first-put race loser — see {@link
+     * CatalogRepository.RegisterOutcome}.
      */
     private void handleDocRegister(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1622,8 +1625,9 @@ public final class CatalogHandler implements HttpHandler {
         if (ownerPrefix == null || ownerPrefix.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'owner_prefix' required\"}"); return;
         }
-        String tumbler = repo.registerDocument(tenant, ownerPrefix, body);
-        HttpUtil.send(exchange, 200, "{\"tumbler\":" + MAPPER.writeValueAsString(tumbler) + "}");
+        var outcome = repo.registerDocumentWithOutcome(tenant, ownerPrefix, body);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("tumbler", outcome.tumbler(), "created", outcome.created())));
     }
 
     /**
@@ -1632,12 +1636,15 @@ public final class CatalogHandler implements HttpHandler {
      * duoak.11 sink #2).
      *
      * <p>Body: {"owner_prefix": "1.1", "docs": [{"title": ..., "file_path": ...}, ...]}
-     * Response: {"tumblers": ["1.1.3", "1.1.4", ...]}  (aligned 1:1 with docs)
+     * Response: {"tumblers": ["1.1.3", "1.1.4", ...], "created": [true, false, ...]}
+     * (both aligned 1:1 with docs)
      *
      * <p>Existing (idempotent) docs return their current tumbler and consume no
      * sequence number; only new docs draw from the contiguous block claimed under
      * one owner-row FOR UPDATE lock. Capped at {@value #MAX_BATCH_DOC_IDS} rows to
-     * stay under PostgreSQL's 32767-parameter Bind limit (~24 cols/row).
+     * stay under PostgreSQL's 32767-parameter Bind limit (~24 cols/row). {@code
+     * created} (nexus-vfef0, additive) mirrors the single-doc route's signal
+     * per entry — see {@link CatalogRepository.RegisterOutcome}.
      */
     @SuppressWarnings("unchecked")
     private void handleRegisterMany(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1655,8 +1662,13 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
-        var tumblers = repo.registerDocumentMany(tenant, ownerPrefix, docs);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", tumblers)));
+        var outcomes = repo.registerDocumentManyWithOutcome(tenant, ownerPrefix, docs);
+        List<String> tumblers = outcomes.stream()
+            .map(CatalogRepository.RegisterOutcome::tumbler).toList();
+        List<Boolean> created = outcomes.stream()
+            .map(CatalogRepository.RegisterOutcome::created).toList();
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("tumblers", tumblers, "created", created)));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

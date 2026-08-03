@@ -1001,8 +1001,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         meta: dict | None = None,
         source_mtime: float = 0.0,
         source_uri: str = "",
+        with_created: bool = False,
         **kwargs: Any,
-    ) -> Tumbler:
+    ) -> Tumbler | tuple[Tumbler, bool]:
         """Register a document; returns the server-assigned tumbler.
 
         Signature matches :meth:`nexus.catalog.catalog.Catalog.register`
@@ -1022,6 +1023,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         on the wire — the honest way an env-var escape hatch survives a
         client/server split. An explicit ``allow_cross_project`` kwarg
         always wins over the env-var default.
+
+        nexus-vfef0: pass ``with_created=True`` to additionally receive the
+        engine's per-call ``created`` signal, returning ``(tumbler,
+        created)`` instead of a bare ``Tumbler``. ``created`` is ``True``
+        only when THIS call's INSERT minted the row — ``False`` for an
+        idempotency-leg hit (the (owner, source_uri)/(owner, file_path)
+        already existed) or a concurrent first-put race loser (a
+        simultaneous caller's INSERT won the race; the engine's ON-CONFLICT
+        backstop handed this call back the WINNER's tumbler instead of
+        minting a duplicate). Older engines that predate this signal omit
+        the wire field entirely; its absence is treated as ``created=True``
+        — the historical assumption every caller ignoring this parameter
+        already makes. Default ``False`` keeps the return type/behavior
+        exactly as before for every other call site; this kwarg exists so
+        ``with_created=True`` can ride the SAME whitelisted ``register``
+        RPC name through :class:`nexus.catalog.factory._ServiceCatalogWriter`
+        rather than requiring a second, unwhitelisted method name.
         """
         payload: dict = {
             "owner_prefix": str(owner),
@@ -1042,7 +1060,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             payload["allow_cross_project"] = True
         payload.update(kwargs)
         result = self._post("/doc/register", payload)
-        return Tumbler.parse(result["tumbler"])
+        tumbler = Tumbler.parse(result["tumbler"])
+        if with_created:
+            return tumbler, bool(result.get("created", True))
+        return tumbler
 
     def register_many(
         self, owner: Tumbler | str, docs: list[dict]

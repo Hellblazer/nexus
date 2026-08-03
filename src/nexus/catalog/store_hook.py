@@ -191,7 +191,13 @@ def catalog_store_hook_tracked(
     the nexus-sdp0u source_uri reconcile below, or the GH #1370
     ghost-by-title reconcile) return ``created=False`` so the nexus-b6enc
     C2 compensation never deletes a pre-existing row the put deduped
-    onto. Returns ``("", False)`` when an error occurs, or in the
+    onto. The ``writer.register`` leg itself now (nexus-vfef0) also
+    returns ``created=False`` for the one race the three prechecks above
+    cannot close — a genuinely CONCURRENT first-put race on a brand-new
+    (collection, title), where the engine's wire response tells a race
+    LOSER (this call landed on the WINNER's row, not its own) apart from
+    a genuine mint; see ``HttpCatalogClient.register``'s ``with_created``
+    kwarg. Returns ``("", False)`` when an error occurs, or in the
     SQLite opt-out mode
     when no local catalog is initialised (service mode always has a
     catalog — the Java service owns it; nexus-f1itv) — the schema
@@ -364,13 +370,24 @@ def catalog_store_hook_tracked(
         # carries the synthesized source_uri, so the second-and-later
         # re-puts converge onto it via by_source_uri. The legacy row itself
         # is collapsed by the nexus-n90xg one-shot backfill sweep, not here.
-        tumbler = writer.register(
+        #
+        # nexus-vfef0: this is also the ONLY leg exposed to the genuinely
+        # CONCURRENT first-put race the three prechecks above cannot close
+        # (two callers both miss all three lookups and both reach here for
+        # a brand-new (collection, title)). ``with_created=True`` surfaces
+        # the engine's created-vs-matched wire signal so the race LOSER
+        # reports ``created=False`` (its own tumbler-shaped return is
+        # actually the WINNER's row) instead of the previously-hardcoded
+        # ``True`` — the exact gap rollback_minted_catalog_entry's KNOWN
+        # RESIDUAL documented.
+        tumbler, created = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
             meta={"doc_id": doc_id},
             source_uri=source_uri or "",
+            with_created=True,
         )
-        return str(tumbler), True
+        return str(tumbler), created
     except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited
         # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
         # assigned", so at DEBUG this was a silent non-registration. WARNING +
@@ -411,24 +428,34 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
     put error, so it never raises — its own failure is logged at WARNING
     with *original_error* attached so both failures are visible.
 
-    KNOWN RESIDUAL (nexus-vfef0, round-1 code review, accepted narrow):
-    ``created=True`` from :func:`catalog_store_hook_tracked` is reliable for
-    every SEQUENTIAL case (the ``by_source_uri`` / ghost-by-title prechecks
-    close those), but NOT for a genuinely CONCURRENT first-put race on a
-    brand-new ``(collection, title)``: two callers can both precheck-miss
-    and both call ``writer.register()``; the engine's own upsert-on-
-    ``source_uri`` idempotency (or its unique-constraint-loser retry) then
-    silently hands the RACE LOSER back the WINNER's tumbler — the wire
-    response carries no created-vs-matched signal to tell the two apart, so
-    the loser's call still reports ``created=True``. If that loser's
-    subsequent ``t3.put()`` then fails, this function is invoked against
-    the WINNER's live, possibly-already-populated tumbler and deletes it.
-    This requires both a genuine concurrent first-put race AND a follow-on
-    write failure on the losing side to manifest — narrow, but reachable
-    under multi-agent concurrent ``store_put`` (this project explicitly
-    dispatches sibling agents). The proper fix threads a created/matched
-    boolean through the engine's ``/doc/register`` response; until then this
-    is an accepted, documented residual, not a behavior change here.
+    FIXED (nexus-vfef0, was a KNOWN RESIDUAL from the nexus-sdp0u round-1
+    code review): ``created=True`` from :func:`catalog_store_hook_tracked`
+    used to be reliable only for every SEQUENTIAL case (the
+    ``by_source_uri`` / ghost-by-title prechecks close those), but NOT for
+    a genuinely CONCURRENT first-put race on a brand-new ``(collection,
+    title)``: two callers can both precheck-miss and both call
+    ``writer.register()``; the engine's own upsert-on-``source_uri``
+    idempotency (or its unique-constraint-loser retry) then hands the RACE
+    LOSER back the WINNER's tumbler. Pre-fix, the wire response carried no
+    created-vs-matched signal to tell the two apart, so the loser's call
+    still reported ``created=True`` — if that loser's subsequent
+    ``t3.put()`` then failed, this function was invoked against the
+    WINNER's live, possibly-already-populated tumbler and deleted it.
+
+    The engine's ``/doc/register`` and ``/doc/register_many`` responses now
+    carry a per-call/per-entry ``created`` boolean (additive wire field;
+    ``CatalogRepository.RegisterOutcome`` on the engine side), threaded
+    through here via ``HttpCatalogClient.register(..., with_created=True)``
+    — a race LOSER now reports ``created=False`` and this function is never
+    invoked against it. The residual now spans ONLY engines predating this
+    field: an older engine omits ``created`` entirely, and the client
+    treats an absent field as ``created=True`` (the historical assumption,
+    preserved for compatibility) — so against a pre-tag engine the race
+    loser can still report ``created=True`` and this function can still be
+    invoked against the winner's row. This narrows to zero once the
+    deployed engine floor reaches the tag that shipped this field (floor
+    bump rides a later, paired release — see AGENTS.md's paired-release
+    choreography — not this bead).
 
     Returns True when the row was deleted.
     """

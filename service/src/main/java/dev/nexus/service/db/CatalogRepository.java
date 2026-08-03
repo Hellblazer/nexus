@@ -855,7 +855,53 @@ public final class CatalogRepository {
         return "";
     }
 
+    /**
+     * Outcome of a {@code registerDocument}/{@code registerDocumentMany} call
+     * (nexus-vfef0): the assigned/matched {@code tumbler} plus whether THIS
+     * call minted it. {@code created=false} covers every leg that hands back
+     * a PRE-EXISTING row — an idempotency-leg hit (source_uri or file_path)
+     * or an ON-CONFLICT race-loser (a concurrent first-put race winner beat
+     * this call's INSERT) — so a caller's compensating rollback on a later
+     * failure (e.g. the client's {@code rollback_minted_catalog_entry}) can
+     * tell "I minted this, it's safe to delete on failure" from "this row
+     * predates my call, deleting it would destroy someone else's document."
+     * Before this record existed, the wire response carried no such signal
+     * at all and every leg looked identical to a caller.
+     *
+     * <p><b>Batch intra-alias caveat</b> (see {@link #registerDocumentManyWithOutcome}):
+     * when a batch call contains two entries that alias to the SAME newly-
+     * minted tumbler (same source_uri, intra-batch dedup), BOTH entries'
+     * outcomes report {@code created=true} for that one shared row — this
+     * is correct for BATCH-LEVEL accounting only ("this call's INSERT
+     * activity created N rows"). It is NOT safe to treat as a per-index
+     * mint signal for INDEPENDENT per-entry delete-on-failure compensation:
+     * a future caller that rolled back entry A's tumbler on A's own
+     * failure, and separately rolled back entry B's (identical) tumbler on
+     * B's own failure, would issue two deletes against one row — the
+     * second a no-op at best, but the pattern is a double-delete bug
+     * waiting to happen if the delete ever gains side effects keyed on
+     * "did a row exist to delete." A per-entry rollback consumer must
+     * dedup by tumbler across the batch first.
+     */
+    public record RegisterOutcome(String tumbler, boolean created) {}
+
+    /**
+     * Register a document, returning only the assigned/matched tumbler.
+     *
+     * <p>Thin wrapper over {@link #registerDocumentWithOutcome} for callers
+     * that only need the tumbler (the majority of call sites). See that
+     * method for the {@code created} signal (nexus-vfef0).
+     */
     public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
+        return registerDocumentWithOutcome(tenant, ownerPrefix, fields).tumbler();
+    }
+
+    /**
+     * Register a document, returning both the assigned/matched tumbler and
+     * whether THIS call minted it. See {@link RegisterOutcome} for the exact
+     * {@code created} contract (nexus-vfef0).
+     */
+    public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
@@ -889,7 +935,7 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(srcUri))
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
-                if (existing != null) return existing.value1();
+                if (existing != null) return new RegisterOutcome(existing.value1(), false);
             }
             String filePath = s(fields, "file_path", "");
             if (!filePath.isEmpty()) {
@@ -899,7 +945,7 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.TUMBLER.startsWith(ownerPrefix + "."))
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
-                if (existing != null) return existing.value1();
+                if (existing != null) return new RegisterOutcome(existing.value1(), false);
             }
 
             // No existing document — atomically claim the next sequence number
@@ -981,9 +1027,9 @@ public final class CatalogRepository {
                 }
                 log.info("event=register_document_race_lost tenant={} source_uri={} winner={}",
                     tenant, srcUri, winner.value1());
-                return winner.value1();
+                return new RegisterOutcome(winner.value1(), false);
             }
-            return tumbler;
+            return new RegisterOutcome(tumbler, true);
         }));
     }
 
@@ -1005,8 +1051,35 @@ public final class CatalogRepository {
      *
      * <p>Caller (the HTTP handler) caps the batch under the PostgreSQL 32767 bind-param
      * ceiling; with ~24 columns per row the safe cap is 1000 rows (24000 params).
+     *
+     * <p>Thin wrapper over {@link #registerDocumentManyWithOutcome} for
+     * callers that only need tumblers. See that method for the per-entry
+     * {@code created} signal (nexus-vfef0).
      */
     public java.util.List<String> registerDocumentMany(
+            String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> docs) {
+        return registerDocumentManyWithOutcome(tenant, ownerPrefix, docs).stream()
+            .map(RegisterOutcome::tumbler)
+            .toList();
+    }
+
+    /**
+     * Batch-register, returning per-entry {@link RegisterOutcome} (tumbler +
+     * {@code created}) aligned 1:1 with {@code docs} (nexus-vfef0). An entry
+     * resolved via the pre-batch idempotency lookup, or an ON-CONFLICT
+     * cross-transaction race loser, reports {@code created=false} — the row
+     * predates this call (or was minted by a concurrent winner). An entry
+     * whose own INSERT landed reports {@code true}. An intra-batch alias of
+     * another NEW entry in the SAME call (two docs sharing one source_uri)
+     * MIRRORS whichever outcome its first occurrence resolved to — usually
+     * {@code true} (the shared row's INSERT landed), {@code false} only if
+     * that first occurrence itself lost a cross-transaction race. See the
+     * batch intra-alias caveat on {@link RegisterOutcome} before treating
+     * this per-entry flag as a per-index rollback signal: two aliased
+     * entries reporting {@code created=true} for the SAME tumbler is
+     * correct for batch-level accounting but is not two independent mints.
+     */
+    public java.util.List<RegisterOutcome> registerDocumentManyWithOutcome(
             String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> docs) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
@@ -1081,6 +1154,10 @@ public final class CatalogRepository {
             // (In-memory joins; timed into resolve_ms so the warm-rerun case
             // doesn't mislabel this as seq-update time — review M-1.)
             String[] out = new String[docs.size()];
+            // nexus-vfef0: per-entry created flag, aligned with out[]. Default
+            // false covers the pre-batch idempotency hit (existing != null,
+            // just below) with no further action needed.
+            boolean[] created = new boolean[docs.size()];
             java.util.List<Integer> newIdx = new java.util.ArrayList<>();
             // nexus-78n33: intra-batch source_uri dedup. Two NEW docs in the
             // SAME batch sharing a source_uri would otherwise both be
@@ -1138,6 +1215,12 @@ public final class CatalogRepository {
                     cursor += 1;
                     String tumbler = ownerPrefix + "." + cursor;
                     out[idx] = tumbler;
+                    // Tentative: this row's own INSERT is about to run. Only
+                    // non-empty source_uri rows can lose the cross-transaction
+                    // race below (see the TOCTOU backstop comment ahead), so
+                    // this is already final truth for every empty-source_uri
+                    // NEW row.
+                    created[idx] = true;
                     String metaJson = jsonOrNull(fields.get("meta"));
                     insert = insert.values(tenant, tumbler,
                             s(fields, "title", ""),
@@ -1217,13 +1300,26 @@ public final class CatalogRepository {
                                 + " but no live winner exists (concurrent tombstone?) — "
                                 + "refusing to return a never-persisted tumbler; retry");
                         }
-                        out[e.getValue()] = winner;
+                        int idx = e.getValue();
+                        // nexus-vfef0: out[idx] still holds THIS call's
+                        // pre-assigned tumbler at this point. If the re-
+                        // resolved winner differs, our own INSERT lost the
+                        // cross-transaction race — the row belongs to a
+                        // concurrent caller, not us.
+                        if (!winner.equals(out[idx])) {
+                            created[idx] = false;
+                        }
+                        out[idx] = winner;
                     }
                 }
             }
-            // Fill intra-batch aliases from their winning row's final tumbler.
+            // Fill intra-batch aliases from their winning row's final tumbler
+            // and created flag (nexus-vfef0): an alias never ran its own
+            // INSERT, so its created status mirrors whichever outcome the
+            // first occurrence in this batch resolved to.
             for (var e : aliasOfIdx.entrySet()) {
                 out[e.getKey()] = out[e.getValue()];
+                created[e.getKey()] = created[e.getValue()];
             }
             long tEnd = System.nanoTime();
             log.info("event=register_many_timing tenant={} owner={} docs={} new={} "
@@ -1238,7 +1334,11 @@ public final class CatalogRepository {
                 (tEnd - tInsert) / 1_000_000,
                 (tEnd - tStart) / 1_000_000);
 
-            return java.util.Arrays.asList(out);
+            var result = new java.util.ArrayList<RegisterOutcome>(docs.size());
+            for (int i = 0; i < docs.size(); i++) {
+                result.add(new RegisterOutcome(out[i], created[i]));
+            }
+            return result;
         }));
     }
 
