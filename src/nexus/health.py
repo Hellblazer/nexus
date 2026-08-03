@@ -2968,17 +2968,17 @@ def _check_dangling_manifests() -> list[HealthResult]:
             # added. Fail OPEN (never crash `nx doctor`) but LOUD — this is
             # the exact ac4id lesson, applied to the fence's own read.
             #
-            # GREP-LEVEL PARITY (nexus-5xn3k.6 code-review-expert CRITICAL,
-            # 2026-08-02): the detail string below is allowlisted VERBATIM
-            # by tests/e2e/fresh-install-mvv.sh's ALLOWLIST_REGEX — the
-            # pinned engine (REQUIRED_ENGINE_VERSION v0.1.61) predates
-            # 3cf64d48, so this branch fires on every virgin box until the
-            # floor moves to a tag >= v0.1.62. Changing this text requires
-            # changing that regex in lockstep, or the MVV gate reds.
-            # MECHANIZED removal trigger (substantive-critic SIGNIFICANT,
-            # 2026-08-02): tests/test_engine_version.py::
-            # TestMvvAllowlistDoesNotOutliveItsTrigger reds at the v0.1.62
-            # floor bump unless that allowlist line is deleted with it.
+            # HISTORY (nexus-5xn3k.6 code-review-expert CRITICAL, 2026-08-02):
+            # from REQUIRED_ENGINE_VERSION v0.1.61 (which predates 3cf64d48)
+            # until the nexus-koms3 v0.1.62 floor bump, this detail string was
+            # allowlisted VERBATIM by tests/e2e/fresh-install-mvv.sh's
+            # doctor-warnings check, because this branch fired on every
+            # virgin box. As of the v0.1.62 floor, the bundled engine ships
+            # the fence routes, so a virgin box no longer 404s here and that
+            # allowlist entry was removed (nexus-koms3, same change). This
+            # fail-open branch itself stays — a FOREIGN or otherwise
+            # below-floor engine can still 404 this route — and
+            # tests/test_health_service_checks.py exercises it directly.
             _log.warning("doctor_dangling_manifest_engine_floor", status=status)
             return [HealthResult(
                 label=label, ok=False, warn=True,

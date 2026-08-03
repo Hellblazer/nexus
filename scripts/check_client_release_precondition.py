@@ -41,26 +41,25 @@ import sys
 #: client commits that must be in a RELEASED conexus version before that
 #: engine may DEPLOY. Commits, not branches: a branch can move, a commit
 #: either is or is not an ancestor of the release tag.
-ENGINE_CLIENT_PRECONDITIONS: dict[str, dict[str, str]] = {
-    "engine-service-v0.1.61": {
-        "a62649ef": "nexus-9ssih client half: _post_link translates the "
-        "engine's 400 code=dangling_endpoint into ValueError; older "
-        "clients surface it as an unhandled HTTP error on every "
-        "auto-link against a missing endpoint",
-    },
-    "engine-service-v0.1.62": {
-        "9ba82a3b": "nexus-lcmbp client half: create_pipeline translates "
-        "the engine's new 409 conflict_running into typed "
-        "PipelineConflictRunning (clean non-zero exit with remedy); older "
-        "clients surface the 409 as an uncaught httpx.HTTPStatusError "
-        "traceback on every retry inside the 5-minute window",
-    },
-}
+#:
+#: Rows exist only for engines AHEAD of ``REQUIRED_ENGINE_VERSION`` —
+#: once the floor reaches a row's engine, the deploy it gated has happened
+#: and every subsequent release supersets the required client commits, so
+#: the row is dead weight (mechanized:
+#: ``TestStalePreconditionRowsDoNotOutliveTheFloor``). Pruned rows, for
+#: the historical record:
+#:   engine-service-v0.1.61 / a62649ef (nexus-9ssih dangling-endpoint 400)
+#:   engine-service-v0.1.62 / 9ba82a3b (nexus-lcmbp 409 conflict_running)
+ENGINE_CLIENT_PRECONDITIONS: dict[str, dict[str, str]] = {}
 
 _REMEDY = (
-    "Remedy: cut the conexus PyPI release carrying the listed commit(s) "
-    "(release skill; AGENTS.md § Cutting a release) BEFORE tagging/deploying "
-    "this engine. Then re-run this check."
+    "Remedy: this blocks the DEPLOY only — the engine tag cuts whenever the "
+    "tree is green (a tag gates delivery, not work; Hal directive "
+    "2026-08-02). Pair the deploy with the conexus release that carries the "
+    "listed commit(s) AND bumps the floor to this tag: deploy fires at "
+    "client-tag push, in parallel with the PyPI publish (AGENTS.md "
+    "§ Engine-service release, paired-release choreography). Then re-run "
+    "this check."
 )
 
 
@@ -131,15 +130,23 @@ def check(engine_tag: str) -> int:
     return 0
 
 
+def _pinned_engine_tag() -> str:
+    """Default to the pinned engine identity — derived, so it cannot rot."""
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+    return "engine-service-v" + ".".join(str(n) for n in REQUIRED_ENGINE_VERSION)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--engine-tag",
-        default="engine-service-v0.1.61",
-        help="engine tag whose client preconditions to verify",
+        default=None,
+        help="engine tag whose client preconditions to verify "
+        "(default: the pinned REQUIRED_ENGINE_VERSION tag)",
     )
     args = ap.parse_args()
-    return check(args.engine_tag)
+    return check(args.engine_tag or _pinned_engine_tag())
 
 
 if __name__ == "__main__":

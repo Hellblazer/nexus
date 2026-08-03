@@ -479,7 +479,14 @@ async def test_implements_link_type_fires() -> None:
         cat = _get_catalog()
     except click.ClickException as e:
         pytest.skip(f"catalog not available: {e.message}")
-    db = cat._db
+    try:
+        db = cat._db
+    except AttributeError:
+        # Service-mode catalog (HttpCatalogClient) has no raw local handle —
+        # this measurement walks the local SQLite directly and predates the
+        # _db retirement; it cannot run against a cloud-mode install
+        # (nexus-g3qb6).
+        pytest.skip("catalog is HTTP-backed (service mode) — no local _db")
 
     # Sample up to 10 seeds from the target collection.
     rows = db.execute(

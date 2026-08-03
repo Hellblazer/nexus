@@ -41,12 +41,17 @@
 #     daemon machinery) actually boots and serves: health, version identity,
 #     catalog read/write, the RUNFENCE index-run fence, one vector round
 #     trip. Exact-count non-vacuity (SMOKE_EXPECTED), fail-loud on any
-#     mismatch or unreachable service — never silently skipped. NOTE: the
-#     version-identity assertion cannot discriminate WHICH artifact is
-#     running (pinned release and stamped dev jar bake the identical
-#     release_version) — the fence round-trip is the actual discriminator
-#     today, and only until a pinned release ships RUNFENCE; see the step
-#     (b)/(d) comments below and nexus-308ph.
+#     mismatch or unreachable service — never silently skipped. NOTE
+#     (nexus-308ph, landed 2026-08-02): release_version ALONE cannot
+#     discriminate WHICH artifact is running — a pinned release binary and a
+#     stamped dev jar built against the same floor bake the identical
+#     release_version. build_ref, a per-run nonce stamped fresh into
+#     release.properties by step 2 below on every invocation, IS the
+#     discriminator of record — see the step (b)/(d) comments below. The
+#     RUNFENCE index-run fence (step d) was the INTERIM discriminator (404
+#     on a pre-fence pinned release, 200 on a fresh jar) but that signal dies
+#     once a pinned release ships the fence routes (v0.1.62+); it stays as
+#     supplementary coverage of the fence contract itself, not identity.
 #
 # THIS GATE IS BGE-768 ONLY (nexus-w6h2m, 2026-07-28). A local service embeds
 # with bge-768 and nothing else — RDR-160 makes that the only valid value in
@@ -291,10 +296,12 @@ NEXUS_CONFIG_DIR="$SCRATCH" uv run nx init --service
 echo "[gate] stopping the pinned-release service nx init auto-started (nexus-4e96a)"
 NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 
-# 2. Rebuild the dev jar if stale, missing, or WRONG-STAMPED (rebuild-on-
-#    key-miss only; a fresh, correctly-stamped jar re-run is a no-op).
+# 2. Rebuild the dev jar, UNCONDITIONALLY stamped, on every invocation.
 #    Skipped when a native binary is supplied — the native path never
-#    launches the jar, so freshness is moot.
+#    launches the jar, so freshness is moot (and, per nexus-308ph below, a
+#    native artifact was built from a tag, never from THIS gate run, so it
+#    structurally cannot carry a matching build_ref — that is the intended
+#    failure mode, not a gap to work around).
 #
 #    Stamp discipline (2026-07-13, found by the 0.1.39->0.1.41 floor bump):
 #    the cloud-probe-path tests in this gate require the service to report
@@ -302,10 +309,19 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 #    BLANK stamp (-> null -> fail-closed), so the gate previously depended on
 #    whatever stamped jar an earlier rehearsal happened to leave in
 #    service/target — ambient machine state, the exact gate defect the
-#    self-provisioning rule forbids. Now: derive the stamp from the floor
-#    constant (same parse as migration-rehearsal/run.sh), treat a jar whose
-#    baked stamp differs as stale, and stamp/restore release.properties
-#    around the build so the jar always carries exactly the floor.
+#    self-provisioning rule forbids. release_version is derived from the
+#    floor constant (same parse as migration-rehearsal/run.sh).
+#
+#    nexus-308ph (2026-08-02): ALSO stamps build_ref, a per-run nonce
+#    (<git short sha>+<epoch seconds>-<pid>) — mirrors
+#    scripts/build-gate-jar.sh's own stamp. This is why the rebuild is now
+#    UNCONDITIONAL rather than rebuild-on-key-miss: build_ref must be fresh
+#    on every single invocation, so a "reuse the jar if release_version
+#    already matches" shortcut would leave a STALE nonce baked into a reused
+#    jar — one that can never equal the value THIS run computes below,
+#    permanently hard-failing the smoke leg's discriminator assertion
+#    (step 5b) for no real reason. Stamp/restore release.properties around
+#    the build so the jar always carries exactly these two values.
 JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
 RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 GATE_STAMP="$(python3 -c '
@@ -315,28 +331,31 @@ m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", sr
 print(".".join(m.groups()) if m else "")
 ')"
 [ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
+GATE_BUILD_REF=""
 if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '
 from tests.db._service_fixture import jar_freshness_skip_reason
 print(jar_freshness_skip_reason() or "")
 ')"
-  BAKED_STAMP=""
-  [ -f "$JAR" ] && BAKED_STAMP="$(unzip -p "$JAR" META-INF/nexus/release.properties 2>/dev/null | sed -n 's/^release_version=//p')"
-  if [ -n "$JAR_SKIP_REASON" ] || [ "$BAKED_STAMP" != "$GATE_STAMP" ]; then
-    [ -n "$JAR_SKIP_REASON" ] && echo "[gate] $JAR_SKIP_REASON"
-    [ "$BAKED_STAMP" != "$GATE_STAMP" ] && echo "[gate] jar stamp '${BAKED_STAMP:-<none>}' != floor '$GATE_STAMP' — rebuilding stamped"
-    echo "[gate] rebuilding service jar (release_version=$GATE_STAMP)..."
-    _restore_props() { git checkout -- "$RELEASE_PROPS" 2>/dev/null || true; }
-    sed "s/^release_version=.*/release_version=${GATE_STAMP}/" "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
-      && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
-    if ! (cd service && ./mvnw -q package -DskipTests); then
-      _restore_props
-      echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
-      echo "         cd service && ./mvnw package -DskipTests" >&2
-      exit 2
-    fi
+  [ -n "$JAR_SKIP_REASON" ] && echo "[gate] $JAR_SKIP_REASON"
+  # Nonce shape mirrors scripts/build-gate-jar.sh (intentional duplication:
+  # the gate must hold the expected value in its own process for the
+  # smoke-leg compare, and the restore choreography differs) — keep in step.
+  GATE_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+  GATE_BUILD_REF="${GATE_SHA}+$(date +%s)-$$"
+  echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
+  _restore_props() { git checkout -- "$RELEASE_PROPS" 2>/dev/null || true; }
+  sed -e "s/^release_version=.*/release_version=${GATE_STAMP}/" \
+      -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
+      "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
+    && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
+  if ! (cd service && ./mvnw -q package -DskipTests); then
     _restore_props
+    echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
+    echo "         cd service && ./mvnw package -DskipTests" >&2
+    exit 2
   fi
+  _restore_props
 fi
 
 # 3. Resolve a launch artifact: installed native binary wins; dev jar fallback.
@@ -373,7 +392,7 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
-SMOKE_EXPECTED=11
+SMOKE_EXPECTED=12
 SMOKE_PASSED=0
 SMOKE_BASE="http://127.0.0.1:$SERVICE_PORT"
 SMOKE_DIR="$SCRATCH/smoke"
@@ -427,21 +446,41 @@ smoke_request GET /health
 smoke_check "GET /health -> status=ok db=up" "d.get('status')=='ok' and d.get('db')=='up'"
 
 # b. Version identity — this throwaway is a STAMPED rebuild (step 2 above),
-# so this is an exact match against GATE_STAMP, not a floor comparison. NOTE:
-# this cannot discriminate WHICH artifact is actually running — a pinned
-# release binary and a freshly-stamped dev jar both bake the identical
-# release_version by construction — see step (d) below.
+# so this is an exact match against GATE_STAMP, not a floor comparison.
+# release_version ALONE cannot discriminate WHICH artifact is actually
+# running — a pinned release binary and a freshly-stamped dev jar both bake
+# the identical release_version by construction. build_ref (nexus-308ph) is
+# what closes that gap: a per-run nonce (step 2 above), stamped fresh on
+# every invocation, that no pinned release — past or future — can ever bake,
+# because no release is ever built BY this gate run. A missing build_ref
+# field (an artifact built before this change, or the pinned-release
+# short-circuit nexus-4e96a exists to catch) or a value mismatch (a stale
+# reused jar, or the wrong artifact serving) is a HARD FAIL naming
+# nexus-4e96a — this IS the artifact-identity discriminator of record.
 #
 # NOTE (all smoke_check calls below that splice a shell var into their
 # PYTHON_EXPR arg, starting with $GATE_STAMP here): unlike the REQUEST side
 # (smoke_request bodies are always built through python3 json.dumps, which
 # escapes for JSON), the ASSERTION side is spliced into raw python SOURCE
-# with no escaping. Every value used here (GATE_STAMP, SMOKE_UID and its
-# derivatives) is script-controlled and shell-safe today — keep it that way;
-# never splice untrusted or free-form text into a PYTHON_EXPR.
+# with no escaping. Every value used here (GATE_STAMP, GATE_BUILD_REF,
+# SMOKE_UID and its derivatives) is script-controlled and shell-safe today —
+# keep it that way; never splice untrusted or free-form text into a
+# PYTHON_EXPR.
 smoke_request GET /version
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /version"
 smoke_check "GET /version -> release_version==$GATE_STAMP" "d.get('release_version')=='$GATE_STAMP'"
+if [ -n "${NEXUS_SERVICE_BIN:-}" ]; then
+  # Native-binary mode skips the stamped rebuild (step 2), so GATE_BUILD_REF
+  # is empty and an equality compare could NEVER pass (d.get() yields None,
+  # never ''). The discriminating invariant for this mode is the inverse:
+  # native release builds NEVER stamp build_ref, so a PRESENT field means a
+  # stray jar is serving instead of $NEXUS_SERVICE_BIN.
+  smoke_check "GET /version -> build_ref ABSENT (native binary never stamps it; a present field means a stray jar is serving, not \$NEXUS_SERVICE_BIN — nexus-308ph)" \
+    "d.get('build_ref') is None"
+else
+  smoke_check "GET /version -> build_ref==$GATE_BUILD_REF (nexus-308ph artifact-identity discriminator; missing/mismatched means the served process is not the jar THIS run built — the nexus-4e96a short-circuit)" \
+    "d.get('build_ref')=='$GATE_BUILD_REF'"
+fi
 
 # c. Catalog round-trip: owner upsert -> doc/register -> show, title round-trips.
 SMOKE_OWNER_PREFIX="9.$SMOKE_UID"
@@ -468,12 +507,15 @@ smoke_check "GET /v1/catalog/show -> title round-trips" "d.get('title')=='$SMOKE
 # claim completion with zero chunks, so exercising that call shape here would
 # smoke-test a request no honest client makes.
 #
-# THIS is the artifact-identity discriminator until nexus-308ph lands a
-# per-run build nonce — RUNFENCE is unreleased (post-v0.1.61), so it 404s
-# against the pinned release binary and 200s only against a fresh dev
-# build, unlike step (b)'s version check above. It silently loses that
-# power the moment a pinned release ships the fence routes. Revisit
-# trigger: REQUIRED_ENGINE_VERSION >= 0.1.62.
+# HISTORICAL NOTE (nexus-308ph, resolved 2026-08-02): before build_ref
+# landed (step (b) above), THIS fence round-trip was the artifact-identity
+# discriminator by accident — RUNFENCE was unreleased (pre-v0.1.62), so it
+# 404'd against the pinned release binary and 200'd only against a fresh dev
+# build. That signal necessarily dies once a pinned release ships the fence
+# routes (v0.1.62+), which is exactly why it was never durable. It stays
+# here now purely as functional coverage of the fence CONTRACT itself
+# (begin/fail/show state transitions) — build_ref is the discriminator of
+# record; this step no longer carries that responsibility.
 smoke_request POST /v1/catalog/index-run/begin \
   "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','run_id':'gate-smoke-$SMOKE_UID','collection':'knowledge__gate-smoke__bge-base-en-v15-768__v1'}))")"
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/begin"
@@ -515,7 +557,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
     "any(r.get('id')=='$SMOKE_CHASH' for r in d)"
 else
   echo "[gate] NEXUS_GATE_NO_VECTOR_SMOKE=1 — vector leg skipped; SMOKE_EXPECTED lowered"
-  SMOKE_EXPECTED=9
+  SMOKE_EXPECTED=10
 fi
 
 smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1

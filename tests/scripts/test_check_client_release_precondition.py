@@ -87,10 +87,16 @@ class TestLogic:
         assert re.fullmatch(r"v\d+\.\d+\.\d+", tag), tag
         assert not tag.startswith("engine-service")
 
-    def test_v0161_precondition_is_registered(self):
-        """The row this script was born for: a62649ef gates the v0.1.61 deploy."""
-        pre = gate.ENGINE_CLIENT_PRECONDITIONS["engine-service-v0.1.61"]
-        assert any(c.startswith("a62649ef") for c in pre)
+    def test_default_engine_tag_derives_from_the_pinned_floor(self):
+        """The CLI default is DERIVED from REQUIRED_ENGINE_VERSION, never a
+        hand-typed literal (the v0.1.61 literal sat stale after the floor
+        moved — same drift class as nexus-b6qlf)."""
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        expected = "engine-service-v" + ".".join(
+            str(n) for n in REQUIRED_ENGINE_VERSION
+        )
+        assert gate._pinned_engine_tag() == expected
 
     def test_is_ancestor_real_git_smoke(self, hermetic_repo):
         """A root-ward commit is an ancestor of HEAD (hermetic repo — the
@@ -102,17 +108,54 @@ class TestLogic:
         assert gate.is_ancestor(proc.stdout.strip(), "HEAD")
 
 
+class TestStalePreconditionRowsDoNotOutliveTheFloor:
+    """The script's own contract: 'Delete rows once the floor moves past the
+    engine version that carried the requirement.' Mechanized, because the
+    prose version was violated the first time it mattered (the v0.1.61 row
+    survived the 2026-08-02 floor bump, pinned in place by its own test) —
+    the same stale-interim-exception shape
+    TestMvvAllowlistDoesNotOutliveItsTrigger and
+    TestSmokeLegDiscriminatorDoesNotOutliveItsPower exist to kill."""
+
+    def test_every_row_names_an_engine_ahead_of_the_floor(self):
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        for tag in gate.ENGINE_CLIENT_PRECONDITIONS:
+            if tag == "next":  # the about-to-be-cut sentinel is always ahead
+                continue
+            version = tuple(
+                int(n) for n in tag.removeprefix("engine-service-v").split(".")
+            )
+            assert version > REQUIRED_ENGINE_VERSION, (
+                f"ENGINE_CLIENT_PRECONDITIONS row {tag!r} is at or behind the "
+                f"pinned floor {REQUIRED_ENGINE_VERSION} — the deploy it gated "
+                "has already happened and every subsequent release supersets "
+                "its required commits. Delete the row (record it in the "
+                "docstring's pruned-rows list) per the module contract."
+            )
+
+
 class TestWiring:
     """An unwired gate is a prose gate with extra steps (nexus-qc4p1 class)."""
 
     def test_engine_release_skill_invokes_the_gate(self):
         skill = (REPO_ROOT / ".claude" / "skills" / "engine-release" / "SKILL.md").read_text()
         assert "check_client_release_precondition.py" in skill, (
-            "the engine-release skill must run the client-precondition gate "
-            "before the tag push — without the invocation step this script "
-            "is exactly as skippable as the prose gate it replaced"
+            "the engine-release skill must surface the client-precondition "
+            "check — without the invocation step this script is exactly as "
+            "skippable as the prose gate it replaced"
         )
-        # The invocation must come BEFORE the tag-push step, not after.
+        # The check surfaces early (pre-tag) so a red is KNOWN while planning
+        # the paired release — but it gates the DEPLOY, never the tag cut
+        # (Hal directive 2026-08-02: the pre-tag-blocking wiring forced
+        # conexus 7.1.0 to ship pinned to a pre-fence engine).
         gate_pos = skill.index("check_client_release_precondition.py")
         push_pos = skill.index("git push origin engine-service-v")
-        assert gate_pos < push_pos, "the gate must run before the tag push"
+        assert gate_pos < push_pos, (
+            "the check must surface before the tag-push step (advisory at "
+            "tag time, blocking at deploy time)"
+        )
+        assert "never the tag cut" in skill, (
+            "the skill must state the deploy-not-tag scoping explicitly — "
+            "the 7.1.0/v0.1.62 inversion came from this wording"
+        )

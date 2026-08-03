@@ -26,6 +26,7 @@ import java.util.Properties;
  * <p>Returns 200:
  * <pre>{"app_version":"1.0-SNAPSHOT",
  *  "release_version":"0.1.6",
+ *  "build_ref":"a1b2c3d+1690000000-4242",
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -34,7 +35,19 @@ import java.util.Properties;
  * (RDR-002: release identity is not carried by the Maven coordinate).
  * {@code release_version} (RDR-002) is the release identity, stamped from the
  * {@code engine-service-vX.Y.Z} git tag at native-build time; it is {@code null}
- * on a dev / unstamped build so a version-pin consumer fail-closes. The schema
+ * on a dev / unstamped build so a version-pin consumer fail-closes.
+ * {@code build_ref} (nexus-308ph) is a per-run artifact-identity discriminator,
+ * distinct from {@code release_version}: a pinned release binary and a
+ * freshly-stamped dev jar built against the SAME floor bake an identical
+ * {@code release_version}, so release_version alone cannot tell them apart.
+ * {@code build_ref} is stamped fresh on every gate-jar build
+ * ({@code scripts/build-gate-jar.sh} / {@code tests/e2e/local-service-gate.sh})
+ * as {@code <git short sha>+<per-run nonce>}; it is {@code UNSET} (the field is
+ * OMITTED, never emitted as {@code null} or {@code ""}) when
+ * {@code release.properties}' {@code build_ref} key is blank or absent — the
+ * checked-in source default and every native-release build, so a pinned
+ * release's /version body stays byte-identical in shape to before this field
+ * existed. The schema
  * fields are the APPLIED Liquibase
  * journal (the service ran {@code update} at startup, so applied ==
  * bundled for a healthy instance). On a journal read failure the schema
@@ -59,6 +72,9 @@ public final class VersionHandler implements HttpHandler {
     private static final String RELEASE_PROPERTIES =
             "/META-INF/nexus/release.properties";
 
+    /** nexus-308ph: the property key for the per-run artifact-identity discriminator. */
+    private static final String BUILD_REF_PROPERTY = "build_ref";
+
     // Liquibase's own bookkeeping table lives in `public`, outside the jOOQ codegen's
     // `nexus`/`t1` inputSchema scope (explicitly excluded — pom.xml codegen <excludes>),
     // so there is no generated Tables.DATABASECHANGELOG to reference. Typed ad-hoc
@@ -75,6 +91,7 @@ public final class VersionHandler implements HttpHandler {
     private final DataSource dataSource;
     private final String appVersion;
     private final String releaseVersion;   // RDR-002; null on dev / unstamped
+    private final String buildRef;         // nexus-308ph; null (field OMITTED) when blank/absent
     private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
 
     public VersionHandler(DataSource dataSource) {
@@ -93,6 +110,7 @@ public final class VersionHandler implements HttpHandler {
         this.embedderRouter = embedderRouter;
         this.appVersion = resolveAppVersion();
         this.releaseVersion = resolveReleaseVersion();
+        this.buildRef = resolveBuildRef();
     }
 
     /** Maven pom.properties (fat JAR) → Implementation-Version → "unknown". */
@@ -163,6 +181,57 @@ public final class VersionHandler implements HttpHandler {
             return null;
         }
         return v;
+    }
+
+    /**
+     * The stamped nexus-308ph per-run build discriminator, or {@code null} when
+     * unset — meaning the field is OMITTED from the /version body entirely
+     * (never emitted as {@code null} or {@code ""}), so a pinned release built
+     * before this field existed (and every native-release build, which never
+     * stamps it) stays shape-identical.
+     *
+     * <p>Reads {@code build_ref} from {@link #RELEASE_PROPERTIES}. Unlike
+     * {@link #resolveReleaseVersion()}, no {@code v}-prefix stripping or
+     * {@code SNAPSHOT}/{@code dev} filtering applies — this is an opaque
+     * per-run nonce (git short sha + a uniqueness suffix), not a version
+     * string, so any non-blank value is significant verbatim.
+     */
+    static String resolveBuildRef() {
+        try (InputStream in = VersionHandler.class.getResourceAsStream(RELEASE_PROPERTIES)) {
+            if (in != null) {
+                Properties props = new Properties();
+                props.load(in);
+                return normalizeBuildRef(props.getProperty(BUILD_REF_PROPERTY));
+            }
+        } catch (IOException e) {
+            log.debug("event=version_build_ref_unreadable error={}", e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Normalize a raw {@code build_ref} property to either a discriminator
+     * value or {@code null} (omit the field). Blank or {@code null} both map
+     * to {@code null}; any other value is returned trimmed, verbatim.
+     */
+    static String normalizeBuildRef(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String v = raw.trim();
+        return v.isEmpty() ? null : v;
+    }
+
+    /**
+     * Append the {@code build_ref} JSON field to {@code body} — but ONLY when
+     * {@code buildRef} is non-null. A missing/blank build_ref means no field
+     * at all (never {@code "build_ref":null}), so pre-nexus-308ph release
+     * bodies and every native-release build stay byte-identical in shape.
+     */
+    static void appendBuildRefField(StringBuilder body, String buildRef) {
+        if (buildRef != null) {
+            body.append(",\"build_ref\":").append(HttpUtil.jsonString(buildRef));
+        }
     }
 
     /** Immutable-for-the-process schema identity (nexus-hubc0). */
@@ -237,6 +306,8 @@ public final class VersionHandler implements HttpHandler {
         // (never silently omitted — the consumer keys its fail-closed pin on it).
         body.append(",\"release_version\":")
             .append(releaseVersion == null ? "null" : HttpUtil.jsonString(releaseVersion));
+        // nexus-308ph: OMITTED (not null/empty) when unset — see appendBuildRefField.
+        appendBuildRefField(body, buildRef);
         if (embedderRouter != null) {
             body.append(",\"embedding_mode\":")
                 .append(HttpUtil.jsonString(embedderRouter.modeName()))

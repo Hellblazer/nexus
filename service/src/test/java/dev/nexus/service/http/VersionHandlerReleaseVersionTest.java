@@ -52,4 +52,59 @@ class VersionHandlerReleaseVersionTest {
         // the engine-service-release workflow stamp step.)
         assertThat(VersionHandler.resolveReleaseVersion()).isNull();
     }
+
+    // ── nexus-308ph: build_ref, the per-run artifact-identity discriminator ──
+    //
+    // Unlike release_version (which the /version body ALWAYS emits, using
+    // explicit JSON null on a dev/unstamped build), build_ref is OMITTED
+    // entirely when unset — a pinned release built before this field existed,
+    // and every native-release build (which never stamps it), must produce a
+    // byte-identical /version shape. These tests cover both the resolve/
+    // normalize logic and the JSON-emission seam directly.
+
+    @Test
+    void buildRefBlankOrNullNormalizesToOmitted() {
+        assertThat(VersionHandler.normalizeBuildRef(null)).isNull();
+        assertThat(VersionHandler.normalizeBuildRef("")).isNull();
+        assertThat(VersionHandler.normalizeBuildRef("   ")).isNull();
+    }
+
+    @Test
+    void buildRefNonBlankReturnedVerbatimTrimmed() {
+        // Opaque nonce, not a version string — no v-stripping, no SNAPSHOT/dev
+        // filtering (unlike normalizeReleaseVersion): any non-blank value after
+        // trimming is significant as-is.
+        assertThat(VersionHandler.normalizeBuildRef("a1b2c3d+1690000000-4242"))
+            .isEqualTo("a1b2c3d+1690000000-4242");
+        assertThat(VersionHandler.normalizeBuildRef("  a1b2c3d+1690000000-4242  "))
+            .isEqualTo("a1b2c3d+1690000000-4242");
+        assertThat(VersionHandler.normalizeBuildRef("v1.2.3-SNAPSHOT-dev"))
+            .isEqualTo("v1.2.3-SNAPSHOT-dev");
+    }
+
+    @Test
+    void appendBuildRefFieldOmitsWhenNull() {
+        var body = new StringBuilder();
+        VersionHandler.appendBuildRefField(body, null);
+        assertThat(body.toString())
+            .as("no build_ref key at all — never \"build_ref\":null")
+            .isEmpty();
+    }
+
+    @Test
+    void appendBuildRefFieldEmitsWhenPresent() {
+        var body = new StringBuilder();
+        VersionHandler.appendBuildRefField(body, "a1b2c3d+1690000000-4242");
+        assertThat(body.toString()).isEqualTo(",\"build_ref\":\"a1b2c3d+1690000000-4242\"");
+    }
+
+    @Test
+    void unstampedSourceBuildRefResolvesToOmitted() {
+        // Mirrors unstampedSourceResourceResolvesToNull: the checked-in
+        // release.properties carries a BLANK build_ref, so a dev build (and
+        // every native-release build, which never stamps this key) resolves to
+        // null — appendBuildRefField then omits the field, keeping a pre-
+        // nexus-308ph /version shape byte-identical.
+        assertThat(VersionHandler.resolveBuildRef()).isNull();
+    }
 }

@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.1.1] - 2026-08-02
+
+The engine-identity release: fresh local installs now receive engine-service-v0.1.62
+(the RUNFENCE-carrying engine that 7.1.0 was gated against but, by a since-corrected
+release-ordering rule, could not yet pin).
+
+### Changed
+- `REQUIRED_ENGINE_VERSION` -> (0, 1, 62). Fresh `nx init --service` installs download
+  `engine-service-v0.1.62`; `nx upgrade` converges existing local installs to it. This
+  activates the index-run fence (RUNFENCE, 7.1.0's headline) on local-mode boxes —
+  under 7.1.0's pin the fence's engine half was absent locally and the client warned
+  and proceeded pre-fence.
+- Release process: client-release preconditions now gate the engine DEPLOY, never the
+  engine tag cut, and engine+client releases pair in one cut (floor bump rides the same
+  release; deploy fires at client-tag push). Process docs and
+  `check_client_release_precondition.py` updated; stale precondition rows are now
+  mechanically tripwired (`TestStalePreconditionRowsDoNotOutliveTheFloor`).
+
+### Fixed
+- Local-service gate: the smoke leg's artifact-identity check no longer relies on the
+  accidental fence-route-404 discriminator (dead as of v0.1.62): a per-run `build_ref`
+  nonce is stamped into the gate-built jar and asserted end-to-end via `/version`
+  (nexus-308ph). `/version` gains an optional `build_ref` field, emitted only when the
+  running binary was stamped — release binaries are unaffected and shape-identical.
+- Fresh-install MVV: pre-fence-engine warning allowlist removed (its trigger died with
+  the floor bump); doctor output on a virgin install is now zero-warnings, full stop.
+
 ## [7.1.0] - 2026-08-02
 
 The RUNFENCE release: a failed index can no longer poison a document. This

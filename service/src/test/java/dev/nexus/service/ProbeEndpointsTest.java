@@ -127,6 +127,10 @@ class ProbeEndpointsTest {
             handler.handle(ex);
             assertThat(ex.status).isEqualTo(200);
             assertThat(ex.bodyString()).contains("release_version");
+            // nexus-308ph: the checked-in release.properties carries a BLANK
+            // build_ref, so the field must be OMITTED entirely from the live
+            // /version body — never "build_ref":null.
+            assertThat(ex.bodyString()).doesNotContain("build_ref");
         }
 
         assertThat(counting.calls.get())
