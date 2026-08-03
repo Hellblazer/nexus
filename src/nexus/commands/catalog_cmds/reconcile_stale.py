@@ -41,6 +41,19 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          with no file_path/source_uri; legitimate, no
                          action (same predicate as
                          catalog_cmds.integrity._classify_never_chunked).
+                         Population is LEGACY-ONLY going forward: since
+                         nexus-sdp0u, every non-empty-title store_put /
+                         memory-promote doc is registered with a synthesized
+                         ``chroma://<collection>/<title>`` source_uri, so a
+                         post-fix doc can no longer land here — it falls to
+                         ``unresolvable_provenance``/``source_uri_only``
+                         below instead. That is the deliberate resolution,
+                         not a gap: manifests are written synchronously at
+                         put time and a write failure surfaces loudly
+                         (store.py's "stored but NOT cataloged" error), so a
+                         post-fix store_put doc that is STILL chunk_count==0
+                         is anomalous and "investigate" is the correct
+                         disposition — "exempt" would hide it.
                          reindex_candidate -> a concrete on-disk location
                          resolves (from file_path or a file:// source_uri)
                          and the file exists there.
@@ -60,7 +73,12 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          ``source_uri_only`` — empty file_path but a
                          non-``file://`` source_uri (RDR-096 P3.1 schemes:
                          ``x-devonthink-item://``, ``nx-orphan-backfill://``,
-                         ``nx-scratch://``); ``no_provenance`` — empty
+                         ``nx-scratch://``; since nexus-sdp0u this also
+                         covers a zero-chunk-count knowledge__ store_put doc
+                         carrying its synthesized ``chroma://`` source_uri —
+                         see the ``rdr145_exempt`` entry above for why that
+                         coupling is deliberate, not a classifier gap);
+                         ``no_provenance`` — empty
                          file_path AND empty source_uri on a non-
                          ``knowledge__`` collection, the ``code__``
                          "unclassified" population ``catalog_cmds.integrity``

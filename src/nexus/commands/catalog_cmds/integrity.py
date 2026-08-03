@@ -618,6 +618,20 @@ def _classify_never_chunked(e: object) -> str:
     nexus-cdypx's own production evidence — code__1-20 alone: 2,286)
     is ``unclassified``: a candidate data-loss population RDR-145 says
     nothing about.
+
+    ``rdr145_exempt`` population is LEGACY-ONLY going forward (nexus-sdp0u):
+    since that fix, every non-empty-title ``store_put`` / ``memory promote``
+    document is registered with a synthesized ``chroma://<collection>/
+    <title>`` ``source_uri``, so a post-fix document can no longer satisfy
+    ``not e.source_uri`` here — it is deliberately left to fall through to
+    ``unclassified`` (and, in ``nx catalog reconcile-stale``, to
+    ``unresolvable_provenance``/``source_uri_only``) instead. This is
+    intentional, not a predicate that needs forking: manifests are written
+    synchronously at put time and a write failure surfaces loudly (see
+    ``commands/store.py``'s "stored but NOT cataloged" error path), so a
+    post-fix ``store_put`` doc that is STILL ``chunk_count == 0`` is
+    anomalous and worth investigating, not something to wave through as
+    "legitimate by design".
     """
     if (
         e.physical_collection.startswith("knowledge__")

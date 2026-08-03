@@ -2551,7 +2551,20 @@ def store_put(
     Args:
         content: Text content to store
         collection: Collection name or prefix (default: knowledge)
-        title: Document title (recommended for deduplication)
+        title: Document title (recommended for deduplication). A non-empty
+            title makes catalog identity stable: re-putting the same
+            (collection, title) pair reconciles onto the existing document
+            (its manifest is replaced with the new content, not duplicated)
+            instead of minting a sibling (nexus-sdp0u). An empty title
+            synthesizes no catalog identity — every empty-title put always
+            registers a new document, since a title-less identity would
+            collapse all untitled documents together. Note: "replaced, not
+            duplicated" is a CATALOG-level guarantee — the OLD T3 chunk
+            itself is not deleted and may remain independently visible via
+            raw vector search (``nx search`` / ``search()``) until a future
+            sweep (nexus-39upx class) reaps it; catalog-aware query paths
+            (``query()``, catalog-scoped search) follow the manifest and see
+            only the new content.
         tags: Comma-separated tags
         category: Document category for filtered queries (e.g.
             ``rdr_postmortem``). Stamped on the chunk metadata so callers

@@ -322,6 +322,36 @@ class TestClassification:
         assert reconcile_stale_mod._classify_never_chunked(not_exempt_wrong_prefix) == "unclassified"
         assert reconcile_stale_mod._classify_never_chunked(not_exempt_has_path) == "unclassified"
 
+    def test_post_sdp0u_store_put_doc_classifies_unresolvable_not_exempt(self, tmp_path):
+        """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #4): a
+        post-fix ``store_put`` document carries a synthesized
+        ``chroma://<collection>/<title>`` ``source_uri`` — so a zero-count
+        one of these can no longer satisfy ``_classify_never_chunked``'s
+        ``rdr145_exempt`` predicate (which requires BOTH file_path and
+        source_uri empty). This pins the DELIBERATE resulting
+        classification: ``unresolvable_provenance``/``source_uri_only``,
+        not ``rdr145_exempt`` — a post-fix store_put doc still at
+        chunk_count==0 is anomalous (manifests write synchronously at put
+        time; failures surface loudly) and should be investigated, not
+        waved through as legitimate. Converts the silent coupling this
+        critique flagged into a pinned contract."""
+        entry = _FakeEntry(
+            "5.1.1", "Post-Fix Note", physical_collection="knowledge__sdp0u",
+            chunk_count=0,
+            source_uri="chroma://knowledge__sdp0u/Post-Fix Note",
+        )
+        assert reconcile_stale_mod._classify_never_chunked(entry) == "unclassified"
+
+        cat = _FakeCat([entry], doc_counts={"knowledge__sdp0u": 1})
+        t3 = _FakeT3({"knowledge__sdp0u"})
+        report, unreadable = reconcile_stale_mod._classify(cat, t3)
+
+        assert unreadable == []
+        assert report["zero_count_rdr145_exempt"] == []
+        unresolvable = report["zero_count_unresolvable_provenance"]
+        assert {r["tumbler"] for r in unresolvable} == {"5.1.1"}
+        assert unresolvable[0]["reason"] == "source_uri_only"
+
     def test_dishonest_never_appears_in_any_action_list(self, tmp_path):
         cat, t3 = _mixed_cat(tmp_path)
         report, _ = reconcile_stale_mod._classify(cat, t3)

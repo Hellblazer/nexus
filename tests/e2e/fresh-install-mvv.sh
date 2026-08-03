@@ -159,6 +159,25 @@ _nx catalog search "fresh-mvv-sentinel" >"$LOGS/catalog-store.log" 2>&1 || true
 grep -q "fresh-mvv-sentinel" "$LOGS/catalog-store.log" \
     || _fail "store put did not register in the engine catalog (nexus-f1itv class)"
 
+# nexus-sdp0u: re-put the SAME title with DIFFERENT content must reconcile
+# onto the SAME catalog document (the synthesized source_uri identity),
+# never mint a sibling. The production symptom this pins: three puts of
+# one title minted three documents (1.1.1/1.1.2/1.1.3) with contradictory
+# content, because source_uri was always empty and the engine's
+# upsert-on-(tenant, source_uri) identity never matched.
+SENTINEL_V2="fresh-mvv-sentinel-v2: the re-put must win, not duplicate"
+echo "$SENTINEL_V2" | _nx store put - --title "fresh-mvv-sentinel" \
+    >"$LOGS/store-reput.log" 2>&1 || _fail "re-put failed (see $LOGS/store-reput.log)"
+grep -Eq "Stored: [0-9a-f]{64}" "$LOGS/store-reput.log" \
+    || _fail "re-put did not emit a full-digest doc id (RDR-180 shape)"
+_nx catalog search "fresh-mvv-sentinel" >"$LOGS/catalog-reput.log" 2>&1 || true
+REPUT_DOC_COUNT="$(grep -c "fresh-mvv-sentinel" "$LOGS/catalog-reput.log" || true)"
+[ "$REPUT_DOC_COUNT" = "1" ] \
+    || _fail "re-put of the same title left $REPUT_DOC_COUNT catalog documents instead of reconciling onto one (nexus-sdp0u class); see $LOGS/catalog-reput.log"
+_nx search "re-put must win not duplicate" >"$LOGS/search-reput.log" 2>&1 || true
+grep -q "fresh-mvv-sentinel-v2" "$LOGS/search-reput.log" \
+    || _fail "semantic search after re-put did not surface the NEW content (nexus-sdp0u class); see $LOGS/search-reput.log"
+
 echo "── 6/9 index md: catalog registration (the e9ru2 assertions) ──"
 # File stem == frontmatter title on purpose: the pre-flight registration
 # titles the catalog row by STEM, and the post-hook's update branch does not
@@ -227,7 +246,7 @@ fi
 
 echo "── 9/9 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
-for f in mcp-entrypoints.log init.log store.log index.log doctor.log; do
+for f in mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log; do
     [ -s "$LOGS/$f" ] || _fail "leg log $f is empty — a journey leg silently skipped"
 done
 

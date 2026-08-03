@@ -151,8 +151,12 @@ def put_cmd(
     # nexus-9099: fire the three post-store hook chains so the chash
     # index, taxonomy assignment, and aspect-extraction queue see CLI
     # store-put events. RDR-095 symmetric-fire; this path was missed by
-    # the original commit. doc_id is the source identity here (no
-    # on-disk file at the CLI boundary, mirroring MCP store_put).
+    # the original commit. doc_id is the source identity here — catalog
+    # identity for store_put is (collection, title) uniformly (nexus-sdp0u),
+    # regardless of whether SOURCE was a file or stdin: the file variant's
+    # on-disk path is deliberately never passed through as catalog
+    # file_path, since that leg is collection-blind and could match/clobber
+    # an unrelated `nx index md` document registered for the same path.
     from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     hooks = HookRegistry()
     install_default_hooks(hooks)

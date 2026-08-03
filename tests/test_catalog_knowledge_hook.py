@@ -213,40 +213,191 @@ class TestStorePutHook:
         assert entry.meta.get("doc_id") == "fresh-content-hash"
         assert entry.physical_collection == "knowledge__fresh"
 
-    def test_non_ghost_same_title_not_reconciled(self, tmp_path, monkeypatch):
-        """A same-titled entry that already HAS chunks (chunk_count > 0)
-        must not be repointed at unrelated new content — that would
-        orphan its existing document_chunks manifest. Falls through to
-        register() exactly as pre-fix, minting a second entry."""
+    def test_legacy_ghost_reconcile_stamps_source_uri_for_next_reput(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-sdp0u fix-round (round-1 critique CRITICAL): a legacy ghost
+        (source_uri="", chunk_count=0 — the pre-fix RDR-145 population) must
+        get source_uri STAMPED when the ghost-by-title branch reconciles it,
+        not just physical_collection/meta. Without the stamp, the manifest
+        write that follows this call makes chunk_count > 0 and the row falls
+        out of BOTH identity checks (by_source_uri misses on "", the ghost
+        fallback requires chunk_count == 0) — so the VERY NEXT re-put would
+        mint a fresh duplicate, reproducing this bead's own bug for the
+        legacy population. This test pins both halves: the stamp on the
+        first reconcile, and that a SECOND re-put (after simulated manifest
+        population) reconciles via by_source_uri onto the SAME tumbler.
+        """
+        from nexus.aspect_readers import uri_for
         from nexus.commands.store import _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
         owner = cat.register_owner("knowledge", "curator")
-        real = cat.register(
-            owner, "Real Doc", content_type="knowledge",
-            physical_collection="knowledge__real",
-            meta={"doc_id": "real-doc-id"},
+        ghost = cat.register(
+            owner, "Legacy Ghost", content_type="knowledge",
+            physical_collection="knowledge__legacy",
+            meta={"doc_id": "stale-legacy-doc-id"},
+            # source_uri deliberately omitted (defaults to "") — this is
+            # the shape of a pre-sdp0u-fix ghost row.
         )
-        cat.append_manifest_chunks(str(real), [
+        assert cat.resolve(ghost).source_uri == "", "fixture must be a legacy (pre-fix) ghost"
+        assert cat.resolve(ghost).chunk_count == 0, "fixture must be a ghost"
+
+        # First re-put: reconciles via the ghost-by-title fallback (the
+        # source_uri lookup misses because the ghost's source_uri is "").
+        first = _catalog_store_hook(
+            title="Legacy Ghost", doc_id="first-content-hash",
+            collection_name="knowledge__legacy",
+        )
+        assert first == str(ghost), "must reuse the ghost's tumbler"
+        entry = cat.resolve(ghost)
+        assert entry.source_uri == uri_for("knowledge__legacy", "Legacy Ghost"), (
+            'ghost-reconcile branch must stamp source_uri, not leave it ""'
+        )
+
+        # Simulate the manifest population that follows every real re-put
+        # (store_put_manifest_direct) — chunk_count becomes > 0, so the
+        # ghost-by-title fallback is no longer reachable for this row.
+        cat.append_manifest_chunks(first, [{"chash": "b" * 64, "position": 0}])
+        cat.resync_chunk_count_cache(first)
+        assert cat.resolve(first).chunk_count == 1
+
+        # Second re-put with DIFFERENT content: must reconcile via
+        # by_source_uri onto the SAME tumbler — no new document minted.
+        # This is the regression pin: pre-fix, this second call would have
+        # minted a fresh duplicate because source_uri was never stamped by
+        # the first (ghost-path) reconcile.
+        second = _catalog_store_hook(
+            title="Legacy Ghost", doc_id="second-content-hash",
+            collection_name="knowledge__legacy",
+        )
+        assert second == first, (
+            "second re-put must reconcile onto the SAME document via "
+            "by_source_uri, not mint a duplicate"
+        )
+        rows = (count_documents(),)
+        assert rows[0] == 1, "no duplicate document was minted on the second re-put"
+        assert cat.resolve(first).meta.get("doc_id") == "second-content-hash"
+
+    def test_legacy_non_ghost_reput_mints_one_bounded_duplicate_then_converges(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-sdp0u round-2 critique: the KNOWN RESIDUAL for legacy
+        NON-ghost rows (chunk_count > 0, source_uri="" — populated before
+        the fix). All three lookups miss on the first post-fix re-put
+        (chash differs, by_source_uri misses on "", the ghost fallback
+        requires chunk_count == 0), so it mints ONE bounded duplicate that
+        carries the synthesized source_uri; the second-and-later re-puts
+        converge onto that new document via by_source_uri. The legacy row
+        itself is collapsed by the nexus-n90xg one-shot backfill, not by
+        this hook. This test pins the bounded-then-converge lifecycle so
+        the residual stays deliberate, not accidental.
+        """
+        from nexus.aspect_readers import uri_for
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("knowledge", "curator")
+        legacy = cat.register(
+            owner, "Legacy Note", content_type="knowledge",
+            physical_collection="knowledge__legacy",
+            meta={"doc_id": "legacy-content-hash"},
+            # source_uri deliberately omitted — pre-sdp0u vintage.
+        )
+        cat.append_manifest_chunks(str(legacy), [{"chash": "c" * 64, "position": 0}])
+        cat.resync_chunk_count_cache(str(legacy))
+        assert cat.resolve(legacy).source_uri == ""
+        assert cat.resolve(legacy).chunk_count == 1, "fixture must be a populated (non-ghost) legacy row"
+
+        # First post-fix re-put: every lookup misses -> ONE bounded duplicate.
+        first = _catalog_store_hook(
+            title="Legacy Note", doc_id="new-content-hash",
+            collection_name="knowledge__legacy",
+        )
+        assert first != str(legacy), "legacy non-ghost row is not reachable; a new doc is minted"
+        assert count_documents() == 2, "exactly one bounded duplicate"
+        assert cat.resolve(first).source_uri == uri_for("knowledge__legacy", "Legacy Note"), (
+            "the minted duplicate must carry the synthesized identity"
+        )
+
+        # Second re-put: converges onto the minted doc via by_source_uri.
+        second = _catalog_store_hook(
+            title="Legacy Note", doc_id="third-content-hash",
+            collection_name="knowledge__legacy",
+        )
+        assert second == first, "second re-put converges via by_source_uri"
+        assert count_documents() == 2, "no further duplicates after convergence"
+
+    def test_non_ghost_same_title_same_collection_reconciled_via_source_uri(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-sdp0u: a re-put of the SAME (collection, title) identity —
+        even with populated chunks (chunk_count > 0) — reconciles onto the
+        existing document via the synthesized source_uri instead of
+        minting a sibling. Supersedes the pre-fix contract: three puts of
+        one title used to mint three documents with contradictory content
+        (production: 1.1.1/1.1.2/1.1.3) because source_uri was always ""
+        and the engine's upsert-on-source_uri identity never matched."""
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        first = _catalog_store_hook(
+            title="Real Doc", doc_id="original-content-hash",
+            collection_name="knowledge__real",
+        )
+        cat.append_manifest_chunks(first, [
             {"chash": "a" * 64, "position": 0},
         ])
-        cat.resync_chunk_count_cache(str(real))
-        assert cat.resolve(real).chunk_count == 1, "fixture must not be a ghost"
+        cat.resync_chunk_count_cache(first)
+        assert cat.resolve(first).chunk_count == 1, "fixture must not be a ghost"
 
         result = _catalog_store_hook(
             title="Real Doc", doc_id="different-content-hash",
-            collection_name="knowledge__new",
+            collection_name="knowledge__real",
         )
-        assert result != str(real), "must not reuse a populated document's tumbler"
+        assert result == first, "re-put of the same identity reuses the tumbler"
 
         rows = (count_documents(),)
-        assert rows[0] == 2, "a new document is registered instead"
+        assert rows[0] == 1, "no sibling document is minted"
 
-        untouched = cat.resolve(real)
-        assert untouched.meta.get("doc_id") == "real-doc-id", "original entry untouched"
-        assert untouched.physical_collection == "knowledge__real"
+        entry = cat.resolve(first)
+        assert entry.meta.get("doc_id") == "different-content-hash"
+        assert entry.physical_collection == "knowledge__real"
+
+    def test_cross_collection_same_title_stays_distinct(self, tmp_path, monkeypatch):
+        """A same-titled document in a DIFFERENT collection is a distinct
+        identity (the synthesized source_uri is collection-scoped) — it
+        must mint its own document, not reconcile onto the first."""
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        first = _catalog_store_hook(
+            title="Shared Title", doc_id="hash-a",
+            collection_name="knowledge__alpha",
+        )
+        # Populate it (chunk_count > 0) so the ghost-by-title fallback
+        # (title-only, no collection scoping) cannot itself reconcile the
+        # second call onto this row — isolating the source_uri behavior
+        # under test.
+        cat.append_manifest_chunks(first, [{"chash": "a" * 64, "position": 0}])
+        cat.resync_chunk_count_cache(first)
+
+        second = _catalog_store_hook(
+            title="Shared Title", doc_id="hash-b",
+            collection_name="knowledge__beta",
+        )
+        assert second != first, "same title in a different collection is a distinct document"
+
+        rows = (count_documents(),)
+        assert rows[0] == 2
 
     def test_empty_title_does_not_reconcile(self, tmp_path, monkeypatch):
         """An empty title must never dedup against arbitrary same-("")-titled
@@ -268,6 +419,29 @@ class TestStorePutHook:
         rows = (count_documents(),)
         assert rows[0] == 2, "empty title must not trigger reconciliation"
         assert result, "a new tumbler is still registered"
+        # nexus-sdp0u: empty title synthesizes NO source_uri — a title-less
+        # identity would collapse every untitled document onto one row.
+        assert cat.resolve(result).source_uri == ""
+
+    def test_source_uri_synthesis_matches_aspect_readers_uri_for(
+        self, tmp_path, monkeypatch,
+    ):
+        """The identity written to the catalog row is EXACTLY
+        ``aspect_readers.uri_for``'s convention — one URI format, never a
+        second one forked here."""
+        from nexus.aspect_readers import uri_for
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        result = _catalog_store_hook(
+            title="URI Format Check", doc_id="hash-format",
+            collection_name="knowledge__format",
+        )
+        entry = cat.resolve(result)
+        assert entry.source_uri == uri_for("knowledge__format", "URI Format Check")
+        assert entry.source_uri == "chroma://knowledge__format/URI Format Check"
 
     def test_ghost_reconciliation_scoped_to_knowledge_owner(
         self, tmp_path, monkeypatch,
@@ -327,6 +501,9 @@ class TestStorePutHook:
         reader = MagicMock()
         reader.by_doc_id.return_value = None
         reader.curator_owner_tumbler_by_name.return_value = None
+        # nexus-sdp0u reconcile lookup also misses, so the hook falls
+        # through to the ghost-reconciliation lookup next.
+        reader.by_source_uri.return_value = None
         # Ghost-reconciliation lookup (GH #1370 Defect 4a) also misses,
         # so the hook falls through to writer.register as before.
         reader.find.return_value = []

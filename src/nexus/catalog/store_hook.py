@@ -19,6 +19,8 @@ import hashlib
 import httpx
 import structlog
 
+from nexus.aspect_readers import uri_for
+
 _log = structlog.get_logger(__name__)
 
 
@@ -185,11 +187,12 @@ def catalog_store_hook_tracked(
     ``T3Database.put()`` as ``catalog_doc_id`` for chunk-write-time
     embedding (RDR-101 Phase 3 PR δ Stage B.4); *created* is True only
     when this call MINTED a brand-new document row (the
-    ``writer.register`` path). Dedup hits (:func:`resolve_knowledge_doc_for_chash`
-    or the GH #1370 ghost-by-title reconcile) return ``created=False`` so the
-    nexus-b6enc C2 compensation never deletes a pre-existing row the
-    put deduped onto. Returns ``("", False)`` when an error occurs, or
-    in the SQLite opt-out mode
+    ``writer.register`` path). Dedup hits (:func:`resolve_knowledge_doc_for_chash`,
+    the nexus-sdp0u source_uri reconcile below, or the GH #1370
+    ghost-by-title reconcile) return ``created=False`` so the nexus-b6enc
+    C2 compensation never deletes a pre-existing row the put deduped
+    onto. Returns ``("", False)`` when an error occurs, or in the
+    SQLite opt-out mode
     when no local catalog is initialised (service mode always has a
     catalog — the Java service owns it; nexus-f1itv) — the schema
     funnel drops empty ``doc_id`` at the boundary.
@@ -202,11 +205,38 @@ def catalog_store_hook_tracked(
     entries written before Phase 4 stored the legacy 16-char sha256-of-
     collection-and-title under ``meta.doc_id``, so this lookup misses
     on those legacy entries and the hook re-registers. When that
-    happens (or when this is the first-ever store for *title*), a
-    second, title-scoped lookup (:func:`_find_ghost_by_title`) reuses
-    a pre-existing GHOST entry's tumbler instead of minting a
-    duplicate (GH #1370 Defect 4a). Only when both lookups miss does
-    the hook register a brand-new document.
+    happens, a second lookup keyed on the synthesized ``source_uri``
+    identity (nexus-sdp0u; non-empty *title* only, see below) reconciles
+    a RE-PUT of the same (collection, title) onto its existing row
+    regardless of chunk_count. When that also misses, a third,
+    title-scoped lookup (:func:`_find_ghost_by_title`) reuses a
+    pre-existing GHOST entry's tumbler instead of minting a duplicate
+    (GH #1370 Defect 4a; legacy rows registered before this fix carry
+    ``source_uri=""`` and are unreachable by the second lookup, so this
+    third one stays the reconciliation path for them). Only when all
+    three lookups miss does the hook register a brand-new document —
+    with the synthesized ``source_uri`` attached, so a LATER re-put finds
+    it via the second lookup instead of falling through to this one.
+
+    nexus-sdp0u: pre-fix, this function always passed ``source_uri=""``
+    to ``writer.register`` — the engine's upsert-on-``(tenant,
+    source_uri)`` identity (``CatalogRepository.registerDocument``'s
+    leg-1 SELECT) therefore never matched, and re-putting the same
+    title minted an unbounded run of documents with contradictory
+    content (production: 1.1.1/1.1.2/1.1.3 from three puts of one
+    title). When *title* is non-empty this now synthesizes a stable
+    ``source_uri`` via :func:`nexus.aspect_readers.uri_for` — the SAME
+    convention the aspect-extraction reader already uses to resolve
+    knowledge-collection identity (chunk metadata carries no
+    ``source_path`` for these single-chunk callers since RDR-102 D2,
+    nexus-bm8dd, so the reader's knowledge-collection identity field is
+    *title* — this reuses that exact convention rather than forking a
+    second one). Empty *title* synthesizes nothing (``source_uri=None``):
+    a title-less ``chroma://<collection>/`` URI would collapse every
+    untitled document under one identity, which is worse than today's
+    unlimited-duplicate behavior for that one case — so it is left
+    exactly as before (nexus-39upx: legacy-duplicate collapse is a
+    separate, out-of-scope backfill).
     """
     # RDR-146 P1.2: this hook fires on every store_put / memory promote,
     # including the long-lived MCP server process. It MUST NOT open a
@@ -240,6 +270,15 @@ def catalog_store_hook_tracked(
         if existing is not None:
             return str(existing.tumbler), False
 
+        # nexus-sdp0u: stable, collection-scoped identity for this document.
+        # Reuses aspect_readers.uri_for's exact chroma:// convention (the
+        # knowledge-collection identity field the reader already resolves
+        # by is *title*, since these single-chunk callers carry no
+        # source_path in chunk metadata post-RDR-102 D2) — one URI format,
+        # never a second one. Empty title synthesizes nothing: see the
+        # docstring for why a title-less URI must not be minted.
+        source_uri = uri_for(collection_name, title) if title else None
+
         # Get or create "knowledge" curator owner, filtered on owner_type so
         # a same-named REPO owner cannot shadow the intended curator (same
         # bug shape as the doc_indexer family fix). Via the protocol method
@@ -258,16 +297,59 @@ def catalog_store_hook_tracked(
             "knowledge", "curator"
         )
 
+        # nexus-sdp0u: reconcile a RE-PUT of the same (collection, title)
+        # identity onto its existing LIVE row — regardless of chunk_count,
+        # unlike the ghost-by-title fallback below — instead of minting a
+        # sibling. by_source_uri is an exact-identity lookup (the URI
+        # already encodes the exact collection+title pair store_put /
+        # memory-promote register under), so unlike _find_ghost_by_title's
+        # FTS token match it needs no owner-prefix post-filter.
+        #
+        # This precheck (rather than letting the engine's own leg-1
+        # idempotency SELECT inside registerDocument silently return the
+        # existing tumbler from writer.register) is what lets this
+        # function keep created=True meaning "genuinely minted": get that
+        # wrong and a later t3.put failure would run
+        # rollback_minted_catalog_entry against a live, already-populated
+        # document instead of the row this call actually minted
+        # (nexus-b6enc C2 firing on the wrong row).
+        if source_uri is not None:
+            existing_by_uri = reader.by_source_uri(source_uri)
+            if existing_by_uri is not None:
+                writer.update(
+                    existing_by_uri.tumbler,
+                    physical_collection=collection_name,
+                    meta={"doc_id": doc_id},
+                )
+                _log.debug(
+                    "catalog_store_hook_reput",
+                    tumbler=str(existing_by_uri.tumbler), source_uri=source_uri,
+                )
+                return str(existing_by_uri.tumbler), False
+
         # GH #1370 Defect 4a: reconcile onto a pre-existing ghost with the
         # same title (under the knowledge curator owner) instead of minting
         # a near-duplicate. See _find_ghost_by_title for the ghost-only
         # restriction rationale.
+        #
+        # nexus-sdp0u fix-round (round-1 critique CRITICAL): this branch
+        # MUST also stamp source_uri, not just physical_collection/meta.
+        # A legacy ghost carries source_uri="" (pre-dates this fix); if the
+        # reconcile below left it "", the row's manifest gets populated
+        # right after (chunk_count becomes > 0) and it falls out of BOTH
+        # identity checks on the NEXT re-put — by_source_uri misses on ""
+        # and _find_ghost_by_title requires chunk_count == 0 — so that
+        # very next re-put would mint a fresh duplicate, reproducing this
+        # bead's own bug for the entire RDR-145 ghost population. Passing
+        # source_uri here is what lets the SECOND-and-later re-put reach
+        # this document via the by_source_uri lookup above instead.
         ghost = _find_ghost_by_title(reader, owner, title)
         if ghost is not None:
             writer.update(
                 ghost.tumbler,
                 physical_collection=collection_name,
                 meta={"doc_id": doc_id},
+                source_uri=source_uri or "",
             )
             _log.debug(
                 "catalog_store_hook_deduped",
@@ -275,10 +357,18 @@ def catalog_store_hook_tracked(
             )
             return str(ghost.tumbler), False
 
+        # KNOWN RESIDUAL (nexus-n90xg): a legacy NON-ghost row (chunk_count
+        # > 0, source_uri="" — populated before nexus-sdp0u) is unreachable
+        # by all three lookups above, so its first post-fix re-put falls
+        # through here and mints ONE bounded duplicate. That new document
+        # carries the synthesized source_uri, so the second-and-later
+        # re-puts converge onto it via by_source_uri. The legacy row itself
+        # is collapsed by the nexus-n90xg one-shot backfill sweep, not here.
         tumbler = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
             meta={"doc_id": doc_id},
+            source_uri=source_uri or "",
         )
         return str(tumbler), True
     except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited
@@ -320,6 +410,25 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
     Fail-loud discipline: this compensation must never MASK the original
     put error, so it never raises — its own failure is logged at WARNING
     with *original_error* attached so both failures are visible.
+
+    KNOWN RESIDUAL (nexus-vfef0, round-1 code review, accepted narrow):
+    ``created=True`` from :func:`catalog_store_hook_tracked` is reliable for
+    every SEQUENTIAL case (the ``by_source_uri`` / ghost-by-title prechecks
+    close those), but NOT for a genuinely CONCURRENT first-put race on a
+    brand-new ``(collection, title)``: two callers can both precheck-miss
+    and both call ``writer.register()``; the engine's own upsert-on-
+    ``source_uri`` idempotency (or its unique-constraint-loser retry) then
+    silently hands the RACE LOSER back the WINNER's tumbler — the wire
+    response carries no created-vs-matched signal to tell the two apart, so
+    the loser's call still reports ``created=True``. If that loser's
+    subsequent ``t3.put()`` then fails, this function is invoked against
+    the WINNER's live, possibly-already-populated tumbler and deletes it.
+    This requires both a genuine concurrent first-put race AND a follow-on
+    write failure on the losing side to manifest — narrow, but reachable
+    under multi-agent concurrent ``store_put`` (this project explicitly
+    dispatches sibling agents). The proper fix threads a created/matched
+    boolean through the engine's ``/doc/register`` response; until then this
+    is an accepted, documented residual, not a behavior change here.
 
     Returns True when the row was deleted.
     """

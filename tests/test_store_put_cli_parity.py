@@ -227,6 +227,134 @@ class TestStoreImportCli:
         assert sorted(doc) == ["/x/doc-0.md", "/x/doc-1.md", "/x/doc-2.md"]
 
 
+# ── nexus-sdp0u: cross-caller catalog identity parity ───────────────────────
+
+
+class TestCrossCallerIdentityParity:
+    """CLI ``nx store put``, MCP ``store_put``, and ``nx memory promote``
+    all register through the same ``catalog_store_hook_tracked`` call
+    (nexus-sdp0u fix) — a re-put of the SAME (collection, title) from a
+    DIFFERENT caller must reconcile onto the same document instead of
+    minting a sibling. Pre-fix, three puts of one title from ANY mix of
+    these three callers minted three documents with contradictory content
+    (the production symptom: 1.1.1/1.1.2/1.1.3)."""
+
+    def test_cli_mcp_and_promote_reputs_reconcile_onto_one_document(
+        self, monkeypatch, tmp_path,
+    ):
+        from nexus.cli import main
+        from nexus.db.t2 import T2Database
+        from nexus.mcp.core import store_put as mcp_store_put
+        from tests._catalog_fixture_ops import documents_by_title
+
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+        title = "sdp0u-cross-caller-parity"
+
+        # 1. CLI `nx store put`.
+        f = tmp_path / "doc.md"
+        f.write_text("cli body")
+        with patch("nexus.commands.store._t3", _make_stub_t3()):
+            cli_result = CliRunner().invoke(main, [
+                "store", "put", str(f),
+                "--collection", "knowledge", "--title", title,
+            ])
+        assert cli_result.exit_code == 0, cli_result.output
+
+        # 2. MCP `store_put` — different content, same (collection, title).
+        with (
+            patch("nexus.mcp.core._get_t3", _make_stub_t3()),
+            patch("nexus.mcp.core._hooks.fire_single", return_value=None),
+            patch("nexus.mcp.core._hooks.fire_batch", return_value=None),
+            patch("nexus.mcp.core._hooks.fire_document", return_value=None),
+            patch("nexus.mcp.core._catalog_auto_link", return_value=0),
+        ):
+            mcp_result = mcp_store_put(
+                content="mcp body (different content)",
+                collection="knowledge", title=title,
+            )
+        assert mcp_result.startswith("Stored:"), mcp_result
+
+        # 3. `nx memory promote` — different content again, same identity.
+        db = T2Database(tmp_path / "memory.db")
+        entry_id = db.put(
+            project="proj", title=title,
+            content="promote body (different content again)", ttl=None,
+        )
+        with (
+            patch("nexus.db.make_t3", _make_stub_t3()),
+            patch("nexus.commands.memory.t2_handle", return_value=db),
+        ):
+            promote_result = CliRunner().invoke(main, [
+                "memory", "promote", str(entry_id), "--collection", "knowledge",
+            ])
+        assert promote_result.exit_code == 0, promote_result.output
+
+        rows = documents_by_title(title)
+        assert len(rows) == 1, (
+            "CLI store put, MCP store_put, and memory promote must all "
+            f"reconcile onto ONE catalog document for {title!r}, got "
+            f"{len(rows)}"
+        )
+
+
+class TestStorePutManifestReplace:
+    """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #2): the
+    "manifest is replaced, not duplicated" claim was previously asserted
+    only by doc-count / meta.doc_id — no test ever inspected
+    ``store_put_manifest_direct``'s actual output (the mechanism that
+    realizes the replace). This exercises the FULL production wiring
+    (``put_cmd`` -> ``catalog_store_hook_tracked`` ->
+    ``store_put_manifest_direct``'s ``atomic_manifest_replace``) and
+    asserts the manifest itself: after a reconciled re-put with different
+    content, the document's manifest contains EXACTLY the new chash — the
+    old chash row is gone, not merely uncounted."""
+
+    def test_reput_replaces_manifest_not_appends(self, monkeypatch, tmp_path):
+        import hashlib
+
+        from nexus.cli import main
+        from tests._catalog_fixture_ops import active_reader, documents_by_title
+
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+        title = "sdp0u-manifest-replace"
+
+        f = tmp_path / "doc.md"
+        f.write_text("original body")
+        with patch("nexus.commands.store._t3", _make_stub_t3()):
+            first_result = CliRunner().invoke(main, [
+                "store", "put", str(f),
+                "--collection", "knowledge", "--title", title,
+            ])
+        assert first_result.exit_code == 0, first_result.output
+        old_chash = hashlib.sha256(b"original body").hexdigest()
+
+        rows = documents_by_title(title)
+        assert len(rows) == 1
+        tumbler = str(rows[0].tumbler)
+        manifest = {row.chash for row in active_reader().get_manifest(tumbler)}
+        assert manifest == {old_chash}, "fixture: first put must manifest exactly its own chash"
+
+        f.write_text("replaced body with entirely different content")
+        with patch("nexus.commands.store._t3", _make_stub_t3()):
+            second_result = CliRunner().invoke(main, [
+                "store", "put", str(f),
+                "--collection", "knowledge", "--title", title,
+            ])
+        assert second_result.exit_code == 0, second_result.output
+        new_chash = hashlib.sha256(b"replaced body with entirely different content").hexdigest()
+
+        rows = documents_by_title(title)
+        assert len(rows) == 1, "re-put must reconcile onto the same document, not mint a sibling"
+        assert str(rows[0].tumbler) == tumbler, "reconciled re-put keeps the same tumbler"
+
+        manifest_after = {row.chash for row in active_reader().get_manifest(tumbler)}
+        assert manifest_after == {new_chash}, (
+            "manifest must be REPLACED: exactly the new chash present, the "
+            f"old chash gone. old={old_chash[:16]}… new={new_chash[:16]}… "
+            f"got={sorted(c[:16] for c in manifest_after)}"
+        )
+
+
 # ── Drift guard: ensure new T3-write CLI paths don't skip the helper ───────
 
 

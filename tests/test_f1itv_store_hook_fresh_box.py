@@ -55,6 +55,7 @@ class _FakeHttpCatalogClient:
     def __init__(self, *_a, **_kw) -> None:
         self.registered: list[dict] = []
         self.owners: list[tuple[str, str]] = []
+        self.updated: list[dict] = []
         _FakeHttpCatalogClient.instances.append(self)
 
     # -- reads (via _SharedServiceCatalogHandle) --
@@ -73,12 +74,15 @@ class _FakeHttpCatalogClient:
     def find(self, query, content_type=None):
         return []  # fresh box: no ghost entries to reconcile
 
+    def by_source_uri(self, uri):
+        return None  # fresh box: nexus-sdp0u reconcile lookup also misses
+
     # -- writes (via _ServiceCatalogWriter, CATALOG_WRITE_OPS) --
     def register_owner(self, name, owner_type):
         self.owners.append((name, owner_type))
         return f"owner:{name}"
 
-    def register(self, *, owner, title, content_type, physical_collection, meta):
+    def register(self, *, owner, title, content_type, physical_collection, meta, source_uri=""):
         self.registered.append(
             {
                 "owner": owner,
@@ -86,9 +90,19 @@ class _FakeHttpCatalogClient:
                 "content_type": content_type,
                 "physical_collection": physical_collection,
                 "meta": meta,
+                "source_uri": source_uri,
             }
         )
         return "1.1.42"
+
+    def update(self, tumbler, *, physical_collection=None, meta=None):
+        self.updated.append(
+            {
+                "tumbler": tumbler,
+                "physical_collection": physical_collection,
+                "meta": meta,
+            }
+        )
 
     def close(self):
         pass
@@ -124,6 +138,10 @@ def test_fresh_box_service_mode_registers(fake_client):
     assert reg["content_type"] == "knowledge"
     assert reg["physical_collection"] == _COLLECTION
     assert reg["meta"] == {"doc_id": _DOC_ID}
+    # nexus-sdp0u: the synthesized identity — same chroma:// convention as
+    # aspect_readers.uri_for — must reach the wire so the engine's
+    # upsert-on-source_uri identity can match a later re-put.
+    assert reg["source_uri"] == f"chroma://{_COLLECTION}/fresh-box-note"
 
 
 def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
@@ -154,6 +172,32 @@ def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
     assert tumbler == "1.1.7"
     (client,) = fake_client.instances
     assert client.registered == [], "dedup hit must not mint a new document"
+
+
+def test_fresh_box_service_mode_reconciles_reput_by_source_uri(fake_client, monkeypatch):
+    """nexus-sdp0u: a RE-PUT of the same (collection, title) — new content,
+    so the chash-dedup lookup above misses — reconciles onto the existing
+    row via the synthesized source_uri instead of minting a sibling, even
+    on a fresh box with no local catalog state."""
+
+    class _Existing:
+        tumbler = "1.1.9"
+
+    monkeypatch.setattr(
+        _FakeHttpCatalogClient, "by_source_uri",
+        lambda self, uri: _Existing() if uri == f"chroma://{_COLLECTION}/fresh-box-note" else None,
+    )
+    tumbler = catalog_store_hook(
+        title="fresh-box-note",
+        doc_id="b" * 64,  # different content chash than _DOC_ID
+        collection_name=_COLLECTION,
+    )
+    assert tumbler == "1.1.9", "must reuse the existing row's tumbler"
+    (client,) = fake_client.instances
+    assert client.registered == [], "reconcile must not mint a new document"
+    (upd,) = client.updated
+    assert upd["tumbler"] == "1.1.9"
+    assert upd["meta"] == {"doc_id": "b" * 64}
 
 
 def test_fresh_box_service_unreachable_is_loud_not_silent(fake_client, monkeypatch):
