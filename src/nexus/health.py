@@ -853,6 +853,241 @@ def _check_tools() -> list[HealthResult]:
     return results
 
 
+# nexus-l2ku5: the (binary, expected serverInfo.name) pairs for the two
+# published MCP entry points. Order matches ``[project.scripts]`` in
+# pyproject.toml.
+_MCP_ENTRY_POINTS: tuple[tuple[str, str], ...] = (
+    ("nx-mcp", "nexus"),
+    ("nx-mcp-catalog", "nexus-catalog"),
+)
+
+# The exact JSON-RPC ``initialize`` request that found nexus-l2ku5 by hand:
+# mcp 2.0.0 (2026-07-28) removed ``mcp.server.fastmcp`` and the unbounded
+# ``mcp>=1.0`` floor let it into every fresh install for 4 days, killing
+# both servers at import with zero signal (Claude Code swallows stderr; no
+# test gate ever booted the INSTALLED entry point — the dev venv is
+# uv.lock-pinned to mcp 1.x).
+_MCP_INITIALIZE_REQUEST = (
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
+    '{"protocolVersion":"2024-11-05","capabilities":{},'
+    '"clientInfo":{"name":"nx-doctor","version":"1"}}}\n'
+)
+
+# nexus-l2ku5 critique round 2: local subprocess handshake, not a network
+# call — parity with this file's other probes (e.g. MinerU's 2.0s HTTP
+# timeout). Two entry points probed serially, so a worst case of both
+# hanging is 2 * 8s = 16s, not the 30s the prior 15.0 implied.
+_MCP_PROBE_TIMEOUT_S = 8.0
+
+# Bound both line COUNT and per-line LENGTH — a crashing binary controls
+# its own stderr and could emit one arbitrarily long line (no newlines) to
+# blow out doctor's output; truncate defensively either way.
+_STDERR_EXCERPT_LINE_MAX_CHARS = 200
+
+
+def _first_lines(text: str, n: int) -> str:
+    """Join the first *n* non-blank lines of *text* with ' | ' separators,
+    each truncated to :data:`_STDERR_EXCERPT_LINE_MAX_CHARS`."""
+    lines = [ln[:_STDERR_EXCERPT_LINE_MAX_CHARS] for ln in text.splitlines() if ln.strip()]
+    return " | ".join(lines[:n])
+
+
+def _probe_mcp_server(
+    binary_path: str, expected_name: str, *, timeout: float = _MCP_PROBE_TIMEOUT_S
+) -> tuple[bool, str]:
+    """Spawn *binary_path*, send a JSON-RPC ``initialize`` request on
+    stdin, and verify the response's ``result.serverInfo.name`` matches
+    *expected_name*.
+
+    Returns ``(ok, detail)``. On failure, *detail* carries the first 3
+    lines of stderr when available — that is where a ``ModuleNotFoundError``
+    lives, and surfacing it (not "could not check") is the entire point of
+    this probe (nexus-l2ku5).
+
+    LOAD-BEARING ASSUMPTION: the MCP stdio server's read loop exits on
+    stdin EOF. ``subprocess.run(input=...)`` writes the one request then
+    closes stdin, which is what lets a healthy server finish this
+    request/response and exit on its own within *timeout* instead of
+    idling as a long-lived process — the same shape as a real MCP client
+    session, just closed after one turn.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
+            [binary_path],
+            input=_MCP_INITIALIZE_REQUEST,
+            capture_output=True,
+            text=True,
+            errors="replace",  # non-UTF8 crash output (e.g. a mangled traceback) must not raise UnicodeDecodeError out of a health check
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr_excerpt = _first_lines(
+            exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace"),
+            3,
+        )
+        detail = f"timed out after {timeout:.0f}s waiting for initialize response"
+        if stderr_excerpt:
+            detail += f" — stderr: {stderr_excerpt}"
+        return False, detail
+    except OSError as exc:
+        return False, f"failed to spawn {binary_path}: {exc}"
+    except Exception as exc:  # noqa: BLE001 — any other spawn/communicate failure must still report, not crash `nx doctor`
+        return False, f"probe error: {exc!r}"
+
+    stderr_excerpt = _first_lines(proc.stderr or "", 3)
+
+    if proc.returncode != 0:
+        detail = f"exited {proc.returncode}"
+        if stderr_excerpt:
+            detail += f" — stderr: {stderr_excerpt}"
+        return False, detail
+
+    response: dict | None = None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("id") == 1:
+            response = candidate
+            break
+
+    if response is None:
+        detail = "no parseable JSON-RPC response on stdout"
+        if stderr_excerpt:
+            detail += f" — stderr: {stderr_excerpt}"
+        return False, detail
+
+    result = response.get("result")
+    server_name = (
+        result.get("serverInfo", {}).get("name") if isinstance(result, dict) else None
+    )
+    if server_name != expected_name:
+        detail = f"serverInfo.name={server_name!r}, expected {expected_name!r}"
+        if stderr_excerpt:
+            detail += f" — stderr: {stderr_excerpt}"
+        return False, detail
+
+    return True, f"serverInfo.name={server_name!r}"
+
+
+def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
+    """Resolve *binary_name* on PATH, preferring an entry NOT under this
+    running process's own ``sys.prefix``.
+
+    nexus-l2ku5 critique round 2: a bare ``shutil.which(binary_name)`` is
+    NOT sufficient — under ``uv run nx doctor`` (the routine maintainer
+    invocation in this checkout), PATH is prefixed with THIS checkout's
+    own ``.venv/bin``, so a plain ``which`` silently resolves the
+    lock-pinned dev venv's own entry point and never reaches a separately
+    installed tool later on PATH (e.g. ``~/.local/bin``) — exactly the
+    substrate this check exists to get past.
+
+    Resolution rule (by preference, not exclusion — a real binary is
+    always probed, never skipped):
+    1. Walk PATH left to right; the FIRST match found in a directory that
+       is NOT under ``sys.prefix`` wins.
+    2. If no such match exists but a match under ``sys.prefix`` does
+       (e.g. this process's own venv is the ONLY thing on PATH — a valid
+       shape when a user invokes that venv's own ``nx`` directly), that
+       match is still returned and still probed for real.
+    3. ``None`` only when the binary resolves nowhere on PATH at all.
+
+    Returns ``(path_or_none, is_own_venv)``.
+    """
+    own_prefix = str(Path(sys.prefix).resolve())
+    path_env = os.environ.get("PATH", os.defpath)
+    own_prefix_hit: str | None = None
+    for directory in path_env.split(os.pathsep):
+        if not directory:
+            continue
+        hit = shutil.which(binary_name, path=directory)
+        if not hit:
+            continue
+        try:
+            resolved_dir = str(Path(hit).resolve().parent)
+        except OSError:
+            resolved_dir = str(Path(directory).resolve())
+        if resolved_dir == own_prefix or resolved_dir.startswith(own_prefix + os.sep):
+            if own_prefix_hit is None:
+                own_prefix_hit = hit
+            continue
+        return hit, False
+    return own_prefix_hit, True
+
+
+def _check_mcp_entry_points() -> list[HealthResult]:
+    """nexus-l2ku5: probe the INSTALLED ``nx-mcp`` / ``nx-mcp-catalog``
+    entry points with a real JSON-RPC ``initialize`` handshake — the layer
+    test that was missing. Every other gate (unit/integration/MVV/sandbox)
+    ran against the uv.lock-pinned dev venv and never booted the entry
+    point a real install resolves fresh, so ``mcp>=1.0`` (no upper bound)
+    let ``mcp`` 2.0.0 delete ``mcp.server.fastmcp`` under every fresh
+    install for 4 days with zero signal.
+
+    Resolution truthfully follows :func:`_resolve_mcp_binary`: it walks
+    PATH and prefers the first hit that is NOT this running process's own
+    ``sys.prefix`` — so under ``uv run nx doctor`` in this checkout it
+    skips PAST this checkout's own ``.venv/bin`` to whatever separately
+    installed tool (e.g. ``~/.local/bin``) is also on PATH. Only when the
+    OWN venv is the sole match does it get probed, and the detail line
+    says so explicitly rather than silently passing off a lock-pinned
+    probe as proof of the installed artifact.
+
+    CRITICAL POLICY: failure to probe is never rendered ✓.
+    * Binary absent from PATH entirely → soft WARN (⚠) — expected in a
+      dev checkout where no separately installed tool need be on PATH;
+      never claimed OK.
+    * Binary present but the handshake fails (crash / timeout / garbage /
+      unexpected exception) → hard FAIL (✗), carrying the stderr excerpt
+      where a ``ModuleNotFoundError`` would show up.
+    """
+    results: list[HealthResult] = []
+    for binary_name, expected_server_name in _MCP_ENTRY_POINTS:
+        label = f"MCP entry point ({binary_name})"
+        binary_path, is_own_venv = _resolve_mcp_binary(binary_name)
+        if not binary_path:
+            results.append(HealthResult(
+                label=label,
+                ok=False,
+                warn=True,
+                detail="installed tool not found on PATH (dev-checkout edge)",
+                fix_suggestions=["reinstall the conexus tool"],
+            ))
+            continue
+
+        try:
+            ok, detail = _probe_mcp_server(binary_path, expected_server_name)
+        except Exception as exc:  # noqa: BLE001 — the probe itself must not crash `nx doctor`; an unexpected exception probing a PRESENT binary is at least as bad as a confirmed crash, so this is a hard FAIL, not a soft warn
+            _log.warning(
+                "doctor_mcp_entry_point_probe_failed",
+                binary=binary_name,
+                error=str(exc),
+            )
+            results.append(HealthResult(
+                label=label,
+                ok=False,
+                fatal=True,
+                detail=f"{binary_path} — probe raised {type(exc).__name__}: {exc}",
+                fix_suggestions=["reinstall the conexus tool"],
+            ))
+            continue
+
+        prefix_note = " (probing this process's own venv)" if is_own_venv else ""
+        results.append(HealthResult(
+            label=label,
+            ok=ok,
+            detail=f"{binary_path}{prefix_note} — {detail}",
+            fatal=not ok,
+            fix_suggestions=["reinstall the conexus tool"] if not ok else [],
+        ))
+    return results
+
+
 def _check_git_hooks() -> list[HealthResult]:
     # nexus-8g79.10 (V2): import from the lower-layer module instead of
     # reaching up into commands/. Use module-attribute access so test
@@ -3375,6 +3610,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_next_seq_drift())
 
     results.extend(_check_tools())
+    results.extend(_check_mcp_entry_points())
     results.extend(_check_git_hooks())
     results.extend(_check_index_log())
     results.extend(_check_orphan_t1())

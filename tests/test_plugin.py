@@ -202,6 +202,15 @@ def test_doctor_missing_chroma_key_reports_warning(
 
 def test_doctor_ripgrep_present(runner: CliRunner, fake_home: Path) -> None:
     """nx doctor checks for ripgrep on PATH."""
-    with patch("nexus.health.shutil.which", return_value="/usr/bin/rg"):
+    with (
+        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        # nexus-l2ku5 round 2 (CRITICAL, code-review): the broad `which`
+        # fake above now also routes the REAL MCP entry-point handshake at
+        # /usr/bin/rg, a real spawn attempt against a non-MCP binary that
+        # silently flips doctor's exit code 0 -> 1 under this test's weak
+        # assertion. Stub the probe — real handshake behavior belongs to
+        # tests/test_health_mcp_entrypoints.py.
+        patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
+    ):
         result = runner.invoke(main, ["doctor"])
     assert "rg" in result.output or "ripgrep" in result.output.lower()

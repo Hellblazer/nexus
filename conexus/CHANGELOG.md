@@ -4,6 +4,11 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.1.2] - 2026-08-03
+
+Version-parity bump only — no plugin-surface changes. Ships alongside the CLI's
+MCP-server hotfix (mcp<2 pin + doctor/MVV handshake probes, nexus-l2ku5).
+
 ## [7.1.1] - 2026-08-02
 
 Version-parity bump only — no plugin-surface changes. Ships alongside the CLI's

@@ -73,18 +73,63 @@ _nx() {
         "$VENV/bin/nx" "$@"
 }
 
-echo "── 1/8 Build the wheel under test ──"
+echo "── 1/9 Build the wheel under test ──"
 ( cd "$REPO_ROOT" && uv build --wheel -o "$WORK/dist" ) >"$LOGS/build.log" 2>&1 \
     || _fail "wheel build failed (see $LOGS/build.log)"
 WHEEL="$(ls "$WORK"/dist/conexus-*.whl)"
 echo "  $WHEEL"
 
-echo "── 2/8 Virgin venv + install ──"
+echo "── 2/9 Virgin venv + install ──"
 uv venv --python 3.12 -q "$VENV"
 uv pip install -q --python "$VENV/bin/python" "$WHEEL"
 _nx --version
 
-echo "── 3/8 nx init (local mode, virgin HOME, scrubbed env) ──"
+echo "── 3/9 MCP entry-point handshake (nexus-l2ku5 layer test) ──"
+# nexus-l2ku5: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp; the
+# unbounded `mcp>=1.0` floor let it into every fresh install for 4 days —
+# both nx-mcp and nx-mcp-catalog died at import with ZERO signal (Claude
+# Code swallows stderr; every OTHER gate runs pinned to the dev venv's
+# uv.lock, never booting the entry point a real install resolves fresh).
+# This leg is the missing layer test: probe the freshly WHEEL-INSTALLED
+# venv's actual nx-mcp / nx-mcp-catalog binaries with a real JSON-RPC
+# `initialize` handshake — not `uv run`, not the repo dev venv — using the
+# SAME probe (nexus.health._probe_mcp_server) `nx doctor`'s check calls, so
+# a regression here mechanically implies a `nx doctor` red on any user box.
+cat > "$WORK/mcp_probe.py" <<'PYEOF'
+import sys
+
+from nexus.health import _MCP_ENTRY_POINTS, _probe_mcp_server
+
+venv = sys.argv[1]
+ok_all = True
+for binary_name, expected_name in _MCP_ENTRY_POINTS:
+    binary_path = f"{venv}/bin/{binary_name}"
+    ok, detail = _probe_mcp_server(binary_path, expected_name)
+    print(f"{'OK' if ok else 'FAIL'} {binary_name}: {detail}")
+    ok_all = ok_all and ok
+sys.exit(0 if ok_all else 1)
+PYEOF
+if ! "$VENV/bin/python" "$WORK/mcp_probe.py" "$VENV" >"$LOGS/mcp-entrypoints.log" 2>&1; then
+    cat "$LOGS/mcp-entrypoints.log" >&2
+    _fail "MCP entry-point handshake failed (nexus-l2ku5) — the freshly wheel-installed venv's nx-mcp/nx-mcp-catalog did not respond to a JSON-RPC initialize with the expected serverInfo.name; see stderr excerpt above"
+fi
+cat "$LOGS/mcp-entrypoints.log"
+
+# Name the dependency explicitly, not just its symptom: a future unbounded
+# floor regression (the root cause here) must be caught even if some future
+# mcp release keeps fastmcp importable but breaks something else.
+SITE_PACKAGES="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+MCP_DIST_INFO="$(ls -d "$SITE_PACKAGES"/mcp-*.dist-info 2>/dev/null | head -1)"
+[ -n "$MCP_DIST_INFO" ] \
+    || _fail "mcp dist-info not found under $SITE_PACKAGES — cannot verify the mcp<2 pin (nexus-l2ku5)"
+MCP_VERSION="$(basename "$MCP_DIST_INFO" | sed -E 's/^mcp-([0-9]+(\.[0-9]+)*).*/\1/')"
+MCP_MAJOR="${MCP_VERSION%%.*}"
+echo "  mcp dist-info version: $MCP_VERSION"
+if [ "$MCP_MAJOR" -ge 2 ]; then
+    _fail "mcp resolved to $MCP_VERSION (>=2) in the fresh install — the mcp>=1.0,<2 pin regressed (nexus-l2ku5: mcp 2.0.0 removed mcp.server.fastmcp, killing both MCP servers at import)"
+fi
+
+echo "── 4/9 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
@@ -101,7 +146,7 @@ if [ -n "${FRESH_MVV_CACHE:-}" ] && [ -d "$HOME_DIR/.cache/nexus" ]; then
     cp -R "$HOME_DIR/.cache/nexus" "$FRESH_MVV_CACHE/nexus" 2>/dev/null || true
 fi
 
-echo "── 4/8 store put: catalog row + manifest (the f1itv assertions) ──"
+echo "── 5/9 store put: catalog row + manifest (the f1itv assertions) ──"
 SENTINEL="fresh-mvv-sentinel: portable pgvector never ships the builder ISA"
 echo "$SENTINEL" | _nx store put - --title "fresh-mvv-sentinel" \
     >"$LOGS/store.log" 2>&1 || _fail "store put failed (see $LOGS/store.log)"
@@ -114,7 +159,7 @@ _nx catalog search "fresh-mvv-sentinel" >"$LOGS/catalog-store.log" 2>&1 || true
 grep -q "fresh-mvv-sentinel" "$LOGS/catalog-store.log" \
     || _fail "store put did not register in the engine catalog (nexus-f1itv class)"
 
-echo "── 5/8 index md: catalog registration (the e9ru2 assertions) ──"
+echo "── 6/9 index md: catalog registration (the e9ru2 assertions) ──"
 # File stem == frontmatter title on purpose: the pre-flight registration
 # titles the catalog row by STEM, and the post-hook's update branch does not
 # overwrite title from frontmatter (recorded as nexus bead — see gate docs);
@@ -135,7 +180,7 @@ _nx catalog search "fresh-mvv-markdown-note" >"$LOGS/catalog-md.log" 2>&1 || tru
 grep -q "fresh-mvv-markdown-note" "$LOGS/catalog-md.log" \
     || _fail "index md did not register in the engine catalog (nexus-e9ru2 class)"
 
-echo "── 6/8 semantic search returns both ──"
+echo "── 7/9 semantic search returns both ──"
 _nx search "portable pgvector builder ISA" >"$LOGS/search1.log" 2>&1 || true
 grep -q "fresh-mvv-sentinel" "$LOGS/search1.log" \
     || _fail "search did not return the stored sentinel"
@@ -143,7 +188,7 @@ _nx search "era-32 wire re-id re-embed" >"$LOGS/search2.log" 2>&1 || true
 grep -q "fresh-mvv" "$LOGS/search2.log" \
     || _fail "search did not return the indexed markdown"
 
-echo "── 7/8 doctor: zero ✗, zero ⚠, warnings allowlisted ──"
+echo "── 8/9 doctor: zero ✗, zero ⚠, warnings allowlisted ──"
 _nx doctor >"$LOGS/doctor.log" 2>&1 || _fail "doctor exited non-zero"
 if grep -q "✗" "$LOGS/doctor.log"; then
     grep "✗" "$LOGS/doctor.log" >&2
@@ -180,9 +225,9 @@ if grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" | grep -q .; then
     _fail "non-allowlisted warnings in a virgin box's doctor (add a fix or an allowlist entry with rationale)"
 fi
 
-echo "── 8/8 non-vacuity ──"
+echo "── 9/9 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
-for f in init.log store.log index.log doctor.log; do
+for f in mcp-entrypoints.log init.log store.log index.log doctor.log; do
     [ -s "$LOGS/$f" ] || _fail "leg log $f is empty — a journey leg silently skipped"
 done
 
