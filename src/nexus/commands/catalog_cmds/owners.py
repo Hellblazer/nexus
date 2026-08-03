@@ -41,6 +41,7 @@ def owners_cmd(as_json: bool) -> None:
                 "type": o.get("owner_type"),
                 "repo_hash": o.get("repo_hash"),
                 "description": o.get("description"),
+                "next_seq": o.get("next_seq"),
             }
             for o in owners
         ]

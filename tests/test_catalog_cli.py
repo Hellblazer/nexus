@@ -733,6 +733,28 @@ class TestOwnersCommand:
         assert result.exit_code == 0
         assert "test-repo" in result.output
 
+    def test_owners_json_includes_next_seq(self, initialized_catalog, catalog_env):
+        """nexus-pu2z8: the engine's list_owners() already carries next_seq
+        (SHAKEOUT-7.1.1 agent C measured 65/65) but the CLI's --json
+        hand-projection dropped it at src/nexus/commands/catalog_cmds/owners.py.
+        next_seq is the surface nexus-0ehwe item 3 named a non-negotiable
+        prerequisite for drift audits (health.py's _check_next_seq_drift). This
+        is the LAYER TEST at the CLI boundary — through the real
+        ``initialized_catalog`` service catalog, not a unit test of
+        list_owners() itself, which was never the broken layer.
+        """
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "owners", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data, "expected at least one registered owner"
+        for owner in data:
+            assert "next_seq" in owner
+        assert any(owner.get("next_seq") is not None for owner in data), (
+            "next_seq present as a key but always None — the engine field "
+            "isn't reaching the CLI projection"
+        )
+
 
 class TestSeedPlanTemplates:
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):

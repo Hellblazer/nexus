@@ -185,7 +185,8 @@ def test_t1_scratch_put_list_clear(runner, scratch_session):
     result = runner.invoke(main, ["scratch", "list"])
     assert result.exit_code == 0 and unique in result.output
 
-    runner.invoke(main, ["scratch", "clear"])
+    # nexus-s6e55: clear is now confirm-gated; -y skips the prompt.
+    runner.invoke(main, ["scratch", "clear", "--yes"])
     result = runner.invoke(main, ["scratch", "list"])
     assert unique not in result.output
 
