@@ -459,7 +459,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "llama-index-core", specifier = ">=0.12.7,<0.15" },
     { name = "markdown-it-py", specifier = ">=4.0.0" },
-    { name = "mcp", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.0,<2" },
     { name = "mineru", extras = ["pipeline"] },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },

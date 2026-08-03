@@ -81,7 +81,12 @@ dependencies = [
     # binary; verifies the new protobuf .sigstore.json bundle offline. 4.x and
     # 3.x both expose Verifier.production(offline=...) + verify_artifact.
     "sigstore>=3.0,<5",
-    "mcp>=1.0",
+    # <2 is load-bearing: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp,
+    # and the uv TOOL venv re-resolves fresh at install (uv.lock does not
+    # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
+    # every fresh install (nexus-l2ku5). Raise only with a deliberate 2.0
+    # API migration, gated by the MVV's installed-venv handshake probe.
+    "mcp>=1.0,<2",
     "fastapi>=0.115",
     "uvicorn[standard]",
     # RDR-101: UUID7 (RFC 9562) for doc_id and chunk_id surrogate identity.
