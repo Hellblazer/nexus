@@ -89,10 +89,16 @@ if not isinstance(ti, dict):
 bg = ti.get("run_in_background", True)
 if isinstance(bg, str):
     bg = bg.strip().lower() not in ("false", "0", "no", "")
+# subagent_type ABSENT/EMPTY => general-purpose (nexus-a795d). Mirrors the
+# run_in_background default just above, in this same file: the harness
+# still starts a general-purpose agent for an omitted type, so recording
+# nothing is a silent ledger blindspot (or a FALSE undeclared accusation
+# against a later same-type dispatch that was declared), never a safe
+# no-op. Reproduced live 2026-08-03 (probe START ac93416a2d9d417d9).
 fields = [
     str(d.get("session_id") or ""),
     str(d.get("tool_name") or ""),
-    str(ti.get("subagent_type") or ""),
+    str(ti.get("subagent_type") or "general-purpose"),
     "background" if bg else "sync",
     str(d.get("tool_use_id") or ""),
 ]

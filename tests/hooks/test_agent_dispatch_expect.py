@@ -51,7 +51,7 @@ SESSION = "sess-dispatch"
 
 
 def _pretooluse(
-    subagent_type: str = "conexus:code-review-expert",
+    subagent_type: str | None = "conexus:code-review-expert",
     *,
     background: bool | None = True,
     tool_use_id: str = "toolu_01aaaaaaaaaaaaaaaaaaaaaa",
@@ -61,8 +61,11 @@ def _pretooluse(
     tool_input: dict[str, object] = {
         "description": "review the diff",
         "prompt": "You are reviewer-1. Review and SendMessage back.",
-        "subagent_type": subagent_type,
     }
+    if subagent_type is not None:
+        # None => key OMITTED entirely (the real omitted-type payload shape).
+        # Pass "" instead to exercise the present-but-empty-string arm.
+        tool_input["subagent_type"] = subagent_type
     if background is not None:
         tool_input["run_in_background"] = background
     return json.dumps(
@@ -189,6 +192,56 @@ class TestSyncVsBackground:
         is the Gap-1 failure itself."""
         _run(_pretooluse(background=None), tmp_path)
         assert "\tbackground\t" in _expfile(tmp_path).read_text()
+
+
+class TestDefaultSubagentType:
+    """nexus-a795d: a dispatch payload lacking subagent_type still starts a
+    general-purpose agent (the harness's own default), while the pre-fix
+    hook exited on the ``-n "$SUBAGENT_TYPE"`` guard without writing a row —
+    a silent ledger blindspot, or a FALSE undeclared accusation against a
+    later real general-purpose dispatch that WAS declared, depending on
+    session shape. Fix mirrors the file's own run_in_background default:
+    ``str(ti.get("subagent_type") or "general-purpose")``. Both shapes
+    reproduced live 2026-08-03 (probe START ac93416a2d9d417d9; prior-session
+    anomaly adc4471cb0cbba237 re-diagnosed as this, not a nested dispatch)."""
+
+    def test_omitted_subagent_type_records_general_purpose(self, tmp_path: Path) -> None:
+        """The key omitted entirely — the real omitted-type payload shape."""
+        _run(_pretooluse(subagent_type=None), tmp_path)
+        row = _expfile(tmp_path).read_text()
+        assert "\tEXPECT\tgeneral-purpose\tbackground\t" in row, row
+
+    def test_empty_string_subagent_type_records_general_purpose(self, tmp_path: Path) -> None:
+        """The key present but empty — same treatment as fully absent."""
+        _run(_pretooluse(subagent_type=""), tmp_path)
+        row = _expfile(tmp_path).read_text()
+        assert "\tEXPECT\tgeneral-purpose\tbackground\t" in row, row
+
+    def test_omitted_subagent_type_records_correct_sync_mode(self, tmp_path: Path) -> None:
+        """The default applies to the name only — mode still comes from
+        run_in_background, unaffected by the subagent_type default."""
+        _run(_pretooluse(subagent_type=None, background=False), tmp_path)
+        row = _expfile(tmp_path).read_text()
+        assert "\tEXPECT\tgeneral-purpose\tsync\t" in row, row
+
+    def test_real_subagent_type_is_unchanged(self, tmp_path: Path) -> None:
+        """A dispatch that DOES declare a type must not be touched by the
+        default — regression guard against the default swallowing real
+        values."""
+        _run(_pretooluse(subagent_type="conexus:code-review-expert"), tmp_path)
+        row = _expfile(tmp_path).read_text()
+        assert "\tEXPECT\tconexus:code-review-expert\tbackground\t" in row, row
+
+    def test_missing_session_id_still_exits_silently_when_type_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        """The SESSION_ID guard is untouched by this fix: an omitted type
+        does not make a missing session id start writing rows."""
+        proc = _run(_pretooluse(subagent_type=None, session_id=""), tmp_path)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        orch = tmp_path / "state" / "nexus" / "orchestration"
+        assert not orch.exists() or not list(orch.glob("*.expectations"))
 
 
 class TestPairsWithSubagentStart:
@@ -440,29 +493,28 @@ class TestFailOpen:
         assert proc.stdout == ""
 
     def test_empty_field_does_not_shift_the_parse(self, tmp_path: Path) -> None:
-        """A missing subagent_type must record NOTHING — never a row whose
-        name is the next field along.
+        """An empty subagent_type must default to general-purpose (nexus-a795d)
+        AT ITS OWN FIELD POSITION — never shift, and never surface the next
+        field's value as the name.
 
         Found by mutation, not by inspection: the parse used ``IFS=$'\\t'
         read``, and tab is IFS *whitespace*, so bash COLLAPSES empty fields
-        and shifts every later value one position left.
-
-        HOW FAR THAT ACTUALLY GOT, stated precisely rather than talked up:
-        with the REAL field order a single shift puts ``tool_use_id`` in
-        the mode slot, the shellib rejects a mode that is not
-        background|sync, and nothing is written — so the corrupt-row
-        outcome needs a ``tool_use_id`` that is itself a valid mode, which
-        the framework never generates. It is a latent parse defect, not a
-        live one. What WAS live is subtler and worse for the suite: the
-        fail-open tests were reaching their exits through the SHIFTED path
-        (a payload with no session_id exited at the tool-name gate holding
-        ``tool_name`` in its session slot), so mutating the guard they name
-        left them green. That is why this test crafts the isolating input
-        instead of relying on a realistic one — it pins the PARSE."""
+        and shifts every later value one position left. ``tool_use_id`` is
+        deliberately set to the string ``"background"`` here — itself a
+        valid dispatch-mode value — so that a shift bug would produce a
+        row that LOOKS plausible (mode="background", i.e. the shifted
+        tool_use_id lands where mode is expected) instead of failing loud.
+        The delimiter is ``\\x1f`` (non-whitespace), which does not
+        collapse empty fields, so no shift occurs and the row carries the
+        DEFAULTED name in the subagent_type slot with the crafted
+        tool_use_id still in the dispatch_id slot, unshifted."""
         proc = _run(_pretooluse(subagent_type="", tool_use_id="background"), tmp_path)
         assert proc.returncode == 0
-        assert not _expfile(tmp_path).exists(), (
-            "field shift produced a row: " + _expfile(tmp_path).read_text()
+        row = _expfile(tmp_path).read_text()
+        assert "\tEXPECT\tgeneral-purpose\tbackground\t" in row, row
+        fields = row.strip().split("\t")
+        assert fields[4] == "background", (
+            "dispatch_id must still carry the crafted tool_use_id, unshifted: " + row
         )
 
     def test_empty_session_id_does_not_shift_the_parse(self, tmp_path: Path) -> None:

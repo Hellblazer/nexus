@@ -53,10 +53,13 @@
 # of a type against N STARTs of that type (first-appearance order,
 # credit-consuming) and reports the DEFICIT.
 #
-# FORMAT — one file per orchestrator session, append-only TSV, three verbs:
-#   <iso-utc-ts> TAB EXPECT  TAB <name>     TAB <background|sync> [TAB <dispatch_id>]
-#   <iso-utc-ts> TAB START   TAB <agent_id> TAB <agent_type>
-#   <iso-utc-ts> TAB BLOCKED TAB <agent_id>
+# FORMAT — one file per orchestrator session, append-only TSV, core verbs:
+#   <iso-utc-ts> TAB EXPECT   TAB <name>     TAB <background|sync> [TAB <dispatch_id>]
+#   <iso-utc-ts> TAB START    TAB <agent_id> TAB <agent_type>
+#   <iso-utc-ts> TAB BLOCKED  TAB <agent_id>
+#   <iso-utc-ts> TAB CONSUMED TAB <agent_id> TAB <agent_type>
+# (REPORTED and WOULDBLOCK are stop-hook-emitted terminal verbs written by
+# subagent-stop.sh, not by this file — documented at that script instead.)
 # The EXPECT row's optional 5th field is the dispatching tool_use_id. No
 # reader interprets it; it exists so (a) the writing hook is idempotent
 # under double registration and (b) two same-type dispatches inside one
@@ -173,42 +176,159 @@ expectations_start() {
 }
 
 # expectations_owes_report <session_id> <agent_id> <agent_type> — the
-# consult rule (v2, post-determination). Returns 0 iff the stopping agent
-# owes a completion report:
-#   EXPECT row exists with mode=background and name == agent_type
-#   AND agent_id has the named-agent morphology "a<name>-..." for that
-#   exact name (kills the subagent_type-collision false-block class).
-# Everything else — sync rows, unknown agents, unnamed morphology,
+# consult rule (v4, nexus-rkigh + nexus-bk974 fix round on top of v3's
+# nexus-hbr4x widening). Returns 0 iff the stopping agent owes a
+# completion report, via a HYBRID rule, TYPE-KEYED (no named-agent
+# morphology requirement):
+#
+#   1. UNMIXED-NESS GATE (nexus-rkigh, checked FIRST, unconditional): if
+#      ANY EXPECT row for agent_type in this session has mode != background
+#      (i.e. a sync EXPECT of this type exists anywhere in the ledger,
+#      regardless of when it was written relative to this stop), the type
+#      is MIXED and this call returns "does not owe" — full stop, no
+#      exception, not even for an agent_id that already holds its own
+#      CONSUMED row for the type (see WHY THE HYBRID below for why that
+#      asymmetry is intentional).
+#   2. CONSUMED-VERB SETTLEMENT (nexus-hbr4x v3, unchanged, applies only
+#      when the gate above found the type UNMIXED): unspent background
+#      credit for agent_type = (#EXPECT rows with mode=background and
+#      name==agent_type) - (#CONSUMED rows for that type belonging to
+#      OTHER agent_ids). If unspent > 0, or this agent_id already holds
+#      its own CONSUMED row for that type (idempotent re-check on a later
+#      stop of the SAME agent, e.g. the stop_hook_active round-trip), the
+#      agent owes; a CONSUMED row is appended (once per agent_id) to spend
+#      the credit.
+# Everything else — no credit left, mixed type, unknown agent_type,
 # missing/unreadable file — returns 1 (fail-open, never block).
 #
-# DELIBERATELY NOT TYPE-KEYED (nexus-qc4p1 scope line). The audit surfaces
-# below now pair on agent_type; this one still requires the "a<name>-"
-# morphology, so in the no-name harness it keeps returning 1 for every
-# agent and the stop guard keeps never blocking — exactly its behaviour
-# before this change. Dropping the morphology gate here would be a
-# behaviour change to a live default-ON guard and would introduce a
-# false-block class the morphology gate exists to kill (a SYNC agent of a
-# type that ALSO had a background dispatch would be told it owes a
-# report). That is nu7fo's remaining half and needs its own decision.
+# WHY THE HYBRID (nexus-rkigh, P1 CRITICAL from Wave-1 round-1 critique,
+# T2 nexus/wave1-critique-round1-2026-08-03 [21378], orchestrator-decided
+# and surfaced to Hal 2026-08-03). v3's pure CONSUMED-verb settlement
+# consumed credit in STOP order, not dispatch/background-ness order:
+# burndown exit criterion 1 ("in a session mixing sync+background of ONE
+# type, no sync agent is blocked") was only a FAVORABLE-order outcome, not
+# a satisfied invariant — if the sync-shaped stop fired before the true
+# background stop, the sync agent was wrongly blocked AND the real
+# background agent was later waved through unrecorded, silently
+# reproducing the original Finding-0 defect behind an apparently-working
+# guard. The fix gates on UNMIXED-ness first: a type with any sync EXPECT
+# row is treated as globally undecidable for this session and NEVER
+# flagged, by ANY agent_id of that type, in EITHER stop order —
+# order-INDEPENDENT, zero false-block by construction, satisfying exit
+# criterion 1 literally. This is deliberately the plan's own named
+# fallback option (ii), "no-mixed-type interim", but applied PER-TYPE
+# instead of session-wide: a session can still mechanize detection for
+# every OTHER type that stays unmixed, only the collided type goes dark.
+# ACCEPTED PRICE: a genuinely owing background agent of a mixed type is
+# never flagged either — pure detection miss, not a false negative masked
+# as success (nothing claims the mixed type was checked). This is why the
+# self-idempotency check in step 2 does NOT override the mixed gate: an
+# agent that picked up a CONSUMED row before its type became mixed (a
+# later dispatch in the same session added a sync EXPECT of the same
+# type) is not special-cased back to "owes" — the gate is evaluated fresh,
+# against the CURRENT full ledger, on every call, so mixed-ness introduced
+# mid-session retroactively silences the type for all subsequent queries,
+# consistent with "never fires for a mixed type" rather than "fires until
+# the first sync EXPECT shows up".
+#
+# WHY TYPE-KEYING AT ALL, NOT MORPHOLOGY (nexus-hbr4x, design T1 d40a5b53,
+# 2026-08-03, STEP 0 re-verified against subagent-stop.sh's own payload
+# parse): neither SubagentStart nor SubagentStop carries a
+# background-vs-sync discriminator or a name field, so the OLD
+# named-agent-morphology gate ("a<name>-...") was UNREACHABLE from the
+# Agent tool (no name parameter) — every real dispatch arrived unnamed,
+# the morphology check always failed, and owes_report returned 1 for
+# every stop across 18/18 and 19/19 measured sessions. The SubagentStop
+# guard had literally never fired (nexus-hbr4x finding 0); dropping the
+# morphology requirement and keying on agent_type alone is what makes it
+# fire at all. See nexus-rkigh above for how the resulting false-block
+# class (introduced by dropping morphology) is now closed.
+#
+# LOCKING (nexus-bk974, P2 SIGNIFICANT, same critique round): the
+# read-decide-append below is wrapped in the SAME bounded mkdir lockdir
+# pattern as agent-dispatch-expect.sh's _expect_if_absent (nexus-3h0u6
+# precedent) — without it, concurrent same-type stops racing the last
+# unit of credit could each observe unspent credit and each append
+# CONSUMED, over-crediting relative to N-of-type intent (this repo's own
+# CLAUDE.md explicitly encourages parallel same-type dispatch fleets, so
+# this is not a hypothetical). Fail-open on lock timeout: never block a
+# stop because of lock contention — an unheld window just degrades this
+# one call back to the pre-lock racy read, it never denies or defers the
+# stop itself.
 expectations_owes_report() {
     local sid="$1" agent_id="${2:-}" agent_type="${3:-}"
     [[ -n "$sid" && -n "$agent_id" && -n "$agent_type" ]] || return 1
     # An agent_type outside the name charset can never equal a stored
     # EXPECT name, so it can never owe. Checking it HERE (not just at
     # write time) makes that an enforced invariant rather than an
-    # implicit cross-function one — and keeps the glob below literal
-    # (no caller-supplied metacharacters in the pattern). Charset kept in
+    # implicit cross-function one — and keeps the awk comparisons below
+    # literal (no caller-supplied metacharacters). Charset kept in
     # lockstep with expectations_expect, ':' included, or the invariant
     # this comment claims would stop being true.
     [[ "$agent_type" =~ ^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$ ]] || return 1
-    # Named-agent morphology gate: agent_id must be "a<agent_type>-...".
-    [[ "$agent_id" == "a${agent_type}-"?* ]] || return 1
+    # agent_id is interpolated into an appended TSV row below; tab/newline
+    # would misalign it, the same hazard expectations_start and
+    # expectations_mark_blocked guard against.
+    if [[ "$agent_id" == *$'\t'* || "$agent_id" == *$'\n'* ]]; then
+        return 1
+    fi
     local file
     file="$(expectations_file "$sid" 2>/dev/null)" || return 1
     [[ -r "$file" ]] || return 1
-    awk -F'\t' -v n="$agent_type" \
-        '$2 == "EXPECT" && $3 == n && $4 == "background" { found = 1 } END { exit !found }' \
-        "$file" 2>/dev/null
+
+    # Bounded lock (nexus-bk974). A lockdir left behind by a killed hook
+    # would otherwise cost every later stop of this session the full
+    # budget forever, so reap one that has sat idle past the critical
+    # section's realistic worst case before contending for it — same
+    # reap-then-contend shape as agent-dispatch-expect.sh's LOCKDIR.
+    local lockdir="${file}.owes.lock" held=""
+    if [[ -d "$lockdir" ]] && [[ -z "$(find "$lockdir" -maxdepth 0 -mmin -1 2>/dev/null)" ]]; then
+        rmdir "$lockdir" 2>/dev/null
+    fi
+    local _i
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        if mkdir "$lockdir" 2>/dev/null; then
+            held=1
+            break
+        fi
+        sleep 0.1
+    done
+
+    local verdict
+    verdict="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
+        $2 == "EXPECT" && $3 == ty {
+            if ($4 == "background") { credit++ } else { mixed = 1 }
+        }
+        $2 == "CONSUMED" && $4 == ty {
+            if ($3 == id) { self = 1 } else { spent++ }
+        }
+        END {
+            # nexus-rkigh: the unmixed-ness gate is checked FIRST and is
+            # unconditional — it overrides even a pre-existing self
+            # CONSUMED row (see the WHY THE HYBRID comment above the
+            # function for why that asymmetry is intentional).
+            if (mixed) { print "no"; exit }
+            if (self) { print "self"; exit }
+            if (credit > spent) { print "new"; exit }
+            print "no"
+        }
+    ' "$file" 2>/dev/null)"
+    case "$verdict" in
+        self)
+            [[ -n "$held" ]] && rmdir "$lockdir" 2>/dev/null
+            return 0
+            ;;
+        new)
+            _expectations_append "$file" \
+                "$(_expectations_ts)"$'\tCONSUMED\t'"$agent_id"$'\t'"$agent_type"
+            [[ -n "$held" ]] && rmdir "$lockdir" 2>/dev/null
+            return 0
+            ;;
+        *)
+            [[ -n "$held" ]] && rmdir "$lockdir" 2>/dev/null
+            return 1
+            ;;
+    esac
 }
 
 # expectations_mark_blocked <session_id> <agent_id> — record that the stop
@@ -289,6 +409,18 @@ expectations_already_blocked() {
 # code repeats the original mistake; the exit code is the part that
 # cannot be misread as silence.
 #
+# UNDECLARED-DEFICIT EXIT CODE (nexus-suuja): a genuine undeclared>0
+# result was previously rc-invisible — the same exit 0 as a fully clean
+# run — so a caller keying on rc alone (not parsing SUMMARY/UNDECLARED
+# lines) could not tell "nothing to report" from "N recognized
+# dispatches never got a report". This function now exits 2 when
+# undeclared>0, checked strictly AFTER the recognized==0 BLINDSPOT check
+# above, which still takes priority and still exits 1. RC CONTRACT:
+#   0 = clean (no undeclared, not a blindspot)
+#   1 = recognized==0 blindspot — false-clean, not a pass
+#   2 = undeclared>0 — a real declaration-completeness deficit
+# See AGENTS.md's ledger usage snippet for the caller-facing summary.
+#
 # WIDENED RECOGNISER (nexus-qc4p1): recognized now means "pairable by
 # EITHER key" — legacy name-morphology, OR the START row's agent_type
 # appearing among EXPECT names. The second key is what the PreToolUse
@@ -346,6 +478,7 @@ expectations_undeclared() {
                 print "BLINDSPOT\tguard recognised 0 of " checked " dispatched agent(s) by name-morphology or agent-type - undeclared=" undeclared " here is NOT evidence of compliance, it means nothing was checkable"
                 exit 1
             }
+            if (undeclared > 0) exit 2
         }
     ' "$file" 2>/dev/null
     return $?

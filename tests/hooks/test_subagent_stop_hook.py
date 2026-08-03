@@ -229,10 +229,17 @@ class TestBlockMode:
         assert proc.returncode == 0
         assert _decision(proc) is None
 
-    def test_unnamed_morphology_not_blocked(self, tmp_path: Path) -> None:
-        """An unnamed dispatch (agent_id 'a<hash>', agent_type = subagent_type)
-        must never match — even when an EXPECT background row exists for a
-        name equal to its subagent_type (scenario-27 collision class)."""
+    def test_unnamed_dispatch_with_background_credit_is_blocked(self, tmp_path: Path) -> None:
+        """nexus-hbr4x widening fix: an UNNAMED dispatch (agent_id
+        'a<hash>', agent_type = subagent_type — the ONLY shape the Agent
+        tool can produce, since it has no name parameter) now DOES match a
+        background EXPECT row for its type. Before this fix owes_report
+        required named-agent morphology the harness can never produce, so
+        the SubagentStop guard never fired for any real dispatch (18/18,
+        19/19 no_terminal, T2 nexus/subagent-reliability-burndown-2026-08-03).
+        This supersedes the old test_unnamed_morphology_not_blocked, which
+        asserted the pre-fix (never-fires) behavior this bead exists to
+        kill."""
         _expect_row(tmp_path, name="general-purpose")
         t = _transcript(tmp_path, with_sendmessage=False)
         proc = _run_hook(
@@ -240,8 +247,166 @@ class TestBlockMode:
             tmp_path,
             mode="block",
         )
-        assert proc.returncode == 0
-        assert _decision(proc) is None
+        assert proc.returncode == 0, proc.stderr
+        decision = _decision(proc)
+        assert decision is not None and decision["decision"] == "block"
+
+    def test_unnamed_background_dispatch_produces_terminal_row(self, tmp_path: Path) -> None:
+        """(+) background EXPECT + START, then a stop through
+        subagent-stop.sh, produces a terminal row (BLOCKED here, transcript
+        unreported) — the completion-report guard now writes ledger
+        evidence for a real (unnamed) background dispatch, not just the
+        unreachable named-morphology shape."""
+        agent_type = "general-purpose"
+        agent_id = "a16b397f79df79c42"
+        _expect_row(tmp_path, name=agent_type, mode="background")
+        f = _expectations_file(tmp_path)
+        with f.open("a") as fh:
+            fh.write(f"2026-08-03T00:00:00Z\tSTART\t{agent_id}\t{agent_type}\n")
+        t = _transcript(tmp_path, with_sendmessage=False)
+        proc = _run_hook(
+            _payload(agent_id=agent_id, agent_type=agent_type, transcript=str(t)),
+            tmp_path,
+            mode="block",
+        )
+        assert proc.returncode == 0, proc.stderr
+        content = _expectations_file(tmp_path).read_text()
+        assert f"\tBLOCKED\t{agent_id}\n" in content
+
+    def test_mixed_type_session_never_blocks_regardless_of_order(self, tmp_path: Path) -> None:
+        """nexus-rkigh (Wave-1 round-1 CRITICAL, fix round): the hybrid
+        design gates owes_report on per-type UNMIXED-ness FIRST. When a
+        type has BOTH a background AND a sync EXPECT row in the same
+        session, owes_report returns "does not owe" unconditionally for
+        every agent_id of that type — order-INDEPENDENT, zero false-block
+        by construction (burndown exit criterion 1, satisfied literally).
+        This supersedes the old
+        test_sync_stop_after_background_credit_consumed_not_blocked, which
+        code review Finding 1 correctly flagged as order-rigged to the
+        favorable case (it never wrote an actual sync EXPECT row, so the
+        session it built was never genuinely mixed). Order A here: the
+        sync-shaped agent stops first."""
+        agent_type = "worker-mixed"
+        _expect_row(tmp_path, name=agent_type, mode="background")
+        _expect_row(tmp_path, name=agent_type, mode="sync")
+        unreported_t = _transcript(tmp_path, with_sendmessage=False)
+
+        sync_id = "async3333333333333"
+        proc1 = _run_hook(
+            _payload(agent_id=sync_id, agent_type=agent_type, transcript=str(unreported_t)),
+            tmp_path,
+            mode="block",
+        )
+        assert proc1.returncode == 0, proc1.stderr
+        assert _decision(proc1) is None
+
+        background_id = "abg4444444444444"
+        proc2 = _run_hook(
+            _payload(agent_id=background_id, agent_type=agent_type, transcript=str(unreported_t)),
+            tmp_path,
+            mode="block",
+        )
+        assert proc2.returncode == 0, proc2.stderr
+        # Accepted price of the hybrid gate: detection miss for a mixed
+        # type extends to the genuinely-owing background agent too.
+        assert _decision(proc2) is None
+
+    def test_mixed_type_session_never_blocks_reverse_order(self, tmp_path: Path) -> None:
+        """Same invariant as above, opposite stop order — the
+        background-labeled agent stops first, the sync-shaped agent
+        second. Neither is blocked either way, proving the gate is
+        order-INDEPENDENT (not just favorable-order lucky, the exact gap
+        code review Finding 1 identified in round 1)."""
+        agent_type = "worker-mixed-rev"
+        _expect_row(tmp_path, name=agent_type, mode="background")
+        _expect_row(tmp_path, name=agent_type, mode="sync")
+        unreported_t = _transcript(tmp_path, with_sendmessage=False)
+
+        background_id = "abg5555555555555"
+        proc1 = _run_hook(
+            _payload(agent_id=background_id, agent_type=agent_type, transcript=str(unreported_t)),
+            tmp_path,
+            mode="block",
+        )
+        assert proc1.returncode == 0, proc1.stderr
+        assert _decision(proc1) is None
+
+        sync_id = "async6666666666666"
+        proc2 = _run_hook(
+            _payload(agent_id=sync_id, agent_type=agent_type, transcript=str(unreported_t)),
+            tmp_path,
+            mode="block",
+        )
+        assert proc2.returncode == 0, proc2.stderr
+        assert _decision(proc2) is None
+
+    def test_consumed_settlement_n_of_type(self, tmp_path: Path) -> None:
+        """UNMIXED session: CONSUMED settlement is N-of-type as before the
+        rkigh fix round (this scenario has no sync EXPECT row for the type
+        at all, so the unmixed-ness gate is a pass-through and settlement
+        behaves exactly as in v3). Two background EXPECT rows for one type
+        give exactly two units of credit — two stops owe (get blocked,
+        unreported transcript), a third stop of the same type finds no
+        credit left and is not blocked."""
+        agent_type = "pool-worker"
+        _expect_row(tmp_path, name=agent_type, mode="background")
+        _expect_row(tmp_path, name=agent_type, mode="background")
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        ids = ["apool0000000000001", "apool0000000000002", "apool0000000000003"]
+        decisions = []
+        for aid in ids:
+            proc = _run_hook(
+                _payload(agent_id=aid, agent_type=agent_type, transcript=str(t)),
+                tmp_path,
+                mode="block",
+            )
+            assert proc.returncode == 0, proc.stderr
+            decisions.append(_decision(proc))
+
+        assert decisions[0] is not None and decisions[0]["decision"] == "block"
+        assert decisions[1] is not None and decisions[1]["decision"] == "block"
+        assert decisions[2] is None
+
+    def test_owes_report_concurrent_stops_never_exceed_credit(self, tmp_path: Path) -> None:
+        """nexus-bk974 (Wave-1 round-1 SIGNIFICANT, fix round): the bounded
+        mkdir lockdir around owes_report's read-decide-append (mirrors
+        agent-dispatch-expect.sh's _expect_if_absent / nexus-3h0u6
+        precedent) must hold N-of-type exactness under REAL concurrency,
+        not just the sequential test_consumed_settlement_n_of_type. 8
+        same-type stops racing 4 units of credit: at most 4 owe (get
+        blocked), and the CONSUMED row count for the type never exceeds
+        the credit pool — without the lock, a race window lets more than
+        4 threads observe unspent credit simultaneously."""
+        import concurrent.futures
+
+        agent_type = "worker-race"
+        credit = 4
+        for _ in range(credit):
+            _expect_row(tmp_path, name=agent_type, mode="background")
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        ids = [f"arace{i:02d}00000000000" for i in range(8)]
+
+        def _stop(aid: str) -> subprocess.CompletedProcess[str]:
+            return _run_hook(
+                _payload(agent_id=aid, agent_type=agent_type, transcript=str(t)),
+                tmp_path,
+                mode="block",
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(_stop, ids))
+
+        for proc in results:
+            assert proc.returncode == 0, proc.stderr
+
+        blocked = sum(1 for proc in results if _decision(proc) is not None)
+        assert blocked == credit, f"expected exactly {credit} blocked, got {blocked}"
+
+        content = _expectations_file(tmp_path).read_text()
+        consumed_rows = [ln for ln in content.splitlines() if "\tCONSUMED\t" in ln]
+        assert len(consumed_rows) == credit, consumed_rows
 
     def test_reported_agent_not_blocked(self, tmp_path: Path) -> None:
         """A SendMessage tool_use in the agent transcript counts as the
@@ -348,6 +513,19 @@ class TestFailOpen:
         t = _transcript(tmp_path, with_sendmessage=False)
         proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
         assert proc.returncode == 0
+        assert _decision(proc) is None
+
+    def test_junk_ledger_content_fails_open(self, tmp_path: Path) -> None:
+        """A ledger file containing malformed/non-TSV junk (missing fields,
+        stray tabs, no trailing newline) must never crash the CONSUMED-
+        settlement awk consult and must never block — fail-open holds for
+        junk CONTENT, not just a missing file."""
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("garbage line without tabs\nEXPECT\n\tEXPECT\tsomething\nnot\ta\tvalid\trow\tat\tall")
+        t = _transcript(tmp_path, with_sendmessage=False)
+        proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
+        assert proc.returncode == 0, proc.stderr
         assert _decision(proc) is None
 
     def test_traversal_session_id_fails_open(self, tmp_path: Path) -> None:
@@ -487,6 +665,63 @@ class TestObserveMode:
         _run_hook(_payload(transcript=str(t)), tmp_path, mode="observe")
         content = _expectations_file(tmp_path).read_text()
         assert "\tWOULDBLOCK\t" not in content
+
+
+def _run_undeclared(tmp_path: Path, session_id: str = SESSION) -> subprocess.CompletedProcess[str]:
+    """Source the reference lib directly and invoke expectations_undeclared,
+    propagating its own exit code as the subprocess's returncode (not the
+    trailing `echo`'s) so tests can assert on rc precisely."""
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+    script = (
+        f'source "{REFERENCE_EXPECTATIONS}"; '
+        f'expectations_undeclared "{session_id}"; rc=$?; echo "RC=$rc"; exit $rc'
+    )
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env
+    )
+
+
+class TestUndeclaredExitCodes:
+    """nexus-suuja: expectations_undeclared's rc contract is now three-way:
+    0 = clean, 1 = recognized==0 blindspot (pre-existing, false-clean not a
+    pass), 2 = undeclared>0 — a real declaration-completeness deficit that
+    was previously rc-invisible (same exit 0 as clean)."""
+
+    def test_rc_zero_when_clean(self, tmp_path: Path) -> None:
+        agent_type = "worker-clean"
+        agent_id = f"a{agent_type}-abc123"
+        _expect_row(tmp_path, name=agent_type, mode="background")
+        f = _expectations_file(tmp_path)
+        with f.open("a") as fh:
+            fh.write(f"2026-08-03T00:00:00Z\tSTART\t{agent_id}\t{agent_type}\n")
+        proc = _run_undeclared(tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "undeclared=0" in proc.stdout
+
+    def test_rc_one_blindspot_when_nothing_recognized(self, tmp_path: Path) -> None:
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        # Unnamed START, no EXPECT row for its type -- unrecognizable by
+        # either key (name-morphology or agent-type-in-EXPECT).
+        with f.open("a") as fh:
+            fh.write("2026-08-03T00:00:00Z\tSTART\ta9f8e7d6c5b4a3\tworker-unseen\n")
+        proc = _run_undeclared(tmp_path)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "BLINDSPOT" in proc.stdout
+
+    def test_rc_two_when_undeclared_deficit(self, tmp_path: Path) -> None:
+        agent_type = "worker-undeclared"
+        agent_id = f"a{agent_type}-def456"
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        # Named START row (recognized by morphology) with NO EXPECT row at
+        # all for this name -> a genuine undeclared deficit.
+        with f.open("a") as fh:
+            fh.write(f"2026-08-03T00:00:00Z\tSTART\t{agent_id}\t{agent_type}\n")
+        proc = _run_undeclared(tmp_path)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "UNDECLARED" in proc.stdout
+        assert "undeclared=1" in proc.stdout
 
 
 class TestPluginWiring:
