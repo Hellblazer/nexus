@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.1.2] - 2026-08-03
+
+Emergency hotfix: restores the nexus MCP servers on fresh installs.
+
+### Fixed
+- **MCP servers dead on every fresh install since 2026-07-28** (nexus-l2ku5): the
+  unbounded `mcp>=1.0` dependency admitted mcp 2.0.0, which removed
+  `mcp.server.fastmcp`; both `nx-mcp` and `nx-mcp-catalog` crashed at import and
+  Claude Code silently showed no nexus tools. Pinned `mcp>=1.0,<2`. Installs made
+  from 7.0.x/7.1.x wheels after 2026-07-28 should upgrade and reinstall
+  (`uv tool install --reinstall 'conexus[local]'` or the platform equivalent).
+- Detection layer so this class can never be silent again: `nx doctor` gains an
+  "MCP entry points" check (boots each server binary with a JSON-RPC initialize
+  handshake, surfaces the crash stderr on failure), and the fresh-install MVV
+  gains the same probe against the freshly wheel-installed venv plus an explicit
+  mcp<2 resolution assert.
+
 ## [7.1.1] - 2026-08-02
 
 The engine-identity release: fresh local installs now receive engine-service-v0.1.62
