@@ -30,4 +30,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.1.2)
 
-(empty — v7.1.2 shipped everything; add entries as develop drifts from the new pin)
+- `agents/_shared/README.md`, `agents/_shared/RELAY_TEMPLATE.md`,
+  `agents/_shared/CONTEXT_PROTOCOL.md`, `skills/development/SKILL.md` —
+  doc correction: "subagents cannot spawn subagents" was falsified by direct
+  probes (2026-08-03, T2 [21371]); nested Agent dispatch works and is
+  ledgered. The caller-orchestrates relay convention is unchanged; only the
+  false capability claim is corrected. Doc-only — no behavioural guard
+  waiting on this.

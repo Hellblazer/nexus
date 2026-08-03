@@ -160,7 +160,7 @@ Agents produce artifacts based on their specialization:
 
 ## RELAY (Standard Format)
 
-Relays are constructed by the **caller** (main conversation or skill) when dispatching agents. Agents do not construct relays to other agents — subagents cannot spawn subagents. Instead, agents output a "Recommended Next Step" block that the caller uses to build the next relay.
+Relays are constructed by the **caller** (main conversation or skill) when dispatching agents. Agents do not construct relays to other agents — nested Agent dispatch works and is ledgered (probe-verified 2026-08-03, T2 [21371]), but orchestration stays with the caller by convention. Instead, agents output a "Recommended Next Step" block that the caller uses to build the next relay.
 
 Standard relay structure:
 

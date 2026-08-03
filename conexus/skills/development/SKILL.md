@@ -129,8 +129,10 @@ Do not retry approaches listed in scratch under tag "failed-approach".
 
 ## Post-Implementation Review + Commit (orchestrator-driven, MANDATORY)
 
-The developer agent CANNOT run this tail itself, it has no Agent tool and
-cannot spawn sibling agents. When the developer returns its
+The developer agent does not run this tail itself — reviewer selection,
+fix-round sequencing, and the commit are the orchestrator's job (nested
+Agent dispatch exists, probe-verified 2026-08-03, but orchestration stays
+at top level by convention). When the developer returns its
 `## Next Step: code-review-expert, substantive-critic, test-validator` block,
 YOU (the orchestrator running this skill) drive the loop. Do not stop at the
 developer's return; do not let the developer self-commit.
