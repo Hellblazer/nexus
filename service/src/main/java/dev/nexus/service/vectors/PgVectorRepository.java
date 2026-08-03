@@ -943,8 +943,11 @@ public final class PgVectorRepository {
             // the ChashHex converted type the jOOQ paths use).
             .append("SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,")
             .append(" (embedding <=> ?::vector) AS distance")
-            .append(" FROM ").append(chunksTable(dim))
-            .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")");
+            .append(" FROM ").append(chunksTable(dim)).append(" c")
+            .append(" WHERE c.collection IN (").append(placeholders(collectionNames.size())).append(")")
+            // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the
+            // HNSW index scan on c stays engaged (see liveChunksPredicate's javadoc).
+            .append(" AND ").append(liveChunksPredicate("c"));
         List<Object> binds = new ArrayList<>();
         binds.add(vectorLiteral(queryVec));
         binds.addAll(collectionNames);
@@ -1180,6 +1183,14 @@ public final class PgVectorRepository {
         StringBuilder scope = new StringBuilder()
             .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")");
         List<Object> scopeBinds = new ArrayList<>(collectionNames);
+        // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate folded into `scope`
+        // BEFORE `gate` is derived from it below, so every downstream query built off
+        // either scope or gate — the bounded gate-selectivity probe, the selective
+        // chash-ranked rank, and the HNSW-first fallback, all three read sites — inherits
+        // it by construction; a single fix point instead of three. Inlined (never a JOIN
+        // to nexus.live_chunks) so the HNSW/GIN scans on `c` (the alias assigned to
+        // `table` below) stay engaged — see liveChunksPredicate's javadoc.
+        scope.append(" AND ").append(liveChunksPredicate("c"));
         // Full gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity:
         // the <% operator form (word_similarity >= pg_trgm.word_similarity_threshold) is
         // gin_trgm_ops-indexable (vectors-002) where the function-call form is not;
@@ -1196,7 +1207,7 @@ public final class PgVectorRepository {
                 appendWherePredicate(scope, scopeBinds, e.getKey(), e.getValue());
             }
         }
-        final String table = chunksTable(dim);
+        final String table = chunksTable(dim) + " c";
         final String gateSql = gate.toString();
         final String scopeSql = scope.toString();
         final String vecLit = vectorLiteral(queryVec);
@@ -1319,7 +1330,11 @@ public final class PgVectorRepository {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
                .from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
+               // this fetch-by-id read was structurally invisible to the nexus-3ck2g
+               // searchWithTokens/hybridSearch fix and its gate.
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids))
+                      .and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch());
@@ -1370,7 +1385,9 @@ public final class PgVectorRepository {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.embedding())
                .from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids))
+                      .and(liveChunksCondition(ctx, ch)))
                .fetch());
 
         Map<String, List<Float>> byChash = new HashMap<>();
@@ -1458,7 +1475,10 @@ public final class PgVectorRepository {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
                .from(ch.table())
-               .where(finalCond)
+               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
+               // this fetch-by-where read was structurally invisible to the
+               // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
+               .where(finalCond.and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch());
@@ -1541,7 +1561,10 @@ public final class PgVectorRepository {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               .where(finalCond)
+               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
+               // this staleness-cache-build read was structurally invisible to the
+               // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
+               .where(finalCond.and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
                .limit(GET_ALL_METADATA_MAX_ROWS + 1)
                .fetch());
@@ -1986,7 +2009,12 @@ public final class PgVectorRepository {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               .where(ch.collection().eq(collection))
+               // nexus-txcbo (found in nexus-3ck2g round-2 critique): exclude
+               // tombstoned docs' chunks (RDR-156 Decision 6) — unlike the
+               // get-family this needs no out-of-band chash: a plain listing
+               // surfaced tombstoned content by default via
+               // POST /v1/vectors/store-list (VectorHandler#handleStoreList).
+               .where(ch.collection().eq(collection).and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch());
@@ -2516,6 +2544,84 @@ public final class PgVectorRepository {
 
     private static String chunksTable(int dim) {
         return "nexus.chunks_" + dim;
+    }
+
+    /**
+     * live_chunks predicate (RDR-156 Decision 6, never implemented until nexus-3ck2g):
+     * a chunk row aliased *alias* is live iff it carries NO manifest row at all (a
+     * manifest-less MCP/{@code store_put} note chunk, RDR-145 — the safety contract
+     * {@code nexus.purge_trash}'s own sweep enforces, mirrored here) OR at least one
+     * manifest row whose owning document is NOT tombstoned. Deliberately INLINED as
+     * literal SQL text — never a JOIN to {@code nexus.live_chunks} — the house pattern
+     * (catalog-006-combined-query-functions.xml:173-181, carried into
+     * catalog-019-tombstone-aware-read-views.xml's {@code search_topic_scoped_<dim>}
+     * bodies) so the HNSW/GIN index scans on the raw {@code chunks_<dim>} table
+     * survive: a JOIN to the view would force the planner off the index path. Both
+     * {@code chunks_<dim>.chash} and {@code catalog_document_chunks.chash} are
+     * {@code bytea} post-RDR-180, so the comparison is native bytea=bytea — no
+     * {@code encode}/{@code decode} needed here (those only matter at the Java
+     * projection boundary, not for an internal join predicate).
+     *
+     * <p>Callers before this fix read {@code chunks_<dim>} directly with no tombstone
+     * predicate at all (nexus-3ck2g bug): {@link #searchWithTokens} and every
+     * {@link #hybridSearch} branch. See {@code TombstoneFilterGateTest}'s
+     * {@code RAW_CHUNKS_READ_METHODS} check, which structurally cannot see a raw
+     * hand-built SQL string the way it sees typed jOOQ statements — this predicate's
+     * presence (by name, {@code liveChunksPredicate(}) in the method body is exactly
+     * what that check requires.
+     */
+    private static String liveChunksPredicate(String alias) {
+        return "(NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
+            + " WHERE m.tenant_id = " + alias + ".tenant_id AND m.chash = " + alias + ".chash)"
+            + " OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
+            + " JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
+            + " WHERE m.tenant_id = " + alias + ".tenant_id AND m.chash = " + alias + ".chash"
+            + " AND d.deleted_at IS NULL))";
+    }
+
+    /**
+     * Typed-jOOQ twin of {@link #liveChunksPredicate} (nexus-8j1zx, found during
+     * nexus-3ck2g's round-1 substantive critique): identical live-chunk semantics — a
+     * chunk row is live iff it carries NO manifest row at all (a manifest-less
+     * MCP/{@code store_put} note chunk, RDR-145) OR at least one manifest row whose
+     * owning document is not tombstoned — expressed as a typed {@link org.jooq.Condition}
+     * against {@code ch}'s own tenant/chash fields, for the four get-family reads
+     * ({@link #get}, {@link #getWhere}, {@link #getEmbeddings}, {@link #getAllMetadata})
+     * that go through {@link DimTables.ChunkTable} rather than the hand-built {@code
+     * chunksTable(dim)} string {@link #searchWithTokens}/{@link #hybridSearch} use.
+     * {@code liveChunksPredicate}'s literal-SQL-text shape is structurally invisible to a
+     * typed jOOQ statement (no {@code chunksTable(} call, no {@code CATALOG_DOCUMENTS}/
+     * {@code CATALOG_DOCUMENT_CHUNKS} token in the SAME statement as the read) — exactly
+     * the get-family gap nexus-8j1zx found, and this predicate closes.
+     *
+     * <p>Both {@code CATALOG_DOCUMENT_CHUNKS.CHASH} and {@code ch.chash()} are hex-carried
+     * via {@link ChashHex} (bytea columns, RDR-180), so the comparison is the same
+     * converted-type equality {@code CatalogRepository.strandedChunkCount} uses.
+     *
+     * <p>Subqueries use {@code ctx.selectOne()} — mirrors {@link
+     * dev.nexus.service.db.CatalogRepository}'s {@code strandedChunkCount}/{@code
+     * hasLiveManifest} helper — which is deliberately OUTSIDE {@code
+     * TombstoneFilterGateTest}'s general {@code CATALOG_DOCUMENTS}/{@code
+     * CATALOG_DOCUMENT_CHUNKS} statement scan (keyed off {@code .select(}/{@code
+     * .selectFrom(}/{@code .selectCount(}/{@code .selectDistinct(}, never {@code
+     * .selectOne(}). This predicate is instead policed by the gate's dedicated {@code
+     * scanTypedChunksSites} check (mirrors {@code scanRawChunksSites}), which requires
+     * every named get-family method to call this helper by name.
+     */
+    private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
+        org.jooq.Condition hasManifest = DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
+        org.jooq.Condition hasLiveManifest = DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+               .join(CATALOG_DOCUMENTS)
+                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+        return hasManifest.not().or(hasLiveManifest);
     }
 
     /**

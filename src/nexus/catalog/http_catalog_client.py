@@ -20,6 +20,7 @@ below maps to an exact ``case`` in the Java handler's switch:
   GET   /v1/catalog/search?q=X          FTS search
   POST  /v1/catalog/update              update document fields
   POST  /v1/catalog/delete              delete by {tumbler}  (also DELETE)
+  POST  /v1/catalog/purge-trash         reclaim tombstoned rows {older_than_days, dry_run} (nexus-3ck2g)
   GET   /v1/catalog/resolve?...         resolve by file_path/source_uri/title
   GET   /v1/catalog/stats               per-tenant statistics
   POST  /v1/catalog/link               upsert link
@@ -1205,6 +1206,49 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     except Exception:  # noqa: BLE001 — per-doc fallback failure isolation (mirrors register_many's per-doc try/except upstream)
                         pass
         return out
+
+    def purge_trash(self, older_than_days: int = 30, *, dry_run: bool = True) -> dict:
+        """POST /v1/catalog/purge-trash — reclaim tombstoned catalog rows and
+        their manifest-orphaned ``chunks_<dim>`` rows via the engine's
+        ``nexus.purge_trash(interval)`` sweep (nexus-3ck2g).
+
+        Delete tombstones the catalog row but deliberately leaves the
+        ``document_chunks`` manifest and T3 chunk rows in place (preserving
+        the manual-restore path, nexus-xavu7); this is the caller that
+        physically reclaims them.
+
+        CAVEAT (nexus-8j1zx fix round): the reclaim this method performs is
+        NOT age-gated the way "once the retention window has passed" might
+        suggest. The underlying ``nexus.purge_trash`` chunk sweep (Steps
+        1-3) runs on EVERY currently-tombstoned document on the very next
+        ``dry_run=False`` call, regardless of how recently it was
+        tombstoned — only the catalog row's physical delete (Step 4, the
+        ``documents_purged`` count) honors ``older_than_days``. So the
+        manual-restore path (nexus-xavu7) stays open only until the NEXT
+        ``dry_run=False`` call anywhere in the tenant, not until this
+        document individually ages past the threshold.
+
+        Wire contract (LOCKED, design of record T1 scratch 2fbc12df): POST
+        body ``{"older_than_days": int, "dry_run": bool}``; the engine's
+        JSON response — ``documents_purged`` (age-gated) plus per-dim
+        ``chunks_<dim>_stranded`` counts (age-INDEPENDENT, see the CAVEAT
+        above), plus the echoed ``dry_run`` flag — is returned to the
+        caller verbatim as a ``dict``; this client does not interpret or
+        reshape it. ``dry_run=True`` (the default) computes the same
+        counts as a preview WITHOUT deleting anything; ``dry_run=False``
+        performs the real sweep, scoped to the request tenant.
+
+        A pre-nexus-3ck2g engine has no matching route for this call and
+        answers 404 — this method does NOT swallow that (unlike the
+        RUNFENCE advisory-write methods above); it propagates the raw
+        ``httpx.HTTPStatusError`` like any other read/write call in this
+        class, so the CLI verb can tell "engine too old" apart from "engine
+        answered."
+        """
+        return self._post("/purge-trash", {
+            "older_than_days": older_than_days,
+            "dry_run": dry_run,
+        }) or {}
 
     def find(
         self, query: str, *, content_type: str | None = None

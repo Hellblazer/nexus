@@ -183,7 +183,17 @@ def make_catalog_writer(
 #: check is honest for both backends: SQLite mode always falls back to the
 #: existing serial ``update()`` loop (unchanged behaviour); service mode
 #: gets the batched path.
-_SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({"update_many", "delete_many"})
+#: nexus-3ck2g: ``purge_trash`` joins this set for the same reason as
+#: ``update_many``/``delete_many`` above — it is a service-only op with no
+#: SQLite/daemon-mode equivalent (the local catalog and its daemon are gone,
+#: RDR-158 P4). It is service-only for a second, independent reason too: the
+#: dry-run COUNT PREVIEW is itself an engine-side read behind the write
+#: surface (``purge_trash(dry_run=True)``), not something a caller could
+#: compute client-side, so it belongs on the writer even for its read-only
+#: mode. Reads never go through ``make_catalog_writer()`` — see the module
+#: docstring — so this whitelist entry does not create a reader-through-
+#: writer path; it just means the *dry-run preview itself* is a writer op.
+_SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({"update_many", "delete_many", "purge_trash"})
 
 
 class _ServiceCatalogWriter:

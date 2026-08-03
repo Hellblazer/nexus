@@ -129,6 +129,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
                 case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
+                case "/purge-trash"           -> handlePurgeTrash(exchange, tenant, method);
                 case "/resolve"               -> handleResolve(exchange, tenant, method);
                 case "/stats"                 -> handleStats(exchange, tenant, method);
 
@@ -493,6 +494,60 @@ public final class CatalogHandler implements HttpHandler {
         }
         int deleted = repo.deleteDocument(tenant, tumbler);
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
+    }
+
+    /**
+     * POST /v1/catalog/purge-trash (nexus-3ck2g E3) — the caller {@code
+     * nexus.purge_trash} never had (catalog-003-soft-delete.xml:200-296 defined the
+     * SECURITY INVOKER function; nothing in the service invoked it, so the stranded-
+     * chunk sweep and the physical tombstone GC it implements were both dead code).
+     *
+     * <p>Body: {@code {"older_than_days": int >= 1 (default 30), "dry_run": bool
+     * (default true)}}. {@code dry_run=true}: count-only preview via {@link
+     * CatalogRepository#purgeTrashPreview}, no mutation. {@code dry_run=false}:
+     * actually purges via {@link CatalogRepository#purgeTrash} — the per-tenant GUC
+     * guard (catalog-003-soft-delete.xml:209-216, "cross-tenant purge is not
+     * permitted") is enforced INSIDE the SQL function itself, and {@code
+     * TenantScope.withTenant} always stamps {@code nexus.tenant} before the function
+     * runs, so there is no unscoped call path. Response carries {@code documents_purged}
+     * plus per-dim {@code chunks_<dim>_stranded} counts in BOTH modes (preview vs.
+     * actual, per the field's own semantics) and {@code dry_run} echoing the mode
+     * actually taken. A live (non-dry-run) invocation confirm-gate is the CLIENT's
+     * job (mirrors the {@code nx catalog reconcile-stale} pattern) — this route
+     * itself does not add its own confirmation step beyond {@code dry_run}'s default.
+     */
+    private void handlePurgeTrash(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+
+        // nexus-3ck2g code-review Minor: a present-but-wrong-typed field (e.g.
+        // "older_than_days": "abc") must 400, not silently fall back to the default
+        // the way an ABSENT field correctly does.
+        int olderThanDays = 30;
+        Object olderThanDaysRaw = body.get("older_than_days");
+        if (olderThanDaysRaw != null) {
+            if (!(olderThanDaysRaw instanceof Number n)) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'older_than_days' must be an integer\"}"); return;
+            }
+            olderThanDays = n.intValue();
+        }
+        if (olderThanDays < 1) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'older_than_days' must be >= 1\"}"); return;
+        }
+
+        boolean dryRun = true;
+        Object dryRunRaw = body.get("dry_run");
+        if (dryRunRaw != null) {
+            if (!(dryRunRaw instanceof Boolean b)) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'dry_run' must be a boolean\"}"); return;
+            }
+            dryRun = b;
+        }
+
+        Map<String, Object> result = dryRun
+            ? repo.purgeTrashPreview(tenant, olderThanDays)
+            : repo.purgeTrash(tenant, olderThanDays);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /** GET /v1/catalog/resolve?file_path=X or ?source_uri=X or ?title=X&collection=X */

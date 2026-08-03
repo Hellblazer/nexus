@@ -35,6 +35,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.vectors.DimTables;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -1980,6 +1981,113 @@ public final class CatalogRepository {
                 .returning(CATALOG_DOCUMENTS.TUMBLER)
                 .fetch(CATALOG_DOCUMENTS.TUMBLER))
         );
+    }
+
+    /**
+     * Per-dim stranded-chunk count (nexus-3ck2g E3) — the SELECT-only mirror of
+     * {@code nexus.purge_trash}'s Step 1-3 DELETE predicate (catalog-003-soft-delete.xml
+     * :200-296): a chunk row is stranded iff it has at least one manifest row
+     * ({@code catalog_document_chunks}) AND none of its manifest rows belong to a live
+     * ({@code deleted_at IS NULL}) document. This is the logical negation of the
+     * live_chunks predicate ({@link dev.nexus.service.vectors.PgVectorRepository}'s
+     * inlined {@code liveChunksPredicate}), restricted to manifest-backed chunks —
+     * manifest-less chunks (RDR-145 MCP/{@code store_put} note chunks) are never
+     * stranded by construction (the {@code hasManifest} EXISTS excludes them, same
+     * safety contract {@code purge_trash} itself enforces).
+     */
+    private static long strandedChunkCount(DSLContext ctx, String tenant, DimTables.ChunkTable ch) {
+        Condition hasManifest = DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(CHK_CHASH_HEX.eq(ch.chash()))));
+        Condition hasLiveManifest = DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+               .join(CATALOG_DOCUMENTS)
+                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(CHK_CHASH_HEX.eq(ch.chash()))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+        Long count = ctx.selectCount().from(ch.table())
+            .where(ch.tenantId().eq(tenant).and(hasManifest).and(hasLiveManifest.not()))
+            .fetchOne(0, Long.class);
+        return count != null ? count : 0L;
+    }
+
+    /**
+     * Aged-tombstone document count (nexus-3ck2g E3) — mirrors {@code nexus.purge_trash}'s
+     * Step 4 WHERE ({@code deleted_at IS NOT NULL AND deleted_at <= NOW() - older_than}).
+     * Threshold is computed against the JAVA clock (not the PG server clock the function
+     * itself uses via {@code NOW()}) — acceptable drift for a preview/summary count;
+     * negligible in practice and never load-bearing for the actual purge, which always
+     * runs the function's own server-side {@code NOW()} arithmetic.
+     */
+    private static long agedTombstoneCount(DSLContext ctx, String tenant, int olderThanDays) {
+        java.time.OffsetDateTime threshold =
+            java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).minusDays(olderThanDays);
+        // TOMBSTONE-EXEMPT (nexus-mqd6t): this read's whole PURPOSE (nexus-3ck2g E3) is
+        // counting the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring
+        // nexus.purge_trash's own Step 4 WHERE -- the inverse of every other CATALOG_DOCUMENTS
+        // read this gate polices, which must exclude tombstones. See
+        // TombstoneFilterGateTest.TOMBSTONE_EXEMPT's "agedTombstoneCount" entry.
+        Long count = ctx.selectCount().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.le(threshold)))
+            .fetchOne(0, Long.class);
+        return count != null ? count : 0L;
+    }
+
+    /**
+     * POST /v1/catalog/purge-trash dry-run preview (nexus-3ck2g E3): count-only,
+     * mutates nothing. Mirrors {@code nexus.purge_trash}'s own predicates via SELECT
+     * COUNT so a caller can see what a real purge would sweep before authorizing one
+     * (reconcile-stale gate pattern — LIVE INVOCATION is Hal-gated on the client side).
+     */
+    public Map<String, Object> purgeTrashPreview(String tenant, int olderThanDays) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("dry_run", true);
+            out.put("documents_purged", agedTombstoneCount(ctx, tenant, olderThanDays));
+            out.put("chunks_384_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384)));
+            out.put("chunks_768_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768)));
+            out.put("chunks_1024_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024)));
+            return out;
+        });
+    }
+
+    /**
+     * POST /v1/catalog/purge-trash execute (nexus-3ck2g E3): invokes the
+     * {@code nexus.purge_trash(interval)} stored function (catalog-003-soft-delete.xml)
+     * under the request tenant's RLS GUC — {@link TenantScope#withTenant} always stamps
+     * {@code nexus.tenant} via {@code set_config(..., true)} before this runs, so the
+     * function's own GUC guard (raises on unset/empty tenant) is satisfied by
+     * construction; there is no unscoped call path. The per-dim stranded-chunk and
+     * aged-tombstone counts are computed FIRST, in the SAME transaction as the
+     * function call (same pattern as {@link #manifestBackfill}'s routine invocation) —
+     * the closest achievable snapshot of what the mutation is about to sweep, modulo
+     * the ordinary read-committed race against a concurrent write in the same instant
+     * (no data-safety impact either way; purge_trash's own WHERE is authoritative for
+     * what actually gets deleted, these counts are reporting only).
+     */
+    public Map<String, Object> purgeTrash(String tenant, int olderThanDays) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384));
+            long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768));
+            long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024));
+
+            Long purged = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
+                ctx.configuration(),
+                org.jooq.types.YearToSecond.valueOf(java.time.Duration.ofDays(olderThanDays)));
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("dry_run", false);
+            out.put("documents_purged", purged != null ? purged : 0L);
+            out.put("chunks_384_stranded", chunks384);
+            out.put("chunks_768_stranded", chunks768);
+            out.put("chunks_1024_stranded", chunks1024);
+            return out;
+        });
     }
 
     /**

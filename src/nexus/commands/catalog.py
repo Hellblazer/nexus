@@ -262,6 +262,7 @@ from nexus.commands.catalog_cmds import integrity as _integrity_cmds  # noqa: E4
 from nexus.commands.catalog_cmds import doctor as _doctor_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import orphan_backfill as _orphan_backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import reconcile_stale as _reconcile_stale_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import purge_trash as _purge_trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -275,6 +276,7 @@ _integrity_cmds.register(catalog)
 _doctor_cmds.register(catalog)
 _orphan_backfill_cmds.register(catalog)
 _reconcile_stale_cmds.register(catalog)
+_purge_trash_cmds.register(catalog)
 
 
 @catalog.command("init")
@@ -735,8 +737,22 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     """Remove a document from the catalog. Links to it are preserved as orphans.
 
     Accepts a tumbler or title. Prompts for confirmation unless -y is passed.
-    The document is removed from SQLite and tombstoned in JSONL, but existing
-    links remain — use 'nx catalog links --type ...' to find orphaned links.
+    The document is soft-tombstoned (``deleted_at`` stamped) — its manifest
+    and T3 chunks are NOT cascaded (nexus-3ck2g: preserves the manual-restore
+    path, nexus-xavu7). On an engine carrying the nexus-3ck2g read-side
+    tombstone filter, the content stops appearing in search results
+    immediately; on an older engine it stays fully searchable until that
+    filter is deployed. The manifest/T3 rows are physically reclaimed later,
+    via ``nx catalog purge-trash --no-dry-run --confirm`` — but that
+    reclaim is NOT age-gated the way the phrase "retention window" might
+    suggest (nexus-8j1zx fix round): ``purge-trash``'s chunk sweep runs
+    on EVERY tombstoned document on its very next non-dry-run invocation,
+    regardless of how recently it was deleted; only the catalog row's
+    physical removal waits for ``--older-than-days``. So the manual-restore
+    path stays open only until the NEXT ``purge-trash --no-dry-run
+    --confirm`` run anywhere in the tenant, not until some age threshold
+    for THIS document. Existing links remain — use 'nx catalog links
+    --type ...' to find orphaned links.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -754,7 +770,16 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     # local catalog (nexus-i711w): backups were local-catalog-only.
     deleted = writer.delete_document(t)
     if deleted:
-        click.echo(f"Deleted: {t} ({entry.title}). Links preserved.")
+        click.echo(
+            f"Deleted: {t} ({entry.title}). Links preserved. "
+            "Content stops appearing in search once the engine's tombstone "
+            "read-filter is deployed (nexus-3ck2g); physical reclaim happens "
+            "via 'nx catalog purge-trash', whose chunk sweep is NOT age-gated "
+            "(it reclaims this doc's chunks on the very next --no-dry-run "
+            "--confirm run anywhere in the tenant, not after a retention "
+            "window for this doc specifically) — only the catalog row itself "
+            "waits for --older-than-days."
+        )
     else:
         click.echo(f"Not found: {t}")
 

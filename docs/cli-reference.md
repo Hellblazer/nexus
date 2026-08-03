@@ -1045,6 +1045,30 @@ Reconcile catalog tumblers against their T3 collections: reports *ghost* tumbler
 
 `--heal` enters an interactive loop per ghost: drop the tumbler, print the `nx store put` template that would repopulate it, skip, or quit. `--json` emits a machine-parseable `{collection: [{tumbler, title, doc_id}]}` map on stdout (CI-friendly). Collections that cannot be read are reported to stderr as SKIPPED, never silently folded in as "all ghosts" or "no ghosts" (nexus-ou4tb), and the exit code marks the verify incomplete.
 
+### nx catalog purge-trash
+
+```
+nx catalog purge-trash [--older-than-days N] [--dry-run/--no-dry-run] [--confirm] [--json]
+```
+
+Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks (nexus-3ck2g). `nx catalog delete` soft-tombstones: it stamps `deleted_at` on the catalog row and deliberately leaves the `document_chunks` manifest and the T3 chunk rows in place, so a manual restore stays possible and the engine's own `nexus.purge_trash` orphan predicate (a manifest row exists but no live parent document does) still has something to sweep. This verb is the caller for that engine-side sweep, which previously had none.
+
+Default is a read-only dry-run: a per-dim stranded-chunk count preview plus an aged-tombstone document count (`--older-than-days`, default 30, must be >= 1), computed engine-side and printed. Nothing is deleted in this mode, and `--json` emits the same counts as machine-parseable JSON.
+
+**Age semantics are asymmetric (nexus-8j1zx) — read before relying on "manual restore stays possible":** only the `documents_purged` count (the physical `catalog_documents` row delete) is gated by `--older-than-days`. The `chunks_<dim>_stranded` sweep is NOT age-gated at all — every currently-tombstoned document's orphaned manifest-backed chunks are swept on the very next `--no-dry-run --confirm` run, however recently that document was deleted. So a manual restore of a document's *content* stays possible only until the next mutating `purge-trash` run anywhere in the tenant, not until that document individually ages past the threshold; the catalog row itself may still be visible (not yet aged out) after its chunks are already gone. The default report's output visually separates the age-gated `documents_purged` line from the age-independent chunk-sweep section to make this explicit.
+
+Mutation is gated behind BOTH `--no-dry-run` AND `--confirm` (same gate as `nx catalog reconcile-stale`): `--no-dry-run` alone still reports only, and `--json` cannot be combined with `--no-dry-run` (the mutation path prints a plain-text report, not JSON).
+
+```
+nx catalog purge-trash                                    # dry-run count preview
+nx catalog purge-trash --json                              # CI-friendly preview
+nx catalog purge-trash --older-than-days 90 --no-dry-run --confirm   # reclaim
+```
+
+Unlike `reconcile-stale`, the catalog writer is constructed even for the default dry-run — the count preview is itself computed engine-side via `nexus.purge_trash(dry_run=true)`, not a classification derived from client-side reads. On an engine older than nexus-3ck2g (no `/v1/catalog/purge-trash` route yet), the command raises a clear error naming the required engine release rather than silently no-op'ing.
+
+Note: this verb reclaims storage; it is not the search-visibility fix for a deleted document. On engines carrying the nexus-3ck2g read-side tombstone filter, content stops appearing in search results as soon as `nx catalog delete` tombstones it — independent of when `purge-trash` later reclaims the underlying rows.
+
 ### nx catalog orphan-backfill
 
 ```

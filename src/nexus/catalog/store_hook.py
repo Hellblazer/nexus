@@ -544,10 +544,34 @@ def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
     catalog row + manifest survived with a stale ``chunk_count`` — a
     permanent ghost. For store_put-origin docs (``content_type ==
     'knowledge'`` with no ``file_path``) whose ``meta.doc_id`` matches
-    the deleted chunk's natural id, delete the catalog row too
-    (``delete_document`` cascades the manifest on both backends: the
-    local Catalog deletes ``document_chunks`` explicitly, the engine via
-    the fk-001 CASCADE).
+    the deleted chunk's natural id, delete the catalog row too via
+    ``delete_document``.
+
+    CORRECTED (nexus-3ck2g; this docstring previously claimed
+    ``delete_document`` cascades the manifest on both backends — false).
+    The engine soft-tombstones: it stamps ``deleted_at`` on the catalog row
+    and DELIBERATELY leaves ``document_chunks`` (the manifest) and the T3
+    chunk rows untouched, so a manual restore stays possible
+    (nexus-xavu7) and so ``nexus.purge_trash``'s own orphan predicate
+    (``EXISTS`` manifest row AND ``NOT EXISTS`` a live parent) still has
+    something to find later — cascading at tombstone time would strand
+    those chunks (manifest-less) forever, since ``purge_trash`` never
+    sweeps a manifest-less chunk (pinned by
+    ``CatalogDocumentCascadeTest`` / ``SoftDeleteTest``). The manifest and
+    T3 chunks survive until an operator runs ``nx catalog purge-trash
+    --no-dry-run --confirm`` (the engine's ``nexus.purge_trash(interval)``,
+    wired to a caller by nexus-3ck2g) — CAVEAT (nexus-8j1zx fix round):
+    that reclaim is NOT age-gated the way "past the retention window"
+    might suggest. ``purge_trash``'s chunk sweep runs on EVERY currently-
+    tombstoned document on the very next non-dry-run invocation, regardless
+    of how recently it was deleted; only the catalog row's physical delete
+    honors ``--older-than-days``. So "manual restore stays possible" holds
+    only until the NEXT ``purge-trash --no-dry-run --confirm`` run anywhere
+    in the tenant, not until some age threshold for this particular
+    document. Until the engine ships the RDR-156 read-side tombstone
+    filter (also nexus-3ck2g), the deleted content also stays fully
+    searchable in the interim — this cleanup only stops the CATALOG ROW
+    from resolving.
 
     Returns ``(tumbler, error)`` — ``("", "")`` when no matching
     store_put-origin row exists (nothing to clean), ``(tumbler, "")`` on
