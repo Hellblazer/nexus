@@ -43,11 +43,12 @@ TUMBLER = Tumbler.parse("1.1.1")
 
 class _Entry:
     def __init__(self, tumbler, title="Test Doc", index_state="complete",
-                 index_content_hash="deadbeef"):
+                 index_content_hash="deadbeef", file_path="src/nexus/foo.py"):
         self.tumbler = tumbler
         self.title = title
         self.index_state = index_state
         self.index_content_hash = index_content_hash
+        self.file_path = file_path
 
 
 class _FakeCat:
@@ -104,17 +105,58 @@ class TestCatalogVerifyCmd:
         assert "DAMAGED" not in result.output
         assert cat.verify_calls == ["1.1.1"]
 
-    def test_damaged_manifest_reports_missing_and_repair_hint(self, runner, monkeypatch):
+    def test_damaged_manifest_reports_missing_and_repair_hint(self, runner, monkeypatch, tmp_path):
+        """nexus-sj4a3: DAMAGED now exits 1, and a doc whose file_path
+        resolves to a real, existing file gets the `nx index <path>
+        --force` hint (with the real path, not a literal placeholder)."""
+        real_file = tmp_path / "thing.py"
+        real_file.write_text("# real file on disk\n")
         cat = _FakeCat(
-            _Entry(TUMBLER),
+            _Entry(TUMBLER, file_path=str(real_file)),
             verify_result={"referenced": 10, "present": 7, "missing": 3},
         )
         monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
         result = runner.invoke(main, ["catalog", "manifest-verify", "1.1.1"])
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert "Missing:     3" in result.output
         assert "DAMAGED" in result.output
         assert "--force" in result.output
+        assert str(real_file) in result.output
+
+    def test_damaged_manifest_without_file_path_gets_store_put_hint(self, runner, monkeypatch):
+        """A document with no indexable file_path (e.g. a `store put`-origin
+        note) must not print the misleading `nx index <path> --force` hint —
+        there is no path to re-index."""
+        cat = _FakeCat(
+            _Entry(TUMBLER, file_path=""),
+            verify_result={"referenced": 4, "present": 3, "missing": 1},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        result = runner.invoke(main, ["catalog", "manifest-verify", "1.1.1"])
+        assert result.exit_code == 1, result.output
+        assert "DAMAGED" in result.output
+        assert "--force" not in result.output
+        assert "reconcile" in result.output or "store put" in result.output
+
+    def test_damaged_manifest_with_stale_file_path_gets_reconcile_hint(
+        self, runner, monkeypatch, tmp_path,
+    ):
+        """nexus-sj4a3 code-review SUGGESTION: a file_path that no longer
+        exists on disk (moved/deleted since indexing) is exactly as
+        unusable as no file_path at all for `nx index <path> --force` — the
+        old check was truthiness-only (`if entry.file_path:`) and printed
+        an actionable-looking but broken hint for a stale path."""
+        missing_path = str(tmp_path / "does_not_exist_anymore.py")
+        cat = _FakeCat(
+            _Entry(TUMBLER, file_path=missing_path),
+            verify_result={"referenced": 4, "present": 3, "missing": 1},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        result = runner.invoke(main, ["catalog", "manifest-verify", "1.1.1"])
+        assert result.exit_code == 1, result.output
+        assert "DAMAGED" in result.output
+        assert "--force" not in result.output
+        assert "reconcile" in result.output or "store put" in result.output
 
     def test_json_output_shape(self, runner, monkeypatch):
         cat = _FakeCat(
@@ -123,7 +165,7 @@ class TestCatalogVerifyCmd:
         )
         monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
         result = runner.invoke(main, ["catalog", "manifest-verify", "1.1.1", "--json"])
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         payload = json.loads(result.stdout)
         assert payload == {
             "tumbler": "1.1.1",
@@ -132,6 +174,7 @@ class TestCatalogVerifyCmd:
             "missing": 1,
             "index_state": "indexing",
             "index_content_hash": "deadbeef",
+            "damaged": True,
         }
 
     def test_not_found_exits_nonzero(self, runner, monkeypatch):

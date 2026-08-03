@@ -3,7 +3,9 @@
 """Catalog integrity / verification commands for the ``nx catalog`` group (nexus-whh61.4).
 
 Carved out of ``commands.catalog``: ``audit-membership`` (audit owner/collection
-membership consistency) and ``verify`` (verify catalog vs T3, heal ghosts),
+membership consistency) and ``verify`` (reconcile catalog vs T3 on the
+RDR-108/180 chash identity — vanished collections / damaged manifests / lost
+documents — with ``--collection``-scoped healing),
 together with the private helpers they exclusively use
 (``_audit_membership_all``, ``_home_matches_root``, ``_source_uri_home_key``,
 ``_heal_ghosts``). Behaviour-preserving; ``register`` attaches both commands to
@@ -461,19 +463,654 @@ def _source_uri_home_key(uri: str) -> str:
 def _exit_incomplete_if_unreadable(unreadable: list[str]) -> None:
     """Fail the command when part of the store could not be verified.
 
-    nexus-ou4tb. Ghosts found is a SUCCESSFUL verification with findings and
-    keeps exit 0 (unchanged). Collections that could not be read mean the
-    verification is INCOMPLETE, which is a different thing, and a script that
-    only parses the ghosts map would otherwise read "no ghosts" as "clean".
-    The exit code is the one channel that carries this without changing the
-    documented stdout shape.
+    nexus-ou4tb / nexus-sj4a3. A finding (vanished collection, damaged
+    manifest, lost document) is a SUCCESSFUL verification with findings and
+    exits 1 through the separate ``click.exceptions.Exit(1)`` path. A check
+    or collection that could not be read AT ALL is a different thing —
+    INCOMPLETE — and a script that only parses the JSON findings would
+    otherwise read "nothing found" as "clean". The exit code (via
+    ``ClickException``, distinct from ``Exit(1)``) is the one channel that
+    carries this without changing the documented stdout shape.
     """
     if unreadable:
         raise click.ClickException(
-            f"verification INCOMPLETE: {len(unreadable)} collection(s) could "
-            f"not be read ({', '.join(sorted(unreadable))}). The results above "
-            "cover only the collections that could be probed."
+            f"verification INCOMPLETE: {len(unreadable)} check(s)/collection(s) "
+            f"could not be read ({', '.join(sorted(unreadable))}). The results "
+            "above cover only what could be probed."
         )
+
+
+def _class_a_vanished_collections(
+    cat: "CatalogReader", t3: object, unreadable: list[str],
+) -> tuple[list[dict], set[str]]:
+    """Class A: catalog collections with docs but absent from T3 entirely.
+
+    Mirrors ``doctor.py``'s ``_run_t3_vs_catalog`` predicate: a physical
+    collection the catalog still has documents for, that T3 no longer
+    knows about at all (deleted, renamed out from under the catalog).
+    Bypass-schema collections (``taxonomy__*``) are excluded, same as the
+    doctor check.
+
+    nexus-sj4a3 code-review CRITICAL (false-vanished storm):
+    ``HttpVectorClient.list_collections()`` catches any non-404
+    ``VectorServiceError`` (e.g. a 500/503/timeout from
+    ``/v1/vectors/stats``) and returns ``[]`` instead of raising — the
+    ``except Exception`` guard below never fires for that case. An empty
+    ``t3_names`` against a catalog that still has populated (non-bypass)
+    collections is therefore INDISTINGUISHABLE from that swallowed error
+    (and from a genuinely-empty T3 — a fresh or wiped store). Reporting
+    "every collection vanished" for either is exactly the "confident wrong
+    verdict" class this rewrite exists to kill, just in the false-DIRTY
+    direction instead of false-clean, so this ambiguity is folded into
+    *unreadable* (INCOMPLETE) instead. ``list_collections`` itself is NOT
+    modified — it is a 57-caller primitive whose other callers depend on
+    the empty-list-on-error contract.
+
+    Both catalog and T3 reads are exception-isolated (code-review
+    IMPORTANT): a mid-sweep failure must not propagate an unhandled
+    traceback out of ``verify``.
+
+    Returns ``(vanished, vanished_names)`` — the report rows and the bare
+    name set (so callers can exclude these docs from the Class C census,
+    and these collections from the Class B damaged list, without
+    double-reporting them).
+    """
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+    try:
+        doc_counts = cat.collection_doc_counts()
+    except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
+        unreadable.append("catalog:collection_doc_counts")
+        _log.warning("catalog_verify_collection_doc_counts_failed", error=str(exc))
+        return [], set()
+
+    try:
+        t3_names = {c["name"] for c in t3.list_collections()}
+    except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
+        unreadable.append("t3:list_collections")
+        _log.warning("catalog_verify_t3_list_collections_failed", error=str(exc))
+        return [], set()
+
+    populated = {
+        coll: count for coll, count in doc_counts.items()
+        if count > 0 and not coll.startswith(_BYPASS_SCHEMA_PREFIXES)
+    }
+
+    if not t3_names and populated:
+        # A swallowed non-404 VectorServiceError (list_collections() -> [])
+        # and a genuinely-empty T3 under a populated catalog look IDENTICAL
+        # from here — neither can be told apart from this call alone, and
+        # both deserve INCOMPLETE, never "N vanished collections".
+        unreadable.append("t3:list_collections:empty-with-populated-catalog")
+        _log.warning(
+            "catalog_verify_t3_empty_with_populated_catalog",
+            populated_collections=len(populated),
+        )
+        return [], set()
+
+    vanished: list[dict] = []
+    vanished_names: set[str] = set()
+    for coll, count in sorted(populated.items()):
+        if coll not in t3_names:
+            vanished.append({"physical_collection": coll, "doc_count": int(count)})
+            vanished_names.add(coll)
+    return vanished, vanished_names
+
+
+def _class_b_damaged_collections(
+    cat: "CatalogReader", unreadable: list[str],
+) -> tuple[list[dict], dict[str, int]]:
+    """Class B: per-collection manifest damage via the engine-side anti-join.
+
+    One round trip (``manifest_verify_all``) instead of N per-collection
+    probes. Non-vacuity (nexus-sj4a3, mirrors ``health.py``'s
+    ``_check_dangling_manifests``, doctor.py:3271-3277): a response naming
+    ZERO collections checked is not a clean bill of health — it means the
+    call could not actually compare anything — so it is folded into
+    *unreadable* (INCOMPLETE) rather than reported as "0 damaged".
+
+    Returns ``(damaged, referenced_by_collection)``. The second value is
+    the FULL per-collection ``referenced`` count from the raw response —
+    not just the damaged rows — so callers can detect the engine SQL's
+    NULL-``collection`` exclusion (nexus-sj4a3 critique CRIT-2; see
+    ``_class_c_unverifiable_rows``).
+    """
+    try:
+        result = cat.manifest_verify_all() or {}
+    except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
+        unreadable.append("catalog:manifest_verify_all")
+        _log.warning("catalog_verify_manifest_verify_all_failed", error=str(exc))
+        return [], {}
+
+    rows = result.get("collections") or []
+    if not rows:
+        unreadable.append("catalog:manifest_verify_all:0-collections")
+        return [], {}
+
+    damaged: list[dict] = []
+    referenced_by_collection: dict[str, int] = {}
+    for row in rows:
+        coll = row.get("collection", "?")
+        referenced = int(row.get("referenced", 0) or 0)
+        referenced_by_collection[coll] = referenced_by_collection.get(coll, 0) + referenced
+        missing = int(row.get("missing", 0) or 0)
+        if missing <= 0:
+            continue
+        present = row.get("present")
+        damaged.append({
+            "collection": coll,
+            "referenced": referenced,
+            "present": int(present) if present is not None else max(referenced - missing, 0),
+            "missing": missing,
+        })
+    return damaged, referenced_by_collection
+
+
+def _classify_never_chunked(e: object) -> str:
+    """Classify a zero-chunk, no-manifest doc for the ``never_chunked`` report.
+
+    nexus-sj4a3 substantive critique CRIT-1: RDR-145's "legitimate by
+    design" framing scopes the manifest-less ``store_put`` exemption to
+    ``knowledge__*`` documents with no indexable ``file_path``/
+    ``source_uri`` — an MCP-authored note has neither. Everything else
+    with ``chunk_count == 0`` and no manifest (dominantly ``code__*``/
+    ``docs__*``/``rdr__*`` docs indexed via ``nx index repo``, per
+    nexus-cdypx's own production evidence — code__1-20 alone: 2,286)
+    is ``unclassified``: a candidate data-loss population RDR-145 says
+    nothing about.
+    """
+    if (
+        e.physical_collection.startswith("knowledge__")
+        and not e.file_path
+        and not e.source_uri
+    ):
+        return "rdr145_exempt"
+    return "unclassified"
+
+
+def _never_chunked_breakdown(entries: list) -> dict:
+    """Per-collection breakdown of never-chunked docs (nexus-sj4a3 CRIT-1).
+
+    Replaces the old bare int: a reconciler cannot act on "N never-chunked
+    docs" without knowing which collections they live in and which
+    sub-class (RDR-145-exempt store_put note vs. unclassified candidate
+    data loss) each falls into.
+    """
+    rdr145_counts: dict[str, int] = {}
+    unclassified_counts: dict[str, int] = {}
+    for e in entries:
+        bucket = (
+            rdr145_counts if _classify_never_chunked(e) == "rdr145_exempt"
+            else unclassified_counts
+        )
+        bucket[e.physical_collection] = bucket.get(e.physical_collection, 0) + 1
+
+    def _rows(counts: dict[str, int]) -> list[dict]:
+        return [
+            {"physical_collection": c, "count": n}
+            for c, n in sorted(counts.items())
+        ]
+
+    rdr145_total = sum(rdr145_counts.values())
+    unclassified_total = sum(unclassified_counts.values())
+    return {
+        "total": rdr145_total + unclassified_total,
+        "rdr145_exempt": {"total": rdr145_total, "by_collection": _rows(rdr145_counts)},
+        "unclassified": {"total": unclassified_total, "by_collection": _rows(unclassified_counts)},
+    }
+
+
+def _census_lost_and_never_chunked(
+    cat: "CatalogReader", entries: list, unreadable: list[str],
+) -> tuple[list[dict], dict, dict[str, int]]:
+    """Class C: chunk_count vs manifest-length census (manifest_heal.py semantics).
+
+    ``lost``: chunk_count > 0 and the manifest has fewer rows than that
+    (includes a wholly absent manifest) — a REAL gap.
+    ``never_chunked``: chunk_count == 0 and no manifest, broken down by
+    :func:`_never_chunked_breakdown` (nexus-sj4a3 critique CRIT-1) — the
+    RDR-145 "legitimate by design" framing applies to the ``rdr145_exempt``
+    sub-class only. Exit stays neutral for BOTH sub-classes; classifying
+    ``unclassified`` further is nexus-cdypx's reconcile job, not verify's.
+
+    Also returns ``manifest_row_totals`` — total manifest ROWS (not
+    chunk_count) per ``physical_collection``, computed from this SAME
+    ``get_manifests`` call (no second round trip). Feeds
+    :func:`_class_c_unverifiable_rows` (critique CRIT-2): ``get_manifests``
+    reads ``catalog_document_chunks`` directly with no ``collection IS NOT
+    NULL`` filter (confirmed against
+    ``CatalogRepository.getManifestMany``), so this total includes
+    pre-backfill (NULL-``collection``) rows that ``manifest_verify_all``
+    silently excludes.
+
+    ``cat.get_manifests`` is exception-isolated (code-review IMPORTANT): a
+    mid-sweep failure must still let the report render — with whatever
+    Class A/B already computed — rather than propagate an unhandled
+    traceback, especially under ``--json``.
+    """
+    if not entries:
+        return [], _never_chunked_breakdown([]), {}
+
+    try:
+        manifests = cat.get_manifests([str(e.tumbler) for e in entries])
+    except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
+        unreadable.append("catalog:get_manifests")
+        _log.warning("catalog_verify_get_manifests_failed", error=str(exc))
+        return [], _never_chunked_breakdown([]), {}
+
+    lost: list[dict] = []
+    never_chunked_entries: list = []
+    manifest_row_totals: dict[str, int] = {}
+    for e in entries:
+        rows = manifests.get(str(e.tumbler), [])
+        manifest_row_totals[e.physical_collection] = (
+            manifest_row_totals.get(e.physical_collection, 0) + len(rows)
+        )
+        if e.chunk_count > 0 and len(rows) < e.chunk_count:
+            lost.append({
+                "tumbler": str(e.tumbler), "title": e.title,
+                "collection": e.physical_collection,
+                "chunk_count": e.chunk_count, "manifest_count": len(rows),
+            })
+        elif e.chunk_count == 0 and not rows:
+            never_chunked_entries.append(e)
+    return lost, _never_chunked_breakdown(never_chunked_entries), manifest_row_totals
+
+
+def _class_c_unverifiable_rows(
+    manifest_row_totals: dict[str, int],
+    referenced_by_collection: dict[str, int],
+    unreadable: list[str],
+) -> list[dict]:
+    """Detect pre-backfill (NULL-``collection``) manifest rows the engine's
+    anti-join silently excludes (nexus-sj4a3 substantive critique CRIT-2).
+
+    ``manifest_verify_all``'s SQL (``catalog-020-index-run-fence.xml``
+    changesets 3/4) excludes ``document_chunks`` rows with ``collection IS
+    NULL`` from "referenced" entirely — pre-backfill state, per the
+    changeset's own comment ("an un-backfilled document never reads as
+    damaged"). Such a row never surfaces as damaged, in either Class B or
+    Class C, no matter how genuinely missing the underlying chunk is.
+
+    Grouping-key check (per the design memo): ``document_chunks.collection``
+    is stamped from the owning doc's ``physical_collection`` at write time
+    (``CatalogRepository`` writers) and by ``manifest_backfill()`` for
+    pre-existing rows (``catalog-014-manifest-collection-stamp.xml``:
+    "using the same derivation as manifest_backfill(): the owning
+    document's physical_collection") — so grouping the client-side
+    manifest-row total by ``e.physical_collection`` (done in
+    ``_census_lost_and_never_chunked``) matches the key the engine groups
+    by, once a row IS backfilled. A per-collection delta between the
+    client's total (unfiltered — ``get_manifests`` has no NULL-collection
+    guard, confirmed against ``CatalogRepository.getManifestMany``) and the
+    engine's ``referenced`` count is therefore exactly the un-backfilled
+    row count for that collection, not a grouping-key mismatch.
+
+    Folds affected collections into *unreadable* (the collection's true
+    damage state cannot be determined) rather than reporting a finding —
+    this is an INCOMPLETE signal, distinct from vanished/damaged/lost.
+    """
+    unverifiable: list[dict] = []
+    for coll, client_total in sorted(manifest_row_totals.items()):
+        referenced = referenced_by_collection.get(coll, 0)
+        delta = client_total - referenced
+        if delta > 0:
+            unverifiable.append({"collection": coll, "unverifiable_rows": delta})
+            unreadable.append(f"catalog:manifest_verify_all:unbackfilled:{coll}")
+    return unverifiable
+
+
+def _emit_verify_report(
+    *,
+    total_docs: int,
+    vanished_collections: list[dict],
+    damaged: list[dict],
+    lost: list[dict],
+    never_chunked: dict,
+    unreadable: list[str],
+    json_out: bool,
+    exit_dirty: bool,
+    mode: str,
+    unverifiable_rows: list[dict] | None = None,
+    raise_on_dirty: bool = True,
+) -> None:
+    """Shared renderer for full-catalog and ``--collection``-scoped verify.
+
+    ``--json``'s stdout shape is the CI contract (nexus-sj4a3): a
+    ``summary`` block plus the finding lists. Deliberately BREAKS the
+    pre-existing ``{collection: [{tumbler, title, doc_id}]}`` shape — that
+    shape encoded the retired pre-RDR-108 identity this rewrite deletes.
+
+    ``mode`` (``"full"`` | ``"scoped"``) drives two mode-specific
+    semantics (nexus-sj4a3 substantive critique SIG-3). Full mode's
+    ``damaged`` rows are COLLECTION-granular (one ``manifest_verify_all``
+    round trip; no per-doc count exists), scoped mode's are per-DOCUMENT —
+    reusing one summary key (``damaged_docs``) for two different units was
+    the bug, so full mode's key is ``damaged_collections`` instead. The
+    clean-percent calculation follows the same split: scoped mode can
+    safely subtract damaged docs (a real per-doc count); full mode cannot
+    (there is no per-doc count to subtract) and prints an explicit caveat
+    instead of silently overstating cleanliness.
+    """
+    unverifiable_rows = unverifiable_rows or []
+    damaged_key = "damaged_docs" if mode == "scoped" else "damaged_collections"
+    summary = {
+        "docs": total_docs,
+        "vanished_collections": len(vanished_collections),
+        damaged_key: len(damaged),
+        "lost_docs": len(lost),
+        "never_chunked_docs": never_chunked["total"],
+        "unreadable_collections": len(unreadable),
+        "exit": 1 if exit_dirty else 0,
+    }
+    if unverifiable_rows:
+        summary["unverifiable_collections"] = len(unverifiable_rows)
+
+    if json_out:
+        payload = {
+            "summary": summary,
+            "vanished_collections": vanished_collections,
+            "damaged": damaged,
+            "lost": lost,
+            "never_chunked": never_chunked,
+            "unreadable": unreadable,
+        }
+        if unverifiable_rows:
+            payload["unverifiable_rows"] = unverifiable_rows
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        click.echo(f"Verified {total_docs} catalog document(s).")
+        if vanished_collections:
+            click.echo(f"\nVanished collections ({len(vanished_collections)}):")
+            for v in vanished_collections:
+                click.echo(
+                    f"  {v['physical_collection']}: {v['doc_count']} doc(s) — "
+                    "collection absent from T3"
+                )
+        if damaged:
+            click.echo(f"\nDamaged manifest(s) ({len(damaged)}):")
+            for d in damaged:
+                if "tumbler" in d:
+                    click.echo(
+                        f"  {d['tumbler']:<12} {d['title']}  "
+                        f"({d['missing']} of {d['referenced']} chash(es) missing)"
+                    )
+                else:
+                    click.echo(
+                        f"  {d['collection']}: {d['missing']} of "
+                        f"{d['referenced']} manifest chash(es) missing from T3"
+                    )
+        if lost:
+            click.echo(f"\nLost document(s) ({len(lost)}):")
+            for e in lost:
+                click.echo(
+                    f"  {e['tumbler']:<12} {e['title']}  ({e['collection']}, "
+                    f"{e['manifest_count']}/{e['chunk_count']} chunks in manifest)"
+                )
+        if never_chunked["total"]:
+            click.echo(
+                f"\nNever-chunked: {never_chunked['total']} doc(s) (report-only):"
+            )
+            exempt = never_chunked["rdr145_exempt"]
+            if exempt["total"]:
+                click.echo(
+                    f"  {exempt['total']} RDR-145 exempt (store_put-origin "
+                    "notes, legitimate by design):"
+                )
+                for row in exempt["by_collection"]:
+                    click.echo(f"    {row['count']:5d}  {row['physical_collection']}")
+            unclassified = never_chunked["unclassified"]
+            if unclassified["total"]:
+                click.echo(
+                    f"  {unclassified['total']} zero-chunk, unclassified — "
+                    "candidate data loss, see nexus-cdypx:"
+                )
+                for row in unclassified["by_collection"]:
+                    click.echo(f"    {row['count']:5d}  {row['physical_collection']}")
+        if unverifiable_rows:
+            click.echo(
+                f"\nUnverifiable manifest rows ({len(unverifiable_rows)} "
+                "collection(s) with pre-backfill rows the engine's anti-join "
+                "excludes — true damage state unknown):"
+            )
+            for u in unverifiable_rows:
+                click.echo(
+                    f"  {u['collection']}: {u['unverifiable_rows']} "
+                    "un-backfilled manifest row(s)"
+                )
+        if unreadable:
+            # nexus-ou4tb: a verify that could not read part of the store must
+            # say so. Reporting a clean verdict over collections/checks it
+            # never managed to probe is exactly the confident-but-blind
+            # verdict this bead exists to kill. To STDERR, always — --json's
+            # stdout is the documented machine-parseable CI contract.
+            click.echo(
+                f"WARNING: {len(unreadable)} check(s)/collection(s) could not be read and "
+                f"were SKIPPED (not verified): {', '.join(sorted(unreadable))}",
+                err=True,
+            )
+            click.echo(
+                "The results above cover only what could be read — "
+                "the skipped ones above are unverified."
+            )
+
+        vanished_doc_total = sum(v["doc_count"] for v in vanished_collections)
+        bad_docs = len(lost) + vanished_doc_total
+        if mode == "scoped":
+            # Scoped mode's `damaged` rows are per-document, a real count
+            # of bad docs to subtract. Full mode's are collection-granular
+            # (see the mode-caveat printed below) and cannot be.
+            bad_docs += len(damaged)
+        clean_pct = ((total_docs - bad_docs) * 100.0 / total_docs) if total_docs else 100.0
+        click.echo(
+            f"\nSummary: {total_docs} doc(s) examined; {clean_pct:.1f}% clean. "
+            f"{len(vanished_collections)} vanished collection(s) "
+            f"({vanished_doc_total} doc(s)), {len(damaged)} damaged "
+            f"{'document' if mode == 'scoped' else 'manifest'} report(s), "
+            f"{len(lost)} lost doc(s), {never_chunked['total']} "
+            "never-chunked (report-only)."
+        )
+        if mode == "full" and damaged:
+            click.echo(
+                "Note: damaged-manifest counts above are COLLECTION-granular "
+                "in full mode (one manifest_verify_all round trip has no "
+                "per-document count) and are excluded from the clean-"
+                "percentage above; use --collection <name> for per-document "
+                "detail."
+            )
+        if not exit_dirty and not unreadable:
+            click.echo("All good.")
+
+    _exit_incomplete_if_unreadable(unreadable)
+    if exit_dirty and raise_on_dirty:
+        raise click.exceptions.Exit(1)
+
+
+def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
+    """Full-catalog default mode: cheap, CI-gateable (nexus-sj4a3).
+
+    Class A (vanished collections) + Class B (damaged manifests, one
+    engine-side round trip) + Class C (chunk_count vs manifest census) —
+    see module docstring / design memo (T1 scratch 7afd8b6f) for the full
+    rationale. Docs whose ``physical_collection`` is a Class-A vanished
+    collection are counted under Class A only, never double-reported as
+    Class B ``damaged`` or Class C ``lost`` (critique SIG-4:
+    ``manifest_verify_all`` derives its collection list independently of
+    T3, so a genuinely-vanished collection's chashes all fail presence and
+    would otherwise ALSO surface as 100% damaged).
+
+    Also runs Class C's ``manifest_row_totals`` against Class B's
+    ``referenced_by_collection`` (critique CRIT-2) to detect pre-backfill
+    manifest rows the engine's anti-join silently excludes — skipped when
+    Class B itself already failed/returned nothing to compare against.
+    """
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+
+    all_entries = [
+        e for e in cat.all_documents(limit=0)
+        if not e.alias_of and e.physical_collection
+    ]
+    total_docs = len(all_entries)
+
+    unreadable: list[str] = []
+    vanished_collections: list[dict] = []
+    vanished_names: set[str] = set()
+    damaged: list[dict] = []
+    lost: list[dict] = []
+    never_chunked = _never_chunked_breakdown([])
+    unverifiable_rows: list[dict] = []
+
+    if all_entries:
+        t3 = _cat_cmd._make_t3()
+        vanished_collections, vanished_names = _class_a_vanished_collections(cat, t3, unreadable)
+        damaged, referenced_by_collection = _class_b_damaged_collections(cat, unreadable)
+        damaged = [d for d in damaged if d.get("collection") not in vanished_names]
+        census_entries = [
+            e for e in all_entries if e.physical_collection not in vanished_names
+        ]
+        lost, never_chunked, manifest_row_totals = _census_lost_and_never_chunked(
+            cat, census_entries, unreadable,
+        )
+        mv_all_incomplete = any(
+            u in (
+                "catalog:manifest_verify_all",
+                "catalog:manifest_verify_all:0-collections",
+            )
+            for u in unreadable
+        )
+        if not mv_all_incomplete:
+            unverifiable_rows = _class_c_unverifiable_rows(
+                manifest_row_totals, referenced_by_collection, unreadable,
+            )
+
+    exit_dirty = bool(vanished_collections or damaged or lost)
+    _emit_verify_report(
+        total_docs=total_docs,
+        vanished_collections=vanished_collections,
+        damaged=damaged,
+        lost=lost,
+        never_chunked=never_chunked,
+        unreadable=unreadable,
+        json_out=json_out,
+        exit_dirty=exit_dirty,
+        mode="full",
+        unverifiable_rows=unverifiable_rows,
+    )
+
+
+def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_out: bool) -> None:
+    """``--collection``-scoped mode: per-document detail (nexus-sj4a3).
+
+    Per doc: manifest via ``get_manifests``, T3 presence via
+    ``existing_ids`` (batched — the ou4tb fail-loud probe; never
+    ``HttpVectorCollection.get`` with its default ``limit=10``, nexus-hdx2u).
+    ``damaged`` = manifest-referenced chashes missing from T3 (per-doc, the
+    detail full mode's Class B cannot give); ``lost``/``never_chunked`` are
+    the same chunk_count-vs-manifest census as full mode, scoped to this
+    collection.
+
+    ``cat.get_manifests`` is exception-isolated (code-review IMPORTANT):
+    a failure must still render the (empty-detail) report rather than
+    propagate an unhandled traceback, especially under ``--json``.
+    """
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+
+    entries = [e for e in cat.list_by_collection(collection) if not e.alias_of]
+    total_docs = len(entries)
+
+    if not entries:
+        _emit_verify_report(
+            total_docs=0, vanished_collections=[], damaged=[], lost=[],
+            never_chunked=_never_chunked_breakdown([]), unreadable=[], json_out=json_out,
+            exit_dirty=False, mode="scoped",
+        )
+        return
+
+    unreadable: list[str] = []
+    try:
+        manifests = cat.get_manifests([str(e.tumbler) for e in entries])
+    except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
+        unreadable.append("catalog:get_manifests")
+        _log.warning(
+            "catalog_verify_get_manifests_failed", collection=collection, error=str(exc),
+        )
+        _emit_verify_report(
+            total_docs=total_docs, vanished_collections=[], damaged=[], lost=[],
+            never_chunked=_never_chunked_breakdown([]), unreadable=unreadable,
+            json_out=json_out, exit_dirty=False, mode="scoped",
+            raise_on_dirty=not heal,
+        )
+        return
+
+    all_chashes = sorted({
+        row.chash
+        for e in entries
+        for row in manifests.get(str(e.tumbler), [])
+        if row.chash
+    })
+    present: set[str] = set()
+    if all_chashes:
+        t3 = _cat_cmd._make_t3()
+        # nexus-ou4tb: existing_ids raises now instead of returning the empty
+        # set — a degraded service must not be able to produce a clean-
+        # looking integrity report. Isolated to this one collection: the
+        # scoped sweep still reports the parts of its own detail that don't
+        # depend on the T3 probe (lost/never_chunked below).
+        try:
+            present = t3.existing_ids(collection, all_chashes)
+        except Exception as exc:  # noqa: BLE001 — per-collection isolation; reported, not swallowed
+            unreadable.append(collection)
+            _log.warning(
+                "catalog_verify_collection_unreadable",
+                collection=collection, expected=len(all_chashes), error=str(exc),
+            )
+
+    damaged: list[dict] = []
+    lost: list[dict] = []
+    never_chunked_entries: list = []
+    if collection not in unreadable:
+        for e in entries:
+            rows = manifests.get(str(e.tumbler), [])
+            manifest_chashes = [r.chash for r in rows if r.chash]
+            missing_chashes = [c for c in manifest_chashes if c not in present]
+            if missing_chashes:
+                damaged.append({
+                    "tumbler": str(e.tumbler), "title": e.title,
+                    "referenced": len(manifest_chashes),
+                    "missing": len(missing_chashes),
+                })
+            if e.chunk_count > 0 and len(rows) < e.chunk_count:
+                lost.append({
+                    "tumbler": str(e.tumbler), "title": e.title,
+                    "collection": collection,
+                    "chunk_count": e.chunk_count, "manifest_count": len(rows),
+                })
+            elif e.chunk_count == 0 and not rows:
+                never_chunked_entries.append(e)
+
+    never_chunked = _never_chunked_breakdown(never_chunked_entries)
+    exit_dirty = bool(damaged or lost)
+    _emit_verify_report(
+        total_docs=total_docs,
+        vanished_collections=[],
+        damaged=damaged,
+        lost=lost,
+        never_chunked=never_chunked,
+        unreadable=unreadable,
+        json_out=json_out,
+        exit_dirty=exit_dirty,
+        mode="scoped",
+        # A successful interactive heal is the corrective action itself;
+        # skip the hard Exit(1) so a clean heal session reports success.
+        raise_on_dirty=not heal,
+    )
+
+    if heal and damaged and collection not in unreadable:
+        writer = _cat_cmd._get_catalog_writer()
+        try:
+            _heal_ghosts(cat, {collection: damaged}, writer=writer)
+        finally:
+            writer.close()
 
 
 @click.command("verify")
@@ -481,184 +1118,103 @@ def _exit_incomplete_if_unreadable(unreadable: list[str]) -> None:
     "--heal",
     is_flag=True,
     default=False,
-    help="For each ghost, prompt to drop the tumbler or print the "
-         "`nx store put` invocation that would repopulate it.",
+    help="For each damaged document, prompt to drop the tumbler or print "
+         "the `nx store put` invocation that would repopulate it. Requires "
+         "--collection (per-document detail only exists in scoped mode). "
+         "Incompatible with --json (interactive prompts would corrupt "
+         "JSON stdout).",
 )
 @click.option(
     "--collection",
     "-c",
     default="",
-    help="Restrict verification to a single physical_collection name.",
+    help="Restrict verification to a single physical_collection name "
+         "(per-document detail mode).",
 )
 @click.option(
     "--json",
     "json_out",
     is_flag=True,
     default=False,
-    help="Emit machine-readable JSON: {collection: [{tumbler, title, doc_id}]}.",
+    help="Emit the machine-readable CI contract shape (see below).",
 )
-
 def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
-    """Reconcile catalog tumblers against their T3 collection.
+    """Reconcile the catalog against T3 on the RDR-108/180 chash identity.
 
-    Reports *ghost* tumblers — entries in the catalog with no matching
-    row in ChromaDB. Ghosts most commonly survive from 4.9.7 / 4.9.8
-    installs where an oversize `store_put` silently truncated before
-    #244's guard landed. Fresh 4.9.9+ writes can no longer create new
-    ghosts.
+    Independent finding classes, all keyed on tumbler ->
+    document_chunks.chash -> T3 chunk id (never the retired pre-RDR-108
+    ``meta.doc_id``):
 
-    The sweep is cheap: one `col.get(ids=[...], include=[])` per 300-id
-    page — no ANN, no payload. Collections missing from T3 (deleted,
-    renamed) are treated the same as missing ids.
+    \b
+      vanished collections  a physical_collection with catalog docs that
+                             T3 no longer knows about at all (deleted,
+                             renamed). FINDING.
+      damaged manifests     a document's manifest references chashes T3
+                             does not have. Full mode reports this per
+                             COLLECTION (one engine-side round trip);
+                             ``--collection`` mode reports it per DOCUMENT.
+                             FINDING.
+      lost documents        chunk_count > 0 but the manifest has fewer
+                             rows than that (including no manifest at
+                             all) — a real gap. FINDING.
+      never-chunked         chunk_count == 0 and no manifest. Split into
+                             ``rdr145_exempt`` (knowledge__* store_put
+                             notes with no file_path/source_uri —
+                             legitimate BY DESIGN) and ``unclassified``
+                             (everything else — candidate data loss, see
+                             nexus-cdypx). Report-only, never a finding,
+                             never affects the exit code either way.
+
+    Exit code: 0 when clean (never-chunked alone still exits 0); 1 when any
+    vanished/damaged/lost finding exists. A check or collection that could
+    not be read at all (degraded T3, pre-fence engine, un-backfilled
+    manifest rows the engine's anti-join excludes) is INCOMPLETE, not
+    clean — that raises a distinct, louder ``ClickException`` regardless of
+    findings.
+
+    ``--json`` is the CI contract: ``{"summary": {...}, "vanished_collections":
+    [...], "damaged": [...], "lost": [...], "never_chunked": {...},
+    "unreadable": [...]}`` (plus ``"unverifiable_rows": [...]`` when
+    present). Full-catalog mode is cheap and meant to gate CI;
+    ``--collection`` mode trades that cheapness for per-document detail
+    (needed for ``--heal``). ``--heal`` cannot be combined with ``--json``.
 
     \b
     Examples:
-      nx catalog verify                                  # full sweep
-      nx catalog verify --collection knowledge__foo      # one collection
-      nx catalog verify --heal                           # interactive fix
+      nx catalog verify                                  # full sweep (CI)
       nx catalog verify --json                           # CI-friendly output
+      nx catalog verify --collection knowledge__foo      # per-doc detail
+      nx catalog verify --collection knowledge__foo --heal   # interactive fix
     """
-    import json as _json  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
+    if heal and json_out:
+        raise click.ClickException(
+            "--heal is interactive and cannot be combined with --json."
+        )
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     cat = _cat_cmd._get_catalog()
-    # nexus-xnz0o: replaced raw SQL with catalog API.
-    # Fetch docs for a single collection or all distinct collections.
+
     if collection:
-        coll_entries = cat.list_by_collection(collection)
-        all_entries = [(e, collection) for e in coll_entries]
-    else:
-        # Paginate through all documents.
-        all_entries = []
-        offset = 0
-        while True:
-            page = cat.all_documents(limit=200, offset=offset)
-            if not page:
-                break
-            for e in page:
-                if e.physical_collection and not e.alias_of:
-                    all_entries.append((e, e.physical_collection))
-            if len(page) < 200:
-                break
-            offset += 200
-
-    # Build rows: (tumbler, title, physical_collection, doc_id)
-    # Only entries with a non-empty meta.doc_id are verifiable; entries
-    # without doc_id are silently skipped (same semantics as original SQL
-    # ``WHERE metadata->>'doc_id' != ''``).
-    rows = [
-        (str(e.tumbler), e.title, coll, e.meta.get("doc_id"))
-        for e, coll in all_entries
-        if not e.alias_of and coll and e.meta.get("doc_id")
-    ]
-
-    if not rows:
-        if collection:
-            click.echo(f"No catalog tumblers with doc_id in {collection}.")
-        else:
-            click.echo("No catalog tumblers with doc_id metadata — nothing to verify.")
+        _verify_scoped(cat, collection, heal=heal, json_out=json_out)
         return
 
-    # Group by physical_collection → list[(tumbler, title, doc_id)]
-    by_collection: dict[str, list[tuple[str, str, str]]] = {}
-    for tumbler_str, title, coll, doc_id in rows:
-        by_collection.setdefault(coll, []).append((tumbler_str, title, doc_id))
-
-    total_tumblers = sum(len(v) for v in by_collection.values())
-    if not json_out:
-        click.echo(
-            f"Verifying {total_tumblers} catalog tumbler(s) across "
-            f"{len(by_collection)} collection(s)..."
+    if heal:
+        raise click.ClickException(
+            "nx catalog verify --heal needs per-document detail — scope the "
+            "sweep first: nx catalog verify --collection <name> --heal."
         )
-
-    t3 = _cat_cmd._make_t3()
-    ghosts_by_collection: dict[str, list[dict]] = {}
-    unreadable: list[str] = []
-    for coll, tumblers in sorted(by_collection.items()):
-        expected_ids = [doc_id for _, _, doc_id in tumblers]
-        # nexus-ou4tb: existing_ids raises now instead of returning the empty
-        # set, which is what stops this command reporting EVERY expected
-        # document as a ghost whenever the service is degraded. But a verify
-        # over many collections must still report the ones it could read —
-        # so an unreadable collection is recorded as unreadable and skipped,
-        # never silently folded in as "all ghosts".
-        try:
-            present = t3.existing_ids(coll, expected_ids)
-        except Exception as exc:  # noqa: BLE001 — per-collection isolation; reported, not swallowed
-            unreadable.append(coll)
-            _log.warning(
-                "catalog_verify_collection_unreadable",
-                collection=coll, expected=len(expected_ids), error=str(exc),
-            )
-            continue
-        ghosts = [
-            {"tumbler": t, "title": title, "doc_id": doc_id}
-            for t, title, doc_id in tumblers
-            if doc_id not in present
-        ]
-        if ghosts:
-            ghosts_by_collection[coll] = ghosts
-
-    if unreadable:
-        # nexus-ou4tb: a verify that could not read part of the store must say
-        # so. Reporting "0 ghosts" over collections it never managed to probe
-        # is exactly the confident-but-blind verdict this bead exists to kill.
-        #
-        # To STDERR, always. --json's stdout is a documented machine-parseable
-        # collection->ghosts map (test_verify_json_output); writing this to
-        # stdout would corrupt the JSON, and nesting the map under a new key
-        # to make room would break every existing parser. The shape stays; the
-        # warning goes where it cannot interfere.
-        click.echo(
-            f"WARNING: {len(unreadable)} collection(s) could not be read and "
-            f"were SKIPPED (not verified): {', '.join(sorted(unreadable))}",
-            err=True,
-        )
-
-    if json_out:
-        click.echo(_json.dumps(ghosts_by_collection, indent=2))
-        _exit_incomplete_if_unreadable(unreadable)
-        return
-
-    total_ghosts = sum(len(v) for v in ghosts_by_collection.values())
-    if not ghosts_by_collection:
-        verdict = "All good." if not unreadable else (
-            "No ghosts among the collections that COULD be read — "
-            "the skipped ones above are unverified."
-        )
-        click.echo(f"Summary: 0 ghosts / {total_tumblers} tumblers. {verdict}")
-        _exit_incomplete_if_unreadable(unreadable)
-        return
-
-    for coll, ghosts in sorted(ghosts_by_collection.items()):
-        click.echo(f"  {coll}: {len(ghosts)} ghost(s) found")
-        for g in ghosts:
-            click.echo(f"    {g['tumbler']:<12} {g['title']}  (doc_id {g['doc_id']})")
-
-    pct = (total_ghosts * 100.0) / max(total_tumblers, 1)
-    click.echo(
-        f"Summary: {total_ghosts} ghosts / {total_tumblers} tumblers ({pct:.1f}%)."
-    )
-    if not heal:
-        click.echo("Run with --heal for remediation options.")
-        return
-
-    writer = _cat_cmd._get_catalog_writer()
-    try:
-        _heal_ghosts(cat, ghosts_by_collection, writer=writer)
-    finally:
-        writer.close()
+    _verify_full(cat, json_out=json_out)
 
 
 def _heal_ghosts(
     cat: "CatalogReader",
-    ghosts_by_collection: dict[str, list[dict]],
+    damaged_by_collection: dict[str, list[dict]],
     *,
     writer: object = None,
 ) -> None:
-    """Interactive heal loop for `nx catalog verify --heal`.
+    """Interactive heal loop for `nx catalog verify --collection <c> --heal`.
 
-    Per ghost, prompt for one of:
+    nexus-sj4a3: damaged docs (manifest chash(es) missing from T3) replace
+    the retired ghost/doc_id shape. Per damaged doc, prompt for one of:
       d  drop the tumbler (catalog.delete_document)
       p  print the `nx store put` invocation that would repopulate it
       s  skip
@@ -666,10 +1222,13 @@ def _heal_ghosts(
     """
     w = writer if writer is not None else cat
     dropped = 0
-    for coll, ghosts in sorted(ghosts_by_collection.items()):
+    for coll, docs in sorted(damaged_by_collection.items()):
         click.echo(f"\nHealing {coll}:")
-        for g in ghosts:
-            click.echo(f"  {g['tumbler']} — {g['title']} (doc_id {g['doc_id']})")
+        for d in docs:
+            click.echo(
+                f"  {d['tumbler']} — {d['title']} "
+                f"({d['missing']} of {d['referenced']} chash(es) missing)"
+            )
             choice = click.prompt(
                 "    [d]rop tumbler / [p]rint put cmd / [s]kip / [q]uit",
                 default="s",
@@ -679,7 +1238,7 @@ def _heal_ghosts(
                 click.echo(f"\nHealed: {dropped} tumbler(s) dropped.")
                 return
             if choice == "d":
-                if w.delete_document(Tumbler.parse(g["tumbler"])):
+                if w.delete_document(Tumbler.parse(d["tumbler"])):
                     dropped += 1
                     click.echo("    dropped.")
                 else:
@@ -689,7 +1248,7 @@ def _heal_ghosts(
                 # template so the user can paste their source material.
                 click.echo(
                     f"    nx store put --collection {coll} "
-                    f"--title {g['title']!r} < source.md"
+                    f"--title {d['title']!r} < source.md"
                 )
             # anything else = skip
     click.echo(f"\nHealed: {dropped} tumbler(s) dropped.")

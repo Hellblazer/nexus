@@ -469,6 +469,10 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     to a skip — this is a diagnostic tool, not a background health check,
     so an unreachable engine or a pre-fence 404 must be visible as a
     failure, never reported as a false-clean result.
+
+    Exit codes: 0 clean; 1 DAMAGED (any manifest chash missing from T3,
+    nexus-sj4a3 — in both text and ``--json`` modes) or lookup/engine
+    failure.
     """
     cat = _get_catalog()
     t = _resolve_tumbler(cat, tumbler_or_title)
@@ -484,6 +488,7 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     referenced = int(counts.get("referenced", 0) or 0)
     present = int(counts.get("present", 0) or 0)
     missing = int(counts.get("missing", 0) or 0)
+    damaged = missing > 0
 
     if as_json:
         click.echo(json.dumps({
@@ -493,7 +498,10 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
             "missing": missing,
             "index_state": entry.index_state,
             "index_content_hash": entry.index_content_hash,
+            "damaged": damaged,
         }, indent=2))
+        if damaged:
+            raise click.exceptions.Exit(1)
         return
 
     click.echo(f"Tumbler:     {entry.tumbler}")
@@ -502,14 +510,27 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     click.echo(f"Referenced:  {referenced}")
     click.echo(f"Present:     {present}")
     click.echo(f"Missing:     {missing}")
-    if missing:
+    if damaged:
         click.echo(
             f"\n{missing} of {referenced} manifest chash(es) missing from "
             f"T3 — this document is DAMAGED."
         )
-        click.echo("Repair: nx index <path> --force")
-    else:
-        click.echo("\nOK — manifest fully present in T3.")
+        # nexus-sj4a3: only point at `nx index <path> --force` when the doc
+        # actually resolves to a filesystem path (a repo-indexed file) —
+        # a `store put`-origin note has no path to re-index, and a
+        # file_path that no longer EXISTS on disk (moved/deleted since
+        # indexing) is exactly as unusable for this hint (code-review
+        # SUGGESTION: truthiness alone let a stale path through with an
+        # actionable-looking but broken hint).
+        if entry.file_path and Path(entry.file_path).exists():
+            click.echo(f"Repair: nx index {entry.file_path} --force")
+        else:
+            click.echo(
+                "Repair: no indexable file_path on this document — try "
+                "`nx catalog reconcile` or re-`nx store put` the content."
+            )
+        raise click.exceptions.Exit(1)
+    click.echo("\nOK — manifest fully present in T3.")
 
 
 @catalog.command("search")
