@@ -310,6 +310,14 @@ Call `nx_plan_audit` MCP tool if ANY of:
 - Discovering plan has technical inaccuracies during execution
 - Plan assumptions violated by codebase reality
 
+## Foreground Verification (MANDATORY, fires regardless of dispatcher briefing)
+
+This applies whether or not your dispatch brief includes a VERIFY/foreground line — it is a property of this agent, not of the caller's template (nexus-dn9xs).
+
+- Before declaring completion, verify claimed test counts by re-running the single named verify command yourself. Do not report a count you have not just re-confirmed in this turn.
+- Never idle on `run_in_background` or `Monitor` waiting for your own verification to finish. A dispatched subagent cannot receive `Monitor` events or background-task-completion notifications — those route to the MAIN loop only, never to you. Waiting on either strands your turn with no way to resume (nexus-dn9xs, 2026-08-03: two developer dispatches stranded themselves this way in one session, each needing a manual nudge to recover).
+- SendMessage your write-back to the orchestrator BEFORE stopping. An idle turn with no message sent is indistinguishable from a stranded one.
+
 ## Completion Protocol (MANDATORY)
 
 You implement and self-verify, then HAND BACK. You do not run the reviewers (no Agent tool) and you do not commit, the caller owns the review-gate-commit tail. Before handing back:
