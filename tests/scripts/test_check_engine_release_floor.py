@@ -17,7 +17,8 @@ service, compare against the floor, exit non-zero (with a remedy) if stale.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -280,3 +281,591 @@ def test_incompatible_service_error_fails_loud(capsys: pytest.CaptureFixture[str
     err = capsys.readouterr().err
     assert "FLOOR CHECK FAILED" in err
     assert _floor_str() in err, "the message must name the required floor"
+
+
+# ── Paired-release mode (nexus-k1c08) ───────────────────────────────────────
+#
+# Under the paired-release choreography (Hal directive 2026-08-02, AGENTS.md
+# § Cutting a release step 0), a client release bumps REQUIRED_ENGINE_VERSION
+# to an engine tag whose deploy fires AT client-tag push. Pre-tag, "cloud
+# reports behind floor" is the EXPECTED state under that choreography, not the
+# i5c2u/b6qlf 9-day-drift red this gate exists to catch. --paired-deploy TAG
+# lets a caller assert "this specific tag is armed" -- but only when TAG
+# independently verifies as published (with the SPECIFIC deploy asset),
+# exactly pinned, newest, AND fresh (round-1 critique CRITICAL 1: (a)-(c)
+# alone are stable facts that never expire, so a reused --paired-deploy on a
+# LATER release would pass forever without a freshness bound). Any single
+# miss keeps the gate red. These tests patch the git/gh wrapper helpers
+# directly (_tag_exists_in_git / _paired_tag_published / _tag_age_hours)
+# rather than subprocess.run itself, mirroring how the pre-existing tests
+# patch probe_managed_service / newest_published_engine at the same seam;
+# the wrapper helpers themselves get dedicated hermetic/subprocess-mocked
+# tests further down.
+
+_PAIRED_TAG = f"engine-service-v{_floor_str()}"
+
+#: Round-1 fix: every test that needs to reach the cloud probe past all four
+#: preconditions must now also stub the freshness check -- a real (unmocked)
+#: call would run `git log` against this checkout's actual history for a tag
+#: that likely doesn't exist, which fails closed (rc 2) rather than reaching
+#: the probe. 1.0h is comfortably inside the default 72h window.
+_FRESH_AGE_HOURS = 1.0
+_STALE_AGE_HOURS = 200.0
+
+
+def test_paired_mode_accepts_cloud_behind_when_all_conditions_hold(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PAIRED MODE" in out
+    assert "0.0.1" in out
+    assert _floor_str() in out
+
+
+def test_paired_mode_tag_missing_from_git_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=False):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 1
+    assert "does not exist in git" in capsys.readouterr().err
+
+
+def test_paired_mode_git_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=gate._TAGS_UNAVAILABLE):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 2
+    assert "UNVERIFIABLE" in capsys.readouterr().err
+
+
+def test_paired_mode_gh_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(
+             gate, "_paired_tag_published",
+             return_value=(gate._TAGS_UNAVAILABLE, "could not invoke `gh`"),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 2
+    assert "UNVERIFIABLE" in capsys.readouterr().err
+
+
+def test_paired_mode_draft_release_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(
+             gate, "_paired_tag_published",
+             return_value=(False, f"release {_PAIRED_TAG} is still a DRAFT -- not published"),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 1
+    assert "DRAFT" in capsys.readouterr().err
+
+
+def test_paired_mode_missing_deploy_asset_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(
+             gate, "_paired_tag_published",
+             return_value=(
+                 False,
+                 f"release {_PAIRED_TAG} has no `{gate._REQUIRED_ASSET_NAME}` asset -- "
+                 "the binary conexus deploy actually consumes has not landed "
+                 "(assets present: nexus-pg-linux-amd64.txz)",
+             ),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert gate._REQUIRED_ASSET_NAME in err
+
+
+def test_paired_mode_wrong_pairing_floor_mismatch_fails(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    other_tag = f"engine-service-v{'.'.join(str(p) for p in _bump(REQUIRED_ENGINE_VERSION, 1))}"
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=other_tag
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "wrong pairing" in err.lower()
+
+
+def test_paired_mode_newer_tag_exists_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    newer = _bump(REQUIRED_ENGINE_VERSION, 1)
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
+        rc = gate.check_floor(url=_TEST_URL, newest=newer, paired_deploy=_PAIRED_TAG)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "newer engine tag" in err.lower()
+
+
+def test_paired_mode_unreachable_stays_rc2(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(
+             gate, "probe_managed_service",
+             side_effect=ManagedServiceUnreachable("connect timed out"),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "unreachable" in err.lower()
+    assert "PAIRED MODE" not in err
+
+
+def test_paired_mode_at_floor_passes_with_normal_message(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PAIRED MODE" not in out
+    assert "current" in out.lower()
+
+
+def test_paired_mode_above_floor_passes_with_normal_message(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    above = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] + 1)
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(
+             gate, "probe_managed_service",
+             return_value=_caps(".".join(str(p) for p in above)),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 0
+    assert "PAIRED MODE" not in capsys.readouterr().out
+
+
+def test_paired_mode_incompatible_managed_service_error_accepted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nexus.db.managed_endpoint import ManagedServiceError
+
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(
+             gate, "probe_managed_service",
+             side_effect=ManagedServiceError("release_version 0.0.1 below floor"),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 0
+    assert "PAIRED MODE" in capsys.readouterr().out
+
+
+def test_paired_mode_ack_uses_structured_deployed_version_not_full_sentence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round-1 critique SIGNIFICANT: probe_managed_service raises
+    ManagedServiceIncompatible (a ManagedServiceError) BEFORE check_floor's
+    own explicit comparison ever runs on the real path -- so the acceptance
+    ack must be built from that exception's structured deployed_version
+    field, not str(exc), or the ack embeds the whole remedy sentence via
+    !r."""
+    from nexus.db.managed_endpoint import ManagedServiceIncompatible
+
+    full_sentence = (
+        f"managed nexus service at {_TEST_URL} is release_version '0.1.17', "
+        f"below the minimum required v{_floor_str()}. Upgrade the managed "
+        "service, or upgrade/downgrade the nx client to match."
+    )
+    exc = ManagedServiceIncompatible(
+        full_sentence, deployed_version="0.1.17", required_version=_floor_str()
+    )
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", side_effect=exc):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PAIRED MODE" in out
+    assert "'0.1.17'" in out  # the clean structured version, via repr
+    # The full remedy sentence must NOT leak into the acknowledgment.
+    assert "Upgrade the managed service" not in out
+    assert "below the minimum required" not in out
+
+
+def test_paired_mode_acknowledgment_names_post_tag_verify(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
+        gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    out = capsys.readouterr().out
+    assert "post-tag verify" in out.lower()
+    assert "--paired-deploy" in out
+    assert "re-run this script" in out.lower()
+
+
+def test_paired_mode_rejects_non_engine_tag(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = gate.check_floor(
+        url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy="v9.9.9"
+    )
+    assert rc == 1
+    assert "engine-service-v" in capsys.readouterr().err
+
+
+def test_paired_mode_rejects_unparseable_tag(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = gate.check_floor(
+        url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION,
+        paired_deploy="engine-service-vSNAPSHOT",
+    )
+    assert rc == 1
+    assert "does not parse" in capsys.readouterr().err.lower()
+
+
+def test_default_mode_unaffected_by_paired_deploy_absence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression pin: paired_deploy=None (the implicit default) must take the
+    exact pre-k1c08 code path -- no PAIRED MODE text anywhere, same rc as
+    test_main_returns_nonzero_on_stale_engine."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        rc = gate.check_floor(url=_TEST_URL)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "PAIRED MODE" not in err
+    assert "FLOOR CHECK FAILED" in err
+
+
+def test_main_accepts_paired_deploy_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        rc = gate.main(["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG])
+    assert rc == 0
+    assert "PAIRED MODE" in capsys.readouterr().out
+
+
+def test_main_accepts_paired_tag_max_age_hours_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """The override flag must actually reach check_paired_preconditions --
+    verified by making it the ONLY thing that turns a stale-tag rejection
+    into an acceptance."""
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        rc_default_window = gate.main(["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG])
+        capsys.readouterr()
+        rc_overridden = gate.main([
+            "--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG,
+            "--paired-tag-max-age-hours", "500",
+        ])
+    assert rc_default_window == 1
+    assert rc_overridden == 0
+
+
+# ── Paired-tag freshness window (nexus-k1c08 fix round, critique CRITICAL 1) ─
+#
+# (a)-(c) are otherwise STABLE facts once armed: they stay true indefinitely
+# if no further engine tag is cut, so a reused --paired-deploy on a LATER
+# release (the promised post-tag VERIFY skipped, or the deploy silently
+# failed) would get the IDENTICAL acceptance forever without this bound --
+# reopening the i5c2u multi-release drift class, now mechanically approved.
+
+
+def test_paired_mode_fresh_tag_passes(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 0
+
+
+def test_paired_mode_stale_tag_fails_with_named_age(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"{_STALE_AGE_HOURS:.1f}h" in err
+    assert f"{gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:.1f}h" in err
+    assert "i5c2u" in err
+
+
+def test_paired_mode_age_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=gate._TAGS_UNAVAILABLE):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
+        )
+    assert rc == 2
+    assert "UNVERIFIABLE" in capsys.readouterr().err
+
+
+def test_paired_mode_stale_tag_override_flag_honored(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG,
+            paired_tag_max_age_hours=_STALE_AGE_HOURS + 1,
+        )
+    assert rc == 0
+
+
+def test_paired_mode_default_window_unchanged_at_72h() -> None:
+    """Pins the default so a future edit can't silently loosen/tighten it."""
+    assert gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS == 72.0
+
+
+# ── Paired-mode git/gh wrapper helpers, hermetic ────────────────────────────
+
+
+def test_tag_exists_in_git_hermetic(tmp_path) -> None:
+    """Same hermetic-tmp-repo pattern as test_newest_published_engine_parses_
+    the_tag_namespace -- decoupled from whatever tags this checkout has."""
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
+    run("git", "init", "-q")
+    (repo / "f").write_text("x")
+    run("git", "add", "f")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i")
+    run("git", "tag", "engine-service-v0.1.9")
+
+    assert gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=repo) is True
+    assert gate._tag_exists_in_git("engine-service-v9.9.9", repo_root=repo) is False
+
+
+def test_tag_exists_in_git_unavailable_when_git_missing(tmp_path) -> None:
+    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("no git")):
+        result = gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=tmp_path)
+    assert result is gate._TAGS_UNAVAILABLE
+
+
+def test_tag_age_hours_hermetic(tmp_path) -> None:
+    """A commit tagged ~now must report an age near zero and well under 72h."""
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
+    run("git", "init", "-q")
+    (repo / "f").write_text("x")
+    run("git", "add", "f")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i")
+    run("git", "tag", "engine-service-v0.1.9")
+
+    age = gate._tag_age_hours("engine-service-v0.1.9", repo_root=repo)
+    assert isinstance(age, float)
+    assert 0.0 <= age < 1.0
+
+
+def test_tag_age_hours_unavailable_for_unknown_tag(tmp_path) -> None:
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+
+    assert gate._tag_age_hours("engine-service-v9.9.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
+
+
+def test_tag_age_hours_unavailable_when_git_missing(tmp_path) -> None:
+    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("no git")):
+        result = gate._tag_age_hours("engine-service-v0.1.9", repo_root=tmp_path)
+    assert result is gate._TAGS_UNAVAILABLE
+
+
+def test_paired_tag_published_parses_gh_json() -> None:
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"isDraft": False, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
+        stderr="",
+    )
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is True
+    assert reason == ""
+
+
+def test_paired_tag_published_detects_draft() -> None:
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"isDraft": True, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
+        stderr="",
+    )
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is False
+    assert "DRAFT" in reason
+
+
+def test_paired_tag_published_detects_zero_assets() -> None:
+    fake = MagicMock(returncode=0, stdout=json.dumps({"isDraft": False, "assets": []}), stderr="")
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is False
+    assert gate._REQUIRED_ASSET_NAME in reason
+    assert "none" in reason.lower()
+
+
+def test_paired_tag_published_requires_specific_binary_asset() -> None:
+    """Round-1 critique CRITICAL 2: engine-service-release.yml's own comments
+    document that both its asset-producing matrices run fail-fast: false, so
+    a non-draft release can carry real assets (a PG bundle, sha256/cosign
+    sidecars) while shipping ZERO native binaries. Bare non-empty is too
+    weak -- only the specific asset conexus deploy consumes proves the
+    pairing is real."""
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "isDraft": False,
+            "assets": [
+                {"name": "nexus-pg-linux-amd64.txz"},
+                {"name": "nexus-pg-linux-amd64.txz.sha256"},
+            ],
+        }),
+        stderr="",
+    )
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is False
+    assert gate._REQUIRED_ASSET_NAME in reason
+    assert "nexus-pg-linux-amd64.txz" in reason  # names what WAS present
+
+
+def test_paired_tag_published_binary_asset_present_passes() -> None:
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "isDraft": False,
+            "assets": [
+                {"name": "nexus-pg-linux-amd64.txz"},
+                {"name": gate._REQUIRED_ASSET_NAME},
+                {"name": f"{gate._REQUIRED_ASSET_NAME}.sha256"},
+            ],
+        }),
+        stderr="",
+    )
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is True
+    assert reason == ""
+
+
+def test_paired_tag_published_missing_isdraft_key_fails_closed() -> None:
+    """Round-1 code-review IMPORTANT: `payload.get("isDraft")` defaulting
+    falsy on a missing key would silently treat 'gh's response shape
+    changed' as not-draft (a pass) -- must be unverifiable instead."""
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
+        stderr="",
+    )
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is gate._TAGS_UNAVAILABLE
+    assert "isDraft" in reason
+
+
+def test_paired_tag_published_gh_missing_fails_closed_with_remedy() -> None:
+    """Round-1 code-review IMPORTANT: the FileNotFoundError message must
+    state the remedy (install/auth gh), not just 'could not invoke'."""
+    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("gh not found")):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is gate._TAGS_UNAVAILABLE
+    assert "could not invoke" in reason
+    assert "gh auth login" in reason or "install" in reason.lower()
+
+
+def test_paired_tag_published_gh_nonzero_exit_fails_closed() -> None:
+    fake = MagicMock(returncode=1, stdout="", stderr="release not found")
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is gate._TAGS_UNAVAILABLE
+    assert "release not found" in reason
+
+
+def test_paired_tag_published_unparseable_json_fails_closed() -> None:
+    fake = MagicMock(returncode=0, stdout="not json", stderr="")
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert ok is gate._TAGS_UNAVAILABLE
+    assert "unparseable" in reason.lower()
+
+
+def test_paired_tag_published_anchors_gh_call_to_repo_root(tmp_path) -> None:
+    """Round-1 code-review IMPORTANT: unlike its git siblings
+    (_tag_exists_in_git, newest_published_engine), _paired_tag_published's
+    gh call previously omitted cwd= anchoring -- gh would silently resolve
+    whatever repo it auto-detects from the process's real cwd instead of
+    failing closed the way the git helpers do."""
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"isDraft": False, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
+        stderr="",
+    )
+    with patch.object(gate.subprocess, "run", return_value=fake) as mock_run:
+        gate._paired_tag_published(_PAIRED_TAG, repo_root=tmp_path)
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("cwd") == tmp_path
+
+
+def test_paired_tag_published_defaults_repo_root_to_module_parent() -> None:
+    fake = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"isDraft": False, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
+        stderr="",
+    )
+    expected_root = gate.pathlib.Path(gate.__file__).resolve().parent.parent
+    with patch.object(gate.subprocess, "run", return_value=fake) as mock_run:
+        gate._paired_tag_published(_PAIRED_TAG)
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("cwd") == expected_root

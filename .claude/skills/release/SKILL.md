@@ -21,10 +21,14 @@ uv run python scripts/check_engine_release_floor.py
 
 If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fails in TWO directions and the remedy differs:
 
-- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see AGENTS.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state: document the armed deploy in the release PR body, treat this red as acknowledged-paired, and VERIFY post-tag that cloud `/version` reaches the floor within the deploy window. Mechanized paired-mode for this script is nexus-k1c08; until it lands the acknowledgment is manual and explicit — never silent.
+- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see AGENTS.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state — mechanized via `--paired-deploy` (nexus-k1c08):
+  ```bash
+  uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
+  ```
+  Name the EXACT tag this release pairs with — never a guess. The flag accepts a below-floor cloud only when that tag independently verifies as (a) a published, non-draft GH release with assets (`gh release view` — a missing/failing `gh` fails the gate, it does not pass it), (b) exactly equal to `REQUIRED_ENGINE_VERSION`, and (c) the newest published `engine-service-v*` tag. Any single miss stays red with a named reason — this is a stricter, mechanized check, not a looser one. On acceptance it prints an explicit "PAIRED MODE" acknowledgment naming both versions and the POST-TAG VERIFY obligation. Do that verify: once the deploy lands, re-run the SAME command WITHOUT `--paired-deploy` — a still-behind cloud at that point is real drift, escalate loudly, do not re-arm the flag to silence it.
 - **a gated engine tag was never pinned** (`REQUIRED_ENGINE_VERSION` behind the newest published tag) → bump `REQUIRED_ENGINE_VERSION` to that tag (this alone also moves `PINNED_SERVICE_TAG`). This is the local-install delivery failure: cloud users get the deployed engine regardless, local-mode users get ONLY what this constant names, so an unpinned tag reaches nobody. When the unpinned tag carries engine halves of features whose CLIENT halves ship in THIS release, the bump into this release is mandatory, not optional — floor-lag ships a client whose pinned engine lacks the engine halves of its own features (the 7.1.0/v0.1.62 inversion).
 
-Re-run until it exits 0 (or the paired-release acknowledgment above is recorded).
+Re-run (without `--paired-deploy`) until it exits 0 — including the post-tag verify for a paired release.
 
 Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 

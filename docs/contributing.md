@@ -227,6 +227,21 @@ Every step below is **required**. Missing any one of them has caused problems in
    let releases ship against a stale, un-cloud-validated engine
    (nexus-i5c2u).
 
+   **Paired release** (Hal directive 2026-08-02): when this release bumps the
+   floor to an engine tag whose deploy fires AT client-tag push, cloud-behind
+   pre-tag is EXPECTED, not drift. Re-run with `--paired-deploy` naming the
+   exact tag (nexus-k1c08):
+   ```bash
+   uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
+   ```
+   The flag accepts a below-floor cloud only when the named tag independently
+   verifies as a published (non-draft, with assets) GH release, exactly equal
+   to `REQUIRED_ENGINE_VERSION`, and the newest published engine tag — any
+   single miss stays red with a named reason. On acceptance it prints a
+   "PAIRED MODE" acknowledgment and a POST-TAG VERIFY obligation: once the
+   deploy lands, re-run the same command WITHOUT `--paired-deploy` to confirm
+   convergence; escalate loudly if it is still behind at that point.
+
    The reverse direction — an engine deploying ahead of the client commits
    it requires — is a separate gate, `scripts/check_client_release_precondition.py`,
    run from the `engine-release` skill before a new `engine-service-v*` tag
