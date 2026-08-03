@@ -176,6 +176,10 @@ def test_doctor_pipeline_sweep_retired_on_service_handle():
         patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.config.get_credential", return_value="sk-key"),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
+        # entry point; the real behavior is unit-tested directly in
+        # tests/test_health_mcp_entrypoints.py.
+        patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
         patch("nexus.registry.RepoRegistry", return_value=mock_reg),
         # Vector-service reachability probe: pretend the service is up.
         patch("nexus.db.http_vector_client._get", return_value=[]),

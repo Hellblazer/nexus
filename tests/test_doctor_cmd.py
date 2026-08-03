@@ -72,11 +72,28 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
         patches.append(patch("nexus.config.get_credential",
                              return_value=cred))
     if callable(which):
+        # nexus-l2ku5 round 2: _resolve_mcp_binary calls the real
+        # shutil.which signature (``shutil.which(name, path=directory)``)
+        # to walk PATH per-entry; test doubles here predate that and only
+        # accept a single positional `name`. Shield them so every existing
+        # `which=` callable keeps working unchanged.
+        def _which_side_effect(name, *_args, **_kwargs):
+            return which(name)
         patches.append(patch("nexus.health.shutil.which",
-                             side_effect=which))
+                             side_effect=_which_side_effect))
     else:
         patches.append(patch("nexus.health.shutil.which",
                              return_value=which))
+    # nexus-l2ku5: `which` above is faked to a placeholder path for every
+    # binary name (including nx-mcp / nx-mcp-catalog) that doesn't
+    # correspond to a real MCP entry point on disk — spawning it for a
+    # real JSON-RPC handshake would fail for reasons unrelated to whatever
+    # this test actually exercises. Stub the probe green by default;
+    # tests/test_health_mcp_entrypoints.py owns the real handshake
+    # behavior (crash / timeout / wrong-name / absent-binary), unit-tested
+    # directly against `_check_mcp_entry_points` / `_probe_mcp_server`.
+    patches.append(patch("nexus.health._probe_mcp_server",
+                         return_value=(True, "stubbed for unrelated doctor test")))
     # RDR-155 P4a.2 (nexus-1k8s1): the cloud reachability probe targets the
     # nexus-service vector surface (nexus.db.http_vector_client._get), not a
     # chromadb.CloudClient construction. ``cloud_client`` keeps its kwarg name
@@ -376,6 +393,10 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
+        # entry point; the real behavior is unit-tested directly in
+        # tests/test_health_mcp_entrypoints.py.
+        patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
         patch(
             "nexus.repos.list_repos_dual",
             side_effect=lambda **_: list(mock_reg.all()),
@@ -411,6 +432,10 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
+        # entry point; the real behavior is unit-tested directly in
+        # tests/test_health_mcp_entrypoints.py.
+        patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
         patch(
             "nexus.repos.list_repos_dual",
             side_effect=lambda **_: list(mock_reg.all()),
