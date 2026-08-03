@@ -30,14 +30,13 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.1.2)
 
-- `agents/_shared/README.md`, `agents/_shared/RELAY_TEMPLATE.md`,
-  `agents/_shared/CONTEXT_PROTOCOL.md`, `skills/development/SKILL.md` —
+- `conexus/agents/_shared/README.md`, `conexus/agents/_shared/RELAY_TEMPLATE.md`, `conexus/agents/_shared/CONTEXT_PROTOCOL.md`, `conexus/skills/development/SKILL.md` —
   doc correction: "subagents cannot spawn subagents" was falsified by direct
   probes (2026-08-03, T2 [21371]); nested Agent dispatch works and is
   ledgered. The caller-orchestrates relay convention is unchanged; only the
   false capability claim is corrected. Doc-only — no behavioural guard
   waiting on this.
-- `hooks/scripts/expectations.sh` — BEHAVIOURAL: the SubagentStop
+- `conexus/hooks/scripts/expectations.sh` — BEHAVIOURAL: the SubagentStop
   completion guard fires for the first time ever (nexus-hbr4x: the old
   named-agent-morphology gate was structurally unsatisfiable — 18/18 and
   19/19 agents no_terminal). Now: per-type unmixed-ness gate + CONSUMED-verb
@@ -46,17 +45,17 @@ mechanize, it matters enough to ship.
   `expectations_undeclared` exits 2 on undeclared>0 (nexus-suuja lib half;
   rc contract: 0 clean / 1 recognized==0 blindspot / 2 deficit). Until this
   ships, completion enforcement remains dead in every running session.
-- `hooks/scripts/agent-dispatch-expect.sh` — BEHAVIOURAL: an absent/empty
+- `conexus/hooks/scripts/agent-dispatch-expect.sh` — BEHAVIOURAL: an absent/empty
   `subagent_type` now defaults to `general-purpose` instead of silently
   skipping the EXPECT row (nexus-a795d — the ledger-blindspot /
   false-UNDECLARED class).
-- `skills/orchestration/SKILL.md`, `agents/developer.md` — BEHAVIOURAL
+- `conexus/skills/orchestration/SKILL.md`, `conexus/agents/developer.md` — BEHAVIOURAL
   guidance: design-of-record brief template (nexus-4kp77), idempotent
   notification-handling rule (nexus-62wt7), VERIFY-line convention
   (nexus-pjzz8), post-suuja rc-contract text, parallel-orchestration
   discipline, and the developer agent's foreground-verification rule
   (nexus-dn9xs candidates a+b).
-- `hooks/scripts/pre_close_verification_hook.sh` — BEHAVIOURAL: exports
+- `conexus/hooks/scripts/pre_close_verification_hook.sh` — BEHAVIOURAL: exports
   `NX_T1_ALLOW_SHARED_FALLBACK=1` beside its `NX_SESSION_ID` export
   (nexus-6a19f) so the review-marker advisory keeps working once the
   nx-package half (nexus-f7xyq fail-loud T1 gate) ships. Skew window is
