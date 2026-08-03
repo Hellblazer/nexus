@@ -28,6 +28,6 @@ mechanize, it matters enough to ship.
 
 ---
 
-## Awaiting the next release (pinned: v7.1.0)
+## Awaiting the next release (pinned: v7.1.1)
 
-(empty — v7.1.0 shipped everything; add entries as develop drifts from the new pin)
+(empty — v7.1.1 shipped everything; add entries as develop drifts from the new pin)

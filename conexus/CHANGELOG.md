@@ -4,6 +4,11 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.1.1] - 2026-08-02
+
+Version-parity bump only — no plugin-surface changes. Ships alongside the CLI's
+engine-identity release (fresh installs pin engine-service-v0.1.62).
+
 ## [7.1.0] - 2026-08-02
 
 Pin advance activates the alignment-wave skill changes that were merged
