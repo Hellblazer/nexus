@@ -252,13 +252,30 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
     """
 
     def test_worktree_marker_path_with_clean_owner_root_is_skipped(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ):
         from nexus.doc_indexer import _catalog_markdown_hook
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03): on
+        # Linux, pytest's ``tmp_path`` lives under ``/tmp/``, matching
+        # ``_TEMP_DIR_PREFIXES`` — this test's owner root would look
+        # ephemeral too, the owner-root exception would exempt the
+        # registration, and the guard would never fire. Force a non-tmp-
+        # shaped prefix set so the owner root reads as clean on BOTH
+        # platforms — this test is about the WORKTREE MARKER, not the
+        # temp-prefix rule. Do not strip this patch; see nexus-u8n4r CI
+        # run 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
 
         cat = ActiveCatalog()
         corpus = "u8n4r-md-clean"
         clean_root = str(tmp_path / "clean-repo")
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(clean_root)
         cat.register_owner(corpus, "curator", repo_root=clean_root)
 
         md_path = (

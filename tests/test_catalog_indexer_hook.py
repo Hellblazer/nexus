@@ -970,11 +970,31 @@ class TestCatalogHookEphemeralPathGuard:
         file must be refused; a sibling clean file in the same run must
         still register (nexus-u8n4r's 4,002-doc production evidence)."""
         from nexus.indexer import _catalog_hook
+        from nexus.repo_identity import is_worktree_or_tempdir_path
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03): on
+        # Linux, pytest's ``tmp_path`` lives under ``/tmp/``, which itself
+        # matches ``_TEMP_DIR_PREFIXES`` — so this test's OWN owner root
+        # (derived from ``tmp_path``) would look ephemeral too, the
+        # owner-root exception would exempt the registration, and the
+        # guard would never fire (false green for the wrong reason). On
+        # macOS ``tmp_path`` is under ``/private/var/folders/...``,
+        # deliberately excluded from the predicate, so the same test
+        # passes there for a DIFFERENT reason. Force a non-tmp-shaped
+        # prefix set so the owner root reads as clean on BOTH platforms —
+        # this test is about the WORKTREE MARKER, not the temp-prefix
+        # rule. Do not strip this patch; see nexus-u8n4r CI run 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
         main_repo = tmp_path / "primary"
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(str(main_repo))
+
         polluted = main_repo / ".claude" / "worktrees" / "agent-x" / "docs" / "foo.md"
         polluted.parent.mkdir(parents=True)
         polluted.write_text("# ephemeral")

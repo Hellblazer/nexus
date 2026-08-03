@@ -82,10 +82,27 @@ class TestCatalogRegisterEphemeralPathGuard:
     """
 
     def test_absolute_worktree_path_under_known_repo_is_refused(
-        self, cat, tmp_path,
+        self, cat, tmp_path, monkeypatch,
     ):
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03):
+        # pytest's ``tmp_path`` lives under ``/tmp/`` on Linux, matching
+        # ``_TEMP_DIR_PREFIXES`` — the owner root here would look
+        # ephemeral too and the owner-root exception would exempt the
+        # registration, hiding the refusal this test exists to pin. Force
+        # a non-tmp-shaped prefix set so the owner root reads as clean on
+        # BOTH platforms. Do not strip this patch; see nexus-u8n4r CI run
+        # 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
         repo_root = tmp_path / "wt-repo-a"
         repo_root.mkdir()
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(str(repo_root))
         cat.register_owner(
             "wt-repo-a", "repo", repo_hash="wta00001", repo_root=str(repo_root),
         )
@@ -101,9 +118,20 @@ class TestCatalogRegisterEphemeralPathGuard:
         assert "error" in result
         assert "nexus-u8n4r" in result["error"]
 
-    def test_bare_relative_worktree_shaped_path_is_refused(self, cat, tmp_path):
+    def test_bare_relative_worktree_shaped_path_is_refused(
+        self, cat, tmp_path, monkeypatch,
+    ):
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence — see the sibling test above for
+        # the full explanation. Do not strip this patch.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
         repo_root = tmp_path / "wt-repo-b"
         repo_root.mkdir()
+        assert not is_worktree_or_tempdir_path(str(repo_root))
         cat.register_owner(
             "wt-repo-b", "repo", repo_hash="wtb00001", repo_root=str(repo_root),
         )

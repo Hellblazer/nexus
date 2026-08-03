@@ -277,15 +277,32 @@ class TestRegisterEphemeralPathGuard:
     """
 
     def test_absolute_worktree_path_under_known_repo_is_refused(
-        self, tmp_path, catalog_env,
+        self, tmp_path, catalog_env, monkeypatch,
     ):
         """Reproduces the exact C1 shape: file_path is absolute AND
         falls under a repo root that's already registered, so
         register_cmd's own relativization step strips the leading
         ``/`` before the old check ever ran."""
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03):
+        # pytest's ``tmp_path`` lives under ``/tmp/`` on Linux, matching
+        # ``_TEMP_DIR_PREFIXES`` — the owner root here would look
+        # ephemeral too and the owner-root exception would exempt the
+        # registration, hiding the refusal this test exists to pin. Force
+        # a non-tmp-shaped prefix set so the owner root reads as clean on
+        # BOTH platforms. Do not strip this patch; see nexus-u8n4r CI run
+        # 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
         cat = ActiveCatalog()
         repo_root = tmp_path / "wt-repo-a"
         repo_root.mkdir()
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(str(repo_root))
         cat.register_owner(
             "wt-repo-a", "repo", repo_hash="wta00001", repo_root=str(repo_root),
         )
@@ -307,15 +324,24 @@ class TestRegisterEphemeralPathGuard:
         assert "nexus-u8n4r" in result.output
 
     def test_bare_relative_worktree_shaped_path_is_refused(
-        self, tmp_path, catalog_env,
+        self, tmp_path, catalog_env, monkeypatch,
     ):
         """The caller passes an already-relative, worktree-shaped
         file_path directly (no absolute-path relativization step at
         all) — the guard must still reconstruct the absolute identity
         via ``owner_repo_root / fp`` and refuse."""
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence — see the sibling test above for
+        # the full explanation. Do not strip this patch.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
         cat = ActiveCatalog()
         repo_root = tmp_path / "wt-repo-b"
         repo_root.mkdir()
+        assert not is_worktree_or_tempdir_path(str(repo_root))
         cat.register_owner(
             "wt-repo-b", "repo", repo_hash="wtb00001", repo_root=str(repo_root),
         )
