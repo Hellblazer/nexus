@@ -27,6 +27,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -45,6 +46,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>When no catalog row exists for a chash, source_uri is null (missing
  *       catalog entry must not crash — graceful null, not 500).
  * </ul>
+ *
+ * <p>nexus-hdx2u E3: {@code /v1/vectors/store-get}'s (id-list) envelope additionally
+ * carries a {@code count} field — matched-LIVE rows before LIMIT — verified below in
+ * {@link #storeGet_countField_reflectsMatchedLiveRows_andSignalsTruncation}.
  *
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, FakeEmbedder, port 0.
  */
@@ -378,7 +383,7 @@ class BridgeAddressFieldsTest {
             "collection", COL, "ids", List.of(CHASH_WITH_URI)));
         assertThat(defResp.statusCode()).isEqualTo(200);
         Map<String, Object> defEnv = MAPPER.readValue(defResp.body(), MAP_TYPE);
-        assertThat(defEnv).containsKeys("ids", "documents", "metadatas", "chashes", "spans");
+        assertThat(defEnv).containsKeys("ids", "documents", "metadatas", "chashes", "spans", "count");
         assertThat(defEnv).doesNotContainKey("source_uris");
 
         // opt-in path
@@ -400,6 +405,186 @@ class BridgeAddressFieldsTest {
         assertThat(spans.get(0))
             .as("span must be the chash:<full_sha256> form from chunk_text_hash")
             .isEqualTo("chash:" + FULL_HASH_1);
+    }
+
+    /**
+     * E3 (nexus-hdx2u): /v1/vectors/store-get's get envelope carries an additive
+     * "count" field — matched-LIVE rows before LIMIT — so the client can detect a
+     * truncated page (count &gt; len(returned)) instead of silently treating a
+     * beyond-the-page id as absent. Existing envelope keys are untouched (additive).
+     */
+    @Test
+    void storeGet_countField_reflectsMatchedLiveRows_andSignalsTruncation() throws Exception {
+        String col = "knowledge__g5count__voyage-context-3__v1";
+        String c1 = dev.nexus.service.db.Chash.ofText("g5count-1").toHex();
+        String c2 = dev.nexus.service.db.Chash.ofText("g5count-2").toHex();
+        String c3 = dev.nexus.service.db.Chash.ofText("g5count-3").toHex();
+
+        post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", col,
+            "ids",        List.of(c1, c2, c3),
+            "documents",  List.of("count fixture one", "count fixture two", "count fixture three"),
+            "metadatas",  List.of(Map.of(), Map.of(), Map.of())));
+
+        // No explicit limit → defaultLimit resolves to ids.size() (3, nexus-hdx2u
+        // E1): the whole matched-LIVE set fits in one page, so no truncation is
+        // possible and count must equal the returned row count.
+        var fullResp = post("/v1/vectors/store-get", Map.of(
+            "collection", col, "ids", List.of(c1, c2, c3)));
+        assertThat(fullResp.statusCode()).isEqualTo(200);
+        Map<String, Object> fullEnv = MAPPER.readValue(fullResp.body(), MAP_TYPE);
+        assertThat(fullEnv).containsKeys("ids", "documents", "metadatas", "chashes", "spans", "count");
+        List<String> fullIds = (List<String>) fullEnv.get("ids");
+        assertThat(fullIds).hasSize(3);
+        assertThat(((Number) fullEnv.get("count")).intValue())
+            .as("no truncation possible (ids.size() <= limit): count == returned rows")
+            .isEqualTo(3);
+
+        // Explicit limit=2 < ids.size()=3 → LIMIT can bind, so the engine must run
+        // the real COUNT query: count reports the full matched-LIVE set (3) even
+        // though the page itself returns only 2 rows.
+        var truncResp = post("/v1/vectors/store-get", Map.of(
+            "collection", col, "ids", List.of(c1, c2, c3), "limit", 2));
+        assertThat(truncResp.statusCode()).isEqualTo(200);
+        Map<String, Object> truncEnv = MAPPER.readValue(truncResp.body(), MAP_TYPE);
+        List<String> truncIds = (List<String>) truncEnv.get("ids");
+        assertThat(truncIds).as("page is capped at the explicit limit").hasSize(2);
+        assertThat(((Number) truncEnv.get("count")).intValue())
+            .as("count reports the full matched-LIVE set, signalling truncation to the client")
+            .isEqualTo(3);
+        assertThat(((Number) truncEnv.get("count")).intValue())
+            .as("count must exceed the returned page size — this is the truncation signal")
+            .isGreaterThan(truncIds.size());
+    }
+
+    /**
+     * E1 regression pin (nexus-hdx2u fix-round, round-1 critique Significant-2):
+     * the literal bug shape — a store-get for MORE than 20 (the old hardcoded
+     * default) ids with NO explicit "limit" in the request body must return
+     * every one of them. A revert of {@code handleStoreGet}'s defaultLimit back
+     * to a fixed 20 (or any value &lt; 157) must fail this test.
+     */
+    @Test
+    void storeGet_moreThan20IdsNoExplicitLimit_returnsAll157() throws Exception {
+        String col = "knowledge__g5e1__voyage-context-3__v1";
+        int n = 157;
+        List<String> ids = new ArrayList<>(n);
+        List<String> docs = new ArrayList<>(n);
+        List<Map<String, Object>> metas = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            ids.add(String.format("%064x", i));
+            docs.add("e1 fixture " + i);
+            metas.add(Map.of());
+        }
+        post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+
+        // No "limit" key at all in the request body.
+        var resp = post("/v1/vectors/store-get", Map.of("collection", col, "ids", ids));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        Map<String, Object> env = MAPPER.readValue(resp.body(), MAP_TYPE);
+        List<String> returned = (List<String>) env.get("ids");
+        assertThat(returned)
+            .as("nexus-hdx2u E1: an absent limit must default to ids.size(), not a fixed 20")
+            .hasSize(n);
+        assertThat(((Number) env.get("count")).intValue()).isEqualTo(n);
+    }
+
+    /**
+     * E2 regression pin (nexus-hdx2u fix-round, round-1 critique Significant-2):
+     * the {@code MAX_BATCH_IDS} boundary — exactly 1000 ids is served normally,
+     * 1001 is rejected with 400 and the exact cap message.
+     */
+    @Test
+    void storeGet_maxBatchIdsBoundary_1000Serves_1001Rejects() throws Exception {
+        String col = "knowledge__g5e2__voyage-context-3__v1";
+
+        List<String> ids1000 = new ArrayList<>(1000);
+        for (int i = 0; i < 1000; i++) {
+            ids1000.add(String.format("%064x", i));
+        }
+        var okResp = post("/v1/vectors/store-get", Map.of("collection", col, "ids", ids1000));
+        assertThat(okResp.statusCode())
+            .as("exactly MAX_BATCH_IDS (1000) must be served, not rejected")
+            .isEqualTo(200);
+        Map<String, Object> okEnv = MAPPER.readValue(okResp.body(), MAP_TYPE);
+        assertThat(okEnv).containsKey("ids");
+
+        List<String> ids1001 = new ArrayList<>(ids1000);
+        ids1001.add(String.format("%064x", 1000));
+        var rejResp = post("/v1/vectors/store-get", Map.of("collection", col, "ids", ids1001));
+        assertThat(rejResp.statusCode())
+            .as("MAX_BATCH_IDS + 1 (1001) must be rejected with 400")
+            .isEqualTo(400);
+        assertThat(rejResp.body()).isEqualTo("{\"error\":\"too many ids (max 1000)\"}");
+    }
+
+    /**
+     * E3 empty-page regression pin (nexus-hdx2u fix-round 2, T1 338f7b9a — round-2
+     * code review): {@code COUNT(*) OVER()} rides on the RETURNED rows, so an
+     * offset that skips past the entire matched-live set has NO row to carry the
+     * window value. A revert to reading {@code count} only from the window
+     * function (dropping the empty-page {@code fetchCount} fallback in {@link
+     * PgVectorRepository#get}) must fail this test with {@code count == 0}
+     * instead of the true matched-live total.
+     */
+    @Test
+    void storeGet_offsetBeyondMatchedSet_returnsZeroRowsButTrueCount() throws Exception {
+        String col = "knowledge__g5e3__voyage-context-3__v1";
+        int n = 5;
+        List<String> ids = new ArrayList<>(n);
+        List<String> docs = new ArrayList<>(n);
+        List<Map<String, Object>> metas = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            ids.add(String.format("%064x", i));
+            docs.add("e3 fixture " + i);
+            metas.add(Map.of());
+        }
+        post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+
+        var resp = post("/v1/vectors/store-get", Map.of(
+            "collection", col, "ids", ids, "offset", 100));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        Map<String, Object> env = MAPPER.readValue(resp.body(), MAP_TYPE);
+        List<String> returned = (List<String>) env.get("ids");
+        assertThat(returned).as("offset beyond the matched set returns zero rows").isEmpty();
+        assertThat(((Number) env.get("count")).intValue())
+            .as("count must still report the true matched-live total, not 0 from an "
+                + "absent window-function row")
+            .isEqualTo(n);
+    }
+
+    /**
+     * E3 empty-page regression pin (nexus-hdx2u fix-round 2, T1 338f7b9a — round-2
+     * code review): same silent-wrong-answer shape as the offset case above, but
+     * triggered by {@code limit=0} instead of an out-of-range offset.
+     */
+    @Test
+    void storeGet_limitZero_returnsZeroRowsButTrueCount() throws Exception {
+        String col = "knowledge__g5e4__voyage-context-3__v1";
+        int n = 5;
+        List<String> ids = new ArrayList<>(n);
+        List<String> docs = new ArrayList<>(n);
+        List<Map<String, Object>> metas = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            ids.add(String.format("%064x", i));
+            docs.add("e3b fixture " + i);
+            metas.add(Map.of());
+        }
+        post("/v1/vectors/upsert-chunks", Map.of(
+            "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+
+        var resp = post("/v1/vectors/store-get", Map.of(
+            "collection", col, "ids", ids, "limit", 0));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        Map<String, Object> env = MAPPER.readValue(resp.body(), MAP_TYPE);
+        List<String> returned = (List<String>) env.get("ids");
+        assertThat(returned).as("limit=0 returns zero rows").isEmpty();
+        assertThat(((Number) env.get("count")).intValue())
+            .as("count must still report the true matched-live total, not 0 from an "
+                + "absent window-function row")
+            .isEqualTo(n);
     }
 
     /**

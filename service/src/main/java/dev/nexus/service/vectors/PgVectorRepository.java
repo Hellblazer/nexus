@@ -1327,31 +1327,71 @@ public final class PgVectorRepository {
         }
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
+        // nexus-hdx2u E3 (fix-round, round-1 critique Significant-1): matched-
+        // LIVE row count is a COUNT(*) OVER() WINDOW FUNCTION in the SAME
+        // SELECT statement as the page fetch — ONE statement, ONE snapshot.
+        // The original shape (two sequential statements: page SELECT then a
+        // separate ctx.fetchCount) each took a FRESH snapshot under READ
+        // COMMITTED (the documented understanding at
+        // CatalogRepository.java:4471-4478), so a concurrent committed write
+        // between them could make count > returned with NO real truncation —
+        // exactly the false positive the client's E4 raise must not see.
+        // Standard SQL processing order (FROM/WHERE -> window functions ->
+        // ORDER BY -> LIMIT/OFFSET) means the window function counts the
+        // FULL WHERE-matched set BEFORE LIMIT/OFFSET trims it to the page,
+        // and every row in the trimmed page carries the identical value —
+        // so any row's count is the answer, or 0 when the page is empty.
+        var countField = DSL.count().over();
+        long[] emptyPageCountHolder = {-1L};
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            org.jooq.Condition cond = ch.collection().eq(collection).and(ch.chash().in(ids))
+                                          .and(liveChunksCondition(ctx, ch));
+            var rows = ctx.select(ch.chash(), ch.chunkText(), ch.metadata(), countField)
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
                // this fetch-by-id read was structurally invisible to the nexus-3ck2g
                // searchWithTokens/hybridSearch fix and its gate.
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids))
-                      .and(liveChunksCondition(ctx, ch)))
+               .where(cond)
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
-               .fetch());
+               .fetch();
+            // nexus-hdx2u E3 (fix-round 2, T1 338f7b9a — round-2 code review):
+            // COUNT(*) OVER() rides on the RETURNED rows, so an empty page
+            // (offset beyond the matched set, or limit=0) has no row to carry
+            // the window value and matchedLive silently defaulted to 0 —
+            // wrong whenever the matched-live set is non-empty (probe:
+            // 5 live chunks, offset=100 -> count 0). Fall back to a real
+            // fetchCount with the IDENTICAL `cond` for the empty-page case
+            // only. The snapshot-race concern that motivated the window
+            // function (T1 fa2f73e6 / T2 [21384]) is MOOT here: there are
+            // no returned rows for a second-statement count to be
+            // inconsistent WITH — nothing to race against.
+            if (rows.isEmpty()) {
+                emptyPageCountHolder[0] = ctx.fetchCount(ch.table(), cond);
+            }
+            return rows;
+        });
 
         List<String> outIds = new ArrayList<>(result.size());
         List<String> outDocs = new ArrayList<>(result.size());
         List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
+        long matchedLive = emptyPageCountHolder[0] >= 0 ? emptyPageCountHolder[0] : 0L;
         for (var rec : result) {
             outIds.add(rec.value1());
             outDocs.add(rec.value2());
             JSONB meta = rec.value3();
             outMetas.add(fromJson(meta != null ? meta.data() : null));
+            matchedLive = rec.get(countField).longValue();
         }
+        Map<String, Object> envelope = new LinkedHashMap<>(
+            Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas));
+        // nexus-hdx2u E3: additive matched-LIVE-rows-before-LIMIT count, so the
+        // client can detect a truncated page (count > len(returned)) instead of
+        // silently treating a beyond-the-page id as absent. Single-statement/
+        // single-snapshot (see above) — never a race between two reads.
+        envelope.put("count", matchedLive);
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant,
-            new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
-            includeSourceUri);
+        return enrichGetEnvelope(tenant, envelope, includeSourceUri);
     }
 
     /** Backward-compat 5-arg overload of {@link #get} (source_uri not included). */

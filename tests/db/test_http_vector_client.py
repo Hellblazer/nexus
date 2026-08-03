@@ -845,6 +845,110 @@ class TestServiceCollectionStubGetWithIds:
         assert len(events) == 1
 
 
+class TestServiceCollectionStubGetCountField:
+    """nexus-hdx2u E4: engine-side ``count`` (E3, additive matched-LIVE-rows-
+    before-LIMIT) is consumed as ADVISORY by the ids-branch of
+    ``_ServiceCollectionStub.get`` — absent degrades to a once-per-process
+    warning (mirrors the ``update_chunks`` "missing"-omitted precedent);
+    present and larger than the returned page is a real truncation the
+    engine itself measured, and raises rather than warns."""
+
+    def _reset_count_unreported_flag(self, monkeypatch):
+        import nexus.db.http_vector_client as hvc
+
+        monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
+
+    def test_count_absent_warns_once_and_does_not_raise(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_count_unreported_flag(monkeypatch)
+        def fake_post(path, body, **kw):
+            # Pre-E3 engine: no "count" key at all.
+            return {"ids": ["a"], "documents": ["x"], "metadatas": [{}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with capture_logs() as logs:
+            result = stub.get(ids=["a"])
+        events = [e for e in logs if e["event"] == "store_get_count_unreported"]
+        assert len(events) == 1
+        assert result["ids"] == ["a"]
+
+    def test_count_unreported_warning_logs_once_per_process(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_count_unreported_flag(monkeypatch)
+        def fake_post(path, body, **kw):
+            return {"ids": ["a"], "documents": ["x"], "metadatas": [{}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with capture_logs() as logs:
+            stub.get(ids=["a"])
+            stub.get(ids=["a"])
+        events = [e for e in logs if e["event"] == "store_get_count_unreported"]
+        assert len(events) == 1
+
+    def test_count_present_and_matching_does_not_raise_or_warn(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_count_unreported_flag(monkeypatch)
+        def fake_post(path, body, **kw):
+            ids = body["ids"]
+            return {
+                "ids": ids, "documents": [f"d-{i}" for i in ids],
+                "metadatas": [{} for _ in ids], "count": len(ids),
+            }
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        with capture_logs() as logs:
+            result = stub.get(ids=["a", "b", "c"])
+        assert result["ids"] == ["a", "b", "c"]
+        assert [e for e in logs if e["event"] == "store_get_count_unreported"] == []
+
+    def test_count_greater_than_returned_raises(self, monkeypatch):
+        """A real truncation the engine itself measured: count reports more
+        matched-live rows than the page actually carried back. This is a
+        stronger signal than the pre-count heuristic and fails loud rather
+        than warning."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_count_unreported_flag(monkeypatch)
+        def fake_post(path, body, **kw):
+            # Engine reports 5 matched-live rows but the page only carries 2
+            # (e.g. limit=2 bound the page while 5 ids actually matched).
+            capped = body["ids"][:2]
+            return {
+                "ids": capped, "documents": [f"d-{i}" for i in capped],
+                "metadatas": [{} for _ in capped], "count": 5,
+            }
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i}" for i in range(5)]
+        with pytest.raises(VectorServiceError, match="matched-live"):
+            stub.get(ids=ids, limit=2)
+
+    def test_count_equal_to_returned_when_ids_partially_absent_does_not_raise(self, monkeypatch):
+        """count reflects the matched-LIVE set, not the requested set —
+        a store-get for ids where some were never written legitimately
+        returns fewer rows than requested without count exceeding
+        len(returned)."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        self._reset_count_unreported_flag(monkeypatch)
+        def fake_post(path, body, **kw):
+            # Only 2 of the 5 requested ids actually exist.
+            present = body["ids"][:2]
+            return {
+                "ids": present, "documents": [f"d-{i}" for i in present],
+                "metadatas": [{} for _ in present], "count": len(present),
+            }
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        ids = [f"id{i}" for i in range(5)]
+        result = stub.get(ids=ids)
+        assert result["ids"] == ids[:2]
+
+
 class TestNotImplementedMethods:
     def test_delete_collection_raises(self):
         client = HttpVectorClient()

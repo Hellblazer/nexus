@@ -116,6 +116,46 @@ _store_get_truncated_logged: bool = False
 _WHERE_GET_DEFAULT_LIMIT = 10
 
 
+#: nexus-hdx2u E4: log ``_ServiceCollectionStub.get``'s count-unreported
+#: notice once per process, not once per call — same log-once shape as
+#: ``_store_get_truncated_logged`` above (a full-repo run against a
+#: pre-E3 engine would otherwise emit this WARNING once per batch).
+_store_get_count_unreported_logged: bool = False
+
+
+def _warn_store_get_count_unreported(collection: str) -> None:
+    """Log-once notice: a ``store-get`` response omitted the engine-side
+    ``count`` field (nexus-hdx2u E3/E4).
+
+    ``count`` — matched-LIVE rows before LIMIT — is an ADDITIVE field a
+    pre-E3 engine, or a rolling-deploy window straddling the version
+    boundary, simply does not send. This is NOT gated behind a
+    ``REQUIRED_ENGINE_VERSION`` floor bump (that conversion — treating an
+    absent ``count`` as fail-loud rather than degrade — is a deliberate
+    future floor decision, not part of this fix): the client degrades to
+    the pre-existing ``_warn_store_get_truncated_at_limit`` heuristic,
+    which stays the only truncation signal on such an engine.
+    """
+    global _store_get_count_unreported_logged
+    if _store_get_count_unreported_logged:
+        _log.debug("store_get_count_unreported", collection=collection)
+        return
+    _store_get_count_unreported_logged = True
+    _log.warning(
+        "store_get_count_unreported",
+        collection=collection,
+        detail=(
+            "the engine's /v1/vectors/store-get response omitted the "
+            '"count" field (matched-LIVE rows before LIMIT) — a pre-'
+            "nexus-hdx2u-E3 engine, or a rolling deploy window straddling "
+            "the version boundary. Degrading to the pre-count "
+            "store_get_truncated_at_limit heuristic; no REQUIRED_ENGINE_"
+            "VERSION floor is enforced for this field yet. Logged once "
+            "per process — further occurrences in this run are DEBUG."
+        ),
+    )
+
+
 def _warn_store_get_truncated_at_limit(collection: str, limit_sent: int, requested: int) -> None:
     """Log-once notice: a ``store-get`` page came back with EXACTLY
     ``limit_sent`` rows for a batch that asked for more ids than that —
@@ -842,6 +882,25 @@ class _ServiceCollectionStub:
         returns), so truncation is only inferable from ``len(returned)
         == limit_sent < len(requested_batch)``.
 
+        nexus-hdx2u E4 — engine-side ``count`` (matched-LIVE rows before
+        LIMIT, additive per E3 — a single-statement/single-snapshot
+        ``COUNT(*) OVER()`` window function alongside the page SELECT, not
+        two sequential reads that could race under READ COMMITTED) is
+        consumed as ADVISORY, mirroring the :meth:`update_chunks`
+        "missing"-omitted degrade precedent
+        (:func:`_warn_update_chunks_missing_unreported`): a per-page
+        response that OMITS ``count`` (a pre-E3 engine, or a rolling
+        deploy window) logs a once-per-process warning
+        (:func:`_warn_store_get_count_unreported`) and falls back to the
+        heuristic tripwire above — no ``REQUIRED_ENGINE_VERSION`` floor is
+        bumped for this fix; treating an absent ``count`` as fail-loud is
+        a deliberate future floor decision, not this one. A response that
+        DOES report ``count`` SUPERSEDES the heuristic entirely (the
+        heuristic does not also run) — ``count > len(returned)`` is a real
+        truncation the engine itself measured (not a client-side guess)
+        and raises :class:`VectorServiceError` immediately rather than
+        warning; ``count <= len(returned)`` is silent success.
+
         nexus-hdx2u round-2 (two fail-loud boundaries, both probed
         empirically against the round-1 fix — no caller exercises
         either, and defining working-but-surprising semantics for them
@@ -905,8 +964,36 @@ class _ServiceCollectionStub:
                     body["include_source_uri"] = True
                 page = _post("/v1/vectors/store-get", body, tenant=self._tenant)
                 page_ids = page.get("ids", []) or []
-                if len(page_ids) == limit_sent and limit_sent < len(batch):
-                    _warn_store_get_truncated_at_limit(self._name, limit_sent, len(batch))
+                # nexus-hdx2u E4 (fix-round): engine-side count (E3, now a
+                # single-statement/single-snapshot COUNT(*) OVER() — see
+                # PgVectorRepository.get) is ADVISORY and, when present,
+                # SUPERSEDES the pre-count heuristic below rather than firing
+                # alongside it — a present count is authoritative (one
+                # snapshot with the rows it describes), so re-running the
+                # heuristic on top of it would be redundant at best and, if
+                # they ever disagreed, a confusing second signal. Absent
+                # (pre-E3 engine, or a rolling deploy window) is the ONLY
+                # case that falls back to the heuristic and logs the once-
+                # per-process count-unreported notice.
+                if "count" in page:
+                    reported_count = page["count"]
+                    if reported_count > len(page_ids):
+                        # A real truncation the engine itself measured (not a
+                        # client-side guess) — raises rather than warns,
+                        # unlike the update_chunks "missing"-omitted
+                        # precedent this mirrors, because an over-limit
+                        # count is not an expected condition.
+                        raise VectorServiceError(
+                            f"store-get for collection '{self._name}': engine "
+                            f"reports {reported_count} matched-live rows for "
+                            f"this batch but returned only {len(page_ids)} — "
+                            f"truncated at limit={limit_sent} (batch size "
+                            f"{len(batch)})."
+                        )
+                else:
+                    if len(page_ids) == limit_sent and limit_sent < len(batch):
+                        _warn_store_get_truncated_at_limit(self._name, limit_sent, len(batch))
+                    _warn_store_get_count_unreported(self._name)
                 out_ids.extend(page_ids)
                 out_docs.extend(page.get("documents", []) or [])
                 out_metas.extend(page.get("metadatas", []) or [])
