@@ -8,24 +8,14 @@ on:
     # duplication (including a live CA-3 hit, since release commits always
     # touch pyproject/uv.lock). main stays protected by its PR-required
     # checks; nothing lands on main outside a PR.
+    # Doc-only skipping is handled by the job-level `changes` predicate +
+    # pytest-gate fan-in (nexus-n0ful) — a workflow-level paths filter would
+    # leave required checks permanently "Expected — waiting" on doc-only
+    # PRs, and two overlapping skip mechanisms with different path sets was
+    # the incoherence flagged in review.
     branches: [develop]
-    # Skip the full matrix for changes that cannot affect test outcomes
-    # (docs + changelogs). Conservative on purpose: NOT a blanket **/*.md —
-    # plugin-structure tests validate skill/agent markdown frontmatter, so
-    # only clearly-non-code prose paths are listed. A push touching any code,
-    # config, or manifest still runs CI in full.
-    paths-ignore:
-      - 'CHANGELOG.md'
-      - 'conexus/CHANGELOG.md'
-      - 'README.md'
-      - 'docs/**'
   pull_request:
     branches: [main, develop]
-    paths-ignore:
-      - 'CHANGELOG.md'
-      - 'conexus/CHANGELOG.md'
-      - 'README.md'
-      - 'docs/**'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -63,6 +53,97 @@ jobs:
         # is read automatically.
         run: uvx ruff@0.15.18 check src/
 
+  changes:
+    # nexus-n0ful: doc-only fast lane predicate for the pytest job. Separate
+    # from CA-3 / write-seam-gate's dorny usage below on purpose — those want
+    # "always true on a develop push" as a safety net (see the :470-era
+    # comment on the CA-3 job); THIS predicate directly controls whether the
+    # expensive service-jar + pytest-shard matrix runs at all, so it must be
+    # ACCURATE, not conservative-toward-always-true. Getting it wrong the
+    # "safe" way (always true) would just make the fast lane a no-op for the
+    # 92%-of-runs push case (project_ci_cost_structure) — the whole point of
+    # this job.
+    #
+    # predicate-quantifier: 'every' — the docs_only output is true only when
+    # EVERY changed file matches the filter (a subset check), not when ANY
+    # file matches (dorny's default 'some'). That is the doc-only PREDICATE:
+    # "this diff touches nothing but docs/changelog/license."
+    #
+    # Strict initial path set (design doc, T1 scratch 34d6700b): docs/**,
+    # README.md, CHANGELOG*, conexus/CHANGELOG.md, LICENSE*. Root `*.md` was
+    # too broad — AGENTS.md (and the CLAUDE.md symlink to it) are TEST
+    # INPUTS (tests/test_engine_release_skill_parity.py and
+    # tests/daemon/test_lifecycle_gate.py read them at assert time), so an
+    # AGENTS.md-only push must still run pytest; only README.md qualifies as
+    # root-level prose. LICENSE* covers LICENSE and LICENSING.md, neither is
+    # a test input. conexus/** is DELIBERATELY excluded —
+    # tests/test_plugin_structure*.py and tests/hooks/** pin files under
+    # conexus/, so a conexus/** change is code as far as this predicate is
+    # concerned. A mechanically-derived conexus-only subset tier (option C's
+    # narrower cousin) was scoped as a follow-up, not implemented here — see
+    # the write-back for why.
+    #
+    # This predicate is now the SINGLE doc-skip mechanism — the former
+    # workflow-level `paths-ignore` under `on.push` / `on.pull_request` was
+    # removed in this same change (review finding: ~99.5% overlap, and the
+    # workflow-level form hangs required checks on doc-only PRs).
+    name: doc-only fast lane predicate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.gate.outputs.code }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          fetch-depth: 0  # dorny needs history to resolve the explicit base below
+
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        id: changes
+        with:
+          predicate-quantifier: 'every'
+          # PUSH events: diff against the previous commit on the SAME branch
+          # (dorny's documented "Long lived branches" pattern —
+          # base: ${{ github.ref }}), NOT the repo default branch — the
+          # opposite of the CA-3/write-seam-gate jobs' deliberately-unset
+          # base. An unset base resolves push diffs against main here
+          # (verified 2026-07-27, nexus-4k91k), which would make docs_only
+          # permanently false on develop (main and develop differ in ci.yml
+          # itself), i.e. this predicate would never fire for its primary
+          # target. github.ref (not github.event.before directly) is
+          # dorny's own recommended input for this — it delegates the
+          # merge-base / first-push edge cases to dorny's resolution logic
+          # instead of hand-rolling them against a raw before-SHA. PR events
+          # need no override — dorny already diffs against the PR base ref
+          # by default; pinning it explicitly documents that intent.
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.ref }}
+          filters: |
+            docs_only:
+              - 'docs/**'
+              - 'README.md'
+              - 'CHANGELOG*'
+              - 'conexus/CHANGELOG.md'
+              - 'LICENSE*'
+
+      - name: Derive the code-changed predicate (fail loud, never default-skip)
+        id: gate
+        # NON-VACUITY: a missing/malformed docs_only output must FAIL this
+        # job, not silently fall through to "code=true" (which would just
+        # waste CI cost, tolerable) or "code=false" (which would SKIP THE
+        # TEST MATRIX on an unproven predicate — never acceptable). The
+        # fan-in job (pytest-gate) additionally requires this job to have
+        # SUCCEEDED before it will accept a doc-only skip.
+        run: |
+          set -euo pipefail
+          docs_only="${{ steps.changes.outputs.docs_only }}"
+          case "$docs_only" in
+            true)  echo "code=false" >> "$GITHUB_OUTPUT" ;;
+            false) echo "code=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::paths-filter produced no usable docs_only output ('$docs_only') — cannot prove the doc-only predicate"
+              exit 1
+              ;;
+          esac
+
   service-jar:
     # nexus-eqxxh: provision the shaded service JAR for the pytest matrix.
     #
@@ -93,6 +174,20 @@ jobs:
     name: service jar (pytest substrate)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # nexus-n0ful: doc-only pushes/PRs need no engine substrate at all. Job-
+    # level skip (never a workflow-level paths: filter — that hangs required
+    # checks, see the pytest-gate job below for the fan-in that makes this
+    # skip branch-protection-safe).
+    #
+    # success() is explicit and load-bearing: a custom `if:` REPLACES the
+    # implicit "skip if any needed job didn't succeed" default rather than
+    # extending it, so without success() a `changes` job FAILURE (not just a
+    # doc-only skip) would leave this job's condition to fall through to
+    # false only by the coincidence of an empty outputs.code — success()
+    # makes the fail-loud-on-broken-predicate behavior explicit instead of
+    # accidental.
+    needs: changes
+    if: success() && needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
@@ -129,11 +224,23 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: pytest (Python ${{ matrix.python-version }})
+    name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
-    needs: service-jar
+    # nexus-n0ful: also needs `changes` directly (not just transitively via
+    # service-jar) so this job's own `if:` below can read the predicate —
+    # a job's `if:` can only see outputs of jobs listed in ITS OWN `needs:`.
+    #
+    # success() is explicit and load-bearing here too (see service-jar's
+    # comment above for why): without it, a custom `if:` REPLACES rather than
+    # extends the implicit "skip if a needed job failed" default, so a
+    # service-jar BUILD FAILURE would no longer auto-skip this job — it would
+    # instead run and fail later at the "Fetch the service jar" download
+    # step, which still fails the leg (and therefore the pytest-gate fan-in)
+    # but wastes a full job slot getting there.
+    needs: [changes, service-jar]
+    if: success() && needs.changes.outputs.code == 'true'
     env:
       # NON-VACUITY BACKSTOP, armed in the SAME change that provisions — which
       # is the whole point. tests/conftest.py::t2_service_env skips
@@ -166,20 +273,39 @@ jobs:
       # Left UNSET rather than set to a value: `none` would mean "provision no
       # T2 substrate", which is true of the CA-3 jobs below but emphatically
       # not of the unit suite.
-    # 45m: the post-job cache-save step counts toward this budget. At 20m a
+    # nexus-n0ful: 45m -> 25m. The 45m ceiling was sized for one process
+    # running the WHOLE unit suite (17:05 measured locally, 25-30m on
+    # runners, cache-save overhead on top — see the history below, kept for
+    # provenance). A 4-way duration-balanced shard puts each leg at roughly
+    # a quarter of that wall time; 25m is a ceiling with real headroom over
+    # the balanced-shard estimate, not a tight bound — a timeout is a
+    # CEILING, not a reservation, GitHub bills actual runtime either way.
+    #
+    # Review-earned arithmetic (why not 20m): the shard divides only
+    # RECORDED TEST time (~206s/leg, balanced via .test_durations.json). The
+    # fixed per-leg setup pipeline — JDK/GraalVM, PG bundle, uv sync, HF +
+    # docling cache restore (or a COLD FETCH on a cache miss), ci_warm_docling.py,
+    # service-jar download — is paid by EVERY shard independently, not
+    # divided by 4, and is exactly what drove both prior emergency bumps
+    # (nexus-cxsbs: cold model fetch; nexus-aqbrk: the engine arm). On top of
+    # that, ~200s of session-fixture/engine-boot overhead is visible in the
+    # 1025s local wall vs the 825s recorded-test sum. 25m covers a cold-cache
+    # leg with headroom; right-size down once real per-shard wall times exist
+    # from CI (not local) runs.
+    #
+    # History (pre-sharding, single-process full-suite budget): at 20m a
     # v5.4.2 release run timed out DURING the cache upload (tests had already
     # passed). Raised 25->30 (nexus-cxsbs) to absorb the HF/docling model cache
     # save (~hundreds of MB) and a cold-cache model fetch on the first run
     # after a uv.lock bump. Raised 30->45 (nexus-aqbrk) for the ENGINE arm,
     # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
     # arm and 25-30m on the runners — 3.12 was cancelled at 30m18s under the
-    # old cap. Since nexus-i711w EVERY leg is the engine arm, so 45m is now the
-    # ceiling for all of them rather than for the push leg alone. A timeout is
-    # a CEILING, not a reservation: GitHub bills actual runtime.
-    timeout-minutes: 45
+    # old cap.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
+        shard: [1, 2, 3, 4]
         # 3.13 RUNS ONLY AT THE MERGE BOUNDARY (Hal, 2026-07-28). i711w deleted
         # the SQLite arm, so every pytest leg now costs the engine arm's ~33.5
         # min; paying that twice on interior PRs bought little. `pytest (Python
@@ -382,8 +508,110 @@ jobs:
         # failure now means the artifacts are wrong and retrying cannot help.
         run: uv run python scripts/ci_warm_docling.py
 
-      - name: Run tests
-        run: uv run pytest tests/ -q --durations=25
+      - name: Run tests (shard ${{ matrix.shard }}/4)
+        # nexus-n0ful: pytest-split partitions the SAME collection every leg
+        # sees (addopts' `-m 'not integration and not slow'` applies
+        # uniformly) into 4 duration-balanced groups, keyed off the committed
+        # .test_durations.json. Refresh cadence (JSON has no comment syntax,
+        # so it lives here + pyproject.toml's pytest-split dev-dep comment):
+        # regenerate on demand with
+        #   uv run pytest tests/ -q --store-durations --durations-path=.test_durations.json
+        # when shard balance visibly drifts (one shard consistently the
+        # tail) — stale entries only degrade balance, never correctness:
+        # pytest-split falls back to the suite average for any test id
+        # missing from the file (new tests since the last refresh), and
+        # extra ids for tests since removed are simply ignored. No CI
+        # enforcement of freshness by design — this is a scheduling hint,
+        # not a correctness input. Serial execution WITHIN the shard is
+        # unchanged — this is matrix parallelism across runners, not
+        # -n/xdist in-process parallelism, so the no-parallel-tests
+        # invariant still holds.
+        run: |
+          uv run pytest tests/ -q --durations=25 \
+            --splits 4 --group ${{ matrix.shard }} \
+            --durations-path=.test_durations.json
+
+  pytest-gate:
+    # nexus-n0ful: required-check fan-in over the sharded `test` matrix.
+    #
+    # NAMING DECISION (documented prominently per the design doc's
+    # instruction — see the write-back for the full rationale): this job is
+    # named `pytest-gate`, NOT `pytest (Python 3.12)`. The old name cannot be
+    # preserved on a single non-matrix job once BOTH python-version and shard
+    # vary independently — develop's required check ("pytest (Python 3.12)")
+    # and main's two required checks ("pytest (Python 3.12)" AND "pytest
+    # (Python 3.13)") need per-version aggregation that a shard+version
+    # matrix's implicit `needs.test.result` cannot give without a second
+    # matrix dimension on THIS job too, which reintroduces the exact
+    # single-check-name problem it's meant to solve. A single clean name +
+    # a one-time required-contexts swap is simpler and more honest than a
+    # legacy name that would silently cover a different, broader set of
+    # matrix legs than the branch-protection UI's label implies.
+    # ACTION NEEDED (Hal, one-time, GitHub repo settings click): this change
+    # lands via a DIRECT PUSH to develop (nexus-n0ful), not a PR, so there is
+    # no "land it in the same PR" moment — the swap is a one-time
+    # repo-settings click Hal performs IMMEDIATELY AFTER this push lands:
+    #   develop: required context "pytest (Python 3.12)"          -> "pytest-gate"
+    #   main:    required contexts "pytest (Python 3.12)" AND
+    #            "pytest (Python 3.13)"                            -> "pytest-gate" (single)
+    # Note this changes main's gate SHAPE from two required checks to one,
+    # because the fan-in already aggregates the 3.13 legs at the merge
+    # boundary. Until the swap, any PR into develop or main shows the old
+    # context stuck "Expected — waiting" and cannot merge (admin direct
+    # pushes are unaffected). Verified live 2026-08-03 via
+    # `gh api repos/Hellblazer/nexus/branches/{develop,main}/protection`.
+    #
+    # NON-VACUITY: every branch below either explicitly PASSes on a proven
+    # condition or explicitly FAILs — there is no fallthrough default-pass.
+    # Empty/cancelled/skipped-without-proof shard results FAIL; an all-
+    # skipped shard matrix PASSes only when `changes` affirmatively proved
+    # the doc-only predicate (job-level skip, never a workflow-level
+    # `paths:` filter — those hang required checks on PRs that legitimately
+    # skip).
+    name: pytest-gate
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify the sharded pytest matrix (or its legitimate skip)
+        run: |
+          set -euo pipefail
+          changes_result="${{ needs.changes.result }}"
+          code="${{ needs.changes.outputs.code }}"
+          test_result="${{ needs.test.result }}"
+
+          echo "changes job result: $changes_result (code=$code)"
+          echo "test matrix result: $test_result"
+
+          if [ "$changes_result" != "success" ]; then
+            echo "::error::the doc-only predicate job (changes) did not succeed ($changes_result) — cannot prove whether the pytest matrix was needed, failing loud instead of guessing"
+            exit 1
+          fi
+
+          case "$code" in
+            true)
+              if [ "$test_result" != "success" ]; then
+                echo "::error::code changed but the pytest shard matrix reported '$test_result' instead of success"
+                exit 1
+              fi
+              ;;
+            false)
+              case "$test_result" in
+                success|skipped) ;;
+                *)
+                  echo "::error::doc-only diff but the pytest shard matrix reported '$test_result' instead of skipped/success"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::unrecognised code predicate '$code' from the changes job — failing loud instead of guessing"
+              exit 1
+              ;;
+          esac
+
+          echo "pytest-gate: PASS"
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

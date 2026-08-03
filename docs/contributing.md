@@ -186,8 +186,10 @@ https://github.com/Hellblazer/nexus/settings/branches:
 - **Rules** (apply to both `main` and `develop`):
   - Require a pull request before merging
   - Require status checks to pass before merging:
-    - `pytest (Python 3.12)`
-    - `pytest (Python 3.13)`
+    - `pytest-gate` (one required check on both `main` and `develop`; it fans
+      in over the sharded pytest matrix — the swap from the prior
+      `pytest (Python 3.12)` / `pytest (Python 3.13)` two-check shape
+      happened at nexus-n0ful)
   - Require branches to be up to date before merging
   - Do not allow force-pushes (the develop reset on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
 

@@ -16,8 +16,8 @@ production uses proves the layer, not the feature. This is the missing layer.
 
 WHY PYTEST AND NOT JUNIT. ``service-ci`` is not a required check on develop or main
 (nexus-hq9na), so a Java version of this would be advisory at merge — no gate at all for a
-class whose whole point is that its failures are silent. ``pytest (Python 3.12)`` IS
-required. Same reasoning as tests/catalog/test_collection_scoped_tables_schema_parity.py.
+class whose whole point is that its failures are silent. ``pytest-gate`` IS required.
+Same reasoning as tests/catalog/test_collection_scoped_tables_schema_parity.py.
 
 WHY IT SPAWNS THE JAR. Extracting ``Main`` into a testable ``Bootstrap.run()`` would cover
 more logic for less effort, but it cannot cover the EXIT PATH or the bare-JVM behaviour —

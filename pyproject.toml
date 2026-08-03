@@ -223,6 +223,16 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.0.0",
+    # nexus-n0ful: CI-latency sharding. Duration-balanced split over the
+    # committed .test_durations.json (see that file's header comment for the
+    # refresh cadence) — chosen over pytest-shard's hash-modulo split because
+    # the unit suite's ~18.8k tests are wildly uneven in cost (PDF-extraction
+    # and daemon-lifecycle tests run seconds; most unit tests run
+    # milliseconds), so a duration-blind split risks one shard absorbing the
+    # slow tail while siblings idle. Stale durations only degrade balance,
+    # never correctness — pytest-split falls back to the suite average for
+    # any test missing from the file (e.g. one added since the last refresh).
+    "pytest-split>=0.10",
     "ruff>=0.15.18",
     "syrupy>=4.0",
     "twine>=6.2.0",
