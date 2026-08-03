@@ -205,7 +205,17 @@ class TestRequiredEngineVersion:
         # pre-existing DB-side stochastic tail (p50 flat across versions,
         # tail already widening in 0.1.59/60), tracked as conexus-5moe;
         # Hal called the gate green 2026-08-02 on that evidence.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 61)
+        # ->(0,1,62) 2026-08-02 (nexus-koms3): engine-service-v0.1.62 deployed
+        # + cloud-gated (STEP-6 full green, nexus-bwulw client-path gate TRUE
+        # EXIT 0 both sides, sweep clean checked=65 healed=0 — nexus-0ehwe
+        # closing evidence, T2 [21359]). check_engine_release_floor exits
+        # clean. This bump also flips TestSmokeLegDiscriminatorDoesNotOutlive
+        # ItsPower and TestMvvAllowlistDoesNotOutliveItsTrigger below from
+        # their pre-fence green state to requiring the nexus-308ph build_ref
+        # discriminator (local-service-gate.sh) and the removed
+        # fresh-install-mvv.sh allowlist entry, respectively — both landed in
+        # the same change as this bump.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 62)
 
 
 class TestParseEngineVersion:

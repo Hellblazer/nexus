@@ -286,7 +286,17 @@ from __future__ import annotations
 #: NOT EXERCISED: no token rotation was performed on this deploy, so kjjab's
 #: ordering hazard was not tested in production. Rotation is safe from here
 #: because the host now runs 0.1.60; it was NOT safe before it.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 61)
+#:
+#: -> (0,1,62) 2026-08-02 (nexus-koms3): engine-service-v0.1.62 deployed +
+#: cloud-gated (STEP-6 full green, nexus-bwulw client-path gate TRUE EXIT 0
+#: both sides, sweep clean checked=65 healed=0 — nexus-0ehwe closing
+#: evidence, T2 [21359]). Deploy-before-floor-bump satisfied;
+#: check_engine_release_floor exits clean, no paired-mode ack needed this
+#: once. This bump also flips the nexus-308ph smoke-leg discriminator test
+#: (tests/test_engine_version.py TestSmokeLegDiscriminatorDoesNotOutliveIts
+#: Power) from its pre-fence green to requiring build_ref in
+#: tests/e2e/local-service-gate.sh — landed in the same change as this bump.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 62)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

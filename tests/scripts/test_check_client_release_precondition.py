@@ -87,10 +87,16 @@ class TestLogic:
         assert re.fullmatch(r"v\d+\.\d+\.\d+", tag), tag
         assert not tag.startswith("engine-service")
 
-    def test_v0161_precondition_is_registered(self):
-        """The row this script was born for: a62649ef gates the v0.1.61 deploy."""
-        pre = gate.ENGINE_CLIENT_PRECONDITIONS["engine-service-v0.1.61"]
-        assert any(c.startswith("a62649ef") for c in pre)
+    def test_default_engine_tag_derives_from_the_pinned_floor(self):
+        """The CLI default is DERIVED from REQUIRED_ENGINE_VERSION, never a
+        hand-typed literal (the v0.1.61 literal sat stale after the floor
+        moved — same drift class as nexus-b6qlf)."""
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        expected = "engine-service-v" + ".".join(
+            str(n) for n in REQUIRED_ENGINE_VERSION
+        )
+        assert gate._pinned_engine_tag() == expected
 
     def test_is_ancestor_real_git_smoke(self, hermetic_repo):
         """A root-ward commit is an ancestor of HEAD (hermetic repo — the
@@ -100,6 +106,33 @@ class TestLogic:
             capture_output=True, text=True,
         )
         assert gate.is_ancestor(proc.stdout.strip(), "HEAD")
+
+
+class TestStalePreconditionRowsDoNotOutliveTheFloor:
+    """The script's own contract: 'Delete rows once the floor moves past the
+    engine version that carried the requirement.' Mechanized, because the
+    prose version was violated the first time it mattered (the v0.1.61 row
+    survived the 2026-08-02 floor bump, pinned in place by its own test) —
+    the same stale-interim-exception shape
+    TestMvvAllowlistDoesNotOutliveItsTrigger and
+    TestSmokeLegDiscriminatorDoesNotOutliveItsPower exist to kill."""
+
+    def test_every_row_names_an_engine_ahead_of_the_floor(self):
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        for tag in gate.ENGINE_CLIENT_PRECONDITIONS:
+            if tag == "next":  # the about-to-be-cut sentinel is always ahead
+                continue
+            version = tuple(
+                int(n) for n in tag.removeprefix("engine-service-v").split(".")
+            )
+            assert version > REQUIRED_ENGINE_VERSION, (
+                f"ENGINE_CLIENT_PRECONDITIONS row {tag!r} is at or behind the "
+                f"pinned floor {REQUIRED_ENGINE_VERSION} — the deploy it gated "
+                "has already happened and every subsequent release supersets "
+                "its required commits. Delete the row (record it in the "
+                "docstring's pruned-rows list) per the module contract."
+            )
 
 
 class TestWiring:

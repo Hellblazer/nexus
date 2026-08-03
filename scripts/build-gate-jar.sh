@@ -27,6 +27,15 @@
 # The stamp is taken from REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py
 # — the ONE floor constant — so it cannot drift when the pin bumps.
 #
+# ALSO stamps build_ref (nexus-308ph): a per-run artifact-identity
+# discriminator, <git short sha>+<per-run nonce>. release_version alone
+# cannot distinguish this jar from a pinned release binary built against the
+# same floor — both bake the identical value. build_ref is unique to THIS
+# invocation, so only the artifact built by THIS run can ever match a value
+# THIS run expects (see tests/e2e/local-service-gate.sh's smoke leg, which
+# asserts the served /version's build_ref against the value it stamped).
+# Printed to stdout as "stamped build_ref=<value>" so a caller can capture it.
+#
 # The working tree is left CLEAN: release.properties is restored on exit,
 # including on failure or interrupt.
 #
@@ -47,6 +56,13 @@ assert m, 'REQUIRED_ENGINE_VERSION not parseable — fix the regex before stampi
 print('.'.join(m.groups()))
 ")
 
+# nexus-308ph: git short sha + a per-invocation nonce (epoch seconds + PID) —
+# unique to THIS run, so no future build (dev or release) can ever bake the
+# identical value.
+sha="$(cd "$repo_root" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+nonce="$(date +%s)-$$"
+build_ref="${sha}+${nonce}"
+
 backup="$(mktemp)"
 cp "$props" "$backup"
 # Restore on ANY exit path: a stamped release.properties left in the tree is a
@@ -56,10 +72,17 @@ cp "$props" "$backup"
 trap 'cp "$backup" "$props"; rm -f "$backup"' EXIT
 
 tmp="$(mktemp)"
-grep -v '^release_version=' "$props" > "$tmp"
+grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"
 printf 'release_version=%s\n' "$ver" >> "$tmp"
+printf 'build_ref=%s\n' "$build_ref" >> "$tmp"
 mv "$tmp" "$props"
 echo "stamped release_version=$ver"
+echo "stamped build_ref=$build_ref"
+# tests/e2e/local-service-gate.sh stamps its own nonce INLINE rather than
+# calling this script: its restore choreography differs (gate-owned cleanup
+# vs this script's byte-snapshot trap), and the gate must hold the expected
+# value in its own process for the smoke-leg compare. Intentional
+# duplication of the <sha>+<epoch>-<pid> shape — keep the two in step.
 
 cd "$repo_root/service"
 ./mvnw -q package -DskipTests "$@"
