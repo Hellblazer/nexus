@@ -693,7 +693,7 @@ nx catalog manifest-verify TUMBLER_OR_TITLE [--json]
 
 Verify one document's RUNFENCE manifest against T3 (nexus-5xn3k.6, design memo §4) — a single-document `manifest_verify` call reporting referenced/present/missing chash counts plus the document's index-run fence state (`index_state`). Unlike `nx doctor`'s corpus-wide `manifest_verify_all` sweep, this checks ONE document without a full scan — use it after `nx doctor` names a document as damaged, or any time you want to confirm a specific document's manifest is intact.
 
-Not to be confused with [`nx catalog verify`](#nx-catalog-verify) below (nexus-whh61.4, a pre-existing and unrelated command) — that one sweeps the whole catalog for *ghost* tumblers (entries with no matching T3 row); this one checks a single document's RUNFENCE fence state.
+Not to be confused with [`nx catalog verify`](#nx-catalog-verify) below (nexus-whh61.4, a pre-existing and unrelated command) — that one reconciles the whole catalog against T3 on the chash identity (vanished/damaged/lost finding classes); this one checks a single document's RUNFENCE fence state.
 
 Read-only — it rewrites nothing. Errors propagate rather than degrading to a skip: this is a diagnostic verb, so an unreachable engine or a pre-fence 404 surfaces as a failure, never a false-clean result. On `missing > 0` it prints a DAMAGED verdict and points at `nx index <path> --force` to repair.
 
@@ -1041,9 +1041,46 @@ Returns non-zero on any check failure. `--json` emits the per-check result for C
 nx catalog verify [--collection NAME] [--heal] [--json]
 ```
 
-Reconcile catalog tumblers against their T3 collections: reports *ghost* tumblers, catalog entries whose `meta.doc_id` has no matching row in T3. Ghosts most commonly survive from 4.9.7/4.9.8 installs where an oversize `store_put` silently truncated before the #244 guard landed; fresh writes cannot create new ones. The sweep is cheap (one batched id-existence probe per 300-id page; no ANN, no payload). Entries without a `doc_id` are skipped as unverifiable.
+Reconcile the catalog against T3 on the RDR-108/180 chash identity (rebuilt by nexus-sj4a3; the pre-rebuild version keyed on the retired pre-RDR-108 `meta.doc_id` and had collapsed to near-zero coverage). Every check walks `tumbler -> document_chunks.chash -> T3 chunk id`. Four independent finding classes:
 
-`--heal` enters an interactive loop per ghost: drop the tumbler, print the `nx store put` template that would repopulate it, skip, or quit. `--json` emits a machine-parseable `{collection: [{tumbler, title, doc_id}]}` map on stdout (CI-friendly). Collections that cannot be read are reported to stderr as SKIPPED, never silently folded in as "all ghosts" or "no ghosts" (nexus-ou4tb), and the exit code marks the verify incomplete.
+- **vanished collections** — a `physical_collection` with catalog docs that T3 no longer knows about at all (deleted, renamed). FINDING.
+- **damaged manifests** — a document's manifest references chashes T3 does not have. Full mode reports this per COLLECTION (one engine-side round trip); `--collection` mode reports it per DOCUMENT. FINDING.
+- **lost documents** — `chunk_count > 0` but the manifest has fewer rows than that (including none). FINDING.
+- **never-chunked** — `chunk_count == 0` and no manifest, split into `rdr145_exempt` (`knowledge__*` store_put notes with no file_path/source_uri — legitimate by design) and `unclassified` (candidate data loss, see nexus-cdypx and `nx catalog reconcile-stale`). Report-only; never affects the exit code.
+
+Exit code: 0 when clean (never-chunked alone still exits 0); 1 on any vanished/damaged/lost finding. A check or collection that could not be read at all (degraded T3, pre-fence engine, un-backfilled manifest rows) is INCOMPLETE, not clean — that raises a distinct, louder error regardless of findings.
+
+`--json` is the CI contract: `{"summary": {...}, "vanished_collections": [...], "damaged": [...], "lost": [...], "never_chunked": {...}, "unreadable": [...]}` (plus `"unverifiable_rows"` when present). Full-catalog mode is cheap and meant to gate CI; `--collection` mode trades that cheapness for per-document detail. `--heal` (requires `--collection`, incompatible with `--json`) prompts per damaged document: drop the tumbler, or print the `nx store put` invocation that would repopulate it.
+
+```
+nx catalog verify                                  # full sweep (CI)
+nx catalog verify --json                           # CI-friendly output
+nx catalog verify --collection knowledge__foo      # per-doc detail
+nx catalog verify --collection knowledge__foo --heal   # interactive fix
+```
+
+### nx catalog reconcile-stale
+
+```
+nx catalog reconcile-stale [--execute recount|tombstone-vanished|tombstone-orphaned] [--dry-run/--no-dry-run] [--confirm] [--json]
+```
+
+Classify — and optionally repair — catalog documents with unreliable `chunk_count`/manifest state (nexus-cdypx: 61.2% of production catalog docs carried `chunk_count == 0`, so catalog-aware routing ranked over a corpus where most docs had no retrievable content). The default invocation is a pure read-only census: it constructs NO catalog writer. Exit 0 means the report was produced; a nonzero exit (the INCOMPLETE guard shared with `nx catalog verify`) means part of the classification could not be trusted and none of the findings should be acted on. This command is not itself a correctness gate over the findings — `nx catalog verify` is that gate.
+
+Three mutation arms, each printing the classification report first, then its own target list, then acting only with `--no-dry-run --confirm` (the same double gate as `purge-trash`):
+
+- **recount** — resync `chunk_count` for zero-count docs whose manifest is actually non-empty. Restores the COUNT, not verified content; re-run `nx catalog verify` afterward.
+- **tombstone-vanished** — delete zero-manifest docs in vanished collections. Non-empty-manifest vanished docs are NEVER touched by this arm (nexus-3ck2g).
+- **tombstone-orphaned** — delete zero-count docs whose confirmed on-disk location is gone (file missing, or the owner's repo_root/worktree itself deleted). Docs whose absence could not be CONFIRMED (no repo_root, malformed tumbler, a non-file source_uri, or no provenance at all) are never in this arm's target set — see `unresolvable_provenance` in the report.
+
+`--json` emits the full structured classification on stdout (diagnostics on stderr) and refuses to combine with `--execute`.
+
+```
+nx catalog reconcile-stale                          # census
+nx catalog reconcile-stale --json                   # CI-friendly
+nx catalog reconcile-stale --execute recount --no-dry-run --confirm
+nx catalog reconcile-stale --execute tombstone-vanished --no-dry-run --confirm
+```
 
 ### nx catalog purge-trash
 
