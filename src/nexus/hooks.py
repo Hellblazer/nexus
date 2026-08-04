@@ -32,8 +32,32 @@ def _default_db_path() -> Path:
 
 
 def _open_t1():
+    """Open the process's T1 store for the SessionEnd flush, never honoring
+    the shared-scope escape hatch.
+
+    nexus-6a19f: ``NX_T1_ALLOW_SHARED_FALLBACK=1`` (see
+    :func:`nexus.db.t1.get_t1_database`) exists so a caller with no usable
+    lease for an explicit session id can opt back into the shared
+    CLI-dedicated scope for READING/WRITING markers (e.g.
+    ``conexus/hooks/scripts/pre_close_verification_hook.sh``). It must
+    NEVER extend to :func:`session_end_flush`'s ``t1.clear()`` call below --
+    clearing the shared scope on every lease-less SessionEnd would wipe
+    every OTHER session's markers accumulated there (the nexus-6a19f
+    Significant-1 finding: this was a live, undocumented, destructive bug
+    pre-f7xyq). Force the flag off for the duration of this call regardless
+    of what the ambient environment carries, so an explicit-but-unleased
+    session id always takes the fail-loud branch here -- ``t1`` stays
+    ``None``, and the ``if t1 is not None: t1.clear()`` guard below never
+    fires for it.
+    """
     from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    return get_t1_database()
+
+    prev = os.environ.pop("NX_T1_ALLOW_SHARED_FALLBACK", None)
+    try:
+        return get_t1_database()
+    finally:
+        if prev is not None:
+            os.environ["NX_T1_ALLOW_SHARED_FALLBACK"] = prev
 
 
 def _infer_repo() -> str:
@@ -101,7 +125,25 @@ def session_end_flush() -> str:
     constructor's fail-loud raise surfaces the gap and the flush is
     skipped.
 
-    Known race window
+    ``T1ServerNotFoundError`` frequency (nexus-6a19f, updated from the
+    original "known race window" framing below): since nexus-f7xyq this
+    raise is no longer a narrow teardown-race case -- it fires for the
+    ROUTINE split-brain scenario where this detached grandchild's
+    resolvable session id (``NX_SESSION_ID`` inherited via ``fork()``, or
+    the current transcript's ``CLAUDE_CODE_SESSION_ID``) has no fresh
+    published T1 lease, which is common whenever the owning MCP process
+    was spawned for a DIFFERENT (earlier or divergent) session than the
+    one this hook invocation resolves. This is expected, not exceptional:
+    a best-effort flush that skips under session-id divergence is the
+    correct, session-isolation-safe behavior -- the alternative (silently
+    reading/writing a different session's shared scope, the pre-f7xyq
+    bug) was worse. ``_open_t1()`` additionally forces
+    ``NX_T1_ALLOW_SHARED_FALLBACK`` off for this call (see its own
+    docstring) so this path can never be talked into the shared-scope
+    ``clear()`` below via that escape hatch.
+
+    Known race window (the original, narrower case this docstring used to
+    describe exclusively)
         On stdio transport the SessionEnd hook fires when stdin EOFs,
         which is the same event that drives the MCP server's lifespan
         ``async finally`` to relinquish its T1 lease record
@@ -156,6 +198,20 @@ def session_end_flush() -> str:
         # is unreachable (the grandchild can outlive the MCP lifespan).
         from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         flushed, expired = t2_index_write(_flush_and_expire)
+        # nexus-6a19f: `t1 is None` here covers every case where
+        # `_open_t1()` raised -- including, since nexus-f7xyq, an explicit
+        # session id with no usable lease. That is load-bearing, not
+        # incidental: pre-f7xyq, that same case returned the SHARED
+        # CLI-dedicated store (the fallback identity every bare `nx
+        # scratch` invocation on the machine reads/writes), and clear()
+        # below would have wiped that ENTIRE shared scope -- every
+        # session's markers, not just this one's -- on every lease-less
+        # SessionEnd. `_open_t1()` forces `NX_T1_ALLOW_SHARED_FALLBACK` off
+        # for its call, so that escape hatch can never route this
+        # particular clear() at the shared scope either. Only ever call
+        # clear() on a store this process can prove is scoped to ITS OWN
+        # session (`t1 is not None` means USE_INHERITED, USE_LEASED, or the
+        # genuinely-bare CLI-dedicated mint -- never the fail-loud branch).
         if t1 is not None:
             t1.clear()
     except (sqlite3.Error, OSError) as exc:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import pytest
 from click.testing import CliRunner
@@ -408,7 +409,30 @@ def test_default_project_dir_slugifies_cwd(
     monkeypatch.delenv("NX_CENSUS_PROJECT_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     got = default_project_dir()
-    assert got.name == str(tmp_path.resolve()).replace("/", "-")
+    assert got.name == re.sub(r"[^A-Za-z0-9]", "-", str(tmp_path.resolve()))
+    assert got.parent.name == "projects"
+
+
+def test_default_project_dir_encodes_dots_like_claude_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """nexus-bieuw: Claude Code maps '.' -> '-' in project-dir names, not just
+    '/' -> '-' (empirical: ``ls ~/.claude/projects/`` shows
+    ``-Users-hal-hildebrand-git-nexus`` for cwd ``/Users/hal.hildebrand/git/nexus``
+    — the dot in the username collapses to a dash exactly like a slash does).
+    A dotted directory component in cwd must therefore also become a dash,
+    not survive verbatim.
+    """
+    monkeypatch.delenv("NX_CENSUS_PROJECT_DIR", raising=False)
+    dotted = tmp_path / "hal.hildebrand" / "git.repo"
+    dotted.mkdir(parents=True)
+    monkeypatch.chdir(dotted)
+
+    got = default_project_dir()
+
+    assert "." not in got.name
+    assert "hal-hildebrand" in got.name
+    assert "git-repo" in got.name
     assert got.parent.name == "projects"
 
 

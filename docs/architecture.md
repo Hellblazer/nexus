@@ -823,6 +823,90 @@ Grouped by verb:
 
    See [MCP Tools vs Agents](exploration/mcp-vs-agents.md) for the full boundary rule, the stub-agent pattern, and guidance on where to place new capabilities. See [Plan-Centric Retrieval](plan-centric-retrieval.md) for how `nx_answer` + the plan library replaced the earlier retrieval-agent chain.
 
+### T1's three scopes and the CLI/MCP split-brain (nexus-aj564)
+
+The T1 session-scoping decision above describes a single session-id-scoped
+T1. In practice three distinct scopes exist simultaneously, and probes on
+2026-08-03 (T2 `nexus/subagent-reliability-findings-2026-08-03`, id 21371;
+homework id 21370) measured them diverging live:
+
+1. **MCP-tool T1** (the `mcp__plugin_conexus_nexus__scratch` tools) is scoped
+   to the session id **frozen into the MCP server process's env at spawn**.
+   Because the MCP server is a long-lived process, this scope survives
+   `/clear` and `/resume` within the same Claude app process — every later
+   harness session in that process keeps writing to the *original* spawn
+   session's scope. It is lost only when the MCP server itself restarts.
+   Agent-tool subagents inherit this scope regardless of nesting depth: a
+   probed sub-subagent (dispatched by a subagent, not by the top-level
+   orchestrator) wrote to and was visible in the same frozen scope as its
+   grandparent. Only depth 1 was directly probed; deeper nesting is inferred
+   rather than measured, but the mechanism (OS-level env inheritance at
+   process spawn, not session-aware routing) does not change with depth, so
+   the same result is expected at any depth.
+2. **`nx` CLI T1** (`nx scratch`) is scoped to the *current transcript
+   session* when a live `t1_session_lease.<sid>` exists under
+   `~/.config/nexus/`. What happens with no live lease now depends on
+   *how* the session id was resolved (nexus-f7xyq, closed, shipped in commit
+   c0568bcd, `src/nexus/db/t1.py:1613-1670`):
+   - An **explicit** session id — `NX_SESSION_ID` or
+     `CLAUDE_CODE_SESSION_ID` set — with no usable lease now **fails loud**,
+     raising `T1ServerNotFoundError`, rather than silently reading another
+     session's data. (`NX_T1_ALLOW_SHARED_FALLBACK=1` is a deliberate,
+     logged escape hatch used by `conexus/hooks/scripts/pre_close_verification_hook.sh`
+     to reach the shared CLI-dedicated scope on purpose.)
+   - A **bare** invocation — neither env var set, including when a session
+     id happens to resolve via the machine-wide `current_session` file —
+     is not making an explicit-session claim, so it still falls through to
+     a shared, CLI-dedicated identity by design; this is intentional
+     continuity for interactive `nx scratch` use, not the bug nexus-f7xyq
+     fixed. A forensic probe that supplies an explicit session id now
+     errors instead of silently returning another session's data; only a
+     bare-invocation probe still reads the shared identity.
+3. **`~/.config/nexus/current_session`** is a machine-wide, last-writer-wins
+   fallback *file* (read by `resolve_active_session_id()`'s tier-4 fallback,
+   not a callable of that name itself). A concurrent, unrelated Claude
+   session can own it at any given instant — it is not a per-conversation
+   value.
+
+**Split-brain, measured:** in the same instant, in the same conversation,
+`nx scratch list` (CLI path) returned 2 entries while the MCP scratch list
+(MCP path) returned 39. The 2 CLI entries were exactly the `review-completed`
+markers — that convention had silently adapted to the split (written via the
+CLI, read via the CLI by the pre-push hook) long before the mechanism behind
+the split was understood.
+
+**Correction of a previously recorded lesson:** "prior-session T1 is never
+searchable" is **true only for the CLI path**. The MCP scope survives
+`/clear` for the life of the MCP server process, so prior-conversation T1
+*is* readable via the MCP scratch tools within the same app process.
+
+The incident that originally produced the false lesson was **not** a scope
+mix-up — both the failed search and the eventual write landed in the *same*
+MCP scope (the failed search even found sibling `sj4a3`-tagged entries
+there). It was a **timing race**: the orchestrator searched T1 while the
+background agent was still running, found nothing yet, and hand-wrote a
+recovery note declaring the write-back lost. The agent's write landed
+moments later, in the same scope the search had already checked (T2
+`nexus/subagent-reliability-findings-2026-08-03` id 21371, Q1/Q3; T2 id
+21373 independently reproduces the same race class). The operative rule is
+therefore **"confirm the agent has actually terminated before declaring a
+write-back lost"** — an idempotent-notification-handling discipline — not
+"check which scope you're reading."
+
+**Practical guidance:**
+
+- `review-completed` markers go through the **`nx` CLI** — that is what the
+  pre-push hook reads. Writing them via the MCP scratch tool alone does not
+  satisfy the hook.
+- Design-of-record and write-back entries stored only via the **MCP scratch
+  tool** die with the MCP process. Anything that must survive an MCP restart
+  or be readable across sessions/processes belongs in T2 (`nx memory put`),
+  not T1.
+- Before declaring an agent's T1 write-back lost: confirm the agent has
+  actually terminated (not just that a search came back empty) — a search
+  that races a still-running agent is expected to find nothing, and that is
+  not evidence of loss.
+
 ## Heritage
 
 | Tool | What Nexus borrows |

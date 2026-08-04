@@ -31,7 +31,16 @@ import java.util.regex.Pattern;
  * ...)} must either self-guard via a {@code DELETED_AT.isNull()} WHERE in
  * the same statement (the tombstone/idempotent-restore writers) or sit on
  * a named exemption (the ONE sanctioned un-tombstone, {@code
- * upsertDocument}).
+ * upsertDocument}). A fifth and sixth check ({@link #scanRawChunksSites},
+ * {@link #scanTypedChunksSites}) cover the two OTHER shapes a
+ * {@code nexus.chunks_<dim>} read can structurally evade the first two
+ * checks entirely: a hand-built {@code chunksTable(dim)} SQL string
+ * (nexus-3ck2g, {@code searchWithTokens}/{@code hybridSearch}) and a typed
+ * {@code DimTables.ChunkTable} accessor (nexus-8j1zx, the get-family reads
+ * — found only in round-1 substantive critique of the FIRST fix, because
+ * a typed jOOQ statement carries neither a {@code chunksTable(} call nor a
+ * {@code CATALOG_DOCUMENTS}/{@code CATALOG_DOCUMENT_CHUNKS} token in the
+ * same statement as the read).
  *
  * <p>Model: {@link RawSqlGateTest} (same package) for the comment/string
  * neutralizer ({@link RawSqlGateTest#blank}) and the brace-depth
@@ -119,6 +128,60 @@ class TombstoneFilterGateTest {
     private static final List<String> FILTER_TOKENS = List.of(
         "DELETED_AT.isNull(", "liveParentDoc(", "liveDocument(", "documentExists(");
 
+    /**
+     * nexus-3ck2g E2: files whose raw {@code chunksTable(dim)}-string-built reads must
+     * carry the inline live_chunks predicate (E1). Unlike {@link #scanDocAndChunkSites}
+     * (which recognizes jOOQ-typed {@code .select(...)}/{@code CATALOG_DOCUMENT_CHUNKS}
+     * statements), {@code searchWithTokens}/{@code hybridSearch} build hand-written SQL
+     * text across MULTIPLE Java statements within one method (a {@code chunksTable(dim)}
+     * call, StringBuilder/String concatenation, the {@code rawVectorFetch(...)} chokepoint
+     * call) — structurally invisible to the token scan above, which is exactly why
+     * {@link #TARGET_FILES} could not see these two methods before this check existed
+     * (nexus-3ck2g bug: the regression shipped and stayed invisible to this whole class of
+     * gate). Method-scoped (WIDEN-style, not statement-scoped): each entry names a method
+     * whose body raw-reads {@code nexus.chunks_<dim>} via {@code chunksTable(dim)}.
+     */
+    private static final Map<String, List<String>> RAW_CHUNKS_READ_METHODS = Map.of(
+        "PgVectorRepository.java", List.of("searchWithTokens", "hybridSearch"));
+
+    /** Marker for a raw {@code chunksTable(dim)} table reference in the blanked source. */
+    private static final String CHUNKS_TABLE_CALL = "chunksTable(";
+    /** Marker for the inline live_chunks predicate call (E1's fix). */
+    private static final String LIVE_CHUNKS_PREDICATE_CALL = "liveChunksPredicate(";
+
+    /**
+     * nexus-8j1zx (found during nexus-3ck2g's round-1 substantive critique): the get-family
+     * reads ({@code get}, {@code getWhere}, {@code getEmbeddings}, {@code getAllMetadata})
+     * go through the TYPED {@link dev.nexus.service.vectors.DimTables.ChunkTable} accessor
+     * ({@code ch.table()}/{@code ch.chash()}/...) rather than the raw {@code chunksTable(dim)}
+     * string helper {@link #RAW_CHUNKS_READ_METHODS} polices, and never reference a
+     * {@code CATALOG_DOCUMENTS}/{@code CATALOG_DOCUMENT_CHUNKS} token in the SAME statement as
+     * the read (the typed live-chunks condition is a separate helper call) — structurally
+     * invisible to BOTH {@link #scanDocAndChunkSites} (keys off those literal tokens) and
+     * {@link #scanRawChunksSites} (keys off the literal {@code chunksTable(} call). Method-scoped
+     * (WIDEN-style) for the same reason as {@link #RAW_CHUNKS_READ_METHODS}: the {@code
+     * DimTables.CHUNKS.get(dim)} accessor assignment and the {@code liveChunksCondition(...)}
+     * call live in different Java statements.
+     *
+     * <p>{@code list} added by nexus-txcbo (nexus-3ck2g round-2 critique): the SAME typed-read
+     * gap as the get-family, found in {@code PgVectorRepository#list} (backs {@code POST
+     * /v1/vectors/store-list} / {@code nx store list} / MCP {@code store_list}) — unlike the
+     * get-family it needs no out-of-band chash; a plain listing surfaced tombstoned content by
+     * default. A live sweep of every {@code DimTables.CHUNKS.get(dim)} occurrence in the file at
+     * fix time found exactly one other unfiltered candidate (this one); {@code count} is
+     * PRE-EXISTING tracked scope of nexus-dzs62 (left untouched); {@code fetchChunkText} has zero
+     * live HTTP callers (left untouched, noted as a landmine); every other occurrence is either
+     * already filtered (get-family above) or a write-path / existence-probe helper feeding the
+     * upsert flow, not a content-serving read.
+     */
+    private static final Map<String, List<String>> TYPED_CHUNKS_READ_METHODS = Map.of(
+        "PgVectorRepository.java", List.of("get", "getWhere", "getEmbeddings", "getAllMetadata", "list"));
+
+    /** Marker for a typed {@code DimTables.ChunkTable} accessor assignment in the blanked source. */
+    private static final String TYPED_CHUNK_TABLE_ACCESS = "DimTables.CHUNKS.get(dim)";
+    /** Marker for the typed live-chunks condition call (nexus-8j1zx's fix). */
+    private static final String LIVE_CHUNKS_CONDITION_CALL = "liveChunksCondition(";
+
     // ── Allowlists (rationale-as-data) ──────────────────────────────────────
 
     record ExemptEntry(String file, String method, String rationale) {}
@@ -179,7 +242,12 @@ class TombstoneFilterGateTest {
         new ExemptEntry("StagingPromoteOps.java", "finalizeTenant",
             "RDR-180 land-then-transform migration leg (nexus-jxizy.10.3/10.4) — same sanction "
             + "class as RawSqlGateTest's raw-SQL allowance for this file: one-shot migration "
-            + "statements over a landing zone, never serving-path")
+            + "statements over a landing zone, never serving-path"),
+        new ExemptEntry("CatalogRepository.java", "agedTombstoneCount",
+            "nexus-3ck2g E3 (/v1/catalog/purge-trash): this read's whole PURPOSE is counting "
+            + "the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring "
+            + "nexus.purge_trash's own Step 4 WHERE — the inverse of every other "
+            + "CATALOG_DOCUMENTS read this gate polices, which must EXCLUDE tombstones")
     );
 
     record WidenEntry(String file, String method, String rationale) {}
@@ -293,13 +361,16 @@ class TombstoneFilterGateTest {
     /** Every candidate site examined (excused or not) — the corpus this gate
      * actually walked, for the non-vacuity floors. */
     record ScanResult(List<Finding> docSites, List<Finding> chunkSites,
-                       List<Finding> setDeletedSites, List<Finding> rawSqlSites) {}
+                       List<Finding> setDeletedSites, List<Finding> rawSqlSites,
+                       List<Finding> rawChunksSites, List<Finding> typedChunksSites) {}
 
     static ScanResult scan() throws IOException {
         List<Finding> docSites = new ArrayList<>();
         List<Finding> chunkSites = new ArrayList<>();
         List<Finding> setDeletedSites = new ArrayList<>();
         List<Finding> rawSqlSites = new ArrayList<>();
+        List<Finding> rawChunksSites = new ArrayList<>();
+        List<Finding> typedChunksSites = new ArrayList<>();
 
         for (var entry : TARGET_FILES.entrySet()) {
             String fname = entry.getKey();
@@ -310,11 +381,13 @@ class TombstoneFilterGateTest {
 
             scanDocAndChunkSites(fname, blanked, exemptRegions, widenRegions, docSites, chunkSites);
             scanSetDeletedSites(fname, blanked, exemptRegions, setDeletedSites);
+            scanRawChunksSites(fname, blanked, exemptRegions, rawChunksSites);
+            scanTypedChunksSites(fname, blanked, exemptRegions, typedChunksSites);
             if (fname.equals("StagingPromoteOps.java")) {
                 scanRawSqlSites(fname, src, blanked, exemptRegions, rawSqlSites);
             }
         }
-        return new ScanResult(docSites, chunkSites, setDeletedSites, rawSqlSites);
+        return new ScanResult(docSites, chunkSites, setDeletedSites, rawSqlSites, rawChunksSites, typedChunksSites);
     }
 
     /** Exposed separately for the statement-vs-method-level meta-test, which
@@ -389,6 +462,61 @@ class TombstoneFilterGateTest {
             String exemptMethod = selfGuarded ? null : methodAt(exemptRegions, pos);
             String snippet = blanked.substring(pos, Math.min(pos + 60, blanked.length())).replace('\n', ' ').trim();
             out.add(new Finding(fname, "set_deleted", line, snippet, selfGuarded || exemptMethod != null, exemptMethod));
+        }
+    }
+
+    /**
+     * nexus-3ck2g E2: for each method named in {@link #RAW_CHUNKS_READ_METHODS} for
+     * *fname*, flag it as a raw-chunks read site if its body calls {@link
+     * #CHUNKS_TABLE_CALL} (reads {@code nexus.chunks_<dim>} via hand-built SQL text —
+     * as opposed to a typed jOOQ {@code DimTables}/{@code ch.table()} read, which this
+     * check does not concern itself with) and does NOT also call {@link
+     * #LIVE_CHUNKS_PREDICATE_CALL} anywhere in the same method body. Method-scoped
+     * (WIDEN-style) rather than statement-scoped by necessity: {@code chunksTable(dim)},
+     * the SQL-string assembly, and the inline predicate live in different Java
+     * statements within {@code searchWithTokens}/{@code hybridSearch} (see the class
+     * javadoc on {@link #RAW_CHUNKS_READ_METHODS}). A method matching the name but
+     * NOT calling {@link #CHUNKS_TABLE_CALL} (e.g. a thin delegating overload) is
+     * silently skipped — it is not itself a raw chunks-table reader.
+     */
+    static void scanRawChunksSites(String fname, String blanked, List<NamedRegion> exemptRegions, List<Finding> out) {
+        List<String> methodNames = RAW_CHUNKS_READ_METHODS.getOrDefault(fname, List.of());
+        if (methodNames.isEmpty()) return;
+        for (NamedRegion r : namedRegions(blanked, methodNames)) {
+            String body = blanked.substring(r.start(), r.end());
+            if (!body.contains(CHUNKS_TABLE_CALL)) continue;
+            boolean hasFilter = body.contains(LIVE_CHUNKS_PREDICATE_CALL);
+            String exemptMethod = hasFilter ? null : methodAt(exemptRegions, r.start());
+            int line = lineOf(blanked, r.start());
+            out.add(new Finding(fname, "raw_chunks", line,
+                r.method() + "(): raw chunksTable(dim) read", hasFilter || exemptMethod != null, exemptMethod));
+        }
+    }
+
+    /**
+     * nexus-8j1zx: for each method named in {@link #TYPED_CHUNKS_READ_METHODS} for
+     * *fname*, flag it as a typed-chunks read site if its body calls {@link
+     * #TYPED_CHUNK_TABLE_ACCESS} (reads {@code nexus.chunks_<dim>} via the typed {@code
+     * DimTables.ChunkTable} accessor — as opposed to the hand-built {@code chunksTable(dim)}
+     * SQL text {@link #scanRawChunksSites} polices) and does NOT also call {@link
+     * #LIVE_CHUNKS_CONDITION_CALL} anywhere in the same method body. Method-scoped
+     * (WIDEN-style) rather than statement-scoped: the {@code DimTables.CHUNKS.get(dim)}
+     * accessor assignment and the {@code liveChunksCondition(...)} call live in different
+     * Java statements in every get-family method. A method matching the name but NOT calling
+     * {@link #TYPED_CHUNK_TABLE_ACCESS} (e.g. a thin delegating overload) is silently
+     * skipped — it is not itself a typed chunks-table reader.
+     */
+    static void scanTypedChunksSites(String fname, String blanked, List<NamedRegion> exemptRegions, List<Finding> out) {
+        List<String> methodNames = TYPED_CHUNKS_READ_METHODS.getOrDefault(fname, List.of());
+        if (methodNames.isEmpty()) return;
+        for (NamedRegion r : namedRegions(blanked, methodNames)) {
+            String body = blanked.substring(r.start(), r.end());
+            if (!body.contains(TYPED_CHUNK_TABLE_ACCESS)) continue;
+            boolean hasFilter = body.contains(LIVE_CHUNKS_CONDITION_CALL);
+            String exemptMethod = hasFilter ? null : methodAt(exemptRegions, r.start());
+            int line = lineOf(blanked, r.start());
+            out.add(new Finding(fname, "typed_chunks", line,
+                r.method() + "(): typed DimTables.ChunkTable read", hasFilter || exemptMethod != null, exemptMethod));
         }
     }
 
@@ -491,7 +619,8 @@ class TombstoneFilterGateTest {
         var violations = new ArrayList<Finding>();
         var consumed = new java.util.LinkedHashSet<String>();  // "file::method"
 
-        for (var f : List.of(result.docSites(), result.chunkSites(), result.setDeletedSites(), result.rawSqlSites())) {
+        for (var f : List.of(result.docSites(), result.chunkSites(), result.setDeletedSites(),
+                              result.rawSqlSites(), result.rawChunksSites(), result.typedChunksSites())) {
             for (Finding fnd : f) {
                 if (!fnd.excused()) violations.add(fnd);
                 if (fnd.exemptMethod() != null) consumed.add(fnd.file() + "::" + fnd.exemptMethod());
@@ -501,8 +630,11 @@ class TombstoneFilterGateTest {
         assertThat(violations)
             .as("unguarded CATALOG_DOCUMENTS/CATALOG_DOCUMENT_CHUNKS read or write "
                 + "(missing DELETED_AT.isNull()/liveParentDoc()/liveDocument()/documentExists() "
-                + "or an unguarded resurrection SET) — filter it, or add a named, rationale-"
-                + "carrying TOMBSTONE_EXEMPT entry: %s", violations)
+                + "or an unguarded resurrection SET), a raw chunksTable(dim) read missing the "
+                + "inline live_chunks predicate (liveChunksPredicate(...), nexus-3ck2g), or a "
+                + "typed DimTables.ChunkTable read missing the typed live_chunks condition "
+                + "(liveChunksCondition(...), nexus-8j1zx) — filter it, or add a named, "
+                + "rationale-carrying TOMBSTONE_EXEMPT entry: %s", violations)
             .isEmpty();
 
         var allExemptKeys = new java.util.LinkedHashSet<String>();
@@ -542,6 +674,33 @@ class TombstoneFilterGateTest {
     }
 
     @Test
+    void floor_rawChunksReadSites() throws IOException {
+        // 2 on the final tree: searchWithTokens + hybridSearch, the two methods
+        // nexus-3ck2g found reading nexus.chunks_<dim> as hand-built SQL text with
+        // no tombstone filter at all (RDR-156 Decision 6, never implemented).
+        var result = scan();
+        assertThat(result.rawChunksSites().size())
+            .as("raw chunksTable(dim) read sites walked — a collapse below this suggests "
+                + "the method-name list in RAW_CHUNKS_READ_METHODS stopped matching")
+            .isGreaterThanOrEqualTo(2);
+    }
+
+    @Test
+    void floor_typedChunksReadSites() throws IOException {
+        // 5 on the final tree: get, getWhere, getEmbeddings, getAllMetadata (nexus-8j1zx)
+        // + list (nexus-txcbo) — the five typed DimTables.ChunkTable reads found reading
+        // nexus.chunks_<dim> with zero tombstone filtering (structurally invisible to
+        // both scanDocAndChunkSites and scanRawChunksSites). Their 5-arg delegating
+        // overloads (get/getWhere) are not themselves candidates (no DimTables.CHUNKS
+        // access in their one-line bodies) so they do not inflate this count.
+        var result = scan();
+        assertThat(result.typedChunksSites().size())
+            .as("typed DimTables.ChunkTable read sites walked — a collapse below this suggests "
+                + "the method-name list in TYPED_CHUNKS_READ_METHODS stopped matching")
+            .isGreaterThanOrEqualTo(5);
+    }
+
+    @Test
     void floor_stagingPromoteOpsRawSqlSites() throws IOException {
         var result = scan();
         assertThat(result.rawSqlSites().size()).isGreaterThanOrEqualTo(2);
@@ -560,6 +719,164 @@ class TombstoneFilterGateTest {
             .as("liveParentDoc(ctx, tenant) USAGE call sites (excludes its own definition, "
                 + "which takes the same two args but is declared, not called)")
             .isGreaterThanOrEqualTo(5);
+    }
+
+    // ── Meta-tests: the raw-chunks scan (nexus-3ck2g E2) ─────────────────────
+
+    /**
+     * The exact regression this check exists to catch: a method matching one of
+     * {@link #RAW_CHUNKS_READ_METHODS} that calls {@code chunksTable(dim)} but never
+     * calls {@code liveChunksPredicate(...)} must be flagged, unexcused.
+     */
+    @Test
+    void rawChunksScan_missingPredicate_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    private String searchWithTokens(String tenant, String queryText) {",
+            "        String table = chunksTable(dim);",
+            "        String sql = \"SELECT chash FROM \" + table;",
+            "        return rawVectorFetch(ctx, sql).toString();",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanRawChunksSites("PgVectorRepository.java", blanked, List.of(), out);
+        assertThat(out).hasSize(1);
+        assertThat(out.get(0).excused())
+            .as("a chunksTable(dim) read with no liveChunksPredicate(...) call anywhere in "
+                + "the method must be flagged")
+            .isFalse();
+    }
+
+    /** The fixed shape: the same method, now calling the inline predicate. */
+    @Test
+    void rawChunksScan_presentPredicate_passes() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    private String searchWithTokens(String tenant, String queryText) {",
+            "        String table = chunksTable(dim);",
+            "        String sql = \"SELECT chash FROM \" + table + liveChunksPredicate(\"c\");",
+            "        return rawVectorFetch(ctx, sql).toString();",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanRawChunksSites("PgVectorRepository.java", blanked, List.of(), out);
+        assertThat(out).hasSize(1);
+        assertThat(out.get(0).excused()).isTrue();
+    }
+
+    /** A method whose name matches but never reads the raw chunks table (no
+     * {@code chunksTable(} call) is not a candidate at all — zero findings. */
+    @Test
+    void rawChunksScan_noChunksTableCall_isNotACandidate() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    private String hybridSearch(String tenant, String queryText) {",
+            "        return \"delegates elsewhere\";",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanRawChunksSites("PgVectorRepository.java", blanked, List.of(), out);
+        assertThat(out).isEmpty();
+    }
+
+    /** A file not named in {@link #RAW_CHUNKS_READ_METHODS} is skipped entirely,
+     * even if it happens to contain a matching method name. */
+    @Test
+    void rawChunksScan_fileNotRegistered_isSkipped() {
+        String synthetic = String.join("\n",
+            "public final class SomeOtherFile {",
+            "    private String searchWithTokens(String tenant) {",
+            "        String table = chunksTable(dim);",
+            "        return table;",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanRawChunksSites("SomeOtherFile.java", blanked, List.of(), out);
+        assertThat(out).isEmpty();
+    }
+
+    // ── Meta-tests: the typed-chunks scan (nexus-8j1zx) ──────────────────────
+
+    /**
+     * The exact regression this check exists to catch: a method matching one of
+     * {@link #TYPED_CHUNKS_READ_METHODS} that reads via {@code DimTables.CHUNKS.get(dim)}
+     * but never calls {@code liveChunksCondition(...)} must be flagged, unexcused.
+     */
+    @Test
+    void typedChunksScan_missingPredicate_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    public Map<String, Object> get(String tenant, String collection, List<String> ids) {",
+            "        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);",
+            "        var result = ctx.select(ch.chash()).from(ch.table())",
+            "                        .where(ch.chash().in(ids)).fetch();",
+            "        return Map.of();",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanTypedChunksSites("PgVectorRepository.java", blanked, List.of(), out);
+        assertThat(out).hasSize(1);
+        assertThat(out.get(0).excused())
+            .as("a DimTables.CHUNKS.get(dim) read with no liveChunksCondition(...) call "
+                + "anywhere in the method must be flagged")
+            .isFalse();
+    }
+
+    /** The fixed shape: the same method, now calling the typed predicate. */
+    @Test
+    void typedChunksScan_presentPredicate_passes() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    public Map<String, Object> get(String tenant, String collection, List<String> ids) {",
+            "        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);",
+            "        var result = ctx.select(ch.chash()).from(ch.table())",
+            "                        .where(ch.chash().in(ids).and(liveChunksCondition(ctx, ch))).fetch();",
+            "        return Map.of();",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanTypedChunksSites("PgVectorRepository.java", blanked, List.of(), out);
+        assertThat(out).hasSize(1);
+        assertThat(out.get(0).excused()).isTrue();
+    }
+
+    /** A method whose name matches but never reads via the typed accessor (no
+     * {@code DimTables.CHUNKS.get(dim)} call) is not a candidate at all — zero findings. */
+    @Test
+    void typedChunksScan_noTypedAccess_isNotACandidate() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    public Map<String, Object> getWhere(String tenant, String collection, Map<String, Object> where) {",
+            "        return get(tenant, collection, List.of());",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanTypedChunksSites("PgVectorRepository.java", blanked, List.of(), out);
+        assertThat(out).isEmpty();
+    }
+
+    /** A file not named in {@link #TYPED_CHUNKS_READ_METHODS} is skipped entirely,
+     * even if it happens to contain a matching method name. */
+    @Test
+    void typedChunksScan_fileNotRegistered_isSkipped() {
+        String synthetic = String.join("\n",
+            "public final class SomeOtherFile {",
+            "    public Map<String, Object> get(String tenant, String collection, List<String> ids) {",
+            "        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);",
+            "        return Map.of();",
+            "    }",
+            "}");
+        String blanked = RawSqlGateTest.blank(synthetic);
+        var out = new ArrayList<Finding>();
+        scanTypedChunksSites("SomeOtherFile.java", blanked, List.of(), out);
+        assertThat(out).isEmpty();
     }
 
     // ── Meta-tests: statement-level vs method-level attribution ─────────────
@@ -762,7 +1079,8 @@ class TombstoneFilterGateTest {
     void test_realTree_zeroUnusedExemptEntries() throws IOException {
         var result = scan();
         var consumed = new java.util.LinkedHashSet<String>();
-        for (var f : List.of(result.docSites(), result.chunkSites(), result.setDeletedSites(), result.rawSqlSites())) {
+        for (var f : List.of(result.docSites(), result.chunkSites(), result.setDeletedSites(),
+                              result.rawSqlSites(), result.rawChunksSites(), result.typedChunksSites())) {
             for (Finding fnd : f) if (fnd.exemptMethod() != null) consumed.add(fnd.file() + "::" + fnd.exemptMethod());
         }
         var allExemptKeys = new java.util.LinkedHashSet<String>();

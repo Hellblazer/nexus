@@ -104,23 +104,32 @@ def scratch_session(isolated_home, monkeypatch):
 
     There is nothing to boot now. CLI T1 scratch routes to the PG-backed
     :class:`~nexus.db.http_scratch_store.HttpScratchStore` (nexus-rn3wo.1), so
-    the live nexus-service the gate already provisions IS the T1 substrate. All
-    that remains is the session-id pinning: each ``runner.invoke`` builds a
-    fresh store, and without a stable session id T1's session scoping would
-    exclude prior writes.
-    """
-    from nexus.session import write_claude_session_id
+    the live nexus-service the gate already provisions IS the T1 substrate.
 
+    Session scoping (updated for nexus-f7xyq): this fixture used to pin an
+    explicit ``NX_SESSION_ID`` with no published T1 lease — the exact shape
+    f7xyq made fail loud (an explicit id with no usable lease raises
+    ``T1ServerNotFoundError`` instead of silently reading the shared scope),
+    so the old pinning broke both scratch tests the first time this gate ran
+    after c0568bcd. What the pinning actually exercised pre-fix was the
+    CLI-dedicated fallback store, which the BARE invocation path still mints
+    — and its session id is persisted in the (isolated) config dir, so
+    consecutive ``runner.invoke`` calls share one scope without any explicit
+    pin. Deleting both explicit-session env vars routes every invocation
+    down that bare path; ``CLAUDE_CODE_SESSION_ID`` in particular is ambient
+    whenever the suite runs under a Claude Code session and would otherwise
+    trip the fail-loud gate against a lease that lives in the REAL config
+    dir, not this isolated one.
+    """
     config_dir = isolated_home / ".config" / "nexus"
     # ``HOME`` is already isolated by ``isolated_home``;
     # ``NEXUS_CONFIG_DIR`` makes that explicit.
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
     # Stay on the default (service) T1 backend — the gate's live service.
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-    session_id = "integration-test-session"
-    monkeypatch.setenv("NX_SESSION_ID", session_id)
-
-    write_claude_session_id(session_id)
+    # Bare-invocation path: no explicit session id (nexus-f7xyq fail-loud).
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
     yield
 
@@ -185,7 +194,8 @@ def test_t1_scratch_put_list_clear(runner, scratch_session):
     result = runner.invoke(main, ["scratch", "list"])
     assert result.exit_code == 0 and unique in result.output
 
-    runner.invoke(main, ["scratch", "clear"])
+    # nexus-s6e55: clear is now confirm-gated; -y skips the prompt.
+    runner.invoke(main, ["scratch", "clear", "--yes"])
     result = runner.invoke(main, ["scratch", "list"])
     assert unique not in result.output
 

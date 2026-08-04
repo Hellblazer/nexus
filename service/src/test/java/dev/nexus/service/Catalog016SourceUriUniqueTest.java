@@ -337,6 +337,43 @@ class Catalog016SourceUriUniqueTest {
     }
 
     @Test
+    void concurrentSingleDocRegistrations_exactlyOneReportsCreatedTrue() throws Exception {
+        // nexus-vfef0: this is the SAME race as
+        // concurrentSingleDocRegistrationsConvergeOnOneTumbler above, but
+        // asserting the created-vs-matched wire signal that bead adds. The
+        // ON-CONFLICT loser leg (:962-984 pre-fix line numbers) must report
+        // created=false — pre-fix it silently returned the winner's tumbler
+        // with no way to tell the two legs apart, which is exactly the
+        // residual documented on the client's rollback_minted_catalog_entry.
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 5; round++) {
+                String uri = "file:///race/created-flag-" + round + ".md";
+                String path = "race-created-flag-" + round + ".md";
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<CatalogRepository.RegisterOutcome>> futures = new ArrayList<>();
+                for (int t = 0; t < 2; t++) {
+                    futures.add(pool.submit(() -> {
+                        start.await();
+                        return repo.registerDocumentWithOutcome(TENANT, "13", Map.of(
+                            "title", "race", "source_uri", uri, "file_path", path));
+                    }));
+                }
+                start.countDown();
+                var a = futures.get(0).get();
+                var b = futures.get(1).get();
+                assertEquals(a.tumbler(), b.tumbler(),
+                    "both racers must converge on one tumbler (round " + round + ")");
+                assertTrue(a.created() ^ b.created(),
+                    "exactly one racer must report created=true, the other created=false "
+                    + "(round " + round + ")");
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void batchIntraBatchDuplicateUrisAliasToOneDocument() throws Exception {
         var docs = List.<Map<String, Object>>of(
             Map.of("title", "b1", "source_uri", "file:///batch/dup.md", "file_path", "dup.md"),

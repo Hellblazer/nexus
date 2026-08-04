@@ -196,26 +196,37 @@ def list_cmd() -> None:
 @click.option("--title", "-t", default="", help="Explicit T2 destination title")
 @_clean_service_errors
 def flag_cmd(entry_id: str, project: str, title: str) -> None:
-    """Mark a scratch entry for SessionEnd flush to T2."""
+    """Mark a scratch entry for SessionEnd flush to T2.
+
+    ID accepts the 8-char prefix 'scratch list' prints (nexus-wzkzr): resolved
+    via ``_resolve_entry_id``, the same helper ``get`` uses, before reaching
+    the backend — neither backend's ``flag`` does prefix fallback itself.
+    """
     t1 = _t1()
+    full_id = _resolve_entry_id(t1, entry_id)
     try:
-        t1.flag(entry_id, project=project, title=title)
+        t1.flag(full_id, project=project, title=title)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Flagged: {entry_id}")
+    click.echo(f"Flagged: {full_id}")
 
 
 @scratch.command("unflag")
 @click.argument("entry_id", metavar="ID")
 @_clean_service_errors
 def unflag_cmd(entry_id: str) -> None:
-    """Remove the SessionEnd flush marking from a scratch entry."""
+    """Remove the SessionEnd flush marking from a scratch entry.
+
+    ID accepts the 8-char prefix 'scratch list' prints (nexus-wzkzr) — see
+    ``flag_cmd``.
+    """
     t1 = _t1()
+    full_id = _resolve_entry_id(t1, entry_id)
     try:
-        t1.unflag(entry_id)
+        t1.unflag(full_id)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Unflagged: {entry_id}")
+    click.echo(f"Unflagged: {full_id}")
 
 
 @scratch.command("promote")
@@ -265,8 +276,31 @@ def delete_cmd(entry_id: str) -> None:
     click.echo(f"Deleted: {entry_id}")
 
 @scratch.command("clear")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
 @_clean_service_errors
-def clear_cmd() -> None:
-    """Remove all T1 scratch entries for the current session."""
-    count = _t1().clear()
+def clear_cmd(yes: bool) -> None:
+    """Remove all T1 scratch entries for the current session.
+
+    nexus-s6e55: T1 is the multi-agent shared bus (RDR-105) — an
+    unconfirmed clear destroys every sibling agent's findings, including
+    entries flagged for SessionEnd flush to T2. Guarded like every other
+    destructive verb (``store delete``, ``memory delete``, the catalog ``gc``
+    family): a preview naming the count (and how many are flagged) then
+    ``click.confirm(..., abort=True)``, skippable with ``--yes``/``-y``.
+    """
+    t1 = _t1()
+    if not yes:
+        entries = t1.list_entries()
+        count = len(entries)
+        if count == 0:
+            click.echo("No scratch entries.")
+            return
+        flagged = sum(1 for e in entries if e.get("flagged"))
+        n = "entry" if count == 1 else "entries"
+        preview = f"Found {count} {n} in this session"
+        if flagged:
+            preview += f" ({flagged} flagged for T2 flush)"
+        click.echo(preview + ".")
+        click.confirm("Clear all scratch entries?", abort=True)
+    count = t1.clear()
     click.echo(f"Cleared {count} {'entry' if count == 1 else 'entries'}.")

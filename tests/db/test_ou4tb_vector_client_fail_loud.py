@@ -157,14 +157,32 @@ class TestCallerLoopsIsolatePerItem:
         assert "_exit_incomplete_if_unreadable" in src
         assert "the skipped ones above are unverified" in src
 
-    def test_verify_json_stdout_shape_is_unchanged(self) -> None:
-        """Backward compatibility: the ghosts map stays top-level."""
+    def test_verify_json_stdout_shape_pins_the_ci_contract(self) -> None:
+        """nexus-sj4a3: the old top-level {collection: [{tumbler, title,
+        doc_id}]} shape encoded the retired pre-RDR-108 doc_id identity and
+        was DELIBERATELY broken. The new CI contract is a "summary" block
+        plus the finding lists — pin its presence in the emitter so a
+        future edit cannot silently drop or rename it.
+
+        ``never_chunked_count`` (a bare int) -> ``never_chunked`` (a
+        structured per-collection breakdown) is a SECOND deliberate break
+        (nexus-sj4a3 substantive critique CRIT-1): the bare int blanket-
+        labeled every zero-chunk doc RDR-145-exempt, including the
+        code__*/docs__*/rdr__* population RDR-145 never covered."""
         from pathlib import Path
 
         src = Path("src/nexus/commands/catalog_cmds/integrity.py").read_text()
-        assert "_json.dumps(ghosts_by_collection, indent=2)" in src, (
-            "the --json contract is a top-level collection->ghosts map; "
-            "nesting it under a new key breaks existing parsers"
+        for must_have in (
+            '"summary": summary', '"vanished_collections": vanished_collections',
+            '"damaged": damaged', '"lost": lost',
+            '"never_chunked": never_chunked', '"unreadable": unreadable',
+        ):
+            assert must_have in src, (
+                f"{must_have!r} missing — the --json CI contract shape changed "
+                "without updating this pin"
+            )
+        assert "ghosts_by_collection" not in src, (
+            "the retired doc_id-keyed ghosts_by_collection shape is back"
         )
 
     def test_doc_indexer_registers_even_when_the_prune_fails(self) -> None:

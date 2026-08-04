@@ -71,6 +71,97 @@ def test_register_ghost(cat) -> None:
     assert catalog_register(title="Ghost", owner="1.1", physical_collection="")["tumbler"] == "1.1.1"
 
 
+class TestCatalogRegisterEphemeralPathGuard:
+    """nexus-u8n4r review fix C1 (code-review-expert Critical): the MCP
+    ``catalog_register`` tool must refuse a worktree/tempdir path using
+    the ABSOLUTE registered identity — never the post-relativization
+    ``fp`` alone, which silently drops the leading ``/`` the worktree
+    marker requires whenever the path matches an already-registered
+    repo root. Mirrors ``TestRegisterEphemeralPathGuard`` in
+    tests/test_catalog_cli.py for the CLI twin.
+    """
+
+    def test_absolute_worktree_path_under_known_repo_is_refused(
+        self, cat, tmp_path, monkeypatch,
+    ):
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03):
+        # pytest's ``tmp_path`` lives under ``/tmp/`` on Linux, matching
+        # ``_TEMP_DIR_PREFIXES`` — the owner root here would look
+        # ephemeral too and the owner-root exception would exempt the
+        # registration, hiding the refusal this test exists to pin. Force
+        # a non-tmp-shaped prefix set so the owner root reads as clean on
+        # BOTH platforms. Do not strip this patch; see nexus-u8n4r CI run
+        # 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        repo_root = tmp_path / "wt-repo-a"
+        repo_root.mkdir()
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(str(repo_root))
+        cat.register_owner(
+            "wt-repo-a", "repo", repo_hash="wta00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wta00001")
+        assert owner is not None
+
+        worktree_path = (
+            repo_root / ".claude" / "worktrees" / "agent-x" / "docs" / "foo.md"
+        )
+        result = catalog_register(
+            title="Ephemeral", owner=str(owner), file_path=str(worktree_path),
+        )
+        assert "error" in result
+        assert "nexus-u8n4r" in result["error"]
+
+    def test_bare_relative_worktree_shaped_path_is_refused(
+        self, cat, tmp_path, monkeypatch,
+    ):
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence — see the sibling test above for
+        # the full explanation. Do not strip this patch.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        repo_root = tmp_path / "wt-repo-b"
+        repo_root.mkdir()
+        assert not is_worktree_or_tempdir_path(str(repo_root))
+        cat.register_owner(
+            "wt-repo-b", "repo", repo_hash="wtb00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wtb00001")
+        assert owner is not None
+
+        result = catalog_register(
+            title="Ephemeral relative", owner=str(owner),
+            file_path=".claude/worktrees/agent-y/docs/bar.md",
+        )
+        assert "error" in result
+        assert "nexus-u8n4r" in result["error"]
+
+    def test_clean_path_still_registers(self, cat, tmp_path):
+        repo_root = tmp_path / "wt-repo-c"
+        repo_root.mkdir()
+        cat.register_owner(
+            "wt-repo-c", "repo", repo_hash="wtc00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wtc00001")
+        assert owner is not None
+
+        result = catalog_register(
+            title="Clean", owner=str(owner),
+            file_path=str(repo_root / "docs" / "clean.md"),
+        )
+        assert "error" not in result
+        assert "tumbler" in result
+
+
 def test_search_returns_match(cat) -> None:
     catalog_register(title="authentication module", owner="1.1", content_type="code")
     catalog_register(title="database schema", owner="1.1", content_type="code")

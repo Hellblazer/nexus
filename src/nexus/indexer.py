@@ -936,6 +936,18 @@ def _catalog_hook(
         # arg, so the inline lookup-or-register is preserved. The
         # idempotency guarantee matches ``ensure_owner_for_repo``:
         # existing owners short-circuit without a re-register.
+        # nexus-u8n4r: hoisted out of the ``owner is None`` branch (it used
+        # to be computed only on first registration) so ``main_repo`` is
+        # ALWAYS available for the per-file ephemeral-path guard below, not
+        # just when this call happens to be the owner's first registration.
+        # ``_repo_identity_with_main`` uses ``git rev-parse --git-common-dir``
+        # to resolve; LRU-memoized (nexus.repo_identity), so this costs at
+        # most one subprocess per unique repo path per process.
+        from nexus.repo_identity import (  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
+            _repo_identity_with_main,
+            should_skip_ephemeral_registration,
+        )
+        _name, _hash, main_repo = _repo_identity_with_main(repo)
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
             # nexus-zr2ie (RDR-137 gate critique 2026-05-28): derive the
@@ -944,10 +956,7 @@ def _catalog_hook(
             # the catalog when the caller's ``repo`` argument was a
             # worktree path; ``resolve_path`` then produced broken
             # paths for every relative-path document under this owner
-            # once the worktree was deleted. ``_repo_identity_with_main``
-            # uses ``git rev-parse --git-common-dir`` to resolve.
-            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
-            _name, _hash, main_repo = _repo_identity_with_main(repo)
+            # once the worktree was deleted.
             owner = writer.register_owner(
                 name=repo_name,
                 owner_type="repo",
@@ -992,6 +1001,7 @@ def _catalog_hook(
         # ghost-chunk class on 2026-05-02.
         skipped_files: list[tuple[Path, str]] = []
         fairness_yielded = 0  # RDR-146 P2: files deferred to the next pass.
+        ephemeral_skipped = 0  # nexus-u8n4r: worktree/tempdir registrations refused.
         import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         # Pass 1: resolve each file to existing-or-new. Changed existing docs are
@@ -1040,6 +1050,76 @@ def _catalog_hook(
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
                 rel_path = abs_path.name
+
+            # nexus-u8n4r: refuse registration of files whose REGISTERED
+            # identity (owner's main-repo root + rel_path — never the raw
+            # on-disk abs_path, see should_skip_ephemeral_registration's
+            # docstring) sits under an agent worktree or system temp dir.
+            # This is the write-time guard for the 4,002-doc rdr__1-1
+            # orphan class (nexus-wq1e4 production evidence): a Claude
+            # Code worktree lives INSIDE the primary repo's tree at
+            # ``.claude/worktrees/<agent>/``, so an unfiltered walk over
+            # the primary repo sweeps the agent's ephemeral checkout in
+            # too. ``str(main_repo)`` (freshly resolved via
+            # _repo_identity_with_main above, NOT the owner's stored
+            # ``repo_root``) is deliberate and correct post-zr2ie — but a
+            # legacy owner registered PRE-zr2ie could in principle carry a
+            # stored ``repo_root`` that has since diverged from what git
+            # resolves today; this guard always trusts the live
+            # resolution, matching register_owner's own zr2ie contract.
+            # Never fires when the owner's own repo_root is itself under
+            # such a path (throwaway owners / the pytest tmp-dir suite) —
+            # see zr2ie's worktree-indexing precedent, which must stay
+            # registrable.
+            _registered_path = str(main_repo / rel_path)
+            _skip_reason: str | None = None
+            if should_skip_ephemeral_registration(_registered_path, str(main_repo)):
+                _skip_reason = "worktree_or_tempdir"
+            elif repo != main_repo and not Path(_registered_path).is_file():
+                # nexus-u8n4r review fix (substantive-critic Critical,
+                # empirically reproduced): the predicate above only
+                # catches paths that are STRUCTURALLY under a worktree
+                # marker. Indexing FROM WITHIN a worktree (repo !=
+                # main_repo) over a file that is WORKTREE-UNIQUE — a
+                # new/uncommitted draft with no mirror at the same
+                # relative path in the main repo — reconstructs a
+                # CLEAN-shaped, main-repo-anchored path that predicate
+                # never flags, even though nothing exists there; once the
+                # worktree is torn down that reconstructed path never
+                # existed and the row is a permanent orphan exactly like
+                # the marker-matched case. Existence at the reconstructed
+                # identity is the SECOND signal — deliberately checked
+                # ONLY when worktree-invoked (repo != main_repo), so the
+                # ordinary non-worktree indexing path pays no extra
+                # per-file stat. ``is_file()`` (not ``exists()``, review
+                # fix Minor #2) so a same-named DIRECTORY in the main repo
+                # never counts as a mirror. Content DRIFT between the
+                # worktree copy and a same-named main-repo file is fine
+                # and expected — this checks PATH existence, not content
+                # equality; a worktree-unique file registers correctly
+                # once it merges to main and is indexed from there. Case-
+                # sensitivity caveat (review fix Minor #3): on a case-
+                # INSENSITIVE filesystem (macOS default) a differently-
+                # cased unrelated main-repo file at the same path also
+                # counts as a mirror — this check is case-sensitive-
+                # correct only on Linux (CI) / other case-sensitive
+                # filesystems.
+                _skip_reason = "worktree_unique_no_main_mirror"
+
+            if _skip_reason is not None:
+                ephemeral_skipped += 1
+                _log.warning(
+                    "ephemeral_path_registration_skipped",
+                    path=_registered_path,
+                    owner=str(owner),
+                    repo=repo_name,
+                    reason=_skip_reason,
+                )
+                from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+                _record_ephemeral_registration_skip(
+                    _registered_path, str(owner), reason=_skip_reason,
+                )
+                continue
 
             # nexus-8luh: capture mtime at index time so stale-source
             # detection (RDR-087 Phase 3.4) can compare stored vs
@@ -1270,11 +1350,21 @@ def _catalog_hook(
                     ok=_page_ok,
                 )
 
-        if skipped_files:
+        if skipped_files or ephemeral_skipped:
+            _updated = (
+                len(indexed_files) - len(new_tumblers)
+                - len(skipped_files) - ephemeral_skipped
+            )
+            _skip_bits = []
+            if skipped_files:
+                _skip_bits.append(f"{len(skipped_files)} skipped (see structlog warnings)")
+            if ephemeral_skipped:
+                _skip_bits.append(
+                    f"{ephemeral_skipped} worktree/tempdir path(s) refused (nexus-u8n4r)"
+                )
             _progress(
-                f"  Catalog: {len(new_tumblers)} new, "
-                f"{len(indexed_files) - len(new_tumblers) - len(skipped_files)} updated, "
-                f"{len(skipped_files)} skipped (see structlog warnings)\n"
+                f"  Catalog: {len(new_tumblers)} new, {_updated} updated, "
+                f"{', '.join(_skip_bits)}\n"
             )
         else:
             _progress(

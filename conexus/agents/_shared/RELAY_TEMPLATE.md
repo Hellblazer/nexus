@@ -1,6 +1,6 @@
 # Relay Template
 
-All agent dispatches follow this standardized structure. **Relays are constructed by the caller** (main conversation or skill) — not by agents themselves. Subagents cannot spawn other subagents; they output "Recommended Next Step" blocks that the caller uses to build the next relay.
+All agent dispatches follow this standardized structure. **Relays are constructed by the caller** (main conversation or skill) — not by agents themselves. Nested Agent dispatch is technically supported and fully ledgered (probe-verified 2026-08-03, T2 [21371]), but by convention subagents do not orchestrate: they output "Recommended Next Step" blocks that the caller uses to build the next relay.
 
 ## Required Fields
 

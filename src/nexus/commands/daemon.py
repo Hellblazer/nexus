@@ -630,6 +630,15 @@ def ensure_storage_supervisor(config_dir: Path):
                     error=str(exc),
                 )
         else:
+            # nexus-4e96a: THE load-bearing short-circuit (this is the branch
+            # that returns without ever spawning a subprocess, let alone
+            # reaching _start_locked's own copy of this check). Raises loud
+            # when this process explicitly requested a launch artifact
+            # (NEXUS_SERVICE_JAR / NEXUS_SERVICE_BIN) that differs from the
+            # one the live lease is actually serving; allows + warns when the
+            # lease predates artifact-identity tracking; no-ops otherwise
+            # (ambient well-known-path flows set neither var).
+            _ssd._raise_or_warn_on_artifact_mismatch(config_dir, existing.endpoint)
             return existing
 
     argv = [

@@ -684,6 +684,20 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 self._send_json({"owners": [
                     {"tumbler_prefix": "1.1", "name": "myrepo", "owner_type": owner_type},
                 ]})
+        elif op == "/purge-trash":
+            # nexus-3ck2g E3: mirrors CatalogHandler.handlePurgeTrash —
+            # {older_than_days: int >= 1 (default 30), dry_run: bool
+            # (default true)} in; CatalogRepository.purgeTrashPreview /
+            # .purgeTrash out, echoing dry_run plus documents_purged and
+            # per-dim chunks_<dim>_stranded counts in BOTH modes.
+            dry_run = body.get("dry_run", True)
+            self._send_json({
+                "dry_run": dry_run,
+                "documents_purged": 3,
+                "chunks_384_stranded": 0,
+                "chunks_768_stranded": 12,
+                "chunks_1024_stranded": 0,
+            })
         else:
             self._send_json({"ok": True})
 

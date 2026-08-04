@@ -26,7 +26,7 @@ Two placement facts, both verified rather than assumed:
 1. ``service-ci`` is NOT a required check on develop or main (nexus-hq9na). A Java
    test of this invariant would be ADVISORY at merge — which, for a class that has
    now recurred three times and shipped a P0 twice, is not a gate at all. This file
-   rides ``pytest (Python 3.12)``, which IS required.
+   rides ``pytest-gate``, which IS required.
 
 2. The obvious cheap implementation — regex the Liquibase changelogs — would make
    this gate a PROXY FOR THE SCHEMA. That is precisely the failure shape of the three

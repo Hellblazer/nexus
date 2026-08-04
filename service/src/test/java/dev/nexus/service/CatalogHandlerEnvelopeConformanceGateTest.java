@@ -173,7 +173,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 65 routes on the final tree. */
+     * post {@code by_doc_id}-removal. 66 routes on the final tree (65 + {@code
+     * /purge-trash}, nexus-3ck2g E3). */
     private static final List<RouteSpec> ROUTES = List.of(
         // ── Documents ─────────────────────────────────────────────────────
         neither("/register", "handleRegister"),
@@ -184,6 +185,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         both("/update_many", "handleUpdateMany", POSITIONAL),
         neither("/delete", "handleDelete"),
         both("/delete_many", "handleDeleteMany", REPORT_ONLY),
+        // nexus-3ck2g E3: response is a flat scalar map (documents_purged,
+        // chunks_<dim>_stranded counts) in both dry-run and live modes --
+        // no JSON array of items (not collectionReturning) and the request
+        // body carries only older_than_days/dry_run scalars, no id list
+        // (not idListAccepting).
+        neither("/purge-trash", "handlePurgeTrash"),
         collectionExempt("/resolve", "handleResolve", RESOLVE_BOUNDED),
         neither("/stats", "handleStats"),
 

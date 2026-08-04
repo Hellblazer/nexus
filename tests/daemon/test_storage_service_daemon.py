@@ -355,6 +355,11 @@ class TestStorageServiceSupervisorUnit:
         # rediscover it after a restart.
         assert "token" in rec.endpoint
         assert rec.endpoint["token"] == sup._service_token
+        # nexus-4e96a: artifact identity, feeding the explicit-mismatch check
+        # in _start_locked / ensure_storage_supervisor. Opaque endpoint field
+        # only (no LeaseRecord/format_version change).
+        assert rec.endpoint["artifact"] == str(sup._binary_path)
+        assert rec.endpoint["launch_kind"] == sup._launch_kind
 
     def test_token_stable_across_restarts_from_creds(
         self, config_dir: Path, clock: _FakeClock
@@ -1486,6 +1491,67 @@ class TestEnsureStorageSupervisor:
         assert rec is not None
         popen.assert_not_called()  # idempotent: a live lease is never re-spawned
 
+    def test_live_lease_raises_on_explicit_artifact_mismatch(
+        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-4e96a mismatch arm, THE load-bearing layer: this is the
+        branch that returns the live lease without ever spawning a
+        subprocess (so storage_service_daemon.py's own _start_locked copy of
+        the check is never even reached). An explicit NEXUS_SERVICE_BIN
+        request differing from the lease's published artifact must raise,
+        with no spawn attempt — sibling of
+        test_live_lease_short_circuits_without_spawn."""
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        self._publish_fresh_lease(config_dir)  # artifact="/fake/nexus-service"
+
+        other_binary = tmp_path / "different-nexus-service"
+        other_binary.write_text("#!/bin/sh\nexit 0\n")
+        other_binary.chmod(0o755)
+        monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
+        monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+
+        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+            with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
+                daemon_mod.ensure_storage_supervisor(config_dir)
+        popen.assert_not_called()
+
+    def test_live_lease_unknown_artifact_allows_with_warning(
+        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A lease published before this fix carries no 'artifact' key at
+        all. Per the design's degrade contract, an explicit request against
+        such a lease must ALLOW (+ warn), never raise — a one-release
+        window, distinct from the genuine-mismatch arm above."""
+        import time as _time
+
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
+
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=_time.time)
+        scope = str(os.getuid())
+        pre_fix_supervisor = ServiceSupervisor(
+            registry, scope, version="0.0.0",
+            endpoint_provider=lambda: {
+                "host": "127.0.0.1", "port": 18099, "pid": 424242, "token": "tok",
+                # deliberately NO "artifact" / "launch_kind" keys.
+            },
+            payload={"supervisor_pid": os.getpid()},  # alive: this test process
+        )
+        pre_fix_supervisor.publish_once()
+
+        other_binary = tmp_path / "different-nexus-service"
+        other_binary.write_text("#!/bin/sh\nexit 0\n")
+        other_binary.chmod(0o755)
+        monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
+        monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+
+        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+        popen.assert_not_called()
+        assert rec is not None and rec.endpoint.get("port") == 18099
+
     def test_spawns_supervisor_when_no_lease(self, config_dir: Path) -> None:
         from nexus.commands import daemon as daemon_mod
         from nexus.daemon.service_registry import ServiceRegistry
@@ -1958,6 +2024,51 @@ class TestRdr175MvvSingleSupervisor:
         assert rec is not None
         assert rec.endpoint.get("port") == 18101
         assert payload["port"] == 18101, "second start must return the live endpoint"
+
+    def test_second_start_raises_on_explicit_artifact_mismatch(
+        self, config_dir: Path, clock: _FakeClock, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-4e96a mismatch arm: an explicit NEXUS_SERVICE_BIN request
+        that differs from the artifact the live lease is already serving
+        must raise loud, never silently attach. Sibling of
+        test_second_start_short_circuits_to_single_lease — same lease setup,
+        but this time the second supervisor's process env EXPLICITLY names a
+        different artifact than the one the first supervisor published."""
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        scope = str(os.getuid())
+        first = _make_supervisor(config_dir, clock, supervised=True)
+        first._proc = _FakeProc(pid=46002)
+        first._service_port = 18104
+        first._publish(18104)  # publishes artifact=str(first._binary_path)
+
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        assert registry.discover(scope) is not None
+
+        other_binary = tmp_path / "different-nexus-service"
+        other_binary.write_text("#!/bin/sh\nexit 0\n")
+        other_binary.chmod(0o755)
+        monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
+        monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+
+        second = _make_supervisor(config_dir, clock, supervised=True)
+
+        def _must_not_spawn() -> tuple[Any, int]:
+            raise AssertionError(
+                "an explicit artifact mismatch must raise BEFORE any spawn attempt"
+            )
+
+        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
+             patch.object(second, "_ensure_pg_running") as ensure_pg:
+            with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
+                second.start()
+
+        ensure_pg.assert_not_called()
+        # The mismatch must not have disturbed the first supervisor's lease.
+        rec = registry.discover(scope)
+        assert rec is not None
+        assert rec.endpoint.get("port") == 18104
 
     def test_second_supervisor_under_live_lease_exits_zero(
         self, config_dir: Path, clock: _FakeClock

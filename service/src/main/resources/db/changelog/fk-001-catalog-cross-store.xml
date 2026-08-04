@@ -267,6 +267,17 @@ ALTER TABLE nexus.aspect_extraction_queue
             acceptable in the migration context (Liquibase holds databasechangeloglock and the
             migration runs in single-writer mode with no concurrent ETL inserts).
         </comment>
+        <!-- nexus-msz9i: this FK is a CORRECTNESS DEPENDENCY of the tombstone read filter.
+             PgVectorRepository#liveChunksPredicate / #liveChunksCondition use the dead-set
+             form NOT EXISTS(dead parent AND no live parent), which is equivalent to the
+             older NOT EXISTS(any manifest) OR EXISTS(live manifest) form ONLY because a
+             manifest row with no owning document is impossible. That impossibility comes
+             from the orphan DELETE below plus adding the FK WITHOUT "NOT VALID". Do not
+             weaken either half (NOT VALID, or dropping the pre-DELETE) without revisiting
+             the predicate — pinned by ForeignKeyConstraintTest
+             #manifestFk_isValidated_liveChunksPredicateDependsOnIt.
+             This is an XML comment, deliberately OUTSIDE <sql> so the changeset checksum
+             on already-migrated deployments is unaffected. -->
         <sql splitStatements="true" stripComments="false">
 -- Step 1: delete orphan chunk rows (doc_id NOT NULL + part of PK; no path to NULL them)
 DELETE FROM nexus.catalog_document_chunks cdc

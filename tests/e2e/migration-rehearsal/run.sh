@@ -81,18 +81,19 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # stale default fail-closes the --cold MVV at the version gate. Kept literal (it
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.62}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.65}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
 # requires) engine-service-v0.1.42"). Kept literal (like COLD_TAG) but
 # bumped alongside REQUIRED_ENGINE_VERSION so the scenario never silently
 # stops being "stale" — the guard below fails loud if it does.
-# Rotated 2026-08-02 with the (0,1,61)->(0,1,62) identity bump (nexus-koms3).
+# Rotated 2026-08-04 with the (0,1,62)->(0,1,65) identity bump (7.2.0 paired
+# release; 7.1.2 pinned v0.1.62).
 # Must stay ONE release behind the current identity or the --package-upgrade
 # convergence leg stops testing a realistic hop (nexus-cfgo9).
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.1.0}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.61}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.1.2}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.62}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product
@@ -312,7 +313,18 @@ elif [ "$DO_BUILD" = 1 ]; then
     exit 1
   fi
   echo "[2/3] Building the LINUX native nexus-service binary (GraalVM container, ~2-3m)…"
-  if [ ! -x service/target/nexus-service ]; then
+  # nexus-ndve9: EXISTENCE IS NOT FRESHNESS. `mvn package` leaves
+  # service/target/nexus-service on disk and nothing here removes it, so an
+  # existence-only guard reuses whatever artifact happens to be there —
+  # forever. The 2026-08-03 v0.1.63 pre-tag shakeout validated a binary dated
+  # 2026-07-22 while reporting on abbcf1bd: 34 newer service/src/main files,
+  # and four count-emitting endpoints (store-get, manifest/get_many,
+  # manifest/chashes, manifest/docs_for_chashes) missing purely because the
+  # artifact predated the commits that added them. Every JVM suite was green
+  # on the tree under test — nothing below this layer could have caught it.
+  # Rebuild whenever ANY service source (or the pom) is newer than the binary.
+  if [ ! -x service/target/nexus-service ] \
+     || [ -n "$(find service/src service/pom.xml -newer service/target/nexus-service -print -quit 2>/dev/null)" ]; then
     # Native build in a linux GraalVM container. The mounted Docker socket lets
     # -Pnative's Testcontainers jOOQ codegen reach the host daemon (DooD);
     # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
@@ -335,7 +347,11 @@ elif [ "$DO_BUILD" = 1 ]; then
       "$GRAAL_IMAGE" \
       -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
   else
-    echo "      (native binary already built — reusing service/target/nexus-service)"
+    # nexus-ndve9: when we DO reuse, say how old the artifact is — the failing
+    # shakeout's log recorded only "candidate native binary present", which
+    # reads as a pass while a 12-day-stale binary is under test.
+    _bin_mtime="$(date -r service/target/nexus-service '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    echo "      (native binary up to date — reusing service/target/nexus-service, built $_bin_mtime)"
   fi
 else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"

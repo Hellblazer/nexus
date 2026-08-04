@@ -296,7 +296,21 @@ from __future__ import annotations
 #: (tests/test_engine_version.py TestSmokeLegDiscriminatorDoesNotOutliveIts
 #: Power) from its pre-fence green to requiring build_ref in
 #: tests/e2e/local-service-gate.sh — landed in the same change as this bump.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 62)
+#:
+#: -> (0,1,65) 2026-08-04 (7.2.0 paired release): engine-service-v0.1.63
+#: (tagged @7e3e8f55; carries dcf77fb7 tombstone filter + purge-trash route,
+#: 897d5c29 store-get engine half, c24eac96 register created-vs-matched),
+#: v0.1.64 (@9b3c89ad, purge-trash interval-parity fix —
+#: production re-execute purged 61/61, census 0), and v0.1.65 (@17721b49,
+#: dead-set liveness predicates — live EXPLAIN on the real tenant: 153ms ->
+#: 0.7ms per hybrid query, ~200x; get/list 27ms fixed tax removed) were each
+#: published + acquire-gated + DEPLOYED + edge-gated with record-deploy
+#: written during the 2026-08-03/04 session (session-4 handoff). Cloud is
+#: serving 0.1.65, so this bump is deploy-first (strictly safer than
+#: deploy-at-tag-push): check_engine_release_floor needed no --paired-deploy
+#: flag, the pin-currency red was the only gate failure. The client halves
+#: (purge-trash + store-get verbs) ship in 7.2.0 alongside this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 65)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

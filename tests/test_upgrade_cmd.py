@@ -140,3 +140,68 @@ class TestUpgradeServiceModeShortCircuit:
             f"--auto must not emit the advisory: {result.output!r}"
         )
         assert not db_path.exists()
+
+
+class TestUpgradeBackfillsInstallModeRecord:
+    """nexus-g7ijj: a successful ``nx upgrade`` backfills a missing
+    ``install.mode`` record (the ladder-succeeded path); ``--dry-run``
+    must write nothing.
+
+    The root ``nx`` group also runs its own ``check_version_transition``
+    auto-trigger on EVERY invocation (nexus/cli.py), which — via the
+    Part 2b hook — can perform the same backfill on an unrelated path (a
+    version-transition / first-ever-run). ``CliRunner`` does not touch
+    ``sys.argv``, so that root trigger's own preview detection cannot see
+    this test's ``--dry-run`` subcommand flag; pre-stamping
+    ``last_seen_version`` to the installed version makes it a same-version
+    no-op so these tests isolate the ``upgrade.py``-level hook only.
+    """
+
+    def _cfg_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from importlib.metadata import version as _pkg_version
+
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        for var in ("NX_LOCAL", "CHROMA_API_KEY", "VOYAGE_API_KEY", "NX_SERVICE_URL"):
+            monkeypatch.delenv(var, raising=False)
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        (cfg / CREDENTIALS_FILENAME).write_text("PGHOST=127.0.0.1\n")
+        (cfg / "last_seen_version").write_text(_pkg_version("conexus") + "\n")
+        return cfg
+
+    def test_successful_upgrade_stamps_the_record(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = self._cfg_dir(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["upgrade"])
+        assert result.exit_code == 0, result.output
+        import yaml
+        data = yaml.safe_load((cfg / "config.yml").read_text())
+        assert data["install"]["mode"] == "local"
+
+    def test_dry_run_does_not_stamp(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = self._cfg_dir(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["upgrade", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert not (cfg / "config.yml").exists()
+
+    def test_malformed_config_yml_does_not_fail_the_upgrade(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-g7ijj fix round: a malformed config.yml must not turn a
+        successful ladder run into a reported FAILURE. Before the fix,
+        ``backfill_install_mode_record()``'s ``load_config()`` /
+        ``get_credential()`` calls raised ``yaml.YAMLError`` uncaught, and
+        this call site (unlike ``upgrade_finish.py``'s) had no try/except —
+        the exception propagated out of ``upgrade()``'s outer try and the
+        non-auto path re-raised, so plain ``nx upgrade`` reported failure
+        even though the real upgrade had already succeeded.
+        """
+        cfg = self._cfg_dir(tmp_path, monkeypatch)
+        # Unclosed flow sequence: yaml.safe_load raises yaml.parser.ParserError.
+        (cfg / "config.yml").write_text("foo: [1, 2\n")
+        result = runner.invoke(main, ["upgrade"])
+        assert result.exit_code == 0, result.output

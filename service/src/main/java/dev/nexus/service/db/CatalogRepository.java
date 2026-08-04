@@ -35,6 +35,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.vectors.DimTables;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -43,9 +44,11 @@ import org.jooq.SelectField;
 import org.jooq.Table;
 import org.jooq.UpdateSetMoreStep;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -854,7 +857,53 @@ public final class CatalogRepository {
         return "";
     }
 
+    /**
+     * Outcome of a {@code registerDocument}/{@code registerDocumentMany} call
+     * (nexus-vfef0): the assigned/matched {@code tumbler} plus whether THIS
+     * call minted it. {@code created=false} covers every leg that hands back
+     * a PRE-EXISTING row — an idempotency-leg hit (source_uri or file_path)
+     * or an ON-CONFLICT race-loser (a concurrent first-put race winner beat
+     * this call's INSERT) — so a caller's compensating rollback on a later
+     * failure (e.g. the client's {@code rollback_minted_catalog_entry}) can
+     * tell "I minted this, it's safe to delete on failure" from "this row
+     * predates my call, deleting it would destroy someone else's document."
+     * Before this record existed, the wire response carried no such signal
+     * at all and every leg looked identical to a caller.
+     *
+     * <p><b>Batch intra-alias caveat</b> (see {@link #registerDocumentManyWithOutcome}):
+     * when a batch call contains two entries that alias to the SAME newly-
+     * minted tumbler (same source_uri, intra-batch dedup), BOTH entries'
+     * outcomes report {@code created=true} for that one shared row — this
+     * is correct for BATCH-LEVEL accounting only ("this call's INSERT
+     * activity created N rows"). It is NOT safe to treat as a per-index
+     * mint signal for INDEPENDENT per-entry delete-on-failure compensation:
+     * a future caller that rolled back entry A's tumbler on A's own
+     * failure, and separately rolled back entry B's (identical) tumbler on
+     * B's own failure, would issue two deletes against one row — the
+     * second a no-op at best, but the pattern is a double-delete bug
+     * waiting to happen if the delete ever gains side effects keyed on
+     * "did a row exist to delete." A per-entry rollback consumer must
+     * dedup by tumbler across the batch first.
+     */
+    public record RegisterOutcome(String tumbler, boolean created) {}
+
+    /**
+     * Register a document, returning only the assigned/matched tumbler.
+     *
+     * <p>Thin wrapper over {@link #registerDocumentWithOutcome} for callers
+     * that only need the tumbler (the majority of call sites). See that
+     * method for the {@code created} signal (nexus-vfef0).
+     */
     public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
+        return registerDocumentWithOutcome(tenant, ownerPrefix, fields).tumbler();
+    }
+
+    /**
+     * Register a document, returning both the assigned/matched tumbler and
+     * whether THIS call minted it. See {@link RegisterOutcome} for the exact
+     * {@code created} contract (nexus-vfef0).
+     */
+    public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
@@ -888,7 +937,7 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(srcUri))
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
-                if (existing != null) return existing.value1();
+                if (existing != null) return new RegisterOutcome(existing.value1(), false);
             }
             String filePath = s(fields, "file_path", "");
             if (!filePath.isEmpty()) {
@@ -898,7 +947,7 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.TUMBLER.startsWith(ownerPrefix + "."))
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
-                if (existing != null) return existing.value1();
+                if (existing != null) return new RegisterOutcome(existing.value1(), false);
             }
 
             // No existing document — atomically claim the next sequence number
@@ -980,9 +1029,9 @@ public final class CatalogRepository {
                 }
                 log.info("event=register_document_race_lost tenant={} source_uri={} winner={}",
                     tenant, srcUri, winner.value1());
-                return winner.value1();
+                return new RegisterOutcome(winner.value1(), false);
             }
-            return tumbler;
+            return new RegisterOutcome(tumbler, true);
         }));
     }
 
@@ -1004,8 +1053,35 @@ public final class CatalogRepository {
      *
      * <p>Caller (the HTTP handler) caps the batch under the PostgreSQL 32767 bind-param
      * ceiling; with ~24 columns per row the safe cap is 1000 rows (24000 params).
+     *
+     * <p>Thin wrapper over {@link #registerDocumentManyWithOutcome} for
+     * callers that only need tumblers. See that method for the per-entry
+     * {@code created} signal (nexus-vfef0).
      */
     public java.util.List<String> registerDocumentMany(
+            String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> docs) {
+        return registerDocumentManyWithOutcome(tenant, ownerPrefix, docs).stream()
+            .map(RegisterOutcome::tumbler)
+            .toList();
+    }
+
+    /**
+     * Batch-register, returning per-entry {@link RegisterOutcome} (tumbler +
+     * {@code created}) aligned 1:1 with {@code docs} (nexus-vfef0). An entry
+     * resolved via the pre-batch idempotency lookup, or an ON-CONFLICT
+     * cross-transaction race loser, reports {@code created=false} — the row
+     * predates this call (or was minted by a concurrent winner). An entry
+     * whose own INSERT landed reports {@code true}. An intra-batch alias of
+     * another NEW entry in the SAME call (two docs sharing one source_uri)
+     * MIRRORS whichever outcome its first occurrence resolved to — usually
+     * {@code true} (the shared row's INSERT landed), {@code false} only if
+     * that first occurrence itself lost a cross-transaction race. See the
+     * batch intra-alias caveat on {@link RegisterOutcome} before treating
+     * this per-entry flag as a per-index rollback signal: two aliased
+     * entries reporting {@code created=true} for the SAME tumbler is
+     * correct for batch-level accounting but is not two independent mints.
+     */
+    public java.util.List<RegisterOutcome> registerDocumentManyWithOutcome(
             String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> docs) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
@@ -1080,6 +1156,10 @@ public final class CatalogRepository {
             // (In-memory joins; timed into resolve_ms so the warm-rerun case
             // doesn't mislabel this as seq-update time — review M-1.)
             String[] out = new String[docs.size()];
+            // nexus-vfef0: per-entry created flag, aligned with out[]. Default
+            // false covers the pre-batch idempotency hit (existing != null,
+            // just below) with no further action needed.
+            boolean[] created = new boolean[docs.size()];
             java.util.List<Integer> newIdx = new java.util.ArrayList<>();
             // nexus-78n33: intra-batch source_uri dedup. Two NEW docs in the
             // SAME batch sharing a source_uri would otherwise both be
@@ -1137,6 +1217,12 @@ public final class CatalogRepository {
                     cursor += 1;
                     String tumbler = ownerPrefix + "." + cursor;
                     out[idx] = tumbler;
+                    // Tentative: this row's own INSERT is about to run. Only
+                    // non-empty source_uri rows can lose the cross-transaction
+                    // race below (see the TOCTOU backstop comment ahead), so
+                    // this is already final truth for every empty-source_uri
+                    // NEW row.
+                    created[idx] = true;
                     String metaJson = jsonOrNull(fields.get("meta"));
                     insert = insert.values(tenant, tumbler,
                             s(fields, "title", ""),
@@ -1216,13 +1302,26 @@ public final class CatalogRepository {
                                 + " but no live winner exists (concurrent tombstone?) — "
                                 + "refusing to return a never-persisted tumbler; retry");
                         }
-                        out[e.getValue()] = winner;
+                        int idx = e.getValue();
+                        // nexus-vfef0: out[idx] still holds THIS call's
+                        // pre-assigned tumbler at this point. If the re-
+                        // resolved winner differs, our own INSERT lost the
+                        // cross-transaction race — the row belongs to a
+                        // concurrent caller, not us.
+                        if (!winner.equals(out[idx])) {
+                            created[idx] = false;
+                        }
+                        out[idx] = winner;
                     }
                 }
             }
-            // Fill intra-batch aliases from their winning row's final tumbler.
+            // Fill intra-batch aliases from their winning row's final tumbler
+            // and created flag (nexus-vfef0): an alias never ran its own
+            // INSERT, so its created status mirrors whichever outcome the
+            // first occurrence in this batch resolved to.
             for (var e : aliasOfIdx.entrySet()) {
                 out[e.getKey()] = out[e.getValue()];
+                created[e.getKey()] = created[e.getValue()];
             }
             long tEnd = System.nanoTime();
             log.info("event=register_many_timing tenant={} owner={} docs={} new={} "
@@ -1237,7 +1336,11 @@ public final class CatalogRepository {
                 (tEnd - tInsert) / 1_000_000,
                 (tEnd - tStart) / 1_000_000);
 
-            return java.util.Arrays.asList(out);
+            var result = new java.util.ArrayList<RegisterOutcome>(docs.size());
+            for (int i = 0; i < docs.size(); i++) {
+                result.add(new RegisterOutcome(out[i], created[i]));
+            }
+            return result;
         }));
     }
 
@@ -1980,6 +2083,176 @@ public final class CatalogRepository {
                 .returning(CATALOG_DOCUMENTS.TUMBLER)
                 .fetch(CATALOG_DOCUMENTS.TUMBLER))
         );
+    }
+
+    /**
+     * Per-dim stranded-chunk count (nexus-3ck2g E3) — the SELECT-only mirror of
+     * {@code nexus.purge_trash}'s Step 1-3 DELETE predicate (catalog-003-soft-delete.xml
+     * :200-296): a chunk row is stranded iff it has at least one manifest row
+     * ({@code catalog_document_chunks}) AND none of its manifest rows belong to a live
+     * ({@code deleted_at IS NULL}) document. This is the logical negation of the
+     * live_chunks predicate ({@link dev.nexus.service.vectors.PgVectorRepository}'s
+     * inlined {@code liveChunksPredicate}), restricted to manifest-backed chunks —
+     * manifest-less chunks (RDR-145 MCP/{@code store_put} note chunks) are never
+     * stranded by construction (the {@code hasManifest} EXISTS excludes them, same
+     * safety contract {@code purge_trash} itself enforces).
+     */
+    // nexus-msz9i: this method deliberately RETAINS the old two-subquery liveness shape
+    // (hasManifest AND NOT hasLiveManifest) that PgVectorRepository#liveChunksPredicate was
+    // rewritten away from. That shape makes PostgreSQL build hashed SubPlans which seq-scan
+    // the ENTIRE catalog_document_chunks manifest once per call — a cost fixed per query and
+    // linear in total manifest size. Acceptable HERE and not worth the churn: this is a
+    // diagnostics/reporting count (purge-trash dry-run preview and the stranded-chunk census,
+    // ~3 calls per explicit operator-invoked report), not a serving read path, and unlike the
+    // predicate it is computing the DEAD set as its result rather than filtering rows by it.
+    // If this ever moves onto a hot path — a periodic health poll, a dashboard refresh, a
+    // per-request census — port it to the dead-set form first; see
+    // PgVectorRepository#liveChunksPredicate and T2 nexus/msz9i-explain-verdict for the
+    // plan evidence and the FK-dependent equivalence argument.
+    private static long strandedChunkCount(DSLContext ctx, String tenant, DimTables.ChunkTable ch) {
+        Condition hasManifest = DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(CHK_CHASH_HEX.eq(ch.chash()))));
+        Condition hasLiveManifest = DSL.exists(
+            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+               .join(CATALOG_DOCUMENTS)
+                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(CHK_CHASH_HEX.eq(ch.chash()))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+        Long count = ctx.selectCount().from(ch.table())
+            .where(ch.tenantId().eq(tenant).and(hasManifest).and(hasLiveManifest.not()))
+            .fetchOne(0, Long.class);
+        return count != null ? count : 0L;
+    }
+
+    /**
+     * The {@code older_than} argument for {@code nexus.purge_trash(interval)}, in EXACT
+     * DAYS (nexus-ff85q).
+     *
+     * <p>⚠ DO NOT reintroduce {@code YearToSecond.valueOf(Duration.ofDays(n))} here. jOOQ
+     * normalises a {@link java.time.Duration} into an interval's year/month/day fields
+     * using FIXED 30-day months and 365.25-day years, so {@code Duration.ofDays(30)}
+     * renders as {@code '+0-1 +0'} — literally {@code interval '1 mon'} — and
+     * {@code Duration.ofDays(365)} renders as {@code '+1-0 +5'} ({@code '1 year 5 days'}).
+     * PostgreSQL then evaluates {@code NOW() - interval '1 mon'} with CALENDAR arithmetic,
+     * which is 28-31 real days depending on the month, NOT the 30 the caller asked for.
+     * That mismatch is the nexus-ff85q production defect: a purge advertised as "older
+     * than 30 days" silently applied a different cut point than the dry-run preview did,
+     * and skipped every tombstone in the gap (63 previewed, 2 purged).
+     *
+     * <p>Putting the whole magnitude in the DAY field leaves nothing for jOOQ to
+     * normalise: PostgreSQL receives {@code '+0-0 +30 00:00:00'} and {@code NOW() - that}
+     * is exactly 30×24h. Pinned by {@code CatalogPurgeTrashPopulationParityTest}.
+     */
+    private static org.jooq.types.YearToSecond olderThanInterval(int olderThanDays) {
+        return new org.jooq.types.YearToSecond(
+            new org.jooq.types.YearToMonth(0, 0),
+            new org.jooq.types.DayToSecond(olderThanDays));
+    }
+
+    /**
+     * Aged-tombstone document count (nexus-3ck2g E3) — mirrors {@code nexus.purge_trash}'s
+     * Step 4 WHERE ({@code deleted_at IS NOT NULL AND deleted_at <= NOW() - older_than}).
+     *
+     * <p>The threshold is evaluated SERVER-SIDE, from the identical {@code NOW() - {interval}}
+     * expression and the identical {@link #olderThanInterval} argument the function itself
+     * receives (nexus-ff85q). It deliberately does NOT compute a Java-clock threshold: that
+     * made this count a SECOND, independently-written definition of one population, and the
+     * two definitions drifted — by up to a day per month of threshold on the interval units
+     * alone, plus whatever app-host/DB-host clock skew exists in a cloud deployment. One
+     * population needs one predicate; this is that predicate, in the same dialect and on the
+     * same clock as the DELETE it previews.
+     */
+    private static long agedTombstoneCount(DSLContext ctx, String tenant, int olderThanDays) {
+        Field<OffsetDateTime> threshold = DSL.field(
+            "now() - {0}", OffsetDateTime.class,
+            DSL.val(olderThanInterval(olderThanDays), SQLDataType.INTERVAL));
+        // TOMBSTONE-EXEMPT (nexus-mqd6t): this read's whole PURPOSE (nexus-3ck2g E3) is
+        // counting the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring
+        // nexus.purge_trash's own Step 4 WHERE -- the inverse of every other CATALOG_DOCUMENTS
+        // read this gate polices, which must exclude tombstones. See
+        // TombstoneFilterGateTest.TOMBSTONE_EXEMPT's "agedTombstoneCount" entry.
+        Long count = ctx.selectCount().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.le(threshold)))
+            .fetchOne(0, Long.class);
+        return count != null ? count : 0L;
+    }
+
+    /**
+     * POST /v1/catalog/purge-trash dry-run preview (nexus-3ck2g E3): count-only,
+     * mutates nothing. Mirrors {@code nexus.purge_trash}'s own predicates via SELECT
+     * COUNT so a caller can see what a real purge would sweep before authorizing one
+     * (reconcile-stale gate pattern — LIVE INVOCATION is Hal-gated on the client side).
+     */
+    public Map<String, Object> purgeTrashPreview(String tenant, int olderThanDays) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("dry_run", true);
+            out.put("documents_purged", agedTombstoneCount(ctx, tenant, olderThanDays));
+            out.put("chunks_384_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384)));
+            out.put("chunks_768_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768)));
+            out.put("chunks_1024_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024)));
+            return out;
+        });
+    }
+
+    /**
+     * POST /v1/catalog/purge-trash execute (nexus-3ck2g E3): invokes the
+     * {@code nexus.purge_trash(interval)} stored function (catalog-003-soft-delete.xml)
+     * under the request tenant's RLS GUC — {@link TenantScope#withTenant} always stamps
+     * {@code nexus.tenant} via {@code set_config(..., true)} before this runs, so the
+     * function's own GUC guard (raises on unset/empty tenant) is satisfied by
+     * construction; there is no unscoped call path. The per-dim stranded-chunk and
+     * aged-tombstone counts are computed FIRST, in the SAME transaction as the
+     * function call (same pattern as {@link #manifestBackfill}'s routine invocation) —
+     * the closest achievable snapshot of what the mutation is about to sweep, modulo
+     * the ordinary read-committed race against a concurrent write in the same instant
+     * (no data-safety impact either way; purge_trash's own WHERE is authoritative for
+     * what actually gets deleted, these counts are reporting only).
+     *
+     * <p>PARTIAL PURGES ARE NEVER SILENT (nexus-ff85q): the aged-tombstone count is
+     * measured in this same transaction, immediately before the function runs, and is
+     * returned as {@code documents_eligible} alongside {@code documents_purged}. Under
+     * identical state the two are equal by construction — both now derive from the same
+     * {@link #olderThanInterval} argument and the same server clock. A difference means the
+     * purge took a strict SUBSET of what it found, which is what production saw (63
+     * eligible, 2 purged, reported as success); it is logged at WARN and is visible on the
+     * wire so {@code nx catalog purge-trash} can say so instead of printing a bare
+     * completion. Not an exception: a concurrent committed tombstone/restore between the
+     * two statements is a legitimate (if rare) read-committed cause, and aborting a purge
+     * that has ALREADY deleted rows would be worse than reporting the discrepancy.
+     */
+    public Map<String, Object> purgeTrash(String tenant, int olderThanDays) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384));
+            long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768));
+            long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024));
+            long eligible   = agedTombstoneCount(ctx, tenant, olderThanDays);
+
+            Long purgedRaw = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
+                ctx.configuration(), olderThanInterval(olderThanDays));
+            long purged = purgedRaw != null ? purgedRaw : 0L;
+
+            if (purged != eligible) {
+                log.warn("event=purge_trash_partial tenant={} older_than_days={} "
+                         + "documents_eligible={} documents_purged={}",
+                         tenant, olderThanDays, eligible, purged);
+            }
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("dry_run", false);
+            out.put("documents_purged", purged);
+            out.put("documents_eligible", eligible);
+            out.put("chunks_384_stranded", chunks384);
+            out.put("chunks_768_stranded", chunks768);
+            out.put("chunks_1024_stranded", chunks1024);
+            return out;
+        });
     }
 
     /**

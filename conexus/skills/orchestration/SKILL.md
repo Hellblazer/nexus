@@ -35,9 +35,79 @@ source tests/e2e/lib/expectations.sh   # plugin copy: conexus/hooks/scripts/expe
 1. The EXPECT row is MECHANIZED — do NOT hand-write one (nexus-qc4p1). A PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`, before the dispatch lands. Hand-writing an extra row now DOUBLE-COUNTS: the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual row inflates the count and shows up as a spurious `EXPECTED_NO_START`. Call `expectations_expect` by hand only for a dispatch the hook cannot see (it fires on the Agent/Task tool only), and key it on the SUBAGENT TYPE, never on an invented name — the Agent tool has no `name` parameter, so a name-keyed row cannot pair with anything the SubagentStart hook records (nexus-nu7fo: 25 dispatches, zero recognised).
 2. Put the completion protocol (SendMessage report: outcome, artifacts, blockers) in every background teammate's dispatch prompt. A unique name is still useful for YOUR bookkeeping and for the mailbox, but it is no longer what the ledger pairs on: two dispatches of one type are matched N-to-N, because no per-instance key exists in either hook payload (`tool_use_id` is absent from SubagentStart, and `prompt_id` is the turn id shared by every dispatch in the message).
 3. At retro / session end:
-   `expectations_census <session_id>` — scripted counts, never hand-count (nexus-hybv1); `expectations_undeclared <session_id>` — any UNDECLARED row files a mechanization bead (Gap-1 escalation). CHECK ITS EXIT CODE: exit 1 + `BLINDSPOT` means it recognised none of the dispatches it saw, which is a false-clean, not a pass (nexus-mk3tw).
+   `expectations_census <session_id>` — scripted counts, never hand-count (nexus-hybv1); `expectations_undeclared <session_id>` — any UNDECLARED row files a mechanization bead (Gap-1 escalation). CHECK ITS EXIT CODE — full contract (locked T1 d40a5b53, nexus-suuja): exit 0 = clean; exit 1 = `recognized==0` false-clean blindspot, not a pass (nexus-mk3tw); exit 2 = `undeclared>0` deficit.
 
 `BLOCKED` followed by `REPORTED` in the ledger means the stop-guard nudged the report out (guard success); a bare `BLOCKED` is genuinely unresolved.
+
+## Subagent Dispatch — Design-of-Record Brief Template (MANDATORY at dispatch time)
+
+Every subagent dispatch is briefed from a design-of-record written before dispatch, stored in T1, and referenced by id in every downstream brief (developer, both reviewers, every fix round) — the agent never re-derives a decision (nexus-4kp77, T2 [21371] §Q4).
+
+Mandatory-fields skeleton:
+
+```
+## <BEAD-ID> DESIGN OF RECORD (<role>, <date>)
+PROBLEM: <one paragraph: observed behavior vs expected, with the pointer that proves it>
+DECISION: <the chosen fix, named, with the authority that backs it (RDR/decision/file:line)>
+REJECTED: <each rejected alternative + the concrete reason it breaks something, with file:line>
+
+## TASK ITEMS  (numbered; one deliverable each)
+<N>. <imperative statement>  <file:line for every site to touch>
+     Constraint: <what must remain true>
+     Test: <the specific assertion required>
+
+## LOCKED INVARIANTS
+- <wire contract / API shape / predicate that parallel halves must both honor, verbatim>
+- <house patterns that must not be violated, with the precedent file:line>
+
+## OUT OF SCOPE
+- <explicitly deferred item> -> <residual bead id or "file a bead">
+
+## VERIFY (commands, exactly as the agent must run them)
+- <test command scoped to the change>
+- <lint command>
+- Report the collected test COUNT, not a description.
+- Verification runs FOREGROUND inside the agent's own turn — never `run_in_background`, never `Monitor`. A dispatched subagent cannot receive Monitor events or background-task-completion notifications; those route to the MAIN loop only. Waiting on either strands the agent (nexus-dn9xs).
+
+## WRITE-BACK (mandatory, before returning)
+mcp__plugin_conexus_nexus__scratch(action="put", content="<bead> <phase> ...", tags="<bead>,<role>,<phase>")
+Report the returned entry_id VERBATIM. It is a UUID; do not invent a title-shaped id.
+
+## HAND-BACK
+SendMessage to orchestrator: outcome, artifact paths, deviations (each labelled DEVIATION with rationale), blockers.
+Shared tree: never git add/commit. Hand back diffs + paths.
+```
+
+Non-negotiable fields: bead id; design-of-record T1 id (referenced, never restated); file:line for every touch site; locked invariants; verify commands (foreground-only, per above); write-back tags; deviation-reporting instruction.
+
+## Notification Handling (idempotent, MANDATORY)
+
+Task notifications are at-least-once, unbounded-delay, and cross session boundaries — a resumed agent re-notifies under the same task-id, and a notification can surface in the NEXT session after the agent already finished (nexus-62wt7, T2 [21371] §Q3).
+
+1. Key on task-id. Maintain a handled set; a repeat notification for a handled id is a no-op unless its content differs.
+2. Never act on a notification's claims directly. Re-derive ground truth first — `git status --porcelain`, file mtimes, and the agent's own T1 write-back (the write-back, not the notification, is the artifact of record). **Where to look**: T1 has three distinct scopes — MCP-tool `scratch` (frozen to the session id at MCP-server spawn time; survives `/clear`/`/resume`, so a background agent's write-back lands in the ORIGINAL session's scope), `nx` CLI `scratch` (scoped to the current transcript session if a live lease exists, else a shared fallback — nexus-f7xyq), and `~/.config/nexus/current_session` (machine-wide last-writer-wins, can be owned by a concurrent session). Check the MCP scope before declaring a write-back lost.
+3. Before treating a write-back as missing, confirm the agent has actually terminated. Searching T1 while the agent is still running and treating absence as loss is the recurring false-loss pattern (cdypx, 2026-08-03).
+4. A late notification arriving after recovery work is already complete is informational only — reconcile it, and CORRECT any recovery note that recorded a now-falsified claim.
+5. Never background-dispatch near a session pause; a live agent at session end cannot be recovered except by hand.
+
+## VERIFY Line Convention (MANDATORY)
+
+Agent write-backs end with a machine-checkable line, not prose (nexus-pjzz8, T2 [21371] §Q5):
+
+```
+VERIFY: <command> => <count> passed
+```
+
+The orchestrator re-runs that ONE command once per round, before accepting the round — never trusts the reported count. Divergence is surfaced, not silently accepted.
+
+## Parallel-Orchestration Discipline (MANDATORY, multi-arc sessions)
+
+- **Parallel arcs**: multiple dev arcs may run concurrently ONLY on disjoint file sets, declared in each brief ("touch ONLY: `<files>`"; name what siblings own). One file = one arc, never two writers.
+- **Shared files** (PENDING_RELEASE.md, CHANGELOG, registration files): the ORCHESTRATOR edits them at commit time; agents never touch them.
+- **Parallel halves of one feature** (e.g. engine + client): the wire contract is LOCKED verbatim in the design-of-record BEFORE dispatch; both briefs cite it; reviewers verify contract compatibility across the halves.
+- **Design gate first**: when a plan marks an item DESIGN DECISION FIRST, the orchestrator locks the design-of-record in T1 before any code dispatch; deviations from a plan's recommendation need the human's nod, named fallbacks do not.
+- **Review at every seam**: each arc gets the stacked dual review independently; cross-arc integration points get named in reviewer briefs.
+- **Commit order**: arcs commit pathspec-limited in dependency order (lib contract before doc text referencing it), one arc per commit.
 
 ## Quick Routing
 

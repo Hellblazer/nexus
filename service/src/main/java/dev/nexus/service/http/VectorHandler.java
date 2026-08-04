@@ -102,6 +102,14 @@ public final class VectorHandler implements HttpHandler {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     /**
+     * Upper bound on {@code ids} accepted by {@code /v1/vectors/store-get}
+     * (nexus-hdx2u E2). Same value and rationale as {@code CatalogHandler
+     * .MAX_BATCH_DOC_IDS} — well under PostgreSQL's 32767-parameter
+     * Bind-message hard limit.
+     */
+    private static final int MAX_BATCH_IDS = 1000;
+
+    /**
      * Engine↔conexus protocol header name (bead nexus-ehc4q).
      * The conexus edge proxy reads this value and injects it into the usage counter.
      * Absent (not "0") when {@code tokens == 0} — zero means "no billable usage" (e.g.
@@ -555,6 +563,9 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection              = requireString(body, "collection");
         Map<String, Object> where      = optMap(body, "where");
+        // Deliberate: 10 is a genuine page-size default for this where-filtered
+        // scan (not a truncation bug — see handleStoreGet's ids-branch default
+        // below, nexus-hdx2u E1).
         int limit                      = optInt(body, "limit", 10);
         int offset                     = optInt(body, "offset", 0);
         boolean includeSourceUri       = optBool(body, "include_source_uri", false);
@@ -598,12 +609,17 @@ public final class VectorHandler implements HttpHandler {
      * {
      *   "collection": "...",
      *   "ids":        ["...", ...],    // optional; if absent returns paginated
-     *   "limit":      20,              // optional, default 20
+     *   "limit":      20,              // optional; default ids.size() when ids present (nexus-hdx2u E1), else 20
      *   "offset":     0               // optional, default 0
      * }
      * </pre>
      *
      * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
+     *
+     * <p><strong>ids-branch cap (nexus-hdx2u E2):</strong> {@code ids} is capped at
+     * {@value #MAX_BATCH_IDS} — 400 on oversize — same rationale and value as
+     * {@code CatalogHandler.MAX_BATCH_DOC_IDS} (well under PostgreSQL's 32767-parameter
+     * Bind-message hard limit).
      */
     private void handleStoreGet(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -612,9 +628,22 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         List<String> ids   = optStringList(body, "ids");
-        int limit          = optInt(body, "limit", 20);
+        // nexus-hdx2u E1: when ids is present, an ABSENT limit defaults to
+        // ids.size() — a get-these-specific-rows fetch means "give me all N I
+        // asked for", not an implicit page size. The historical fixed default
+        // (20) silently truncated any larger batch with no signal (the client
+        // half of this bead, C1, made the identical fix on the Python stub's
+        // own separate default). The no-ids (paginated where-scan) branch
+        // keeps a real page-size default — same as handleStoreList below.
+        int defaultLimit   = (ids != null) ? ids.size() : 20;
+        int limit          = optInt(body, "limit", defaultLimit);
         int offset         = optInt(body, "offset", 0);
         boolean includeSourceUri = optBool(body, "include_source_uri", false);
+
+        if (ids != null && ids.size() > MAX_BATCH_IDS) {
+            HttpUtil.send(ex, 400, "{\"error\":\"too many ids (max " + MAX_BATCH_IDS + ")\"}");
+            return;
+        }
 
         // No ids → paginated full fetch (same envelope); getWhere with no
         // predicates is exactly that shape.

@@ -233,6 +233,93 @@ def test_identity_where_falls_back_when_corpus_owner_missing(tmp_path, monkeypat
     assert where == {"source_path": "/abs/path/x.pdf"}
 
 
+class TestCatalogMarkdownHookEphemeralPathGuard:
+    """nexus-u8n4r: ``_catalog_markdown_hook`` refuses a brand-new
+    registration when the stored ``file_path`` (absolute here, since no
+    ``base_path`` is threaded — the shape ``nx collection reindex`` and
+    the standalone RDR-only index command use) sits under an agent
+    worktree marker, UNLESS the resolving owner's own ``repo_root`` is
+    itself rooted there. See
+    ``nexus.repo_identity.should_skip_ephemeral_registration``.
+
+    The hook's default owner is a "curator" (``owner_type="curator"``)
+    which normally carries an EMPTY ``repo_root`` — a documented residual
+    where the guard never fires. To exercise the owner-root exception
+    branch these tests pre-register the curator owner with an explicit
+    ``repo_root`` (the catalog protocol accepts it for any owner_type),
+    modelling an operator-configured corpus owner rather than the
+    hook's own default.
+    """
+
+    def test_worktree_marker_path_with_clean_owner_root_is_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.doc_indexer import _catalog_markdown_hook
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03): on
+        # Linux, pytest's ``tmp_path`` lives under ``/tmp/``, matching
+        # ``_TEMP_DIR_PREFIXES`` — this test's owner root would look
+        # ephemeral too, the owner-root exception would exempt the
+        # registration, and the guard would never fire. Force a non-tmp-
+        # shaped prefix set so the owner root reads as clean on BOTH
+        # platforms — this test is about the WORKTREE MARKER, not the
+        # temp-prefix rule. Do not strip this patch; see nexus-u8n4r CI
+        # run 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        cat = ActiveCatalog()
+        corpus = "u8n4r-md-clean"
+        clean_root = str(tmp_path / "clean-repo")
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(clean_root)
+        cat.register_owner(corpus, "curator", repo_root=clean_root)
+
+        md_path = (
+            Path(clean_root) / ".claude" / "worktrees"
+            / "agent-z" / "docs" / "rdr" / "rdr-999.md"
+        )
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _catalog_markdown_hook(
+                md_path, "rdr__u8n4r-md-clean", "rdr", corpus, 3,
+            )
+
+        assert documents_by_file_path(str(md_path)) == []
+        skipped = [
+            log_entry for log_entry in logs
+            if log_entry.get("event") == "ephemeral_path_registration_skipped"
+        ]
+        assert len(skipped) == 1
+        assert skipped[0]["path"] == str(md_path)
+
+    def test_worktree_marker_path_with_owner_rooted_in_tmp_is_registered(
+        self, tmp_path,
+    ):
+        from nexus.doc_indexer import _catalog_markdown_hook
+
+        cat = ActiveCatalog()
+        corpus = "u8n4r-md-tmp"
+        tmp_root = "/tmp/nexus-u8n4r-md-sandbox"
+        cat.register_owner(corpus, "curator", repo_root=tmp_root)
+
+        md_path = (
+            Path(tmp_root) / ".claude" / "worktrees"
+            / "agent-z" / "docs" / "rdr" / "rdr-999.md"
+        )
+
+        _catalog_markdown_hook(
+            md_path, "rdr__u8n4r-md-tmp", "rdr", corpus, 3,
+        )
+
+        docs = documents_by_file_path(str(md_path))
+        assert len(docs) == 1
+
+
 def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     tmp_path, monkeypatch,
 ):

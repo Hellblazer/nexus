@@ -303,9 +303,23 @@ class TestDedicatedIdCacheFile:
     def test_independent_of_resolve_active_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """The dedicated id must NEVER equal NX_SESSION_ID / current_session's
-        resolved id -- it is a separate, purpose-built identity namespace."""
-        monkeypatch.setenv("NX_SESSION_ID", "impostor-live-mcp-session")
+        """The dedicated id must NEVER equal current_session's resolved id
+        -- it is a separate, purpose-built identity namespace.
+
+        nexus-f7xyq: this exercises the genuinely-bare tier-4 (flat-file)
+        case, NOT an explicit NX_SESSION_ID -- an explicit, unleased
+        session id now fails loud instead of reaching the CLI-dedicated
+        path at all (see TestExplicitVsBareFailLoudGate), so proving
+        independence via NX_SESSION_ID would no longer exercise this
+        branch. The flat file is still the right vehicle for this
+        assertion: it resolves via resolve_active_session_id() (tier 4)
+        without making an explicit-session claim.
+        """
+        from nexus.session import write_claude_session_id
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        write_claude_session_id("impostor-live-mcp-session")
         from nexus.db.t1 import get_t1_database
 
         store = get_t1_database()
@@ -564,31 +578,35 @@ class TestLiveSessionLease:
         )
         assert entry["content"] == "written by the live MCP session"
 
-    def test_no_lease_falls_through_to_cli_dedicated(
+    def test_no_lease_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """A resolvable session id with NO published lease (e.g. a stale
-        current_session pointer with no live MCP, or a live MCP that never
-        resolved a session id itself) must fall through to the unchanged
-        CLI-dedicated path -- not raise, not silently do nothing."""
-        from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
+        """nexus-f7xyq: an EXPLICIT session id (NX_SESSION_ID env) with NO
+        published lease must FAIL LOUD -- never silently fall through to the
+        shared CLI-dedicated identity. Pre-fix this silently borrowed the
+        shared scope, so a caller naming a specific (unleased) session read
+        or wrote a DIFFERENT session's data while believing it addressed the
+        one it named."""
+        from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
 
         monkeypatch.setenv("NX_SESSION_ID", "resolvable-but-no-lease-published")
 
-        result = get_t1_database()
-        assert isinstance(result, _CliDedicatedScratchStore)
-        assert result.session_id == _cli_dedicated_session_id(config_dir)
-        assert result.session_id != "resolvable-but-no-lease-published"
+        with pytest.raises(T1ServerNotFoundError) as exc_info:
+            get_t1_database()
+        msg = str(exc_info.value)
+        assert "resolvable-but-no-lease-published" in msg
+        assert "missing or expired" in msg
+        assert "predecessor scopes are readable only while their lease is fresh" in msg
 
-    def test_stale_lease_after_clear_falls_through(
+    def test_lease_after_clear_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
         """After clear_t1_session_lease (MCP teardown), a later process with
-        the same resolvable session id must fall through to CLI-dedicated,
-        not read a removed lease."""
+        the SAME explicit session id (NX_SESSION_ID) must fail loud -- not
+        silently read a removed lease's replacement (the shared
+        CLI-dedicated identity)."""
         from nexus.db.t1 import (
-            _CliDedicatedScratchStore,
-            _cli_dedicated_session_id,
+            T1ServerNotFoundError,
             clear_t1_session_lease,
             get_t1_database,
             publish_t1_session_lease,
@@ -601,9 +619,9 @@ class TestLiveSessionLease:
 
         monkeypatch.setenv("NX_SESSION_ID", live_session_id)
 
-        result = get_t1_database()
-        assert isinstance(result, _CliDedicatedScratchStore)
-        assert result.session_id == _cli_dedicated_session_id(config_dir)
+        with pytest.raises(T1ServerNotFoundError) as exc_info:
+            get_t1_database()
+        assert live_session_id in str(exc_info.value)
 
     def test_stale_unlinked_lease_degrades_to_clean_runtime_error(
         self, fake_service, config_dir, monkeypatch
@@ -685,17 +703,25 @@ class TestLeaseFreshness:
 
 
 class TestStaleLeaseFallthrough:
-    """Integration: a stale lease must not be borrowed by either consumer --
-    get_t1_database()'s tier-2 borrow path falls through to CLI-dedicated
-    (this class), and mcp.core's Branch-0 self-check mints fresh + takes
-    ownership (TestBranch0StaleLeaseRecovery below)."""
+    """Integration: a stale (TTL-expired) lease must not be silently
+    borrowed OR silently swapped for a different scope.
 
-    def test_stale_lease_falls_through_to_cli_dedicated(
+    nexus-f7xyq (critique fix #5): ``read_t1_session_lease`` enforces a
+    freshness TTL -- a lease FILE can exist on disk while logically
+    EXPIRED. For an EXPLICIT session id (NX_SESSION_ID /
+    CLAUDE_CODE_SESSION_ID) that must hit the SAME loud error as a
+    missing lease entirely -- never degrade to file-exists semantics by
+    falling through to the shared CLI-dedicated identity (this class).
+    mcp.core's Branch-0 self-check has its own, unrelated recovery: mint
+    fresh + take ownership for ITS OWN resolved session
+    (TestBranch0StaleLeaseRecovery below) -- that path never reaches
+    get_t1_database()'s CLI-dedicated branch at all."""
+
+    def test_stale_lease_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
         from nexus.db.t1 import (
-            _CliDedicatedScratchStore,
-            _cli_dedicated_session_id,
+            T1ServerNotFoundError,
             get_t1_database,
             publish_t1_session_lease,
         )
@@ -703,15 +729,334 @@ class TestStaleLeaseFallthrough:
         live_session_id = "live-mcp-session-stale-ttl"
         live_token = _mint_live_session_token(fake_service, live_session_id)
         # Already expired: nobody has refreshed this lease since it was
-        # published, simulating a dead original owner.
+        # published, simulating a dead original owner. The lease FILE still
+        # exists on disk -- only its stored expires_at is in the past.
         publish_t1_session_lease(live_session_id, live_token, config_dir, ttl_seconds=-1.0)
+        lease_path = config_dir / f"t1_session_lease.{live_session_id}"
+        assert lease_path.exists(), "the expired lease file must still be present on disk"
 
         monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        with pytest.raises(T1ServerNotFoundError) as exc_info:
+            get_t1_database()
+        assert live_session_id in str(exc_info.value)
+        assert "missing or expired" in str(exc_info.value)
+
+
+# ── nexus-f7xyq: explicit-vs-bare fail-loud gate ────────────────────────────
+#
+# The four required cases (T2 [21374] burndown item 4a): (1) explicit unknown
+# id -> loud error, (2) explicit id + TTL-expired lease -> same loud error
+# (TestStaleLeaseFallthrough above), (3) bare invocation unchanged (this
+# class), (4) live-leased id scopes correctly (already covered by
+# TestLiveSessionLease.test_get_t1_database_uses_published_lease_over_cli_dedicated
+# and test_hook_process_reads_same_data_live_mcp_wrote above -- USE_LEASED
+# action, never reaches the new gate). Plus the literal repro guard from the
+# bead: ``NX_SESSION_ID=$(uuidgen) nx scratch list`` must error, not return
+# shared entries.
+
+
+class TestExplicitVsBareFailLoudGate:
+    def test_bare_invocation_with_no_env_at_all_is_unchanged(
+        self, fake_service, config_dir
+    ) -> None:
+        """No NX_SESSION_ID, no CLAUDE_CODE_SESSION_ID -- the genuinely-bare
+        case -- must keep falling through to the shared CLI-dedicated
+        identity exactly as before nexus-f7xyq. This is the control: the
+        fail-loud gate must NOT fire just because MINT was reached."""
+        from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
 
         result = get_t1_database()
         assert isinstance(result, _CliDedicatedScratchStore)
         assert result.session_id == _cli_dedicated_session_id(config_dir)
-        assert result.session_id != live_session_id
+
+    def test_bare_invocation_with_only_current_session_file_is_unchanged(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """A session id that resolves ONLY via the machine-wide
+        current_session flat file (tier 4 of resolve_active_session_id's
+        chain, not an explicit env var) is NOT "explicit" -- it must keep
+        falling through to the shared CLI-dedicated identity, not fail loud.
+        This is the case the design explicitly carves out as unchanged."""
+        from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
+        from nexus.session import write_claude_session_id
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        write_claude_session_id("file-resolved-not-explicit")
+
+        result = get_t1_database()
+        assert isinstance(result, _CliDedicatedScratchStore)
+        assert result.session_id == _cli_dedicated_session_id(config_dir)
+        assert result.session_id != "file-resolved-not-explicit"
+
+    def test_claude_code_session_id_env_is_also_explicit(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """CLAUDE_CODE_SESSION_ID (tier 3) is just as explicit as
+        NX_SESSION_ID (tier 2) -- an unleased id supplied via either must
+        fail loud identically."""
+        from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-code-explicit-unleased")
+
+        with pytest.raises(T1ServerNotFoundError) as exc_info:
+            get_t1_database()
+        assert "claude-code-explicit-unleased" in str(exc_info.value)
+
+    def test_live_leased_explicit_id_scopes_correctly(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Case (4): an explicit session id WITH a fresh published lease
+        must scope correctly (USE_LEASED), unaffected by the fail-loud
+        gate -- restated here alongside the other three cases so all four
+        required cases live together for a single reviewing pass."""
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database, publish_t1_session_lease
+
+        live_session_id = "explicit-live-leased-f7xyq"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        publish_t1_session_lease(live_session_id, live_token, config_dir)
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        result = get_t1_database()
+        assert isinstance(result, HttpScratchStore)
+        assert result.session_id == live_session_id
+
+    def test_repro_guard_nx_scratch_list_errors_not_shared_entries(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The literal repro from the bead: ``NX_SESSION_ID=$(uuidgen) nx
+        scratch list`` must error (clean ClickException, exit != 0) instead
+        of silently returning the shared CLI-dedicated scope's entries.
+        Seeds a shared-scope entry first so a regression back to the old
+        behavior would show up as that entry appearing in the output."""
+        import uuid
+
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+        from nexus.db.t1 import get_t1_database
+
+        # Seed the shared CLI-dedicated scope with a canary entry -- this is
+        # what a regression would leak.
+        seeded = get_t1_database()
+        seeded.put("canary entry in the shared CLI-dedicated scope", tags="canary")
+
+        monkeypatch.setenv("NX_SESSION_ID", str(uuid.uuid4()))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["scratch", "list"])
+
+        assert result.exit_code != 0, (
+            f"expected a clean error, got exit_code=0 with output: {result.output!r}"
+        )
+        assert "Traceback" not in result.output
+        assert "canary entry" not in result.output, (
+            "regression: the shared scope's entries leaked through an "
+            "explicit-but-unleased session id"
+        )
+
+
+# ── nexus-6a19f: NX_T1_ALLOW_SHARED_FALLBACK escape hatch (round-1 fix) ─────
+#
+# Round-1 critique CRITICAL: resolve_explicit_session_id() correctly
+# distinguishes "explicit" from "bare", but pre_close_verification_hook.sh
+# (and any other established consumer that forces NX_SESSION_ID to reach the
+# shared scope's markers) broke under the fail-loud default. The fix is a
+# surgical, opt-in escape hatch -- checked ONLY in get_t1_database()'s
+# MINT+explicit-id branch -- that restores the pre-f7xyq shared-fallback
+# behavior while keeping it observable (a structlog WARNING) and NEVER
+# letting it re-enable session_end_flush's shared-scope clear() (Significant
+# finding 2, covered by TestSessionEndNeverClearsSharedScope below).
+
+
+class TestSharedFallbackEscapeHatch:
+    def test_escape_hatch_restores_shared_fallback(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
+
+        monkeypatch.setenv("NX_SESSION_ID", "escape-hatch-explicit-unleased")
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "1")
+
+        result = get_t1_database()
+        assert isinstance(result, _CliDedicatedScratchStore)
+        assert result.session_id == _cli_dedicated_session_id(config_dir)
+
+    def test_escape_hatch_emits_warning(
+        self, fake_service, config_dir, monkeypatch, capsys
+    ) -> None:
+        """The substitution must stay observable -- a caller reading logs
+        can tell the shared scope was used instead of the named session."""
+        from nexus.db.t1 import get_t1_database
+
+        monkeypatch.setenv("NX_SESSION_ID", "escape-hatch-warning-probe")
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "1")
+
+        get_t1_database()
+
+        captured = capsys.readouterr()
+        assert "t1_shared_scope_fallback" in captured.out
+        assert "escape-hatch-warning-probe" in captured.out
+
+    def test_escape_hatch_value_other_than_1_does_not_activate(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Only the exact value "1" activates the hatch -- mirrors the
+        existing NX_T1_ISOLATED == "1" exact-match convention in this same
+        factory, so a typo'd or truthy-but-not-"1" value fails loud rather
+        than silently degrading."""
+        from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
+
+        monkeypatch.setenv("NX_SESSION_ID", "escape-hatch-not-exactly-one")
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "true")
+
+        with pytest.raises(T1ServerNotFoundError):
+            get_t1_database()
+
+    def test_escape_hatch_does_not_affect_bare_invocation(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The hatch is scoped to the explicit-id branch only -- setting it
+        with no explicit session id in env must not change bare-invocation
+        behavior at all (still the plain CLI-dedicated mint, no warning
+        needed since there was never a fail-loud decision to override)."""
+        from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "1")
+
+        result = get_t1_database()
+        assert isinstance(result, _CliDedicatedScratchStore)
+        assert result.session_id == _cli_dedicated_session_id(config_dir)
+
+    def test_escape_hatch_does_not_affect_live_leased_id(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """A fresh lease still wins over the hatch -- USE_LEASED is decided
+        before the MINT branch (and the hatch) is ever reached."""
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database, publish_t1_session_lease
+
+        live_session_id = "escape-hatch-with-live-lease"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        publish_t1_session_lease(live_session_id, live_token, config_dir)
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "1")
+
+        result = get_t1_database()
+        assert isinstance(result, HttpScratchStore)
+        assert result.session_id == live_session_id
+
+
+# ── nexus-6a19f Significant-1/2: session_end_flush never touches the shared
+# scope's clear() ───────────────────────────────────────────────────────────
+#
+# Pre-f7xyq, a lease-less explicit-session SessionEnd silently returned the
+# SHARED CLI-dedicated store, and session_end_flush's `t1.clear()` wiped it
+# -- every session's markers, not just this one's. Post-f7xyq that path
+# raises instead (t1=None, clear() skipped by the `if t1 is not None` guard)
+# -- but the new NX_T1_ALLOW_SHARED_FALLBACK hatch reintroduces a store on
+# that path, so this locks that `_open_t1()` forces the hatch off for its
+# own call regardless of what SessionEnd inherited from a forced-NX_SESSION_ID
+# parent (the exact shape pre_close_verification_hook.sh's export produces).
+
+
+class TestSessionEndNeverClearsSharedScope:
+    def test_lease_less_explicit_session_end_survives_shared_scope(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """No escape hatch: session_end_flush's own except-and-skip already
+        guards this (t1=None), but pin it explicitly as a named regression
+        -- a canary written to the shared scope must still be there after a
+        lease-less SessionEnd with an explicit (unleased) session id."""
+        import nexus.mcp_infra as mcp_infra
+
+        from nexus.db.t1 import get_t1_database
+        from nexus.hooks import session_end_flush
+
+        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
+
+        # Seed the shared scope (bare invocation) with a canary.
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        seeded = get_t1_database()
+        canary_id = seeded.put("canary must survive a lease-less SessionEnd", tags="canary")
+
+        # Simulate the detached SessionEnd grandchild with an explicit,
+        # unleased session id (e.g. inherited NX_SESSION_ID via fork()) and
+        # NO escape hatch set.
+        monkeypatch.setenv("NX_SESSION_ID", "session-end-explicit-no-lease-no-hatch")
+        monkeypatch.delenv("NX_T1_ALLOW_SHARED_FALLBACK", raising=False)
+
+        output = session_end_flush()
+        assert "Flushed 0" in output
+
+        # Re-check the shared scope via a fresh bare invocation: canary intact.
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        survivor = get_t1_database()
+        assert survivor.get(canary_id) is not None, (
+            "regression: the shared CLI-dedicated scope was cleared by a "
+            "lease-less explicit-session SessionEnd"
+        )
+
+    def test_escape_hatch_set_still_survives_shared_scope(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """WITH the escape hatch set (e.g. inherited from a
+        pre_close_verification_hook.sh-style forced export),
+        session_end_flush must STILL never clear the shared scope --
+        _open_t1() forces the hatch off for its own call, so this path
+        takes the SAME fail-loud-then-skip route as the no-hatch case."""
+        import nexus.mcp_infra as mcp_infra
+
+        from nexus.db.t1 import get_t1_database
+        from nexus.hooks import session_end_flush
+
+        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        seeded = get_t1_database()
+        canary_id = seeded.put(
+            "canary must survive even with the hatch set", tags="canary"
+        )
+
+        monkeypatch.setenv("NX_SESSION_ID", "session-end-explicit-no-lease-with-hatch")
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "1")
+
+        output = session_end_flush()
+        assert "Flushed 0" in output
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_T1_ALLOW_SHARED_FALLBACK", raising=False)
+        survivor = get_t1_database()
+        assert survivor.get(canary_id) is not None, (
+            "regression: NX_T1_ALLOW_SHARED_FALLBACK reached session_end_flush's "
+            "clear() and wiped the shared scope"
+        )
+
+    def test_open_t1_restores_ambient_escape_hatch_after_call(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """`_open_t1()` must only suppress the hatch for the DURATION of its
+        own get_t1_database() call -- restoring the ambient env afterward so
+        it doesn't leak a side effect into any other code running in the
+        same detached process."""
+        from nexus.hooks import _open_t1
+
+        monkeypatch.setenv("NX_SESSION_ID", "restore-ambient-probe")
+        monkeypatch.setenv("NX_T1_ALLOW_SHARED_FALLBACK", "1")
+
+        with pytest.raises(Exception):  # noqa: B017, PT011 — T1ServerNotFoundError, forced off inside _open_t1
+            _open_t1()
+
+        assert os.environ.get("NX_T1_ALLOW_SHARED_FALLBACK") == "1", (
+            "_open_t1() must restore the ambient env var after its call"
+        )
 
 
 class TestSessionEndFlushViaLease:

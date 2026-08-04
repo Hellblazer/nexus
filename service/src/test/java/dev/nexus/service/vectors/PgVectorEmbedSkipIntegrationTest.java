@@ -97,6 +97,12 @@ class PgVectorEmbedSkipIntegrationTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_1024 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
+            // nexus-3ck2g: the get-family's typed liveChunksCondition (RDR-156 Decision 6)
+            // joins catalog_document_chunks/catalog_documents for the first time from this
+            // role — this test's own repo.get() verification calls need SELECT on both so
+            // the tombstone-filter EXISTS subqueries can resolve.
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }

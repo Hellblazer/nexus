@@ -291,6 +291,39 @@ def catalog_register(
                 best = max(candidates, key=len)
                 fp = make_relative(fp, _Path(best))
 
+        # nexus-u8n4r: this is a single-doc, user-explicit registration
+        # (unlike the bulk index hooks), so a clear refusal beats a
+        # silent skip — the caller named this path deliberately. Same
+        # owner-root exception as the bulk hooks: a throwaway owner
+        # explicitly rooted in a worktree/tempdir stays registrable.
+        # Review fix C1 (code-review-expert): test the ABSOLUTE
+        # registered identity, never the post-relativization ``fp`` —
+        # see ``reconstruct_absolute_registered_path``'s docstring for
+        # why the naive ``fp or file_path`` was silently inert for a
+        # worktree nested inside an already-registered repo.
+        from nexus.repo_identity import (  # noqa: PLC0415 — deliberate function-local import
+            owner_repo_root_best_effort,
+            reconstruct_absolute_registered_path,
+            should_skip_ephemeral_registration,
+        )
+
+        _owner_repo_root = owner_repo_root_best_effort(cat, owner)
+        _registered_path = reconstruct_absolute_registered_path(
+            file_path, fp, _owner_repo_root,
+        )
+        if should_skip_ephemeral_registration(_registered_path, _owner_repo_root):
+            return {
+                "error": (
+                    f"refusing to register {_registered_path!r}: it sits under "
+                    f"an agent worktree or system temp dir (nexus-u8n4r) and "
+                    f"owner {owner!r}'s repo_root is not itself rooted there — "
+                    f"the ephemeral checkout will vanish and leave a permanent "
+                    f"orphan. If this is a deliberate throwaway owner rooted "
+                    f"in a worktree/tempdir, register the owner with that "
+                    f"repo_root first so the exception applies."
+                )
+            }
+
         tumbler = writer.register(
             Tumbler.parse(owner), title,
             content_type=content_type, file_path=fp,

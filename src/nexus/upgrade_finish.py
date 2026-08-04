@@ -1794,6 +1794,19 @@ def check_version_transition(
                     pass
         except OSError:
             return None  # unwritable config dir: skip silently, retry next run
+        # nexus-g7ijj: best-effort install.mode backfill, gated on the
+        # one-shot stamp claim above having already won the race (so two
+        # concurrent transitioners don't both attempt it) and NEVER on the
+        # preview path (the `if not preview:` this sits inside). Placed
+        # ahead of the `if not seen: return None` below on purpose — an
+        # ancient install that upgraded through several releases before
+        # this stamp file ever existed hits exactly that first-ever-run
+        # branch, and is exactly the never-recorded case this closes.
+        try:
+            from nexus.config import backfill_install_mode_record  # noqa: PLC0415 — deferred to avoid import cycle
+            backfill_install_mode_record()
+        except Exception:  # noqa: BLE001 — best-effort; the finish pass must never break CLI startup
+            _log.warning("install_mode_backfill_failed", exc_info=True)
     # nexus-8eaeg: a preview claims NOTHING — not even the one-shot stamp.
     # Consuming it here would let `nx upgrade --dry-run` silently burn the
     # transition, so the real finish pass would never run automatically.

@@ -2551,7 +2551,20 @@ def store_put(
     Args:
         content: Text content to store
         collection: Collection name or prefix (default: knowledge)
-        title: Document title (recommended for deduplication)
+        title: Document title (recommended for deduplication). A non-empty
+            title makes catalog identity stable: re-putting the same
+            (collection, title) pair reconciles onto the existing document
+            (its manifest is replaced with the new content, not duplicated)
+            instead of minting a sibling (nexus-sdp0u). An empty title
+            synthesizes no catalog identity — every empty-title put always
+            registers a new document, since a title-less identity would
+            collapse all untitled documents together. Note: "replaced, not
+            duplicated" is a CATALOG-level guarantee — the OLD T3 chunk
+            itself is not deleted and may remain independently visible via
+            raw vector search (``nx search`` / ``search()``) until a future
+            sweep (nexus-39upx class) reaps it; catalog-aware query paths
+            (``query()``, catalog-scoped search) follow the manifest and see
+            only the new content.
         tags: Comma-separated tags
         category: Document category for filtered queries (e.g.
             ``rdr_postmortem``). Stamped on the chunk metadata so callers
@@ -3791,8 +3804,17 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
             # nexus-b6enc C4: delete asymmetry — the T3 chunk is gone, so
             # a store_put-origin catalog row (knowledge, no file_path)
             # keyed on this chunk id must not survive with a stale
-            # chunk_count. delete_document cascades the manifest rows on
-            # both backends. Cleanup failure is surfaced, never silent.
+            # chunk_count. delete_document tombstones that catalog row.
+            # CORRECTED (nexus-3ck2g): this comment previously claimed
+            # delete_document cascades the manifest rows — false. The
+            # engine soft-tombstones only; document_chunks + the T3 chunks
+            # survive until `nx catalog purge-trash` reclaims them — NOT
+            # gated by a retention window (nexus-8j1zx: the chunk sweep
+            # runs on every tombstoned doc on the NEXT --no-dry-run
+            # --confirm run, regardless of age; only the catalog row
+            # itself waits for --older-than-days — see store_hook.
+            # store_delete_catalog_cleanup's docstring for the full
+            # rationale). Cleanup failure here is surfaced, never silent.
             from nexus.catalog.store_hook import store_delete_catalog_cleanup  # noqa: PLC0415 — deferred for startup cost
             tumbler, cleanup_error = store_delete_catalog_cleanup(doc_id)
             if cleanup_error:

@@ -393,6 +393,64 @@ class TestReadChromaUri:
         assert result.metadata["chunk_count"] == 3
         assert result.metadata["manifest_ordered"] is True
 
+    def test_manifest_ids_branch_fails_loud_when_coll_overreturns(self):
+        """nexus-hdx2u round-2: the manifest-ids branch's local safety
+        net (``len(returned) <= len(requested)``) must trip when
+        ``coll.get(ids=...)`` returns MORE rows than requested — a
+        store-get response can never legitimately exceed its request
+        size. The reader's contract never raises to callers (it always
+        returns a typed ``ReadResult``), so the AssertionError this
+        trips surfaces as ``ReadFail(reason='unreachable')`` with the
+        assertion detail preserved, not a bare exception escaping.
+
+        Also pins the round-2 hardening: the check runs independently
+        against ids/documents/metadatas, not just documents — the
+        ``zip()`` reassembly loop silently truncates to the shortest of
+        the three, so an overreturn confined to only ``ids`` (as here)
+        must still be caught.
+        """
+        from dataclasses import dataclass
+
+        from nexus.aspect_readers import ReadFail, _gather_chroma_chunks_by_field
+
+        @dataclass
+        class _Row:
+            chash: str
+            position: int
+
+        chashes = ["a" * 64, "b" * 64]
+
+        def manifest_lookup(doc_id: str) -> list[_Row]:
+            return [
+                _Row(chash=chashes[0], position=0),
+                _Row(chash=chashes[1], position=1),
+            ]
+
+        class _OverReturningColl:
+            """Returns one MORE id than requested — never legitimate.
+            Documents/metadatas stay correctly sized so only the ids
+            length is over — proving the ids-specific check (not just
+            the documents check) is what catches it."""
+
+            def get(self, ids=None, include=None):  # noqa: ANN001
+                return {
+                    "ids": [*ids, "phantom"],
+                    "documents": [f"t-{i}" for i in ids],
+                    "metadatas": [{"chunk_text_hash": i} for i in ids],
+                }
+
+        result = _gather_chroma_chunks_by_field(
+            coll=_OverReturningColl(),
+            collection="docs__x",
+            source_id="anything",
+            identity_field="doc_id",
+            match_value="1.99.9",
+            manifest_lookup=manifest_lookup,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "never exceed its request size" in result.detail
+
     def test_no_matching_chunks_returns_read_fail_empty(self, t3_client):
         from nexus.aspect_readers import ReadFail, _read_chroma_uri
 

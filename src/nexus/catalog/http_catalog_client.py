@@ -20,6 +20,7 @@ below maps to an exact ``case`` in the Java handler's switch:
   GET   /v1/catalog/search?q=X          FTS search
   POST  /v1/catalog/update              update document fields
   POST  /v1/catalog/delete              delete by {tumbler}  (also DELETE)
+  POST  /v1/catalog/purge-trash         reclaim tombstoned rows {older_than_days, dry_run} (nexus-3ck2g)
   GET   /v1/catalog/resolve?...         resolve by file_path/source_uri/title
   GET   /v1/catalog/stats               per-tenant statistics
   POST  /v1/catalog/link               upsert link
@@ -1000,8 +1001,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         meta: dict | None = None,
         source_mtime: float = 0.0,
         source_uri: str = "",
+        with_created: bool = False,
         **kwargs: Any,
-    ) -> Tumbler:
+    ) -> Tumbler | tuple[Tumbler, bool]:
         """Register a document; returns the server-assigned tumbler.
 
         Signature matches :meth:`nexus.catalog.catalog.Catalog.register`
@@ -1021,6 +1023,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         on the wire — the honest way an env-var escape hatch survives a
         client/server split. An explicit ``allow_cross_project`` kwarg
         always wins over the env-var default.
+
+        nexus-vfef0: pass ``with_created=True`` to additionally receive the
+        engine's per-call ``created`` signal, returning ``(tumbler,
+        created)`` instead of a bare ``Tumbler``. ``created`` is ``True``
+        only when THIS call's INSERT minted the row — ``False`` for an
+        idempotency-leg hit (the (owner, source_uri)/(owner, file_path)
+        already existed) or a concurrent first-put race loser (a
+        simultaneous caller's INSERT won the race; the engine's ON-CONFLICT
+        backstop handed this call back the WINNER's tumbler instead of
+        minting a duplicate). Older engines that predate this signal omit
+        the wire field entirely; its absence is treated as ``created=True``
+        — the historical assumption every caller ignoring this parameter
+        already makes. Default ``False`` keeps the return type/behavior
+        exactly as before for every other call site; this kwarg exists so
+        ``with_created=True`` can ride the SAME whitelisted ``register``
+        RPC name through :class:`nexus.catalog.factory._ServiceCatalogWriter`
+        rather than requiring a second, unwhitelisted method name.
         """
         payload: dict = {
             "owner_prefix": str(owner),
@@ -1041,7 +1060,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             payload["allow_cross_project"] = True
         payload.update(kwargs)
         result = self._post("/doc/register", payload)
-        return Tumbler.parse(result["tumbler"])
+        tumbler = Tumbler.parse(result["tumbler"])
+        if with_created:
+            return tumbler, bool(result.get("created", True))
+        return tumbler
 
     def register_many(
         self, owner: Tumbler | str, docs: list[dict]
@@ -1205,6 +1227,58 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     except Exception:  # noqa: BLE001 — per-doc fallback failure isolation (mirrors register_many's per-doc try/except upstream)
                         pass
         return out
+
+    def purge_trash(self, older_than_days: int = 30, *, dry_run: bool = True) -> dict:
+        """POST /v1/catalog/purge-trash — reclaim tombstoned catalog rows and
+        their manifest-orphaned ``chunks_<dim>`` rows via the engine's
+        ``nexus.purge_trash(interval)`` sweep (nexus-3ck2g).
+
+        Delete tombstones the catalog row but deliberately leaves the
+        ``document_chunks`` manifest and T3 chunk rows in place (preserving
+        the manual-restore path, nexus-xavu7); this is the caller that
+        physically reclaims them.
+
+        CAVEAT (nexus-8j1zx fix round): the reclaim this method performs is
+        NOT age-gated the way "once the retention window has passed" might
+        suggest. The underlying ``nexus.purge_trash`` chunk sweep (Steps
+        1-3) runs on EVERY currently-tombstoned document on the very next
+        ``dry_run=False`` call, regardless of how recently it was
+        tombstoned — only the catalog row's physical delete (Step 4, the
+        ``documents_purged`` count) honors ``older_than_days``. So the
+        manual-restore path (nexus-xavu7) stays open only until the NEXT
+        ``dry_run=False`` call anywhere in the tenant, not until this
+        document individually ages past the threshold.
+
+        Wire contract (LOCKED, design of record T1 scratch 2fbc12df): POST
+        body ``{"older_than_days": int, "dry_run": bool}``; the engine's
+        JSON response — ``documents_purged`` (age-gated) plus per-dim
+        ``chunks_<dim>_stranded`` counts (age-INDEPENDENT, see the CAVEAT
+        above), plus the echoed ``dry_run`` flag — is returned to the
+        caller verbatim as a ``dict``; this client does not interpret or
+        reshape it. ``dry_run=True`` (the default) computes the same
+        counts as a preview WITHOUT deleting anything; ``dry_run=False``
+        performs the real sweep, scoped to the request tenant.
+
+        ``dry_run=False`` responses from a nexus-ff85q-or-newer engine carry
+        one ADDITIONAL key, ``documents_eligible``: the age-gated population
+        the engine measured in the same transaction as the purge.
+        ``documents_purged < documents_eligible`` means the purge took a
+        strict subset of its own reported population — the CLI verb treats
+        that as an error (see ``catalog_cmds.purge_trash``). Older engines
+        omit the key entirely; verbatim passthrough means callers must treat
+        it as optional, never assume it.
+
+        A pre-nexus-3ck2g engine has no matching route for this call and
+        answers 404 — this method does NOT swallow that (unlike the
+        RUNFENCE advisory-write methods above); it propagates the raw
+        ``httpx.HTTPStatusError`` like any other read/write call in this
+        class, so the CLI verb can tell "engine too old" apart from "engine
+        answered."
+        """
+        return self._post("/purge-trash", {
+            "older_than_days": older_than_days,
+            "dry_run": dry_run,
+        }) or {}
 
     def find(
         self, query: str, *, content_type: str | None = None

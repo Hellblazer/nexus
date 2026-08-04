@@ -1534,12 +1534,35 @@ def get_t1_database(
           bound to that SAME session/token, read via :func:`read_t1_session_lease`.
           Never mints/rotates -- this is how a detached process (the
           SessionEnd hook) reaches the live MCP session's T1 data.
-        - No inherited session and no lease → mints a CLI-dedicated,
-          persisted session id (see :func:`_cli_dedicated_session_id`) and
-          returns a :class:`_CliDedicatedScratchStore` (self-healing wrapper).
+        - No inherited session and no lease, and the resolved (if any)
+          session id was **explicit** (``NX_SESSION_ID`` or
+          ``CLAUDE_CODE_SESSION_ID`` env -- see
+          :func:`nexus.session.resolve_explicit_session_id`) → raises
+          :class:`T1ServerNotFoundError` (nexus-f7xyq). A caller naming a
+          specific session with no usable lease for it must never be
+          silently handed a DIFFERENT session's shared scope. Escape hatch
+          (nexus-6a19f): ``NX_T1_ALLOW_SHARED_FALLBACK=1`` opts a caller
+          back into the pre-fix shared CLI-dedicated fallback for THIS
+          branch only (a structlog WARNING is emitted either way) --
+          for established consumers like
+          ``conexus/hooks/scripts/pre_close_verification_hook.sh`` that
+          intentionally read the shared scope's cross-cutting markers under
+          a forced ``NX_SESSION_ID``. Never consulted by
+          :func:`resolve_t1_routing_tiers`, the MCP lifespan, or
+          :func:`nexus.hooks.session_end_flush` (which forces it off for
+          its own call -- the escape hatch is for marker reads/writes,
+          never for ``session_end_flush``'s scope-``clear()``).
+        - No inherited session, no lease, and no explicit session id (the
+          genuinely-bare case -- including when a session id happens to
+          resolve only via the machine-wide ``current_session`` file) →
+          mints a CLI-dedicated, persisted session id (see
+          :func:`_cli_dedicated_session_id`) and returns a
+          :class:`_CliDedicatedScratchStore` (self-healing wrapper).
     * ``NX_T1_ISOLATED=1`` → :class:`T1Database` (in-process ephemeral
       scratch). The ``=sqlite`` opt-out that used to route here as well
-      hard-errors instead (RDR-158 P3, nexus-7bomn).
+      hard-errors instead (RDR-158 P3, nexus-7bomn). This escape hatch is
+      checked FIRST, ahead of every branch above (including the
+      explicit-session fail-loud gate), and always wins.
 
     The ``session_id`` and ``client`` arguments are forwarded to ``T1Database``
     on the Chroma path; they are ignored on the service path (session_id is
@@ -1587,6 +1610,65 @@ def get_t1_database(
             session_id=decision.session_id, _session_token=decision.session_token
         )
 
+    # nexus-f7xyq: an EXPLICIT session id (NX_SESSION_ID or
+    # CLAUDE_CODE_SESSION_ID env) with no usable lease -- decision.action
+    # == MINT covers BOTH "no lease was ever published" and "one was
+    # published but read_t1_session_lease found it past its TTL" (the
+    # freshness check above already collapses both to "absent", see
+    # nexus-ngcpo) -- must FAIL LOUD rather than silently borrow the
+    # shared CLI-dedicated identity below. Probe-proven 2026-08-03:
+    # ``NX_SESSION_ID=<any-uuid-with-no-live-lease> nx scratch list``
+    # returned the SAME shared entries for every such uuid, never scoping
+    # to the named session and never erroring -- a session-isolation
+    # violation this module's own comments (nexus-c8yvj, above) already
+    # treat as security-relevant on the MCP side. The genuinely-bare case
+    # (neither env var set -- including when a session id happens to
+    # resolve via the machine-wide current_session file, tier 4 of
+    # resolve_active_session_id's chain) is UNCHANGED: it is not making an
+    # explicit-session claim, so it keeps falling through to the shared
+    # CLI-dedicated identity below exactly as before.
+    from nexus.session import resolve_explicit_session_id  # noqa: PLC0415 — deliberate: mirrors resolve_t1_routing_tiers's own per-call re-import for test-patch visibility, see that function's comment
+
+    explicit_session_id = resolve_explicit_session_id()
+    if explicit_session_id:
+        # nexus-6a19f (round-1 critique CRITICAL fix): CLAUDE_CODE_SESSION_ID
+        # is AMBIENT -- Claude Code stamps it on every subprocess regardless
+        # of whether the CURRENT transcript's MCP server ever published a T1
+        # lease for that exact id (the MCP process is frozen-at-spawn; a
+        # detached CLI/hook invocation resolves the CURRENT transcript id --
+        # they diverge routinely, not as a rare edge case). Some established
+        # consumers (conexus/hooks/scripts/pre_close_verification_hook.sh)
+        # deliberately export NX_SESSION_ID to reach the shared CLI-dedicated
+        # scope where cross-cutting markers (e.g. review-completed) live, and
+        # were written against the PRE-f7xyq fallback behavior. Narrowing
+        # "explicit" further would not help -- the hook sets NX_SESSION_ID
+        # itself. NX_T1_ALLOW_SHARED_FALLBACK=1 is the surgical escape hatch:
+        # checked ONLY in this branch (never in resolve_t1_routing_tiers, the
+        # MCP lifespan, or the isolation check above), it restores the
+        # pre-fix shared-scope read/write behavior for a caller that
+        # explicitly opts in, while a structlog WARNING keeps the substitution
+        # observable. Unset (the default for every other caller, including
+        # `nx scratch` run interactively) keeps the new fail-loud contract.
+        if os.environ.get("NX_T1_ALLOW_SHARED_FALLBACK") == "1":
+            _log.warning(
+                "t1_shared_scope_fallback",
+                session_id=explicit_session_id,
+                msg=(
+                    "NX_T1_ALLOW_SHARED_FALLBACK=1 set; no usable lease for "
+                    "this session id, so reads/writes route to the shared "
+                    "CLI-dedicated scope instead of the named session"
+                ),
+            )
+        else:
+            _log.warning(
+                "t1_explicit_session_no_usable_lease",
+                session_id=explicit_session_id,
+            )
+            raise T1ServerNotFoundError(
+                f"lease for {explicit_session_id!r} missing or expired; "
+                "predecessor scopes are readable only while their lease is fresh"
+            )
+
     # nexus-rn3wo.1: bare CLI, no inherited live MCP session, and no
     # published lease for a resolvable session id either
     # (decision.action == MINT). Mint (or reuse) the CLI-dedicated
@@ -1596,7 +1678,9 @@ def get_t1_database(
     # separate, generic, shared-across-bare-invocations identity, never
     # tied to whatever (if anything) resolve_active_session_id() found;
     # see resolve_t1_routing_tiers's docstring for why tier 3 stays
-    # caller-specific rather than unified too.
+    # caller-specific rather than unified too. (The explicit-session-id
+    # case above has already been carved out and fails loud instead of
+    # reaching here.)
     dedicated_id = _cli_dedicated_session_id(config_dir)
     # nexus-jc33g: the dedicated-id file gave cross-invocation id
     # continuity, but the TOKEN was re-minted unconditionally on every

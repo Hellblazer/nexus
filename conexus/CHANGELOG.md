@@ -4,6 +4,34 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.2.0] - 2026-08-04
+
+Pin advance activates the subagent-reliability wave merged inert under the
+v7.1.2 pin (the full PENDING_RELEASE ledger empties into this release):
+
+- **SubagentStop completion guard fires for the first time ever**
+  (nexus-hbr4x): the old named-agent-morphology gate was structurally
+  unsatisfiable (18/18 and 19/19 agents `no_terminal`). Now a per-type
+  unmixed-ness gate with CONSUMED-verb credit settlement (order-independent,
+  zero false-block; nexus-rkigh), a bounded lockdir around the
+  read-decide-append (nexus-bk974), and `expectations_undeclared` rc
+  contract: 0 clean / 1 recognized==0 blindspot / 2 deficit (nexus-suuja).
+- Dispatch hook (`agent-dispatch-expect.sh`): absent/empty `subagent_type`
+  defaults to `general-purpose` instead of silently skipping the EXPECT row
+  (nexus-a795d — the ledger-blindspot / false-UNDECLARED class).
+- Orchestration skill + developer agent: design-of-record brief template
+  (nexus-4kp77), idempotent notification-handling rule (nexus-62wt7),
+  VERIFY-line convention (nexus-pjzz8), post-suuja rc-contract text,
+  parallel-orchestration discipline, and the developer agent's
+  foreground-verification rule (nexus-dn9xs candidates a+b).
+- Pre-close verification hook exports `NX_T1_ALLOW_SHARED_FALLBACK=1` beside
+  its `NX_SESSION_ID` export (nexus-6a19f) so the review-marker advisory
+  keeps working under the nx-package fail-loud T1 gate (nexus-f7xyq).
+- Doc correction across `_shared/` agent docs + development skill:
+  "subagents cannot spawn subagents" was falsified by direct probe
+  (T2 [21371]) — nested Agent dispatch works and is ledgered; the
+  caller-orchestrates relay convention is unchanged.
+
 ## [7.1.2] - 2026-08-03
 
 Version-parity bump only — no plugin-surface changes. Ships alongside the CLI's

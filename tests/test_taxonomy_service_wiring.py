@@ -452,12 +452,19 @@ class _StubWithIds:
         self._ids = ids
         self._docs = docs
 
-    def get(self, ids=None, where=None, include=None, limit=10, offset=0):  # noqa: ANN001
+    def get(self, ids=None, where=None, include=None, limit=None, offset=0):  # noqa: ANN001
         if ids is not None:
             idx = {i: d for i, d in zip(self._ids, self._docs)}
             rids = [i for i in ids if i in idx]
+            # nexus-hdx2u: honor an explicit limit on the ids path — the
+            # production stub's default is None (unlimited / len(ids)),
+            # never a silent hardcoded cap; a caller that DOES pass a
+            # small limit must see it actually truncate the response,
+            # or this double would mask a real truncation regression.
+            if limit is not None:
+                rids = rids[:limit]
             return {"ids": rids, "documents": [idx[i] for i in rids]}
-        sl = slice(offset, offset + limit)
+        sl = slice(offset, offset + (limit if limit is not None else len(self._ids)))
         return {"ids": self._ids[sl], "documents": self._docs[sl]}
 
 
@@ -496,6 +503,47 @@ def test_svc_fetch_by_ids_bails_on_misalign():
 
     g_ids, g_texts, g_embs = HttpTaxonomyStore._svc_fetch_by_ids(_Drop(ids, docs, embs), "docs__d", ids)
     assert g_embs is None  # refuses misaligned
+
+
+def test_svc_fetch_by_ids_pages_at_250_without_truncation():
+    """nexus-hdx2u: _svc_fetch_by_ids batches ids at _PAGE=250 internally;
+    a corpus larger than one page must come back whole — not silently
+    truncated the way the stub's old implicit ``limit: int = 10`` default
+    used to truncate every >10-id ``stub.get(ids=...)`` call."""
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    ids, docs, embs = _corpus(260)
+    t3 = _SplitT3(ids, docs, embs)
+    g_ids, g_texts, g_embs = HttpTaxonomyStore._svc_fetch_by_ids(t3, "docs__d", ids)
+    assert g_ids == ids
+    assert g_texts == docs
+    assert g_embs.shape == (260, 3)
+
+
+def test_svc_fetch_by_ids_raises_when_stub_overreturns():
+    """The nexus-hdx2u consumer-side safety net: a store-get response can
+    never legitimately exceed its request size. A stub that violates that
+    (buggy engine, or a masking test double) must trip the local assert
+    in HttpTaxonomyStore._svc_fetch_by_ids rather than silently misalign
+    ids to texts."""
+    import pytest
+
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+    ids, _docs, _embs = _corpus(4)
+
+    class _OverReturns:
+        def get(self, ids=None, where=None, include=None, limit=None, offset=0):  # noqa: ANN001
+            # Returns one MORE row than was requested — never legitimate.
+            return {
+                "ids": [*ids, "phantom"],
+                "documents": [*[f"t-{i}" for i in ids], "ghost"],
+            }
+
+    class _T3:
+        def get_or_create_collection(self, name):  # noqa: ANN001
+            return _OverReturns()
+
+    with pytest.raises(AssertionError):
+        HttpTaxonomyStore._svc_fetch_by_ids(_T3(), "docs__d", ids)
 
 
 def test_svc_fetch_all_embeddings_paginates():

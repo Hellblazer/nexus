@@ -1628,6 +1628,12 @@ class _FakeChromaColl:
         include = include or []
         if ids is not None:
             keys = [i for i in ids if i in self._docs or i in self._embs]
+            # nexus-hdx2u: honor an explicit limit on the ids path so this
+            # double can't mask a real truncation regression — the
+            # production stub's ids-branch default is None (unlimited),
+            # never a silent hardcoded cap.
+            if limit is not None:
+                keys = keys[:limit]
         else:
             start = offset or 0
             keys = self._order[start:start + (limit or len(self._order))]
@@ -1834,6 +1840,75 @@ class TestOrchestrators:
         store = self._store(client, [])
         fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"only": "t"})})
         assert store.split_topic(6, 5, fake_client) == 0  # 1 doc < k=5
+
+    def test_split_topic_pages_ids_past_250_without_truncation(self, client, monkeypatch) -> None:
+        """nexus-hdx2u: the non-service split_topic branch pages doc_ids at
+        _PAGE=250 via ``coll.get(ids=batch, ...)``. A topic with more than
+        one page of documents must have ALL of them read — not silently
+        capped, the way the shared service stub's old implicit
+        ``limit: int = 10`` default used to cap every id-based get()."""
+        n = 260
+        doc_ids = [f"d{i}" for i in range(n)]
+        client.import_topic(
+            src_id=9, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=n, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        for d in doc_ids:
+            client.assign_topic(d, 9, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 9, "embedding": [1.0, 0.0], "label": "parent", "doc_count": n},
+        ])
+        documents = {d: f"t-{d}" for d in doc_ids}
+        embeddings = {d: ([1.0, 0.0] if i % 2 == 0 else [0.0, 1.0]) for i, d in enumerate(doc_ids)}
+        seen_fetched_ids: list[str] = []
+
+        def _spy_compute_split(topic_id, doc_ids_arg, texts, fetched_ids, embeddings_arr, collection_name, k):  # noqa: ANN001
+            seen_fetched_ids.extend(fetched_ids)
+            return {
+                "topic_id": topic_id,
+                "collection_name": collection_name,
+                "child_specs": [
+                    {"label": "c0", "terms_json": "[]", "doc_count": 1, "doc_ids": [doc_ids[0]],
+                     "centroid": [1.0, 0.0], "created_at": "2026-01-01T00:00:00Z"},
+                    {"label": "c1", "terms_json": "[]", "doc_count": 1, "doc_ids": [doc_ids[1]],
+                     "centroid": [0.0, 1.0], "created_at": "2026-01-01T00:00:00Z"},
+                ],
+            }
+        monkeypatch.setattr(_hts, "compute_split", _spy_compute_split)
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents=documents, embeddings=embeddings)})
+        n_children = store.split_topic(9, 2, fake_client)
+        assert n_children == 2
+        # All 260 doc_ids' vectors were read, not truncated to a page-1 subset.
+        assert sorted(seen_fetched_ids) == sorted(doc_ids)
+
+    def test_split_topic_raises_when_collection_overreturns(self, client, monkeypatch) -> None:
+        """Consumer-side safety net (nexus-hdx2u): a store-get response can
+        never legitimately exceed its request size. A collection stub
+        that violates that must trip the local assert in split_topic's
+        non-service branch rather than silently misalign vectors to
+        documents."""
+        client.import_topic(
+            src_id=10, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=2, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("d1", 10, "hdbscan")
+        client.assign_topic("d2", 10, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 10, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 2},
+        ])
+        monkeypatch.setattr(
+            _hts, "compute_split",
+            lambda *a, **k: {"topic_id": 10, "collection_name": "c", "child_specs": []})
+
+        class _OverReturningColl:
+            def get(self, ids=None, include=None, limit=None, offset=None):  # noqa: ANN001
+                return {
+                    "ids": [*ids, "phantom"],
+                    "documents": [*[f"t-{i}" for i in ids], "ghost"],
+                    "embeddings": [*[[1.0, 0.0] for _ in ids], [0.0, 1.0]],
+                }
+
+        fake_client = _FakeChromaClient({"c": _OverReturningColl()})
+        with pytest.raises(AssertionError):
+            store.split_topic(10, 2, fake_client)
 
     def test_project_against_match_and_novel(self, client) -> None:
         store = self._store(client, [

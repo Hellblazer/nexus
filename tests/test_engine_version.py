@@ -215,7 +215,16 @@ class TestRequiredEngineVersion:
         # discriminator (local-service-gate.sh) and the removed
         # fresh-install-mvv.sh allowlist entry, respectively — both landed in
         # the same change as this bump.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 62)
+        # ->(0,1,65) 2026-08-04 (7.2.0 paired release): v0.1.63 (tombstone
+        # filter + purge-trash route + store-get/register engine halves),
+        # v0.1.64 (purge-trash interval-parity — production purged 61/61,
+        # census 0), v0.1.65 (dead-set liveness predicates — real-tenant
+        # EXPLAIN 153ms -> 0.7ms per hybrid query). Each published +
+        # acquire-gated + deployed + edge-gated 2026-08-03/04. The 7.2.0
+        # client verbs (purge-trash, store-get) hard-require the v0.1.63+
+        # routes; fix-delivery rule covers the rest. Deploy-first: cloud was
+        # serving 0.1.65 before this bump landed.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 65)
 
 
 class TestParseEngineVersion:

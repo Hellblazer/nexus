@@ -266,6 +266,118 @@ class TestRegisterAndShow:
         assert "Citations:" not in result.output
 
 
+class TestRegisterEphemeralPathGuard:
+    """nexus-u8n4r review fix C1 (code-review-expert Critical): ``nx
+    catalog register`` must refuse a worktree/tempdir path using the
+    ABSOLUTE registered identity — the pre-relativization ``file_path``
+    when absolute, or ``owner_repo_root / fp`` when the caller passed a
+    relative path — never the post-relativization ``fp`` alone, which
+    silently drops the leading ``/`` the worktree marker requires
+    whenever the path matches an already-registered repo root.
+    """
+
+    def test_absolute_worktree_path_under_known_repo_is_refused(
+        self, tmp_path, catalog_env, monkeypatch,
+    ):
+        """Reproduces the exact C1 shape: file_path is absolute AND
+        falls under a repo root that's already registered, so
+        register_cmd's own relativization step strips the leading
+        ``/`` before the old check ever ran."""
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03):
+        # pytest's ``tmp_path`` lives under ``/tmp/`` on Linux, matching
+        # ``_TEMP_DIR_PREFIXES`` — the owner root here would look
+        # ephemeral too and the owner-root exception would exempt the
+        # registration, hiding the refusal this test exists to pin. Force
+        # a non-tmp-shaped prefix set so the owner root reads as clean on
+        # BOTH platforms. Do not strip this patch; see nexus-u8n4r CI run
+        # 30850463195.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        cat = ActiveCatalog()
+        repo_root = tmp_path / "wt-repo-a"
+        repo_root.mkdir()
+        # Non-vacuity: prove the premise (clean owner root) instead of
+        # inheriting it from whichever platform happens to be running.
+        assert not is_worktree_or_tempdir_path(str(repo_root))
+        cat.register_owner(
+            "wt-repo-a", "repo", repo_hash="wta00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wta00001")
+        assert owner is not None
+
+        worktree_path = (
+            repo_root / ".claude" / "worktrees" / "agent-x" / "docs" / "foo.md"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Ephemeral",
+            "--owner", str(owner),
+            "--file-path", str(worktree_path),
+        ])
+        assert result.exit_code != 0
+        assert "nexus-u8n4r" in result.output
+
+    def test_bare_relative_worktree_shaped_path_is_refused(
+        self, tmp_path, catalog_env, monkeypatch,
+    ):
+        """The caller passes an already-relative, worktree-shaped
+        file_path directly (no absolute-path relativization step at
+        all) — the guard must still reconstruct the absolute identity
+        via ``owner_repo_root / fp`` and refuse."""
+        from nexus.repo_identity import is_worktree_or_tempdir_path
+
+        # Linux/CI-vs-macOS divergence — see the sibling test above for
+        # the full explanation. Do not strip this patch.
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        cat = ActiveCatalog()
+        repo_root = tmp_path / "wt-repo-b"
+        repo_root.mkdir()
+        assert not is_worktree_or_tempdir_path(str(repo_root))
+        cat.register_owner(
+            "wt-repo-b", "repo", repo_hash="wtb00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wtb00001")
+        assert owner is not None
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Ephemeral relative",
+            "--owner", str(owner),
+            "--file-path", ".claude/worktrees/agent-y/docs/bar.md",
+        ])
+        assert result.exit_code != 0
+        assert "nexus-u8n4r" in result.output
+
+    def test_clean_path_still_registers(self, tmp_path, catalog_env):
+        cat = ActiveCatalog()
+        repo_root = tmp_path / "wt-repo-c"
+        repo_root.mkdir()
+        cat.register_owner(
+            "wt-repo-c", "repo", repo_hash="wtc00001", repo_root=str(repo_root),
+        )
+        owner = cat.owner_for_repo("wtc00001")
+        assert owner is not None
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Clean",
+            "--owner", str(owner),
+            "--file-path", str(repo_root / "docs" / "clean.md"),
+        ])
+        assert result.exit_code == 0, result.output
+
+
 class TestListCommand:
     def test_list_entries(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -733,6 +845,28 @@ class TestOwnersCommand:
         assert result.exit_code == 0
         assert "test-repo" in result.output
 
+    def test_owners_json_includes_next_seq(self, initialized_catalog, catalog_env):
+        """nexus-pu2z8: the engine's list_owners() already carries next_seq
+        (SHAKEOUT-7.1.1 agent C measured 65/65) but the CLI's --json
+        hand-projection dropped it at src/nexus/commands/catalog_cmds/owners.py.
+        next_seq is the surface nexus-0ehwe item 3 named a non-negotiable
+        prerequisite for drift audits (health.py's _check_next_seq_drift). This
+        is the LAYER TEST at the CLI boundary — through the real
+        ``initialized_catalog`` service catalog, not a unit test of
+        list_owners() itself, which was never the broken layer.
+        """
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "owners", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data, "expected at least one registered owner"
+        for owner in data:
+            assert "next_seq" in owner
+        assert any(owner.get("next_seq") is not None for owner in data), (
+            "next_seq present as a key but always None — the engine field "
+            "isn't reaching the CLI projection"
+        )
+
 
 class TestSeedPlanTemplates:
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
@@ -1018,23 +1152,102 @@ class TestDiscoveryTools:
         assert "No orphan" in result.output
 
 
+class _FakeEntry:
+    """Minimal CatalogEntry stand-in for full-mode verify tests (nexus-sj4a3)."""
+
+    def __init__(
+        self, tumbler, title, *, physical_collection, chunk_count=0, alias_of="",
+        file_path="", source_uri="",
+    ):
+        self.tumbler = tumbler
+        self.title = title
+        self.physical_collection = physical_collection
+        self.chunk_count = chunk_count
+        self.alias_of = alias_of
+        self.file_path = file_path
+        self.source_uri = source_uri
+
+
+class _FakeFullCat:
+    """Full-catalog-mode fake catalog reader.
+
+    ``manifest_verify_all`` is a SERVER-SIDE anti-join against the real T3
+    pgvector tables (RDR-152: one Postgres per tenant, shared by catalog and
+    vectors) — it is NOT reachable through the Python-side ``_make_t3()``
+    mock the scoped-mode path uses. A real ``ActiveCatalog`` + real engine
+    would therefore always show every real manifest row as 100% "missing"
+    in these tests (nothing is ever written to the real vector tables here),
+    making Class A/B/C combinations impossible to control deterministically.
+    This fake sidesteps that entirely, mirroring the same-shape fake
+    ``_Cat`` in ``tests/test_health_service_checks.py``'s
+    ``TestCheckDanglingManifests`` (the doctor check backed by the same
+    ``manifest_verify_all`` primitive).
+    """
+
+    def __init__(
+        self, entries, *, doc_counts=None, mv_all=None, manifests=None,
+        doc_counts_exc=None, get_manifests_exc=None,
+    ):
+        self._entries = entries
+        self._doc_counts = doc_counts or {}
+        self._mv_all = mv_all if mv_all is not None else {"collections": [], "count": 0}
+        self._manifests = manifests or {}
+        self._doc_counts_exc = doc_counts_exc
+        self._get_manifests_exc = get_manifests_exc
+
+    def all_documents(self, limit=0):
+        return list(self._entries)
+
+    def collection_doc_counts(self):
+        if self._doc_counts_exc is not None:
+            raise self._doc_counts_exc
+        return dict(self._doc_counts)
+
+    def manifest_verify_all(self):
+        return self._mv_all
+
+    def get_manifests(self, doc_ids):
+        if self._get_manifests_exc is not None:
+            raise self._get_manifests_exc
+        return {d: self._manifests[d] for d in doc_ids if d in self._manifests}
+
+
 class TestVerifyCommand:
-    """GH #249: nx catalog verify reconciles tumblers against ChromaDB."""
+    """nexus-sj4a3: full-catalog + ``--collection``-scoped verify on the
+    RDR-108/180 chash identity (tumbler -> document_chunks.chash -> T3
+    chunk id). Retired: the pre-RDR-108 ``meta.doc_id`` filter that covered
+    only 1.5% of production and exited 0 at 89.6% ghost rate."""
 
     @staticmethod
-    def _register_with_doc_id(
-        cat, owner_str, title, coll, doc_id, content_type="knowledge",
+    def _register_chunked(
+        cat, owner_str, title, coll, *, chunk_count=0, chashes=None,
+        content_type="knowledge",
     ):
+        """Register a doc with a physical_collection + chunk_count and,
+        when *chashes* is given, write a real manifest (the RDR-108
+        identity: tumbler -> document_chunks.chash -> T3 chunk id)."""
         from nexus.catalog.tumbler import Tumbler
-        return cat.register(
+        t = cat.register(
             Tumbler.parse(owner_str), title,
             content_type=content_type,
             physical_collection=coll,
-            meta={"doc_id": doc_id},
+            chunk_count=chunk_count,
         )
+        if chashes:
+            cat.atomic_manifest_replace(str(t), [
+                {
+                    "chash": chash, "position": i, "chunk_index": i,
+                    "line_start": None, "line_end": None,
+                    "char_start": None, "char_end": None,
+                }
+                for i, chash in enumerate(chashes)
+            ])
+        return t
 
-    def _patch_t3(self, monkeypatch, present_ids_by_collection):
-        """Patch _make_t3 in commands.catalog so existing_ids returns the seeded set."""
+    def _patch_t3(self, monkeypatch, present_ids_by_collection, t3_collections=None):
+        """Patch _make_t3 in commands.catalog: existing_ids returns the seeded
+        set (scoped-mode Class-B-per-doc probe), list_collections returns the
+        given (or inferred) collection names (full-mode Class-A probe)."""
         from unittest.mock import MagicMock
 
         # Module-wide cloud_mode fixture forces is_local_mode() False, so
@@ -1046,202 +1259,611 @@ class TestVerifyCommand:
             return {i for i in ids if i in present}
 
         fake.existing_ids.side_effect = _existing_ids
+        names = (
+            t3_collections if t3_collections is not None
+            else set(present_ids_by_collection.keys())
+        )
+        fake.list_collections.return_value = [{"name": n} for n in names]
         monkeypatch.setattr(
             "nexus.commands.catalog._make_t3", lambda: fake,
         )
         return fake
 
-    def test_verify_clean(self, initialized_catalog, catalog_env, monkeypatch):
-        """All tumblers present in ChromaDB → '0 ghosts' summary, exit 0."""
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "Doc One",
-            "knowledge__thing", "abc123def456aaaa",
+    # ── full-catalog mode (fake cat — see _FakeFullCat docstring) ──────────
+
+    def test_verify_clean(self, catalog_env, monkeypatch):
+        """Every class clean → 'All good.', exit 0."""
+        entries = [_FakeEntry("1.1.1", "Doc One", physical_collection="knowledge__thing", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
         )
-        self._patch_t3(monkeypatch, {"knowledge__thing": ["abc123def456aaaa"]})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "verify"])
 
         assert result.exit_code == 0, result.output
-        assert "0 ghosts" in result.output
+        assert "All good." in result.output
 
-    def test_verify_flags_ghosts(
-        self, initialized_catalog, catalog_env, monkeypatch,
-    ):
-        """Tumbler in catalog but missing from T3 → surfaced as ghost, summary non-zero."""
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "Present Doc",
-            "knowledge__thing", "aaaa111111111111",
+    def test_verify_flags_damaged(self, catalog_env, monkeypatch):
+        """Class B: a manifest referencing a T3-missing chash → damaged
+        collection finding, exit 1. Flips the pre-fix bug (rc 0 at 89.6%
+        ghost rate)."""
+        entries = [_FakeEntry("1.1.1", "Doc", physical_collection="knowledge__thing", chunk_count=2)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 2, "present": 1, "missing": 1},
+            ], "count": 1},
+            manifests={"1.1.1": [object(), object()]},  # len == chunk_count: not "lost"
         )
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "Ghost Doc",
-            "knowledge__thing", "bbbb222222222222",
-        )
-        self._patch_t3(
-            monkeypatch, {"knowledge__thing": ["aaaa111111111111"]},
-        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "verify"])
 
-        assert result.exit_code == 0, result.output
-        assert "1 ghost(s) found" in result.output
-        assert "Ghost Doc" in result.output
-        assert "bbbb222222222222" in result.output
-        # The present doc must NOT be reported as a ghost.
-        assert "Present Doc" not in result.output
+        assert result.exit_code == 1, result.output
+        assert "damaged" in result.output.lower()
+        assert "knowledge__thing" in result.output
 
-    def test_verify_missing_collection_is_all_ghosts(
-        self, initialized_catalog, catalog_env, monkeypatch,
-    ):
-        """Collection absent from T3 (deleted/renamed) → every tumbler is a ghost."""
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "A",
-            "knowledge__gone", "cccc333333333333",
+    def test_verify_missing_collection_is_vanished(self, catalog_env, monkeypatch):
+        """Class A: collection absent from T3 entirely (deleted/renamed) →
+        vanished-collection finding, exit 1. Flips
+        test_verify_missing_collection_is_all_ghosts."""
+        entries = [
+            _FakeEntry("1.1.1", "A", physical_collection="knowledge__gone", chunk_count=0),
+            _FakeEntry("1.1.2", "Clean Doc", physical_collection="knowledge__other", chunk_count=1),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__gone": 1, "knowledge__other": 1},
+            # knowledge__other stays checked>0 so the mv_all non-vacuity
+            # guard doesn't fold this test into the "0 collections" case.
+            mv_all={"collections": [
+                {"collection": "knowledge__other", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.2": [object()]},
         )
-        # T3 patch returns empty for any collection.
-        self._patch_t3(monkeypatch, {})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__other"})
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "verify"])
 
-        assert result.exit_code == 0, result.output
-        assert "1 ghost(s) found" in result.output
+        assert result.exit_code == 1, result.output
         assert "knowledge__gone" in result.output
+        assert "vanished" in result.output.lower()
 
-    def test_verify_collection_filter(
-        self, initialized_catalog, catalog_env, monkeypatch,
-    ):
-        """--collection scopes the sweep to a single physical_collection."""
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "In Scope",
-            "knowledge__foo", "dddd444444444444",
+    def test_verify_lost_exits_nonzero(self, catalog_env, monkeypatch):
+        """Class C: chunk_count > 0 but the manifest is shorter → lost
+        document, exit 1."""
+        entries = [_FakeEntry("1.1.1", "Partial", physical_collection="knowledge__thing", chunk_count=3)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 3, "present": 3, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object(), object()]},  # 2 rows, chunk_count=3
         )
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "Out Of Scope",
-            "knowledge__bar", "eeee555555555555",
-        )
-        # Neither is present — both would ghost if unfiltered.
-        self._patch_t3(monkeypatch, {})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
 
         runner = CliRunner()
-        result = runner.invoke(
-            main, ["catalog", "verify", "--collection", "knowledge__foo"],
-        )
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
 
-        assert result.exit_code == 0, result.output
-        assert "In Scope" in result.output
-        assert "Out Of Scope" not in result.output
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["lost_docs"] == 1
+        assert data["summary"]["exit"] == 1
 
-    def test_verify_json_output(
-        self, initialized_catalog, catalog_env, monkeypatch,
-    ):
-        """--json emits a collection→ghosts map machine-parseable output."""
-        self._register_with_doc_id(
-            initialized_catalog, "1.1", "Ghost",
-            "knowledge__x", "ffff666666666666",
+    def test_verify_never_chunked_is_exit_neutral(self, catalog_env, monkeypatch):
+        """chunk_count==0 + no manifest is report-only (RDR-145 manifest-less
+        store_put notes): a clean corpus plus one never-chunked doc still
+        exits 0, and the count is reported."""
+        entries = [
+            _FakeEntry("1.1.1", "Indexed", physical_collection="knowledge__thing", chunk_count=1),
+            _FakeEntry("1.1.2", "Note-only", physical_collection="knowledge__thing", chunk_count=0),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 2},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},  # 1.1.2 absent -> never_chunked
         )
-        self._patch_t3(monkeypatch, {})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "verify", "--json"])
 
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout)
-        assert "knowledge__x" in data
-        assert data["knowledge__x"][0]["doc_id"] == "ffff666666666666"
-        assert data["knowledge__x"][0]["title"] == "Ghost"
+        assert data["summary"]["never_chunked_docs"] == 1
+        assert data["summary"]["lost_docs"] == 0
+        assert data["summary"]["exit"] == 0
 
-    def test_verify_skips_tumblers_without_doc_id(
-        self, initialized_catalog, catalog_env, monkeypatch,
+    def test_verify_manifest_verify_all_zero_collections_is_incomplete(
+        self, catalog_env, monkeypatch,
     ):
-        """Tumblers with no meta.doc_id (e.g. raw catalog register with no indexer
-        hook) are unverifiable and must be skipped silently — not reported as ghosts."""
-        from nexus.catalog.tumbler import Tumbler
-
-        # Register without the doc_id meta field.
-        initialized_catalog.register(
-            Tumbler.parse("1.1"), "Unverifiable",
-            content_type="knowledge",
-            physical_collection="knowledge__thing",
+        """Non-vacuity (mirrors health.py's _check_dangling_manifests): 0
+        collections checked while real docs exist is INCOMPLETE, never a
+        clean pass."""
+        entries = [_FakeEntry("1.1.1", "A", physical_collection="knowledge__thing", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [], "count": 0},
+            manifests={"1.1.1": [object()]},
         )
-        self._patch_t3(monkeypatch, {})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code != 0
+        assert "INCOMPLETE" in result.output
+
+    def test_verify_json_output(self, catalog_env, monkeypatch):
+        """--json emits the new CI-contract shape (deliberately breaks the
+        retired {collection: [{tumbler, title, doc_id}]} shape).
+
+        nexus-sj4a3 critique SIG-3: full mode's damaged rows are
+        COLLECTION-granular (one manifest_verify_all round trip; no
+        per-doc count), so the summary key is ``damaged_collections`` here
+        — distinct from scoped mode's per-document ``damaged_docs``
+        (see test_verify_scoped_json_output)."""
+        entries = [_FakeEntry("1.1.1", "Ghost", physical_collection="knowledge__x", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__x": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__x", "referenced": 1, "present": 0, "missing": 1},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__x"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["exit"] == 1
+        assert data["summary"]["damaged_collections"] == 1
+        assert len(data["damaged"]) == 1
+        assert data["damaged"][0]["collection"] == "knowledge__x"
+        assert data["damaged"][0]["missing"] == 1
+
+    def test_verify_covers_docs_without_legacy_doc_id(self, catalog_env, monkeypatch):
+        """nexus-sj4a3: the retired meta.doc_id filter used to silently skip
+        every doc lacking that legacy field (98.5% of production). A doc
+        carrying no doc_id concept at all — the RDR-108 norm — must be
+        COVERED, not silently dropped. Flips
+        test_verify_skips_tumblers_without_doc_id."""
+        entries = [_FakeEntry("1.1.1", "Modern Doc", physical_collection="knowledge__thing", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["docs"] == 1, (
+            "the doc — carrying no meta.doc_id at all — must be counted, "
+            "not silently skipped"
+        )
+
+    def test_verify_coverage_counts_all_non_alias_docs(self, catalog_env, monkeypatch):
+        """Anti-vacuity pin: every registered non-alias doc with a
+        physical_collection is counted in summary.docs — the whole point
+        of the rewrite vs. the old 1.5%-coverage bug."""
+        entries = [
+            _FakeEntry("1.1.1", "A", physical_collection="knowledge__thing", chunk_count=1),
+            _FakeEntry("1.1.2", "B", physical_collection="knowledge__thing", chunk_count=1),
+            _FakeEntry("1.1.3", "C (alias)", physical_collection="knowledge__thing", chunk_count=1, alias_of="1.1.1"),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 2},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 2, "present": 2, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()], "1.1.2": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["docs"] == 2, "alias row excluded, both real docs counted"
+
+    def test_verify_full_mode_heal_refused(self, initialized_catalog, catalog_env):
+        """--heal without --collection is refused — full mode has no
+        per-document detail to heal from."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--heal"])
+        assert result.exit_code != 0
+        assert "--collection" in result.output
+
+    def test_verify_heal_refused_with_json(self, initialized_catalog, catalog_env):
+        """nexus-sj4a3 code-review SUGGESTION: --heal is interactive
+        (click.prompt loops); combined with --json it would interleave
+        prompts with JSON stdout. Refuse the combination outright rather
+        than risk an Abort on a non-interactive pipe."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["catalog", "verify", "--collection", "knowledge__thing", "--heal", "--json"],
+        )
+        assert result.exit_code != 0
+        assert "--json" in result.output
+
+    # ── code-review CRITICAL: false-vanished storm (list_collections() -> []) ──
+
+    def test_verify_t3_list_collections_empty_is_incomplete_not_vanished(
+        self, catalog_env, monkeypatch,
+    ):
+        """nexus-sj4a3 code-review CRITICAL: production
+        HttpVectorClient.list_collections() catches any non-404
+        VectorServiceError (a 500/503/timeout from /v1/vectors/stats) and
+        returns [] instead of raising. An empty t3_names against a
+        populated catalog is indistinguishable from that swallowed failure
+        (or a genuinely-empty T3) and must read as INCOMPLETE — never as
+        'every collection vanished' (the false mass-vanished-collections
+        alarm this finding exists to kill)."""
+        entries = [
+            _FakeEntry("1.1.1", "A", physical_collection="knowledge__thing", chunk_count=1),
+            _FakeEntry("1.1.2", "B", physical_collection="knowledge__other", chunk_count=1),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1, "knowledge__other": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+                {"collection": "knowledge__other", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 2},
+            manifests={"1.1.1": [object()], "1.1.2": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        # list_collections() returns [] WITHOUT raising — the swallowed-error shape.
+        self._patch_t3(monkeypatch, {}, t3_collections=set())
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code != 0, result.output
+        data = json.loads(result.stdout)
+        assert data["vanished_collections"] == [], (
+            "an empty T3 listing must never be reported as vanished collections"
+        )
+        assert data["summary"]["vanished_collections"] == 0
+        assert any("empty-with-populated-catalog" in u for u in data["unreadable"])
+
+    def test_verify_empty_catalog_and_empty_t3_is_clean(
+        self, catalog_env, monkeypatch,
+    ):
+        """Round-2 pin: a genuinely virgin box (no catalog docs, no T3
+        collections) is CLEAN rc=0 — the empty-T3 INCOMPLETE rule above
+        applies only when the catalog is populated."""
+        cat = _FakeFullCat(
+            entries=[], doc_counts={},
+            mv_all={"collections": [], "count": 0}, manifests={},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections=set())
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "verify"])
 
         assert result.exit_code == 0, result.output
-        assert "Unverifiable" not in result.output
-        # No tumblers to verify, since doc_id was missing.
-        assert "nothing to verify" in result.output.lower()
+
+    # ── critique CRIT-1: never_chunked must not blanket-label RDR-145 ──────
+
+    def test_verify_never_chunked_breakdown_by_collection(self, catalog_env, monkeypatch):
+        """nexus-sj4a3 substantive critique CRIT-1: RDR-145's 'legitimate by
+        design' framing is scoped to knowledge__* store_put notes (empty
+        file_path/source_uri) — a code__ zero-chunk doc (nx index repo's
+        write path, cdypx's dominant production population) must NOT get
+        that label, and the report must break the never-chunked population
+        down per collection so cdypx's reconcile can act on it."""
+        entries = [
+            _FakeEntry(
+                "1.1.1", "Store-put note", physical_collection="knowledge__notes",
+                chunk_count=0, file_path="", source_uri="",
+            ),
+            _FakeEntry(
+                "1.1.2", "Indexed code file", physical_collection="code__1-20",
+                chunk_count=0, file_path="src/nexus/thing.py",
+                source_uri="file:///repo/src/nexus/thing.py",
+            ),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__notes": 1, "code__1-20": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__notes", "referenced": 0, "present": 0, "missing": 0},
+                {"collection": "code__1-20", "referenced": 0, "present": 0, "missing": 0},
+            ], "count": 2},
+            manifests={},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__notes", "code__1-20"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        nc = data["never_chunked"]
+        assert nc["total"] == 2
+        assert nc["rdr145_exempt"]["total"] == 1
+        assert nc["rdr145_exempt"]["by_collection"] == [
+            {"physical_collection": "knowledge__notes", "count": 1},
+        ]
+        assert nc["unclassified"]["total"] == 1
+        assert nc["unclassified"]["by_collection"] == [
+            {"physical_collection": "code__1-20", "count": 1},
+        ]
+        assert "legitimate by design" not in result.output.replace("\n", " ") or (
+            "code__1-20" not in result.output.split("legitimate by design")[0]
+        )
+
+    # ── critique CRIT-2: NULL-collection manifest rows the anti-join drops ──
+
+    def test_verify_unbackfilled_manifest_rows_reported_unverifiable(
+        self, catalog_env, monkeypatch,
+    ):
+        """nexus-sj4a3 substantive critique CRIT-2: manifest_verify_all's
+        SQL excludes document_chunks rows with collection IS NULL
+        (pre-backfill state) from 'referenced' entirely — such rows read
+        clean in every class. A per-collection delta between the client's
+        manifest-row total (get_manifests has no such filter) and the
+        engine's referenced count surfaces the un-backfilled population as
+        unverifiable/incomplete, never as a clean pass."""
+        entries = [
+            _FakeEntry(
+                "1.1.1", "Partially backfilled", physical_collection="knowledge__partial",
+                chunk_count=1,
+            ),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__partial": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__partial", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            # 3 manifest rows client-side; the engine only counted 1 as
+            # "referenced" — 2 rows are pre-backfill (collection IS NULL)
+            # and invisible to manifest_verify_all.
+            manifests={"1.1.1": [object(), object(), object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__partial"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code != 0, result.output
+        data = json.loads(result.stdout)
+        assert data["unverifiable_rows"] == [
+            {"collection": "knowledge__partial", "unverifiable_rows": 2},
+        ]
+        assert any("unbackfilled:knowledge__partial" in u for u in data["unreadable"])
+
+    # ── code-review IMPORTANT: engine reads must be exception-isolated ─────
+
+    def test_verify_get_manifests_failure_still_emits_valid_json(
+        self, catalog_env, monkeypatch,
+    ):
+        """nexus-sj4a3 code-review IMPORTANT: cat.get_manifests() failing
+        mid-sweep must not propagate an unhandled traceback — especially
+        under --json, where the CI contract requires valid JSON on stdout
+        even when part of the sweep could not be read."""
+        entries = [_FakeEntry("1.1.1", "A", physical_collection="knowledge__thing", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            get_manifests_exc=RuntimeError("engine unreachable"),
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code != 0, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            "an unhandled traceback reached the CLI boundary"
+        )
+        data = json.loads(result.stdout)
+        assert "catalog:get_manifests" in data["unreadable"]
+
+    def test_verify_collection_doc_counts_failure_is_incomplete(
+        self, catalog_env, monkeypatch,
+    ):
+        """Same guard for cat.collection_doc_counts() (Class A's other
+        engine read)."""
+        entries = [_FakeEntry("1.1.1", "A", physical_collection="knowledge__thing", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts_exc=RuntimeError("engine unreachable"),
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code != 0, result.output
+        assert "INCOMPLETE" in result.output
+
+    # ── critique SIG-4: Class A/B double-report ─────────────────────────────
+
+    def test_verify_vanished_collection_not_also_reported_damaged(
+        self, catalog_env, monkeypatch,
+    ):
+        """nexus-sj4a3 substantive critique SIG-4: manifest_verify_all
+        derives its collection list independently of T3, so a genuinely
+        vanished collection's chashes all fail presence — it must surface
+        once, under vanished_collections, never ALSO under damaged."""
+        entries = [
+            _FakeEntry("1.1.1", "Ghost Collection Doc", physical_collection="knowledge__gone", chunk_count=1),
+            _FakeEntry("1.1.2", "Clean Doc", physical_collection="knowledge__other", chunk_count=1),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__gone": 1, "knowledge__other": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__gone", "referenced": 1, "present": 0, "missing": 1},
+                {"collection": "knowledge__other", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 2},
+            manifests={"1.1.1": [object()], "1.1.2": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__other"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert len(data["vanished_collections"]) == 1
+        assert data["vanished_collections"][0]["physical_collection"] == "knowledge__gone"
+        assert data["damaged"] == [], (
+            "vanished collection must not ALSO appear in the damaged list"
+        )
+
+    # ── --collection scoped mode (real ActiveCatalog + mocked T3) ──────────
+
+    def test_verify_collection_filter(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """--collection scopes the sweep to a single physical_collection —
+        the out-of-scope collection is never even examined."""
+        missing_chash = "d" * 64
+        present_chash = "e" * 64
+        self._register_chunked(
+            initialized_catalog, "1.1", "In Scope",
+            "knowledge__foo", chunk_count=1, chashes=[missing_chash],
+        )
+        self._register_chunked(
+            initialized_catalog, "1.1", "Out Of Scope",
+            "knowledge__bar", chunk_count=1, chashes=[present_chash],
+        )
+        self._patch_t3(monkeypatch, {"knowledge__bar": [present_chash]})
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "verify", "--collection", "knowledge__foo"],
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "In Scope" in result.output
+        assert "Out Of Scope" not in result.output
+
+    def test_verify_scoped_json_output(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """--collection --json emits per-doc damaged detail."""
+        chash = "f" * 64
+        self._register_chunked(
+            initialized_catalog, "1.1", "Ghost",
+            "knowledge__x", chunk_count=1, chashes=[chash],
+        )
+        self._patch_t3(monkeypatch, {"knowledge__x": []})
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "verify", "--collection", "knowledge__x", "--json"],
+        )
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["exit"] == 1
+        assert len(data["damaged"]) == 1
+        assert data["damaged"][0]["title"] == "Ghost"
+        assert data["damaged"][0]["missing"] == 1
 
     def test_verify_excludes_alias_rows(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
-        """Alias rows (alias_of != '') must NOT appear as ghosts in verify_cmd.
+        """Alias rows (alias_of != '') must NOT appear as findings.
 
-        This pins the fix for nexus-xnz0o: all_documents() previously omitted
-        alias_of from its SELECT, so CatalogEntry.alias_of was always "" and
-        the ``not e.alias_of`` guard in verify_cmd was vacuously True.
-
-        Setup:
-          - Register a real doc with a doc_id in coll_paper; T3 says it's gone (ghost).
-          - Register a second doc with a doc_id; alias it to the first doc.
-          - T3 mock returns no IDs (both are "ghosts" if the alias filter is broken).
-          - Correct behaviour: only the real doc is a ghost; the alias is excluded.
+        Pins the fix for nexus-xnz0o: all_documents()/list_by_collection()
+        previously omitted alias_of from its SELECT, so CatalogEntry.alias_of
+        was always "" and the ``not e.alias_of`` guard was vacuously True.
         """
         from nexus.catalog.tumbler import Tumbler
 
         coll = "knowledge__alias_test"
-        # Register the canonical doc (verifiable — has doc_id, has collection).
-        self._register_with_doc_id(
+        chash = "9" * 64
+        self._register_chunked(
             initialized_catalog, "1.1", "Canonical",
-            coll, "alias-test-canon-docid",
+            coll, chunk_count=1, chashes=[chash],
         )
-        # Register a second doc and alias it to the canonical.
         alias_tumbler = initialized_catalog.register(
-            Tumbler.parse("1.1"),
-            "Alias Doc",
-            content_type="knowledge",
-            physical_collection=coll,
-            meta={"doc_id": "alias-test-alias-docid"},
+            Tumbler.parse("1.1"), "Alias Doc",
+            content_type="knowledge", physical_collection=coll,
         )
-        # Mark it as an alias of the canonical.
         # nexus-iltyk: set_alias mutates but is NOT on CATALOG_WRITE_OPS, so
-        # the typed writer will not forward it on the SQLite arm while the
-        # service "reader" handle proxies it. No single object does both.
+        # the typed writer will not forward it. No single object does both.
         unroutable_write_target().set_alias(alias_tumbler, Tumbler.parse("1.1.1"))
 
-        # T3 reports nothing in coll — both would be "ghosts" if alias filter broken.
-        self._patch_t3(monkeypatch, {coll: set()})
+        # T3 reports nothing present — the canonical doc is damaged.
+        self._patch_t3(monkeypatch, {coll: []})
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "verify", "--collection", coll])
 
-        assert result.exit_code == 0, result.output
-        # "Canonical" is a ghost (expected).
-        assert "Canonical" in result.output or "1 ghost" in result.output or "ghost" in result.output.lower(), (
-            f"Expected Canonical to be flagged as ghost; output:\n{result.output}"
-        )
-        # "Alias Doc" must NOT appear — alias rows are excluded from ghost checks.
+        assert result.exit_code == 1, result.output
+        assert "Canonical" in result.output
         assert "Alias Doc" not in result.output, (
             f"Alias row 'Alias Doc' appeared in verify output — alias filter broken:\n{result.output}"
         )
 
-    def test_verify_heal_drops_ghost(
+    def test_verify_heal_drops_damaged(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
-        """--heal with `d` (drop) removes the ghost tumbler from the catalog."""
-        self._register_with_doc_id(
+        """--collection --heal with `d` (drop) removes the damaged tumbler."""
+        chash = "7" * 64
+        self._register_chunked(
             initialized_catalog, "1.1", "Ghost",
-            "knowledge__thing", "7777aaaaaaaaaaaa",
+            "knowledge__thing", chunk_count=1, chashes=[chash],
         )
-        self._patch_t3(monkeypatch, {})
+        self._patch_t3(monkeypatch, {"knowledge__thing": []})
 
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["catalog", "verify", "--heal"],
+            ["catalog", "verify", "--collection", "knowledge__thing", "--heal"],
             input="d\n",
         )
 
@@ -1252,6 +1874,33 @@ class TestVerifyCommand:
         # the raw local-SQLite reopen this used has no service equivalent).
         from tests._catalog_fixture_ops import documents_by_title
         assert documents_by_title("Ghost") == []
+
+    def test_verify_scoped_all_damaged_not_100_percent_clean(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """nexus-sj4a3 substantive critique SIG-3: scoped mode's clean-pct
+        must subtract damaged docs (a real per-doc count in scoped mode) —
+        an all-damaged run must never print '100.0% clean'."""
+        chash_a = "1" * 64
+        chash_b = "2" * 64
+        self._register_chunked(
+            initialized_catalog, "1.1", "Ghost A", "knowledge__thing",
+            chunk_count=1, chashes=[chash_a],
+        )
+        self._register_chunked(
+            initialized_catalog, "1.1", "Ghost B", "knowledge__thing",
+            chunk_count=1, chashes=[chash_b],
+        )
+        self._patch_t3(monkeypatch, {"knowledge__thing": []})
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "verify", "--collection", "knowledge__thing"],
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "100.0% clean" not in result.output
+        assert "0.0% clean" in result.output
 
     def test_coverage_report(self, initialized_catalog, catalog_env):
         """Coverage shows linked vs total count per content type."""

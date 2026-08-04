@@ -261,6 +261,8 @@ from nexus.commands.catalog_cmds import report as _report_cmds  # noqa: E402 —
 from nexus.commands.catalog_cmds import integrity as _integrity_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import doctor as _doctor_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import orphan_backfill as _orphan_backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import reconcile_stale as _reconcile_stale_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import purge_trash as _purge_trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -273,6 +275,8 @@ _report_cmds.register(catalog)
 _integrity_cmds.register(catalog)
 _doctor_cmds.register(catalog)
 _orphan_backfill_cmds.register(catalog)
+_reconcile_stale_cmds.register(catalog)
+_purge_trash_cmds.register(catalog)
 
 
 @catalog.command("init")
@@ -469,6 +473,10 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     to a skip — this is a diagnostic tool, not a background health check,
     so an unreachable engine or a pre-fence 404 must be visible as a
     failure, never reported as a false-clean result.
+
+    Exit codes: 0 clean; 1 DAMAGED (any manifest chash missing from T3,
+    nexus-sj4a3 — in both text and ``--json`` modes) or lookup/engine
+    failure.
     """
     cat = _get_catalog()
     t = _resolve_tumbler(cat, tumbler_or_title)
@@ -484,6 +492,7 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     referenced = int(counts.get("referenced", 0) or 0)
     present = int(counts.get("present", 0) or 0)
     missing = int(counts.get("missing", 0) or 0)
+    damaged = missing > 0
 
     if as_json:
         click.echo(json.dumps({
@@ -493,7 +502,10 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
             "missing": missing,
             "index_state": entry.index_state,
             "index_content_hash": entry.index_content_hash,
+            "damaged": damaged,
         }, indent=2))
+        if damaged:
+            raise click.exceptions.Exit(1)
         return
 
     click.echo(f"Tumbler:     {entry.tumbler}")
@@ -502,14 +514,27 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     click.echo(f"Referenced:  {referenced}")
     click.echo(f"Present:     {present}")
     click.echo(f"Missing:     {missing}")
-    if missing:
+    if damaged:
         click.echo(
             f"\n{missing} of {referenced} manifest chash(es) missing from "
             f"T3 — this document is DAMAGED."
         )
-        click.echo("Repair: nx index <path> --force")
-    else:
-        click.echo("\nOK — manifest fully present in T3.")
+        # nexus-sj4a3: only point at `nx index <path> --force` when the doc
+        # actually resolves to a filesystem path (a repo-indexed file) —
+        # a `store put`-origin note has no path to re-index, and a
+        # file_path that no longer EXISTS on disk (moved/deleted since
+        # indexing) is exactly as unusable for this hint (code-review
+        # SUGGESTION: truthiness alone let a stale path through with an
+        # actionable-looking but broken hint).
+        if entry.file_path and Path(entry.file_path).exists():
+            click.echo(f"Repair: nx index {entry.file_path} --force")
+        else:
+            click.echo(
+                "Repair: no indexable file_path on this document — try "
+                "`nx catalog reconcile` or re-`nx store put` the content."
+            )
+        raise click.exceptions.Exit(1)
+    click.echo("\nOK — manifest fully present in T3.")
 
 
 @catalog.command("search")
@@ -581,6 +606,35 @@ def register_cmd(
             if rel != fp:
                 fp = rel
                 break
+
+    # nexus-u8n4r: single-doc, user-explicit registration — refuse loudly
+    # rather than skip silently, mirroring the MCP catalog_register tool.
+    # Same owner-root exception as the bulk index hooks. Review fix C1
+    # (code-review-expert): test the ABSOLUTE registered identity, never
+    # the post-relativization ``fp`` — see
+    # ``reconstruct_absolute_registered_path``'s docstring for why the
+    # naive ``fp or file_path`` was silently inert for a worktree nested
+    # inside an already-registered repo.
+    from nexus.repo_identity import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+        owner_repo_root_best_effort,
+        reconstruct_absolute_registered_path,
+        should_skip_ephemeral_registration,
+    )
+
+    _owner_repo_root = owner_repo_root_best_effort(cat, owner)
+    _registered_path = reconstruct_absolute_registered_path(
+        file_path, fp, _owner_repo_root,
+    )
+    if should_skip_ephemeral_registration(_registered_path, _owner_repo_root):
+        raise click.ClickException(
+            f"refusing to register {_registered_path!r}: it sits under an "
+            f"agent worktree or system temp dir (nexus-u8n4r) and owner "
+            f"{owner!r}'s repo_root is not itself rooted there — the "
+            f"ephemeral checkout will vanish and leave a permanent orphan. "
+            f"If this is a deliberate throwaway owner rooted in a "
+            f"worktree/tempdir, register the owner with that repo_root "
+            f"first so the exception applies."
+        )
 
     try:
         tumbler = writer.register(
@@ -712,8 +766,22 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     """Remove a document from the catalog. Links to it are preserved as orphans.
 
     Accepts a tumbler or title. Prompts for confirmation unless -y is passed.
-    The document is removed from SQLite and tombstoned in JSONL, but existing
-    links remain — use 'nx catalog links --type ...' to find orphaned links.
+    The document is soft-tombstoned (``deleted_at`` stamped) — its manifest
+    and T3 chunks are NOT cascaded (nexus-3ck2g: preserves the manual-restore
+    path, nexus-xavu7). On an engine carrying the nexus-3ck2g read-side
+    tombstone filter, the content stops appearing in search results
+    immediately; on an older engine it stays fully searchable until that
+    filter is deployed. The manifest/T3 rows are physically reclaimed later,
+    via ``nx catalog purge-trash --no-dry-run --confirm`` — but that
+    reclaim is NOT age-gated the way the phrase "retention window" might
+    suggest (nexus-8j1zx fix round): ``purge-trash``'s chunk sweep runs
+    on EVERY tombstoned document on its very next non-dry-run invocation,
+    regardless of how recently it was deleted; only the catalog row's
+    physical removal waits for ``--older-than-days``. So the manual-restore
+    path stays open only until the NEXT ``purge-trash --no-dry-run
+    --confirm`` run anywhere in the tenant, not until some age threshold
+    for THIS document. Existing links remain — use 'nx catalog links
+    --type ...' to find orphaned links.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -731,7 +799,16 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     # local catalog (nexus-i711w): backups were local-catalog-only.
     deleted = writer.delete_document(t)
     if deleted:
-        click.echo(f"Deleted: {t} ({entry.title}). Links preserved.")
+        click.echo(
+            f"Deleted: {t} ({entry.title}). Links preserved. "
+            "Content stops appearing in search once the engine's tombstone "
+            "read-filter is deployed (nexus-3ck2g); physical reclaim happens "
+            "via 'nx catalog purge-trash', whose chunk sweep is NOT age-gated "
+            "(it reclaims this doc's chunks on the very next --no-dry-run "
+            "--confirm run anywhere in the tenant, not after a retention "
+            "window for this doc specifically) — only the catalog row itself "
+            "waits for --older-than-days."
+        )
     else:
         click.echo(f"Not found: {t}")
 

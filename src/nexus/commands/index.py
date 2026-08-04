@@ -508,6 +508,7 @@ def index_repo_cmd(
         # this run's gaps.
         from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
             reset_complete_refusals,
+            reset_ephemeral_registration_skips,
             reset_manifest_identity_drops,
             reset_manifest_write_failures,
         )
@@ -517,6 +518,9 @@ def index_repo_cmd(
         # refusal collector so the end-of-run summary reflects only this
         # run's refusals.
         reset_complete_refusals()
+        # nexus-u8n4r: zero the worktree/tempdir registration-skip collector
+        # so the end-of-run summary reflects only this run's refusals.
+        reset_ephemeral_registration_skips()
 
         bar: tqdm | None = None
         n = 0
@@ -667,6 +671,40 @@ def index_repo_cmd(
                     err=True,
                 )
 
+        def _emit_ephemeral_skip_summary() -> None:
+            # nexus-u8n4r: files under an agent-worktree or system temp-dir
+            # path were refused registration (not silently swept into the
+            # primary owner's collections) — surface the count, broken
+            # down by reason, so the operator sees the run was not
+            # silently clean. Review fix (2026-08-03): the two reasons are
+            # operationally different — "worktree/temp-marker" is routine
+            # agent-worktree debris, while "worktree-unique (no main
+            # mirror)" means an UNCOMMITTED DRAFT never made it into the
+            # index at all.
+            from nexus.mcp_infra import get_ephemeral_registration_skips  # noqa: PLC0415 — deliberate function-local import (rare branch: only on skips)
+            skips = get_ephemeral_registration_skips()
+            if not skips:
+                return
+            _reason_labels = {
+                "worktree_or_tempdir": "worktree/temp-marker",
+                "worktree_unique_no_main_mirror": "worktree-unique (no main mirror)",
+            }
+            _preferred_order = ("worktree_or_tempdir", "worktree_unique_no_main_mirror")
+            _counts: dict[str, int] = {}
+            for skip in skips:
+                reason = skip.get("reason") or "unspecified"
+                _counts[reason] = _counts.get(reason, 0) + 1
+            _ordered_reasons = [r for r in _preferred_order if r in _counts]
+            _ordered_reasons += sorted(r for r in _counts if r not in _preferred_order)
+            _breakdown = ", ".join(
+                f"{_counts[r]} {_reason_labels.get(r, r)}" for r in _ordered_reasons
+            )
+            click.echo(
+                f"  ⚠ {len(skips)} file(s) skipped — not registered "
+                f"(nexus-u8n4r): {_breakdown}",
+                err=True,
+            )
+
         # nexus-7niu: per-stage timer collection. The callback appends one
         # StageTimers per file; end-of-run aggregation formats the table.
         timers_collected: list = []  # list[StageTimers]
@@ -697,6 +735,7 @@ def index_repo_cmd(
                 bar.close()
             _emit_retry_summary()
             _emit_manifest_write_failure_summary()
+            _emit_ephemeral_skip_summary()
             _emit_debug_timing()
         # nexus-5xn3k.6 AC4: the per-file "skipped" label already exists on
         # the on_file callback's console line (above, monitor/non-tty only)

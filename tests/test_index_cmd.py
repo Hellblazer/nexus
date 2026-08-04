@@ -387,6 +387,78 @@ def test_manifest_write_failure_summary_surfaces_failures(runner, repo_dir, mock
     assert "nx catalog reconcile" in result.output
 
 
+# ── nexus-u8n4r: ephemeral-path registration-skip summary ───────────────────
+
+def test_ephemeral_registration_skip_collector_round_trips_reason():
+    """nexus-u8n4r review fix (Significant): the collector must carry
+    ``reason`` through record -> get, not just ``path``/``owner``."""
+    from nexus.mcp_infra import (
+        _record_ephemeral_registration_skip,
+        get_ephemeral_registration_skips,
+        reset_ephemeral_registration_skips,
+    )
+
+    reset_ephemeral_registration_skips()
+    try:
+        _record_ephemeral_registration_skip(
+            "/r/.claude/worktrees/a/x.py", "1.1", reason="worktree_or_tempdir",
+        )
+        _record_ephemeral_registration_skip(
+            "/r/draft.md", "1.1", reason="worktree_unique_no_main_mirror",
+        )
+        skips = get_ephemeral_registration_skips()
+        assert len(skips) == 2
+        assert skips[0]["reason"] == "worktree_or_tempdir"
+        assert skips[1]["reason"] == "worktree_unique_no_main_mirror"
+    finally:
+        reset_ephemeral_registration_skips()
+
+
+def test_ephemeral_skip_summary_silent_on_no_skips(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert "nexus-u8n4r" not in result.output
+
+
+def test_ephemeral_skip_summary_surfaces_per_reason_breakdown(
+    runner, repo_dir, mock_reg, monkeypatch,
+):
+    """nexus-u8n4r review fix (Significant): the summary must break down
+    by reason, not just print an aggregate count — the two reasons are
+    operationally different (structural worktree/temp-marker debris vs.
+    an uncommitted draft that never made it into the index)."""
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_ephemeral_registration_skips",
+        lambda: [
+            {"path": "/r/.claude/worktrees/a/x.py", "owner": "1.1", "reason": "worktree_or_tempdir"},
+            {"path": "/r/.claude/worktrees/a/y.py", "owner": "1.1", "reason": "worktree_or_tempdir"},
+            {"path": "/r/.claude/worktrees/a/z.md", "owner": "1.1", "reason": "worktree_or_tempdir"},
+            {"path": "/r/draft1.md", "owner": "1.1", "reason": "worktree_unique_no_main_mirror"},
+            {"path": "/r/draft2.md", "owner": "1.1", "reason": "worktree_unique_no_main_mirror"},
+        ],
+    )
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert (
+        "5 file(s) skipped — not registered (nexus-u8n4r): "
+        "3 worktree/temp-marker, 2 worktree-unique (no main mirror)"
+    ) in result.output
+
+
+def test_ephemeral_skip_summary_labels_unknown_reason_verbatim(
+    runner, repo_dir, mock_reg, monkeypatch,
+):
+    """An unrecognized reason string (future-proofing) still renders —
+    verbatim, not swallowed — rather than crashing the summary."""
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_ephemeral_registration_skips",
+        lambda: [{"path": "/r/x.py", "owner": "1.1", "reason": "some_new_reason"}],
+    )
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert "1 file(s) skipped — not registered (nexus-u8n4r): 1 some_new_reason" in result.output
+
+
 # ── RDR monitor behaviour ───────────────────────────────────────────────────
 
 def _make_rdr_dir(home: Path, count: int = 1) -> Path:

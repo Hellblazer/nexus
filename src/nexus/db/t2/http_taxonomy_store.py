@@ -1142,7 +1142,15 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
             # nexus-1k8s1); we pass include for intent only.
             res = stub.get(ids=batch, include=["documents"])
-            for fid, fdoc in zip(res.get("ids") or [], res.get("documents") or []):
+            res_ids = res.get("ids") or []
+            # nexus-hdx2u: a store-get can legitimately return FEWER rows
+            # than requested (absent/deleted ids), never more.
+            assert len(res_ids) <= len(batch), (
+                f"stub.get(ids=...) returned {len(res_ids)} rows for "
+                f"{len(batch)} requested ids — a store-get response can "
+                "never exceed its request size"
+            )
+            for fid, fdoc in zip(res_ids, res.get("documents") or []):
                 if fdoc:
                     ids.append(fid)
                     texts.append(fdoc)
@@ -1267,6 +1275,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 got_ids = result.get("ids") or []
                 got_docs = result.get("documents") or []
                 got_embs = result.get("embeddings")
+                # nexus-hdx2u: a store-get can legitimately return FEWER
+                # rows than requested (absent/deleted ids), never more.
+                assert len(got_ids) <= len(batch), (
+                    f"coll.get(ids=...) returned {len(got_ids)} rows for "
+                    f"{len(batch)} requested ids — a store-get response "
+                    "can never exceed its request size"
+                )
                 # Refuse on skew rather than mis-pair a vector to the wrong
                 # document — same contract as _svc_fetch_by_ids.
                 if got_embs is None or len(got_embs) != len(got_ids):

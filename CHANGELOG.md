@@ -6,6 +6,92 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.2.0] - 2026-08-04
+
+The trash-lifecycle + engine-performance release, paired with engine-service-v0.1.65
+(already deployed to the managed service; local installs converge to it via the pin).
+
+### Added
+- **`nx catalog purge-trash`** (nexus-3ck2g, nexus-8j1zx, nexus-txcbo): physical
+  reclaim of tombstoned catalog rows and their manifest-orphaned T3 chunks — the
+  caller for the engine-side `nexus.purge_trash` sweep, which previously had none.
+  Dry-run and execute evaluate ONE shared server-side population (nexus-ff85q: the
+  first production execute purged 2 of its dry-run's 63 because jOOQ normalized the
+  interval into calendar months; intervals are now exact days) and a partial purge
+  exits non-zero naming both magnitudes. Across both production executes the sweep
+  reclaimed 285 chunks + 63 documents (2 pre-fix, 61 on the post-fix re-execute).
+- **`nx catalog reconcile-stale`** (nexus-cdypx): classify catalog documents with
+  unreliable `chunk_count`/manifest state (61.2% of production docs carried
+  `chunk_count == 0`), plus three double-gated mutation arms: `recount`,
+  `tombstone-vanished`, `tombstone-orphaned`. Read-only census by default.
+- **`nx catalog verify` rebuilt on the RDR-108/180 chash identity** (nexus-sj4a3):
+  the old version keyed on the retired `meta.doc_id` and had collapsed to
+  near-zero coverage. Now reports vanished-collection / damaged-manifest /
+  lost-document findings with real exit codes and a structured `--json` CI
+  contract; INCOMPLETE (unreadable substrate) is distinct from clean.
+- Release tooling: `check_engine_release_floor.py --paired-deploy` (nexus-k1c08)
+  mechanizes the paired-release choreography — expected pre-tag cloud-behind is
+  distinguishable from real drift, with the named tag independently verified.
+
+### Changed
+- **`REQUIRED_ENGINE_VERSION` -> (0, 1, 65)** — three engine releases, each
+  deployed + edge-gated before this bump (deploy-first):
+  - v0.1.63: tombstone visibility filter, the `/v1/catalog/purge-trash` route,
+    store-get/register engine halves.
+  - v0.1.64: purge-trash calendar-interval parity fix (production re-execute
+    purged 61/61, census 0).
+  - v0.1.65: tombstone liveness predicates rewritten to dead-set form — live
+    EXPLAIN on the production tenant shows ~200x on hybrid queries (153ms ->
+    0.7ms) and removes a 27ms fixed tax from the get/list family (nexus-msz9i).
+- Tombstoned (trashed) documents are excluded from search and fetch surfaces
+  (nexus-3ck2g): `nx catalog delete` now actually removes a document from
+  retrieval, not just from `nx catalog list`.
+- CI: 4-way duration-balanced pytest shard + doc-only fast lane behind a single
+  `pytest-gate` fan-in required check (nexus-n0ful); wall time 24-30min -> ~13min.
+
+### Fixed
+- **T3 store-get silently truncated >10-id batches** (nexus-hdx2u): the client
+  stub's own `limit: int = 10` default capped every batch — aspect extraction fed
+  10-of-157 fragments per document and taxonomy centroids were computed from 4%
+  of the corpus, with alignment guards passing because both sides were equally
+  truncated. Full batches now served with an authoritative live-count.
+- `nx store put` / MCP `store_put` / `nx memory promote` re-puts upsert instead of
+  duplicating: registration synthesizes the canonical `chroma://<collection>/<title>`
+  source_uri instead of writing `source_uri=''` (nexus-sdp0u).
+- Concurrent first-put registration race: register responses carry
+  created-vs-matched, closing a rollback race that could drop the winner's row
+  (nexus-vfef0).
+- Catalog registration guard refuses agent-worktree and temp-dir paths at every
+  write choke point (nexus-u8n4r) — ephemeral checkout paths can no longer become
+  permanent catalog identities.
+- Explicit-session-id T1 scratch calls fail loud instead of silently reading the
+  shared machine-wide scope (nexus-f7xyq); the review-marker hook opts into the
+  fallback explicitly (nexus-6a19f).
+- `nx daemon` start paths fail loud on a launch-artifact mismatch instead of
+  silently serving the wrong binary (nexus-4e96a).
+- `nx upgrade` backfills `install.mode` on convergence; `nx doctor`'s three
+  service checks render an honest managed-mode skip detail instead of a
+  misleading pass (nexus-g7ijj).
+- CLI shakeout wave: `owners --json` next_seq, scratch flag/unflag prefix
+  resolution, `scratch clear` confirm gate, census dot-username encoding.
+
+### Plugin (conexus 7.2.0 — pin advance makes these live)
+- **SubagentStop completion guard fires for the first time ever** (nexus-hbr4x):
+  the old named-agent-morphology gate was structurally unsatisfiable (18/18
+  agents `no_terminal`). Now a per-type unmixed-ness gate with CONSUMED-verb
+  credit settlement (nexus-rkigh), a bounded lockdir around read-decide-append
+  (nexus-bk974), and `expectations_undeclared` rc contract 0/1/2 (nexus-suuja).
+- Dispatch hook: absent/empty `subagent_type` defaults to `general-purpose`
+  instead of silently skipping the EXPECT row (nexus-a795d).
+- Orchestration skill + developer agent: design-of-record brief template
+  (nexus-4kp77), idempotent notification handling (nexus-62wt7), VERIFY-line
+  convention (nexus-pjzz8), parallel-arc discipline, foreground-verification
+  rule (nexus-dn9xs).
+- Pre-close verification hook exports `NX_T1_ALLOW_SHARED_FALLBACK=1`
+  (nexus-6a19f) so the review-marker advisory survives the f7xyq fail-loud gate.
+- Doc correction: "subagents cannot spawn subagents" was falsified by direct
+  probe — nested Agent dispatch works and is ledgered.
+
 ## [7.1.2] - 2026-08-03
 
 Emergency hotfix: restores the nexus MCP servers on fresh installs.

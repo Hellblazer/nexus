@@ -182,6 +182,88 @@ class TestMcpGhostRegisterCompensation:
         )
 
 
+# ── nexus-vfef0: race-loser created=False must skip rollback (MCP) ──────────
+
+
+class _RaceLoserWriter:
+    """Wraps the real service-mode writer, forcing ``register()`` to report
+    ``created=False`` — as if THIS call were the concurrent first-put race
+    LOSER — while still performing the real registration underneath, so a
+    real row lands in the DB and the test can prove it survives.
+
+    Delegates every other attribute (including ``register_owner``,
+    ``update``, ``close``) to the real writer via ``__getattr__``, same
+    pattern as ``TestWriterCloseGuard._CloseBomb`` above.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def register(self, *args, **kwargs):
+        result = self._inner.register(*args, **kwargs)
+        if kwargs.get("with_created"):
+            tumbler, _created = result
+            return tumbler, False
+        return result
+
+
+class TestVfef0RaceLoserSkipsRollback:
+    def test_race_loser_created_false_never_triggers_rollback(
+        self, catalog_env: Path,
+    ) -> None:
+        """nexus-vfef0 regression: when ``writer.register(with_created=True)``
+        reports ``created=False`` (the concurrent first-put race-loser leg),
+        a subsequent ``t3.put`` failure must NOT invoke
+        ``rollback_minted_catalog_entry`` — the returned row belongs to a
+        concurrent WINNER, not this call.
+
+        Pre-fix, this leg was hardcoded ``created=True`` in
+        ``catalog_store_hook_tracked`` (the wire carried no created-vs-
+        matched signal at all), so the same failure would have deleted the
+        winner's live row out from under it. This pins the literal bug
+        scenario at the Python layer, one level up from the engine-side
+        ``created`` contract already covered by
+        ``CatalogRepositoryTest``/``Catalog016SourceUriUniqueTest``.
+        """
+        from nexus.catalog.factory import make_catalog_writer as real_make
+
+        rollback_calls: list[str] = []
+
+        def _tracking_rollback(tumbler, *, original_error=""):
+            rollback_calls.append(tumbler)
+            # Never actually delete — this test's assertion IS that it's
+            # never called; a real delete here would also mask a bug.
+            return False
+
+        with patch(
+            "nexus.catalog.factory.make_catalog_writer",
+            side_effect=lambda *a, **k: _RaceLoserWriter(real_make(*a, **k)),
+        ), patch(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            side_effect=_tracking_rollback,
+        ):
+            result = _mcp_store_put_with(
+                _FailingT3(), "race loser content", "b6enc-race-loser",
+            )
+
+        assert result.startswith("Error"), result
+        assert rollback_calls == [], (
+            "created=False (race-loser leg) must never trigger "
+            "rollback_minted_catalog_entry — got calls for: "
+            f"{rollback_calls}"
+        )
+        # The row this call actually registered (via the wrapped real
+        # writer) must survive untouched — from this call's perspective it
+        # is indistinguishable from a genuine dedup hit.
+        assert len(_catalog_rows(catalog_env, "b6enc-race-loser")) == 1, (
+            "the race-loser leg's created=False must leave the registered "
+            "row in place, exactly like a genuine dedup hit"
+        )
+
+
 # ── C3: manifest leg fail-loud (MCP) ─────────────────────────────────────────
 
 

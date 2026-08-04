@@ -599,6 +599,30 @@ def _register_or_lookup_doc_id(
         if existing is not None:
             return str(existing.tumbler)
 
+        # nexus-u8n4r: refuse registration when the identity about to be
+        # STORED (``fp`` — absolute when no ``base_path`` was threaded, as
+        # is the case for the standalone ``nx index md``/``nx index rdr``
+        # pre-flight path) sits under an agent worktree or system temp
+        # dir, UNLESS this owner's own repo_root is itself rooted there
+        # (throwaway owners / the pytest tmp-dir suite). See
+        # ``nexus.repo_identity.should_skip_ephemeral_registration`` for
+        # the full rationale; curator owners (this function's default)
+        # normally carry an empty repo_root, so this is a documented
+        # residual, not a gap this call site closes on its own.
+        from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
+            owner_repo_root_best_effort,
+            should_skip_ephemeral_registration,
+        )
+        _owner_repo_root = owner_repo_root_best_effort(reader, owner)
+        if should_skip_ephemeral_registration(fp, _owner_repo_root):
+            _log.warning(
+                "ephemeral_path_registration_skipped",
+                path=fp, owner=str(owner), reason="worktree_or_tempdir",
+            )
+            from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+            _record_ephemeral_registration_skip(fp, str(owner), reason="worktree_or_tempdir")
+            return ""
+
         try:
             source_mtime = file_path.stat().st_mtime
         except OSError:
@@ -2372,6 +2396,29 @@ def _catalog_markdown_hook(
                 update_kwargs["year"] = year
             writer.update(existing.tumbler, **update_kwargs)
         else:
+            # nexus-u8n4r: refuse a brand-new registration when ``fp``
+            # (absolute when no ``base_path`` was threaded — the shape
+            # this function's callers, ``nx collection reindex`` and the
+            # standalone RDR-only index command, use) sits under an
+            # agent worktree or system temp dir, unless this owner's own
+            # repo_root is itself rooted there. See
+            # ``nexus.repo_identity.should_skip_ephemeral_registration``.
+            # An already-existing doc (the branch above) is left alone —
+            # this only stops NEW pollution, not a re-index of something
+            # registered before this guard existed.
+            from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
+                owner_repo_root_best_effort,
+                should_skip_ephemeral_registration,
+            )
+            _owner_repo_root = owner_repo_root_best_effort(reader, owner)
+            if should_skip_ephemeral_registration(fp, _owner_repo_root):
+                _log.warning(
+                    "ephemeral_path_registration_skipped",
+                    path=fp, owner=str(owner), reason="worktree_or_tempdir",
+                )
+                from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+                _record_ephemeral_registration_skip(fp, str(owner), reason="worktree_or_tempdir")
+                return
             writer.register(
                 owner=owner, title=title, content_type=content_type,
                 file_path=fp, physical_collection=collection_name,
