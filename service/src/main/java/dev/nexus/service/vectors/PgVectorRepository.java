@@ -2611,12 +2611,43 @@ public final class PgVectorRepository {
      * what that check requires.
      */
     private static String liveChunksPredicate(String alias) {
+        // nexus-msz9i (hybrid p50 744ms -> ~1000ms at the v0.1.63 deploy): the original
+        // two-subquery form `NOT EXISTS(any manifest) OR EXISTS(live manifest)` cost
+        // ~250ms/query and GREW with the corpus. EXPLAIN (ANALYZE, BUFFERS) on a 76k-chunk
+        // / 57k-manifest fixture: PostgreSQL turned BOTH correlated EXISTS into HASHED
+        // SubPlans, each seq-scanning the ENTIRE manifest once per query (a fixed cost
+        // linear in TOTAL manifest size, not in rows examined) — and the resulting cost
+        // estimate rose ~160x (8,130 -> 1,290,101), which additionally (a) crossed
+        // jit_above_cost/jit_inline/jit_optimize, adding ~118ms of JIT COMPILE per query,
+        // and (b) flipped the gate probe off its Seq Scan onto a chunks_<dim>_pk Index
+        // Scan, ~10x buffers (6,415 -> 63,166).
+        //
+        // This form is the DEAD-SET equivalent: one EXISTS whose row set is bounded by the
+        // TOMBSTONED population instead of the whole manifest.
+        //     live <=> NOT EXISTS(dead parent AND no live parent)
+        //           == NOT EXISTS(dead parent) OR EXISTS(live parent)   [the old form]
+        // The inner NOT EXISTS is keyed on m.chash (= alias.chash), so it does not depend
+        // on WHICH dead parent matched — the rewrite is exact, not an approximation.
+        //
+        // EQUIVALENCE DEPENDS ON A VALIDATED FK. The two forms differ on exactly one input:
+        // a manifest row whose doc_id has no catalog_documents row (the old form calls such
+        // a chunk DEAD, this one calls it LIVE). That input is unreachable —
+        // fk_catalog_chunks_catalog_doc (fk-001-5) DELETEs orphans then adds the FK with no
+        // NOT VALID, so it is enforced and validated. If that FK is ever dropped or
+        // re-added NOT VALID, revisit this predicate.
+        //
+        // Measured (same fixture, gate probe): plan and cost restored to the pre-dcf77fb7
+        // shape — Seq Scan, cost 12,009 (vs 8,130 with no predicate at all), no JIT,
+        // buffers 63,166 -> 21,288, execution 1,536ms -> 1,364ms against a 1,355ms
+        // no-predicate baseline.
         return "(NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
-            + " WHERE m.tenant_id = " + alias + ".tenant_id AND m.chash = " + alias + ".chash)"
-            + " OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
             + " JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
             + " WHERE m.tenant_id = " + alias + ".tenant_id AND m.chash = " + alias + ".chash"
-            + " AND d.deleted_at IS NULL))";
+            + " AND d.deleted_at IS NOT NULL"
+            + " AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2"
+            + " JOIN nexus.catalog_documents d2 ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id"
+            + " WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash"
+            + " AND d2.deleted_at IS NULL)))";
     }
 
     /**
@@ -2649,19 +2680,54 @@ public final class PgVectorRepository {
      * every named get-family method to call this helper by name.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
-        org.jooq.Condition hasManifest = DSL.exists(
-            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
-               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
-                      .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
-        org.jooq.Condition hasLiveManifest = DSL.exists(
+        // nexus-msz9i: the DEAD-SET form, the typed twin of the rewrite applied to
+        // liveChunksPredicate. See that method for the full derivation and the
+        // FK-dependent equivalence argument (fk_catalog_chunks_catalog_doc, validated,
+        // makes a manifest row with no owning document impossible — the single input on
+        // which this form and the old one disagree).
+        //
+        // WHY THIS PATH MATTERED MORE, NOT LESS, THAN hybridSearch. The old shape
+        // (hasManifest.not().or(hasLiveManifest)) made PostgreSQL build two hashed
+        // SubPlans that seq-scan the ENTIRE catalog_document_chunks manifest — a cost
+        // FIXED per query and independent of how few rows the caller asked for. That tax
+        // is a rounding error on a ~1.4s hybrid query but it IS the whole cost of a cheap
+        // point lookup. Measured on the msz9i fixture (76k chunks / 57k manifest rows) by
+        // EXPLAIN (ANALYZE, BUFFERS) of the jOOQ-RENDERED production SQL — each shape
+        // against its own run's no-filter baseline:
+        //     OLD shape: get()  200 ids  0.270 ms -> 27.329 ms (101x), buffers 723 -> 2,715
+        //                list() 100 rows 0.037 ms -> 27.331 ms (739x), buffers 125 -> 2,121
+        //     THIS form: get()  200 ids  0.080 ms ->  0.917 ms, list() 0.037 ms -> 1.059 ms
+        // i.e. ~30x and ~26x faster than the old shape respectively. The planner drives this
+        // form as a Nested Loop Anti Join with per-candidate index probes (loops = rows
+        // actually fetched, not the manifest) — the per-candidate indexed lookup this filter
+        // was always meant to be.
+        //
+        // The aliases below (lcc_m2 / lcc_d2) exist so the inner NOT EXISTS can correlate on
+        // the OUTER subquery's chash without shadowing it. Their presence is load-bearing:
+        // an earlier probe that spliced an UNALIASED raw-SQL dead-set into the rendered
+        // list() query measured only 27.3 -> 25.1 ms, because the planner built the dead set
+        // with a manifest-wide hash join instead of per-candidate probes. The typed form
+        // below does not reproduce that; do not "simplify" the aliasing without re-running
+        // the plan probe.
+        var m2 = CATALOG_DOCUMENT_CHUNKS.as("lcc_m2");
+        var d2 = CATALOG_DOCUMENTS.as("lcc_d2");
+        org.jooq.Condition noLiveParent = DSL.notExists(
+            ctx.selectOne().from(m2)
+               .join(d2)
+                 .on(d2.TENANT_ID.eq(m2.TENANT_ID)
+                     .and(d2.TUMBLER.eq(m2.DOC_ID)))
+               .where(m2.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                      .and(ChashHex.hex(m2.CHASH).eq(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH)))
+                      .and(d2.DELETED_AT.isNull())));
+        return DSL.notExists(
             ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                .join(CATALOG_DOCUMENTS)
                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
                       .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
-        return hasManifest.not().or(hasLiveManifest);
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                      .and(noLiveParent)));
     }
 
     /**

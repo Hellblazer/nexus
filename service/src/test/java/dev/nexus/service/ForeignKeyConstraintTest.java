@@ -192,6 +192,45 @@ class ForeignKeyConstraintTest {
         }
     }
 
+    /**
+     * nexus-msz9i: {@code PgVectorRepository#liveChunksPredicate} (and its jOOQ twin
+     * {@code liveChunksCondition}) express chunk liveness in the DEAD-SET form
+     * {@code NOT EXISTS(dead parent AND no live parent)}. That form is equivalent to the
+     * older {@code NOT EXISTS(any manifest) OR EXISTS(live manifest)} form on every
+     * REACHABLE input, but the two DISAGREE on one unreachable input: a
+     * {@code catalog_document_chunks} row whose {@code doc_id} has no
+     * {@code catalog_documents} row (old form => chunk DEAD, dead-set form => chunk LIVE).
+     *
+     * <p>What makes that input unreachable is precisely this constraint being ENFORCED and
+     * VALIDATED — fk-001-5 DELETEs pre-existing orphans and then adds the FK with no
+     * {@code NOT VALID}, so neither existing nor future rows can dangle. A merely-present
+     * constraint is NOT enough: a {@code NOT VALID} FK would leave pre-existing orphan rows
+     * in place and silently flip those chunks from filtered to visible.
+     *
+     * <p>{@code convalidated} is therefore a correctness dependency of the tombstone read
+     * filter, not a schema nicety. If this assertion ever fails, revisit the predicate
+     * before relaxing the constraint.
+     */
+    @Test @Order(1)
+    void manifestFk_isValidated_liveChunksPredicateDependsOnIt() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT c.convalidated FROM pg_constraint c " +
+                "JOIN pg_namespace n ON n.oid = c.connamespace " +
+                "WHERE c.contype = 'f' " +
+                "  AND c.conname = 'fk_catalog_chunks_catalog_doc' " +
+                "  AND n.nspname = 'nexus'");
+            assertThat(rs.next())
+                .as("fk_catalog_chunks_catalog_doc must exist (liveChunksPredicate depends on it)")
+                .isTrue();
+            assertThat(rs.getBoolean(1))
+                .as("fk_catalog_chunks_catalog_doc must be VALIDATED — nexus-msz9i's dead-set "
+                    + "liveChunksPredicate is only equivalent to the old form because dangling "
+                    + "manifest rows are impossible; a NOT VALID FK reintroduces them")
+                .isTrue();
+        }
+    }
+
     @Test @Order(2)
     void docAspectsDocId_isNullable() throws Exception {
         try (Connection su = pg.createConnection("")) {

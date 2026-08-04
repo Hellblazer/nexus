@@ -2097,6 +2097,18 @@ public final class CatalogRepository {
      * stranded by construction (the {@code hasManifest} EXISTS excludes them, same
      * safety contract {@code purge_trash} itself enforces).
      */
+    // nexus-msz9i: this method deliberately RETAINS the old two-subquery liveness shape
+    // (hasManifest AND NOT hasLiveManifest) that PgVectorRepository#liveChunksPredicate was
+    // rewritten away from. That shape makes PostgreSQL build hashed SubPlans which seq-scan
+    // the ENTIRE catalog_document_chunks manifest once per call — a cost fixed per query and
+    // linear in total manifest size. Acceptable HERE and not worth the churn: this is a
+    // diagnostics/reporting count (purge-trash dry-run preview and the stranded-chunk census,
+    // ~3 calls per explicit operator-invoked report), not a serving read path, and unlike the
+    // predicate it is computing the DEAD set as its result rather than filtering rows by it.
+    // If this ever moves onto a hot path — a periodic health poll, a dashboard refresh, a
+    // per-request census — port it to the dead-set form first; see
+    // PgVectorRepository#liveChunksPredicate and T2 nexus/msz9i-explain-verdict for the
+    // plan evidence and the FK-dependent equivalence argument.
     private static long strandedChunkCount(DSLContext ctx, String tenant, DimTables.ChunkTable ch) {
         Condition hasManifest = DSL.exists(
             ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
