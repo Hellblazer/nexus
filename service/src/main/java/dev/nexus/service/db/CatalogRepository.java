@@ -44,9 +44,11 @@ import org.jooq.SelectField;
 import org.jooq.Table;
 import org.jooq.UpdateSetMoreStep;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -2115,16 +2117,47 @@ public final class CatalogRepository {
     }
 
     /**
+     * The {@code older_than} argument for {@code nexus.purge_trash(interval)}, in EXACT
+     * DAYS (nexus-ff85q).
+     *
+     * <p>⚠ DO NOT reintroduce {@code YearToSecond.valueOf(Duration.ofDays(n))} here. jOOQ
+     * normalises a {@link java.time.Duration} into an interval's year/month/day fields
+     * using FIXED 30-day months and 365.25-day years, so {@code Duration.ofDays(30)}
+     * renders as {@code '+0-1 +0'} — literally {@code interval '1 mon'} — and
+     * {@code Duration.ofDays(365)} renders as {@code '+1-0 +5'} ({@code '1 year 5 days'}).
+     * PostgreSQL then evaluates {@code NOW() - interval '1 mon'} with CALENDAR arithmetic,
+     * which is 28-31 real days depending on the month, NOT the 30 the caller asked for.
+     * That mismatch is the nexus-ff85q production defect: a purge advertised as "older
+     * than 30 days" silently applied a different cut point than the dry-run preview did,
+     * and skipped every tombstone in the gap (63 previewed, 2 purged).
+     *
+     * <p>Putting the whole magnitude in the DAY field leaves nothing for jOOQ to
+     * normalise: PostgreSQL receives {@code '+0-0 +30 00:00:00'} and {@code NOW() - that}
+     * is exactly 30×24h. Pinned by {@code CatalogPurgeTrashPopulationParityTest}.
+     */
+    private static org.jooq.types.YearToSecond olderThanInterval(int olderThanDays) {
+        return new org.jooq.types.YearToSecond(
+            new org.jooq.types.YearToMonth(0, 0),
+            new org.jooq.types.DayToSecond(olderThanDays));
+    }
+
+    /**
      * Aged-tombstone document count (nexus-3ck2g E3) — mirrors {@code nexus.purge_trash}'s
      * Step 4 WHERE ({@code deleted_at IS NOT NULL AND deleted_at <= NOW() - older_than}).
-     * Threshold is computed against the JAVA clock (not the PG server clock the function
-     * itself uses via {@code NOW()}) — acceptable drift for a preview/summary count;
-     * negligible in practice and never load-bearing for the actual purge, which always
-     * runs the function's own server-side {@code NOW()} arithmetic.
+     *
+     * <p>The threshold is evaluated SERVER-SIDE, from the identical {@code NOW() - {interval}}
+     * expression and the identical {@link #olderThanInterval} argument the function itself
+     * receives (nexus-ff85q). It deliberately does NOT compute a Java-clock threshold: that
+     * made this count a SECOND, independently-written definition of one population, and the
+     * two definitions drifted — by up to a day per month of threshold on the interval units
+     * alone, plus whatever app-host/DB-host clock skew exists in a cloud deployment. One
+     * population needs one predicate; this is that predicate, in the same dialect and on the
+     * same clock as the DELETE it previews.
      */
     private static long agedTombstoneCount(DSLContext ctx, String tenant, int olderThanDays) {
-        java.time.OffsetDateTime threshold =
-            java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).minusDays(olderThanDays);
+        Field<OffsetDateTime> threshold = DSL.field(
+            "now() - {0}", OffsetDateTime.class,
+            DSL.val(olderThanInterval(olderThanDays), SQLDataType.INTERVAL));
         // TOMBSTONE-EXEMPT (nexus-mqd6t): this read's whole PURPOSE (nexus-3ck2g E3) is
         // counting the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring
         // nexus.purge_trash's own Step 4 WHERE -- the inverse of every other CATALOG_DOCUMENTS
@@ -2169,20 +2202,40 @@ public final class CatalogRepository {
      * the ordinary read-committed race against a concurrent write in the same instant
      * (no data-safety impact either way; purge_trash's own WHERE is authoritative for
      * what actually gets deleted, these counts are reporting only).
+     *
+     * <p>PARTIAL PURGES ARE NEVER SILENT (nexus-ff85q): the aged-tombstone count is
+     * measured in this same transaction, immediately before the function runs, and is
+     * returned as {@code documents_eligible} alongside {@code documents_purged}. Under
+     * identical state the two are equal by construction — both now derive from the same
+     * {@link #olderThanInterval} argument and the same server clock. A difference means the
+     * purge took a strict SUBSET of what it found, which is what production saw (63
+     * eligible, 2 purged, reported as success); it is logged at WARN and is visible on the
+     * wire so {@code nx catalog purge-trash} can say so instead of printing a bare
+     * completion. Not an exception: a concurrent committed tombstone/restore between the
+     * two statements is a legitimate (if rare) read-committed cause, and aborting a purge
+     * that has ALREADY deleted rows would be worse than reporting the discrepancy.
      */
     public Map<String, Object> purgeTrash(String tenant, int olderThanDays) {
         return tenantScope.withTenant(tenant, ctx -> {
             long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384));
             long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768));
             long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024));
+            long eligible   = agedTombstoneCount(ctx, tenant, olderThanDays);
 
-            Long purged = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
-                ctx.configuration(),
-                org.jooq.types.YearToSecond.valueOf(java.time.Duration.ofDays(olderThanDays)));
+            Long purgedRaw = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
+                ctx.configuration(), olderThanInterval(olderThanDays));
+            long purged = purgedRaw != null ? purgedRaw : 0L;
+
+            if (purged != eligible) {
+                log.warn("event=purge_trash_partial tenant={} older_than_days={} "
+                         + "documents_eligible={} documents_purged={}",
+                         tenant, olderThanDays, eligible, purged);
+            }
 
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("dry_run", false);
-            out.put("documents_purged", purged != null ? purged : 0L);
+            out.put("documents_purged", purged);
+            out.put("documents_eligible", eligible);
             out.put("chunks_384_stranded", chunks384);
             out.put("chunks_768_stranded", chunks768);
             out.put("chunks_1024_stranded", chunks1024);

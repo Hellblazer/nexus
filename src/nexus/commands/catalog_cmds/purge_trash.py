@@ -81,15 +81,31 @@ def _echo_result(result: dict, older_than_days: int) -> None:
     everything else stays shape-agnostic so a future additional dim's
     ``chunks_<dim>_stranded`` key needs no code change here.
     ``dry_run`` is echoed separately by the caller, not repeated here.
+
+    ``documents_eligible`` (execute responses only, nexus-ff85q) is the
+    aged-tombstone population the engine measured in the SAME transaction,
+    immediately before the purge ran. It is printed next to
+    ``documents_purged``, NOT under the chunk-storage heading — it is an
+    age-gated document count, and the shape-agnostic passthrough below
+    would otherwise file it with the chunk sweep and repeat the exact
+    mislabelling nexus-8j1zx fixed. When it exceeds ``documents_purged``
+    the purge took a strict subset of what it found; see
+    :func:`purge_trash_cmd` for why that is an ERROR and not a footnote.
     """
     docs_key = "documents_purged"
+    eligible_key = "documents_eligible"
     if docs_key in result:
         click.echo(
             f"  {docs_key} (age-gated, tombstoned >= {older_than_days} day(s) ago): "
             f"{result[docs_key]}"
         )
+    if eligible_key in result:
+        click.echo(
+            f"  {eligible_key} (age-gated population measured at purge time): "
+            f"{result[eligible_key]}"
+        )
 
-    chunk_keys = sorted(k for k in result if k not in ("dry_run", docs_key))
+    chunk_keys = sorted(k for k in result if k not in ("dry_run", docs_key, eligible_key))
     if chunk_keys:
         click.echo(
             "  Chunk storage swept — NOT age-gated, every tombstoned doc's "
@@ -205,6 +221,76 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     _log.info(
         "purge_trash_cmd_done",
         older_than_days=older_than_days, will_act=will_act,
+    )
+
+    if will_act:
+        _fail_on_partial_purge(result, older_than_days)
+
+
+def _fail_on_partial_purge(result: dict, older_than_days: int) -> None:
+    """Refuse to report a partial purge as a plain success (nexus-ff85q).
+
+    THE DEFECT THIS CLOSES: the first production execute purged 2 of the
+    63 age-eligible documents its own dry-run had reported, printed a
+    completion report, and exited 0. Nothing in the output said "61 of
+    these are still here" — the operator's only signal was noticing that a
+    follow-up dry-run still listed them. A purge that removes a strict
+    SUBSET of the population it measured is by definition incomplete, so
+    it exits non-zero. The full report is printed FIRST by the caller and
+    the chunk sweep may well have completed, so this is emphatically not
+    "nothing happened".
+
+    THE EXIT CODE IS A SIGNAL, NOT A DIAGNOSIS. The engine's own
+    ``CatalogRepository.purgeTrash`` treats this same shortfall as a
+    soft WARN because one benign cause exists: the eligibility count and
+    the purge run as two statements in one READ COMMITTED transaction, so
+    a ``nexus.document_restore`` (or a fresh tombstone) committing between
+    them legitimately moves the population under the purge's feet. That
+    race is real but small — it moves the count by however many documents
+    a concurrent operator touched in that window, typically one or two,
+    never the 61 production saw. So the message below reports the
+    MAGNITUDES and names both readings rather than asserting which
+    occurred; the operator, who knows whether anyone else was working the
+    trash, is better placed to tell them apart than this function is.
+
+    This deliberately does NOT implement a repeat-detector, a
+    magnitude threshold, or a retry. A threshold would need a defensible
+    cut point nobody has evidence for, and any of them would reintroduce a
+    silent window — the exact property the bead exists to remove. The
+    contract is narrow and total: partial is never silent.
+
+    Older engines (pre-nexus-ff85q) do not send ``documents_eligible`` at
+    all; the check no-ops rather than inventing a verdict it cannot
+    support, so this client stays usable against them.
+    """
+    eligible = result.get("documents_eligible")
+    purged = result.get("documents_purged")
+    if not isinstance(eligible, int) or not isinstance(purged, int):
+        return
+    if purged >= eligible:
+        return
+
+    shortfall = eligible - purged
+    _log.warning(
+        "purge_trash_partial",
+        older_than_days=older_than_days,
+        documents_eligible=eligible, documents_purged=purged,
+        shortfall=shortfall,
+    )
+    raise click.ClickException(
+        f"PARTIAL PURGE: {purged} of {eligible} age-eligible document(s) were "
+        f"purged; {shortfall} still eligible. The chunk-storage counts above "
+        f"still reflect what was swept.\n"
+        f"Two readings, and the magnitude tells them apart:\n"
+        f"  - A concurrent tombstone or restore committing between the "
+        f"eligibility count and the delete is a legitimate read-committed "
+        f"race. A shortfall of 1-2 on an actively-used catalog is plausibly "
+        f"that.\n"
+        f"  - A larger shortfall is not: it means the purge applied a "
+        f"different population than it measured (nexus-ff85q).\n"
+        f"Re-run the dry-run (`nx catalog purge-trash --older-than-days "
+        f"{older_than_days}`) to see the current eligible count; purge-trash "
+        f"is idempotent, so re-running the execute is safe either way."
     )
 
 

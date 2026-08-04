@@ -1259,6 +1259,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         counts as a preview WITHOUT deleting anything; ``dry_run=False``
         performs the real sweep, scoped to the request tenant.
 
+        ``dry_run=False`` responses from a nexus-ff85q-or-newer engine carry
+        one ADDITIONAL key, ``documents_eligible``: the age-gated population
+        the engine measured in the same transaction as the purge.
+        ``documents_purged < documents_eligible`` means the purge took a
+        strict subset of its own reported population — the CLI verb treats
+        that as an error (see ``catalog_cmds.purge_trash``). Older engines
+        omit the key entirely; verbatim passthrough means callers must treat
+        it as optional, never assume it.
+
         A pre-nexus-3ck2g engine has no matching route for this call and
         answers 404 — this method does NOT swallow that (unlike the
         RUNFENCE advisory-write methods above); it propagates the raw

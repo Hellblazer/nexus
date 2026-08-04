@@ -1059,6 +1059,8 @@ Default is a read-only dry-run: a per-dim stranded-chunk count preview plus an a
 
 Mutation is gated behind BOTH `--no-dry-run` AND `--confirm` (same gate as `nx catalog reconcile-stale`): `--no-dry-run` alone still reports only, and `--json` cannot be combined with `--no-dry-run` (the mutation path prints a plain-text report, not JSON).
 
+**A partial purge is an error, not a footnote (nexus-ff85q).** The execute report carries `documents_eligible` — the age-gated population the engine measured in the same transaction as the purge — alongside `documents_purged`. Under identical state the two are equal. If fewer documents were purged than were eligible, the command prints the full report (the chunk sweep may have completed) and then exits non-zero naming the shortfall, rather than reporting a bare success. `purge-trash` is idempotent, so re-running is the correct first response. This exists because the first production execute purged 2 of the 63 documents its own dry-run reported and exited 0: the threshold the execute path applied was a calendar month rather than the requested 30 days, and every tombstone in the gap was silently skipped. Both halves are fixed — the interval is now exact days and the preview evaluates its threshold with the same expression and the same server clock as the purge — but the discrepancy check stays as the standing guard.
+
 ```
 nx catalog purge-trash                                    # dry-run count preview
 nx catalog purge-trash --json                              # CI-friendly preview

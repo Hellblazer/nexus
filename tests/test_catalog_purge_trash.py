@@ -181,6 +181,131 @@ class TestConfirmGate:
         assert writer.calls == [{"older_than_days": 30, "dry_run": True}]
 
 
+# ── CLI: partial-purge detection (nexus-ff85q) ───────────────────────────
+
+
+class TestPartialPurgeIsNeverReportedAsSuccess:
+    """nexus-ff85q client half.
+
+    Production 2026-08-03: an execute purged 2 of the 63 age-eligible
+    documents its own dry-run had reported and exited 0 with a completion
+    report. The engine half (CatalogRepository.purgeTrash) now returns the
+    eligible population it measured in the same transaction as
+    ``documents_eligible``; these tests pin that the CLI acts on it.
+    """
+
+    @staticmethod
+    def _execute(monkeypatch, result: dict):
+        writer = _FakeWriter(result=result)
+        _patch_writer(monkeypatch, writer)
+        return writer, CliRunner().invoke(
+            main, ["catalog", "purge-trash", "--no-dry-run", "--confirm"]
+        )
+
+    def test_partial_purge_exits_non_zero_and_names_the_shortfall(self, monkeypatch):
+        writer, result = self._execute(monkeypatch, {
+            "dry_run": False, "documents_purged": 2, "documents_eligible": 63,
+            "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+            "chunks_1024_stranded": 285,
+        })
+
+        assert result.exit_code != 0, result.output
+        assert "partial purge" in result.output.lower()
+        # The exact production magnitudes must appear — an operator has to be
+        # able to size the shortfall without a follow-up dry-run.
+        assert "2 of 63" in result.output
+        assert "61 still eligible" in result.output
+        # The benign reading must be named explicitly, with the magnitude that
+        # distinguishes it: the engine treats this same signal as a soft WARN
+        # because a concurrent restore is a legitimate read-committed cause, and
+        # a client that only shouts "not safe to ignore" trains operators to
+        # reflexively rerun (substantive-critic Sig-3).
+        lowered = result.output.lower()
+        assert "read-committed" in lowered
+        assert "restore" in lowered
+        assert "1-2" in result.output
+        # The report itself is still printed BEFORE the failure: the chunk sweep
+        # may well have completed and the operator needs to know what it did.
+        assert "documents_purged" in result.output
+        assert "chunks_1024_stranded: 285" in result.output
+        assert writer.closed
+
+    def test_message_promises_no_behaviour_the_command_does_not_implement(self, monkeypatch):
+        """The first draft told the operator to act "if the shortfall repeats"
+        while implementing no repeat-detector at all — advice the mechanism
+        cannot honour (substantive-critic Sig-3). The message must describe only
+        what this command actually does: report magnitudes, name the two
+        readings, and point at the idempotent re-run."""
+        _, result = self._execute(monkeypatch, {
+            "dry_run": False, "documents_purged": 2, "documents_eligible": 63,
+            "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+            "chunks_1024_stranded": 285,
+        })
+
+        lowered = result.output.lower()
+        assert "repeats" not in lowered
+        assert "idempotent" in lowered
+
+    def test_complete_purge_exits_zero(self, monkeypatch):
+        _, result = self._execute(monkeypatch, {
+            "dry_run": False, "documents_purged": 63, "documents_eligible": 63,
+            "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+            "chunks_1024_stranded": 285,
+        })
+
+        assert result.exit_code == 0, result.output
+        assert "partial purge" not in result.output.lower()
+
+    def test_eligible_count_is_not_filed_under_the_chunk_storage_heading(self, monkeypatch):
+        """``documents_eligible`` is an age-GATED document count. The
+        shape-agnostic passthrough that prints ``chunks_<dim>_stranded``
+        would otherwise list it under the "NOT age-gated" chunk heading —
+        exactly the mislabelling nexus-8j1zx fixed for the other counts."""
+        _, result = self._execute(monkeypatch, {
+            "dry_run": False, "documents_purged": 63, "documents_eligible": 63,
+            "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+            "chunks_1024_stranded": 285,
+        })
+
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        eligible_idx = next(
+            i for i, line in enumerate(lines) if "documents_eligible" in line
+        )
+        chunk_header_idx = next(
+            i for i, line in enumerate(lines) if "chunk storage swept" in line.lower()
+        )
+        assert eligible_idx < chunk_header_idx, result.output
+        assert "age-gated" in lines[eligible_idx].lower()
+
+    def test_pre_ff85q_engine_without_eligible_field_still_exits_zero(self, monkeypatch):
+        """An engine that predates the eligible-count field sends no verdict
+        to act on; the client must not invent one and refuse to work."""
+        _, result = self._execute(monkeypatch, {
+            "dry_run": False, "documents_purged": 2,
+            "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+            "chunks_1024_stranded": 285,
+        })
+
+        assert result.exit_code == 0, result.output
+        assert "partial purge" not in result.output.lower()
+
+    def test_dry_run_is_never_subject_to_the_partial_check(self, monkeypatch):
+        """The preview reports its population as ``documents_purged`` and purges
+        nothing — a 0-vs-N comparison there would fail every dry-run."""
+        writer = _FakeWriter(result={
+            "dry_run": True, "documents_purged": 0, "documents_eligible": 63,
+            "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+            "chunks_1024_stranded": 285,
+        })
+        _patch_writer(monkeypatch, writer)
+
+        result = CliRunner().invoke(main, ["catalog", "purge-trash"])
+
+        assert result.exit_code == 0, result.output
+        assert "partial purge" not in result.output.lower()
+
+
 # ── CLI: --json ──────────────────────────────────────────────────────────
 
 
