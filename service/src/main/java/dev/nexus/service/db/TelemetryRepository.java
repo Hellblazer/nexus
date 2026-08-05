@@ -767,6 +767,149 @@ public final class TelemetryRepository {
         });
     }
 
+    /** Fixed latency bucket edges (ms), matching the RDR-080 production
+     *  distribution cited in {@code nx_answer}'s own docstring and pinned by
+     *  the shakedown playbook §4.5 ("SAME QUERIES, SAME BUCKETS, EVERY TIME"):
+     *  under 5s, 5s-30s, 30s-2min, 2min-5min, over 5min (residual — not in the
+     *  original 100-run distribution, but required so bucket counts always
+     *  sum to {@code total} rather than silently dropping outlier runs). */
+    private static final long BUCKET_5S   = 5_000L;
+    private static final long BUCKET_30S  = 30_000L;
+    private static final long BUCKET_2MIN = 120_000L;
+    private static final long BUCKET_5MIN = 300_000L;
+
+    /**
+     * Read {@code nx_answer_runs} rows plus exact aggregates over the whole
+     * filtered set (nexus-eho3u — the read half of a write-only instrument).
+     *
+     * <p>Same non-vacuity shape as {@link #getHookFailures}: {@code total},
+     * {@code oldest_created_at}, {@code hit_count}/{@code fallback_count},
+     * {@code avg_duration_ms}/{@code avg_cost_usd}, and the latency-bucket
+     * histogram are ALL computed over the full {@code since}-filtered set,
+     * independent of {@code limit} — a caller asking for the last 5 rows
+     * must not see a total of 5.
+     *
+     * <p>{@code hit_count} counts rows with a REAL matched plan: {@code
+     * plan_id} non-null AND {@code != 0}. {@code plan_id = 0} is NOT a
+     * matched plan — it is the synthetic ad-hoc {@code Match} sentinel
+     * {@code _nx_answer_plan_miss} (core.py) returns on every SUCCESSFUL
+     * inline-planner run (see {@code Match(plan_id=0, name="ad-hoc", ...)}
+     * at that function's tail); {@code plans.id} is {@code BIGSERIAL}, so
+     * {@code 0} can never collide with a real plan row and is exclusively
+     * this sentinel (nexus-eho3u review fix — the original {@code plan_id
+     * IS NOT NULL} predicate counted every successful ad-hoc run as a
+     * "hit", inverting the plan-match-rate figure the shakedown playbook's
+     * §4.5 baseline reports). {@code fallback_count} is the complement:
+     * {@code plan_id IS NULL OR plan_id = 0} — a genuine plan-match miss
+     * (null, e.g. a planner error before any Match existed) and a
+     * successful ad-hoc run (0) are both "not a matched plan" for this
+     * metric. There is no {@code session_id} or verb column on this table
+     * (checked against the live schema, RDR-152 telemetry-001 baseline) —
+     * a session filter or per-verb breakdown would be a speculative field
+     * this table cannot back, so neither is offered here.
+     *
+     * @param tenant   RLS tenant
+     * @param sinceIso only rows with {@code created_at >= sinceIso}; blank/null
+     *                 means no time bound
+     * @param limit    max rows in the returned page; does not affect the
+     *                 aggregates
+     */
+    public Map<String, Object> queryNxAnswerRuns(String tenant, String sinceIso, int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (sinceIso != null && !sinceIso.isBlank()) {
+                cond = cond.and(NX_ANSWER_RUNS.CREATED_AT.ge(parseTs(sinceIso)));
+            }
+
+            var agg = ctx.select(
+                    count().as("total"),
+                    min(NX_ANSWER_RUNS.CREATED_AT).as("oldest"),
+                    avg(NX_ANSWER_RUNS.DURATION_MS).as("avg_duration_ms"),
+                    avg(NX_ANSWER_RUNS.COST_USD).as("avg_cost_usd"),
+                    // plan_id = 0 is the ad-hoc-Match sentinel (core.py
+                    // _nx_answer_plan_miss), never a real matched plan —
+                    // see the method docstring.
+                    sum(when(NX_ANSWER_RUNS.PLAN_ID.isNotNull()
+                            .and(NX_ANSWER_RUNS.PLAN_ID.ne(0L)), 1).otherwise(0)).as("hit_count"),
+                    sum(when(NX_ANSWER_RUNS.PLAN_ID.isNull()
+                            .or(NX_ANSWER_RUNS.PLAN_ID.eq(0L)), 1).otherwise(0)).as("fallback_count"),
+                    sum(when(NX_ANSWER_RUNS.DURATION_MS.lt(BUCKET_5S), 1).otherwise(0)).as("b_under_5s"),
+                    sum(when(NX_ANSWER_RUNS.DURATION_MS.ge(BUCKET_5S)
+                            .and(NX_ANSWER_RUNS.DURATION_MS.lt(BUCKET_30S)), 1).otherwise(0)).as("b_5s_30s"),
+                    sum(when(NX_ANSWER_RUNS.DURATION_MS.ge(BUCKET_30S)
+                            .and(NX_ANSWER_RUNS.DURATION_MS.lt(BUCKET_2MIN)), 1).otherwise(0)).as("b_30s_2min"),
+                    sum(when(NX_ANSWER_RUNS.DURATION_MS.ge(BUCKET_2MIN)
+                            .and(NX_ANSWER_RUNS.DURATION_MS.le(BUCKET_5MIN)), 1).otherwise(0)).as("b_2min_5min"),
+                    sum(when(NX_ANSWER_RUNS.DURATION_MS.gt(BUCKET_5MIN), 1).otherwise(0)).as("b_over_5min"))
+                .from(NX_ANSWER_RUNS)
+                .where(cond)
+                .fetchOne();
+
+            int total = agg != null && agg.get("total") != null ? ((Number) agg.get("total")).intValue() : 0;
+            OffsetDateTime oldest = agg != null ? (OffsetDateTime) agg.get("oldest") : null;
+            Double avgDurationMs = agg != null && agg.get("avg_duration_ms") != null
+                ? ((Number) agg.get("avg_duration_ms")).doubleValue() : null;
+            Double avgCostUsd = agg != null && agg.get("avg_cost_usd") != null
+                ? ((Number) agg.get("avg_cost_usd")).doubleValue() : null;
+            long hitCount = agg != null && agg.get("hit_count") != null
+                ? ((Number) agg.get("hit_count")).longValue() : 0L;
+            long fallbackCount = agg != null && agg.get("fallback_count") != null
+                ? ((Number) agg.get("fallback_count")).longValue() : 0L;
+
+            Map<String, Object> buckets = new java.util.LinkedHashMap<>();
+            buckets.put("under_5s",    bucketVal(agg, "b_under_5s"));
+            buckets.put("5s_to_30s",   bucketVal(agg, "b_5s_30s"));
+            buckets.put("30s_to_2min", bucketVal(agg, "b_30s_2min"));
+            buckets.put("2min_to_5min", bucketVal(agg, "b_2min_5min"));
+            buckets.put("over_5min",   bucketVal(agg, "b_over_5min"));
+
+            List<Map<String, Object>> rows = ctx.select(
+                    NX_ANSWER_RUNS.ID,
+                    NX_ANSWER_RUNS.QUESTION,
+                    NX_ANSWER_RUNS.PLAN_ID,
+                    NX_ANSWER_RUNS.MATCHED_CONFIDENCE,
+                    NX_ANSWER_RUNS.STEP_COUNT,
+                    NX_ANSWER_RUNS.FINAL_TEXT,
+                    NX_ANSWER_RUNS.COST_USD,
+                    NX_ANSWER_RUNS.DURATION_MS,
+                    NX_ANSWER_RUNS.CREATED_AT)
+                .from(NX_ANSWER_RUNS)
+                .where(cond)
+                .orderBy(NX_ANSWER_RUNS.CREATED_AT.desc(), NX_ANSWER_RUNS.ID.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",                 r.value1());
+                    m.put("question",           r.value2());
+                    m.put("plan_id",            r.value3());
+                    m.put("matched_confidence", r.value4());
+                    m.put("step_count",         r.value5());
+                    m.put("final_text",         r.value6());
+                    m.put("cost_usd",           r.value7());
+                    m.put("duration_ms",        r.value8());
+                    m.put("created_at",         utcIso(r.value9()));
+                    return m;
+                });
+
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", rows);
+            out.put("total", total);
+            out.put("oldest_created_at", oldest != null ? utcIso(oldest) : "");
+            out.put("hit_count", hitCount);
+            out.put("fallback_count", fallbackCount);
+            out.put("avg_duration_ms", avgDurationMs);
+            out.put("avg_cost_usd", avgCostUsd);
+            out.put("latency_buckets", buckets);
+            return out;
+        });
+    }
+
+    private static long bucketVal(org.jooq.Record agg, String key) {
+        Object v = agg != null ? agg.get(key) : null;
+        return v != null ? ((Number) v).longValue() : 0L;
+    }
+
     // ── hook_failures ──────────────────────────────────────────────────────────
 
     /**

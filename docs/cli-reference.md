@@ -2753,6 +2753,57 @@ In service mode the counts are read from the engine via `GET /v1/telemetry/tier_
 
 ---
 
+## nx answer-runs
+
+```
+nx answer-runs [--since ISO8601] [--limit N] [--json]
+```
+
+Reads the `nx_answer_runs` telemetry table: every `nx_answer` MCP call
+writes a row here via `POST /v1/telemetry/nx_answer_runs/record`, and until
+`GET /v1/telemetry/nx_answer_runs/query` (nexus-eho3u) landed nothing ever
+read one back — the ETL `import_nx_answer_run` path doesn't count, it only
+writes in the other direction. Service-mode only; the table has no
+session_id column, so unlike `nx tier-status` there is no per-session
+default — `--since` bounds the window, `--limit` caps the listed page
+(default 20, does not affect the aggregates), `--json` emits structured
+output.
+
+Reports, computed over the whole `--since`-filtered set independent of
+`--limit`: total run count, oldest run timestamp, plan-match hit count vs.
+inline-planner fallback count, average `duration_ms`/`cost_usd`, and a
+fixed-edge latency histogram (`<5s`, `5s-30s`, `30s-2min`, `2min-5min`,
+`>5min` — the same buckets as the production distribution `nx_answer`'s own
+docstring cites, and the shape the shakedown playbook's §4.5 telemetry
+baseline snapshot captures every run). Against an engine that predates the
+route (or an unreachable service) the command degrades to an honest
+"service-backed; read unavailable" message — a 404 is diagnosed as version
+skew, any other HTTP status points at a live engine error, never a silent
+"total: 0".
+
+A "hit" is a row with a REAL matched plan (`plan_id` set and non-zero).
+`plan_id = 0` is the synthetic ad-hoc `Match` sentinel every SUCCESSFUL
+inline-planner run carries internally — not a matched plan — so it counts
+toward `fallback`, and the per-row listing renders it `fallback` rather
+than the misleading `plan=0`.
+
+`created_at` is stamped by the ENGINE's clock, not this machine's. A run
+recorded moments ago may not appear for a sub-second-precision `--since`
+value if this machine's clock and the engine's have drifted by even a few
+hundred milliseconds (observed non-hypothetically during development);
+prefer cutoffs with real separation — minutes or more — from any write you
+expect the read to see.
+
+`--json` wraps the store's result in a query envelope —
+`{since, limit, captured_at, ...}` — mirroring `nx tier-status --json`'s
+`{scope, session_id, last_n, since, ...}` shape, so a caller diffing
+successive §4.5 baseline snapshots can see the window and page size that
+produced each one. `captured_at` is this process's own wall clock at
+render time (display metadata only, never compared against a server
+timestamp).
+
+---
+
 ## nx census
 
 ```

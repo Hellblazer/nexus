@@ -246,6 +246,9 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
 #   aspect_queue.enqueue_many      indexer.py:3583 — the core aspect-enqueue path
 #   telemetry.query_tier_writes    doctor.py:1129, tier_status.py:204
 #   telemetry.query_tier_writes_once  _session_end_launcher.py:250
+#
+# ADDED nexus-eho3u (2026-08-05), same criteria, same no-twin shape:
+#   telemetry.query_nx_answer_runs  answer_runs.py — nx answer-runs CLI verb
 # Landing only the first four would have left the blind spot half-open while the
 # comments here asserted it closed. Verified independently before adding.
 #
@@ -304,6 +307,12 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'list_hook_failures': ['days', 'hook_names', 'limit'],
         'query_tier_writes': ['session_id', 'since', 'last_n'],
         'query_tier_writes_once': ['session_id', 'timeout'],
+        # nexus-eho3u: nx_answer_runs was WRITE-ONLY over HTTP (/record only,
+        # no read route) — every nx_answer call wrote a row and nothing ever
+        # read one back. Same no-twin shape as list_hook_failures: this is
+        # the read surface's first and only home, not a port of a SQLite
+        # reader, so it needs the supplemental entry.
+        'query_nx_answer_runs': ['since', 'limit'],
     },
 }
 

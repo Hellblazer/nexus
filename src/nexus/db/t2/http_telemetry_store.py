@@ -38,6 +38,8 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/import           — import_* methods (ETL)
     POST /v1/telemetry/import_batch     — import_rows_batch (bulk ETL)
     POST /v1/telemetry/ids/probe        — probe_ids (verify-fill inner loop, RDR-178 wave-2 P1)
+    GET  /v1/telemetry/nx_answer_runs/query — query_nx_answer_runs (nexus-eho3u: the read
+                                               half of a formerly write-only instrument)
 """
 
 from __future__ import annotations
@@ -289,6 +291,85 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "cost_usd":           cost_usd,
             "duration_ms":        duration_ms,
         })
+
+    def query_nx_answer_runs(
+        self,
+        *,
+        since: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Read nx_answer_runs rows plus exact aggregates (nexus-eho3u).
+
+        SERVICE-MODE ONLY — same shape as :meth:`list_hook_failures`: until
+        engine-service carries the ``/nx_answer_runs/query`` route, every
+        ``nx_answer`` call recorded a row here and nothing ever read one
+        back (the ``import_nx_answer_run`` ETL path does not count — it is
+        write-only in the other direction). Registered in
+        ``T2_SUPPLEMENTAL_CONTRACT`` for the same reason as
+        ``list_hook_failures``: no SQLite twin, so the parity tripwire
+        cannot see it on its own.
+
+        Calls ``GET /v1/telemetry/nx_answer_runs/query``.
+
+        Returns a dict with:
+            rows: last *limit* runs, newest first — each
+                ``{id, question, plan_id, matched_confidence, step_count,
+                final_text, cost_usd, duration_ms, created_at}``.
+            total: exact row count over the WHOLE *since*-filtered set, not
+                the page — a caller asking for the last 5 runs must not see
+                a total of 5.
+            oldest_created_at: oldest row in the filtered set ("" if empty).
+            hit_count / fallback_count: rows with a REAL matched plan
+                (``plan_id`` non-null AND != 0) vs. not (``plan_id`` null,
+                a genuine planner-error miss, OR ``plan_id == 0``, the
+                synthetic ad-hoc ``Match`` sentinel every SUCCESSFUL
+                inline-planner run carries — see
+                ``core.py::_nx_answer_plan_miss``'s ``Match(plan_id=0,
+                name="ad-hoc", ...)``; ``plans.id`` is BIGSERIAL so 0 can
+                never be a real plan row) — the "plan-match hit rate versus
+                inline-planner fallback" figure the shakedown playbook's
+                §4.5 telemetry baseline snapshot wants. (Review fix,
+                nexus-eho3u: an earlier version of this method treated
+                ``plan_id IS NOT NULL`` alone as the hit predicate, which
+                counted every successful ad-hoc run as a hit and inverted
+                this metric.)
+            avg_duration_ms / avg_cost_usd: averages over the filtered set
+                (``None`` when there are no rows).
+            latency_buckets: fixed-edge histogram matching the production
+                distribution nx_answer's own docstring cites (under 5s,
+                5s-30s, 30s-2min, 2min-5min, over 5min) — "SAME QUERIES,
+                SAME BUCKETS, EVERY TIME" per the shakedown playbook, so the
+                edges live here and in ``TelemetryRepository`` only, never
+                re-derived per caller.
+
+        There is no session_id filter: the table has no session_id column
+        (checked against the live schema before adding one — a session
+        filter here would be a speculative field this table cannot back).
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if since:
+            params["since"] = since
+        resp = self._get("/v1/telemetry/nx_answer_runs/query", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {
+                "rows": [], "total": 0, "oldest_created_at": "",
+                "hit_count": 0, "fallback_count": 0,
+                "avg_duration_ms": None, "avg_cost_usd": None,
+                "latency_buckets": {
+                    "under_5s": 0, "5s_to_30s": 0, "30s_to_2min": 0,
+                    "2min_to_5min": 0, "over_5min": 0,
+                },
+            }
+        return {
+            "rows": list(resp.get("rows") or []),
+            "total": int(resp.get("total") or 0),
+            "oldest_created_at": str(resp.get("oldest_created_at") or ""),
+            "hit_count": int(resp.get("hit_count") or 0),
+            "fallback_count": int(resp.get("fallback_count") or 0),
+            "avg_duration_ms": resp.get("avg_duration_ms"),
+            "avg_cost_usd": resp.get("avg_cost_usd"),
+            "latency_buckets": dict(resp.get("latency_buckets") or {}),
+        }
 
     def record_hook_failure(
         self,
@@ -778,6 +859,39 @@ def tier_writes_read_failure_message(exc: Exception) -> str:
             f"the tier_writes/query route returned HTTP {status} — the route "
             "exists but failed; investigate the engine before assuming "
             "version skew."
+        )
+    return prefix + (
+        f"the service read failed ({type(exc).__name__}) — "
+        "service unreachable."
+    )
+
+
+def nx_answer_runs_read_failure_message(exc: Exception) -> str:
+    """One shared, honest diagnosis for a failed nx_answer_runs/query read.
+
+    Same three-way split as :func:`tier_writes_read_failure_message`
+    (nexus-eho3u — the read path is new, the honesty contract it must meet
+    is not): a 404 means this engine predates the route (version skew, never
+    reported as a silent zero), any other HTTP status means the route exists
+    and failed on a live engine, and no status at all means the service is
+    unreachable. Used by ``nx answer-runs`` so a caller cannot mistake
+    "no route" for "no runs".
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    prefix = (
+        "nx_answer_runs are recorded in the service-backed telemetry store "
+        "(Postgres); "
+    )
+    if status == 404:
+        return prefix + (
+            "this engine predates the nx_answer_runs/query route — "
+            "deploy an engine carrying nexus-eho3u to see counts."
+        )
+    if status is not None:
+        return prefix + (
+            f"the nx_answer_runs/query route returned HTTP {status} — the "
+            "route exists but failed; investigate the engine before "
+            "assuming version skew."
         )
     return prefix + (
         f"the service read failed ({type(exc).__name__}) — "

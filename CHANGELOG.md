@@ -16,6 +16,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower bounds, never silently dropped (nexus-h1zu0).
 
 ### Added
+- **`nx answer-runs [--since ISO8601] [--limit N] [--json]`** (nexus-eho3u):
+  read surface for the `nx_answer_runs` telemetry table, write-only since
+  RDR-080 — every `nx_answer` call recorded a row and nothing ever read one
+  back. A new engine route and `HttpTelemetryStore.query_nx_answer_runs`
+  return the last N runs plus exact aggregates (total, plan-match hits vs
+  inline-planner fallbacks — the ad-hoc `plan_id=0` sentinel counted as a
+  fallback, not a hit — average duration/cost, and a fixed-edge latency
+  histogram matching the shakedown playbook's buckets) computed over the
+  whole `--since` set independent of `--limit`. `--json` carries a
+  `{since, limit, captured_at}` envelope for baseline scripts; timestamps
+  are server-stamped (the `--since` help notes the clock-skew caveat); a
+  pre-route engine renders an honest "read unavailable", never a false
+  zero. Requires the paired engine release.
 - **`tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]`** (nexus-796zn): the
   fresh-install gate can now install the PUBLISHED artifact from PyPI via
   `uv tool install` in its scrubbed sandbox — exercising dependency

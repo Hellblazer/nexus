@@ -190,9 +190,15 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
             with _STORE_LOCK:
                 _ID_SEQ["nar"] += 1
                 _nx_answer_runs.append({
-                    "id":               _ID_SEQ["nar"],
-                    "question":         body.get("question", ""),
-                    "created_at":       body.get("created_at", datetime.now(UTC).isoformat()),
+                    "id":                 _ID_SEQ["nar"],
+                    "question":           body.get("question", ""),
+                    "plan_id":            body.get("plan_id"),
+                    "matched_confidence": body.get("matched_confidence"),
+                    "step_count":         int(body.get("step_count", 0) or 0),
+                    "final_text":         body.get("final_text", ""),
+                    "cost_usd":           float(body.get("cost_usd", 0.0) or 0.0),
+                    "duration_ms":        int(body.get("duration_ms", 0) or 0),
+                    "created_at":         body.get("created_at") or datetime.now(UTC).isoformat(),
                 })
             self._send(200, {"ok": True})
 
@@ -401,6 +407,75 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 "row_count":           row_count,
                 "zero_hit_rate":       zero_hit_rate,
                 "median_top_distance": median,
+            })
+
+        elif pp == "/v1/telemetry/nx_answer_runs/query":
+            # nexus-eho3u: mirror TelemetryRepository.queryNxAnswerRuns —
+            # aggregates (total/oldest/hit-fallback/buckets/averages) over
+            # the WHOLE since-filtered set, page capped by limit.
+            since = qs.get("since", "")
+            limit = int(qs.get("limit", "20"))
+            with _STORE_LOCK:
+                rows = list(_nx_answer_runs)
+            if since:
+                rows = [r for r in rows if r["created_at"] >= since]
+            rows.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
+
+            total = len(rows)
+            oldest = min((r["created_at"] for r in rows), default="")
+            # plan_id 0 is the ad-hoc Match sentinel every successful
+            # inline-planner run carries (core.py::_nx_answer_plan_miss) —
+            # NOT a real plan (plans.id is BIGSERIAL). Mirrors the
+            # corrected TelemetryRepository.queryNxAnswerRuns predicate
+            # (nexus-eho3u review fix).
+            hit_count = sum(
+                1 for r in rows
+                if r.get("plan_id") is not None and r.get("plan_id") != 0
+            )
+            fallback_count = total - hit_count
+            durations = [r["duration_ms"] for r in rows]
+            costs = [r["cost_usd"] for r in rows]
+            avg_duration_ms = sum(durations) / len(durations) if durations else None
+            avg_cost_usd = sum(costs) / len(costs) if costs else None
+
+            buckets = {
+                "under_5s": 0, "5s_to_30s": 0, "30s_to_2min": 0,
+                "2min_to_5min": 0, "over_5min": 0,
+            }
+            for d in durations:
+                if d < 5_000:
+                    buckets["under_5s"] += 1
+                elif d < 30_000:
+                    buckets["5s_to_30s"] += 1
+                elif d < 120_000:
+                    buckets["30s_to_2min"] += 1
+                elif d <= 300_000:
+                    buckets["2min_to_5min"] += 1
+                else:
+                    buckets["over_5min"] += 1
+
+            page = rows[:limit]
+            self._send(200, {
+                "rows": [
+                    {
+                        "id": r["id"], "question": r["question"],
+                        "plan_id": r.get("plan_id"),
+                        "matched_confidence": r.get("matched_confidence"),
+                        "step_count": r.get("step_count", 0),
+                        "final_text": r.get("final_text", ""),
+                        "cost_usd": r.get("cost_usd", 0.0),
+                        "duration_ms": r.get("duration_ms", 0),
+                        "created_at": r["created_at"],
+                    }
+                    for r in page
+                ],
+                "total": total,
+                "oldest_created_at": oldest,
+                "hit_count": hit_count,
+                "fallback_count": fallback_count,
+                "avg_duration_ms": avg_duration_ms,
+                "avg_cost_usd": avg_cost_usd,
+                "latency_buckets": buckets,
             })
 
         elif pp == "/v1/telemetry/frecency/get":
@@ -647,6 +722,127 @@ class TestQueryTierWrites:
         )
         with _pytest.raises(httpx.HTTPStatusError):
             client.query_tier_writes_once(session_id="once-1", timeout=2.0)
+
+
+class TestQueryNxAnswerRuns:
+    """nexus-eho3u: the read half of nx_answer_runs —
+    GET /v1/telemetry/nx_answer_runs/query."""
+
+    def test_write_then_read_rows_and_aggregates(self, client):
+        client.record_nx_answer_run(
+            question="fallback", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=2_000,
+        )
+        client.record_nx_answer_run(
+            question="hit", plan_id=7, matched_confidence=0.9,
+            step_count=1, final_text="answer", cost_usd=0.01, duration_ms=10_000,
+        )
+
+        result = client.query_nx_answer_runs()
+
+        assert result["total"] == 2
+        assert result["hit_count"] == 1
+        assert result["fallback_count"] == 1
+        assert result["avg_duration_ms"] == 6_000
+        assert len(result["rows"]) == 2
+        # Newest first.
+        assert result["rows"][0]["question"] == "hit"
+        assert result["rows"][0]["plan_id"] == 7
+        assert result["rows"][1]["question"] == "fallback"
+        assert result["rows"][1]["plan_id"] is None
+
+    def test_plan_id_zero_is_the_ad_hoc_sentinel_not_a_hit(self, client):
+        """nexus-eho3u review fix: plan_id=0 is the synthetic ad-hoc Match
+        sentinel every SUCCESSFUL inline-planner run carries
+        (core.py::_nx_answer_plan_miss's `Match(plan_id=0, name="ad-hoc",
+        ...)`) — plans.id is BIGSERIAL, so 0 can never be a real plan. An
+        earlier `plan_id is not None` predicate counted this as a HIT,
+        inverting the plan-match-rate metric. Kill control: under that old
+        predicate hit_count would read 2 (the real hit AND the sentinel)
+        and fallback_count would read 1 — both wrong."""
+        client.record_nx_answer_run(
+            question="real hit", plan_id=11, matched_confidence=0.9,
+            step_count=1, final_text="answer", cost_usd=0.001, duration_ms=1_000,
+        )
+        client.record_nx_answer_run(
+            question="ad-hoc success (sentinel)", plan_id=0, matched_confidence=None,
+            step_count=2, final_text="ad-hoc answer", cost_usd=0.002, duration_ms=2_000,
+        )
+        client.record_nx_answer_run(
+            question="genuine fallback (planner error)", plan_id=None,
+            matched_confidence=None, step_count=0, final_text="Planner error: x",
+            cost_usd=0.0, duration_ms=3_000,
+        )
+
+        result = client.query_nx_answer_runs()
+
+        assert result["total"] == 3
+        assert result["hit_count"] == 1, "only the real matched plan (plan_id=11) counts as a hit"
+        assert result["fallback_count"] == 2, (
+            "plan_id=0 (ad-hoc sentinel) AND plan_id=None (genuine miss) both count as fallback"
+        )
+        sentinel_row = next(
+            r for r in result["rows"] if r["question"] == "ad-hoc success (sentinel)"
+        )
+        assert sentinel_row["plan_id"] == 0
+
+    def test_limit_caps_page_not_aggregates(self, client):
+        for i in range(5):
+            client.record_nx_answer_run(
+                question=f"q{i}", plan_id=None, matched_confidence=None,
+                step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+            )
+
+        result = client.query_nx_answer_runs(limit=1)
+        assert len(result["rows"]) == 1
+        assert result["total"] == 5
+
+    def test_since_filters(self, client):
+        client._post("/v1/telemetry/nx_answer_runs/record", {
+            "question": "old", "created_at": "2020-01-01T00:00:00Z",
+            "duration_ms": 1_000, "cost_usd": 0.0, "step_count": 0,
+            "final_text": "",
+        })
+        client._post("/v1/telemetry/nx_answer_runs/record", {
+            "question": "new", "created_at": "2099-01-01T00:00:00Z",
+            "duration_ms": 1_000, "cost_usd": 0.0, "step_count": 0,
+            "final_text": "",
+        })
+
+        recent = client.query_nx_answer_runs(since="2030-01-01T00:00:00Z")
+        assert recent["total"] == 1
+        assert recent["rows"][0]["question"] == "new"
+
+        unbounded = client.query_nx_answer_runs()
+        assert unbounded["total"] == 2
+
+    def test_empty_returns_zeroed_structure(self, client):
+        result = client.query_nx_answer_runs()
+        assert result == {
+            "rows": [], "total": 0, "oldest_created_at": "",
+            "hit_count": 0, "fallback_count": 0,
+            "avg_duration_ms": None, "avg_cost_usd": None,
+            "latency_buckets": {
+                "under_5s": 0, "5s_to_30s": 0, "30s_to_2min": 0,
+                "2min_to_5min": 0, "over_5min": 0,
+            },
+        }
+
+    def test_latency_buckets_sum_to_total(self, client):
+        durations = [1_000, 6_000, 40_000, 150_000, 400_000]
+        for i, d in enumerate(durations):
+            client.record_nx_answer_run(
+                question=f"bucket-{i}", plan_id=None, matched_confidence=None,
+                step_count=0, final_text="", cost_usd=0.0, duration_ms=d,
+            )
+
+        result = client.query_nx_answer_runs()
+        buckets = result["latency_buckets"]
+        assert buckets == {
+            "under_5s": 1, "5s_to_30s": 1, "30s_to_2min": 1,
+            "2min_to_5min": 1, "over_5min": 1,
+        }
+        assert sum(buckets.values()) == result["total"]
 
 
 class TestConsentAudit:
