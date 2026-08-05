@@ -11,12 +11,14 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```bash
 uv sync                                  # install deps
 scripts/reinstall-tool.sh                # install nx CLI locally (preserves extras)
-uv run pytest                            # full unit suite (no API keys needed)
+uv run pytest -n auto                    # full unit suite, ~2min parallel (no API keys needed)
+uv run pytest                            # serial fallback (~14min; debugging only)
+uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
 uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
 
-Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/conftest.py`) or skip.
+Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/conftest.py`) or skip. **After any pull/rebase touching `service/`, run `scripts/build-gate-jar.sh`** — the substrate's freshness gate rejects a stale/unstamped jar and the whole suite errors at setup. Test-authoring directives (scenario journeys, lint bucket, contract-suite patterns, parametrize rules) live in [`tests/AGENTS.md`](tests/AGENTS.md).
 
 ## Architecture at a glance
 
