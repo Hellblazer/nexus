@@ -118,7 +118,13 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # with db/migrations.py and _run_upgrade's local leg
 # (test_migrations_rdr108_phase1c.py,
 # test_upgrade_name_vs_embed_dim_advisory.py). SHRINK, downward-only.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 58
+# 58 -> 59 (nexus-h1zu0, 2026-08-05): +1, test_h1zu0_dim_routing.py — every
+# test in the file asserts dim_for_model_token(token) -> int|None, a pure
+# dict lookup against the routing table mirroring Java's
+# PgVectorRepository.MODEL_DIMS; "voyage-code-3"/"voyage-context-3" are
+# literal ARGUMENTS naming the table's keys, not a behavior assertion about
+# which embedder ran. Rationale in conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).

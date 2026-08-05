@@ -449,10 +449,138 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
                         click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
 
 
+def _manifest_verify_list(as_json: bool) -> None:
+    """``nx catalog manifest-verify --list`` implementation (nexus-heizf part 1).
+
+    Wires the previously dead ``HttpCatalogClient.manifest_orphans`` (zero
+    callers before this bead — T2 nexus/55l58-instrument-map-2026-08-04) to
+    a CLI surface: one ``manifest_verify_all()`` call to find which
+    collections are damaged, then :func:`nexus.health.manifest_orphan_report`
+    to enumerate the actual dangling rows for those collections, grouped by
+    document with compact position ranges + a distinct-chash count per doc.
+
+    A damaged collection whose model token cannot be routed to a dim table
+    (nexus-h1zu0) is reported by name in a separate warning/field rather
+    than silently omitted — see ``manifest_orphan_report``'s docstring. A
+    dim's orphan population that exceeds the enumeration's row ceiling, or
+    a refetch that fails outright, surfaces the SAME way: the affected
+    collection(s) land in ``incomplete_collections`` (row counts shown are
+    a LOWER BOUND), never silently reported as if complete.
+    """
+    from nexus.health import (  # noqa: PLC0415 — deferred to avoid a module-load-time import cycle (commands -> health -> catalog factories)
+        _DANGLING_MANIFEST_POPULATION_NOTE,
+        _compact_position_ranges,
+        manifest_orphan_report,
+    )
+
+    cat = _get_catalog()
+    try:
+        census = cat.manifest_verify_all() or {}
+    except Exception as exc:  # noqa: BLE001 — diagnostic verb: surface the raw failure verbatim, never fail open
+        raise click.ClickException(f"manifest_verify_all failed: {exc}") from exc
+
+    rows = census.get("collections") or []
+    damaged = [r for r in rows if int(r.get("missing", 0) or 0) > 0]
+
+    if not damaged:
+        if as_json:
+            click.echo(json.dumps({
+                "collections": [], "total_rows": 0,
+                "unroutable_collections": [], "incomplete_collections": {},
+                "clean": True, "population": _DANGLING_MANIFEST_POPULATION_NOTE,
+            }, indent=2))
+        else:
+            click.echo(f"OK — no dangling manifest rows ({len(rows)} collection(s) checked).")
+        return
+
+    try:
+        report = manifest_orphan_report(cat, damaged)
+    except Exception as exc:  # noqa: BLE001 — diagnostic verb: surface the raw failure verbatim, never fail open (matches manifest_verify_all's handling above)
+        raise click.ClickException(f"manifest_orphan_report failed: {exc}") from exc
+
+    if as_json:
+        payload_collections = []
+        for coll, docs in sorted(report["collections"].items()):
+            doc_entries = [
+                {
+                    "doc_id": doc_id,
+                    "positions": _compact_position_ranges(info["positions"]),
+                    "distinct_chashes": len(info["chashes"]),
+                }
+                for doc_id, info in sorted(docs.items())
+            ]
+            payload_collections.append({
+                "collection": coll,
+                "documents": doc_entries,
+                "row_count": sum(len(i["positions"]) for i in docs.values()),
+            })
+        click.echo(json.dumps({
+            "collections": payload_collections,
+            "total_rows": report["total_rows"],
+            "unroutable_collections": report["unroutable_collections"],
+            "incomplete_collections": report["incomplete_collections"],
+            "clean": False,
+            "population": _DANGLING_MANIFEST_POPULATION_NOTE,
+        }, indent=2))
+    else:
+        click.echo(f"[{_DANGLING_MANIFEST_POPULATION_NOTE}]")
+        click.echo(
+            f"{report['total_rows']} dangling manifest row(s) across "
+            f"{len(report['collections'])} collection(s)"
+            + (
+                f", {len(report['unroutable_collections'])} collection(s) "
+                "could not be enumerated"
+                if report["unroutable_collections"] else ""
+            )
+            + (
+                f", {len(report['incomplete_collections'])} collection(s) "
+                "only PARTIALLY enumerated"
+                if report["incomplete_collections"] else ""
+            )
+            + ":"
+        )
+        for coll, docs in sorted(report["collections"].items()):
+            click.echo(f"\n{coll}:")
+            for doc_id, info in sorted(docs.items()):
+                positions = _compact_position_ranges(info["positions"])
+                click.echo(
+                    f"  {doc_id}  positions=[{positions}]  "
+                    f"distinct_chashes={len(info['chashes'])}"
+                )
+        if report["unroutable_collections"]:
+            click.echo(
+                f"\nWARNING: {len(report['unroutable_collections'])} damaged "
+                "collection(s) could not be enumerated (unrecognized model "
+                "routing or an enumeration error): "
+                f"{', '.join(report['unroutable_collections'])}",
+                err=True,
+            )
+        if report["incomplete_collections"]:
+            partials = "; ".join(
+                f"{coll} ({info['enumerated']} of {info['expected']})"
+                for coll, info in sorted(report["incomplete_collections"].items())
+            )
+            click.echo(
+                f"\nWARNING: {len(report['incomplete_collections'])} damaged "
+                "collection(s) only PARTIALLY enumerated (row cap or an "
+                f"enumeration error) — counts are a LOWER BOUND: {partials}",
+                err=True,
+            )
+    raise click.exceptions.Exit(1)
+
+
 @catalog.command("manifest-verify")
-@click.argument("tumbler_or_title")
+@click.argument("tumbler_or_title", required=False)
 @click.option("--json", "as_json", is_flag=True)
-def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
+@click.option(
+    "--list", "list_mode", is_flag=True,
+    help=(
+        "Enumerate EVERY dangling manifest row across the whole catalog "
+        "(nexus-heizf), grouped by collection then document, instead of "
+        "checking one document. Takes no TUMBLER_OR_TITLE argument."
+    ),
+)
+def manifest_verify_cmd(tumbler_or_title: str | None, as_json: bool, list_mode: bool) -> None:
     """Verify one document's RUNFENCE manifest against T3 (nexus-5xn3k.6, design memo §4).
 
     Checks ``manifest_verify(doc_id)`` — the engine's per-document
@@ -461,6 +589,18 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
     doctor`'s corpus-wide sweep (`manifest_verify_all`), this checks ONE
     document without a full scan — the diagnostic verb for "is THIS
     document okay," e.g. after `nx doctor` names it as damaged.
+
+    ``--list`` (nexus-heizf) switches to corpus-wide ENUMERATION instead:
+    every manifest ROW referencing a chunk that does not exist in T3,
+    grouped by collection then document — the row-listing counterpart to
+    `nx doctor`'s collection-level census (``manifest_verify_all``). POPULATION:
+    LIVE documents' manifest rows with no backing T3 chunk row (direction
+    manifest -> chunk). This is a DIFFERENT, disjoint population from ``nx
+    catalog purge-trash``'s stranded-chunk preview (existing chunk rows of
+    TOMBSTONED documents with no live parent, direction chunk -> parent) —
+    see that command's docstring. A chash cannot be in both; neither
+    reading substitutes for the other (nexus-55l58, the 2026-08-04
+    shakedown's mixed-instrument mistake this bead exists to prevent).
 
     NOT to be confused with ``nx catalog verify`` (nexus-whh61.4, a
     different, pre-existing command) — that one sweeps the whole catalog
@@ -476,8 +616,21 @@ def manifest_verify_cmd(tumbler_or_title: str, as_json: bool) -> None:
 
     Exit codes: 0 clean; 1 DAMAGED (any manifest chash missing from T3,
     nexus-sj4a3 — in both text and ``--json`` modes) or lookup/engine
-    failure.
+    failure. ``--list`` follows the same convention: 0 when no dangling
+    rows exist, 1 when any do (or any damaged collection could not be
+    fully enumerated).
     """
+    if list_mode:
+        if tumbler_or_title:
+            raise click.UsageError(
+                "--list takes no TUMBLER_OR_TITLE argument — it enumerates "
+                "the whole catalog, not one document."
+            )
+        _manifest_verify_list(as_json)
+        return
+    if not tumbler_or_title:
+        raise click.UsageError("TUMBLER_OR_TITLE is required unless --list is given.")
+
     cat = _get_catalog()
     t = _resolve_tumbler(cat, tumbler_or_title)
     entry = cat.resolve(t)

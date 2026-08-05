@@ -185,6 +185,33 @@ _MODEL_DIMS: dict[str, int] = {
 #: The per-dim physical tables shipped by vectors-001-baseline.xml.
 _KNOWN_DIMS: frozenset[int] = frozenset(_MODEL_DIMS.values())
 
+
+def dim_for_model_token(token: str) -> int | None:
+    """Public accessor for :data:`_MODEL_DIMS` (nexus-h1zu0).
+
+    THE canonical model-segment -> pgvector-table-dimension routing table,
+    mirroring the Java authority ``PgVectorRepository.MODEL_DIMS`` (and, by
+    construction, ``nexus.manifest_orphans(dim)``'s per-dim ``split_part``
+    IN-lists — rdr180-002-hex-boundary-functions.xml). Returns ``None`` for
+    an unrecognized token rather than guessing.
+
+    Deliberately NOT the same registry as ``nexus.corpus.
+    CANONICAL_EMBEDDING_MODELS``/``LOCAL_EMBEDDING_MODELS`` (consulted by
+    ``commands.collection._dim_for_model_token`` and ``commands.
+    catalog_cmds.doctor._expected_dim_for_model_token``): those answer a
+    COLLECTION-NAMING-POLICY question (which models are canonical to mint
+    a NEW collection name with) and omit the legacy ``voyage-3`` token on
+    purpose (RDR-103 canonical-set guard). This function answers a
+    STORAGE-ROUTING question (which physical ``chunks_<dim>`` table does
+    an EXISTING collection's data live in) and must include every token
+    the engine could have routed a live collection to — ``voyage-3``
+    included. Use this one for anything that talks to
+    ``nexus.manifest_orphans``/``manifest_verify_all`` or the
+    ``chunks_<dim>`` tables directly; use the corpus.py pair for
+    collection-name minting/validation.
+    """
+    return _MODEL_DIMS.get(token)
+
 #: Voyage models — the same-model re-embeds that BILL the operator key. Used by
 #: the cost guardrail (detection.py) to estimate the cross-model→voyage charge.
 _VOYAGE_MODELS: frozenset[str] = frozenset(

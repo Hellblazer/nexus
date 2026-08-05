@@ -1488,7 +1488,22 @@ class TestCheckDanglingManifests:
     the catalog reader's ``manifest_verify_all()`` return/raise instead.
     """
 
-    def _cat(self, *, collections: list[dict] | None = None, raise_status: int | None = None):
+    def _cat(
+        self, *, collections: list[dict] | None = None, raise_status: int | None = None,
+        orphans_by_dim: dict[int, list[dict]] | None = None, orphans_exc: Exception | None = None,
+        orphans_responses_by_dim: dict[int, list] | None = None,
+        orphans_calls_log: list[tuple[int, int]] | None = None,
+    ):
+        """*orphans_responses_by_dim*: an optional ``{dim: [resp_or_exc, ...]}``
+        QUEUE consumed one entry per ``manifest_orphans(dim, ...)`` call for
+        that dim (nexus-heizf code-review fix round) — lets a test give the
+        FIRST call a truncated sample and the refetch a DIFFERENT outcome
+        (success or a raised exception), which a single ``orphans_by_dim``
+        dict cannot express. Falls through to the original ``orphans_by_dim``/
+        ``orphans_exc`` behavior once a dim's queue is exhausted or absent.
+        *orphans_calls_log*, when given, records ``(dim, limit)`` for every
+        call — used to assert the refetch never exceeds the ceiling.
+        """
         import httpx
 
         class _Cat:
@@ -1501,6 +1516,20 @@ class TestCheckDanglingManifests:
                     )
                 rows = collections or []
                 return {"collections": rows, "count": len(rows)}
+
+            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+                if orphans_calls_log is not None:
+                    orphans_calls_log.append((dim, limit))
+                queue = (orphans_responses_by_dim or {}).get(dim)
+                if queue:
+                    resp = queue.pop(0)
+                    if isinstance(resp, Exception):
+                        raise resp
+                    return resp
+                if orphans_exc is not None:
+                    raise orphans_exc
+                rows = (orphans_by_dim or {}).get(dim, [])
+                return {"dim": dim, "count": len(rows), "orphans": rows[:limit]}
         return _Cat()
 
     def _run(self, monkeypatch, cat):
@@ -1520,6 +1549,102 @@ class TestCheckDanglingManifests:
         assert "code__x" in r.detail
         assert "1 of 2" in r.detail, r.detail
         assert any("reconcile" in f for f in r.fix_suggestions)
+
+    def test_wording_says_rows_not_chashes(self, monkeypatch) -> None:
+        """nexus-heizf part 2: manifest_verify_all's SQL counts manifest
+        ROWS (position-duplicated chashes counted twice), not distinct
+        chashes — the detail text must say so, never "chash(es)"."""
+        cat = self._cat(collections=[
+            {"collection": "code__x", "referenced": 2, "present": 1, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "row(s)" in r.detail, r.detail
+        assert "chash(es) missing" not in r.detail, r.detail
+
+    def test_small_count_names_damaged_tumblers(self, monkeypatch) -> None:
+        """nexus-heizf part 1: <=10 damaged documents are named directly —
+        no need to run a separate --list command to learn which."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
+            ],
+            orphans_by_dim={
+                768: [{"tenant_id": "t", "doc_id": "1.2.3", "position": 0,
+                       "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"}],
+            },
+        )
+        r = self._run(monkeypatch, cat)
+        assert "1.2.3" in r.detail, r.detail
+        assert "--list" not in r.detail, r.detail
+
+    def test_large_count_points_at_list_flag_instead_of_naming(self, monkeypatch) -> None:
+        """nexus-heizf part 1: >10 damaged documents point at `nx catalog
+        manifest-verify --list` rather than dumping every tumbler inline."""
+        rows = [
+            {"tenant_id": "t", "doc_id": f"1.2.{i}", "position": 0,
+             "chash": f"{i:02x}" * 32, "collection": "code__x__bge-base-en-v15-768__v1"}
+            for i in range(11)
+        ]
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 11, "present": 0, "missing": 11},
+            ],
+            orphans_by_dim={768: rows},
+        )
+        r = self._run(monkeypatch, cat)
+        assert "nx catalog manifest-verify --list" in r.detail, r.detail
+        assert "1.2.0" not in r.detail, r.detail
+
+    def test_distinct_chash_count_shown_when_cheap(self, monkeypatch) -> None:
+        """Two manifest rows (two positions) sharing ONE chash must report
+        1 distinct chash alongside the 2-row count — the enumeration is
+        already in hand (part 1's wiring), so this is free."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 2, "present": 0, "missing": 2},
+            ],
+            orphans_by_dim={
+                768: [
+                    {"tenant_id": "t", "doc_id": "1.2.3", "position": 0,
+                     "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"},
+                    {"tenant_id": "t", "doc_id": "1.2.3", "position": 1,
+                     "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"},
+                ],
+            },
+        )
+        r = self._run(monkeypatch, cat)
+        assert "2 manifest row(s)" in r.detail, r.detail
+        assert "1 distinct chash(es)" in r.detail, r.detail
+
+    def test_enumeration_failure_degrades_to_collection_level_only(self, monkeypatch) -> None:
+        """manifest_orphans failing must never crash `nx doctor` or hide the
+        collection-level warning already established by manifest_verify_all
+        — it degrades to the old collection-only detail plus the --list
+        pointer (best-effort enrichment, not load-bearing)."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
+            ],
+            orphans_exc=RuntimeError("engine unreachable"),
+        )
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "code__x__bge-base-en-v15-768__v1" in r.detail
+        assert "nx catalog manifest-verify --list" in r.detail, r.detail
+
+    def test_unroutable_collection_reported_loud_not_silent(self, monkeypatch) -> None:
+        """nexus-h1zu0: a damaged collection whose model token has no known
+        dim routing must be surfaced explicitly, never silently dropped
+        from the enumeration with no error."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__some-future-model-9000__v1", "referenced": 1, "present": 0, "missing": 1},
+            ],
+            orphans_by_dim={},
+        )
+        r = self._run(monkeypatch, cat)
+        assert "could not be enumerated" in r.detail, r.detail
+        assert "code__x__some-future-model-9000__v1" in r.detail, r.detail
 
     def test_fully_resolvable_manifest_is_clean(self, monkeypatch) -> None:
         cat = self._cat(collections=[
@@ -1586,6 +1711,156 @@ class TestCheckDanglingManifests:
         r = h._check_dangling_manifests()[0]
         assert r.ok is True
         assert "no catalog" in r.detail
+
+    def test_detail_always_carries_the_population_disjointness_note(self, monkeypatch) -> None:
+        """nexus-h1zu0 / substantive-critic Significant-1 (2026-08-05): the
+        disjointness caveat vs `purge-trash`'s 'stranded' population must be
+        in the LIVE detail text an agent actually parses, not docstring/help
+        only — the 2026-08-04 nexus-55l58 shakedown was misled by exactly
+        that gap."""
+        cat = self._cat(collections=[
+            {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "purge-trash" in r.detail, r.detail
+        assert "stranded" in r.detail, r.detail
+
+    def test_text_mode_states_unroutable_count_even_with_zero_enumerated_rows(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-heizf code-review fix round: when every damaged collection
+        is unroutable, total_rows is 0 but the warn must still be legible —
+        the unroutable count/names, not a bare '0 row(s)' that reads as
+        contradicting the non-zero exit."""
+        cat = self._cat(collections=[
+            {"collection": "code__x__unknown-token__v1", "referenced": 1, "present": 0, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "could not be enumerated" in r.detail, r.detail
+        assert "code__x__unknown-token__v1" in r.detail, r.detail
+
+
+class TestManifestOrphanReportCompleteness:
+    """nexus-heizf code-review fix round (2026-08-05): manifest_orphan_report
+    must never treat a truncated or failed refetch as a complete result —
+    cross-checked against the census's own `missing` count per collection."""
+
+    def _cat(self, *, responses: dict[int, list]):
+        class _Cat:
+            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+                queue = responses.get(dim, [])
+                if not queue:
+                    return {"dim": dim, "count": 0, "orphans": []}
+                resp = queue.pop(0)
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        return _Cat()
+
+    def _row(self, doc_id: str, position: int, chash: str, collection: str) -> dict:
+        return {
+            "tenant_id": "t", "doc_id": doc_id, "position": position,
+            "chash": chash, "collection": collection,
+        }
+
+    def test_refetch_failure_marks_collection_incomplete_not_silently_complete(self) -> None:
+        from nexus.health import manifest_orphan_report
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        cat = self._cat(responses={
+            768: [
+                # First (sample) call: count says 5 total, only 1 comes back.
+                {"dim": 768, "count": 5, "orphans": [self._row("1.2.3", 0, "a" * 64, coll)]},
+                # Refetch attempt fails outright.
+                RuntimeError("engine unreachable mid-refetch"),
+            ],
+        })
+        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 5, "referenced": 5}])
+
+        assert report["total_rows"] == 1, "the partial sample must still be reported, not discarded"
+        assert coll not in report["unroutable_collections"]
+        assert report["incomplete_collections"] == {coll: {"enumerated": 1, "expected": 5}}
+
+    def test_refetch_success_clears_incomplete(self) -> None:
+        from nexus.health import manifest_orphan_report
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        cat = self._cat(responses={
+            768: [
+                {"dim": 768, "count": 2, "orphans": [self._row("1.2.3", 0, "a" * 64, coll)]},
+                {"dim": 768, "count": 2, "orphans": [
+                    self._row("1.2.3", 0, "a" * 64, coll),
+                    self._row("1.2.3", 1, "b" * 64, coll),
+                ]},
+            ],
+        })
+        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 2, "referenced": 2}])
+
+        assert report["total_rows"] == 2
+        assert report["incomplete_collections"] == {}
+
+    def test_count_exceeding_ceiling_bounds_the_refetch_and_marks_incomplete(
+        self, monkeypatch,
+    ) -> None:
+        """The refetch must NEVER request more than
+        `_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM` — a single damaged dim with a
+        huge orphan population must not drive an unbounded response."""
+        import nexus.health as h
+        monkeypatch.setattr(h, "_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM", 3)
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        calls: list[int] = []
+
+        class _Cat:
+            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+                calls.append(limit)
+                if len(calls) == 1:
+                    return {"dim": dim, "count": 100, "orphans": [self._row_static("1.2.3", 0, "a" * 64, coll)]}
+                # Second call: engine-wide count is still 100, but the
+                # ceiling-bounded refetch can only ask for `limit` rows.
+                return {
+                    "dim": dim, "count": 100,
+                    "orphans": [
+                        self._row_static("1.2.3", i, f"{i:064x}", coll) for i in range(limit)
+                    ],
+                }
+
+            @staticmethod
+            def _row_static(doc_id, position, chash, collection):
+                return {"tenant_id": "t", "doc_id": doc_id, "position": position,
+                        "chash": chash, "collection": collection}
+
+        from nexus.health import manifest_orphan_report
+        report = manifest_orphan_report(_Cat(), [{"collection": coll, "missing": 100, "referenced": 100}])
+
+        assert calls == [h._MANIFEST_ORPHANS_SAMPLE_LIMIT, 3], (
+            f"refetch must be bounded to the ceiling (3), got calls={calls}"
+        )
+        assert report["incomplete_collections"] == {coll: {"enumerated": 3, "expected": 100}}
+
+    def test_malformed_position_is_skipped_not_raised(self) -> None:
+        """nexus-heizf code-review fix round: a malformed `position` from
+        the wire must be logged and skipped, never an unhandled exception —
+        `manifest_orphan_report`'s own docstring promises "never raises"."""
+        from nexus.health import manifest_orphan_report
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        cat = self._cat(responses={
+            768: [{
+                "dim": 768, "count": 2,
+                "orphans": [
+                    self._row("1.2.3", "not-an-int", "a" * 64, coll),
+                    self._row("1.2.3", 1, "b" * 64, coll),
+                ],
+            }],
+        })
+        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 2, "referenced": 2}])
+
+        # Both rows counted (total_rows), but only the parseable position
+        # landed in the doc's position list.
+        assert report["total_rows"] == 2
+        assert report["collections"][coll]["1.2.3"]["positions"] == [1]
+        assert report["collections"][coll]["1.2.3"]["chashes"] == {"a" * 64, "b" * 64}
 
 
 class TestCheckStaleIndexingRuns:

@@ -3183,6 +3183,227 @@ def _check_dimension_orphans() -> list[HealthResult]:
     )]
 
 
+#: nexus-heizf: above this many distinct damaged DOCUMENTS, doctor stops
+#: naming tumblers inline and points at the enumeration command instead.
+_DANGLING_MANIFEST_NAME_THRESHOLD = 10
+
+#: nexus-heizf part 1: a single ``manifest_orphans`` call's sample cap.
+#: Chosen generously so the common case (a few dozen to a couple hundred
+#: dangling rows, per the 2026-08-04 nexus-55l58 shakedown's 188) needs no
+#: second round trip; :func:`manifest_orphan_report` still re-fetches on the
+#: rare miss, bounded by ``_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM`` below.
+_MANIFEST_ORPHANS_SAMPLE_LIMIT = 2000
+
+#: nexus-heizf code-review fix round (2026-08-05): the ceiling on the
+#: refetch below. ``manifest_orphans(dim)``'s ``limit`` is an ENGINE-WIDE
+#: cap on that dim's orphan rows (not scoped to the damaged collections
+#: under investigation here) with no upper bound enforced server-side and
+#: — load-bearing for why this is a single bounded fetch, not a paged loop
+#: — NO ``offset`` parameter (CatalogRepository.manifestOrphanReport /
+#: CatalogHandler.handleManifestOrphans both take only ``limit``), so
+#: repeated calls cannot walk pages the way the ``MAX_QUERY_RESULTS=300``
+#: convention elsewhere in this codebase does. Un-bounding the refetch
+#: (the pre-fix-round shape: ``limit=count``) would let one damaged dim
+#: with tens of thousands of rows drive an unbounded response. 10k is
+#: ~50x the 2026-08-04 nexus-55l58 shakedown's 188-row observation —
+#: generous headroom for real data, still a hard stop. Exceeding it (or a
+#: refetch failure) is never silently treated as complete: see the
+#: per-collection ``incomplete_collections`` cross-check against the
+#: census's own ``missing`` counts at the end of
+#: :func:`manifest_orphan_report`.
+_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM = 10_000
+
+#: nexus-h1zu0 / nexus-heizf: the one-line runtime disjointness caveat —
+#: appears in `nx doctor`'s dangling-manifest detail AND
+#: `nx catalog manifest-verify --list`'s output (both text and --json),
+#: never docstring/help-only (substantive-critic Significant-1, 2026-08-05:
+#: the 2026-08-04 nexus-55l58 shakedown was mislead by an instrument's
+#: *docstring*, which nobody reads mid-incident — the live numeric output
+#: itself must carry the warning). See ``purge_trash.py``'s matching line.
+_DANGLING_MANIFEST_POPULATION_NOTE = (
+    "population: live-doc manifest rows missing a T3 chunk — disjoint "
+    "from `nx catalog purge-trash`'s 'stranded' chunks (tombstoned-doc "
+    "chunks with no live parent); one reading clean says nothing about "
+    "the other"
+)
+
+
+def _compact_position_ranges(positions: list[int]) -> str:
+    """Compact a list of manifest positions into ``"0-3,7,9-12"`` form.
+
+    Pure display helper — a damaged document with hundreds of contiguous
+    dangling positions (a whole-file re-chunk gone wrong) renders as one
+    short range instead of a wall of individual numbers.
+    """
+    xs = sorted(set(positions))
+    if not xs:
+        return ""
+    ranges: list[str] = []
+    start = prev = xs[0]
+    for x in xs[1:]:
+        if x == prev + 1:
+            prev = x
+            continue
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = x
+    ranges.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
+
+
+def manifest_orphan_report(cat: object, damaged_collections: list[dict]) -> dict:
+    """Enumerate the dangling manifest ROWS behind a ``manifest_verify_all``
+    census, grouped by collection then by document (nexus-heizf part 1).
+
+    Wires the previously-dead ``manifest_orphans(dim)`` client method
+    (RDR-159 P-1b, zero callers before this bead — T2 nexus/55l58-
+    instrument-map-2026-08-04) to a consumer: given the damaged rows
+    ``manifest_verify_all()`` already returned (``{"collection",
+    "referenced", "present", "missing"}`` dicts with ``missing > 0``),
+    resolves each collection's dim via :func:`nexus.db.reconcile.
+    dim_for_model_token` and enumerates the actual ``(doc_id, position,
+    chash)`` rows for every resolvable dim.
+
+    ROUTING PARITY (nexus-h1zu0): ``manifest_verify_all`` does not route by
+    model token at all — it ORs presence across all three ``chunks_<dim>``
+    tables per manifest row, so it never drops a collection for having an
+    unrecognized token. ``manifest_orphans(dim)``'s SQL, by contrast, only
+    returns rows for collections whose ``__<model>__`` segment is in that
+    dim's hardcoded IN-list (rdr180-002-hex-boundary-functions.xml). A
+    collection with a token outside ALL three IN-lists is therefore
+    invisible to ``manifest_orphans`` at every dim while still being
+    counted (and possibly flagged ``missing``) by ``manifest_verify_all`` —
+    a SILENT per-collection coverage gap with no error. This function
+    closes the "silent, no error" half of that gap (not the underlying SQL
+    routing itself — see :func:`nexus.db.reconcile.dim_for_model_token`'s
+    docstring for why a client-side fix was chosen over an engine-side SQL
+    change): any damaged collection this function cannot route, OR whose
+    ``manifest_orphans`` call itself fails, is reported by NAME in
+    ``unroutable_collections`` rather than being dropped without a trace.
+    On 2026-08-04 production data every damaged collection routed cleanly
+    (188 census rows = 188 enumerated rows) — the gap is latent, not
+    active; this function makes it loud if it ever isn't.
+
+    COMPLETENESS (code-review-expert fix round, 2026-08-05): a dim's
+    orphan population can exceed what a single bounded fetch returns (see
+    ``_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM``), and the bounded refetch
+    itself can fail. NEITHER case is silently treated as a complete
+    result — the row count actually enumerated for each collection is
+    cross-checked against the census's own ``missing`` count from
+    *damaged_collections*; a shortfall lands the collection in
+    ``incomplete_collections`` with both numbers, regardless of which of
+    the two causes produced it (uniform handling, not a special case per
+    failure mode).
+
+    Returns::
+
+        {
+            "collections": {
+                "<collection>": {
+                    "<doc_id>": {"positions": [0, 1, ...], "chashes": {"..."}},
+                    ...
+                },
+                ...
+            },
+            "unroutable_collections": [...],  # sorted, deduped names
+            "incomplete_collections": {
+                "<collection>": {"enumerated": <int>, "expected": <int>},
+                ...
+            },
+            "total_rows": <int>,              # sum of enumerated rows
+        }
+
+    Best-effort: never raises. A ``manifest_orphans`` failure for one dim
+    folds that dim's collections into ``unroutable_collections`` and moves
+    on to the next dim rather than aborting the whole report. Per-row
+    field parsing is guarded too (a malformed ``position`` from the wire
+    is logged and skipped, never an unhandled exception).
+    """
+    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid a module-load-time import cycle
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
+    from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — see above
+
+    damaged_names = {str(row.get("collection", "?")) for row in damaged_collections}
+    expected_missing: dict[str, int] = {
+        str(row.get("collection", "?")): int(row.get("missing", 0) or 0)
+        for row in damaged_collections
+    }
+    dims_needed: dict[int, list[str]] = {}
+    unroutable: list[str] = []
+    for name in sorted(damaged_names):
+        if not is_conformant_collection_name(name):
+            unroutable.append(name)
+            continue
+        token = parse_conformant_collection_name(name)["embedding_model"]
+        dim = dim_for_model_token(token)
+        if dim is None:
+            unroutable.append(name)
+            continue
+        dims_needed.setdefault(dim, []).append(name)
+
+    collections: dict[str, dict[str, dict]] = {}
+    total_rows = 0
+    for dim in sorted(dims_needed):
+        try:
+            first = cat.manifest_orphans(dim, limit=_MANIFEST_ORPHANS_SAMPLE_LIMIT)
+        except Exception as exc:  # noqa: BLE001 — isolated per dim: reported, not swallowed
+            _log.warning("doctor_manifest_orphans_failed", dim=dim, error=str(exc))
+            unroutable.extend(dims_needed[dim])
+            continue
+        count = int(first.get("count", 0) or 0)
+        orphans = first.get("orphans") or []
+        if count > len(orphans):
+            # Bounded refetch (nexus-heizf fix round): never request more
+            # than the hard ceiling, and a refetch failure is left to fall
+            # through to the completeness cross-check below rather than
+            # silently standing in for a complete result.
+            fetch_limit = min(count, _MANIFEST_ORPHANS_MAX_ROWS_PER_DIM)
+            if fetch_limit > len(orphans):
+                try:
+                    second = cat.manifest_orphans(dim, limit=fetch_limit)
+                    orphans = second.get("orphans") or orphans
+                except Exception as exc:  # noqa: BLE001 — best-effort refetch; a shortfall is still caught below
+                    _log.warning("doctor_manifest_orphans_refetch_failed", dim=dim, error=str(exc))
+        for row in orphans:
+            coll = str(row.get("collection", "?"))
+            if coll not in damaged_names:
+                continue
+            doc_id = str(row.get("doc_id", "?"))
+            bucket = collections.setdefault(coll, {})
+            doc_bucket = bucket.setdefault(doc_id, {"positions": [], "chashes": set()})
+            position = row.get("position")
+            if position is not None:
+                try:
+                    doc_bucket["positions"].append(int(position))
+                except (TypeError, ValueError) as exc:
+                    _log.warning(
+                        "doctor_manifest_orphans_row_position_unparseable",
+                        row=row, error=str(exc),
+                    )
+            chash = row.get("chash")
+            if chash:
+                doc_bucket["chashes"].add(str(chash))
+            total_rows += 1
+
+    incomplete: dict[str, dict[str, int]] = {}
+    for coll, expected in expected_missing.items():
+        if coll in unroutable or expected <= 0:
+            continue
+        enumerated = sum(
+            len(info["positions"]) for info in collections.get(coll, {}).values()
+        )
+        if enumerated < expected:
+            incomplete[coll] = {"enumerated": enumerated, "expected": expected}
+
+    return {
+        "collections": collections,
+        "unroutable_collections": sorted(set(unroutable)),
+        "incomplete_collections": incomplete,
+        "total_rows": total_rows,
+    }
+
+
 def _check_dangling_manifests() -> list[HealthResult]:
     """Name collections whose manifest references chashes that no longer
     exist in T3 (nexus-5xn3k AC5, RE-ARMED by nexus-5xn3k.6 on
@@ -3214,6 +3435,37 @@ def _check_dangling_manifests() -> list[HealthResult]:
 
     Degrades to a skip — a doctor check must never crash the command it is
     diagnosing, and never guess.
+
+    POPULATION (nexus-heizf part 3 — read this before comparing this
+    check's count against ``nx catalog purge-trash``'s "stranded chunks"
+    preview; they are DISJOINT, not two views of the same rows, and one
+    reading clean says NOTHING about the other):
+
+    * THIS check: manifest ROWS of LIVE documents
+      (``catalog_documents.deleted_at IS NULL``) whose ``(collection,
+      chash)`` has NO backing row in any ``chunks_<dim>`` table. Direction:
+      manifest -> chunk. A chash can be counted here more than once (one
+      per manifest row/position that references it) — see the wording
+      note below.
+    * ``purge-trash``'s stranded-chunk preview (``nexus.purge_trash``'s
+      dry-run count, ``commands/catalog_cmds/purge_trash.py``): EXISTING
+      ``chunks_<dim>`` rows that ARE manifest-backed but have NO LIVE
+      parent document (every referencing manifest row's document is
+      tombstoned). Direction: chunk -> parent.
+
+    A chash cannot be in both populations at once (this check requires a
+    LIVE parent by construction; purge-trash requires the opposite). Zero
+    stranded chunks says nothing about this check's count, and vice versa
+    — the 2026-08-04 nexus-55l58 shakedown mistook one instrument's zero
+    for evidence against the other's non-zero finding on the SAME data.
+
+    WORDING: ``manifest_verify_all()``'s ``missing`` count is manifest ROWS,
+    not distinct chashes — the same chash referenced from two positions in
+    one document's manifest counts twice. The detail text below says
+    "row(s)"; a cheap distinct-chash count is layered on top via
+    :func:`manifest_orphan_report` when the enumeration succeeds (nexus-
+    heizf part 2 — the 2026-08-04 shakedown's 188 rows were 186 distinct
+    chashes).
     """
     label = "dangling manifest chashes"
     try:
@@ -3295,23 +3547,79 @@ def _check_dangling_manifests() -> list[HealthResult]:
         )]
 
     names = "; ".join(
-        f"{name} ({n_missing} of {n_ref} manifest chash(es) missing from T3)"
+        f"{name} ({n_missing} of {n_ref} manifest row(s) missing a T3 chunk)"
         for name, n_missing, n_ref in dangling
     )
+    detail = (
+        f"{len(dangling)} collection(s) have manifest rows referencing chunks "
+        f"that do not exist: {names}. A document in this state reports a "
+        "chunk_count and returns nothing; re-indexing may silently no-op "
+        f"(nexus-5xn3k). [{_DANGLING_MANIFEST_POPULATION_NOTE}]"
+    )
+    fix_suggestions = [
+        "nx catalog reconcile          (rebuild manifests from T3)",
+        "nx index <path> --force       (discard the staleness decision and re-index)",
+    ]
+
+    # nexus-heizf part 1: best-effort enrichment — name the actual damaged
+    # documents (small count) or point at the enumeration command (large
+    # count). A failure here must never downgrade or hide the
+    # collection-level warning already established above.
+    try:
+        report = manifest_orphan_report(cat, [
+            {"collection": name, "missing": n_missing, "referenced": n_ref}
+            for name, n_missing, n_ref in dangling
+        ])
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment only
+        _log.debug("doctor_dangling_manifest_enumeration_failed", error=str(exc))
+        report = None
+
+    unroutable = report["unroutable_collections"] if report is not None else []
+    incomplete = report["incomplete_collections"] if report is not None else {}
+
+    if report is not None and report["total_rows"]:
+        doc_ids: set[str] = set()
+        chashes: set[str] = set()
+        for coll_docs in report["collections"].values():
+            for doc_id, info in coll_docs.items():
+                doc_ids.add(doc_id)
+                chashes.update(info["chashes"])
+        n_docs = len(doc_ids)
+        detail += (
+            f" ({report['total_rows']} manifest row(s), {len(chashes)} "
+            f"distinct chash(es), {n_docs} document(s))"
+        )
+    else:
+        n_docs = 0
+
+    if unroutable:
+        detail += (
+            f"; {len(unroutable)} collection(s) could not be enumerated "
+            f"(unrecognized model routing or an enumeration error): "
+            f"{', '.join(unroutable)}"
+        )
+    if incomplete:
+        partials = "; ".join(
+            f"{coll} ({info['enumerated']} of {info['expected']})"
+            for coll, info in sorted(incomplete.items())
+        )
+        detail += (
+            f"; {len(incomplete)} collection(s) only PARTIALLY enumerated "
+            f"(row cap or an enumeration error) — counts are a LOWER "
+            f"BOUND for them: {partials}"
+        )
+
+    if 0 < n_docs <= _DANGLING_MANIFEST_NAME_THRESHOLD and not unroutable and not incomplete:
+        detail += f". Damaged document(s): {', '.join(sorted(doc_ids))}"
+    else:
+        detail += ". Run: nx catalog manifest-verify --list"
+
     return [HealthResult(
         label=label,
         ok=False,
         warn=True,
-        detail=(
-            f"{len(dangling)} collection(s) reference chunks that do not exist: "
-            f"{names}. A document in this state reports a chunk_count and "
-            "returns nothing; re-indexing may silently no-op (nexus-5xn3k)."
-        ),
-        fix_suggestions=[
-            "nx catalog manifest-verify <tumbler>   (name the specific document)",
-            "nx catalog reconcile          (rebuild manifests from T3)",
-            "nx index <path> --force       (discard the staleness decision and re-index)",
-        ],
+        detail=detail,
+        fix_suggestions=fix_suggestions,
     )]
 
 

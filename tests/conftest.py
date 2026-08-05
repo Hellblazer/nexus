@@ -1015,6 +1015,14 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # set-difference logic in bench_tumblers/plan_teardown; no Voyage call is
     # ever made and no embedder mode is asserted.
     "test_teardown_scope.py",
+    # nexus-h1zu0: dim_for_model_token(token) -> int|None is a pure dict
+    # lookup (nexus.db.reconcile._MODEL_DIMS, mirroring the Java
+    # PgVectorRepository.MODEL_DIMS authority). "voyage-code-3"/
+    # "voyage-context-3" are passed as literal ARGUMENTS asserting the
+    # routing TABLE's contents, not a behavior assertion about which
+    # embedder ran — no Voyage call, no credential, no embedder mode
+    # involved anywhere in the file. Reason class "string-literal-as-name".
+    "test_h1zu0_dim_routing.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({

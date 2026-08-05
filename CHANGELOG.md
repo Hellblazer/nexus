@@ -6,7 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`nx catalog manifest-verify --list [--json]`** (nexus-heizf): enumerate every
+  dangling manifest row across the catalog — grouped by collection and document,
+  with compact position ranges and distinct-chash counts — via the engine's
+  previously caller-less `manifest_orphans` endpoint. Exit 1 when any rows exist.
+  Collections the client cannot route (unrecognized embedding-model token) or
+  cannot fully enumerate (fetch failure / per-dim ceiling) are named loudly as
+  lower bounds, never silently dropped (nexus-h1zu0).
+
 ### Fixed
+- **`nx doctor`'s dangling-manifest warn names the patients** (nexus-heizf): for
+  ten or fewer damaged documents it lists their tumblers directly, otherwise it
+  points at `nx catalog manifest-verify --list`; its count is now correctly
+  labeled manifest *rows* (with the distinct-chash count alongside). Doctor,
+  `--list`, and `nx catalog purge-trash` output all carry a one-line note that
+  the dangling-manifest census (live docs' manifest rows missing chunks) and
+  purge-trash's "stranded" sweep (tombstoned docs' surviving chunks) measure
+  disjoint populations — one reading clean says nothing about the other.
 - **RUNFENCE coverage gap — the index-run fence had recorded zero runs for 99%
   of the corpus** (nexus-vw594): `_fence_begin` existed only on the PDF/md/dt
   ingest paths; the repo code/prose indexers and MCP `store_put` (10,439 of
