@@ -42,6 +42,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.lint
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _THIS_FILE = Path(__file__).resolve()
 

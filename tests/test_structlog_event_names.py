@@ -64,6 +64,8 @@ import re
 
 import pytest
 
+pytestmark = pytest.mark.lint
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"

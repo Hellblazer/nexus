@@ -10,6 +10,8 @@ from pathlib import Path
 import yaml
 import pytest
 
+pytestmark = pytest.mark.lint
+
 REPO_ROOT = Path(__file__).parent.parent
 PLUGIN_DIR = REPO_ROOT / "conexus"
 AGENTS_DIR = PLUGIN_DIR / "agents"
