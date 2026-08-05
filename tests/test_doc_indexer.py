@@ -588,6 +588,104 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voy
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
 
+# ── nexus-2xu6t STEP 0: does a preflight register exception feed the
+# nexus-94fxl identity-drop collector (get_manifest_identity_drops), the
+# same collector nexus-tp8yk D2 wired into nx dt index's / nx index repo's
+# non-zero exit? Empirical proof this bead's acceptance criterion demands,
+# not inference from reading the ``except Exception`` swallow at
+# ``_register_or_lookup_doc_id``'s tail.
+
+
+def test_register_or_lookup_doc_id_returns_empty_when_writer_register_raises(
+    sample_pdf, monkeypatch,
+):
+    """Direct proof of the swallow itself: ``writer.register`` raising
+    inside ``_register_or_lookup_doc_id`` is caught by the broad
+    ``except Exception`` (nexus-h9f1w / GH #1350 Fix C) and the function
+    returns ``""`` rather than propagating — this is the documented,
+    intentional best-effort contract, pinned here so a future change to
+    that contract is a deliberate, visible diff rather than a silent
+    behavior change underneath the identity-drop test below.
+    """
+    from nexus.doc_indexer import _register_or_lookup_doc_id
+
+    reader = MagicMock()
+    reader.by_file_path.return_value = None
+    reader.curator_owner_tumbler_by_name.return_value = "1.99"
+    writer = MagicMock()
+    writer.register.side_effect = RuntimeError("engine unreachable")
+
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+        doc_id = _register_or_lookup_doc_id(
+            sample_pdf, "mybook",
+            content_type="paper", physical_collection="docs__mybook",
+        )
+    assert doc_id == ""
+    writer.register.assert_called_once()
+
+
+def test_preflight_register_failure_feeds_identity_drop_collector(
+    sample_pdf, monkeypatch, mock_t3, voyage_client,
+):
+    """nexus-2xu6t STEP 0 verdict test: a catalog-register exception during
+    preflight registration must not silently vanish — it must feed the
+    identity-drop collector so ``nx dt index`` / ``nx index repo`` (both
+    wired by nexus-tp8yk D2) fail loud instead of reporting plain success.
+
+    Runs the REAL ``_register_or_lookup_doc_id`` (only the catalog reader/
+    writer are doubled — ``writer.register`` raises) through the REAL
+    ``index_pdf`` pipeline, including the REAL (unmocked) default hook
+    chain, so this proves the actual production wiring end-to-end rather
+    than a mocked collector call.
+
+    Path coverage note (critic round, 2026-08-05): ``sample_pdf`` is fake,
+    unopenable-by-pymupdf bytes, so ``index_pdf``'s streaming-routing probe
+    (``pymupdf.open`` failing -> ``page_count = -1``) falls through to the
+    NON-streaming batch/single-flush path (``_index_document``) — this
+    test covers that fallback specifically. ``_STREAMING_THRESHOLD = 0``
+    means every REAL, openable PDF is routed through the streaming
+    pipeline (``pipeline_index_pdf``) unconditionally instead; that path
+    is pinned separately by ``tests/test_pipeline_stages.py::
+    TestPipelineIndexPdf::test_streaming_register_failure_feeds_identity_
+    drop_collector``, which drives the same swallow through ``uploader_
+    loop``'s hook chain.
+    """
+    from nexus.mcp_infra import (
+        get_manifest_identity_drops,
+        reset_manifest_identity_drops,
+    )
+
+    set_credentials(monkeypatch)
+    reset_manifest_identity_drops()
+
+    reader = MagicMock()
+    reader.by_file_path.return_value = None
+    reader.curator_owner_tumbler_by_name.return_value = "1.99"
+    writer = MagicMock()
+    writer.register.side_effect = RuntimeError("engine unreachable")
+
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+         pdf_extract_patches_ctx(), \
+         patch("voyageai.Client", return_value=voyage_client):
+        result = index_pdf(sample_pdf, corpus="mybook")
+
+    # Collect-and-continue (nexus-9800y convention): the registration
+    # failure must NOT abort the write — chunks land regardless.
+    assert result == 1, "registration failure must not abort the chunk write"
+    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+
+    drops = get_manifest_identity_drops()
+    assert drops, (
+        "a preflight catalog-register exception did not feed the "
+        "identity-drop collector — nx dt index / nx index repo would "
+        "report plain success on this failure (nexus-2xu6t unfixed at "
+        "this call site)"
+    )
+
+
 def test_index_pdf_small_doc_prune_deleted_as_dead_code(
     sample_pdf, monkeypatch, voyage_client,
 ) -> None:

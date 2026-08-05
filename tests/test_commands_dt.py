@@ -25,7 +25,7 @@ Tests run on every platform via fake-helper monkeypatching plus
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -581,6 +581,201 @@ class TestStampFailedSummary:
         assert result.exit_code == 0, result.output
         assert "Indexed 1 record(s)" in result.output
         assert "stamp-failed" not in result.output
+
+
+# ── nexus-2xu6t: nx dt index must NOT report success when the catalog ───────
+# register failed (pbawi acceptance item 3) ──────────────────────────────────
+
+
+class TestIdentityDropSummary:
+    """``nx dt index`` reports SUCCESS when the preflight catalog register
+    failed — chunks land in T3 (searchable) but no catalog Document exists
+    for them (no tumbler, no ``--link-semantic``, no ``--writeback``).
+
+    nexus-tp8yk D2 already wires ``get_manifest_identity_drops()`` into
+    this command's exit code (see ``index_cmd``'s tail, mirroring
+    ``index_repo_cmd``'s ``_emit_manifest_write_failure_summary``); these
+    tests are the first to actually exercise that wiring for ``nx dt
+    index`` specifically. Two layers, mirroring test_index_cmd.py's own
+    split for ``nx index repo``:
+
+    * ``test_register_throw_*`` drives the REAL ``_register_or_lookup_
+      doc_id`` swallow through a broken catalog writer (forcing
+      ``NX_STORAGE_BACKEND_VECTORS=chroma`` so the write lands on the
+      injected ``make_t3`` double rather than the real local engine's
+      ``/v1/vectors`` service path — service mode is the pytest-env
+      default per ``is_vector_service_mode``'s RDR-155 P4a.2 docstring),
+      proving the register-failure -> collector link end to end.
+    * ``test_summary_*`` mirrors ``test_identity_drop_summary_surfaces_
+      drops`` / ``test_identity_drop_summary_silent_when_none`` in
+      test_index_cmd.py: mocks the collector directly to pin the
+      collector -> exit-code wiring in isolation, with a REAL
+      multi-record dispatch (via ``fake_dispatcher``) proving the drop
+      does not abort per-record processing.
+    """
+
+    @staticmethod
+    def _voyage_double() -> MagicMock:
+        from voyageai.object.contextualized_embeddings import (
+            ContextualizedEmbeddingsObject,
+            ContextualizedEmbeddingsResult,
+        )
+
+        client = MagicMock()
+
+        def _fake_cce(inputs, model, input_type):
+            batch = inputs[0]
+            cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+            cce_item.embeddings = [[0.1, 0.2] for _ in batch]
+            result = MagicMock(spec=ContextualizedEmbeddingsObject)
+            result.results = [cce_item]
+            return result
+
+        client.contextualized_embed.side_effect = _fake_cce
+        return client
+
+    @staticmethod
+    def _empty_t3() -> MagicMock:
+        t3 = MagicMock()
+        t3.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value={"ids": [], "metadatas": []}),
+        )
+        return t3
+
+    @staticmethod
+    def _broken_catalog(*, register_raises: bool):
+        """Reader/writer doubles mirroring the pbawi 409/wedge shape:
+        first-time file, curator owner already resolves (no
+        ``register_owner`` round-trip), and — when *register_raises* —
+        ``writer.register`` throws exactly like a wedged owner's real
+        engine 409 (nexus-pbawi)."""
+        reader = MagicMock()
+        reader.by_file_path.return_value = None
+        reader.curator_owner_tumbler_by_name.return_value = "1.99"
+        reader.find_by_file_path.return_value = MagicMock(tumbler="1.99.1")
+        writer = MagicMock()
+        if register_raises:
+            writer.register.side_effect = RuntimeError(
+                "integrity constraint violation",
+            )
+        else:
+            writer.register.return_value = "1.99.1"
+        return reader, writer
+
+    def _make_md(self, tmp_path, name: str):
+        p = tmp_path / f"{name}.md"
+        p.write_text(f"# {name}\n\nSome real prose body for {name}.\n")
+        return p
+
+    def test_register_throw_exits_nonzero_with_distinct_summary_and_batch_continues(
+        self, runner, fake_selectors, monkeypatch, tmp_path,
+    ):
+        from nexus.cli import main
+
+        # Force the injected make_t3() double onto the write path instead of
+        # the real local engine's /v1/vectors service route — see class
+        # docstring. index_markdown stays on the single-flush
+        # _index_document path either way (no streaming pipeline
+        # involved), so this is the only override single-file .md needs.
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+        md_a = self._make_md(tmp_path, "recA")
+        md_b = self._make_md(tmp_path, "recB")
+        fake_selectors["selection"].return_value = [
+            ("U-A", str(md_a)),
+            ("U-B", str(md_b)),
+        ]
+
+        reader, writer = self._broken_catalog(register_raises=True)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        # Collect-and-continue (nexus-9800y convention): the register
+        # exception on record A must not abort record B — both land.
+        assert "Indexed 2 record(s)" in result.output, result.output
+        # Distinct, non-clean outcome — never the plain success summary.
+        assert (
+            "WITHOUT a catalog document identity" in result.output
+        ), result.output
+        assert "nx catalog reconcile" in result.output
+        # pbawi acceptance item 3, verbatim requirement: must NOT exit 0.
+        assert result.exit_code != 0, result.output
+
+    def test_register_ok_summary_unchanged(
+        self, runner, fake_selectors, monkeypatch, tmp_path,
+    ):
+        """Baseline regression pin: when registration succeeds, the
+        identity-drop WARNING must not appear and the run exits 0 —
+        the fix must not cry wolf on the healthy path."""
+        from nexus.cli import main
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+        md_a = self._make_md(tmp_path, "recOK")
+        fake_selectors["selection"].return_value = [("U-OK", str(md_a))]
+
+        reader, writer = self._broken_catalog(register_raises=False)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.doc_indexer._fence_begin"), \
+             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "WITHOUT a catalog document identity" not in result.output
+        assert result.exit_code == 0, result.output
+
+    def test_summary_surfaces_drops_and_batch_continues(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        """Collector -> exit-code wiring, isolated from the register
+        mechanism (mirrors test_index_cmd.py's ``test_identity_drop_
+        summary_surfaces_drops``). ``fake_dispatcher`` reports two clean
+        per-record successes; the collector nonetheless reports drops
+        (as it would after a real register failure) — the run must
+        still process BOTH records (collect-and-continue) and THEN
+        fail loud at the tail.
+        """
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_identity_drops",
+            lambda: [
+                {"collection": "docs__dt", "batch_size": 3},
+                {"collection": "docs__dt", "batch_size": 5},
+            ],
+        )
+        fake_selectors["selection"].return_value = [
+            ("U-A", "/a.pdf"), ("U-B", "/b.md"),
+        ]
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert len(fake_dispatcher) == 2, "both records must be dispatched"
+        assert "Indexed 2 record(s)" in result.output, result.output
+        assert (
+            "WARNING: 2 chunk batch(es) (8 chunks; collection(s): "
+            "docs__dt) were indexed WITHOUT a catalog document identity"
+        ) in result.output, result.output
+        assert "nx catalog reconcile" in result.output
+        assert result.exit_code != 0, result.output
+
+    def test_summary_silent_when_no_drops(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert result.exit_code == 0, result.output
+        assert "WITHOUT a catalog document identity" not in result.output
 
 
 # ── nx dt open ───────────────────────────────────────────────────────────────

@@ -570,6 +570,85 @@ class TestPipelineIndexPdf:
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
 
+    def test_streaming_register_failure_feeds_identity_drop_collector(self, db, mock_t3) -> None:
+        """nexus-2xu6t follow-up (critic round, 2026-08-05): a preflight
+        catalog-register exception must feed the nexus-94fxl identity-drop
+        collector on the STREAMING path too, not just the non-streaming
+        fallback ``tests/test_doc_indexer.py::test_preflight_register_
+        failure_feeds_identity_drop_collector`` pins.
+
+        ``_STREAMING_THRESHOLD = 0`` (doc_indexer.py) means every REAL PDF
+        that ``index_pdf`` can open with pymupdf routes through THIS
+        function (``pipeline_index_pdf``) unconditionally — the batch/
+        single-flush path the sibling test exercises is reached only when
+        pymupdf's page-count probe fails (an unopenable file), which is
+        the FALLBACK, not the forced production route. The critic caught
+        that the sibling test's ``sample_pdf`` fixture (fake, unopenable
+        bytes) accidentally exercises exactly that fallback, leaving the
+        actually-forced streaming path unpinned.
+
+        This drives ``pipeline_index_pdf`` directly (the routing decision
+        itself — pymupdf openability -> streaming vs batch — is already
+        pinned by ``TestStreamingRouting`` in test_doc_indexer.py, not
+        this test's job) with a broken catalog writer, proving the same
+        ``_register_or_lookup_doc_id`` swallow (doc_indexer.py, ``except
+        Exception`` -> returns ``""``) reaches ``uploader_loop``'s
+        ``hooks.fire_batch(catalog_doc_id="")`` -> ``manifest_write_
+        batch_hook`` -> ``_record_manifest_identity_drop`` chain here too.
+
+        Kill-control (manual, run during review): commenting out
+        ``_record_manifest_identity_drop(...)`` in
+        ``manifest_write_batch_hook`` (src/nexus/mcp_infra.py) turns this
+        RED — same probe already applied to the non-streaming sibling
+        test and to the ``nx dt index`` CLI-layer tests in
+        ``tests/test_commands_dt.py::TestIdentityDropSummary``.
+        """
+        from nexus.mcp_infra import (
+            get_manifest_identity_drops,
+            reset_manifest_identity_drops,
+        )
+
+        reset_manifest_identity_drops()
+
+        reader = MagicMock()
+        reader.by_file_path.return_value = None
+        reader.by_source_uri.return_value = None
+        reader.curator_owner_tumbler_by_name.return_value = "1.99"
+        writer = MagicMock()
+        writer.register.side_effect = RuntimeError("integrity constraint violation")
+
+        fake_result = _er(2)
+        fake_chunks = _tc(
+            ("chunk one", 0, {"page_number": 1, "chunk_type": "text"}),
+        )
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+            ME.return_value.extract.side_effect = _fx(fake_result.metadata["page_count"], fake_result)
+            MC.return_value.chunk.return_value = fake_chunks
+            total = pipeline_index_pdf(
+                Path("/streamreg.pdf"), "streamregfail1", "docs__test",
+                mock_t3, db=db, embed_fn=_embed, corpus="test",
+            )
+
+        # Collect-and-continue: the register exception must not abort the
+        # streaming upload — the chunk still lands.
+        assert total == 1, "register failure must not abort the streaming upload"
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        # writer.register was reached at least once (the pre-flight call in
+        # pipeline_index_pdf) — confirms the broken double was actually on
+        # the path, not bypassed.
+        writer.register.assert_called()
+
+        drops = get_manifest_identity_drops()
+        assert drops, (
+            "a preflight catalog-register exception on the STREAMING path "
+            "did not feed the identity-drop collector — nx dt index / nx "
+            "index pdf would report plain success on this failure when "
+            "routed through pipeline_index_pdf"
+        )
+
     def test_first_exc_propagates_even_when_mark_failed_raises(self, db, mock_t3) -> None:
         """nexus-rewgw: the /fail POST's own failure must never mask the
         ORIGINAL pipeline exception nor skip `raise first_exc`. The
