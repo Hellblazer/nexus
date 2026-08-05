@@ -387,6 +387,15 @@ def _index_dt_content_record(
     record), never an exception. Returns ``True`` only when chunks were written
     AND the DT identity was stamped.
 
+    ``ChunkLandingUnverifiedError`` and ``IndexRunVerifyRefused`` (both
+    ``NexusError`` subclasses ``index_markdown``'s fence can raise —
+    errors.py:196, 234) are deliberately NOT part of the except tuple below
+    and are left to propagate to the caller (nexus-hb10j) — mirroring
+    ``_index_record``'s "indexer exception is a precondition" contract.
+    ``index_cmd``'s ``dt_content_active`` branch catches both at the call
+    site and converts them into a failed-record entry, exactly like the
+    file-backed branch does.
+
     The extracted text is cached at a STABLE per-UUID path
     (``<catalog>/.dt-content/<uuid>.md``) rather than a throwaway temp file
     (code-review HIGH-1). A throwaway path breaks re-index idempotency — the
@@ -720,9 +729,48 @@ def index_cmd(
             # exactly as before.
             if dt_content_active:
                 dt_collection = _resolve_dt_collection(collection, corpus, ext)
-                if _index_dt_content_record(
-                    uuid, collection=dt_collection, corpus=corpus,
-                ):
+                try:
+                    content_indexed = _index_dt_content_record(
+                        uuid, collection=dt_collection, corpus=corpus,
+                    )
+                except IndexRunVerifyRefused as exc:
+                    # nexus-hb10j (substantive-critic, 2xu6t adjudication,
+                    # T2 [21480], 2026-08-05): mirrors the file-backed
+                    # _index_record catch below. IndexRunVerifyRefused is a
+                    # NexusError, not (ImportError, RuntimeError, OSError) —
+                    # _index_dt_content_record's own except tuple around
+                    # index_markdown() never matches it, so it propagates
+                    # here unchanged. Pre-fix this escaped the loop entirely
+                    # and aborted the WHOLE --dt-content batch on the first
+                    # affected record — third occurrence of the
+                    # nexus-2fyb/qo84l/9800y regression class, this time for
+                    # the non-file-backed ingest path. Convert to a
+                    # failed-record entry with the SAME wording the
+                    # file-backed branch renders.
+                    from nexus.commands.index import _index_run_refused_message  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import between commands/dt.py and commands/index.py
+                    _log.error(
+                        "dt_content_index_completion_refused",
+                        uuid=uuid,
+                        doc_id=exc.doc_id,
+                        referenced=exc.referenced,
+                        present=exc.present,
+                        missing=exc.missing,
+                    )
+                    failed.append((uuid, path, _index_run_refused_message(exc)))
+                    continue
+                except ChunkLandingUnverifiedError as exc:
+                    # Same rationale as above, for the D1 stale-positive
+                    # fence's own exception type — mirrors the file-backed
+                    # catch below verbatim.
+                    _log.error(
+                        "dt_content_chunk_landing_unverified",
+                        uuid=uuid,
+                        collection=exc.collection,
+                        count=exc.count,
+                    )
+                    failed.append((uuid, path, str(exc)))
+                    continue
+                if content_indexed:
                     content_extracted += 1
                     indexed += 1
                     touched_collections.add(dt_collection)

@@ -583,6 +583,205 @@ class TestStampFailedSummary:
         assert "stamp-failed" not in result.output
 
 
+# ── nexus-hb10j: --dt-content per-record catches must include the two ──────
+# NexusError subclasses tp8yk/w6wp0 introduced (ChunkLandingUnverifiedError, ─
+# IndexRunVerifyRefused) — collect-and-continue, mirroring the file-backed ──
+# _index_record call site (dt.py 748-805), not a whole-batch abort. ─────────
+
+
+class TestDtContentExceptionHandling:
+    """``_index_dt_content_record`` (the ``--dt-content`` non-file-backed
+    ingest path) only caught ``(RuntimeError, ImportError, OSError)`` around
+    its ``index_markdown()`` call — ``ChunkLandingUnverifiedError`` and
+    ``IndexRunVerifyRefused`` (both ``NexusError`` subclasses raised since
+    tp8yk/w6wp0) fell through uncaught and aborted the WHOLE ``--dt-content``
+    batch on the first affected record (third occurrence of the
+    nexus-2fyb/qo84l/9800y regression class — filed by the 2xu6t critic, T2
+    [21480]).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _dt_available(self, monkeypatch):
+        """``dt_content_active`` gates on ``_dt.available()`` — force it on
+        so the ``--dt-content`` branch is reached without a real DT."""
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+
+    def test_chunk_landing_unverified_collects_and_continues(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise ChunkLandingUnverifiedError(collection=collection, count=3)
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        # Collect-and-continue: U-OK must still be processed despite
+        # U-BAD's exception — a whole-batch abort would report "Indexed 0
+        # record(s)" (and, pre-fix, a raw traceback / empty output — see
+        # the RED run) and never reach U-OK at all.
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 from DT content" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert "U-BAD" in result.output, result.output
+        assert "cannot confirm 3 chunk(s)" in result.output, result.output
+        # ChunkLandingUnverifiedError fires BEFORE any manifest write
+        # (doc_indexer.py:1202-1206, D1's whole point) and — unlike
+        # IndexRunVerifyRefused's _record_complete_refusal side effect —
+        # touches none of the three run-level gate collectors
+        # (get_manifest_write_failures / get_manifest_identity_drops /
+        # get_complete_refusals). So the per-record ``failed`` bucket
+        # alone does not force a nonzero exit here; that's the run-level
+        # gate's job (see test_dt_content_refusal_still_honours_run_
+        # level_gate below), and this pin matches the file-backed
+        # sibling's identical existing contract (dt.py 782-805).
+        assert result.exit_code == 0, result.output
+
+    def test_index_run_verify_refused_collects_and_continues(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.errors import IndexRunVerifyRefused
+
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise IndexRunVerifyRefused(
+                    doc_id="1.99.1", referenced=5, present=3, missing=2,
+                    chunk_count=5,
+                )
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 from DT content" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert "U-BAD" in result.output, result.output
+        assert "completion REFUSED" in result.output, result.output
+        # Same rationale as the ChunkLandingUnverifiedError test above: a
+        # bare raise from this stub does not, by itself, populate
+        # get_complete_refusals() (only the real doc_indexer._fence_
+        # complete -> _record_complete_refusal call site does that, as a
+        # side effect of the SAME exception in production) — see the
+        # dedicated integration test below for that wiring.
+        assert result.exit_code == 0, result.output
+
+    def test_dt_content_refusal_still_honours_run_level_gate(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """Integration check (nexus-hb10j fix-shape guidance: 'verify the
+        record-level catches feed it consistently'): the run-level
+        identity-drop/refusal gate (commands._helpers, nexus-7f5qj) is the
+        ONLY thing that drives nonzero exit for a --dt-content batch —
+        mirrors TestIdentityDropSummary.test_summary_surfaces_drops_and_
+        batch_continues, which pins the same contract for the file-backed
+        branch. Simulates the collector entry doc_indexer._fence_complete's
+        real IndexRunVerifyRefused raise site (_record_complete_refusal)
+        would populate, alongside the SAME exception being converted to a
+        per-record ``failed`` entry by our new except clause — proving the
+        new catch does not shadow, reset, or otherwise interfere with the
+        collector-driven exit gate.
+        """
+        from nexus.errors import IndexRunVerifyRefused
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_complete_refusals",
+            lambda: ["1.99.1"],
+        )
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            raise IndexRunVerifyRefused(
+                doc_id="1.99.1", referenced=5, present=3, missing=2,
+                chunk_count=5,
+            )
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "1 failed" in result.output, result.output
+        assert "completion refused" in result.output.lower(), result.output
+        assert result.exit_code != 0, result.output
+
+    def test_register_ok_path_unchanged(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """Regression pin: no exception -> both records index cleanly via
+        the dt-content path, exit 0, no 'failed' mention."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-A", "x-devonthink-item://a"),
+            ("U-B", "x-devonthink-item://b"),
+        ]
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record",
+            lambda uuid, *, collection, corpus, extraction_source="dt_content": True,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Indexed 2 record(s)" in result.output, result.output
+        assert "2 from DT content" in result.output, result.output
+        assert "failed" not in result.output, result.output
+        assert result.exit_code == 0, result.output
+
+    def test_skip_path_unchanged_when_dt_content_returns_false(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """Kill control: the existing False-return (not an exception) path
+        — e.g. empty DT text — must still bucket as skipped, not failed.
+        Proves the new except clauses don't accidentally widen to catch
+        the plain bool-return contract."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-EMPTY", "x-devonthink-item://empty"),
+        ]
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record",
+            lambda uuid, *, collection, corpus, extraction_source="dt_content": False,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Indexed 0 record(s) (1 skipped)" in result.output, result.output
+        assert "failed" not in result.output, result.output
+        assert result.exit_code == 0, result.output
+
+
 # ── nexus-2xu6t: nx dt index must NOT report success when the catalog ───────
 # register failed (pbawi acceptance item 3) ──────────────────────────────────
 
