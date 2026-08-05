@@ -51,6 +51,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
  *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
  *   GET   /v1/catalog/manifest/verify_all per-collection referenced/present/missing, every live doc
  *   POST  /v1/catalog/index-run/begin    stamp index_state='indexing' (idempotent, NOT a lock)
@@ -153,6 +154,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
                 case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
+                case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /manifest/orphans and
                 // /docs/orphaned already existed; links had no equivalent,
                 // which is why the client could not build a doctor check.
@@ -1894,6 +1896,38 @@ public final class CatalogHandler implements HttpHandler {
             Map.of("dim", dim,
                    "count", report.get("count"),
                    "orphans", report.get("orphans"))));
+    }
+
+    /**
+     * GET /v1/catalog/chash/conformance?dim=384 — per-table chash width-
+     * conformance report (RDR-180, bead nexus-du2dw): the engine-route
+     * counterpart to the local-only nexus_diag psql probe, for managed/cloud
+     * installs with no direct substrate access.
+     *
+     * <p>Response: {@code {"dim": <d>, "tables": [{"table_name", "total",
+     * "non_conformant", "sample_chashes"}, ...]}}. Tenant-scoped (SECURITY
+     * INVOKER + FORCE RLS on the underlying tables) — see {@link
+     * CatalogRepository#chashConformanceReport} for why that is the correct
+     * scoping model here. An unsupported dim is a 400.
+     */
+    private void handleChashConformance(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String dimRaw = queryParam(exchange, "dim");
+        if (dimRaw == null || dimRaw.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"dim query param required (384|768|1024)\"}"); return;
+        }
+        int dim;
+        try {
+            dim = Integer.parseInt(dimRaw);
+        } catch (NumberFormatException e) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"dim must be an integer (384|768|1024)\"}"); return;
+        }
+        // requireSupportedDim inside the repo throws IllegalArgumentException for an
+        // unsupported dim — caught by the outer dispatch-level handler (→ 400), same
+        // convention as handleManifestOrphans.
+        List<Map<String, Object>> tables = repo.chashConformanceReport(tenant, dim);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("dim", dim, "tables", tables)));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

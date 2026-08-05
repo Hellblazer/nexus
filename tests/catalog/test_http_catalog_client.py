@@ -358,6 +358,20 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                      "collection": "knowledge__o__minilm-l6-v2-384__v1"},
                 ],
             })
+        elif op == "/chash/conformance":
+            # RDR-180 (nexus-du2dw): GET /chash/conformance?dim= ->
+            # {dim, tables: [{table_name, total, non_conformant, sample_chashes}]}
+            params = self._query_params()
+            dim = int(params.get("dim", "0"))
+            self._send_json({
+                "dim": dim,
+                "tables": [
+                    {"table_name": f"nexus.chunks_{dim}", "total": 10,
+                     "non_conformant": 0, "sample_chashes": []},
+                    {"table_name": "nexus.catalog_document_chunks", "total": 10,
+                     "non_conformant": 0, "sample_chashes": []},
+                ],
+            })
         elif op == "/manifest/verify":
             # nexus-5xn3k.3: mirrors CatalogRepository.manifestVerify's
             # {referenced, present, missing} shape. Default clean (0/0/0);
@@ -1384,6 +1398,24 @@ class TestHttpCatalogClientRoundTrip:
 
         with pytest.raises(ValueError, match="limit must be > 0"):
             client.manifest_orphans(384, limit=0)
+
+    def test_chash_conformance_report_returns_per_table_counts(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        # RDR-180 (nexus-du2dw): GET /chash/conformance?dim= -> {dim, tables}
+        result = client.chash_conformance_report(384)
+        assert result["dim"] == 384
+        assert len(result["tables"]) == 2
+        names = {row["table_name"] for row in result["tables"]}
+        assert names == {"nexus.chunks_384", "nexus.catalog_document_chunks"}
+        assert all(row["non_conformant"] == 0 for row in result["tables"])
+
+    def test_chash_conformance_report_rejects_unsupported_dim(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="dim must be one of"):
+            client.chash_conformance_report(512)
 
     def test_index_run_lifecycle_happy_path(
         self, client: HttpCatalogClient

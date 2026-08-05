@@ -637,6 +637,50 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "orphans": result.get("orphans", []),
         }
 
+    def chash_conformance_report(self, dim: int) -> dict:
+        """Per-table chash width-conformance report for *dim* (RDR-180, bead
+        nexus-du2dw): the engine-route counterpart to the LOCAL-ONLY
+        ``nexus_diag`` psql probe (``nexus.db.diag_connection`` — shells a
+        local psql at 127.0.0.1, nexus-y3wuu), for managed/cloud installs
+        with no direct substrate access.
+
+        Returns ``{"dim": d, "tables": [{"table_name", "total",
+        "non_conformant", "sample_chashes"}, ...]}``. One row per covered
+        table: ``chunks_<dim>`` and ``catalog_document_chunks`` (filtered to
+        *dim*'s model-token collections — same IN-list routing caveat as
+        :meth:`manifest_orphans`: a collection whose model token is outside
+        every dim's IN-list is invisible here). ``non_conformant`` counts
+        ``octet_length(chash) <> 32`` (the era-safe RDR-180 predicate,
+        ``nexus.db.chash_tables``); ``sample_chashes`` is hex-encoded,
+        capped at 20 by the server-side function.
+
+        Tenant-scoped (the stored function is SECURITY INVOKER, counting
+        under the request tenant's RLS GUC) — deliberately NOT the
+        cross-tenant BYPASSRLS view the local install-binary gate reads.
+        This gives a managed-mode tenant visibility into their OWN data's
+        conformance; it is not a substitute for the local gate's whole-store
+        decision. ``dim`` must be one of 384/768/1024.
+        """
+        if dim not in self._MANIFEST_DIMS:
+            raise ValueError(
+                f"dim must be one of {self._MANIFEST_DIMS}, got {dim!r}"
+            )
+        result = self._get("/chash/conformance", dim=dim)
+        result = result or {}
+        if "tables" not in result:
+            # Same fail-closed contract as manifest_orphans' `count` field —
+            # a stripped `tables` key defaulting to [] would read as a false
+            # clean-store zero rather than a broken response.
+            raise RuntimeError(
+                "chash/conformance response carried no `tables` field — "
+                "cannot verify chash conformance; refusing a false-clean "
+                f"empty report (response keys: {sorted(result)})"
+            )
+        return {
+            "dim": int(result.get("dim", dim)),
+            "tables": result.get("tables", []),
+        }
+
     # ══════════════════════════════════════════════════════════════════════
     # INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.3) — design memo §3.3/§3.4
     #

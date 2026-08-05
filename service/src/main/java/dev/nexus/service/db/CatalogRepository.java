@@ -10,6 +10,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
@@ -2454,6 +2455,40 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "unsupported dim " + dim + " — supported values: 384, 768, 1024");
         }
+    }
+
+    /**
+     * RDR-180 (bead nexus-du2dw): per-table chash width-conformance report for
+     * one dim — the engine-route counterpart to the LOCAL-ONLY nexus_diag psql
+     * probe ({@code nexus.db.diag_connection}, nexus-y3wuu), for managed/cloud
+     * installs with no direct substrate access.
+     *
+     * <p>Invokes the {@code nexus.chash_conformance_report(dim)} stored
+     * function (rdr180-021), which returns one row per covered table
+     * ({@code chunks_<dim>}, and {@code catalog_document_chunks} filtered to
+     * that dim's model-token collections — same IN-list routing caveat as
+     * {@link #manifestOrphanReport}) with {@code total}, {@code
+     * non_conformant} (octet_length(chash) &lt;&gt; 32 — the era-safe RDR-180
+     * predicate), and {@code sample_chashes} (hex-encoded, capped at 20 by the
+     * function itself).
+     *
+     * <p>SECURITY INVOKER + FORCE RLS: tenant-scoped, NOT the cross-tenant
+     * BYPASSRLS view the local install-binary gate reads — see the
+     * changeset's header for why that is the correct scoping for a
+     * managed-mode tenant's own self-service check.
+     *
+     * <p>Returns {@code List<Map<String,Object>>} with keys {@code
+     * table_name}/{@code total}/{@code non_conformant}/{@code
+     * sample_chashes}. {@code dim} must be 384/768/1024 (validated here so an
+     * unsupported dim is a clean IllegalArgumentException → 400, not a
+     * PL/pgSQL RAISE → 500).
+     */
+    public List<Map<String, Object>> chashConformanceReport(String tenant, int dim) {
+        requireSupportedDim(dim);
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(CHASH_CONFORMANCE_REPORT.call(dim))
+               .fetch()
+               .map(org.jooq.Record::intoMap));
     }
 
     /**

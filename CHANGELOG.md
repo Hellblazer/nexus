@@ -16,6 +16,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower bounds, never silently dropped (nexus-h1zu0).
 
 ### Added
+- **`nx doctor` now covers chash width-conformance on managed/cloud installs**
+  (nexus-du2dw): the width-non-conformant chash probe (`octet_length(chash) <>
+  32` — the GH #1414 / nexus-pnwu0 class) previously existed only as a local
+  `psql` invocation, which managed/cloud installs could never run — a
+  permanent blind spot. A new engine route (`GET /v1/catalog/chash/conformance`,
+  `nexus.chash_conformance_report(dim)`) exposes per-table
+  total/non-conformant/sample counts, tenant-scoped, and `nx doctor` reports
+  it under its own label alongside the existing local check (which keeps its
+  cross-tenant role in the install gates). Honest on pre-route engines
+  (skipped with a loud warning, never a false clean) and names collections it
+  cannot route to a dim table instead of silently skipping them. Requires the
+  paired engine release; the counting SQL is falsified by a real
+  poisoned-row test at the engine layer.
 - **`nx catalog owners --census [--json]`** (nexus-7kl32): read-only
   classification of every registered repo owner's root path — healthy /
   path-vanished / path-exists-empty / unreadable (unreadable never defaults to
@@ -24,6 +37,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in its own output.
 
 ### Fixed
+- **`nx index pdf` streaming metadata was silently empty** (nexus-w6wp0):
+  streaming-pipeline summary/`--json` metadata (pages, title, author) came
+  back empty for any PDF routed through the streaming pipeline — the chunk
+  count was right, everything else was not. The metadata read keyed on the
+  `source_path` field RDR-102 removed from chunk metadata months ago. Now
+  scoped through the document's catalog manifest (falling back to
+  `content_hash` only when catalog registration failed, with a logged
+  warning), and a chunks-written-but-nothing-found state fails loudly with a
+  clear message that indexing itself succeeded, instead of returning empties.
+  Note: byte-identical duplicate registrations share deduplicated chunk rows
+  by design, so their display metadata remains last-write-wins.
 - **`nx doctor` no longer renders dead owners as green** (nexus-7kl32): the
   git-hooks check's "could not check" state — including ~24 owner directories
   that no longer exist on this install — rendered as `ok=True`, dominating

@@ -3704,6 +3704,237 @@ def _check_dangling_manifests() -> list[HealthResult]:
     )]
 
 
+#: RDR-180 (bead nexus-du2dw): the label for the ENGINE-ROUTE chash
+#: conformance check, deliberately DISTINCT from ``CHASH_CONFORMANCE_LABEL``
+#: (``nexus.db.chash_tables``, "Chunk chash conformance") — that label is
+#: substring-matched by the install-binary gate and the convergence gate
+#: (``upgrade_finish.py``, ``commands/daemon.py``), both of which need the
+#: LOCAL nexus_diag probe's cross-tenant BYPASSRLS visibility (nexus-vounk:
+#: a tenant-scoped session undercounts to zero on a poisoned store). This
+#: check's tenant-scoped count cannot honestly stand in for that decision,
+#: so it reports under its own label and is never wired into those gates —
+#: it exists purely so a managed/cloud install (no local psql access) gets
+#: SOME observability instead of none.
+_CHASH_CONFORMANCE_REPORT_LABEL = "Chunk chash conformance (tenant-scoped, engine route)"
+
+#: Dims the ``chash_conformance_report`` stored function accepts (RDR-180).
+_CHASH_CONFORMANCE_REPORT_DIMS: tuple[int, ...] = (384, 768, 1024)
+
+
+def _check_chash_conformance_report() -> list[HealthResult]:
+    """Managed/cloud-mode chash width-conformance check (RDR-180, bead
+    nexus-du2dw) — the engine-route counterpart to the LOCAL-ONLY
+    ``nexus_diag`` psql probe run by :func:`_check_migration_state`
+    (``nexus.db.diag_connection`` — shells a local psql at 127.0.0.1 using a
+    local ``pg_credentials`` file, LOCAL-ONLY BY DESIGN per the nexus-y3wuu
+    Hal decision). A managed/cloud install has no local Postgres and no
+    local credentials file, so that probe is PERMANENTLY BLIND there — the
+    same blind-spot family as the nexus-55l58 shakedown's §3.3b
+    substrate-direct anchor finding.
+
+    SCOPING (read before comparing this check's count against the local
+    'Chunk chash conformance' label): this check calls
+    ``HttpCatalogClient.chash_conformance_report``, which invokes a
+    SECURITY INVOKER stored function — tenant-scoped by FORCE RLS, NOT the
+    cross-tenant BYPASSRLS view the local probe reads (nexus-vounk: a
+    tenant-scoped session undercounts to zero on a poisoned store, which is
+    exactly why the install-binary gate needs the cross-tenant view). This
+    check gives a managed-mode tenant visibility into THEIR OWN data's
+    conformance; it is a self-service observability surface, not a
+    substitute for the local gate's whole-store decision — hence the
+    distinct label (never fed into the install-binary/convergence gates,
+    which filter on ``CHASH_CONFORMANCE_LABEL`` exactly).
+
+    Covers the GATING ("poison") tables that are dim-routable —
+    ``chunks_<dim>`` and ``catalog_document_chunks`` (filtered to that dim's
+    model-token collections, same IN-list routing caveat as
+    ``manifest_orphans``/``_check_dangling_manifests``). The LEGACY-DEBT
+    tables (topic_assignments, frecency, relevance_log) are NOT covered —
+    they are not dim-routable by construction (mixed identity space); this
+    is a stated scope reduction relative to the local probe's four-table
+    coverage, not a silent one.
+
+    Engine-floor honesty (vw594 F3 / manifest_verify_all precedent): a
+    pre-route engine 404s ``/chash/conformance`` — this degrades to a LOUD
+    WARN naming the gap explicitly, never a silent/false clean pass. Any
+    other failure (engine down, catalog unavailable) also degrades to a
+    WARN or a benign skip, matching ``_check_dangling_manifests``'s
+    fail-open-but-loud contract — this check must never crash `nx doctor`
+    and must never read "couldn't check" as "checked, clean" (nexus-kmo9h).
+    """
+    label = _CHASH_CONFORMANCE_REPORT_LABEL
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_chash_conformance_report_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
+    import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
+
+    rows: list[dict] = []
+    dims_checked = 0
+    for dim in _CHASH_CONFORMANCE_REPORT_DIMS:
+        try:
+            result = cat.chash_conformance_report(dim)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 404:
+                # Pre-route engine: every dim 404s identically, so stop at
+                # the first one — the vw594 F3 / manifest_verify_all
+                # precedent, applied here. Fail OPEN, but LOUD.
+                _log.warning(
+                    "doctor_chash_conformance_report_engine_floor",
+                    status=status, dim=dim,
+                )
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        "SKIPPED (engine predates the chash-conformance "
+                        f"route — /chash/conformance 404'd on dim={dim}; "
+                        "re-run after the next engine tag lands). This is "
+                        "NOT a clean-store signal — if a local psql is "
+                        "available, `nx doctor`'s local 'Chunk chash "
+                        "conformance' check is the authoritative "
+                        "cross-tenant probe until the engine is upgraded."
+                    ),
+                )]
+            _log.warning(
+                "doctor_chash_conformance_report_check_failed",
+                error=str(exc), dim=dim,
+            )
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"SKIPPED (chash_conformance_report failed for dim={dim}: {exc})",
+            )]
+        except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`, but must not lie either
+            # substantive-critic (T2 nexus/critique-du2dw-2026-08-05 [21458]):
+            # this branch used to return ok=True "skipped" — which silently
+            # swallows HttpCatalogClient.chash_conformance_report's OWN
+            # deliberate fail-closed RuntimeError (missing `tables` field —
+            # see that method's docstring) into a false-benign pass,
+            # contradicting this check's own "never a false clean" promise a
+            # few lines above. WARN, never ok=True, for ANY exception here.
+            _log.warning(
+                "doctor_chash_conformance_report_check_failed",
+                error=str(exc), dim=dim,
+            )
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"SKIPPED (chash_conformance_report failed for dim={dim}: {exc})",
+            )]
+        dims_checked += 1
+        rows.extend(result.get("tables") or [])
+
+    if dims_checked == 0:
+        # NON-VACUITY (nexus-kmo9h): zero dims actually checked is not a
+        # clean bill of health.
+        return [HealthResult(label=label, ok=True, detail="skipped (no dim reachable)")]
+
+    total_non_conformant = 0
+    offenders: list[str] = []
+    for row in rows:
+        try:
+            n = int(row.get("non_conformant", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            _log.debug(
+                "doctor_chash_conformance_report_row_skipped", row=row, error=str(exc),
+            )
+            continue
+        total_non_conformant += n
+        if n > 0:
+            offenders.append(f"{row.get('table_name', '?')}={n}")
+
+    # substantive-critic SIGNIFICANT (nexus-4ijv4, T2 [21458]): a collection
+    # whose model token maps to no dim is INVISIBLE to the per-dim loop
+    # above at every dim — same IN-list routing caveat as manifest_orphans
+    # / _check_dangling_manifests (nexus-h1zu0). Left unstated, a tenant
+    # with such content reads "clean" while those collections were never
+    # counted or sampled at all — the exact false-clean-by-omission shape
+    # nexus-kmo9h exists to catch. Best-effort: a probe failure here must
+    # never crash this check or hide the primary (non_)conformant result.
+    unroutable_collections: list[str] = []
+    try:
+        from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
+        from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
+
+        t3 = make_t3()
+        for c in t3.list_collections():
+            name = str(c.get("name", ""))
+            if not name or not is_conformant_collection_name(name):
+                continue
+            token = parse_conformant_collection_name(name)["embedding_model"]
+            if dim_for_model_token(token) is None:
+                unroutable_collections.append(name)
+        unroutable_collections = sorted(set(unroutable_collections))
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment only; never hides the primary result
+        _log.debug("doctor_chash_conformance_report_unroutable_probe_failed", error=str(exc))
+        unroutable_collections = []
+
+    unroutable_suffix = ""
+    if unroutable_collections:
+        names = ", ".join(unroutable_collections[:10])
+        more = (
+            f" (+{len(unroutable_collections) - 10} more)"
+            if len(unroutable_collections) > 10 else ""
+        )
+        unroutable_suffix = (
+            f" NOT CHECKED: {len(unroutable_collections)} collection(s) use "
+            "an embedding-model token this probe cannot route to any dim — "
+            f"never counted, never sampled: {names}{more} (same IN-list "
+            "routing caveat as manifest_orphans; nexus-h1zu0)."
+        )
+
+    if total_non_conformant > 0:
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"{total_non_conformant} chunk row(s) in YOUR tenant have a "
+                "width-non-conformant chash (octet_length <> 32 — legacy "
+                "pre-RDR-108 ids; the GH #1414 / nexus-pnwu0 class). Per "
+                f"table: {', '.join(offenders)}. This is a TENANT-SCOPED "
+                "count (see this check's docstring for why it differs from "
+                "the local cross-tenant psql probe). Re-indexing affected "
+                "content heals these rows in place." + unroutable_suffix
+            ),
+            fix_suggestions=[
+                "nx catalog owners list        (find affected collections' repos)",
+                "nx index repo <path>          (re-index file-backed collections, additive)",
+                "nx upgrade                    (the chash-rekey rung recomputes conformant ids)",
+                "nx doctor                     (re-run; this warning clears once healed)",
+            ],
+        )]
+
+    if unroutable_collections:
+        # nexus-4ijv4: clean-with-unroutable must NEVER render as a plain
+        # clean pass — the CHECKED tables/dims are genuinely clean, but the
+        # tenant's store as a WHOLE was not fully checked. WARN, not ok=True.
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"clean across {len(rows)} checked table(s), {dims_checked} "
+                f"dim(s) (tenant-scoped) —{unroutable_suffix}"
+            ),
+        )]
+
+    return [HealthResult(
+        label=label,
+        ok=True,
+        detail=(
+            f"clean — 0 width-non-conformant chash rows across {len(rows)} "
+            f"table(s), {dims_checked} dim(s) checked (tenant-scoped)"
+        ),
+    )]
+
+
 #: Threshold beyond which a document stranded in ``index_state='indexing'``
 #: is worth flagging (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
 #: substantive-critic on .3's client diff). Generous by design: 'indexing'
@@ -4116,6 +4347,14 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # resolve in T3 — the class `nx catalog reconcile` does not cover
     # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
     results.extend(_check_dangling_manifests())
+    # RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
+    # coverage via the engine route — the local nexus_diag psql probe inside
+    # _check_migration_state (above) is LOCAL-ONLY by design (nexus-y3wuu)
+    # and permanently blind on installs with no direct substrate access.
+    # Runs ALONGSIDE the local check (distinct label, tenant-scoped, never
+    # fed into the install-binary/convergence gates — see the check's own
+    # docstring for the scoping rationale).
+    results.extend(_check_chash_conformance_report())
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).

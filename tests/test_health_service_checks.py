@@ -1740,6 +1740,257 @@ class TestCheckDanglingManifests:
         assert "code__x__unknown-token__v1" in r.detail, r.detail
 
 
+class TestCheckChashConformanceReport:
+    """RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
+    coverage via the engine route (``nexus.chash_conformance_report(dim)``).
+
+    The LOCAL ``nexus_diag`` psql probe (``nexus.db.diag_connection``) is
+    LOCAL-ONLY BY DESIGN (nexus-y3wuu Hal decision) — it shells a local
+    ``psql`` at 127.0.0.1 using a local ``pg_credentials`` file, which does
+    not exist on managed/cloud installs. This check is the fallback
+    observability surface for those installs, via
+    ``HttpCatalogClient.chash_conformance_report``.
+
+    KILL-CONTROL NOTE (CORRECTED — code-review fix round, substantive-critic
+    CRITICAL nexus-5nrzk, T2 [21458]): the prior claim here ("seeding is
+    impossible by construction") was FALSE AS WRITTEN. Seeding a genuine
+    width-non-conformant row through the real engine IS possible — but only
+    via a superuser CHECK-constraint-drop maneuver at the JAVA test layer
+    (``service/src/test/java/dev/nexus/service/ChashConformanceReportIntegrationTest.java``,
+    mirroring ``RekeyOpsIntegrationTest``'s ``withChecksDropped`` helper),
+    NOT reachable through any client-facing HTTP/Python write path (the
+    width CHECK, even NOT VALID, still enforces on every NEW client write —
+    see ``rdr180-001-bytea-chash.xml``). This Python engine-integration
+    test file (``tests/db/test_du2dw_chash_conformance_report_engine.py``)
+    therefore still cannot seed poison itself and continues to prove only
+    the clean branch + wiring against a real engine. The actual non-zero
+    branch — ``nexus.chash_conformance_report(dim)`` counting a real
+    poisoned row and returning its hex in ``sample_chashes`` — is now
+    proven end-to-end at the Java layer instead. THIS class proves the same
+    failure branch at the FAKE-CATALOG-READER layer (a stub
+    ``chash_conformance_report`` returning non-conformant counts) — the
+    same layer-test posture ``TestCheckDanglingManifests`` above already
+    uses for its analogous engine-route checks
+    (``manifest_verify_all``/``manifest_orphans``), now corroborated by a
+    real-poison proof one layer down rather than merely asserted absent.
+    """
+
+    def _cat(
+        self, *, tables_by_dim: dict[int, list[dict]] | None = None,
+        raise_status: int | None = None, raise_exc: Exception | None = None,
+    ):
+        import httpx
+
+        class _Cat:
+            def chash_conformance_report(self, dim: int) -> dict:
+                if raise_status is not None:
+                    request = httpx.Request("GET", "https://engine.example/v1/catalog/chash/conformance")
+                    response = httpx.Response(raise_status, request=request)
+                    raise httpx.HTTPStatusError(
+                        f"{raise_status} error", request=request, response=response,
+                    )
+                if raise_exc is not None:
+                    raise raise_exc
+                tables = (tables_by_dim or {}).get(dim, [
+                    {"table_name": f"nexus.chunks_{dim}", "total": 5, "non_conformant": 0, "sample_chashes": []},
+                    {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+                ])
+                return {"dim": dim, "tables": tables}
+        return _Cat()
+
+    def _t3(self, *, collection_names: list[str] | None = None, raise_exc: Exception | None = None):
+        """Fake T3 handle backing the unroutable-collections probe
+        (nexus-4ijv4). ``None`` names -> no collections (the common case for
+        the other tests in this class, which don't care about this axis)."""
+        class _T3:
+            def list_collections(self) -> list[dict]:
+                if raise_exc is not None:
+                    raise raise_exc
+                return [{"name": n} for n in (collection_names or [])]
+        return _T3()
+
+    def _run(self, monkeypatch, cat, *, t3=None):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3",
+            lambda *a, **k: (t3 if t3 is not None else self._t3()),
+            raising=False,
+        )
+        return h._check_chash_conformance_report()[0]
+
+    def test_clean_store_across_all_dims(self, monkeypatch) -> None:
+        cat = self._cat()
+        r = self._run(monkeypatch, cat)
+        assert r.ok is True
+        assert "clean" in r.detail
+        assert "3 dim(s) checked" in r.detail, r.detail
+
+    def test_non_conformant_rows_reported_loud(self, monkeypatch) -> None:
+        """The failure branch (kill control — see class docstring for why
+        this is proven at the fake-reader layer, not via a live seed)."""
+        cat = self._cat(tables_by_dim={
+            384: [
+                {"table_name": "nexus.chunks_384", "total": 5, "non_conformant": 2, "sample_chashes": ["aa", "bb"]},
+                {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+            ],
+        })
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "2 chunk row(s)" in r.detail, r.detail
+        assert "nexus.chunks_384=2" in r.detail, r.detail
+        assert "TENANT-SCOPED" in r.detail, r.detail
+        assert any("nx upgrade" in f for f in r.fix_suggestions)
+
+    def test_engine_predating_route_renders_skipped_with_warning(self, monkeypatch) -> None:
+        """vw594 F3 / manifest_verify_all precedent: a pre-route engine 404s
+        every dim identically — SKIPPED + loud warn, never a false clean."""
+        cat = self._cat(raise_status=404)
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+        assert "chash-conformance route" in r.detail, r.detail
+        assert "NOT a clean-store signal" in r.detail, r.detail
+
+    def test_other_transport_failure_renders_skipped_with_warning_not_clean(self, monkeypatch) -> None:
+        cat = self._cat(raise_status=500)
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+
+    def test_unexpected_exception_renders_warn_not_a_false_clean(self, monkeypatch) -> None:
+        """substantive-critic (T2 [21458]): this branch used to swallow ANY
+        exception — including HttpCatalogClient.chash_conformance_report's
+        OWN deliberate fail-closed RuntimeError (a malformed response) —
+        into ok=True 'skipped', contradicting this check's own never-a-
+        false-clean docstring promise. Must never crash `nx doctor` (still
+        true here) AND must never render ok=True."""
+        cat = self._cat(raise_exc=RuntimeError("engine unreachable"))
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail, r.detail
+
+    def test_client_fail_closed_runtimeerror_renders_warn_not_a_false_clean(
+        self, monkeypatch,
+    ) -> None:
+        """The exact concrete shape the prior bug swallowed: HttpCatalogClient
+        .chash_conformance_report raises RuntimeError when the response
+        carries no `tables` field (its own fail-closed contract, see that
+        method's docstring) — this must surface as a loud WARN, never a
+        silent clean pass."""
+        cat = self._cat(raise_exc=RuntimeError(
+            "chash/conformance response carried no `tables` field — cannot "
+            "verify chash conformance; refusing a false-clean empty report"
+        ))
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "carried no `tables` field" in r.detail, r.detail
+
+    def test_catalog_unavailable_degrades_to_plain_skip(self, monkeypatch) -> None:
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: None, raising=False,
+        )
+        r = h._check_chash_conformance_report()[0]
+        assert r.ok is True
+        assert "no catalog" in r.detail
+
+    def test_label_distinct_from_gate_matched_local_probe_label(self) -> None:
+        """This check must NEVER collide with ``CHASH_CONFORMANCE_LABEL`` —
+        the install-binary gate (``commands/daemon.py``) and the convergence
+        gate (``upgrade_finish.py``) exact-match on that label and need the
+        LOCAL nexus_diag probe's cross-tenant BYPASSRLS visibility
+        (nexus-vounk); this engine-route check's tenant-scoped count would
+        silently under-report a poisoned store if it fed the same gate."""
+        import nexus.health as h
+        from nexus.db.chash_tables import CHASH_CONFORMANCE_LABEL
+
+        assert h._CHASH_CONFORMANCE_REPORT_LABEL != CHASH_CONFORMANCE_LABEL
+
+    # ── unroutable-collection surfacing (nexus-4ijv4, T2 [21458]) ──────────
+
+    def test_clean_with_unroutable_collection_is_not_plain_clean(self, monkeypatch) -> None:
+        """The core complaint: a tenant with content under an unrecognized
+        embedding-model token must NOT read as a plain clean pass — those
+        collections were never counted or sampled at all."""
+        cat = self._cat()  # every dim clean
+        t3 = self._t3(collection_names=[
+            "knowledge__x__some-unrecognized-legacy-token-9000__v1",
+        ])
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is False and r.warn is True, (
+            "clean-with-unroutable must render as a WARN, not ok=True — "
+            f"got ok={r.ok} warn={r.warn} detail={r.detail!r}"
+        )
+        assert "NOT CHECKED" in r.detail, r.detail
+        assert "some-unrecognized-legacy-token-9000" in r.detail, r.detail
+
+    def test_dirty_with_unroutable_collection_carries_both_notes(self, monkeypatch) -> None:
+        """The non_conformant>0 branch must ALSO carry the unroutable note —
+        the two findings are orthogonal (one is about rows the probe
+        checked and found bad, the other is about content the probe never
+        reached at all) and neither should hide the other."""
+        cat = self._cat(tables_by_dim={
+            384: [
+                {"table_name": "nexus.chunks_384", "total": 5, "non_conformant": 1, "sample_chashes": ["aa"]},
+                {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+            ],
+        })
+        t3 = self._t3(collection_names=[
+            "knowledge__x__some-unrecognized-legacy-token-9000__v1",
+        ])
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is False and r.warn is True
+        assert "1 chunk row(s)" in r.detail, r.detail
+        assert "NOT CHECKED" in r.detail, r.detail
+        assert "some-unrecognized-legacy-token-9000" in r.detail, r.detail
+
+    def test_fully_routable_collections_still_render_plain_clean(self, monkeypatch) -> None:
+        """Regression guard: a tenant whose collections ALL route to a known
+        dim must still get the plain clean pass — the new probe must not
+        false-positive on ordinary, fully-covered content."""
+        cat = self._cat()
+        t3 = self._t3(collection_names=[
+            "knowledge__x__bge-base-en-v15-768__v1",
+            "code__y__voyage-code-3__v1",
+        ])
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is True
+        assert "clean" in r.detail
+        assert "NOT CHECKED" not in r.detail, r.detail
+
+    def test_unroutable_probe_failure_does_not_hide_primary_clean_result(
+        self, monkeypatch,
+    ) -> None:
+        """Best-effort: the unroutable-collection enrichment failing must
+        never crash this check or suppress the primary (clean) verdict —
+        it just loses the enrichment, silently to the operator's detriment
+        but never to a crash."""
+        cat = self._cat()
+        t3 = self._t3(raise_exc=RuntimeError("t3 unreachable"))
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is True
+        assert "clean" in r.detail
+
+    def test_unroutable_probe_failure_does_not_hide_primary_dirty_result(
+        self, monkeypatch,
+    ) -> None:
+        cat = self._cat(tables_by_dim={
+            384: [
+                {"table_name": "nexus.chunks_384", "total": 5, "non_conformant": 3, "sample_chashes": ["aa"]},
+                {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+            ],
+        })
+        t3 = self._t3(raise_exc=RuntimeError("t3 unreachable"))
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is False and r.warn is True
+        assert "3 chunk row(s)" in r.detail, r.detail
+
+
 class TestManifestOrphanReportCompleteness:
     """nexus-heizf code-review fix round (2026-08-05): manifest_orphan_report
     must never treat a truncated or failed refetch as a complete result —
