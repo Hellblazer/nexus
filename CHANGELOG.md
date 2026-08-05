@@ -16,6 +16,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower bounds, never silently dropped (nexus-h1zu0).
 
 ### Added
+- **`nx catalog owners --execute deactivate` / `--execute reactivate`**
+  (nexus-cw262): the engine owner-deactivate surface. Soft-deletes registered
+  repo owners whose root path is confirmed vanished with zero live documents,
+  so dead owners stop resurfacing in every `nx doctor` / census run.
+  Double-gated (`--no-dry-run --confirm`), TOCTOU-safe (re-verifies each
+  candidate immediately before its write), and reversible — via
+  `--execute reactivate --owner <prefix>` or automatically (and losslessly)
+  on any live re-registration of the same owner. Every eligible row
+  discloses the residual risk (a healthy-but-unmounted 0-doc owner is
+  indistinguishable from debris) with its recovery paths;
+  `--include-deactivated` keeps deactivated owners auditable. The arm's
+  availability is reported honestly per connected engine build
+  (`mutation_status`: available / unavailable / unknown) — requires the
+  paired engine release. The census's `path_vanished` corroboration adds one
+  read per candidate (deliberate cost; excludes live-document owners from
+  ever being deactivated).
+
+### Changed
+- `nx catalog owners` (plain listing) and `--census` exclude deactivated
+  owners by default; `--include-deactivated` shows them. Doctor's dead-owner
+  remedy is capability-qualified against the connected engine.
+
 - **`nx doctor` now covers chash width-conformance on managed/cloud installs**
   (nexus-du2dw): the width-non-conformant chash probe (`octet_length(chash) <>
   32` — the GH #1414 / nexus-pnwu0 class) previously existed only as a local
