@@ -243,15 +243,70 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
 
     The ONE surviving caller of this branch — ``index_pdf``'s streaming-
     path ``return_metadata=True`` metadata read (fetching page/title/
-    author for the return value, not a prune) — is independently broken
-    by the identical gap (it also always sees zero rows) and is tracked
-    separately (nexus-w6wp0) rather than fixed here; nexus-tbkk1's scope
-    is the stale-chunk *prune* sites in doc_indexer.py/pipeline_stages.py
-    only.
+    author for the return value, not a prune) — was independently broken
+    by the identical gap (it also always saw zero rows). nexus-w6wp0
+    (2026-08-05) fixed that call site to pass ``content_hash`` like every
+    other caller; as of that fix, the no-``content_hash`` branch below has
+    ZERO surviving production callers in this codebase. It is kept rather
+    than deleted because removing a public-shaped helper's dead branch is
+    out of scope for a bug-fix bead — nexus-tbkk1's scope was the
+    stale-chunk *prune* sites in doc_indexer.py/pipeline_stages.py only,
+    and nexus-w6wp0's was this one read site.
     """
     if content_hash:
         return {"content_hash": content_hash}
     return {"source_path": file_path}
+
+
+def _metadata_for_doc_id(col: Any, doc_id: str) -> list[dict]:
+    """nexus-w6wp0: fetch *doc_id*'s own chunk metadatas via the catalog
+    manifest (doc_id -> document_chunks -> chash), not a content-derived
+    where-filter.
+
+    The manifest is the per-document chunk binding post RDR-108/180: it
+    scopes the read to exactly the chash rows THIS document's manifest
+    currently claims, unlike a collection-wide content_hash-keyed query
+    which can also pick up a disjoint or partially-overlapping decoy --
+    e.g. a stale/orphaned leftover batch from an earlier superseded write
+    that happens to share this content_hash but isn't part of this
+    document's live manifest. Self-contained (opens/closes its own
+    catalog reader), mirroring ``_check_document_fork``'s manifest fetch.
+
+    NOT a fix for TRUE byte-identical duplicate documents (round-2 review
+    correction, substantive-critic, 2026-08-05): identical content_hash
+    implies identical per-chunk text, hence identical chash SETS, so two
+    documents' manifests resolve to the SAME shared, content-deduplicated
+    T3 rows either way (RDR-108's chunk-level dedup -- see t3.py's
+    store_put docstring and test_within_collection_identical_chunks_
+    collapse). Those shared rows carry whichever registration's title/
+    source_author was written last (last-write-wins), regardless of which
+    document's manifest scopes the read. Acceptable for a summary display
+    (chunk content is correct either way; only title/author attribution
+    on a genuine duplicate reflects the most recent indexer), not
+    something this function disambiguates further.
+
+    Deliberately NOT best-effort (unlike ``_check_document_fork``, whose
+    fork signal is optional): this result feeds the ``return_metadata``
+    dict callers depend on, so a genuine catalog-read failure propagates
+    as-is rather than being swallowed to an empty list -- FAIL LOUD, never
+    a silent empty standing in for a real error. An empty MANIFEST
+    (doc_id resolves but has zero chash rows) is not itself an error and
+    returns ``[]`` normally; the caller's own count>0-but-empty guard is
+    what turns a genuinely inconsistent zero-metadata result into a loud
+    failure.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+
+    reader = make_catalog_reader()
+    try:
+        manifest = reader.get_manifest(doc_id)
+        chashes = sorted({row.chash for row in manifest if getattr(row, "chash", "")})
+    finally:
+        reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
+    if not chashes:
+        return []
+    batch = _vector_with_retry(col.get, ids=chashes, include=["metadatas"])
+    return batch.get("metadatas", [])
 
 
 def _doc_id_for_path(file_path: Path) -> str:
@@ -1961,7 +2016,11 @@ def index_pdf(
         {"chunks": int, "pages": list[int], "title": str, "author": str}
 
     Metadata is derived from chunk metadatas produced during extraction
-    (no additional T3 query).  Default False preserves existing int behavior.
+    (no additional T3 query) on the batch and incremental paths.  The
+    streaming path (nexus-w6wp0) does one additional content_hash-keyed T3
+    query after upload, since streaming discards per-chunk metadata as it
+    flushes and does not retain a full in-process list to derive from.
+    Default False preserves existing int behavior.
 
     Pass *enrich=True* to enable Semantic Scholar bibliographic metadata
     lookup (year, venue, authors, citations).  Default is False (opt-in)
@@ -2135,24 +2194,160 @@ def index_pdf(
             if on_fork_detected is not None:
                 on_fork_detected(_forks)
             if return_metadata:
-                # Query T3 for metadata after streaming upload.
-                # nexus-dcym: re-resolve doc_id since pipeline_index_pdf
-                # may have just registered the catalog entry.
-                meta_where = _identity_where(str(pdf_path), corpus)
-                all_meta: list[dict] = []
-                offset = 0
-                while True:
-                    batch = _vector_with_retry(
-                        col.get,
-                        where=meta_where,
-                        include=["metadatas"],
-                        limit=300,
-                        offset=offset,
+                # nexus-w6wp0: query T3 for metadata after streaming upload.
+                # NOT _identity_where's no-hash source_path fallback, which
+                # RDR-102 D2 (2026-05-02, commit 83ac62c7) made permanently
+                # unable to match any chunk written since (make_chunk_
+                # metadata dropped source_path entirely; see
+                # _identity_where's docstring / nexus-tbkk1).
+                #
+                # Review round (code-review-expert + substantive-critic,
+                # 2026-08-05, verified round 2) Critical-2: a bare
+                # content_hash-keyed query is scoped to the whole
+                # COLLECTION, not to this document -- it can pick up rows
+                # from a DIFFERENT, DISJOINT-or-partially-overlapping
+                # registration event that happens to share this
+                # content_hash (e.g. a stale/orphaned leftover batch from
+                # an earlier superseded write not yet swept, or a second
+                # registration under a different doc_id whose manifest does
+                # not actually reference these rows). When doc_id is known,
+                # the catalog manifest (doc_id -> document_chunks -> chash)
+                # scopes the read to exactly the rows THIS document's
+                # manifest currently claims, which such decoys are not
+                # part of.
+                #
+                # What this does NOT fix (round-2 correction -- the
+                # original comment here overclaimed "collision-free"):
+                # TRUE byte-identical duplicate PDFs (identical
+                # content_hash implies identical per-chunk text, hence
+                # identical chash SETS) resolve to the SAME shared,
+                # content-deduplicated T3 rows either document's manifest
+                # points at (RDR-108's chunk-level dedup: "identical chunk
+                # text in the same collection collapses to one T3 row by
+                # design"; see t3.py's store_put docstring and
+                # test_within_collection_identical_chunks_collapse). Those
+                # shared rows carry whichever registration's title/
+                # source_author metadata was written LAST (last-write-
+                # wins on the shared row -- t3.py ~780-783), regardless of
+                # which document's manifest you scope by. Manifest-scoping
+                # does not and cannot disambiguate that case differently
+                # from a content_hash-keyed query, because both paths land
+                # on the identical physical rows. This is acceptable for a
+                # summary display (the chunk CONTENT returned is correct
+                # either way; only the title/author attribution on a
+                # genuine duplicate is "whoever indexed most recently"),
+                # not a defect this fix introduces or needs to solve --
+                # just not a case manifest-scoping helps with.
+                #
+                # content_hash remains the fallback ONLY when doc_id is
+                # empty. Per nexus-i711w the service owns the catalog in
+                # EVERY mode -- doc_id=="" here is NOT a "no catalog
+                # configured" mode, it means _register_or_lookup_doc_id hit
+                # an UNEXPECTED catalog-registration failure (its own
+                # best-effort ``except Exception`` swallowed the error and
+                # returned ""). That is an anomalous state, not a
+                # supported mode, so it is logged as a warning below rather
+                # than silently treated as "normal, no catalog here."
+                #
+                # Why not thread extraction-time metadata through in-memory
+                # instead (the original brief's preferred option, and what
+                # the batch/incremental branches already do)? Streaming's
+                # chunker_loop discards each chunk's page_number once
+                # uploaded -- it never accumulates a "pages actually
+                # chunked" set in this process, only pipeline_index_pdf's
+                # post-pass ``extraction_result.metadata['page_count']``
+                # (total PDF pages, not "pages with chunks" -- a different,
+                # less precise fact than what batch/incremental report).
+                # Threading the real per-chunk data through would mean (a)
+                # chunker_loop maintaining a shared page-number set across
+                # its producer thread, and (b) changing pipeline_index_pdf's
+                # return type from a bare ``int`` for every caller (batch
+                # paths, tests in pipeline_stages.py/test_pipeline_stages.py
+                # -- currently unverifiable in this session: the T2 engine
+                # substrate those tests need is mid-rebuild by a concurrent
+                # sibling editing service/). That is real surface in
+                # pipeline_stages.py, outside this bead's granted file
+                # scope (doc_indexer.py + its tests only) in a shared tree.
+                # The manifest-scoped read below gets the same collision-
+                # safety with zero pipeline_stages.py changes -- the
+                # smaller, honest fix for this bead; threading extraction
+                # metadata through is a legitimate follow-up with its own
+                # scope.
+                #
+                # Residual race (SIGNIFICANT, substantive-critic): pipeline_
+                # stages.pipeline_index_pdf's force=True pre-flight deletes
+                # T3 chunks matching this content_hash before a *concurrent*
+                # force re-run's own pipeline executes. Such a concurrent
+                # run targets the SAME content_hash (same document, same
+                # content) and so could delete this run's just-written
+                # chunks between this read's manifest fetch and its
+                # ids-query, racing the guard below into a false failure.
+                # This is not new: the pre-existing staleness-check read
+                # above and _check_document_fork's own manifest read carry
+                # the identical non-atomicity. Not fixed here (would need
+                # pipeline-side locking, out of scope for a read-path bug
+                # fix); documented honestly rather than silently accepted.
+                if doc_id:
+                    all_meta = _metadata_for_doc_id(col, doc_id)
+                else:
+                    # nexus-w6wp0 round 2: doc_id=="" here means catalog
+                    # REGISTRATION FAILED for this run (nexus-i711w: the
+                    # service owns the catalog in every mode; there is no
+                    # "no catalog configured" mode to fall back from) --
+                    # log it as the anomaly it is rather than silently
+                    # treating it as an ordinary, supported path.
+                    _log.warning(
+                        "index_pdf_metadata_read_no_doc_id",
+                        pdf=str(pdf_path),
+                        content_hash=content_hash,
+                        reason="catalog registration failed or returned no doc_id; "
+                               "falling back to a content_hash-scoped metadata read",
                     )
-                    all_meta.extend(batch.get("metadatas", []))
-                    if len(batch.get("ids", [])) < 300:
-                        break
-                    offset += 300
+                    meta_where = _identity_where(str(pdf_path), corpus, content_hash=content_hash)
+                    all_meta = []
+                    offset = 0
+                    while True:
+                        batch = _vector_with_retry(
+                            col.get,
+                            where=meta_where,
+                            include=["metadatas"],
+                            limit=300,
+                            offset=offset,
+                        )
+                        all_meta.extend(batch.get("metadatas", []))
+                        if len(batch.get("ids", [])) < 300:
+                            break
+                        offset += 300
+                if count and not all_meta:
+                    # FAIL LOUD (nexus-w6wp0, reworded round 2): indexing
+                    # itself SUCCEEDED -- the pipeline already reports
+                    # *count* chunks committed to T3 -- this is a failure
+                    # of the METADATA DISPLAY READ only (pages/title/author
+                    # for the CLI summary), most likely a concurrent
+                    # re-index race (e.g. a --force re-run deleting and
+                    # rewriting this content_hash's rows between this run's
+                    # write and this read; see the race note above). No
+                    # data was lost. Never paper over it with a silently
+                    # empty pages/title/author dict, which is the original
+                    # bug this fix removes -- but the message must not read
+                    # as data loss either.
+                    from nexus.errors import IndexingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+
+                    _verify_hint = (
+                        f"'nx catalog manifest-verify {doc_id}' to confirm the chunks "
+                        f"are present"
+                        if doc_id else
+                        "'nx doctor' to check for a damaged manifest (no doc_id was "
+                        "resolved for this run to target manifest-verify directly)"
+                    )
+                    raise IndexingError(
+                        f"index_pdf: indexing succeeded ({count} chunk(s) committed to "
+                        f"T3 for {pdf_path}, content_hash={content_hash}, "
+                        f"doc_id={doc_id!r}), but the metadata display read found none "
+                        f"of them -- likely a concurrent re-index race, not data loss. "
+                        f"Remedy: re-run 'nx index pdf' (the staleness check will skip "
+                        f"if nothing changed), or inspect {_verify_hint}."
+                    )
                 return {
                     "chunks": count,
                     "pages": sorted({m.get("page_number", 0) for m in all_meta}),

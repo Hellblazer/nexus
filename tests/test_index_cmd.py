@@ -182,6 +182,34 @@ def test_index_credentials_missing_exits_nonzero_with_message(
     assert "Set via" in result.output or "config set" in result.output
 
 
+def test_index_pdf_indexing_error_exits_nonzero_with_clean_message(runner, fake_pdf):
+    """nexus-w6wp0 review round (code-review-expert Critical, 2026-08-05):
+    index_pdf's streaming return_metadata path can raise IndexingError
+    (pipeline reported chunks written but the metadata query found none)
+    -- the CLI wrapper must translate it to a ClickException (clean
+    message, non-zero exit) rather than let it propagate as a raw
+    traceback, same nexus-2fyb convention as CredentialsMissingError etc.
+    above.
+    """
+    from nexus.errors import IndexingError
+
+    def _raise(*args, **kwargs):
+        raise IndexingError(
+            "index_pdf: pipeline reported 5 chunk(s) written for x.pdf "
+            "(content_hash=abc123) but the metadata query found none -- "
+            "cannot determine pages/title/author"
+        )
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+
+    assert result.exit_code != 0, result.output
+    assert "pipeline reported 5 chunk(s) written" in result.output
+    # No raw traceback leaked to the CliRunner output -- ClickException's
+    # clean rendering, not an unhandled-exception dump.
+    assert "Traceback (most recent call last)" not in result.output
+
+
 def test_index_pdf_conflict_running_exits_nonzero_with_remedy(runner, fake_pdf):
     """nexus-lcmbp: a retry against a stranded 'running' pipeline row must
     exit non-zero and print the error + remedy — never rc=0 with 0 chunks.

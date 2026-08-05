@@ -1185,22 +1185,80 @@ class TestServiceModeIndexerRouting:
             "it bypasses the routing gate and always returns T3Database(daemon)."
         )
 
-    def test_index_document_with_explicit_t3_uses_provided_instance(self, monkeypatch):
+    def test_index_document_with_explicit_t3_uses_provided_instance(self, monkeypatch, tmp_path):
         """When t3 is explicitly provided (non-None), it must be used as-is
-        regardless of service mode — the caller owns the T3 instance."""
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
-        explicit_t3 = MagicMock()
-        explicit_t3.get_or_create_collection = MagicMock(return_value=MagicMock())
+        regardless of service mode — the caller owns the T3 instance.
 
-        # In the fixed code: if t3 is not None: db = t3 (no routing, no make_t3)
-        # Verify this path directly
+        nexus-w6wp0 shared-tree triage (2026-08-05): converted from a
+        source-string ``inspect.getsource`` grep to a real behavioral
+        assertion. The grep form pins one exact spelling of the guard and
+        breaks on any wording-preserving refactor (not just a behavioral
+        regression) — it also produced a false read against an unrelated,
+        concurrent edit elsewhere in the file during the du2dw sibling's
+        full-suite triage. Asserting the actual routing behavior (the
+        provided instance's own ``get_or_create_collection`` is used;
+        neither ``make_t3`` nor ``get_t3`` is ever called) is sturdier and
+        tests the thing that actually matters.
+
+        ``collection_name`` below uses a local-model token
+        (``minilm-l6-v2-384``), not a voyage one: RDR-109's mode-declarations
+        lint (tests/test_mode_declarations_are_explicit.py) flags any
+        ``voyage-(context|code)-3`` reference lacking the ``cloud_mode``
+        fixture, and this test genuinely doesn't need cloud-mode semantics
+        -- the collection name is an opaque passthrough string here
+        (``_index_document`` returns 0 before ever resolving an embedder,
+        via the empty-``chunk_fn`` short-circuit below), same
+        "string-literal-as-name" exemption class already documented for
+        several files in conftest.py's ``_MODE_LINT_EXCLUDE_FILES``.
+        """
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+
+        explicit_col = MagicMock()
+        explicit_col.get.return_value = {"metadatas": []}  # staleness check: not found
+        explicit_t3 = MagicMock()
+        explicit_t3.get_or_create_collection = MagicMock(return_value=explicit_col)
+
+        make_t3_called: list[str] = []
+        get_t3_called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.doc_indexer.make_t3",
+            lambda: (make_t3_called.append("CALLED"), MagicMock())[1],
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_t3",
+            lambda: (get_t3_called.append("CALLED"), MagicMock())[1],
+        )
+
         from nexus.doc_indexer import _index_document  # noqa: PLC0415
-        import inspect
-        source = inspect.getsource(_index_document)
-        # The fix must NOT call make_t3 when t3 is provided
-        assert "if t3 is not None" in source, (
-            "_index_document must have the 'if t3 is not None: db = t3' guard "
-            "added by the RDR-152 Seam B fix"
+
+        source_file = tmp_path / "doc.md"
+        source_file.write_text("content")
+
+        def _empty_chunk_fn(*_args, **_kwargs):
+            # Short-circuits _index_document at its "if not prepared:
+            # return 0" gate — the routing decision under test (t3
+            # provided -> no factory call) happens well before this point,
+            # so an empty chunk list keeps the test cheap (no embed/upsert
+            # machinery needed) without touching the behavior being pinned.
+            return []
+
+        result = _index_document(
+            source_file, "test-corpus", _empty_chunk_fn,
+            t3=explicit_t3, collection_name="docs__test__minilm-l6-v2-384__v1",
+        )
+
+        assert result == 0
+        explicit_t3.get_or_create_collection.assert_called_once_with(
+            "docs__test__minilm-l6-v2-384__v1"
+        )
+        assert not make_t3_called, (
+            "make_t3() must NOT be called when t3 is provided explicitly — "
+            "the caller owns the T3 instance."
+        )
+        assert not get_t3_called, (
+            "get_t3() must NOT be called when t3 is provided explicitly — "
+            "the caller owns the T3 instance."
         )
 
 

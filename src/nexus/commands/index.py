@@ -1368,6 +1368,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         ChunkLandingUnverifiedError,
         CredentialsMissingError,
+        IndexingError,
         IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
@@ -1394,6 +1395,15 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # str(e) alone is sufficient here (unlike
             # IndexRunVerifyRefused, which needs _index_run_refused_
             # message's dedicated reformatting of its raw field dump).
+            raise click.ClickException(str(e)) from e
+        except IndexingError as e:
+            # nexus-w6wp0 review round (code-review-expert + substantive-
+            # critic, 2026-08-05): index_pdf's streaming return_metadata
+            # path can raise IndexingError (chunks written but the
+            # metadata query found none) -- same nexus-2fyb translation
+            # convention as the other typed errors above, so this new
+            # failure mode gets a clean message instead of a raw
+            # traceback.
             raise click.ClickException(str(e)) from e
 
     if path is not None and dir_path is not None:
