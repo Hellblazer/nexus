@@ -216,8 +216,8 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
     ``indexer.py``'s ``_prune_misclassified_in_collection`` legacy
     ``source_path`` fallback (serves ``nx index repo``'s code/prose
     paths) and ``indexer_utils.check_staleness``'s source_path fallback
-    are STILL LIVE, unaudited by this bead, and still under active
-    nexus-ou4tb fail-loud maintenance — tracked as nexus-afudo.
+    were unaudited by this bead and subsequently audited + deleted by
+    nexus-afudo (2026-08-05) — Phase 5b is now fully closed.
     Only the doc_indexer.py/pipeline_stages.py HALF of Phase 5b closes
     here: the four prune call sites that used to take this branch in
     THOSE two files (``_index_document``, ``_index_pdf_incremental``,
@@ -1480,7 +1480,8 @@ def _index_document(
     # at_call_site (superseded by nexus-tbkk1's dead-code-deletion tests).
     # This closes only the doc_indexer.py/pipeline_stages.py HALF of
     # RDR-102 D2's "Phase 5b" 4-site class — indexer.py/indexer_utils.py
-    # sibling sites are STILL LIVE, unaudited (nexus-afudo). Automatic
+    # sibling sites were audited and deleted by nexus-afudo (2026-08-05)
+    # — Phase 5b is now fully closed. Automatic
     # replacement protection is mcp_infra._sweep_superseded_vectors
     # (manifest-diff based, fires on every hooks.fire_batch/fire_document
     # call above), proven end-to-end at tests/integration/test_tp8yk_
@@ -1698,8 +1699,9 @@ def _index_pdf_incremental(
     # former prune block above (RDR-102 D2 removed source_path from
     # make_chunk_metadata; this where-clause always matched zero rows).
     # Closes only the doc_indexer.py/pipeline_stages.py HALF of RDR-102
-    # D2's "Phase 5b" — indexer.py/indexer_utils.py siblings are STILL
-    # LIVE, unaudited (nexus-afudo). Automatic replacement protection is
+    # D2's "Phase 5b" — the indexer.py/indexer_utils.py siblings were
+    # audited and deleted by nexus-afudo (2026-08-05); Phase 5b is now
+    # fully closed. Automatic replacement protection is
     # mcp_infra._sweep_superseded_vectors, proven end-to-end at tests/
     # integration/test_tp8yk_manifest_never_outruns_chunks.py::
     # test_union_guard_keeps_shared_chunk_at_the_production_wiring — not
@@ -2320,8 +2322,9 @@ def index_pdf(
     # and _index_pdf_incremental's former prune blocks (RDR-102 D2
     # removed source_path from make_chunk_metadata; this where-clause
     # always matched zero rows). Closes only the doc_indexer.py/
-    # pipeline_stages.py HALF of RDR-102 D2's "Phase 5b" — indexer.py/
-    # indexer_utils.py siblings are STILL LIVE, unaudited (nexus-afudo).
+    # pipeline_stages.py HALF of RDR-102 D2's "Phase 5b" — the indexer.py/
+    # indexer_utils.py siblings were audited and deleted by nexus-afudo
+    # (2026-08-05); Phase 5b is now fully closed.
     # Automatic replacement protection is mcp_infra._sweep_superseded_
     # vectors, proven end-to-end at tests/integration/test_tp8yk_
     # manifest_never_outruns_chunks.py::test_union_guard_keeps_shared_

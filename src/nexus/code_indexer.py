@@ -335,7 +335,8 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     # Staleness check — skip if content + model unchanged.
     # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver; falls back to source_path for legacy chunks.
+    # supplied a resolver. (The source_path fallback was deleted as dead
+    # code by nexus-afudo, 2026-08-05 — RDR-102 Phase 5b.)
     catalog_doc_id_for_staleness = (
         ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
     )

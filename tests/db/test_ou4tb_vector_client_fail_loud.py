@@ -111,10 +111,12 @@ class TestTheContractIsUniformAcrossTheClass:
 class TestCallerLoopsIsolatePerItem:
     """Grep-level pins on the sites audited for nexus-ou4tb (b).
 
-    Originally seven; now six live entries — nexus-tbkk1 retired the
+    Originally seven; now five live entries — nexus-tbkk1 retired the
     doc_indexer.py entry when its guarded prune was deleted as dead code
     (see the SITES list comment below), the same shape as RDR-155 P4b's
     earlier retirement of the migration/collision_audit.py entry.
+    nexus-afudo (2026-08-05) retired the indexer.py legacy-prune entry
+    the same way — see below.
 
     Deliberately structural rather than behavioural: driving a real degraded
     service through each of these paths needs a different fixture per site,
@@ -124,7 +126,22 @@ class TestCallerLoopsIsolatePerItem:
     SITES = [
         # (file, marker that must be inside a guarded region)
         ("src/nexus/indexer.py", "frecency_staleness_lookup_failed_skipping_file"),
-        ("src/nexus/indexer.py", "legacy_prune_failed_skipping_source_path"),
+        # (nexus-afudo: indexer.py's "legacy_prune_failed_skipping_
+        # source_path" guarded region — _prune_misclassified_in_
+        # collection's per-path source_path fallback loop — was DELETED
+        # as dead code, completing RDR-102 D2's "Phase 5b" for the
+        # indexer.py/indexer_utils.py sibling sites nexus-tbkk1 left
+        # live. RDR-102 D2 removed source_path from make_chunk_metadata
+        # for every writer (not just doc_indexer.py's), so the prune's
+        # where-clause never matched a real chunk row regardless of
+        # legacy_paths cardinality; a live-store probe (field>=!
+        # existence test) confirmed zero source_path rows across 13
+        # representative collections, including the code__/docs__
+        # collections this prune specifically targets. There is no
+        # longer a prune here to isolate a failure around. See
+        # nexus.indexer_utils.StalenessCache's docstring and
+        # test_indexer.py::test_prune_misclassified_source_path_
+        # fallback_deleted_as_dead_code.)
         ("src/nexus/indexer.py", "gc_sweep_read_failed_skipping_collection"),
         ("src/nexus/exporter.py", "skip_existing_probe_failed_importing_batch"),
         # (nexus-tbkk1: doc_indexer.py's "stale_chunk_prune_failed_

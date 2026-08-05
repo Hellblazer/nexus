@@ -293,17 +293,28 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
 # ── _run_index_frecency_only ────────────────────────────────────────────────
 
 def test_frecency_only_updates_frecency_score(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path via an
+    explicit ``_build_frecency_doc_id_map`` patch. Pre-fix this relied
+    on the (now-deleted) legacy source_path where-filter firing when
+    the catalog reader is None — the exact dead-code class nexus-afudo
+    closed; a MagicMock ``col.get`` that ignores ``where=`` made that
+    false confidence indistinguishable from a real pass. See
+    ``test_frecency_only_skips_unmapped_files_source_path_fallback_
+    deleted_as_dead_code`` for the doc_id-less case, which now skips
+    instead of querying.
+    """
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"; repo.mkdir()
     src = repo / "main.py"; src.write_text("x = 1\n")
-    old = {"frecency_score": 0.1, "source_path": str(src), "title": "main.py:1-1"}
+    old = {"frecency_score": 0.1, "title": "main.py:1-1"}
     col = MagicMock(); col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock(); db.get_or_create_collection.return_value = col
     db.get_collection.return_value = col
-    # Catalog absent (nexus-i711w, module-header seam): reader None routes
-    # the doc_id map AND the manifest path to their legacy fallbacks, which
-    # is the state this test was written against.
-    with patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
+    with patch(
+        "nexus.indexer._build_frecency_doc_id_map",
+        return_value={src: "1.1.1"},
+    ), \
+         patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
@@ -312,6 +323,8 @@ def test_frecency_only_updates_frecency_score(tmp_path):
     assert kw["ids"] == ["c1"]
     assert kw["metadatas"][0]["frecency_score"] == 0.75
     assert kw["metadatas"][0]["title"] == "main.py:1-1"
+    where = col.get.call_args.kwargs["where"]
+    assert where == {"doc_id": "1.1.1"}
 
 
 def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
@@ -352,22 +365,35 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
     )
 
 
-def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path):
-    """Files missing from the catalog map use the legacy source_path
-    filter so chunks predating the catalog backfill keep getting
-    frecency updates.
+def test_frecency_only_skips_unmapped_files_source_path_fallback_deleted_as_dead_code(
+    tmp_path,
+):
+    """nexus-afudo (2026-08-05): the legacy source_path where-filter
+    this test used to exercise (files missing from the catalog doc_id
+    map) is DELETED dead code. RDR-102 D2 (2026-05-02) removed
+    source_path from make_chunk_metadata for every writer, so
+    ``where={"source_path": ...}`` always matched zero rows in
+    production; a live-store probe (field>=! existence test) found
+    zero source_path rows across 13 representative collections
+    (~115k chunks). A file with no catalog doc_id now has its
+    frecency refresh SKIPPED outright — no query, since the fallback
+    it used to fall through to could never find anything.
+
+    Kill control: with ``col.get`` NOT mocked with a specific
+    return_value that a stray call could accidentally satisfy, an
+    unintended reintroduction of the deleted where-filter would make
+    ``col.get`` get called (and ``update_chunks`` would be invoked with
+    whatever the default MagicMock().get() shape produces) — this
+    assertion fails either way if the dead branch comes back.
     """
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"
     repo.mkdir()
     src = repo / "legacy.py"
     src.write_text("z = 3\n")
-    old = {"frecency_score": 0.1, "source_path": str(src), "title": "legacy.py:1-1"}
     col = MagicMock()
-    col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock()
     db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
     db.get_collection.return_value = col
     with patch(
         "nexus.indexer._build_frecency_doc_id_map",
@@ -378,8 +404,8 @@ def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path)
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
         _run_index_frecency_only(repo, _reg())
-    where = col.get.call_args.kwargs["where"]
-    assert where == {"source_path": str(src)}
+    col.get.assert_not_called()
+    db.update_chunks.assert_not_called()
 
 
 def test_frecency_only_skips_unindexed_files(tmp_path):
@@ -1414,14 +1440,27 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
 
 
 def test_run_index_prune_misclassified(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed ``$in``
+    path via ``file_to_doc_id`` — the legacy source_path where-filter
+    this test used to route through (via a default/empty
+    ``file_to_doc_id``) is deleted dead code (see
+    ``test_prune_misclassified_source_path_fallback_deleted_as_
+    dead_code``).
+    """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"; repo.mkdir()
+    main_py = repo / "main.py"
     cc = MagicMock(); cc.get.return_value = {"ids": []}
     dc = MagicMock(); dc.get.return_value = {"ids": ["stale-1"]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
-    _prune_misclassified(repo, "code__repo", "docs__repo", [repo/"main.py"], [repo/"README.md"], [], db)
+    _prune_misclassified(
+        repo, "code__repo", "docs__repo", [main_py], [repo/"README.md"], [], db,
+        file_to_doc_id={main_py: "doc-main"},
+    )
     dc.delete.assert_called_once_with(ids=["stale-1"])
+    where = dc.get.call_args.kwargs["where"]
+    assert where == {"doc_id": {"$in": ["doc-main"]}}
 
 
 def test_registry_c2_fallback(tmp_path):
@@ -1913,15 +1952,27 @@ def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
 
 
 def test_frecency_update_paginates(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path (a
+    real ``_build_frecency_doc_id_map`` patch) so this pagination
+    behavior is exercised through code that can still fire in
+    production — the legacy source_path where-filter this test used
+    to route through is deleted dead code (see
+    ``test_frecency_only_skips_unmapped_files_source_path_fallback_
+    deleted_as_dead_code``).
+    """
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"; repo.mkdir(); src = repo / "big.py"; src.write_text("# g\n")
-    p1 = {"ids": [f"c-{i}" for i in range(300)], "metadatas": [{"frecency_score":0.0,"source_path":str(src)}]*300}
-    p2 = {"ids": [f"c-{i}" for i in range(300,310)], "metadatas": [{"frecency_score":0.0,"source_path":str(src)}]*10}
+    p1 = {"ids": [f"c-{i}" for i in range(300)], "metadatas": [{"frecency_score":0.0}]*300}
+    p2 = {"ids": [f"c-{i}" for i in range(300,310)], "metadatas": [{"frecency_score":0.0}]*10}
     cc = MagicMock(); cc.get.side_effect = [p1, p2]
     dc = MagicMock(); dc.get.return_value = {"ids":[],"metadatas":[]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
-    with patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
+    with patch(
+        "nexus.indexer._build_frecency_doc_id_map",
+        return_value={src: "1.1.1"},
+    ), \
+         patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3", return_value=db):
@@ -1929,19 +1980,34 @@ def test_frecency_update_paginates(tmp_path):
     ids = set()
     for c in db.update_chunks.call_args_list: ids.update(c.kwargs.get("ids") or c.args[0])
     assert len(ids) == 310
+    where = cc.get.call_args_list[0].kwargs["where"]
+    assert where == {"doc_id": "1.1.1"}
 
 
 def test_prune_misclassified_paginates(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed ``$in``
+    path (via ``file_to_doc_id``) so this pagination behavior is
+    exercised through code that can still fire in production — the
+    legacy source_path where-filter this test used to route through
+    (via an empty/default ``file_to_doc_id``) is deleted dead code
+    (see ``test_prune_misclassified_source_path_fallback_deleted_as_
+    dead_code``).
+    """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"; repo.mkdir(); bp = repo / "g.md"; bp.write_text("# b\n")
     cc = MagicMock(); cc.get.side_effect = [{"ids":[f"s-{i}" for i in range(300)]}, {"ids":[f"s-{i}" for i in range(300,310)]}]
     dc = MagicMock(); dc.get.return_value = {"ids":[]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
-    _prune_misclassified(repo, "code__repo", "docs__repo", [], [bp], [], db)
+    _prune_misclassified(
+        repo, "code__repo", "docs__repo", [], [bp], [], db,
+        file_to_doc_id={bp: "doc-1"},
+    )
     d = set()
     for c in cc.delete.call_args_list: d.update(c.kwargs.get("ids") or (c.args[0] if c.args else []))
     assert d == {f"s-{i}" for i in range(310)}
+    where = cc.get.call_args_list[0].kwargs["where"]
+    assert where == {"doc_id": {"$in": ["doc-1"]}}
 
 
 def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
@@ -1978,10 +2044,25 @@ def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
     cc.delete.assert_called_once_with(ids=["chunk-abc"])
 
 
-def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_path):
-    """Files missing from ``file_to_doc_id`` use the legacy source_path
-    lookup so chunks indexed before the catalog backfill keep getting
-    cleaned up.
+def test_prune_misclassified_source_path_fallback_deleted_as_dead_code(tmp_path):
+    """nexus-afudo (2026-08-05): the legacy source_path where-filter
+    this test used to exercise (files missing from ``file_to_doc_id``)
+    is DELETED dead code. RDR-102 D2 (2026-05-02) removed source_path
+    from make_chunk_metadata for every writer, so
+    ``where={"source_path": ...}`` always matched zero rows in
+    production regardless of how many files landed in this "legacy"
+    bucket; a live-store probe (field>=! existence test) found zero
+    source_path rows across 13 representative collections (~115k
+    chunks), including the code__/docs__ collections this exact prune
+    targets. An unmapped file (no catalog doc_id) is now silently
+    skipped by the prune — no query, since the fallback it used to
+    fall through to could never find anything.
+
+    Kill control: if the deleted branch were reintroduced, ``cc.get``
+    (mocked with NO return_value here, unlike the old test) would be
+    called and ``cc.delete`` would fire off whatever the default
+    MagicMock response produces — both assertions below fail either
+    way.
     """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"
@@ -1989,20 +2070,17 @@ def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_pa
     bp = repo / "legacy.md"
     bp.write_text("# l\n")
     cc = MagicMock()
-    cc.get.return_value = {"ids": ["chunk-legacy"]}
     dc = MagicMock()
-    dc.get.return_value = {"ids": []}
     db = MagicMock()
     db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
-    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     _prune_misclassified(
         repo, "code__repo", "docs__repo",
         [], [bp], [], db,
         file_to_doc_id={},
     )
-    where = cc.get.call_args.kwargs["where"]
-    assert where == {"source_path": str(bp)}
+    cc.get.assert_not_called()
+    cc.delete.assert_not_called()
 
 
 # ── Lock file cleanup ───────────────────────────────────────────────────────

@@ -1699,13 +1699,16 @@ def _build_frecency_doc_id_map(
     repo: Path, files: list[Path],
 ) -> dict[Path, str]:
     """nexus-f4z9: resolve each file's catalog ``doc_id`` so the
-    frecency-only update can key chunk lookups on ``doc_id`` instead
-    of ``source_path``. Returns a ``{abs_path: doc_id}`` mapping;
-    files without a catalog entry are absent from the map (the caller
-    falls back to the legacy ``source_path`` filter for those).
+    frecency-only update can key chunk lookups on ``doc_id``. Returns a
+    ``{abs_path: doc_id}`` mapping; files without a catalog entry are
+    absent from the map — the caller now SKIPS the frecency refresh
+    for those files (nexus-afudo, 2026-08-05: the legacy source_path
+    filter this used to fall back to was deleted as dead code; RDR-102
+    D2 removed source_path from make_chunk_metadata for every writer).
 
     Best-effort: catalog absent / owner missing / lookup failure all
-    return an empty map so the caller's legacy path keeps working.
+    return an empty map, which now means "no frecency refresh this run
+    for the affected files" rather than a doomed source_path query.
     """
     file_to_doc_id: dict[Path, str] = {}
     try:
@@ -1724,8 +1727,8 @@ def _build_frecency_doc_id_map(
         # per-file ``by_file_path`` pass (a second full serial-WAN sweep
         # in service mode, paid on every warm run). A by_owner failure
         # raises into the outer except -> empty map, which the documented
-        # contract tolerates (caller falls back to the legacy
-        # source_path filter).
+        # contract tolerates (caller now skips the frecency refresh for
+        # the affected files — nexus-afudo).
         path_to_entry = {e.file_path: e for e in cat.by_owner(owner)}
         for abs_path in files:
             try:
@@ -1804,8 +1807,9 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 
     # nexus-f4z9: pre-resolve doc_ids once for all files so the chunk
     # lookup can key on ``doc_id`` when the catalog has the entry.
-    # Files predating the catalog backfill fall through to the legacy
-    # ``source_path``-keyed filter.
+    # Files predating the catalog backfill (no doc_id) are skipped by
+    # the per-file loop below — nexus-afudo (2026-08-05) deleted the
+    # legacy source_path-keyed filter they used to fall through to.
     file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
 
     # Update frecency in all three content-type collections (nexus-e0w01).
@@ -1863,12 +1867,25 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                         existing = present
 
             if existing is None:
-                # Legacy where-filter fallback. Returns nothing for
-                # post-Phase-3 chunks; correct for pre-Phase-3 only.
-                where = (
-                    {"doc_id": doc_id} if doc_id
-                    else {"source_path": str(file)}
-                )
+                if not doc_id:
+                    # nexus-afudo (2026-08-05): the legacy source_path
+                    # where-filter this used to fall back to is DELETED
+                    # dead code. RDR-102 D2 (2026-05-02) removed
+                    # source_path from make_chunk_metadata for every
+                    # writer; a live-store probe (field>=! existence
+                    # test) found zero source_path rows across 13
+                    # representative collections (~115k chunks,
+                    # including this run's own code__/docs__/rdr__
+                    # collections). A file with no catalog doc_id has no
+                    # frecency-refresh path left — skip it; the next run
+                    # retries once the catalog hook backfills a doc_id.
+                    continue
+                # doc_id-keyed where-filter. Returns nothing for
+                # post-Phase-3 chunks whose manifest resolution above
+                # failed or found no chashes; still worth trying — a
+                # transient manifest-read failure with an otherwise
+                # healthy doc_id should not skip the file outright.
+                where = {"doc_id": doc_id}
                 try:
                     existing = _paginated_get(
                         col, include=["metadatas"], where=where,
@@ -2113,7 +2130,10 @@ def _index_pdf_file(
 
     # Staleness check.
     # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver; falls back to source_path for legacy chunks.
+    # supplied a resolver. Empty doc_id is an unconditional "stale" —
+    # nexus-afudo (2026-08-05) deleted check_staleness's legacy
+    # source_path fallback as dead code (RDR-102 D2 removed
+    # source_path from make_chunk_metadata for every writer).
     catalog_doc_id_for_staleness = (
         doc_id_resolver(file) if doc_id_resolver is not None else ""
     )
@@ -2343,20 +2363,18 @@ def _prune_misclassified_in_collection(
     where-filter retained as fallback for catalog-absent callers.
 
     Files not present in *file_to_doc_id* (legacy / pre-RDR-102 D2
-    rows) fall back to per-path ``source_path`` lookup so collections
-    that pre-date the catalog backfill keep getting cleaned up. The
-    legacy set is typically small post-backfill.
+    rows) are silently skipped by this prune — nexus-afudo (2026-08-05)
+    deleted the per-path ``source_path`` lookup that used to cover them
+    as dead code (RDR-102 D2 made it permanently unable to match any
+    real chunk row). See ``_prune_misclassified_in_collection``'s
+    trailing comment for the evidence and the real backstop
+    (``mcp_infra._sweep_superseded_vectors`` + ``nx t3 gc``).
     """
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
 
-    doc_ids: list[str] = []
-    legacy_paths: list[str] = []
-    for path in target_paths:
-        d = file_to_doc_id.get(path, "")
-        if d:
-            doc_ids.append(d)
-        else:
-            legacy_paths.append(str(path))
+    doc_ids: list[str] = [
+        d for path in target_paths if (d := file_to_doc_id.get(path, ""))
+    ]
 
     pruned = 0
 
@@ -2485,9 +2503,11 @@ def _prune_misclassified_in_collection(
                     col, include=[], where={"doc_id": {"$in": batch}},
                 )
             except VectorServiceError as exc:
-                # nexus-ou4tb walk: a degraded service is NOT "no legacy
-                # rows" — isolate the batch but say so (matches the sibling
-                # legacy source_path arm below). Prune stays best-effort.
+                # nexus-ou4tb walk: a degraded service is NOT "no
+                # matching rows" — isolate the batch but say so. Prune
+                # stays best-effort. (The sibling legacy source_path arm
+                # this comment used to reference was deleted as dead
+                # code — nexus-afudo, 2026-08-05.)
                 _log.warning(
                     "legacy_prune_in_query_failed",
                     batch_size=len(batch),
@@ -2509,29 +2529,22 @@ def _prune_misclassified_in_collection(
                     doc_id_batch_size=len(batch),
                 )
 
-    # Legacy source_path fallback for unmapped files. Cardinality is
-    # bounded by the number of files indexed before catalog backfill,
-    # which on a repo that has been on a recent nexus is typically zero.
-    for src in legacy_paths:
-        # nexus-ou4tb: isolate per source_path — the guarded sibling loop
-        # above already does this, and one path's degrade must not abort the
-        # remaining prune work.
-        try:
-            existing = _paginated_get(col, include=[], where={"source_path": src})
-            if existing["ids"]:
-                _batched_delete(col, existing["ids"])
-                pruned += len(existing["ids"])
-                _log.debug(
-                    f"pruned misclassified chunks from {kind} collection (legacy)",
-                    count=len(existing["ids"]),
-                    source_path=src,
-                )
-        except Exception:  # noqa: BLE001 — one path's failure must not abort the prune
-            _log.warning(
-                "legacy_prune_failed_skipping_source_path",
-                source_path=src, collection=getattr(col, "name", "?"),
-                exc_info=True,
-            )
+    # nexus-afudo (2026-08-05): the legacy source_path where-filter loop
+    # (files absent from file_to_doc_id) DELETED as dead code. RDR-102 D2
+    # (83ac62c7, 2026-05-02) hard-removed source_path from
+    # make_chunk_metadata — the single factory every writer routes
+    # through — so `where={"source_path": src}` matched zero rows for
+    # any chunk written since then, regardless of how many files landed
+    # in legacy_paths. A live-store probe (field>=! existence test)
+    # found zero source_path rows across 13 representative collections
+    # (~115k chunks), extending nexus-tbkk1's original 6-collection
+    # probe to the code__/docs__ collections this exact prune targets.
+    # The real cross-document protection is mcp_infra.
+    # _sweep_superseded_vectors (manifest-diff, fires on every re-index)
+    # plus nx t3 gc (chash-vs-manifest, RDR-108 Phase 4) as the
+    # comprehensive manual backstop for manifest-absent legacy rows —
+    # same framing nexus-tbkk1 used for the sibling doc_indexer.py /
+    # pipeline_stages.py sites this bead closes the remainder of.
 
     return pruned
 
@@ -2555,8 +2568,10 @@ def _prune_misclassified(
 
     nexus-dcym: when ``file_to_doc_id`` is supplied (always populated by
     the catalog hook), the chunk-prune lookup keys on ``doc_id``. Files
-    not in the map fall back to the legacy ``source_path`` lookup so
-    chunks indexed before catalog backfill keep getting cleaned up.
+    not in the map are silently skipped — nexus-afudo (2026-08-05)
+    deleted the legacy ``source_path`` lookup they used to fall back
+    to as dead code (RDR-102 D2 made it permanently unable to match a
+    real chunk row).
 
     Pre-batching history: this function used to do one
     ``col.get(where={"doc_id": <id>})`` per file. For ART (~4,800 files)
@@ -3471,11 +3486,8 @@ def _run_index(
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
-        code_source_paths=len(code_staleness.by_source_path),
         docs_doc_ids=len(docs_staleness.by_doc_id),
-        docs_source_paths=len(docs_staleness.by_source_path),
         rdr_doc_ids=len(rdr_staleness.by_doc_id),
-        rdr_source_paths=len(rdr_staleness.by_source_path),
         elapsed_seconds=time.monotonic() - _staleness_t0,
     )
     if on_phase is not None:

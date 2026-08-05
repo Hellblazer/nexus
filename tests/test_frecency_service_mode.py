@@ -105,7 +105,15 @@ class TestFrecencyServiceModeRouting:
         mock_get_svc.assert_called_once()
 
     def test_does_not_return_early_in_service_mode(self, tmp_path: Path) -> None:
-        """In service mode, function proceeds through the frecency loop (not a skip)."""
+        """In service mode, function proceeds through the frecency loop (not a skip).
+
+        nexus-afudo (2026-08-05): ``_build_frecency_doc_id_map`` now
+        returns a real doc_id for the file. The legacy source_path
+        where-filter this test used to route the per-file update
+        through (via an empty doc_id map) is DELETED dead code — a
+        doc_id-less file is now skipped outright, so this test needs a
+        real doc_id to still prove the loop executes.
+        """
         # Collection with one chunk — proves the inner loop executes
         svc = _make_svc_client(
             collection_exists=True,
@@ -118,7 +126,10 @@ class TestFrecencyServiceModeRouting:
             patch("nexus.db.make_t3"),
             patch("nexus.db.http_vector_client.get_http_vector_client", return_value=svc),
             patch("nexus.frecency.batch_frecency", return_value=frecency_data),
-            patch("nexus.indexer._build_frecency_doc_id_map", return_value={}),
+            patch(
+                "nexus.indexer._build_frecency_doc_id_map",
+                return_value={tmp_path / "file.py": "1.1.1"},
+            ),
             patch("nexus.catalog.factory.make_catalog_reader", side_effect=Exception("no catalog")),
         ):
             from nexus.indexer import _run_index_frecency_only
@@ -132,9 +143,15 @@ class TestFrecencyServiceModeRouting:
         )
 
     def test_update_chunks_called_with_frecency_score(self, tmp_path: Path) -> None:
-        """update_chunks on the service client receives the updated frecency_score metadata."""
+        """update_chunks on the service client receives the updated frecency_score metadata.
+
+        nexus-afudo (2026-08-05): ``_build_frecency_doc_id_map`` now
+        returns a real doc_id — see
+        ``test_does_not_return_early_in_service_mode`` for why an
+        empty map no longer reaches ``update_chunks`` at all.
+        """
         chunk_id = "chunk-bbb"
-        original_meta = {"source_path": "file.py", "frecency_score": 0.0}
+        original_meta = {"doc_id": "1.1.1", "frecency_score": 0.0}
         svc = _make_svc_client(
             collection_exists=True,
             chunk_ids=[chunk_id],
@@ -147,7 +164,10 @@ class TestFrecencyServiceModeRouting:
             patch("nexus.db.make_t3"),
             patch("nexus.db.http_vector_client.get_http_vector_client", return_value=svc),
             patch("nexus.frecency.batch_frecency", return_value=frecency_data),
-            patch("nexus.indexer._build_frecency_doc_id_map", return_value={}),
+            patch(
+                "nexus.indexer._build_frecency_doc_id_map",
+                return_value={tmp_path / "file.py": "1.1.1"},
+            ),
             patch("nexus.catalog.factory.make_catalog_reader", side_effect=Exception("no catalog")),
         ):
             from nexus.indexer import _run_index_frecency_only

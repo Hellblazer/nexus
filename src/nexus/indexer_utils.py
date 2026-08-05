@@ -343,7 +343,7 @@ class StalenessCache:
     :func:`check_staleness` so per-file checks become O(1) dict lookups
     instead of O(N) ChromaDB roundtrips.
 
-    Two indexes:
+    One index:
 
     - ``by_doc_id`` keys on the catalog tumbler stored in chunk
       metadata. Populated only for chunks whose stored ``doc_id`` field
@@ -352,12 +352,24 @@ class StalenessCache:
       backfill are absent from this index, which the cached
       ``check_staleness`` correctly treats as a cache miss → "stale" →
       re-index → ghost-chunk healed.
-    - ``by_source_path`` keys on the chunk's ``source_path`` metadata.
-      Populated for every chunk that carries a non-empty source_path
-      (most of them; RDR-102 D2 dropped source_path from the canonical
-      schema, so post-D2 chunks won't appear here — they live only in
-      ``by_doc_id``). Used only when the caller has no doc_id (legacy /
-      catalog absent code path).
+
+    nexus-afudo (2026-08-05): ``by_source_path`` DELETED as dead code —
+    RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed ``source_path`` from
+    ``make_chunk_metadata``, the single factory every writer
+    (code_indexer.py, prose_indexer.py, pipeline_stages.py, and
+    doc_indexer.py alike) routes through, so no chunk written since
+    then has ever carried the key. A live-store existence probe
+    (field>=! boundary-value test, method validated against present/
+    absent-field controls) found zero rows carrying ``source_path``
+    across 13 representative collections (~115k chunks) spanning both
+    continuously-reindexed (code__1-1, code__1-20, code__1-33) and
+    long-untouched corpora — see ``nexus.doc_indexer._identity_where``'s
+    docstring for the original 6-collection probe and T2
+    ``nexus/nexus-afudo-audit-2026-08-05`` for the extension. The index
+    was therefore always empty in production; caller-side lookups
+    against it always missed, and ``check_staleness`` correctly treated
+    every doc_id-less file as unconditionally stale (no behavior
+    change from deleting an index that could never hold a row).
 
     Why the cache exists: ``nx index repo`` on a healthy repo where
     nothing has changed is dominated by per-file
@@ -370,7 +382,6 @@ class StalenessCache:
     """
 
     by_doc_id: dict[str, tuple[str, str]] = field(default_factory=dict)
-    by_source_path: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def build_staleness_cache(col: object) -> StalenessCache:
@@ -543,9 +554,9 @@ def build_staleness_cache(col: object) -> StalenessCache:
                 doc_id = chash_to_doc.get(chash, "")
         if doc_id:
             cache.by_doc_id[doc_id] = value
-        source_path = meta.get("source_path", "")
-        if source_path:
-            cache.by_source_path[source_path] = value
+        # nexus-afudo: by_source_path population DELETED as dead code —
+        # see StalenessCache's docstring. No chunk written since RDR-102
+        # D2 (2026-05-02) carries a source_path key.
     return cache
 
 
@@ -563,13 +574,14 @@ def check_staleness(
     Two execution modes:
 
     - **Cached (preferred when the orchestrator passes a cache).**
-      Looks up ``doc_id`` in :attr:`StalenessCache.by_doc_id` (or
-      ``source_file`` in :attr:`StalenessCache.by_source_path` for
-      legacy / no-catalog callers). Pure dict lookup, no ChromaDB
-      roundtrip. The orchestrator builds the cache once per collection
-      via :func:`build_staleness_cache` before the per-file loop, so
-      ``nx index repo`` on a healthy repo (most files current) pays
-      one paginated sweep instead of one Chroma query per file.
+      Looks up ``doc_id`` in :attr:`StalenessCache.by_doc_id`. Pure
+      dict lookup, no ChromaDB roundtrip. The orchestrator builds the
+      cache once per collection via :func:`build_staleness_cache`
+      before the per-file loop, so ``nx index repo`` on a healthy repo
+      (most files current) pays one paginated sweep instead of one
+      Chroma query per file. A file with no ``doc_id`` (legacy /
+      catalog-absent caller) is an unconditional cache miss — see
+      nexus-afudo below.
     - **Per-file (back-compat).** When *cache* is ``None``, performs a
       ChromaDB ``get()`` wrapped in ``_vector_with_retry``. The retry
       logic is part of the staleness check's contract — callers must
@@ -584,9 +596,12 @@ def check_staleness(
         doc_id: Catalog ``doc_id`` for the file. When non-empty (RDR-101
             Phase 4, nexus-dcym), the chunk lookup keys on ``doc_id`` so
             that the staleness check stays consistent across renames and
-            owner-scope changes. Empty falls back to the legacy
-            ``source_path``-keyed lookup for chunks predating the
-            doc_id backfill.
+            owner-scope changes. Empty means unconditional "stale" (see
+            nexus-afudo below) — every production caller
+            (code_indexer.py, prose_indexer.py, indexer.py's PDF path)
+            supplies a real catalog-resolved doc_id or falls through
+            this fast-fail; there is no source_path-keyed lookup left
+            to fall back to.
         cache: Optional :class:`StalenessCache`. When supplied the
             check is a dict lookup; when ``None`` the check is a Chroma
             roundtrip.
@@ -594,20 +609,36 @@ def check_staleness(
     Returns:
         True when the stored chunk has the same content_hash AND embedding_model,
         meaning the file is current and can be skipped.  False otherwise.
+
+    nexus-afudo (2026-08-05): the ``source_path``-keyed fallback (both
+    the cached ``StalenessCache.by_source_path`` lookup and the
+    uncached ``where={"source_path": ...}`` Chroma query) was DELETED
+    as dead code. RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed
+    ``source_path`` from ``make_chunk_metadata`` — the single factory
+    every writer routes through — so no chunk written since then has
+    ever carried the key, and the fallback could only ever match a
+    genuinely pre-2026-05-02 legacy row. A live-store probe (field>=!
+    boundary-value existence test) found zero such rows across 13
+    representative collections (~115k chunks), extending nexus-tbkk1's
+    original 6-collection / ~47k-chunk probe to the code__/docs__/rdr__
+    collections this module's callers (``nx index repo``) actually
+    write. Empty ``doc_id`` now returns False immediately (no query,
+    no dict lookup) — behaviorally identical to the deleted fallback,
+    which always missed in production, just without the doomed I/O.
     """
     if cache is not None:
-        if doc_id:
-            stored = cache.by_doc_id.get(doc_id)
-            # Cache miss when the caller has a doc_id heals a ghost
-            # chunk by treating the file as stale: re-index will write
-            # a chunk carrying doc_id metadata and the next sweep
-            # populates by_doc_id for it. Mirrors the Chroma-path
-            # behaviour at indexer_utils.check_staleness:291.
-            if stored is None:
-                return False
-            return stored == (content_hash, embedding_model)
-        # Legacy / no-doc_id caller: fall back to source_path lookup.
-        stored = cache.by_source_path.get(str(source_file))
+        if not doc_id:
+            # No catalog doc_id for this file (legacy / catalog-absent
+            # caller). See the nexus-afudo docstring note above — no
+            # source_path-keyed cache entry can ever exist to check
+            # against, so this is an unconditional "treat as stale."
+            return False
+        stored = cache.by_doc_id.get(doc_id)
+        # Cache miss when the caller has a doc_id heals a ghost
+        # chunk by treating the file as stale: re-index will write
+        # a chunk carrying doc_id metadata and the next sweep
+        # populates by_doc_id for it. Mirrors the Chroma-path
+        # behaviour at indexer_utils.check_staleness:291.
         if stored is None:
             return False
         return stored == (content_hash, embedding_model)
@@ -615,16 +646,14 @@ def check_staleness(
     # RDR-108 Phase 3 (nexus-bdag): chunks no longer carry ``doc_id`` —
     # the catalog ``document_chunks`` manifest is authoritative. Query
     # by ``content_hash`` (a file-level fingerprint that all chunks of
-    # the same file share); falling back to ``source_path`` for legacy
-    # chunks predating RDR-102 D2.
-    where: dict
-    if content_hash:
-        where = {"content_hash": content_hash}
-    else:
-        where = {"source_path": str(source_file)}
+    # the same file share). An empty content_hash has no identity to
+    # query by — see the nexus-afudo docstring note above; unconditional
+    # "treat as stale" rather than a doomed source_path query.
+    if not content_hash:
+        return False
     existing = _vector_with_retry(
         col.get,  # type: ignore[attr-defined]
-        where=where,
+        where={"content_hash": content_hash},
         include=["metadatas"],
         limit=1,
     )

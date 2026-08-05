@@ -1177,9 +1177,9 @@ def _update_chunk_metadata(
 # in this same fix round (zero production callers survived) — see
 # indexer_utils.py's deletion comment. This closes only the
 # doc_indexer.py/pipeline_stages.py HALF of RDR-102 D2's "Phase 5b"
-# 4-site dead-code class — indexer.py/indexer_utils.py sibling sites
-# (nx index repo's code/prose paths) are STILL LIVE, unaudited by this
-# bead, tracked as nexus-afudo. Automatic (fires-on-every-reindex)
+# 4-site dead-code class — the indexer.py/indexer_utils.py sibling sites
+# (nx index repo's code/prose paths) were audited and deleted by
+# nexus-afudo (2026-08-05); Phase 5b is now fully closed. Automatic (fires-on-every-reindex)
 # replacement protection for THIS pipeline is mcp_infra._sweep_
 # superseded_vectors (manifest-diff based, fires from the same
 # fire_batch/fire_document hook chain this pipeline already calls),

@@ -100,17 +100,30 @@ def test_check_staleness_uses_content_hash_when_provided(tmp_path):
     assert where == {"content_hash": "abc"}
 
 
-def test_check_staleness_falls_back_to_source_path_when_no_content_hash(tmp_path):
-    """No content_hash passed → legacy source_path lookup (back-compat
-    for direct test callers; production CLI ingest always supplies a
-    content_hash).
+def test_check_staleness_no_content_hash_returns_stale_source_path_fallback_deleted_as_dead_code(
+    tmp_path,
+):
+    """nexus-afudo (2026-08-05): the legacy source_path where-filter
+    this test used to exercise (no content_hash passed) is DELETED
+    dead code. RDR-102 D2 (2026-05-02) removed source_path from
+    make_chunk_metadata for every writer, so
+    ``where={"source_path": ...}`` always matched zero rows in
+    production; no production caller (code_indexer.py, prose_indexer.py,
+    indexer.py's PDF path) ever passes an empty content_hash — all
+    three compute a real sha256 hexdigest first. An empty content_hash
+    now returns False immediately: unconditionally "stale", no query.
+
+    Kill control: ``mock_col.get`` carries no return_value here (unlike
+    the old test's ``{"metadatas": [], "ids": []}`` stub), so a
+    reintroduced query would either raise or return a MagicMock the
+    ``existing["metadatas"]`` subscript can't consume — either way this
+    test would fail, on top of the direct call-count assertion below.
     """
     mock_col = MagicMock()
-    mock_col.get.return_value = {"metadatas": [], "ids": []}
     file_path = tmp_path / "foo.py"
-    check_staleness(mock_col, file_path, "", "voyage-code-3")
-    where = mock_col.get.call_args.kwargs["where"]
-    assert where == {"source_path": str(file_path)}
+    result = check_staleness(mock_col, file_path, "", "voyage-code-3")
+    assert result is False
+    mock_col.get.assert_not_called()
 
 
 def test_check_staleness_passes_when_chunk_has_matching_content_hash(tmp_path):

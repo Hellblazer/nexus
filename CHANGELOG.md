@@ -16,6 +16,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower bounds, never silently dropped (nexus-h1zu0).
 
 ### Fixed
+- **RDR-102 "Phase 5b" fully closed — the remaining `source_path` fallbacks
+  deleted** (nexus-afudo): the three sibling sites nexus-tbkk1 left live —
+  `indexer.py`'s `_prune_misclassified_in_collection` legacy prune loop and
+  `_run_index_frecency_only` fallback, plus `indexer_utils.check_staleness`'s
+  fallback (both halves, including `StalenessCache.by_source_path`) — were
+  audited with the same live-store existence probe (extended to 13 collections
+  / ~115k chunks across `code__`/`docs__`/`rdr__`/`knowledge__`; zero resident
+  `source_path` rows) and deleted with kill-control tests. Staleness checks
+  now fail safe toward re-indexing for any chunk without a doc-id-keyed
+  identity. Probe evidence: T2 `nexus/nexus-afudo-audit-2026-08-05`.
 - **Stale-chunk prune's `source_path` filter was permanently dead code**
   (nexus-tbkk1): four prune blocks (`doc_indexer.py`'s `_index_document`,
   `_index_pdf_incremental`, `index_pdf`'s small-doc branch, and
