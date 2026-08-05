@@ -684,12 +684,31 @@ def index_cmd(
     # nexus-5xn3k.6 (RUNFENCE C4, bead scope note): zero the completion-
     # refusal collector so the end-of-run summary reflects only this run's
     # refusals — mirrors nx index repo's reset_manifest_write_failures().
-    from nexus.mcp_infra import reset_complete_refusals  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+    #
+    # nexus-tp8yk D2b: also zero the manifest-write-failure and identity-
+    # drop collectors (index_repo_cmd's parity — full nx index reset()
+    # triple), so this run's exit-code check below reflects only THIS
+    # run's problems, not leftover state from an earlier call in the same
+    # process.
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        reset_complete_refusals,
+        reset_manifest_identity_drops,
+        reset_manifest_write_failures,
+    )
     reset_complete_refusals()
+    reset_manifest_write_failures()
+    reset_manifest_identity_drops()
     # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l): must be bound
     # before the per-record try/except below reaches its `except
     # IndexRunVerifyRefused` clause.
-    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
+    #
+    # nexus-tp8yk substantive-critic CRITICAL (nexus-9800y, 2026-08-04): same
+    # bind-before-use requirement for the new `except ChunkLandingUnverifiedError`
+    # clause below.
+    from nexus.errors import (  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
+        ChunkLandingUnverifiedError,
+        IndexRunVerifyRefused,
+    )
 
     # RDR-139 Layer D: only probe DT availability once, and only when the
     # opt-in flag is set. Flag off -> the unsupported-extension skip path is
@@ -766,6 +785,30 @@ def index_cmd(
                 missing=exc.missing,
             )
             failed.append((uuid, path, _index_run_refused_message(exc)))
+            continue
+        except ChunkLandingUnverifiedError as exc:
+            # nexus-tp8yk D1 / substantive-critic CRITICAL (nexus-9800y,
+            # 2026-08-04): NOT an (ImportError, RuntimeError) —
+            # ChunkLandingUnverifiedError is a plain NexusError, same shape
+            # as IndexRunVerifyRefused above. index_pdf/index_markdown raise
+            # it from _upsert_skip_reembed when a stale-positive existing_ids
+            # probe meets an engine response that omits "missing" (cannot
+            # tell whether the batch landed) — BEFORE any manifest row is
+            # committed, which is the D1 fix itself. Pre-fix this fell
+            # through this except tuple entirely, escaping the loop and
+            # aborting the WHOLE `nx dt index` batch on the first affected
+            # record — exactly the nexus-2fyb/nexus-qo84l regression class
+            # the IndexRunVerifyRefused handler above already fixed once, for
+            # a failure mode nexus-tp8yk introduced. Convert to a
+            # failed-record entry so record N+1 still indexes.
+            _log.error(
+                "dt_index_chunk_landing_unverified",
+                uuid=uuid,
+                path=path,
+                collection=exc.collection,
+                count=exc.count,
+            )
+            failed.append((uuid, path, str(exc)))
             continue
         except (RuntimeError, ImportError) as exc:
             # nexus-2fyb code-review R4-I2: a single indexing failure must
@@ -867,7 +910,11 @@ def index_cmd(
     # keyed on doc_id, not per-record uuid), so this states the overlap as
     # a count relationship rather than naming which of the indexed records
     # it is.
-    from nexus.mcp_infra import get_complete_refusals  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal)
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal)
+        get_complete_refusals,
+        get_manifest_identity_drops,
+        get_manifest_write_failures,
+    )
     refused = get_complete_refusals()
     if refused:
         click.echo(
@@ -880,6 +927,40 @@ def index_cmd(
             # stream placement — all WARNING-level summary lines go to
             # stderr, not stdout.
             err=True,
+        )
+
+    # nexus-tp8yk D2b: mirrors commands/index.py's index_repo_cmd — a
+    # completion refusal, a manifest write failure, or an identity drop
+    # used to leave rc=0 (WARNING-only). Refusal != unconfirmed: a
+    # pre-fence engine's None sentinel still warns at rc 0, untouched by
+    # this bead — only a POSITIVE engine verdict or a write/identity
+    # failure fails the run.
+    write_failed = get_manifest_write_failures()
+    if write_failed:
+        click.echo(
+            f"  WARNING: catalog manifest write failed for {len(write_failed)} "
+            f"document(s) — they will not appear in catalog-aware queries. "
+            f"Run 'nx catalog reconcile' to repair.",
+            err=True,
+        )
+    identity_drops = get_manifest_identity_drops()
+    if identity_drops:
+        n_chunks = sum(d["batch_size"] for d in identity_drops)
+        cols = sorted({d["collection"] for d in identity_drops})
+        click.echo(
+            f"  WARNING: {len(identity_drops)} chunk batch(es) ({n_chunks} "
+            f"chunks; collection(s): {', '.join(cols)}) were indexed "
+            f"WITHOUT a catalog document identity — their manifests were "
+            f"not written and the documents will not appear in "
+            f"catalog-aware queries. Run 'nx catalog reconcile' to repair.",
+            err=True,
+        )
+    if refused or write_failed or identity_drops:
+        raise click.ClickException(
+            "one or more records had manifest write failures, identity "
+            "drops, or completion refusals this run — see the WARNING "
+            "lines above. Run 'nx catalog manifest-verify <tumbler>' to "
+            "inspect a specific record, or re-index with --force."
         )
 
 

@@ -193,6 +193,44 @@ class PutOversizedError(NexusError):
         )
 
 
+class ChunkLandingUnverifiedError(NexusError):
+    """A metadata-only chunk update returned ``missing=None`` — the engine's
+    response omitted the "missing" field, so the client cannot tell whether
+    any of the updated ids were a stale-positive probe miss (nexus-tp8yk D1,
+    design memo §1 P1: ``_upsert_skip_reembed`` used to treat this as "no
+    reroute" and proceed silently, letting the caller's manifest hook write
+    rows for chunks that were never confirmed present in T3).
+
+    ``None`` means "cannot tell", never "zero misses" — ``REQUIRED_ENGINE_
+    VERSION`` pins one engine identity per release (CLAUDE.md § Releases),
+    so this should be unreachable against a correctly-deployed fleet; when
+    it fires anyway (a pre-nexus-5xn3k engine, or a mixed-version fleet
+    mid-rolling-deploy) the caller must refuse to proceed rather than
+    silently commit manifest rows for an unconfirmed batch. The caller
+    (``doc_indexer``'s fence-bracketed call sites) converts this into a
+    failed index run — the fence stays ``'indexing'``, over-work on the
+    next pass, never silent under-work.
+
+    Attributes:
+        collection: T3 collection the update targeted.
+        count: number of ids whose landing could not be confirmed.
+    """
+
+    def __init__(self, *, collection: str, count: int) -> None:
+        self.collection = collection
+        self.count = count
+        super().__init__(
+            f"cannot confirm {count} chunk(s) landed in T3 collection "
+            f"{collection!r} — the engine's update-chunks response omitted "
+            f"the 'missing' field, so a stale-positive probe result cannot "
+            f"be distinguished from a genuine landing. Refusing to proceed: "
+            f"committing a manifest for these chunks would risk rows that "
+            f"reference content never confirmed present. Re-run once the "
+            f"engine fleet is on a consistent version (see REQUIRED_ENGINE_"
+            f"VERSION), or check 'nx doctor' for a version mismatch."
+        )
+
+
 class IndexRunVerifyRefused(NexusError):
     """``HttpCatalogClient.complete_index_run`` was refused by the engine's
     fail-closed verify-then-stamp gate (RUNFENCE, nexus-5xn3k, design memo

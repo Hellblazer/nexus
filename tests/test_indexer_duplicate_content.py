@@ -563,7 +563,18 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
 
     with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, patch(
         "nexus.doc_indexer.PDFChunker"
-    ) as chunker_cls:
+    ) as chunker_cls, patch("nexus.doc_indexer._fence_complete"):
+        # nexus-tp8yk D2a: index_pdf's small-doc branch now calls the
+        # PROPAGATING _fence_complete explicitly. local_t3 is an
+        # InMemoryVectorClient double — chunks never reach the REAL
+        # engine's T3 the catalog's fail-closed /complete verify checks
+        # against (only the manifest, via the real catalog registration
+        # this test intentionally does NOT mock, actually lands there).
+        # Unstubbed this refuses with a real IndexRunVerifyRefused; this
+        # test proves T3-side dedup + manifest-position recording, not
+        # RUNFENCE completion (owned by test_5xn3k_fence_ordering.py /
+        # tests/db/test_5xn3k_runfence_gate.py) — stub the fence like
+        # every other decoupled-substrate test in the suite.
         ext_cls.return_value.extract.return_value = extractor_result
         chunker_cls.return_value.chunk.return_value = [chunk_one, chunk_two]
         result = index_pdf(

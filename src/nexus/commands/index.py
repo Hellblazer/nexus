@@ -608,6 +608,14 @@ def index_repo_cmd(
                 err=True,
             )
 
+        # nexus-tp8yk D2b: refusals / manifest-write failures / identity
+        # drops used to be stderr WARNING-only — an operator (or a script
+        # keying on rc==0) had no way to know a "clean" run left dangling
+        # manifest rows or an unstamped completion. Set inside
+        # _emit_manifest_write_failure_summary below; checked at the tail
+        # of this command to fail the run loudly (see CHANGELOG).
+        manifest_problems_detected = False
+
         def _emit_manifest_write_failure_summary() -> None:
             # GH #1371: a persistent (retries-exhausted or non-retryable)
             # catalog manifest-write failure previously surfaced only as a
@@ -618,8 +626,10 @@ def index_repo_cmd(
                 get_manifest_identity_drops,
                 get_manifest_write_failures,
             )
+            nonlocal manifest_problems_detected
             failed = get_manifest_write_failures()
             if failed:
+                manifest_problems_detected = True
                 click.echo(
                     f"  WARNING: catalog manifest write failed for {len(failed)} "
                     f"document(s) — they will not appear in catalog-aware "
@@ -631,6 +641,7 @@ def index_repo_cmd(
             # failure count above — a clean "0 failed" hid them entirely.
             drops = get_manifest_identity_drops()
             if drops:
+                manifest_problems_detected = True
                 n_chunks = sum(d["batch_size"] for d in drops)
                 cols = sorted({d["collection"] for d in drops})
                 click.echo(
@@ -662,6 +673,7 @@ def index_repo_cmd(
             # unconnected numbers for the operator to reconcile by hand.
             refused = get_complete_refusals()
             if refused:
+                manifest_problems_detected = True
                 indexed_files = n - skipped_files
                 click.echo(
                     f"  WARNING: {len(refused)} of the {indexed_files} "
@@ -824,6 +836,24 @@ def index_repo_cmd(
         # index_repository (see `_emit_retry_summary`) so it fires on both
         # success and exception paths — Reviewer A/I-2.
         click.echo("Done.")
+
+        # nexus-tp8yk D2b: a manifest write failure / identity drop /
+        # completion refusal used to leave rc=0 — a "clean" run that a
+        # script or CI job keying on the exit code would never notice was
+        # damaged. The WARNING lines above already named the problem;
+        # this converts "clean but wrong" into a failed run. Refusal !=
+        # unconfirmed (nexus-5xn3k's pre-fence engine floor still warns at
+        # rc 0 — see _stamp_index_run_complete's None-sentinel handling,
+        # untouched by this bead): only a POSITIVE engine verdict (a
+        # refusal) or a write/identity failure triggers this.
+        if manifest_problems_detected:
+            raise click.ClickException(
+                "one or more documents had manifest write failures, "
+                "identity drops, or completion refusals this run — see "
+                "the WARNING lines above. Run 'nx catalog manifest-verify "
+                "<tumbler>' to inspect a specific document, or re-index "
+                "with --force."
+            )
 
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:
@@ -1336,6 +1366,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        ChunkLandingUnverifiedError,
         CredentialsMissingError,
         IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
@@ -1351,6 +1382,18 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         except CredentialsMissingError as e:
             raise click.ClickException(str(e)) from e
         except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as e:
+            raise click.ClickException(str(e)) from e
+        except ChunkLandingUnverifiedError as e:
+            # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04):
+            # this raise already exits non-zero via Click's default
+            # unhandled-exception path, but as a raw traceback rather
+            # than the exception's own actionable message — the
+            # nexus-2fyb convention this wrapper exists for. The
+            # exception's __init__ already builds a clean, human-
+            # readable message (collection + count + remedy), so
+            # str(e) alone is sufficient here (unlike
+            # IndexRunVerifyRefused, which needs _index_run_refused_
+            # message's dedicated reformatting of its raw field dump).
             raise click.ClickException(str(e)) from e
 
     if path is not None and dir_path is not None:
@@ -1715,7 +1758,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        ChunkLandingUnverifiedError,
         CredentialsMissingError,
+        IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
     )
@@ -1771,6 +1816,19 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         raise click.ClickException(str(exc)) from exc
     except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as exc:
         # nexus-y8qtj: fail-loud identity errors surface the same way.
+        raise click.ClickException(str(exc)) from exc
+    except IndexRunVerifyRefused as exc:
+        # nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04): this
+        # command never caught the RUNFENCE completion refusal at all —
+        # index_pdf_cmd has caught it since nexus-5xn3k.6; index_md_cmd
+        # was missed. Pre-fix a refusal here fell through as a raw
+        # traceback instead of the clean, actionable wording every other
+        # CLI surface renders for the identical exception.
+        raise click.ClickException(_index_run_refused_message(exc)) from exc
+    except ChunkLandingUnverifiedError as exc:
+        # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): see
+        # the identical rationale on index_pdf_cmd's wrapper. The
+        # exception's own message is already clean and actionable.
         raise click.ClickException(str(exc)) from exc
     result_label = "Force re-indexed" if force else "Indexed"
     # nexus-5xn3k.6 AC4: see the identical rationale on the pdf command.

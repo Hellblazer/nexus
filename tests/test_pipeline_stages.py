@@ -525,6 +525,36 @@ class TestUploaderLoop:
                     f"upsert_chunks_with_embeddings returns."
                 )
 
+    def test_upsert_precedes_fire_batch_ordering(self, db) -> None:
+        """nexus-tp8yk design memo §0 ("already correct — do not touch"):
+        the streaming uploader's manifest-hook chain must only ever see
+        chunks the T3 upsert already confirmed. Regression fence — pins
+        the ordering so a future refactor cannot silently reorder
+        ``fire_batch`` ahead of ``upsert_chunks_with_embeddings`` and
+        reintroduce the P1 mechanism (manifest rows for chunks that never
+        landed) one call site over from the ones nexus-tp8yk fixed
+        directly (doc_indexer's single-flush paths).
+        """
+        _pop_chunks(db, "h1", 3)
+        t3 = MagicMock()
+        seq: list[str] = []
+        t3.upsert_chunks_with_embeddings.side_effect = (
+            lambda *a, **k: seq.append("upsert")
+        )
+
+        def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **_kwargs):
+            seq.append("fire_batch")
+
+        from nexus.hook_registry import HookRegistry
+        hooks = HookRegistry()
+        hooks.register_batch(_capture_batch)
+
+        uploader_loop("h1", db, t3, "docs__test", threading.Event(), hooks=hooks)
+
+        assert seq == ["upsert", "fire_batch"], (
+            f"upsert must strictly precede fire_batch — got {seq}"
+        )
+
 
 
 class TestPipelineIndexPdf:
@@ -629,18 +659,53 @@ class TestPipelineIndexPdf:
             pytest.fail("metadata enrichment post-pass not called")
 
     def test_stale_chunk_pruning(self, db) -> None:
-        _, col = _run_with_col(
-            db,
-            col_get_return={"ids": ["abc123_0", "abc123_1", "old_hash_0"], "metadatas": [
-                {"content_hash": "abc123_full", "source_path": "/a.pdf"},
-                {"content_hash": "abc123_full", "source_path": "/a.pdf"},
-                {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
-            fake_result=_er(1),
-            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
-            content_hash="abc123_full")
+        # nexus-tp8yk D3: pipeline_index_pdf auto-registers a real catalog
+        # doc_id when none is supplied (nexus.doc_indexer._register_or_
+        # lookup_doc_id, called internally), so the prune's union guard now
+        # queries docs_for_chashes for "old_hash_0" — a fake, non-hex test
+        # id the real engine's chash validation would reject. Stub the
+        # reader so the guard sees what it would in a real corpus: nothing
+        # else references this chash, i.e. genuinely orphaned -> deleted.
+        with patch(
+            "nexus.catalog.factory.make_catalog_reader",
+            return_value=MagicMock(docs_for_chashes=MagicMock(return_value={})),
+        ):
+            _, col = _run_with_col(
+                db,
+                col_get_return={"ids": ["abc123_0", "abc123_1", "old_hash_0"], "metadatas": [
+                    {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                    {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                    {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
+                fake_result=_er(1),
+                fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+                content_hash="abc123_full")
         col.delete.assert_called_once()
         ids = col.delete.call_args.kwargs.get("ids", col.delete.call_args[1].get("ids", []))
         assert "old_hash_0" in ids and "abc123_0" not in ids
+
+    def test_stale_chunk_pruning_kept_when_shared_with_another_document(self, db) -> None:
+        """nexus-tp8yk D3 kill-control-adjacent: the union guard's OTHER
+        branch — a stale chash still referenced by a DIFFERENT live
+        document must survive, never deleted. Falsifies a guard that
+        always returns "orphaned" regardless of docs_for_chashes' answer.
+        """
+        with patch(
+            "nexus.catalog.factory.make_catalog_reader",
+            return_value=MagicMock(
+                docs_for_chashes=MagicMock(
+                    return_value={"old_hash_0": ["some-other-live-doc"]},
+                ),
+            ),
+        ):
+            _, col = _run_with_col(
+                db,
+                col_get_return={"ids": ["abc123_0", "old_hash_0"], "metadatas": [
+                    {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                    {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
+                fake_result=_er(1),
+                fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+                content_hash="abc123_full")
+        col.delete.assert_not_called()
 
     def test_conflict_already_running(self, db, mock_t3) -> None:
         """nexus-lcmbp: a retry against a fresh-heartbeat 'running' row is
@@ -871,12 +936,23 @@ def test_update_chunk_metadata(get_exc, upd_exc, expected) -> None:
         None, True, True, id="success"),
 ])
 def test_prune_stale_chunks(get_exc, get_ret, del_exc, expected, del_called) -> None:
-    col = MagicMock()
-    col.get = MagicMock(side_effect=get_exc) if get_exc else MagicMock(return_value=get_ret)
-    if del_exc:
-        col.delete = MagicMock(side_effect=del_exc)
-    assert _prune_stale_chunks(col, "/doc.pdf", "new_hash") is expected
-    (col.delete.assert_called if del_called else col.delete.assert_not_called)()
+    # nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04):
+    # _prune_stale_chunks now ALWAYS routes candidates through
+    # indexer_utils.prune_orphan_candidates (no more `if doc_id:` skip),
+    # which resolves a REAL catalog reader when one is available — this
+    # test's subject is the query/delete PAGINATION mechanics, not
+    # catalog union-guard behavior (owned by test_indexer_utils_prune_
+    # orphan_candidates.py / the doc_indexer.py D3 tests), so declare "no
+    # catalog" explicitly rather than accidentally depending on whatever
+    # the autouse T2 substrate's docs_for_chashes happens to say about
+    # these synthetic non-hex ids.
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
+        col = MagicMock()
+        col.get = MagicMock(side_effect=get_exc) if get_exc else MagicMock(return_value=get_ret)
+        if del_exc:
+            col.delete = MagicMock(side_effect=del_exc)
+        assert _prune_stale_chunks(col, "/doc.pdf", "new_hash") is expected
+        (col.delete.assert_called if del_called else col.delete.assert_not_called)()
 
 
 def test_pipeline_data_kept_on_enrichment_failure(db) -> None:

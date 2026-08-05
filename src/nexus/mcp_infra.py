@@ -1038,15 +1038,15 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     # double carrying no read methods, so the sweep silently no-opped there and
     # covered none of this. A missing wire-up must fail at the call, loudly,
     # not degrade into the no-op we are here to remove.
-    try:
-        refs = reader.docs_for_chashes(sorted(dropped)) or {}
-    except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
-        structlog.get_logger().warning(
-            "superseded_sweep_skipped_no_reverse_lookup",
-            doc_id=doc_id, candidates=len(dropped))
-        return
-    orphaned = [h for h in sorted(dropped)
-                if not any(d != doc_id for d in (refs.get(h) or []))]
+    #
+    # nexus-tp8yk D3: the union-guard LOGIC (docs_for_chashes lookup,
+    # fail-open, event name) now lives in the shared
+    # ``nexus.indexer_utils.orphaned_chashes`` — this call is a pure
+    # delegation, zero behaviour change; the three T3-deleting prune sites
+    # in doc_indexer.py/pipeline_stages.py route through the same helper.
+    from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    orphaned = orphaned_chashes(reader, doc_id, dropped)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
         return

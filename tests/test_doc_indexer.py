@@ -138,6 +138,30 @@ def _no_bib_enrich(monkeypatch):
     monkeypatch.setattr("nexus.bib_enricher.enrich", lambda title: {})
 
 
+@pytest.fixture(autouse=True)
+def _no_propagating_fence_complete(monkeypatch):
+    """nexus-tp8yk D2a: this file's T3 doubles (``mock_t3``,
+    ``make_vector_test_client()``) never write to the real engine's
+    pgvector — but every test here DOES resolve a real catalog doc_id
+    (the T2-everywhere autouse engine substrate), so the completion
+    stamp's fail-closed verify (which compares the manifest against the
+    REAL engine's T3, which never received these chunks) now refuses on
+    every fenced single-flush/incremental/pipeline run this file drives.
+    That refusal is technically accurate in isolation but irrelevant to
+    what this file actually tests — content/metadata/hook behavior, not
+    the RUNFENCE completion contract itself, which
+    ``test_5xn3k_fence_ordering.py`` owns via its own dedicated
+    ``_RecordingFenceWriter`` doubles and
+    ``tests/db/test_5xn3k_runfence_gate.py`` owns via a real,
+    substrate-matched engine. Stub to a no-op here, mirroring
+    ``_fence_begin``/``_fence_fail``'s existing advisory-only
+    (never-raises) behavior — this file was green before nexus-tp8yk made
+    the stamp propagate, and nothing about that substrate mismatch is
+    what any of these tests are pinning.
+    """
+    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **kw: None)
+
+
 @pytest.fixture
 def sample_pdf(tmp_path: Path) -> Path:
     p = tmp_path / "sample.pdf"
@@ -561,6 +585,89 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voy
                 result = index_pdf(sample_pdf, corpus="mybook")
     assert result == 1
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+
+
+def test_index_pdf_prune_union_guard_wired_at_call_site(
+    sample_pdf, monkeypatch, voyage_client,
+) -> None:
+    """nexus-tp8yk D3 substantive-critic SIGNIFICANT (nexus-tp8yk-
+    substantive-critique-2026-08-04): proves the D3 union guard is
+    actually WIRED at index_pdf's small-doc-branch prune block — i.e.
+    that ``prune_orphan_candidates``/``orphaned_chashes`` are the real
+    gate between "T3 reports a stale id" and "col.delete gets called" —
+    at the PRODUCTION entry point (``index_pdf``), not just via the
+    helper's own unit tests (tests/test_indexer_utils_prune_orphan_
+    candidates.py) or the real-engine helper test (tests/db/
+    test_http_catalog_integration.py::TestPruneUnionGuard).
+
+    DISCOVERED while building this test, documented rather than silently
+    absorbed: ``_identity_where``'s ``source_path`` fallback (used by
+    this exact prune query) filters on a chunk-metadata field RDR-102 D2
+    hard-removed from ``make_chunk_metadata`` — every PDF/markdown chunk
+    ``doc_indexer.py`` writes in real production carries NO
+    ``source_path`` at all, so this specific ``col.get(where={"source_
+    path": ...})`` query returns zero rows on a genuinely fresh install
+    and ``stale_ids`` is always empty; the union guard code added here
+    never fires via real writes. The user-visible cross-document
+    protection people actually get on a fresh install comes from
+    ``mcp_infra._sweep_superseded_vectors`` (manifest-diff based,
+    proven end-to-end against the real engine by tests/integration/
+    test_tp8yk_manifest_never_outruns_chunks.py::test_union_guard_keeps_
+    shared_chunk_at_the_production_wiring). That gap PRE-DATES nexus-
+    tp8yk (RDR-102 D2) and is out of this bead's scope to fix — tracked
+    separately. This test forces ``stale_ids`` non-empty via a
+    controlled T3 double specifically so the WIRING nexus-tp8yk added
+    here is verified on its own, independent of whether real writes
+    happen to populate its candidate query today.
+    """
+    from nexus.doc_indexer import index_pdf
+
+    shared_chash = "a" * 64
+    exclusive_chash = "b" * 64
+    pdf_path_str = str(sample_pdf.resolve())
+
+    def _col_get(where=None, include=None, limit=None, offset=0, **kw):
+        if where == {"source_path": pdf_path_str}:
+            if offset == 0:
+                return {"ids": [shared_chash, exclusive_chash]}
+            return {"ids": []}
+        return {"ids": [], "metadatas": []}
+
+    col = MagicMock()
+    col.get.side_effect = _col_get
+    col.delete = MagicMock()
+    t3 = MagicMock()
+    t3.get_or_create_collection.return_value = col
+
+    reader = MagicMock()
+    # shared_chash: referenced by ANOTHER live document -> must survive.
+    # exclusive_chash: referenced by nobody -> genuinely orphaned -> deleted.
+    reader.docs_for_chashes.return_value = {shared_chash: ["9.9.9"]}
+
+    set_credentials(monkeypatch)
+    with patch("nexus.doc_indexer.make_t3", return_value=t3), \
+         patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.2.3"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+         pdf_extract_patches_ctx(), \
+         patch("voyageai.Client", return_value=voyage_client):
+        result = index_pdf(sample_pdf, corpus="mybook")
+
+    assert result == 1
+    reader.docs_for_chashes.assert_called_once()
+    called_candidates = sorted(reader.docs_for_chashes.call_args[0][0])
+    assert called_candidates == sorted([shared_chash, exclusive_chash]), (
+        f"expected both candidates routed through the union guard, got "
+        f"{called_candidates}"
+    )
+    col.delete.assert_called_once()
+    deleted_ids = col.delete.call_args.kwargs.get("ids") or col.delete.call_args[0][0]
+    assert deleted_ids == [exclusive_chash], (
+        "the union guard must delete ONLY the genuinely-orphaned "
+        f"candidate and never the one another document references — "
+        f"got {deleted_ids}"
+    )
 
 
 def test_index_pdf_fires_document_hook_exactly_once(
@@ -1790,6 +1897,12 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
 
     nexus-i711w: the local Catalog.init is gone — pre-flight registration
     goes to the live catalog, which needs no init.
+
+    nexus-tp8yk D2a: the module-level autouse ``_no_propagating_fence_
+    complete`` fixture stubs ``_fence_complete`` for every test in this
+    file (this T3 is a fully in-process double, decoupled by design from
+    the real engine-backed catalog every test registers against) — see
+    that fixture's docstring for the full rationale.
     """
     from nexus.db.t3 import T3Database
 

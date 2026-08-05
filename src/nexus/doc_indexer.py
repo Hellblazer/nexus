@@ -1034,7 +1034,26 @@ def _upsert_skip_reembed(
         # when the engine's response omitted the "missing" field (a
         # pre-nexus-5xn3k.2 engine) — "cannot tell", not "zero misses".
         # HttpVectorClient.update_chunks already logged the WARNING for
-        # that case; preserve today's behaviour here (no reroute).
+        # that case.
+        #
+        # nexus-tp8yk D1: "cannot tell" used to fall through as "no
+        # reroute" and return normally — the caller's manifest hook then
+        # wrote rows for a batch this function never confirmed landed
+        # (design memo §1 P1). CONFIRMED-LANDING CONTRACT: every id this
+        # function is given is either (a) a fresh upsert, confirmed by
+        # upsert_chunks' own ack-mismatch check, (b) a genuine metadata-
+        # only refresh (``missing`` reported and this id wasn't in it), or
+        # (c) rerouted through a full upsert below when ``missing`` names
+        # it. A ``None`` response satisfies none of the three — refuse
+        # rather than silently proceed. All four call sites are already
+        # wrapped in a fence-bracketed try/except (``_fence_fail`` then
+        # re-raise), so this raise fails the run loudly instead of
+        # minting an unconfirmed manifest.
+        if missing is None:
+            from nexus.errors import ChunkLandingUnverifiedError  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+            raise ChunkLandingUnverifiedError(
+                collection=collection_name, count=len(old_idx),
+            )
         if missing:
             # The existing_ids probe was a STALE POSITIVE for these ids:
             # reported present, but the row was gone by the time the
@@ -1323,18 +1342,21 @@ def _index_document(
         # embed/upsert (nexus-5xn3k.4) — see `_catalog_doc_id_for_batch` up
         # near `metadatas = [p[2] for p in prepared]`.
         #
-        # nexus-5xn3k.4: single-flush documents (this whole function is one
-        # upsert, one fire_batch — no streaming) ride write_manifest_many's
-        # optional `complete` map for the completion stamp, no extra round
-        # trip. Hash-once MUST: the SAME `content_hash` computed above reaches
-        # both `_fence_begin` and this map.
+        # nexus-tp8yk D2a: this whole function is single-flush (one upsert,
+        # one fire_batch — no streaming). It USED TO ride write_manifest_
+        # many's optional `complete` map for the completion stamp — but the
+        # production writer never exposes write_manifest_many (dcv2k: the
+        # op is absent from both CATALOG_WRITE_OPS and
+        # _SERVICE_ONLY_WRITE_OPS), so that ride never fired on any real
+        # run; completion fell through to mcp_infra's per-doc
+        # `_stamp_index_run_complete`, whose refusal is recorded but never
+        # propagates to the CLI (design memo §1 P1). manifest_complete is
+        # now always None here; the explicit, PROPAGATING `_fence_complete`
+        # call below (mirroring `_index_pdf_incremental`'s tail) is the
+        # completion stamp for this path.
         hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
             catalog_doc_id=_catalog_doc_id_for_batch,
-            manifest_complete=(
-                {_catalog_doc_id_for_batch: content_hash}
-                if _catalog_doc_id_for_batch else None
-            ),
         )
         for _did, _doc in zip(ids, documents):
             hooks.fire_single(_did, collection_name, _doc)
@@ -1379,9 +1401,31 @@ def _index_document(
             break
         offset += 300
     if stale_ids:
-        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-        for i in range(0, len(stale_ids), 300):
-            _vector_with_retry(col.delete, ids=stale_ids[i:i + 300])
+        # nexus-tp8yk D3: union guard — identical chunk text collapses to
+        # ONE T3 row shared across every document that contains it, so
+        # "not in THIS document's manifest" is not "unreferenced" without
+        # checking every OTHER document. Fail-open: an unprovable orphan
+        # is kept, never deleted. nexus-tp8yk D3 substantive-critic
+        # SIGNIFICANT (2026-08-04): route through the shared helper
+        # UNCONDITIONALLY — it distinguishes "no catalog at all" (legacy
+        # unconditional delete preserved) from "catalog healthy, doc_id
+        # transiently unresolved" (guard still runs) on its own; gating
+        # on `if _catalog_doc_id_for_batch:` here would silently
+        # re-degrade a transient registration failure to an unguarded
+        # delete, the exact P2 incident class this bead exists to close.
+        from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
+        orphan_ids = prune_orphan_candidates(_catalog_doc_id_for_batch, stale_ids)
+        if orphan_ids:
+            # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+            for i in range(0, len(orphan_ids), 300):
+                _vector_with_retry(col.delete, ids=orphan_ids[i:i + 300])
+
+    # nexus-tp8yk D2a: explicit completion stamp, replacing the dead
+    # manifest_complete ride (see the comment above `hooks.fire_batch`).
+    # Zero-extraction never reaches here — `if not prepared: return 0`
+    # above already short-circuits, so `len(prepared)` is always > 0.
+    if _catalog_doc_id_for_batch:
+        _fence_complete(_catalog_doc_id_for_batch, content_hash, len(prepared))
 
     if return_metadata:
         return metadatas
@@ -1601,9 +1645,20 @@ def _index_pdf_incremental(
             break
         offset += 300
     if stale_ids:
-        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-        for i in range(0, len(stale_ids), 300):
-            _vector_with_retry(col.delete, ids=stale_ids[i:i + 300])
+        # nexus-tp8yk D3: union guard — identical chunk text collapses to
+        # ONE T3 row shared across every document that contains it, so
+        # "not in THIS document's manifest" is not "unreferenced" without
+        # checking every OTHER document. Fail-open: an unprovable orphan
+        # is kept, never deleted. nexus-tp8yk D3 substantive-critic
+        # SIGNIFICANT (2026-08-04): route through the shared helper
+        # UNCONDITIONALLY — see the identical rationale on the
+        # _index_document prune site above.
+        from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
+        orphan_ids = prune_orphan_candidates(_catalog_doc_id_for_batch, stale_ids)
+        if orphan_ids:
+            # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+            for i in range(0, len(orphan_ids), 300):
+                _vector_with_retry(col.delete, ids=orphan_ids[i:i + 300])
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
@@ -2131,8 +2186,14 @@ def index_pdf(
     # previously post-upsert, mirroring the pre-.4 _index_document bug)
     # so the fence can be committed before the first byte of content
     # lands. This branch is single-flush (one upsert, one fire_batch —
-    # same shape as _index_document), so completion rides
-    # write_manifest_many's optional `complete` map, not an explicit call.
+    # same shape as _index_document). nexus-tp8yk D2a (substantive-critic
+    # SIGNIFICANT, 2026-08-04 — this comment was stale, still describing
+    # the pre-fix shape): completion no longer rides write_manifest_many's
+    # optional `complete` map — that ride was structurally unreachable on
+    # every real run (dcv2k: the production writer never exposes
+    # write_manifest_many). It is now an explicit, PROPAGATING
+    # `_fence_complete` call at this branch's tail, ~60 lines below (see
+    # that call site's own comment for the full rationale).
     if hooks is None:
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         hooks = HookRegistry()
@@ -2175,13 +2236,20 @@ def index_pdf(
         # Post-store hook chains (RDR-095). Both single-doc and batch chains
         # fire from every storage event; the per-doc loop covers single-shape
         # consumers on CLI ingest.
+        #
+        # nexus-tp8yk D2a: this branch is single-flush (one upsert, one
+        # fire_batch — same shape as _index_document). It USED TO ride
+        # write_manifest_many's optional `complete` map — but the
+        # production writer never exposes write_manifest_many (dcv2k), so
+        # the ride never fired on any real run; completion fell through to
+        # mcp_infra's per-doc `_stamp_index_run_complete`, whose refusal is
+        # recorded but never propagates to the CLI (design memo §1 P1).
+        # manifest_complete is now always None; the explicit, PROPAGATING
+        # `_fence_complete` call below (mirroring `_index_pdf_incremental`)
+        # is the completion stamp for this branch.
         hooks.fire_batch(
             ids, col_name, documents, embeddings, metadatas_list,
             catalog_doc_id=_catalog_doc_id_for_batch,
-            manifest_complete=(
-                {_catalog_doc_id_for_batch: content_hash}
-                if _catalog_doc_id_for_batch else None
-            ),
         )
         for _did, _doc in zip(ids, documents):
             hooks.fire_single(_did, col_name, _doc)
@@ -2236,14 +2304,34 @@ def index_pdf(
                 break
             offset += 300
         if stale_ids:
-            # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-            for i in range(0, len(stale_ids), 300):
-                _vector_with_retry(col.delete, ids=stale_ids[i:i + 300])
+            # nexus-tp8yk D3: union guard — identical chunk text collapses
+            # to ONE T3 row shared across every document that contains it,
+            # so "not in THIS document's manifest" is not "unreferenced"
+            # without checking every OTHER document. Fail-open: an
+            # unprovable orphan is kept, never deleted. nexus-tp8yk D3
+            # substantive-critic SIGNIFICANT (2026-08-04): route through
+            # the shared helper UNCONDITIONALLY — see the identical
+            # rationale on the _index_document prune site above.
+            from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
+            orphan_ids = prune_orphan_candidates(_catalog_doc_id_for_batch, stale_ids)
+            if orphan_ids:
+                # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+                for i in range(0, len(orphan_ids), 300):
+                    _vector_with_retry(col.delete, ids=orphan_ids[i:i + 300])
     except Exception:  # noqa: BLE001 — prune must not strand catalog registration
         _log.warning(
             "stale_chunk_prune_failed_registration_still_running",
             pdf=str(pdf_path), collection=col_name, exc_info=True,
         )
+
+    # nexus-tp8yk D2a: explicit completion stamp, replacing the dead
+    # manifest_complete ride (see the comment above `hooks.fire_batch`).
+    # BEFORE catalog metadata registration, mirroring
+    # `_index_pdf_incremental`'s tail ordering — a refusal here propagates
+    # and the caller never reaches `_register_in_catalog` for this run,
+    # exactly as the incremental branch's caller never does on refusal.
+    if _catalog_doc_id_for_batch:
+        _fence_complete(_catalog_doc_id_for_batch, content_hash, len(prepared))
 
     _register_in_catalog(metadatas_list, len(metadatas_list))
 

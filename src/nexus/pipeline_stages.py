@@ -936,7 +936,7 @@ def pipeline_index_pdf(
             post_pass_ok = False
 
     # 3. Stale chunk pruning.
-    if not _prune_stale_chunks(col, str(pdf_path), content_hash, corpus=corpus):
+    if not _prune_stale_chunks(col, str(pdf_path), content_hash, corpus=corpus, doc_id=doc_id):
         post_pass_ok = False
 
     state = db.get_pipeline_state(content_hash)
@@ -1145,7 +1145,7 @@ def _update_chunk_metadata(
 
 
 def _prune_stale_chunks(
-    col: Any, pdf_path: str, content_hash: str, *, corpus: str = "",
+    col: Any, pdf_path: str, content_hash: str, *, corpus: str = "", doc_id: str = "",
 ) -> bool:
     """Delete chunks from T3 that belong to a previous version of the same PDF.
 
@@ -1156,6 +1156,19 @@ def _prune_stale_chunks(
     nexus-dcym: when *corpus* is supplied and the catalog already
     registered the file, the chunk lookup keys on ``doc_id``. Empty or
     missing entries fall back to the legacy ``source_path`` lookup.
+
+    nexus-tp8yk D3: candidates are always routed through
+    ``indexer_utils.prune_orphan_candidates`` (the shared union guard)
+    before deletion — identical chunk text collapses to ONE T3 row
+    shared across every document that contains it, so a chunk found
+    here is not necessarily unreferenced by some OTHER live document.
+    nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04): this used
+    to gate the guard on ``if doc_id:``, falling back to an unconditional
+    delete whenever *doc_id* was empty — including a TRANSIENT
+    registration failure on an otherwise-healthy catalog, not only a
+    genuinely absent one. ``prune_orphan_candidates`` makes that
+    distinction itself (on catalog-reader availability, not on *doc_id*),
+    so this call site no longer needs to.
     """
     from nexus.doc_indexer import _identity_where  # noqa: PLC0415  — circular-dep avoidance (nexus.doc_indexer)
     stale_ids: list[str] = []
@@ -1184,6 +1197,12 @@ def _prune_stale_chunks(
         _log.warning("stale_prune_query_failed", pdf_path=pdf_path, error=str(exc))
         return False
 
+    if not stale_ids:
+        return True
+
+    from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
+
+    stale_ids = prune_orphan_candidates(doc_id, stale_ids)
     if not stale_ids:
         return True
 

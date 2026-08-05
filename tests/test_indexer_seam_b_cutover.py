@@ -324,9 +324,20 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
 
     with patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
+        # nexus-tp8yk D2a: _index_document now calls the PROPAGATING
+        # _fence_complete explicitly (mirrors _index_pdf_incremental's
+        # pre-existing shape, see that test's identical comment below in
+        # this file) — the mocked db never lands chunks in the substrate
+        # the real engine's fail-closed /complete verifies against, so
+        # unstubbed it correctly raises IndexRunVerifyRefused. This test
+        # proves the service-mode embed guard, not fence integration
+        # (nexus-5xn3k.7 / nexus-tp8yk's own gates own the genuine proof);
+        # stub the fence like every other decoupled-substrate test here.
         _index_document(
             test_file,
             corpus="test-corpus",
@@ -358,9 +369,13 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
 
     with patch("nexus.doc_indexer._embed_with_fallback"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
+        # nexus-tp8yk D2a: see the identical rationale on
+        # test_index_document_service_mode_skips_embed_fallback above.
         _index_document(
             test_file,
             corpus="test-corpus",
@@ -408,9 +423,13 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
          patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
          patch("nexus.doc_indexer._make_local_embed_fn") as local_embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
+        # nexus-tp8yk D2a: see the identical rationale on
+        # test_index_document_service_mode_skips_embed_fallback above.
         # Must NOT raise CredentialsMissingError or any credential-related error
         count = _index_document(
             test_file,

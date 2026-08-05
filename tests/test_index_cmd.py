@@ -382,9 +382,12 @@ def test_manifest_write_failure_summary_surfaces_failures(runner, repo_dir, mock
         lambda: ["1.9.0", "1.9.1"],
     )
     result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
-    assert result.exit_code == 0, result.output
+    # nexus-tp8yk D2b: a manifest write failure now fails the run's exit
+    # code — was WARNING-only (rc=0) before this bead.
+    assert result.exit_code != 0, result.output
     assert "WARNING: catalog manifest write failed for 2 document(s)" in result.output
     assert "nx catalog reconcile" in result.output
+    assert "manifest-verify" in result.output
 
 
 # ── nexus-u8n4r: ephemeral-path registration-skip summary ───────────────────
@@ -931,9 +934,12 @@ def test_identity_drop_summary_surfaces_drops(runner, repo_dir, mock_reg, monkey
         ],
     )
     result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
-    assert result.exit_code == 0, result.output
+    # nexus-tp8yk D2b: an identity drop now fails the run's exit code —
+    # was WARNING-only (rc=0) before this bead.
+    assert result.exit_code != 0, result.output
     assert (
         "WARNING: 2 chunk batch(es) (27 chunks; collection(s): rdr__nexus) "
         "were indexed WITHOUT a catalog document identity" in result.output
     )
     assert "nx catalog reconcile" in result.output
+    assert "manifest-verify" in result.output

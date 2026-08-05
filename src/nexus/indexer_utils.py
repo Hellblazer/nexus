@@ -12,7 +12,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +38,124 @@ _DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
     "*.lock", "go.sum",
 ]
+
+
+def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> list[str]:
+    """Of *candidates* (chashes no longer in *doc_id*'s manifest), return the
+    subset with NO OTHER live document referencing them — safe to delete
+    from T3.
+
+    Shared union guard (nexus-tp8yk D3), extracted from
+    ``mcp_infra._sweep_superseded_vectors`` (the ORIGINAL guard — this
+    function preserves its exact log event and fail-open contract) so
+    every T3-deleting prune site gets the identical protection: identical
+    chunk TEXT collapses to ONE T3 row shared by every document that
+    contains it (CLAUDE.md § catalog/T3 split). "Not in THIS document's
+    manifest" is therefore NOT "unreferenced" — deleting on that basis
+    would silently remove chunks another live document still depends on.
+
+    FAIL-OPEN, deliberately, on every failure mode: no reader, or a reader
+    whose ``docs_for_chashes`` raises. Over-retention is recoverable (the
+    next successful sweep catches it); over-deletion is not.
+
+    Args:
+        reader: a catalog READER exposing ``docs_for_chashes(chashes) ->
+            dict[str, list[str]]`` (never the write-only proxy — see
+            nexus-kgos1: a write-only proxy raises AttributeError for
+            every read op, which used to be swallowed into a silent
+            always-empty sweep). May be ``None`` (uninitialized catalog);
+            treated the same as a lookup failure.
+        doc_id: the document whose prune candidates are being checked.
+            Excluded from the "still referenced" test — finding *doc_id*
+            itself in the reverse lookup is not evidence of sharing.
+        candidates: chashes to test (typically ``stale_ids`` /
+            ``dropped`` — chashes this run no longer references).
+
+    Returns:
+        The subset of *candidates* referenced by no live document other
+        than *doc_id*. Empty on empty input or any read failure.
+    """
+    cands = sorted({c for c in candidates if c})
+    if not cands:
+        return []
+    # structlog.get_logger() called AT CALL TIME, deliberately, not the
+    # module-level ``_log`` — matches the original _sweep_superseded_
+    # vectors's exact pattern, which existing tests patch via
+    # ``patch("structlog.get_logger")`` (tests/test_superseded_vector_
+    # sweep.py). A pre-bound module logger would not observe that patch.
+    import structlog  # noqa: PLC0415 — see rationale above
+
+    if reader is None:
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_no_reverse_lookup",
+            doc_id=doc_id, candidates=len(cands),
+        )
+        return []
+    try:
+        refs = reader.docs_for_chashes(cands) or {}
+    except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_no_reverse_lookup",
+            doc_id=doc_id, candidates=len(cands),
+        )
+        return []
+    return [h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))]
+
+
+def prune_orphan_candidates(doc_id: str, candidates: Iterable[str]) -> list[str]:
+    """Resolve a catalog reader and apply :func:`orphaned_chashes`, with a
+    principled fallback for the one case that function cannot see: NO
+    catalog reader available at all.
+
+    nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04): the three
+    ``doc_indexer.py`` prune sites and ``pipeline_stages._prune_stale_
+    chunks`` used to gate the whole union-guard call on
+    ``if doc_id: ...`` — falling back to an UNCONDITIONAL delete whenever
+    *doc_id* was empty. ``_register_or_lookup_doc_id``'s own docstring
+    is explicit that ``""`` is returned "only when an unexpected error
+    occurs" (a transient registration failure), not only when the
+    catalog is genuinely absent — so a healthy catalog experiencing one
+    bad request on this run degraded silently to the exact unguarded
+    delete this bead exists to close (the P2 incident class). This
+    function separates the two cases on the READER's own availability,
+    which the empty-doc_id string cannot distinguish by itself:
+
+    * No reader at all (a genuinely uninitialized/absent catalog) —
+      nothing tracks cross-document manifest sharing in that state, so
+      the pre-tp8yk unconditional-delete behaviour is preserved (there
+      is no "other document" a delete could be wrong about).
+    * A reader IS available (the catalog is healthy) but *doc_id* is
+      ``""`` — routes through :func:`orphaned_chashes` anyway.
+      Self-exclusion degrades gracefully: with no real *doc_id* to
+      exclude, a candidate referenced by ANY live document (including
+      one this run simply failed to identify itself as) is correctly
+      kept; a candidate referenced by nothing is correctly deleted.
+      Never silently degrades to unconditional delete on a healthy
+      catalog.
+
+    Args:
+        doc_id: the resolved (or empty-string) doc_id for this run.
+        candidates: chashes to test (typically ``stale_ids``).
+
+    Returns:
+        The subset of *candidates* safe to delete.
+    """
+    cands = list(candidates)
+    if not cands:
+        return []
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    try:
+        reader = make_catalog_reader()
+    except Exception:  # noqa: BLE001 — reader construction failure: same fail-safe posture as a read failure below
+        reader = None
+    if reader is None:
+        _log.warning(
+            "prune_union_guard_no_catalog_unconditional_delete",
+            doc_id=doc_id, candidates=len(cands),
+        )
+        return cands
+    return orphaned_chashes(reader, doc_id, cands)
 
 
 def find_repo_root(path: Path) -> Path | None:

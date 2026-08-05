@@ -18,6 +18,40 @@ from nexus.doc_indexer import _index_document
 from tests.conftest import set_credentials
 
 
+@pytest.fixture(autouse=True)
+def _no_catalog_identity(monkeypatch):
+    """nexus-tp8yk D2a/D3: this file's ``mock_t3`` MagicMock never writes
+    real chunks anywhere the real T2-everywhere catalog engine's T3 can
+    see, but ``_index_document`` still resolves a REAL catalog doc_id by
+    default (autouse engine substrate) — which would make the new
+    PROPAGATING ``_fence_complete`` refuse (referenced>0, present=0) and
+    would route the prune's D3 union guard through a real
+    ``docs_for_chashes`` call the synthetic ``old_hash_________N`` test
+    ids were never written to exercise. This file's actual subject is
+    PAGINATION of the stale-chunk delete loop, not catalog identity or
+    the RUNFENCE/union-guard contracts (owned elsewhere) — stub doc_id
+    resolution to "" so ``_index_document`` takes its no-catalog-ingest
+    branch (no fence calls).
+
+    nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04): the
+    prune's union guard used to gate on ``if doc_id:`` and fall back to
+    unconditional delete whenever it was empty — that gate is GONE
+    (``indexer_utils.prune_orphan_candidates`` now makes the "no
+    catalog" vs. "catalog healthy, doc_id unresolved" distinction on
+    reader availability, not on *doc_id*), so an empty doc_id ALONE no
+    longer bypasses the real catalog reader. Explicitly declare "no
+    catalog" here too — preserving this file's exact-count assertions
+    deterministically rather than depending on how the real engine's
+    ``docs_for_chashes`` happens to answer for non-hex synthetic ids.
+    """
+    monkeypatch.setattr(
+        "nexus.doc_indexer._register_or_lookup_doc_id", lambda *a, **kw: "",
+    )
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader", lambda *a, **kw: None,
+    )
+
+
 @pytest.fixture
 def sample_file(tmp_path: Path) -> Path:
     p = tmp_path / "big_doc.md"

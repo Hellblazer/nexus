@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Manifests can no longer outrun their chunks at index time** (nexus-tp8yk, the
+  producer of 184 of the 188 nexus-55l58 dangling manifest rows): the single-flush
+  PDF and md/prose index paths built the RUNFENCE manifest from the *intended*
+  chunk set and could commit it even when the chunk batch never landed in T3 —
+  leaving documents that report a `chunk_count` and return nothing. Three changes:
+  - the skip-reembed path now raises `ChunkLandingUnverifiedError` instead of
+    silently proceeding when chunk landing cannot be confirmed (D1);
+  - both single-flush paths stamp fence completion explicitly, and the completion
+    verify's refusal now propagates instead of being swallowed (D2);
+  - the three post-commit prune sites route through a shared `orphaned_chashes()`
+    union guard (the one `_sweep_superseded_vectors` already had), so a prune can
+    no longer delete T3 rows another live document's manifest references (D3).
+- **BEHAVIOR CHANGE — `nx index` / `nx dt index` exit codes**: both commands now
+  exit **non-zero** when a run had manifest write failures, document identity
+  drops, or fence-completion refusals. Previously these were stderr warnings with
+  exit 0, which is how partially-populated documents shipped as "success". Scripts
+  that treat any non-zero exit as fatal will now surface real damage instead of
+  masking it; an *unconfirmed* completion stamp (engine cannot verify either way)
+  remains a warning with exit 0.
+
 ## [7.2.0] - 2026-08-04
 
 The trash-lifecycle + engine-performance release, paired with engine-service-v0.1.65
