@@ -1659,26 +1659,61 @@ def _run_pdf(tmp_path, col_meta=None, n=1):
 
 def _assert_int(r): assert isinstance(r, int) and not isinstance(r, bool)
 
-def test_index_code_file_returns_int_not_bool(tmp_path): _assert_int(_run_code(tmp_path))
-def test_index_code_file_returns_zero_when_skipped(tmp_path):
-    h = hashlib.sha256(b"x = 1\ny = 2\n").hexdigest()
-    r = _run_code(tmp_path, col_meta={"metadatas":[{"content_hash":h,"embedding_model":"voyage-code-3"}],"ids":[]}); assert r == 0; _assert_int(r)
-def test_index_code_file_returns_positive_when_indexed(tmp_path):
-    r = _run_code(tmp_path, chunks=[_chunk(idx=0,count=2), _chunk(text="y = 2",idx=1,count=2,ls=2,le=2)]); _assert_int(r); assert r == 2
+# nexus-test-cleanup P3a: the 3 file kinds (code/prose/pdf) each pinned the
+# same 3 assertions (int-not-bool return type; zero when skipped by
+# content-hash match; positive when actually indexed) as 9 near-identical
+# defs. Substantive-critic review (P3 fix pass): the first collapse chained
+# all 3 signals per kind into one sequential-assert body, coupling
+# previously-independent failure ids. Re-split via a second parametrize axis
+# ("signal") crossed with the kind-triple, so all 9 original signals keep
+# independent node ids ([code-int_not_bool], [code-zero_when_skipped], ...)
+# while the runner/kwargs boilerplate still collapses to one body.
+@pytest.mark.parametrize(
+    "runner,content_bytes,model,positive_kwargs,expected_positive",
+    [
+        pytest.param(
+            _run_code, b"x = 1\ny = 2\n", "voyage-code-3",
+            dict(chunks=[_chunk(idx=0, count=2), _chunk(text="y = 2", idx=1, count=2, ls=2, le=2)]),
+            2, id="code",
+        ),
+        pytest.param(
+            _run_pdf, b"%PDF-1.4 fake content", "voyage-context-3",
+            dict(n=2), 2, id="pdf",
+        ),
+        pytest.param(
+            _run_prose, b"Line one\nLine two\n", "voyage-context-3",
+            dict(content="Line one\nLine two\nLine three\n"), None, id="prose",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "signal", ["int_not_bool", "zero_when_skipped", "positive_when_indexed"],
+)
+def test_index_file_returns_int_reflecting_skip_and_index_state(
+    tmp_path, signal, runner, content_bytes, model, positive_kwargs, expected_positive
+):
+    # Each runner mkdir()s <root>/"repo" itself (exist_ok=False); the subroot
+    # name doubles as the tmp_path subtree so no two signal cases collide.
+    root = tmp_path / signal
+    root.mkdir()
 
-def test_index_prose_file_returns_int_not_bool(tmp_path): _assert_int(_run_prose(tmp_path))
-def test_index_prose_file_returns_zero_when_skipped(tmp_path):
-    h = hashlib.sha256(b"Line one\nLine two\n").hexdigest()
-    r = _run_prose(tmp_path, col_meta={"metadatas":[{"content_hash":h,"embedding_model":"voyage-context-3"}],"ids":[]}); assert r == 0; _assert_int(r)
-def test_index_prose_file_returns_positive_when_indexed(tmp_path):
-    r = _run_prose(tmp_path, content="Line one\nLine two\nLine three\n"); _assert_int(r); assert r > 0
-
-def test_index_pdf_file_returns_int_not_bool(tmp_path): _assert_int(_run_pdf(tmp_path))
-def test_index_pdf_file_returns_zero_when_skipped(tmp_path):
-    h = hashlib.sha256(b"%PDF-1.4 fake content").hexdigest()
-    r = _run_pdf(tmp_path, col_meta={"metadatas":[{"content_hash":h,"embedding_model":"voyage-context-3"}],"ids":[]}); assert r == 0; _assert_int(r)
-def test_index_pdf_file_returns_positive_when_indexed(tmp_path):
-    r = _run_pdf(tmp_path, n=2); _assert_int(r); assert r == 2
+    if signal == "int_not_bool":
+        _assert_int(runner(root))
+    elif signal == "zero_when_skipped":
+        h = hashlib.sha256(content_bytes).hexdigest()
+        r = runner(
+            root,
+            col_meta={"metadatas": [{"content_hash": h, "embedding_model": model}], "ids": []},
+        )
+        assert r == 0
+        _assert_int(r)
+    else:
+        r = runner(root, **positive_kwargs)
+        _assert_int(r)
+        if expected_positive is None:
+            assert r > 0
+        else:
+            assert r == expected_positive
 
 
 # ── on_start / on_file callbacks ────────────────────────────────────────────

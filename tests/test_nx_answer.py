@@ -2211,35 +2211,25 @@ class TestScopeNormalization:
     """nx_answer must normalize a malformed comma-list scope to broad
     search (with a warning) instead of filtering retrieval to nothing."""
 
-    def test_comma_list_scope_normalizes_to_empty_with_warning(self):
+    @pytest.mark.parametrize(
+        "raw,expected_norm,warning_present,warning_substr",
+        [
+            pytest.param("rdr,code,docs", "", True, "comma-list", id="comma_list_normalizes_to_empty_with_warning"),
+            pytest.param("knowledge", "knowledge", False, None, id="single_corpus_unchanged_no_warning"),
+            pytest.param("1.2", "1.2", False, None, id="subtree_scope_unchanged"),
+            pytest.param("   ", "", False, None, id="whitespace_only_normalizes_to_empty"),
+            pytest.param("  knowledge  ", "knowledge", False, None, id="surrounding_whitespace_stripped"),
+        ],
+    )
+    def test_normalize_scope(self, raw, expected_norm, warning_present, warning_substr):
         from nexus.mcp.core import _nx_answer_normalize_scope
-        norm, warning = _nx_answer_normalize_scope("rdr,code,docs")
-        assert norm == ""
-        assert warning is not None
-        assert "comma-list" in warning
-
-    def test_single_corpus_scope_unchanged_no_warning(self):
-        from nexus.mcp.core import _nx_answer_normalize_scope
-        norm, warning = _nx_answer_normalize_scope("knowledge")
-        assert norm == "knowledge"
-        assert warning is None
-
-    def test_subtree_scope_unchanged(self):
-        from nexus.mcp.core import _nx_answer_normalize_scope
-        norm, warning = _nx_answer_normalize_scope("1.2")
-        assert norm == "1.2"
-        assert warning is None
-
-    def test_whitespace_only_scope_normalizes_to_empty(self):
-        from nexus.mcp.core import _nx_answer_normalize_scope
-        norm, warning = _nx_answer_normalize_scope("   ")
-        assert norm == ""
-        assert warning is None
-
-    def test_surrounding_whitespace_stripped(self):
-        from nexus.mcp.core import _nx_answer_normalize_scope
-        norm, _ = _nx_answer_normalize_scope("  knowledge  ")
-        assert norm == "knowledge"
+        norm, warning = _nx_answer_normalize_scope(raw)
+        assert norm == expected_norm
+        if warning_present:
+            assert warning is not None
+            assert warning_substr in warning
+        else:
+            assert warning is None
 
 
 class TestEmptyRetrievalGuard:
@@ -2247,36 +2237,41 @@ class TestEmptyRetrievalGuard:
     yield zero evidence, rather than letting the operator synthesize a
     confident off-topic answer from ambient SessionStart context."""
 
-    def test_fires_when_retrieval_step_empty(self):
+    @pytest.mark.parametrize(
+        "steps,expected",
+        [
+            pytest.param(
+                [{"ids": [], "distances": []}, {"output": "synthesized prose"}],
+                True, id="fires_when_retrieval_step_empty",
+            ),
+            pytest.param(
+                [{"ids": ["c1", "c2"]}, {"output": "prose"}],
+                False, id="does_not_fire_when_evidence_present",
+            ),
+            pytest.param(
+                # No step exposes ids/tumblers -> not retrieval-bearing -> exempt.
+                [{"output": "a synthesized answer with no retrieval"}],
+                False, id="exempts_pure_generate_plan_no_retrieval",
+            ),
+            pytest.param(
+                [{"tumblers": []}, {"summary": "prose"}],
+                True, id="fires_on_empty_tumbler_traversal",
+            ),
+            pytest.param(
+                # One empty search step + one non-empty traversal -> evidence exists.
+                [{"ids": []}, {"tumblers": ["1.2.3"]}, {"output": "prose"}],
+                False, id="evidence_in_any_step_suppresses_guard",
+            ),
+            pytest.param(
+                ["not a dict", None, {"ids": []}],
+                True, id="non_dict_steps_ignored_alongside_empty_ids",
+            ),
+            pytest.param(
+                ["just", "strings"],
+                False, id="all_non_dict_steps_not_retrieval_bearing",
+            ),
+        ],
+    )
+    def test_empty_retrieval_guard(self, steps, expected):
         from nexus.mcp.core import _nx_answer_is_empty_retrieval
-        # A search step that returned zero ids.
-        steps = [{"ids": [], "distances": []}, {"output": "synthesized prose"}]
-        assert _nx_answer_is_empty_retrieval(steps) is True
-
-    def test_does_not_fire_when_evidence_present(self):
-        from nexus.mcp.core import _nx_answer_is_empty_retrieval
-        steps = [{"ids": ["c1", "c2"]}, {"output": "prose"}]
-        assert _nx_answer_is_empty_retrieval(steps) is False
-
-    def test_exempts_pure_generate_plan_no_retrieval(self):
-        from nexus.mcp.core import _nx_answer_is_empty_retrieval
-        # No step exposes ids/tumblers -> not retrieval-bearing -> exempt.
-        steps = [{"output": "a synthesized answer with no retrieval"}]
-        assert _nx_answer_is_empty_retrieval(steps) is False
-
-    def test_fires_on_empty_tumbler_traversal(self):
-        from nexus.mcp.core import _nx_answer_is_empty_retrieval
-        steps = [{"tumblers": []}, {"summary": "prose"}]
-        assert _nx_answer_is_empty_retrieval(steps) is True
-
-    def test_evidence_in_any_step_suppresses_guard(self):
-        from nexus.mcp.core import _nx_answer_is_empty_retrieval
-        # One empty search step + one non-empty traversal -> evidence exists.
-        steps = [{"ids": []}, {"tumblers": ["1.2.3"]}, {"output": "prose"}]
-        assert _nx_answer_is_empty_retrieval(steps) is False
-
-    def test_non_dict_steps_ignored(self):
-        from nexus.mcp.core import _nx_answer_is_empty_retrieval
-        steps = ["not a dict", None, {"ids": []}]
-        assert _nx_answer_is_empty_retrieval(steps) is True
-        assert _nx_answer_is_empty_retrieval(["just", "strings"]) is False
+        assert _nx_answer_is_empty_retrieval(steps) is expected

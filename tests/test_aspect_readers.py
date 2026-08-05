@@ -82,31 +82,25 @@ class TestIdentityFieldDispatch:
     each in turn (P2.0 spike survey, 2026-04-27).
     """
 
-    def test_rdr_collection_uses_doc_id(self):
+    @pytest.mark.parametrize(
+        "collection",
+        [
+            "rdr__nexus-571b8edd",
+            "docs__corpus",
+            "code__nexus",
+            # Both paper-shaped and slug-shaped knowledge collections
+            # dispatch on doc_id; the source_path/title divergence is
+            # resolved by the catalog projection in doc_id_lookup.
+            "knowledge__knowledge",
+            "knowledge__delos",
+            "future__newshape",
+        ],
+        ids=["rdr", "docs", "code", "knowledge_slug", "knowledge_paper", "unknown_prefix"],
+    )
+    def test_collection_uses_doc_id(self, collection):
         # nexus-o6aa.10.1: post-fix, every prefix dispatches on doc_id.
         from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("rdr__nexus-571b8edd") == ("doc_id",)
-
-    def test_docs_collection_uses_doc_id(self):
-        from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("docs__corpus") == ("doc_id",)
-
-    def test_code_collection_uses_doc_id(self):
-        from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("code__nexus") == ("doc_id",)
-
-    def test_knowledge_collection_uses_doc_id(self):
-        # Both paper-shaped (``knowledge__delos``) and slug-shaped
-        # (``knowledge__knowledge``) collections dispatch on doc_id;
-        # the source_path/title divergence is resolved by the catalog
-        # projection in ``doc_id_lookup``.
-        from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("knowledge__knowledge") == ("doc_id",)
-        assert _identity_fields_for("knowledge__delos") == ("doc_id",)
-
-    def test_unknown_prefix_falls_back_to_doc_id(self):
-        from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("future__newshape") == ("doc_id",)
+        assert _identity_fields_for(collection) == ("doc_id",)
 
     def test_dispatch_table_uniformly_keyed_on_doc_id(self):
         from nexus.aspect_readers import CHROMA_IDENTITY_FIELD
@@ -490,17 +484,15 @@ class TestReadChromaUri:
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
 
-    def test_malformed_uri_missing_collection(self, t3_client):
+    @pytest.mark.parametrize(
+        "uri",
+        ["chroma:///source-id-only", "chroma://knowledge__t5/"],
+        ids=["missing_collection", "missing_source_id"],
+    )
+    def test_malformed_uri_returns_read_fail_unreachable(self, t3_client, uri):
         from nexus.aspect_readers import ReadFail, _read_chroma_uri
 
-        result = _read_chroma_uri("chroma:///source-id-only", t3=t3_client)
-        assert isinstance(result, ReadFail)
-        assert result.reason == "unreachable"
-
-    def test_malformed_uri_missing_source_id(self, t3_client):
-        from nexus.aspect_readers import ReadFail, _read_chroma_uri
-
-        result = _read_chroma_uri("chroma://knowledge__t5/", t3=t3_client)
+        result = _read_chroma_uri(uri, t3=t3_client)
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
 
@@ -601,50 +593,39 @@ class TestReadChromaUri:
         assert "alpha" in result.text
         assert "beta" in result.text
 
-    def test_absolute_source_path_round_trips(self, t3_client):
-        """Cloud-shaped source_paths are absolute filesystem paths
-        like ``/Users/.../paper.pdf``. The URI is then
-        ``chroma://collection//Users/.../paper.pdf`` (double-slash
-        separator). ``parsed.path.removeprefix('/')`` strips exactly
-        one leading slash, preserving the second to recover the
-        absolute path.
-        """
+    @pytest.mark.parametrize(
+        "collection, sp",
+        [
+            # Cloud-shaped source_paths are absolute filesystem paths
+            # like ``/Users/.../paper.pdf``. The URI is then
+            # ``chroma://collection//Users/.../paper.pdf`` (double-slash
+            # separator). ``parsed.path.removeprefix('/')`` strips
+            # exactly one leading slash, preserving the second to
+            # recover the absolute path.
+            ("knowledge__abs", "/Users/me/papers/aleph-bft.pdf"),
+            # rdr__/docs__/code__ source paths typically contain ``/``;
+            # the URI ``chroma://<collection>/<source-identifier>``
+            # carries them in the path component without percent-
+            # encoding. ``urlparse`` returns the slashes verbatim and
+            # ``.lstrip('/')`` removes only the single leading
+            # separator before the path.
+            ("rdr__t8", "docs/rdr/rdr-090-realistic-agentic-scholar.md"),
+        ],
+        ids=["absolute_source_path", "source_path_with_slashes"],
+    )
+    def test_source_path_round_trips(self, t3_client, collection, sp):
         from nexus.aspect_readers import ReadOk, _read_chroma_uri
 
-        sp = "/Users/me/papers/aleph-bft.pdf"
         _seed_chunks(
             t3_client,
-            "knowledge__abs",
+            collection,
             identity_field="source_path",
             source_id=sp,
-            chunks=[(0, "Paper body.")],
+            chunks=[(0, "body.")],
         )
         # ``//`` separator after netloc preserves the leading slash.
         result = _read_chroma_uri(
-            f"chroma://knowledge__abs/{sp}", t3=t3_client,
-        )
-        assert isinstance(result, ReadOk)
-        assert result.metadata["source_id"] == sp
-
-    def test_source_path_with_slashes_round_trips(self, t3_client):
-        """rdr__/docs__/code__ source paths typically contain ``/``;
-        the URI ``chroma://<collection>/<source-identifier>`` carries
-        them in the path component without percent-encoding.
-        ``urlparse`` returns the slashes verbatim and ``.lstrip('/')``
-        removes only the single leading separator before the path.
-        """
-        from nexus.aspect_readers import ReadOk, _read_chroma_uri
-
-        sp = "docs/rdr/rdr-090-realistic-agentic-scholar.md"
-        _seed_chunks(
-            t3_client,
-            "rdr__t8",
-            identity_field="source_path",
-            source_id=sp,
-            chunks=[(0, "RDR body.")],
-        )
-        result = _read_chroma_uri(
-            f"chroma://rdr__t8/{sp}", t3=t3_client,
+            f"chroma://{collection}/{sp}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.metadata["source_id"] == sp
@@ -967,37 +948,29 @@ class TestReadScratchUri:
         assert result.reason == "unreachable"
         assert "no scratch client" in result.detail
 
-    def test_malformed_uri_missing_session_id(self, t1_scratch):
+    @pytest.mark.parametrize(
+        "uri, detail_substring",
+        [
+            # nx-scratch://session// — empty session-id segment.
+            ("nx-scratch://session//entry-id", None),
+            ("nx-scratch://session/sess-only/", None),
+            # The shape is ``nx-scratch://session/...``; anything else
+            # at the netloc position is rejected so callers don't
+            # paste arbitrary URIs that happen to share the scheme.
+            ("nx-scratch://other-host/sess/entry", "netloc"),
+        ],
+        ids=["missing_session_id", "missing_entry_id", "unexpected_netloc"],
+    )
+    def test_malformed_uri_returns_read_fail_unreachable(
+        self, t1_scratch, uri, detail_substring,
+    ):
         from nexus.aspect_readers import ReadFail, _read_scratch_uri
 
-        # nx-scratch://session// — empty session-id segment.
-        result = _read_scratch_uri(
-            "nx-scratch://session//entry-id", scratch=t1_scratch,
-        )
+        result = _read_scratch_uri(uri, scratch=t1_scratch)
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
-
-    def test_malformed_uri_missing_entry_id(self, t1_scratch):
-        from nexus.aspect_readers import ReadFail, _read_scratch_uri
-
-        result = _read_scratch_uri(
-            "nx-scratch://session/sess-only/", scratch=t1_scratch,
-        )
-        assert isinstance(result, ReadFail)
-        assert result.reason == "unreachable"
-
-    def test_unexpected_netloc_returns_read_fail(self, t1_scratch):
-        from nexus.aspect_readers import ReadFail, _read_scratch_uri
-
-        # The shape is ``nx-scratch://session/...``; anything else
-        # at the netloc position is rejected so callers don't paste
-        # arbitrary URIs that happen to share the scheme.
-        result = _read_scratch_uri(
-            "nx-scratch://other-host/sess/entry", scratch=t1_scratch,
-        )
-        assert isinstance(result, ReadFail)
-        assert result.reason == "unreachable"
-        assert "netloc" in result.detail
+        if detail_substring is not None:
+            assert detail_substring in result.detail
 
     def test_empty_content_returns_read_fail_empty(self, t1_scratch):
         from nexus.aspect_readers import ReadFail, _read_scratch_uri
@@ -1079,47 +1052,27 @@ class TestReadHttpsUri:
         assert result.metadata["http_status"] == 200
         assert client.calls == ["https://docs.bito.ai/ingest"]
 
-    def test_401_returns_read_fail_unauthorized(self):
+    @pytest.mark.parametrize(
+        "status, body, url, expected_reason, detail_substring",
+        [
+            (401, "denied", "https://paywalled.example.com/x", "unauthorized", "401"),
+            (403, "forbidden", "https://x.example.com", "unauthorized", None),
+            (404, "not found", "https://x.example.com/missing", "unreachable", "404"),
+            (503, "service unavailable", "https://flaky.example.com", "unreachable", None),
+        ],
+        ids=["401", "403", "404", "5xx"],
+    )
+    def test_error_status_maps_to_read_fail_reason(
+        self, status, body, url, expected_reason, detail_substring,
+    ):
         from nexus.aspect_readers import ReadFail, _read_https_uri
 
-        client = _StubHttpClient([_StubHttpResponse(401, "denied")])
-        result = _read_https_uri(
-            "https://paywalled.example.com/x", http_client=client,
-        )
+        client = _StubHttpClient([_StubHttpResponse(status, body)])
+        result = _read_https_uri(url, http_client=client)
         assert isinstance(result, ReadFail)
-        assert result.reason == "unauthorized"
-        assert "401" in result.detail
-
-    def test_403_returns_read_fail_unauthorized(self):
-        from nexus.aspect_readers import ReadFail, _read_https_uri
-
-        client = _StubHttpClient([_StubHttpResponse(403, "forbidden")])
-        result = _read_https_uri(
-            "https://x.example.com", http_client=client,
-        )
-        assert isinstance(result, ReadFail)
-        assert result.reason == "unauthorized"
-
-    def test_404_returns_read_fail_unreachable(self):
-        from nexus.aspect_readers import ReadFail, _read_https_uri
-
-        client = _StubHttpClient([_StubHttpResponse(404, "not found")])
-        result = _read_https_uri(
-            "https://x.example.com/missing", http_client=client,
-        )
-        assert isinstance(result, ReadFail)
-        assert result.reason == "unreachable"
-        assert "404" in result.detail
-
-    def test_5xx_returns_read_fail_unreachable(self):
-        from nexus.aspect_readers import ReadFail, _read_https_uri
-
-        client = _StubHttpClient([_StubHttpResponse(503, "service unavailable")])
-        result = _read_https_uri(
-            "https://flaky.example.com", http_client=client,
-        )
-        assert isinstance(result, ReadFail)
-        assert result.reason == "unreachable"
+        assert result.reason == expected_reason
+        if detail_substring is not None:
+            assert detail_substring in result.detail
 
     def test_network_exception_returns_read_fail_unreachable(self):
         from nexus.aspect_readers import ReadFail, _read_https_uri

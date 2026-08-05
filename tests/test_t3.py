@@ -170,9 +170,7 @@ def test_voyage_embedding_fn_selects_model(mock_chromadb, collection, expected_m
 # ── AC3: store put ──────────────────────────────────────────────────────────
 
 
-def test_store_put_permanent_returns_id(mock_db):
-    db, mock_col, _ = mock_db
-    doc_id = db.put(collection="knowledge__security", content="text", title="sec.md", tags="security,audit")
+def _check_store_put_bare_id_shape(mock_col, doc_id):
     # nexus-oe2i: exact == 64 per RDR-180 (the full chunk_text_hash digest).
     # The pre-D1 assertion `len > 0` predated content-derived natural
     # IDs and would silently pass any non-empty string.
@@ -180,13 +178,7 @@ def test_store_put_permanent_returns_id(mock_db):
     assert len(doc_id) == 64
 
 
-def test_store_put_permanent_metadata(mock_db):
-    db, mock_col, _ = mock_db
-    db.put(
-        collection="knowledge__security", content="security finding text", title="sec.md",
-        tags="security,audit", category="security", session_id="sess-001",
-        source_agent="codebase-deep-analyzer",
-    )
+def _check_store_put_full_metadata(mock_col, doc_id):
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
     assert meta["title"] == "sec.md"
     assert meta["tags"] == "security,audit"
@@ -205,15 +197,46 @@ def test_store_put_permanent_metadata(mock_db):
     assert meta["embedding_model"] == "voyage-context-3"
 
 
-def test_store_put_with_ttl_metadata(mock_db):
-    db, mock_col, _ = mock_db
-    db.put(collection="knowledge__security", content="temp finding", title="temp.md", ttl_days=30)
+def _check_store_put_ttl_metadata(mock_col, doc_id):
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
     assert meta["ttl_days"] == 30
     # expires_at no longer stored; verify the inputs to is_expired() are present
     assert "expires_at" not in meta
     assert meta["indexed_at"]
     assert datetime.fromisoformat(meta["indexed_at"]) <= datetime.now(UTC)
+
+
+# nexus-test-cleanup P3a folded 3 independent call-shape checks (bare id,
+# full metadata, ttl metadata) into one sequential-assert def; substantive-
+# critic review (P3 fix pass) flagged that as coupling 3 previously-
+# independent signals into one failure id. Restored via parametrize: each
+# call shape + its checker travels together so a failure in one case can't
+# hide the other two.
+@pytest.mark.parametrize(
+    "put_kwargs,check",
+    [
+        pytest.param(
+            dict(collection="knowledge__security", content="text", title="sec.md", tags="security,audit"),
+            _check_store_put_bare_id_shape, id="bare-id-shape",
+        ),
+        pytest.param(
+            dict(
+                collection="knowledge__security", content="security finding text", title="sec.md",
+                tags="security,audit", category="security", session_id="sess-001",
+                source_agent="codebase-deep-analyzer",
+            ),
+            _check_store_put_full_metadata, id="full-metadata",
+        ),
+        pytest.param(
+            dict(collection="knowledge__security", content="temp finding", title="temp.md", ttl_days=30),
+            _check_store_put_ttl_metadata, id="ttl-metadata",
+        ),
+    ],
+)
+def test_store_put_permanent_returns_id_metadata_and_ttl(mock_db, put_kwargs, check):
+    db, mock_col, _ = mock_db
+    doc_id = db.put(**put_kwargs)
+    check(mock_col, doc_id)
 
 
 # ── AC4: expire ─────────────────────────────────────────────────────────────
@@ -490,41 +513,73 @@ def test_put_cce_collection_uses_document_input_type(mock_chromadb):
 # ── AC7: collection list ────────────────────────────────────────────────────
 
 
-def test_list_collections_returns_names_and_counts(mock_chromadb):
-    _, mock_client = mock_chromadb
+def _setup_list_collections_populated(mock_client):
     mock_col1, mock_col2 = MagicMock(), MagicMock()
     mock_col1.count.return_value = 42
     mock_col2.count.return_value = 7
     mock_client.list_collections.return_value = ["code__myrepo", "knowledge__sec"]
     mock_client.get_collection.side_effect = [mock_col1, mock_col2]
-    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
-    result = db.list_collections()
+
+
+def _check_list_collections_populated(result):
     assert len(result) == 2
     by_name = {r["name"]: r for r in result}
     assert by_name["code__myrepo"]["count"] == 42
     assert by_name["knowledge__sec"]["count"] == 7
 
 
-def test_list_collections_empty(mock_chromadb):
-    _, mock_client = mock_chromadb
+def _setup_list_collections_empty(mock_client):
     mock_client.list_collections.return_value = []
-    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
-    assert db.list_collections() == []
 
 
-def test_list_collections_skips_failed_count(mock_chromadb):
-    _, mock_client = mock_chromadb
+def _check_list_collections_empty(result):
+    assert result == []
+
+
+def _setup_list_collections_partial_failure(mock_client):
     mock_ok = MagicMock()
     mock_ok.count.return_value = 10
     mock_fail = MagicMock()
     mock_fail.count.side_effect = RuntimeError("network error")
     mock_client.list_collections.return_value = ["knowledge__good", "knowledge__broken"]
     mock_client.get_collection.side_effect = lambda name: mock_ok if name == "knowledge__good" else mock_fail
-    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
-    result = db.list_collections()
+
+
+def _check_list_collections_partial_failure(result):
     names = [r["name"] for r in result]
     assert "knowledge__good" in names
     assert "knowledge__broken" not in names
+
+
+# nexus-test-cleanup P3a folded 3 independent edge states of
+# db.list_collections() into one sequential-assert def; substantive-critic
+# review (P3 fix pass) flagged that as coupling 3 previously-independent
+# signals into one failure id. Restored via parametrize: each mock setup +
+# its checker travels together so a failure in one edge state can't hide
+# the other two.
+@pytest.mark.parametrize(
+    "setup,check",
+    [
+        pytest.param(
+            _setup_list_collections_populated, _check_list_collections_populated,
+            id="populated-names-and-counts",
+        ),
+        pytest.param(
+            _setup_list_collections_empty, _check_list_collections_empty,
+            id="empty-client",
+        ),
+        pytest.param(
+            _setup_list_collections_partial_failure, _check_list_collections_partial_failure,
+            id="failed-count-skipped",
+        ),
+    ],
+)
+def test_list_collections_names_counts_empty_and_failed_count_skipped(mock_chromadb, setup, check):
+    _, mock_client = mock_chromadb
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
+    setup(mock_client)
+    result = db.list_collections()
+    check(result)
 
 
 # ── Deterministic ID (RDR-108 D1: content-derived natural ID) ────────────────
@@ -1251,11 +1306,15 @@ def test_search_single_chunk_document_retrievable(local_t3: T3Database):
 # ── local_t3: collection_info ───────────────────────────────────────────────
 
 
-def test_collection_info_returns_count_and_metadata(local_t3: T3Database):
+def test_collection_info_returns_count_and_metadata_and_increases(local_t3: T3Database):
     local_t3.put(collection="knowledge__info_test", content="Some knowledge content", title="info-doc.md", tags="test")
     info = local_t3.collection_info("knowledge__info_test")
     assert info["count"] == 1
     assert isinstance(info["metadata"], dict)
+
+    local_t3.put(collection="knowledge__count_test", content="first doc", title="doc-1.md")
+    local_t3.put(collection="knowledge__count_test", content="second doc", title="doc-2.md")
+    assert local_t3.collection_info("knowledge__count_test")["count"] == 2
 
 
 def test_collection_info_nonexistent_collection_raises(local_t3: T3Database):
@@ -1263,16 +1322,10 @@ def test_collection_info_nonexistent_collection_raises(local_t3: T3Database):
         local_t3.collection_info("knowledge__does_not_exist")
 
 
-def test_collection_info_count_increases(local_t3: T3Database):
-    local_t3.put(collection="knowledge__count_test", content="first doc", title="doc-1.md")
-    local_t3.put(collection="knowledge__count_test", content="second doc", title="doc-2.md")
-    assert local_t3.collection_info("knowledge__count_test")["count"] == 2
-
-
 # ── local_t3: list_store ────────────────────────────────────────────────────
 
 
-def test_list_store_returns_entries_with_metadata(local_t3: T3Database):
+def test_list_store_returns_entries_with_metadata_and_multiple(local_t3: T3Database):
     local_t3.put(collection="knowledge__ls_test", content="stored content", title="ls-doc.md", tags="alpha,beta", ttl_days=30)
     entries = local_t3.list_store("knowledge__ls_test")
     assert len(entries) == 1
@@ -1282,17 +1335,15 @@ def test_list_store_returns_entries_with_metadata(local_t3: T3Database):
     assert entry["tags"] == "alpha,beta"
     assert entry["ttl_days"] == 30
 
-
-def test_list_store_nonexistent_collection_returns_empty(local_t3: T3Database):
-    assert local_t3.list_store("knowledge__no_such_coll") == []
-
-
-def test_list_store_multiple_entries(local_t3: T3Database):
     for i in range(3):
         local_t3.put(collection="knowledge__multi_ls", content=f"content {i}", title=f"doc-{i}.md")
     entries = local_t3.list_store("knowledge__multi_ls")
     assert len(entries) == 3
     assert {e["title"] for e in entries} == {"doc-0.md", "doc-1.md", "doc-2.md"}
+
+
+def test_list_store_nonexistent_collection_returns_empty(local_t3: T3Database):
+    assert local_t3.list_store("knowledge__no_such_coll") == []
 
 
 # ── local_t3: collection_exists ─────────────────────────────────────────────

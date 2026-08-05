@@ -32,23 +32,22 @@ def test_min_max_normalize_all_equal_returns_zero():
     assert result == pytest.approx(0.0, abs=1e-3)
 
 
-def test_hybrid_score_weights():
+@pytest.mark.parametrize(
+    "vector_norm, frecency_norm, expected",
+    [
+        # 0.7*0.8 + 0.3*0.5 = 0.56 + 0.15 = 0.71
+        (0.8, 0.5, 0.71),
+        # For docs/knowledge results with no frecency, score = 0.7 * vector_norm.
+        (1.0, 0.0, 0.7),
+        # Ripgrep exact-match: vector_norm=1.0 before weighted sum.
+        (1.0, 0.6, 0.7 * 1.0 + 0.3 * 0.6),
+    ],
+    ids=["weighted_mix", "zero_frecency", "ripgrep_exact_vector_norm_one"],
+)
+def test_hybrid_score_weights(vector_norm: float, frecency_norm: float, expected: float):
     """hybrid_score = 0.7 * vector_norm + 0.3 * frecency_norm."""
-    # vector_norm=0.8, frecency_norm=0.5 → 0.7*0.8 + 0.3*0.5 = 0.56 + 0.15 = 0.71
-    score = hybrid_score(vector_norm=0.8, frecency_norm=0.5)
-    assert score == pytest.approx(0.71, abs=1e-6)
-
-
-def test_hybrid_score_zero_frecency():
-    """For docs/knowledge results with no frecency, score = 0.7 * vector_norm."""
-    score = hybrid_score(vector_norm=1.0, frecency_norm=0.0)
-    assert score == pytest.approx(0.7, abs=1e-6)
-
-
-def test_hybrid_score_ripgrep_exact_vector_norm_one():
-    """Ripgrep exact-match: vector_norm=1.0 before weighted sum."""
-    score = hybrid_score(vector_norm=1.0, frecency_norm=0.6)
-    assert score == pytest.approx(0.7 * 1.0 + 0.3 * 0.6, abs=1e-6)
+    score = hybrid_score(vector_norm=vector_norm, frecency_norm=frecency_norm)
+    assert score == pytest.approx(expected, abs=1e-6)
 
 
 # ── AC2: --hybrid warns when no code corpus ───────────────────────────────────
@@ -205,74 +204,83 @@ class TestThresholdOverride:
     workaround for silent threshold-drop on dense-prose collections.
     """
 
-    def test_none_preserves_config_threshold(self):
-        """Override=None falls back to per-collection config (code=0.45)."""
-        t3 = _ThresholdFakeT3({
-            "code__nexus": [
-                {"id": "a", "content": "keep", "distance": 0.30},
-                {"id": "b", "content": "drop", "distance": 0.50},
-            ],
-        })
+    @pytest.mark.parametrize(
+        "collection, rows, threshold_override, expected_ids, voyage",
+        [
+            # Override=None falls back to per-collection config (code=0.45).
+            (
+                "code__nexus",
+                [
+                    {"id": "a", "content": "keep", "distance": 0.30},
+                    {"id": "b", "content": "drop", "distance": 0.50},
+                ],
+                None,
+                {"a"},
+                True,
+            ),
+            # Override=0.35 filters results that the 0.45 config would keep.
+            (
+                "code__nexus",
+                [
+                    {"id": "a", "content": "keep", "distance": 0.30},
+                    {"id": "b", "content": "edge", "distance": 0.40},
+                ],
+                0.35,
+                {"a"},
+                True,
+            ),
+            # Override=1.0 keeps results the 0.65 knowledge threshold would drop.
+            (
+                "knowledge__papers",
+                [
+                    {"id": "a", "content": "below", "distance": 0.60},
+                    {"id": "b", "content": "above", "distance": 0.80},
+                ],
+                1.0,
+                {"a", "b"},
+                True,
+            ),
+            # Override=inf keeps everything regardless of distance.
+            (
+                "knowledge__papers",
+                [
+                    {"id": "a", "content": "fine", "distance": 0.30},
+                    {"id": "b", "content": "noise", "distance": 0.95},
+                    {"id": "c", "content": "garbage", "distance": 1.50},
+                ],
+                float("inf"),
+                {"a", "b", "c"},
+                True,
+            ),
+            # threshold_override bypasses the Voyage gate — explicit user
+            # intent overrides the local-mode skip heuristic.
+            (
+                "knowledge__papers",
+                [
+                    {"id": "a", "content": "keep", "distance": 0.50},
+                    {"id": "b", "content": "drop", "distance": 0.90},
+                ],
+                0.70,
+                {"a"},
+                False,
+            ),
+        ],
+        ids=[
+            "none_preserves_config_threshold",
+            "strict_override_filters_more",
+            "permissive_override_keeps_more",
+            "infinity_override_disables_filter",
+            "override_applies_without_voyage_client",
+        ],
+    )
+    def test_threshold_override_behavior(
+        self, collection, rows, threshold_override, expected_ids, voyage,
+    ):
+        t3 = _ThresholdFakeT3({collection: rows}, voyage=voyage)
         results = search_cross_corpus(
-            "test", ["code__nexus"], 10, t3, threshold_override=None,
+            "test", [collection], 10, t3, threshold_override=threshold_override,
         )
-        assert {r.id for r in results} == {"a"}
-
-    def test_strict_override_filters_more(self):
-        """Override=0.35 filters results that the 0.45 config would keep."""
-        t3 = _ThresholdFakeT3({
-            "code__nexus": [
-                {"id": "a", "content": "keep", "distance": 0.30},
-                {"id": "b", "content": "edge", "distance": 0.40},
-            ],
-        })
-        results = search_cross_corpus(
-            "test", ["code__nexus"], 10, t3, threshold_override=0.35,
-        )
-        assert {r.id for r in results} == {"a"}
-
-    def test_permissive_override_keeps_more(self):
-        """Override=1.0 keeps results the 0.65 knowledge threshold would drop."""
-        t3 = _ThresholdFakeT3({
-            "knowledge__papers": [
-                {"id": "a", "content": "below", "distance": 0.60},
-                {"id": "b", "content": "above", "distance": 0.80},
-            ],
-        })
-        results = search_cross_corpus(
-            "test", ["knowledge__papers"], 10, t3, threshold_override=1.0,
-        )
-        assert {r.id for r in results} == {"a", "b"}
-
-    def test_infinity_override_disables_filter(self):
-        """Override=inf keeps everything regardless of distance."""
-        t3 = _ThresholdFakeT3({
-            "knowledge__papers": [
-                {"id": "a", "content": "fine", "distance": 0.30},
-                {"id": "b", "content": "noise", "distance": 0.95},
-                {"id": "c", "content": "garbage", "distance": 1.50},
-            ],
-        })
-        results = search_cross_corpus(
-            "test", ["knowledge__papers"], 10, t3,
-            threshold_override=float("inf"),
-        )
-        assert {r.id for r in results} == {"a", "b", "c"}
-
-    def test_override_applies_without_voyage_client(self):
-        """``threshold_override`` bypasses the Voyage gate — explicit user
-        intent overrides the local-mode skip heuristic."""
-        t3 = _ThresholdFakeT3(
-            {"knowledge__papers": [
-                {"id": "a", "content": "keep", "distance": 0.50},
-                {"id": "b", "content": "drop", "distance": 0.90},
-            ]},
-            voyage=False,
-        )
-        results = search_cross_corpus(
-            "test", ["knowledge__papers"], 10, t3, threshold_override=0.70,
-        )
-        assert {r.id for r in results} == {"a"}
+        assert {r.id for r in results} == expected_ids
 
 
 class _ConcurrentFakeT3:
@@ -438,48 +446,55 @@ class TestSearchDiagnostics:
         assert raw == 1 and dropped == 0
         assert top_dist is None
 
-    def test_worst_offender_picks_highest_top_distance(self):
-        """Worst offender = full-drop collection with highest top_distance."""
-        t3 = _ThresholdFakeT3({
-            "code__a": [
-                {"id": "a1", "content": "x", "distance": 0.50},
-                {"id": "a2", "content": "x", "distance": 0.55},
-            ],
-            "knowledge__b": [
-                {"id": "b1", "content": "x", "distance": 0.80},
-                {"id": "b2", "content": "x", "distance": 0.95},
-            ],
-        })
+    @pytest.mark.parametrize(
+        "collections_data, search_cols, expected_worst_name, expected_top_distance",
+        [
+            # Worst offender = full-drop collection with highest top_distance.
+            (
+                {
+                    "code__a": [
+                        {"id": "a1", "content": "x", "distance": 0.50},
+                        {"id": "a2", "content": "x", "distance": 0.55},
+                    ],
+                    "knowledge__b": [
+                        {"id": "b1", "content": "x", "distance": 0.80},
+                        {"id": "b2", "content": "x", "distance": 0.95},
+                    ],
+                },
+                ["code__a", "knowledge__b"],
+                "knowledge__b",
+                0.80,
+            ),
+            # Collections with any survivor are not eligible as 'worst'.
+            (
+                {
+                    "code__a": [
+                        {"id": "a1", "content": "keep", "distance": 0.30},
+                        {"id": "a2", "content": "drop", "distance": 0.80},
+                    ],
+                    "knowledge__b": [
+                        {"id": "b1", "content": "x", "distance": 0.70},
+                    ],
+                },
+                ["code__a", "knowledge__b"],
+                "knowledge__b",
+                None,
+            ),
+        ],
+        ids=["picks_highest_top_distance", "ignores_partial_drops"],
+    )
+    def test_worst_offender_picks_full_drop_collection(
+        self, collections_data, search_cols, expected_worst_name, expected_top_distance,
+    ):
+        t3 = _ThresholdFakeT3(collections_data)
         diag_out: list = []
-        search_cross_corpus(
-            "test", ["code__a", "knowledge__b"], 10, t3,
-            diagnostics_out=diag_out,
-        )
+        search_cross_corpus("test", search_cols, 10, t3, diagnostics_out=diag_out)
         worst = diag_out[0].worst_offender()
         assert worst is not None
-        name, threshold, top_distance = worst
-        assert name == "knowledge__b"
-        assert top_distance == pytest.approx(0.80)
-
-    def test_worst_offender_ignores_partial_drops(self):
-        """Collections with any survivor are not eligible as 'worst'."""
-        t3 = _ThresholdFakeT3({
-            "code__a": [
-                {"id": "a1", "content": "keep", "distance": 0.30},
-                {"id": "a2", "content": "drop", "distance": 0.80},
-            ],
-            "knowledge__b": [
-                {"id": "b1", "content": "x", "distance": 0.70},
-            ],
-        })
-        diag_out: list = []
-        search_cross_corpus(
-            "test", ["code__a", "knowledge__b"], 10, t3,
-            diagnostics_out=diag_out,
-        )
-        worst = diag_out[0].worst_offender()
-        assert worst is not None
-        assert worst[0] == "knowledge__b"
+        name, _threshold, top_distance = worst
+        assert name == expected_worst_name
+        if expected_top_distance is not None:
+            assert top_distance == pytest.approx(expected_top_distance)
 
     def test_worst_offender_none_when_no_full_drops(self):
         """``None`` when no collection had every candidate dropped."""
@@ -1351,24 +1366,27 @@ class TestThresholdGateServiceMode:
         monkeypatch.setattr(client.__class__, "embedding_mode", lambda self: mode)
         return client
 
-    def test_server_voyage_mode_filters(self, monkeypatch):
-        t3 = self._service_t3(monkeypatch, "voyage")
+    @pytest.mark.parametrize(
+        "mode, set_irrelevant_voyage_key, expected_ids",
+        [
+            # 0.50 > code threshold 0.45.
+            ("voyage", False, {"a"}),
+            # The engine embeds bge locally — Voyage-calibrated thresholds
+            # stay off REGARDLESS of any client credential state.
+            ("onnx-local", True, {"a", "b"}),
+            # /version unreachable → unknown, not "voyage": thresholds off.
+            (None, False, {"a", "b"}),
+        ],
+        ids=["server_voyage_mode_filters", "server_onnx_local_mode_skips_filtering", "unknown_mode_skips_filtering"],
+    )
+    def test_service_mode_threshold_gate(
+        self, monkeypatch, mode, set_irrelevant_voyage_key, expected_ids,
+    ):
+        if set_irrelevant_voyage_key:
+            monkeypatch.setenv("VOYAGE_API_KEY", "sk-configured-but-irrelevant")
+        t3 = self._service_t3(monkeypatch, mode)
         results = search_cross_corpus("test", ["code__nexus"], 10, t3)
-        assert {r.id for r in results} == {"a"}  # 0.50 > code threshold 0.45
-
-    def test_server_onnx_local_mode_skips_filtering(self, monkeypatch):
-        # The engine embeds bge locally — Voyage-calibrated thresholds stay
-        # off REGARDLESS of any client credential state.
-        monkeypatch.setenv("VOYAGE_API_KEY", "sk-configured-but-irrelevant")
-        t3 = self._service_t3(monkeypatch, "onnx-local")
-        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
-        assert {r.id for r in results} == {"a", "b"}
-
-    def test_unknown_mode_skips_filtering(self, monkeypatch):
-        # /version unreachable → unknown, not "voyage": thresholds off.
-        t3 = self._service_t3(monkeypatch, None)
-        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
-        assert {r.id for r in results} == {"a", "b"}
+        assert {r.id for r in results} == expected_ids
 
     def test_non_service_fake_keeps_attribute_gate(self):
         # Regression guard for the existing unit-test contract: a fake t3

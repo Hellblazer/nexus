@@ -696,38 +696,25 @@ class TestMCPPrefixStripping:
     before resolution."""
 
     @pytest.mark.asyncio
-    async def test_mcp_prefix_stripped(self):
+    @pytest.mark.parametrize(
+        "tool_in, expected_out",
+        [
+            ("mcp__plugin_conexus_nexus__search", "search"),
+            ("search", "search"),
+            # Planner may use tools from other MCP servers (serena,
+            # context7). The prefix should be stripped to the bare name.
+            ("mcp__plugin_sn_serena__jet_brains_find_symbol", "jet_brains_find_symbol"),
+        ],
+        ids=["nexus_mcp_prefix_stripped", "bare_tool_name_unchanged", "non_nexus_mcp_prefix_stripped"],
+    )
+    async def test_tool_name_prefix_stripping(self, tool_in, expected_out):
         from nexus.plans.runner import plan_run
 
-        plan = {"steps": [
-            {"tool": "mcp__plugin_conexus_nexus__search", "args": {"query": "test"}},
-        ]}
+        plan = {"steps": [{"tool": tool_in, "args": {"query": "test"}}]}
         disp = _FakeDispatcher()
         await plan_run(_match(plan), {}, dispatcher=disp)
-        # Dispatcher should receive "search", not the full prefix.
-        assert disp.calls[0][0] == "search"
-
-    @pytest.mark.asyncio
-    async def test_bare_tool_name_unchanged(self):
-        from nexus.plans.runner import plan_run
-
-        plan = {"steps": [{"tool": "search", "args": {"query": "test"}}]}
-        disp = _FakeDispatcher()
-        await plan_run(_match(plan), {}, dispatcher=disp)
-        assert disp.calls[0][0] == "search"
-
-    @pytest.mark.asyncio
-    async def test_non_nexus_mcp_prefix_stripped(self):
-        """Planner may use tools from other MCP servers (serena, context7).
-        The prefix should be stripped to the bare tool name."""
-        from nexus.plans.runner import plan_run
-
-        plan = {"steps": [
-            {"tool": "mcp__plugin_sn_serena__jet_brains_find_symbol", "args": {"query": "test"}},
-        ]}
-        disp = _FakeDispatcher()
-        await plan_run(_match(plan), {}, dispatcher=disp)
-        assert disp.calls[0][0] == "jet_brains_find_symbol"
+        # Dispatcher should receive the bare tool name, not the full prefix.
+        assert disp.calls[0][0] == expected_out
 
 
 class TestLegacyToolKeyAliases:
@@ -735,22 +722,21 @@ class TestLegacyToolKeyAliases:
     should accept all three."""
 
     @pytest.mark.asyncio
-    async def test_op_key_alias(self):
+    @pytest.mark.parametrize(
+        "key, tool_value, args",
+        [
+            ("op", "search", {"query": "test"}),
+            ("operation", "query", {"question": "test"}),
+        ],
+        ids=["op_key_alias", "operation_key_alias"],
+    )
+    async def test_legacy_key_alias(self, key, tool_value, args):
         from nexus.plans.runner import plan_run
 
-        plan = {"steps": [{"op": "search", "args": {"query": "test"}}]}
+        plan = {"steps": [{key: tool_value, "args": args}]}
         disp = _FakeDispatcher()
         await plan_run(_match(plan), {}, dispatcher=disp)
-        assert disp.calls[0][0] == "search"
-
-    @pytest.mark.asyncio
-    async def test_operation_key_alias(self):
-        from nexus.plans.runner import plan_run
-
-        plan = {"steps": [{"operation": "query", "args": {"question": "test"}}]}
-        disp = _FakeDispatcher()
-        await plan_run(_match(plan), {}, dispatcher=disp)
-        assert disp.calls[0][0] == "query"
+        assert disp.calls[0][0] == tool_value
 
 
 # ── _hydrate_operator_args: inputs-arg translation (nexus-yis0) ───────────────
@@ -764,6 +750,29 @@ class TestHydrateInputsTranslation:
     the unknown-kwarg drop in ``_default_dispatcher`` strips the arg
     and the operator fires with no positional, raising TypeError.
     """
+
+    @pytest.mark.parametrize(
+        "op, args_in",
+        [
+            ("filter", {"items": "[]", "criterion": "relevance"}),
+            ("check", {"items": "[]", "check_instruction": "consistent"}),
+            ("verify", {"claim": "X is true", "evidence": "see §2"}),
+            ("groupby", {"items": "[]", "key": "publication year"}),
+            ("aggregate", {"groups": "[]", "reducer": "most-cited method"}),
+        ],
+        ids=["filter", "check", "verify", "groupby", "aggregate"],
+    )
+    def test_bare_name_resolves_to_operator_tool(self, op, args_in):
+        """RDR-088 nexus-ac40.1 / RDR-093 nexus-9bz6+o7u2: plan YAML using
+        the bare verb (``tool: filter`` / ``check`` / ``verify`` /
+        ``groupby`` / ``aggregate``) must resolve through
+        ``_OPERATOR_TOOL_MAP`` to ``operator_<op>``, with correctly-named
+        args passed through untouched."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(op, args_in)
+        assert tool == f"operator_{op}"
+        assert args == args_in
 
     def test_summarize_renames_inputs_to_content(self):
         from nexus.plans.runner import _hydrate_operator_args
@@ -841,17 +850,6 @@ class TestHydrateInputsTranslation:
         assert tool == "operator_extract"
         assert args == {"inputs": "item list", "fields": "a,b"}
 
-    def test_filter_bare_name_resolves_to_operator_filter(self):
-        """RDR-088 nexus-ac40.1: plan YAML using ``tool: filter`` must
-        resolve through ``_OPERATOR_TOOL_MAP`` to ``operator_filter``."""
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "filter", {"items": '[]', "criterion": "relevance"},
-        )
-        assert tool == "operator_filter"
-        assert args == {"items": '[]', "criterion": "relevance"}
-
     def test_filter_renames_inputs_to_items(self):
         """RDR-088 nexus-ac40.1 audit carry-over: pre-hydrated step passing
         ``$stepN.contents`` via ``inputs:`` must be renamed to
@@ -869,64 +867,7 @@ class TestHydrateInputsTranslation:
             "criterion": "keep",
         }
 
-    def test_filter_coerces_list_items_to_json(self):
-        """List-valued ``items`` must be json-encoded so the operator
-        prompt sees clean JSON rather than Python repr. Mirrors the
-        existing rank/compare coercion at runner.py:666."""
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "filter",
-            {"items": [{"id": "a"}, {"id": "b"}], "criterion": "x"},
-        )
-        assert tool == "operator_filter"
-        assert args["items"] == json.dumps([{"id": "a"}, {"id": "b"}])
-
-    def test_filter_preserves_string_items(self):
-        """Already-stringified ``items`` must pass through untouched
-        to avoid double-JSON-encoding."""
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "filter",
-            {"items": '["already", "json"]', "criterion": "x"},
-        )
-        assert tool == "operator_filter"
-        assert args["items"] == '["already", "json"]'
-
-    def test_filter_ids_hydrates_to_items(self):
-        """When a filter step declares ``ids:`` and the auto-hydration
-        path runs ``store_get_many``, the fetched content list must
-        land on the ``items`` arg (not ``inputs``), so the filter's
-        positional arg is populated."""
-        from unittest.mock import patch
-
-        from nexus.plans.runner import _hydrate_operator_args
-
-        fake_contents = {"contents": ["doc-a body", "doc-b body"]}
-        with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
-        ):
-            tool, args = _hydrate_operator_args(
-                "filter",
-                {"ids": ["doc-a", "doc-b"], "criterion": "on-topic"},
-            )
-        assert tool == "operator_filter"
-        assert "ids" not in args and "collections" not in args
-        assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
-        assert args["criterion"] == "on-topic"
-
     # ── operator_check hydration (RDR-088 nexus-ac40.4) ─────────────────
-
-    def test_check_bare_name_resolves_to_operator_check(self):
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "check",
-            {"items": '[]', "check_instruction": "consistent"},
-        )
-        assert tool == "operator_check"
-        assert args == {"items": '[]', "check_instruction": "consistent"}
 
     def test_check_renames_inputs_to_items(self):
         """Pre-hydrated step passing ``$stepN.contents`` via ``inputs:`` must
@@ -944,49 +885,7 @@ class TestHydrateInputsTranslation:
             "check_instruction": "agree",
         }
 
-    def test_check_coerces_list_items_to_json(self):
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "check",
-            {"items": [{"id": "p1"}, {"id": "p2"}],
-             "check_instruction": "consistent"},
-        )
-        assert tool == "operator_check"
-        assert args["items"] == json.dumps([{"id": "p1"}, {"id": "p2"}])
-
-    def test_check_ids_hydrates_to_items(self):
-        """check + ids: auto-hydration pulls document bodies and lands
-        them on ``items`` so the operator prompt sees concrete content."""
-        from unittest.mock import patch
-
-        from nexus.plans.runner import _hydrate_operator_args
-
-        fake_contents = {"contents": ["body-a", "body-b"]}
-        with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
-        ):
-            tool, args = _hydrate_operator_args(
-                "check",
-                {"ids": ["doc-a", "doc-b"],
-                 "check_instruction": "claim holds"},
-            )
-        assert tool == "operator_check"
-        assert args["items"] == json.dumps(["body-a", "body-b"])
-        assert args["check_instruction"] == "claim holds"
-        assert "ids" not in args and "collections" not in args
-
     # ── operator_verify hydration (RDR-088 nexus-ac40.4) ────────────────
-
-    def test_verify_bare_name_resolves_to_operator_verify(self):
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "verify",
-            {"claim": "X is true", "evidence": "see §2"},
-        )
-        assert tool == "operator_verify"
-        assert args == {"claim": "X is true", "evidence": "see §2"}
 
     def test_verify_passes_scalar_args_untouched(self):
         """operator_verify takes two scalars (claim + evidence); there is
@@ -1020,17 +919,6 @@ class TestHydrateInputsTranslation:
 
     # ── operator_groupby hydration (RDR-093 nexus-9bz6) ──────────────────
 
-    def test_groupby_bare_name_resolves_to_operator_groupby(self):
-        """Plan YAML using ``tool: groupby`` must resolve through
-        ``_OPERATOR_TOOL_MAP`` to ``operator_groupby``."""
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "groupby", {"items": '[]', "key": "publication year"},
-        )
-        assert tool == "operator_groupby"
-        assert args == {"items": '[]', "key": "publication year"}
-
     def test_groupby_renames_inputs_to_items(self):
         """Pre-hydrated step passing ``$stepN.contents`` via ``inputs:``
         must be renamed to ``items`` so groupby's positional arg is
@@ -1047,49 +935,87 @@ class TestHydrateInputsTranslation:
             "key": "method family",
         }
 
-    def test_groupby_coerces_list_items_to_json(self):
+    # ── items coercion/hydration shared by filter, check & groupby ───────
+    # (RDR-088 nexus-ac40.1/.4, RDR-093 nexus-9bz6): each of these three
+    # operators exposes an ``items`` positional arg fed either by a
+    # pre-hydrated ``inputs``/``items`` value or an auto-hydrated ``ids``
+    # list. The coercion/preservation/hydration behavior is identical
+    # across the three; only the operator's other required kwarg
+    # (criterion / check_instruction / key) differs.
+
+    @pytest.mark.parametrize(
+        "op, extra_kwarg",
+        [
+            ("filter", ("criterion", "x")),
+            ("check", ("check_instruction", "consistent")),
+            ("groupby", ("key", "x")),
+        ],
+        ids=["filter", "check", "groupby"],
+    )
+    def test_coerces_list_items_to_json(self, op, extra_kwarg):
         """List-valued ``items`` must be json-encoded so the operator
-        prompt sees clean JSON rather than Python repr."""
+        prompt sees clean JSON rather than Python repr. Mirrors the
+        existing rank/compare coercion at runner.py:666."""
         from nexus.plans.runner import _hydrate_operator_args
 
+        key, value = extra_kwarg
         tool, args = _hydrate_operator_args(
-            "groupby",
-            {"items": [{"id": "a"}, {"id": "b"}], "key": "x"},
+            op, {"items": [{"id": "a"}, {"id": "b"}], key: value},
         )
-        assert tool == "operator_groupby"
+        assert tool == f"operator_{op}"
         assert args["items"] == json.dumps([{"id": "a"}, {"id": "b"}])
 
-    def test_groupby_preserves_string_items(self):
-        """Already-stringified ``items`` must pass through untouched."""
+    @pytest.mark.parametrize(
+        "op, extra_kwarg",
+        [
+            ("filter", ("criterion", "x")),
+            ("groupby", ("key", "year")),
+        ],
+        ids=["filter", "groupby"],
+    )
+    def test_preserves_string_items(self, op, extra_kwarg):
+        """Already-stringified ``items`` must pass through untouched
+        to avoid double-JSON-encoding."""
         from nexus.plans.runner import _hydrate_operator_args
 
+        key, value = extra_kwarg
+        already_json = '[{"id": "a"}]'
         tool, args = _hydrate_operator_args(
-            "groupby",
-            {"items": '[{"id": "a"}]', "key": "year"},
+            op, {"items": already_json, key: value},
         )
-        assert tool == "operator_groupby"
-        assert args["items"] == '[{"id": "a"}]'
+        assert tool == f"operator_{op}"
+        assert args["items"] == already_json
 
-    def test_groupby_ids_hydrates_to_items(self):
-        """When a groupby step declares ``ids:`` and the auto-hydration
-        path runs ``store_get_many``, the fetched content list must
-        land on the ``items`` arg so the prompt sees concrete content."""
+    @pytest.mark.parametrize(
+        "op, extra_kwarg",
+        [
+            ("filter", ("criterion", "on-topic")),
+            ("check", ("check_instruction", "claim holds")),
+            ("groupby", ("key", "year")),
+        ],
+        ids=["filter", "check", "groupby"],
+    )
+    def test_ids_hydrates_to_items(self, op, extra_kwarg):
+        """When a step declares ``ids:`` and the auto-hydration path runs
+        ``store_get_many``, the fetched content list must land on the
+        ``items`` arg (not ``inputs``), so the operator's positional arg
+        is populated."""
         from unittest.mock import patch
 
         from nexus.plans.runner import _hydrate_operator_args
 
+        key, value = extra_kwarg
         fake_contents = {"contents": ["doc-a body", "doc-b body"]}
         with patch(
             "nexus.mcp.core.store_get_many", return_value=fake_contents,
         ):
             tool, args = _hydrate_operator_args(
-                "groupby",
-                {"ids": ["doc-a", "doc-b"], "key": "year"},
+                op, {"ids": ["doc-a", "doc-b"], key: value},
             )
-        assert tool == "operator_groupby"
+        assert tool == f"operator_{op}"
         assert "ids" not in args and "collections" not in args
         assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
-        assert args["key"] == "year"
+        assert args[key] == value
 
     def test_groupby_truncation_metadata_attached_when_cap_fires(self):
         """RDR-093 S-1 fix: when ``_OPERATOR_MAX_INPUTS=100`` cap fires
@@ -1240,18 +1166,6 @@ class TestHydrateInputsTranslation:
         }
 
     # ── operator_aggregate hydration (RDR-093 nexus-o7u2) ────────────────
-
-    def test_aggregate_bare_name_resolves_to_operator_aggregate(self):
-        """Plan YAML using ``tool: aggregate`` must resolve through
-        ``_OPERATOR_TOOL_MAP`` to ``operator_aggregate``."""
-        from nexus.plans.runner import _hydrate_operator_args
-
-        tool, args = _hydrate_operator_args(
-            "aggregate",
-            {"groups": '[]', "reducer": "most-cited method"},
-        )
-        assert tool == "operator_aggregate"
-        assert args == {"groups": '[]', "reducer": "most-cited method"}
 
     def test_aggregate_stray_inputs_is_not_translated(self):
         """RDR-093 Phase 2 verify-style test (load-bearing for the

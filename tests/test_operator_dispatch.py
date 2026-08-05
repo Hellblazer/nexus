@@ -760,99 +760,134 @@ _FAKE_PAYLOADS: dict[str, dict] = {
 }
 
 
-class TestOperatorExtract:
+class TestSimpleOperatorReturnShapeAndPromptContent:
+    """Extract/Rank/Compare/Summarize/Generate: the simplest operator
+    family, each a thin ``claude_dispatch`` wrapper. Two facets are
+    identical in shape across all five — the returned dict carries the
+    documented key, and the composed prompt embeds every caller-supplied
+    argument verbatim — so they're tabled here rather than duplicated
+    per operator. Operator-specific behavior (schema shape, multi-item
+    scenarios, one/two-sided compare mode selection) stays in each
+    operator's own class below.
+    """
 
     @pytest.mark.asyncio
-    async def test_returns_extractions_key(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "op_name, call_kwargs, fake_return, expected_key",
+        [
+            (
+                "operator_extract",
+                {"inputs": '["text one"]', "fields": "title"},
+                {"extractions": [{"title": "Alpha"}]},
+                "extractions",
+            ),
+            (
+                "operator_rank",
+                {"items": '["a", "b"]', "criterion": "relevance"},
+                {"ranked": ["b", "a"]},
+                "ranked",
+            ),
+            (
+                "operator_compare",
+                {"items": '["A", "B"]'},
+                {"comparison": "A is better"},
+                "comparison",
+            ),
+            (
+                "operator_summarize",
+                {"content": "Long content here."},
+                {"summary": "Short summary.", "citations": []},
+                "summary",
+            ),
+            (
+                "operator_generate",
+                {"template": "synthesis", "context": "some context"},
+                {"output": "Generated text.", "citations": []},
+                "output",
+            ),
+        ],
+        ids=["extract", "rank", "compare", "summarize", "generate"],
+    )
+    async def test_returns_expected_key(
+        self, monkeypatch, op_name, call_kwargs, fake_return, expected_key,
+    ) -> None:
         import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_extract
+        import nexus.mcp.core as _core
 
         async def fake(*a, **kw):
-            return {"extractions": [{"title": "Alpha"}]}
+            return fake_return
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        result = await operator_extract(inputs='["text one"]', fields="title")
-        assert "extractions" in result
-        assert isinstance(result["extractions"], list)
+        operator = getattr(_core, op_name)
+        result = await operator(**call_kwargs)
+        assert expected_key in result
+        assert isinstance(result[expected_key], type(fake_return[expected_key]))
 
     @pytest.mark.asyncio
-    async def test_prompt_contains_fields(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "op_name, call_kwargs, fake_return, expected_substrings",
+        [
+            (
+                "operator_extract",
+                {"inputs": "some text", "fields": "author,year"},
+                {"extractions": []},
+                ["author", "year"],
+            ),
+            (
+                "operator_extract",
+                {"inputs": "unique sentinel value abc123", "fields": "x"},
+                {"extractions": []},
+                ["unique sentinel value abc123"],
+            ),
+            (
+                "operator_rank",
+                {"items": '["x"]', "criterion": "novelty"},
+                {"ranked": []},
+                ["novelty"],
+            ),
+            (
+                "operator_summarize",
+                {"content": "sentinel content xyz"},
+                {"summary": "", "citations": []},
+                ["sentinel content xyz"],
+            ),
+            (
+                "operator_generate",
+                {"template": "executive-summary", "context": "sentinel ctx abc"},
+                {"output": "", "citations": []},
+                ["sentinel ctx abc", "executive-summary"],
+            ),
+        ],
+        ids=[
+            "extract_fields",
+            "extract_inputs_echoed",
+            "rank_criterion",
+            "summarize_content",
+            "generate_template_and_context",
+        ],
+    )
+    async def test_prompt_contains_call_args(
+        self, monkeypatch, op_name, call_kwargs, fake_return, expected_substrings,
+    ) -> None:
         import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_extract
+        import nexus.mcp.core as _core
 
         captured: list[str] = []
 
         async def fake(prompt, schema, timeout=60.0):
             captured.append(prompt)
-            return {"extractions": []}
+            return fake_return
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_extract(inputs="some text", fields="author,year")
+        operator = getattr(_core, op_name)
+        await operator(**call_kwargs)
 
         assert captured, "claude_dispatch never called"
-        assert "author" in captured[0]
-        assert "year" in captured[0]
-
-    @pytest.mark.asyncio
-    async def test_prompt_contains_inputs(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_extract
-
-        captured: list[str] = []
-
-        async def fake(prompt, schema, timeout=60.0):
-            captured.append(prompt)
-            return {"extractions": []}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_extract(inputs="unique sentinel value abc123", fields="x")
-
-        assert "unique sentinel value abc123" in captured[0]
-
-
-class TestOperatorRank:
-
-    @pytest.mark.asyncio
-    async def test_returns_ranked_key(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_rank
-
-        async def fake(*a, **kw):
-            return {"ranked": ["b", "a"]}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        result = await operator_rank(items='["a", "b"]', criterion="relevance")
-        assert "ranked" in result
-
-    @pytest.mark.asyncio
-    async def test_prompt_contains_criterion(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_rank
-
-        captured: list[str] = []
-
-        async def fake(prompt, schema, timeout=60.0):
-            captured.append(prompt)
-            return {"ranked": []}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_rank(items='["x"]', criterion="novelty")
-        assert "novelty" in captured[0]
+        for substring in expected_substrings:
+            assert substring in captured[0]
 
 
 class TestOperatorCompare:
-
-    @pytest.mark.asyncio
-    async def test_returns_comparison_key(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_compare
-
-        async def fake(*a, **kw):
-            return {"comparison": "A is better"}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        result = await operator_compare(items='["A", "B"]')
-        assert "comparison" in result
 
     @pytest.mark.asyncio
     async def test_one_sided_prompt_uses_items(self, monkeypatch) -> None:
@@ -966,67 +1001,6 @@ class TestOperatorCompare:
         assert "Compare the following items" in captured["prompt"]
         assert "fallback" in captured["prompt"]
         assert "Set A:" not in captured["prompt"]
-
-
-class TestOperatorSummarize:
-
-    @pytest.mark.asyncio
-    async def test_returns_summary_key(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_summarize
-
-        async def fake(*a, **kw):
-            return {"summary": "Short summary.", "citations": []}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        result = await operator_summarize(content="Long content here.")
-        assert "summary" in result
-
-    @pytest.mark.asyncio
-    async def test_prompt_contains_content(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_summarize
-
-        captured: list[str] = []
-
-        async def fake(prompt, schema, timeout=60.0):
-            captured.append(prompt)
-            return {"summary": "", "citations": []}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_summarize(content="sentinel content xyz")
-        assert "sentinel content xyz" in captured[0]
-
-
-class TestOperatorGenerate:
-
-    @pytest.mark.asyncio
-    async def test_returns_output_key(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_generate
-
-        async def fake(*a, **kw):
-            return {"output": "Generated text.", "citations": []}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        result = await operator_generate(template="synthesis", context="some context")
-        assert "output" in result
-
-    @pytest.mark.asyncio
-    async def test_prompt_contains_template_and_context(self, monkeypatch) -> None:
-        import nexus.operators.dispatch as _mod
-        from nexus.mcp.core import operator_generate
-
-        captured: list[str] = []
-
-        async def fake(prompt, schema, timeout=60.0):
-            captured.append(prompt)
-            return {"output": "", "citations": []}
-
-        monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_generate(template="executive-summary", context="sentinel ctx abc")
-        assert "sentinel ctx abc" in captured[0]
-        assert "executive-summary" in captured[0]
 
 
 class TestOperatorFilter:

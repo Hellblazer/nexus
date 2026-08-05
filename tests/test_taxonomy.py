@@ -1586,35 +1586,34 @@ class TestSklearnHdbscanSmoke:
 class TestReviewMethods:
     """CatalogTaxonomy methods for review workflow."""
 
-    def test_get_unreviewed_topics(self, db: T2Database) -> None:
-        """get_unreviewed_topics returns only pending topics."""
+    def test_get_unreviewed_topics_status_filter_limit_and_all_collections(
+        self, db: T2Database,
+    ) -> None:
+        """get_unreviewed_topics: status-filtered to pending, respects limit,
+        and returns all collections when collection= is omitted."""
         _seed_topic(db.taxonomy, "pending-topic", collection="proj", doc_count=5,
                     review_status="pending")
         _seed_topic(db.taxonomy, "accepted-topic", collection="proj", doc_count=3,
                     review_status="accepted")
         _seed_topic(db.taxonomy, "deleted-topic", collection="proj", doc_count=1,
                     review_status="deleted")
-
         unreviewed = db.taxonomy.get_unreviewed_topics(collection="proj")
         assert len(unreviewed) == 1
         assert unreviewed[0]["label"] == "pending-topic"
 
-    def test_get_unreviewed_topics_limit(self, db: T2Database) -> None:
-        """get_unreviewed_topics respects limit."""
         for i in range(10):
             _seed_topic(db.taxonomy, f"topic-{i}", collection="proj",
                         doc_count=i + 1)
-
         result = db.taxonomy.get_unreviewed_topics(collection="proj", limit=3)
         assert len(result) == 3
 
-    def test_get_unreviewed_topics_all_collections(self, db: T2Database) -> None:
-        """get_unreviewed_topics with empty collection returns all."""
         _seed_topic(db.taxonomy, "topic-a", collection="coll-a", doc_count=5)
         _seed_topic(db.taxonomy, "topic-b", collection="coll-b", doc_count=3)
-
         result = db.taxonomy.get_unreviewed_topics()
-        assert len(result) == 2
+        # No collection filter -> every still-pending topic seeded above:
+        # pending-topic (1) + topic-0..9 (10) + topic-a/topic-b (2) = 13.
+        # accepted-topic/deleted-topic are excluded (non-pending status).
+        assert len(result) == 13
 
     def test_mark_topic_reviewed(self, db: T2Database) -> None:
         """mark_topic_reviewed updates review_status."""
@@ -1645,8 +1644,12 @@ class TestReviewMethods:
         assert db.taxonomy.get_topic_by_id(topic_id) is None
         assert db.taxonomy.get_all_topic_doc_ids(topic_id) == []
 
-    def test_merge_topics(self, db: T2Database) -> None:
-        """merge_topics moves assignments from source to target, deletes source."""
+    def test_merge_topics_moves_assignments_and_dedupes_shared_docs(
+        self, db: T2Database,
+    ) -> None:
+        """merge_topics moves assignments from source to target and deletes
+        source; a doc assigned to both source and target dedupes to one
+        assignment on target."""
         source_id = _seed_topic(db.taxonomy, "source", collection="proj", doc_count=2)
         target_id = _seed_topic(db.taxonomy, "target", collection="proj", doc_count=3)
         _seed_assignment(db.taxonomy, "doc-a", source_id)
@@ -1664,19 +1667,15 @@ class TestReviewMethods:
             "doc-a", "doc-b", "doc-c",
         ]
 
-    def test_merge_topics_dedup(self, db: T2Database) -> None:
-        """merge_topics handles docs assigned to both source and target."""
-        source_id = _seed_topic(db.taxonomy, "source", collection="proj", doc_count=1)
-        target_id = _seed_topic(db.taxonomy, "target", collection="proj", doc_count=1)
+        # Dedup case: same doc assigned to both source and target.
+        source_id2 = _seed_topic(db.taxonomy, "source2", collection="proj", doc_count=1)
+        target_id2 = _seed_topic(db.taxonomy, "target2", collection="proj", doc_count=1)
+        _seed_assignment(db.taxonomy, "shared-doc", source_id2)
+        _seed_assignment(db.taxonomy, "shared-doc", target_id2)
 
-        # Same doc assigned to both topics
-        _seed_assignment(db.taxonomy, "shared-doc", source_id)
-        _seed_assignment(db.taxonomy, "shared-doc", target_id)
+        db.taxonomy.merge_topics(source_id2, target_id2)
 
-        db.taxonomy.merge_topics(source_id, target_id)
-
-        # Only one assignment for the shared doc on target
-        assert db.taxonomy.get_all_topic_doc_ids(target_id) == ["shared-doc"]
+        assert db.taxonomy.get_all_topic_doc_ids(target_id2) == ["shared-doc"]
 
     # ── RDR-164 P5 (nexus-c6vze): dead Chroma centroid cleanup removed ────────
     # nexus-5kl1b closed obsolete: post-RDR-155 P4a the raw-Chroma
@@ -2001,7 +2000,15 @@ class TestResolveLabel:
 
 
 class TestSplitTopic:
-    """split_topic creates child topics via KMeans sub-clustering."""
+    """split_topic / compute_split / persist_split: the split pipeline.
+
+    nexus-test-cleanup P3a: this class used to be a 12-test grab-bag
+    covering split, get_all_topics, label mutation, and projection links
+    under one misleading name (T1 scratch 8334713d). Regrouped into 4
+    subject-scoped classes; only the actual split-pipeline tests remain
+    here. See TestGetAllTopics, TestTopicLabelUpdates, TestProjectionLinks
+    below for the rest.
+    """
 
     @pytest.fixture()
     def chroma(self) -> Any:
@@ -2060,163 +2067,6 @@ class TestSplitTopic:
         # Parent centroid should be gone, child centroids should exist
         assert parent_id not in centroid_topic_ids
         assert child_ids == centroid_topic_ids
-
-    def test_get_all_topics_returns_roots_and_children(self, db: T2Database) -> None:
-        """get_all_topics returns every row; get_topics returns only roots.
-
-        GitHub #243 + bead nexus-kxez. label / relabel pre-check used
-        get_topics and therefore couldn't see split sub-topics.
-        """
-        parent_a = _seed_topic(db.taxonomy, "root-a", collection="c", doc_count=10)
-        _seed_topic(db.taxonomy, "root-b", collection="c", doc_count=8)
-        _seed_topic(
-            db.taxonomy, "child-a1", collection="c", doc_count=4,
-            parent_id=parent_a,
-        )
-
-        roots = db.taxonomy.get_topics()
-        assert {t["label"] for t in roots} == {"root-a", "root-b"}
-
-        everything = db.taxonomy.get_all_topics()
-        assert {t["label"] for t in everything} == {"root-a", "root-b", "child-a1"}
-
-    def test_get_all_topics_filters_by_collection(self, db: T2Database) -> None:
-        """get_all_topics(collection=...) narrows to one collection."""
-        _seed_topic(db.taxonomy, "a-root", collection="c1", doc_count=10)
-        _seed_topic(db.taxonomy, "b-root", collection="c2", doc_count=5)
-        # Keyword form: the Http twin's get_all_topics takes collection
-        # keyword-only.
-        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c1")} == {"a-root"}
-        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c2")} == {"b-root"}
-
-    def test_update_topic_label_preserves_review_status(
-        self, db: T2Database,
-    ) -> None:
-        """update_topic_label changes only the label, not review_status.
-
-        GitHub #241 Item 3: rename_topic sets review_status='accepted'
-        as a side effect, which is correct for the interactive review
-        path but wrong for batch LLM labeling. update_topic_label is
-        the label-only helper.
-        """
-        tid = _seed_topic(
-            db.taxonomy, "old-label", collection="c", doc_count=5,
-            review_status="pending",
-        )
-
-        db.taxonomy.update_topic_label(tid, "new-label")
-        topic = db.taxonomy.get_topic_by_id(tid)
-        assert (topic["label"], topic["review_status"]) == ("new-label", "pending")
-
-    def test_rename_topic_still_accepts(self, db: T2Database) -> None:
-        """rename_topic continues to transition review_status → accepted.
-
-        Used by the interactive ``nx taxonomy review`` rename path.
-        Regression guard: the #241 Item 3 fix does not touch rename_topic.
-        """
-        tid = _seed_topic(
-            db.taxonomy, "old", collection="c", doc_count=5,
-            review_status="pending",
-        )
-
-        db.taxonomy.rename_topic(tid, "renamed")
-        topic = db.taxonomy.get_topic_by_id(tid)
-        assert (topic["label"], topic["review_status"]) == ("renamed", "accepted")
-
-    def test_get_projection_counts_by_collection(self, db: T2Database) -> None:
-        """get_projection_counts_by_collection groups by source_collection.
-
-        GitHub #239: status uses this to flag collections with topics
-        but zero projection assignments.
-        """
-        # Seed two topics (targets) in different collections
-        tgt_a = _seed_topic(db.taxonomy, "tgt-a", collection="c_target_a", doc_count=5)
-        tgt_b = _seed_topic(db.taxonomy, "tgt-b", collection="c_target_b", doc_count=3)
-
-        # Projection assignments originate from two different source collections.
-        db.taxonomy.assign_topic(
-            "doc-1", tgt_a, assigned_by="projection",
-            similarity=0.9, source_collection="c_src_1",
-        )
-        db.taxonomy.assign_topic(
-            "doc-2", tgt_a, assigned_by="projection",
-            similarity=0.8, source_collection="c_src_1",
-        )
-        db.taxonomy.assign_topic(
-            "doc-3", tgt_b, assigned_by="projection",
-            similarity=0.7, source_collection="c_src_2",
-        )
-        # A non-projection assignment must be ignored by the helper.
-        db.taxonomy.assign_topic(
-            "doc-4", tgt_a, assigned_by="hdbscan",
-        )
-
-        counts = db.taxonomy.get_projection_counts_by_collection()
-        assert counts == {"c_src_1": 2, "c_src_2": 1}
-
-    def test_refresh_projection_links_aggregates_per_chunk_pairs(
-        self, db: T2Database,
-    ) -> None:
-        """refresh_projection_links produces (src_topic, tgt_topic) pair counts.
-
-        GitHub #240: project --persist only wrote topic_assignments;
-        links view read topic_links which was stale. The refresh helper
-        aggregates per-chunk projection rows into topic-pair counts
-        and upserts them into topic_links.
-        """
-        src_id = _seed_topic(db.taxonomy, "src-topic", collection="c_src", doc_count=3)
-        tgt_id = _seed_topic(db.taxonomy, "tgt-topic", collection="c_tgt", doc_count=0)
-
-        # Three docs assigned to src-topic via hdbscan, then projected to tgt-topic.
-        for doc_id in ("doc-1", "doc-2", "doc-3"):
-            db.taxonomy.assign_topic(doc_id, src_id, assigned_by="hdbscan")
-            db.taxonomy.assign_topic(
-                doc_id, tgt_id, assigned_by="projection",
-                similarity=0.8, source_collection="c_src",
-            )
-
-        written = db.taxonomy.refresh_projection_links()
-        assert written == 1
-
-        pair = (min(src_id, tgt_id), max(src_id, tgt_id))
-        count = _link_pairs(db.taxonomy, [src_id, tgt_id]).get(pair)
-        assert count == 3  # three per-chunk projection rows
-
-    def test_refresh_projection_links_merges_existing_types(
-        self, db: T2Database,
-    ) -> None:
-        """Existing link_types (e.g. 'cites') survive the projection refresh."""
-        import json as _json
-
-        src_id = _seed_topic(db.taxonomy, "src", collection="c1", doc_count=1)
-        tgt_id = _seed_topic(db.taxonomy, "tgt", collection="c2", doc_count=0)
-        from_id = min(src_id, tgt_id)
-        to_id = max(src_id, tgt_id)
-
-        # Seed an existing link_types entry (simulates prior compute_topic_links)
-        db.taxonomy.upsert_topic_links([
-            {"from_topic_id": from_id, "to_topic_id": to_id,
-             "link_count": 5, "link_types": ["cites"]},
-        ])
-
-        # Assign a projection pair
-        db.taxonomy.assign_topic("doc-1", src_id, assigned_by="hdbscan")
-        db.taxonomy.assign_topic(
-            "doc-1", tgt_id, assigned_by="projection",
-            similarity=0.9, source_collection="c1",
-        )
-
-        db.taxonomy.refresh_projection_links()
-
-        # The pair still exists after the refresh on both substrates.
-        assert (from_id, to_id) in _link_pairs(db.taxonomy, [from_id, to_id])
-
-    def test_refresh_projection_links_no_op_when_no_projections(
-        self, db: T2Database,
-    ) -> None:
-        """No projection rows → returns 0 and doesn't crash."""
-        _seed_topic(db.taxonomy, "t", collection="c", doc_count=0)
-        assert db.taxonomy.refresh_projection_links() == 0
 
     def test_split_too_few_docs(self, db: T2Database) -> None:
         """Split with fewer docs than k returns 0."""
@@ -2316,6 +2166,191 @@ class TestSplitTopic:
         # Parent doc_count is 0
         parent = db.taxonomy.get_topic_by_id(parent_id)
         assert parent["doc_count"] == 0
+
+
+class TestGetAllTopics:
+    """get_all_topics / get_topics: roots-only vs every-row, with collection filter.
+
+    Split out of the former TestSplitTopic grab-bag (nexus-test-cleanup P3a).
+    """
+
+    def test_get_all_topics_returns_roots_and_children(self, db: T2Database) -> None:
+        """get_all_topics returns every row; get_topics returns only roots.
+
+        GitHub #243 + bead nexus-kxez. label / relabel pre-check used
+        get_topics and therefore couldn't see split sub-topics.
+        """
+        parent_a = _seed_topic(db.taxonomy, "root-a", collection="c", doc_count=10)
+        _seed_topic(db.taxonomy, "root-b", collection="c", doc_count=8)
+        _seed_topic(
+            db.taxonomy, "child-a1", collection="c", doc_count=4,
+            parent_id=parent_a,
+        )
+
+        roots = db.taxonomy.get_topics()
+        assert {t["label"] for t in roots} == {"root-a", "root-b"}
+
+        everything = db.taxonomy.get_all_topics()
+        assert {t["label"] for t in everything} == {"root-a", "root-b", "child-a1"}
+
+    def test_get_all_topics_filters_by_collection(self, db: T2Database) -> None:
+        """get_all_topics(collection=...) narrows to one collection."""
+        _seed_topic(db.taxonomy, "a-root", collection="c1", doc_count=10)
+        _seed_topic(db.taxonomy, "b-root", collection="c2", doc_count=5)
+        # Keyword form: the Http twin's get_all_topics takes collection
+        # keyword-only.
+        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c1")} == {"a-root"}
+        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c2")} == {"b-root"}
+
+
+class TestTopicLabelUpdates:
+    """update_topic_label (label-only) vs rename_topic (label + review_status).
+
+    Split out of the former TestSplitTopic grab-bag (nexus-test-cleanup P3a).
+    GitHub #241 Item 3 introduced update_topic_label specifically because
+    rename_topic's review_status side effect is wrong for batch LLM
+    labeling. The two checks operate on independently-seeded topics
+    (different tids) via different sibling methods — not one entity's
+    state progression — so a first-assert failure was silently hiding the
+    second method's own regression. Substantive-critic review (P3 fix
+    pass) flagged the sequential-assert merge; restored via parametrize so
+    each method keeps its own failure id.
+    """
+
+    @pytest.mark.parametrize(
+        "method,new_label,expected_status",
+        [
+            pytest.param(
+                "update_topic_label", "new-label", "pending",
+                id="update_topic_label-preserves-status",
+            ),
+            pytest.param(
+                "rename_topic", "renamed", "accepted",
+                id="rename_topic-transitions-to-accepted",
+            ),
+        ],
+    )
+    def test_update_topic_label_preserves_status_rename_topic_still_accepts(
+        self, db: T2Database, method: str, new_label: str, expected_status: str,
+    ) -> None:
+        """update_topic_label changes only the label, not review_status;
+        rename_topic continues to transition review_status -> accepted.
+
+        GitHub #241 Item 3: rename_topic sets review_status='accepted' as a
+        side effect, correct for the interactive review path but wrong for
+        batch LLM labeling — update_topic_label is the label-only helper.
+        Regression guard: the #241 Item 3 fix does not touch rename_topic,
+        used by the interactive ``nx taxonomy review`` rename path.
+        """
+        tid = _seed_topic(
+            db.taxonomy, "old-label", collection="c", doc_count=5,
+            review_status="pending",
+        )
+        getattr(db.taxonomy, method)(tid, new_label)
+        topic = db.taxonomy.get_topic_by_id(tid)
+        assert (topic["label"], topic["review_status"]) == (new_label, expected_status)
+
+
+class TestProjectionLinks:
+    """get_projection_counts_by_collection + refresh_projection_links.
+
+    Split out of the former TestSplitTopic grab-bag (nexus-test-cleanup P3a).
+    """
+
+    def test_get_projection_counts_by_collection(self, db: T2Database) -> None:
+        """get_projection_counts_by_collection groups by source_collection.
+
+        GitHub #239: status uses this to flag collections with topics
+        but zero projection assignments.
+        """
+        # Seed two topics (targets) in different collections
+        tgt_a = _seed_topic(db.taxonomy, "tgt-a", collection="c_target_a", doc_count=5)
+        tgt_b = _seed_topic(db.taxonomy, "tgt-b", collection="c_target_b", doc_count=3)
+
+        # Projection assignments originate from two different source collections.
+        db.taxonomy.assign_topic(
+            "doc-1", tgt_a, assigned_by="projection",
+            similarity=0.9, source_collection="c_src_1",
+        )
+        db.taxonomy.assign_topic(
+            "doc-2", tgt_a, assigned_by="projection",
+            similarity=0.8, source_collection="c_src_1",
+        )
+        db.taxonomy.assign_topic(
+            "doc-3", tgt_b, assigned_by="projection",
+            similarity=0.7, source_collection="c_src_2",
+        )
+        # A non-projection assignment must be ignored by the helper.
+        db.taxonomy.assign_topic(
+            "doc-4", tgt_a, assigned_by="hdbscan",
+        )
+
+        counts = db.taxonomy.get_projection_counts_by_collection()
+        assert counts == {"c_src_1": 2, "c_src_2": 1}
+
+    def test_refresh_projection_links_aggregates_per_chunk_pairs(
+        self, db: T2Database,
+    ) -> None:
+        """refresh_projection_links produces (src_topic, tgt_topic) pair counts.
+
+        GitHub #240: project --persist only wrote topic_assignments;
+        links view read topic_links which was stale. The refresh helper
+        aggregates per-chunk projection rows into topic-pair counts
+        and upserts them into topic_links.
+        """
+        src_id = _seed_topic(db.taxonomy, "src-topic", collection="c_src", doc_count=3)
+        tgt_id = _seed_topic(db.taxonomy, "tgt-topic", collection="c_tgt", doc_count=0)
+
+        # Three docs assigned to src-topic via hdbscan, then projected to tgt-topic.
+        for doc_id in ("doc-1", "doc-2", "doc-3"):
+            db.taxonomy.assign_topic(doc_id, src_id, assigned_by="hdbscan")
+            db.taxonomy.assign_topic(
+                doc_id, tgt_id, assigned_by="projection",
+                similarity=0.8, source_collection="c_src",
+            )
+
+        written = db.taxonomy.refresh_projection_links()
+        assert written == 1
+
+        pair = (min(src_id, tgt_id), max(src_id, tgt_id))
+        count = _link_pairs(db.taxonomy, [src_id, tgt_id]).get(pair)
+        assert count == 3  # three per-chunk projection rows
+
+    def test_refresh_projection_links_merges_existing_types(
+        self, db: T2Database,
+    ) -> None:
+        """Existing link_types (e.g. 'cites') survive the projection refresh."""
+        import json as _json
+
+        src_id = _seed_topic(db.taxonomy, "src", collection="c1", doc_count=1)
+        tgt_id = _seed_topic(db.taxonomy, "tgt", collection="c2", doc_count=0)
+        from_id = min(src_id, tgt_id)
+        to_id = max(src_id, tgt_id)
+
+        # Seed an existing link_types entry (simulates prior compute_topic_links)
+        db.taxonomy.upsert_topic_links([
+            {"from_topic_id": from_id, "to_topic_id": to_id,
+             "link_count": 5, "link_types": ["cites"]},
+        ])
+
+        # Assign a projection pair
+        db.taxonomy.assign_topic("doc-1", src_id, assigned_by="hdbscan")
+        db.taxonomy.assign_topic(
+            "doc-1", tgt_id, assigned_by="projection",
+            similarity=0.9, source_collection="c1",
+        )
+
+        db.taxonomy.refresh_projection_links()
+
+        # The pair still exists after the refresh on both substrates.
+        assert (from_id, to_id) in _link_pairs(db.taxonomy, [from_id, to_id])
+
+    def test_refresh_projection_links_no_op_when_no_projections(
+        self, db: T2Database,
+    ) -> None:
+        """No projection rows → returns 0 and doesn't crash."""
+        _seed_topic(db.taxonomy, "t", collection="c", doc_count=0)
+        assert db.taxonomy.refresh_projection_links() == 0
 
 
 class TestManualOpsCLI:
