@@ -587,38 +587,45 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voy
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
 
-def test_index_pdf_prune_union_guard_wired_at_call_site(
+def test_index_pdf_small_doc_prune_deleted_as_dead_code(
     sample_pdf, monkeypatch, voyage_client,
 ) -> None:
-    """nexus-tp8yk D3 substantive-critic SIGNIFICANT (nexus-tp8yk-
-    substantive-critique-2026-08-04): proves the D3 union guard is
-    actually WIRED at index_pdf's small-doc-branch prune block — i.e.
-    that ``prune_orphan_candidates``/``orphaned_chashes`` are the real
-    gate between "T3 reports a stale id" and "col.delete gets called" —
-    at the PRODUCTION entry point (``index_pdf``), not just via the
-    helper's own unit tests (tests/test_indexer_utils_prune_orphan_
-    candidates.py) or the real-engine helper test (tests/db/
-    test_http_catalog_integration.py::TestPruneUnionGuard).
+    """nexus-tbkk1: the stale-chunk prune block formerly at index_pdf's
+    small-doc branch (which routed candidates through nexus-tp8yk's D3
+    union guard) is DELETED dead code, not merely runtime-unreachable.
 
-    DISCOVERED while building this test, documented rather than silently
-    absorbed: ``_identity_where``'s ``source_path`` fallback (used by
-    this exact prune query) filters on a chunk-metadata field RDR-102 D2
-    hard-removed from ``make_chunk_metadata`` — every PDF/markdown chunk
-    ``doc_indexer.py`` writes in real production carries NO
-    ``source_path`` at all, so this specific ``col.get(where={"source_
-    path": ...})`` query returns zero rows on a genuinely fresh install
-    and ``stale_ids`` is always empty; the union guard code added here
-    never fires via real writes. The user-visible cross-document
-    protection people actually get on a fresh install comes from
-    ``mcp_infra._sweep_superseded_vectors`` (manifest-diff based,
-    proven end-to-end against the real engine by tests/integration/
-    test_tp8yk_manifest_never_outruns_chunks.py::test_union_guard_keeps_
-    shared_chunk_at_the_production_wiring). That gap PRE-DATES nexus-
-    tp8yk (RDR-102 D2) and is out of this bead's scope to fix — tracked
-    separately. This test forces ``stale_ids`` non-empty via a
-    controlled T3 double specifically so the WIRING nexus-tp8yk added
-    here is verified on its own, independent of whether real writes
-    happen to populate its candidate query today.
+    This test SUPERSEDES nexus-tp8yk's test_index_pdf_prune_union_guard_
+    wired_at_call_site, whose own docstring discovered and documented the
+    gap this bead closes: ``_identity_where``'s ``source_path`` fallback
+    (used by this exact prune query) filters on a chunk-metadata field
+    RDR-102 D2 hard-removed from ``make_chunk_metadata`` — every PDF/
+    markdown chunk doc_indexer.py writes in real production carries NO
+    ``source_path`` at all, so ``col.get(where={"source_path": ...})``
+    always returned zero rows and the union-guard wiring that test proved
+    never fired via real writes. Rather than leave a runtime-dead branch
+    with a passing wiring test, nexus-tbkk1 deletes the branch outright.
+
+    The union-guard LOGIC itself (``orphaned_chashes``) is untouched by
+    this deletion and remains covered by tests/db/test_http_catalog_
+    integration.py::TestPruneUnionGuard. Its thin wrapper
+    ``prune_orphan_candidates`` — built specifically for this deleted
+    call site and its three siblings — was ALSO deleted in this same
+    fix round (substantive-critic Significant #2: zero production
+    callers survived this deletion), along with its now-pointless
+    dedicated test file; see ``nexus.indexer_utils``'s deletion comment.
+    The real cross-document prune protection users actually get is
+    ``mcp_infra._sweep_superseded_vectors`` (manifest-diff based, calls
+    ``orphaned_chashes`` directly), proven end-to-end at tests/
+    integration/test_tp8yk_manifest_never_outruns_chunks.py::
+    test_union_guard_keeps_shared_chunk_at_the_production_wiring.
+
+    Kill control: seeds a T3 double that WOULD have produced two prune
+    candidates (one genuinely orphaned, one shared with another live
+    document) under the old code. If the deleted block were
+    reintroduced, ``col.get`` would be called with the source_path
+    where-clause, ``reader.docs_for_chashes`` would fire, and ``col.
+    delete`` would remove the orphaned candidate — every one of these
+    assertions fails the moment that regresses.
     """
     from nexus.doc_indexer import index_pdf
 
@@ -640,8 +647,6 @@ def test_index_pdf_prune_union_guard_wired_at_call_site(
     t3.get_or_create_collection.return_value = col
 
     reader = MagicMock()
-    # shared_chash: referenced by ANOTHER live document -> must survive.
-    # exclusive_chash: referenced by nobody -> genuinely orphaned -> deleted.
     reader.docs_for_chashes.return_value = {shared_chash: ["9.9.9"]}
 
     set_credentials(monkeypatch)
@@ -655,19 +660,14 @@ def test_index_pdf_prune_union_guard_wired_at_call_site(
         result = index_pdf(sample_pdf, corpus="mybook")
 
     assert result == 1
-    reader.docs_for_chashes.assert_called_once()
-    called_candidates = sorted(reader.docs_for_chashes.call_args[0][0])
-    assert called_candidates == sorted([shared_chash, exclusive_chash]), (
-        f"expected both candidates routed through the union guard, got "
-        f"{called_candidates}"
-    )
-    col.delete.assert_called_once()
-    deleted_ids = col.delete.call_args.kwargs.get("ids") or col.delete.call_args[0][0]
-    assert deleted_ids == [exclusive_chash], (
-        "the union guard must delete ONLY the genuinely-orphaned "
-        f"candidate and never the one another document references — "
-        f"got {deleted_ids}"
-    )
+    reader.docs_for_chashes.assert_not_called()
+    col.delete.assert_not_called()
+    # The prune's source_path-keyed query must never even be issued.
+    for call in col.get.call_args_list:
+        where = call.kwargs.get("where") if call.kwargs else (call.args[0] if call.args else None)
+        assert where != {"source_path": pdf_path_str}, (
+            f"dead source_path prune query resurrected: {call}"
+        )
 
 
 def test_index_pdf_fires_document_hook_exactly_once(
@@ -1553,28 +1553,46 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
     assert progress
 
 
-def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_client, cloud_mode):
-    """RDR-180 (nexus-jxizy.3): chunk natural ID is the full
-    ``chunk_text_hash`` digest. Stale-chunk pruning deletes T3 chunks
-    whose ID is no longer in the current upsert set (i.e. their text
-    no longer appears in this document)."""
+def test_stale_chunk_pruning_deleted_as_dead_code(sample_md, monkeypatch, voyage_client, cloud_mode):
+    """nexus-tbkk1: ``_index_document``'s stale-chunk prune block
+    (formerly triggered after the incremental-staleness check, via
+    ``_identity_where``'s ``source_path`` fallback) is DELETED dead code.
+
+    Supersedes RDR-180's (nexus-jxizy.3) ``test_stale_chunk_pruning_
+    deletes_old_ids``, which asserted this same prune deleted T3 chunks
+    whose id fell out of the current upsert set. That test's ``mock_col.
+    get`` used an unconditional ``side_effect`` list keyed on CALL ORDER,
+    never inspecting the ``where=`` argument — so it never actually
+    proved the production where-clause (``{"source_path": file_path}``)
+    matches anything. RDR-102 D2 (2026-05-02) removed ``source_path``
+    from ``make_chunk_metadata`` entirely, so in real production it
+    never does, and the prune query was permanently a zero-row no-op —
+    see nexus-tbkk1 and nexus-tp8yk's test_index_pdf_prune_union_guard_
+    wired_at_call_site (the sibling PDF-branch discovery that prompted
+    this bead). The real cross-document prune protection is
+    ``mcp_infra._sweep_superseded_vectors``, proven at tests/
+    integration/test_tp8yk_manifest_never_outruns_chunks.py::
+    test_union_guard_keeps_shared_chunk_at_the_production_wiring.
+
+    Kill control: only ONE ``col.get`` call is seeded (the surviving
+    content_hash-keyed staleness check) — if the deleted prune block
+    were reintroduced, it would issue a SECOND ``col.get`` call past the
+    seeded ``side_effect`` list, raising ``StopIteration`` inside
+    ``index_markdown`` and failing this test.
+    """
     set_credentials(monkeypatch)
     new_chunk_texts = [f"chunk text {i}" for i in range(3)]
-    new_ids = {
-        hashlib.sha256(t.encode()).hexdigest() for t in new_chunk_texts
-    }
     stale_ids = {
         hashlib.sha256(f"old text {i}".encode()).hexdigest()
         for i in range(2)
     }
     mock_col = MagicMock()
     mock_col.get.side_effect = [
-        # First call: staleness check (one prior chunk with old content_hash).
+        # ONLY call expected post-deletion: the content_hash-keyed
+        # incremental staleness check (one prior chunk, old content_hash).
         {"ids": [next(iter(stale_ids))],
          "metadatas": [{"content_hash": "old_hash",
                         "embedding_model": "voyage-context-3"}]},
-        # Second call: prune scan returns the union of new + stale IDs.
-        {"ids": list(new_ids | stale_ids)},
     ]
     captured_deletes: list = []
     mock_col.delete.side_effect = lambda ids: captured_deletes.extend(ids)
@@ -1593,7 +1611,8 @@ def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_clie
             with patch("voyageai.Client", return_value=voyage_client):
                 chk_cls.return_value.chunk.return_value = chunks
                 index_markdown(sample_md, corpus="docs")
-    assert set(captured_deletes) == stale_ids
+    assert captured_deletes == []
+    mock_col.delete.assert_not_called()
 
 
 @pytest.fixture
@@ -1668,6 +1687,51 @@ def test_index_pdf_incremental_deletes_checkpoint_on_success(incr_setup):
     result, _ = incr_setup.run(n)
     assert result == n
     assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
+
+
+def test_index_pdf_incremental_prune_deleted_as_dead_code(incr_setup) -> None:
+    """nexus-tbkk1: ``_index_pdf_incremental``'s stale-chunk prune block
+    (formerly gated on ``_identity_where``'s ``source_path`` fallback,
+    the >128-chunk sibling of the small-doc branch's identical deletion
+    — see ``test_index_pdf_small_doc_prune_deleted_as_dead_code`` and
+    ``_index_document``'s ``test_stale_chunk_pruning_deleted_as_dead_
+    code``) is DELETED dead code. No prior test exercised this specific
+    prune site directly; this is new coverage, not a superseding
+    rewrite.
+
+    Kill control: seed a T3 double whose ``col.get`` would, under the
+    pre-nexus-tbkk1 code, be queried a SECOND time (via the prune's
+    ``where={"source_path": ...}`` clause) and report a legacy-shaped
+    stale row. Reintroducing the deleted block makes ``col.delete``
+    fire; this test fails the moment that regresses.
+    """
+    n_chunks = incr_setup.threshold + 10
+    mock_chunks = _make_n_chunks(n_chunks)
+    pdf_path_str = str(incr_setup.path.resolve())
+
+    def _col_get(where=None, include=None, limit=None, offset=0, **kw):
+        if where == {"source_path": pdf_path_str}:
+            if offset == 0:
+                return {"ids": ["stale-legacy-id"]}
+            return {"ids": []}
+        return {"ids": [], "metadatas": []}
+
+    mock_col = MagicMock()
+    mock_col.get.side_effect = _col_get
+    mock_col.delete = MagicMock()
+    t3 = MagicMock()
+    t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
+                ext_cls.return_value.extract.return_value = MagicMock(
+                    text="x" * 5000,
+                    metadata={"extraction_method": "docling", "page_count": 50,
+                              "format": "markdown", "page_boundaries": []})
+                chk_cls.return_value.chunk.return_value = mock_chunks
+                result = index_pdf(incr_setup.path, corpus="test", embed_fn=_fake_embed)
+    assert result == n_chunks
+    mock_col.delete.assert_not_called()
 
 
 def test_index_pdf_small_doc_uses_original_path(incr_setup):

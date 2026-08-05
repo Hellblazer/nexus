@@ -16,6 +16,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower bounds, never silently dropped (nexus-h1zu0).
 
 ### Fixed
+- **Stale-chunk prune's `source_path` filter was permanently dead code**
+  (nexus-tbkk1): four prune blocks (`doc_indexer.py`'s `_index_document`,
+  `_index_pdf_incremental`, `index_pdf`'s small-doc branch, and
+  `pipeline_stages._prune_stale_chunks` on the streaming PDF path) queried T3
+  for stale chunks via `_identity_where`'s `source_path` fallback — but
+  RDR-102 D2 (2026-05-02) removed `source_path` from `make_chunk_metadata` for
+  every writer, so the where-clause matched zero rows on any post-D2 chunk and
+  the blocks never fired (a live-store probe across ~47k chunks in six
+  collections found zero resident `source_path` rows). Deleted as dead code,
+  along with the now caller-less `prune_orphan_candidates` helper; the real
+  cross-document prune protection is `mcp_infra._sweep_superseded_vectors`
+  (manifest-diff based), with `nx t3 gc` as the comprehensive manual backstop.
+  The sibling `source_path` fallbacks in `indexer.py`/`indexer_utils.py`
+  remain live pending their own audit (nexus-afudo). No user-visible behavior
+  change — the deleted code was already a no-op.
 - **`nx doctor`'s dangling-manifest warn names the patients** (nexus-heizf): for
   ten or fewer damaged documents it lists their tumblers directly, otherwise it
   points at `nx catalog manifest-verify --list`; its count is now correctly

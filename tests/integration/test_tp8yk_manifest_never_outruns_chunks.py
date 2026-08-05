@@ -346,11 +346,10 @@ def test_union_guard_keeps_shared_chunk_at_the_production_wiring(tmp_path) -> No
     SIGNIFICANT (2026-08-04): the memo's own TDD plan specified this exact
     scenario (two docs sharing a chash, re-index one, assert the other's
     manifest survives). It was originally substituted with tests of the
-    extracted ``orphaned_chashes``/``prune_orphan_candidates`` HELPERS
-    (tests/db/test_http_catalog_integration.py::TestPruneUnionGuard,
-    tests/test_indexer_utils_prune_orphan_candidates.py) — those prove the
-    helper is correct in isolation, not that production wiring reaches it.
-    This test closes that gap end-to-end, against the real engine.
+    extracted ``orphaned_chashes`` HELPER (tests/db/test_http_catalog_
+    integration.py::TestPruneUnionGuard) — that proves the helper is
+    correct in isolation, not that production wiring reaches it. This
+    test closes that gap end-to-end, against the real engine.
 
     CORRECTED SCOPE NOTE (found while building this test, substantive-
     critic SIGNIFICANT #3 follow-up): this test's PASS is driven by
@@ -361,15 +360,24 @@ def test_union_guard_keeps_shared_chunk_at_the_production_wiring(tmp_path) -> No
     tp8yk added inside ``index_pdf``'s own ``_identity_where``-based
     prune block (confirmed by an instrumented run: that call's candidate
     list is empty here). That block's ``source_path``-keyed candidate
-    query is a PRE-EXISTING dead path for PDF/markdown content — RDR-102
+    query was a PRE-EXISTING dead path for PDF/markdown content — RDR-102
     D2 hard-removed ``source_path`` from ``metadata_schema.make_chunk_
     metadata``, the sole factory every doc_indexer.py/pipeline_stages.py
     chunk write routes through — tracked separately as nexus-tbkk1, out
-    of nexus-tp8yk's scope to fix. The WIRING of nexus-tp8yk's own
-    addition at that specific call site (index_pdf's small-doc branch)
-    is instead proven directly, with a controlled T3 double that forces
-    non-empty candidates, by tests/test_doc_indexer.py::test_index_pdf_
-    prune_union_guard_wired_at_call_site.
+    of nexus-tp8yk's scope to fix at the time this test was written.
+
+    nexus-tbkk1 UPDATE (2026-08-05): that dead prune block (and nexus-
+    tp8yk's ``prune_orphan_candidates`` union-guard wrapper around it,
+    which had zero production callers left once all four of its call
+    sites were deleted) are now GONE. ``tests/test_doc_indexer.py::
+    test_index_pdf_prune_union_guard_wired_at_call_site`` (referenced
+    above by an earlier version of this docstring) is superseded by
+    ``test_index_pdf_small_doc_prune_deleted_as_dead_code`` in the same
+    file, which proves the deletion rather than the wiring.
+    ``prune_orphan_candidates``'s own dedicated test file (tests/
+    test_indexer_utils_prune_orphan_candidates.py) is deleted; the
+    surviving ``orphaned_chashes`` helper remains covered by
+    tests/db/test_http_catalog_integration.py::TestPruneUnionGuard.
 
     This test remains valuable on its own terms regardless: it is a
     real, production-entry-point, real-engine proof that nexus-tp8yk's

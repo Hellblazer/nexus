@@ -109,11 +109,16 @@ class TestTheContractIsUniformAcrossTheClass:
 
 
 class TestCallerLoopsIsolatePerItem:
-    """Grep-level pins on the seven sites audited for nexus-ou4tb (b).
+    """Grep-level pins on the sites audited for nexus-ou4tb (b).
+
+    Originally seven; now six live entries — nexus-tbkk1 retired the
+    doc_indexer.py entry when its guarded prune was deleted as dead code
+    (see the SITES list comment below), the same shape as RDR-155 P4b's
+    earlier retirement of the migration/collision_audit.py entry.
 
     Deliberately structural rather than behavioural: driving a real degraded
-    service through each of these paths needs seven different fixtures, and
-    the property that actually regresses is "somebody removed the guard".
+    service through each of these paths needs a different fixture per site,
+    and the property that actually regresses is "somebody removed the guard".
     """
 
     SITES = [
@@ -122,7 +127,15 @@ class TestCallerLoopsIsolatePerItem:
         ("src/nexus/indexer.py", "legacy_prune_failed_skipping_source_path"),
         ("src/nexus/indexer.py", "gc_sweep_read_failed_skipping_collection"),
         ("src/nexus/exporter.py", "skip_existing_probe_failed_importing_batch"),
-        ("src/nexus/doc_indexer.py", "stale_chunk_prune_failed_registration_still_running"),
+        # (nexus-tbkk1: doc_indexer.py's "stale_chunk_prune_failed_
+        # registration_still_running" guarded region — index_pdf's
+        # small-doc-branch stale-chunk prune — was DELETED as dead code.
+        # RDR-102 D2 removed source_path from make_chunk_metadata, so the
+        # prune's where-clause never matched a real chunk row; there is
+        # no longer a prune here to isolate a failure around. See
+        # nexus.doc_indexer._identity_where's docstring and
+        # test_doc_indexer.py::test_index_pdf_small_doc_prune_deleted_as_
+        # dead_code.)
         ("src/nexus/commands/catalog_cmds/integrity.py", "catalog_verify_collection_unreadable"),
         # (RDR-155 P4b: migration/collision_audit.py's guarded page loop
         # died with the file.)
@@ -185,15 +198,37 @@ class TestCallerLoopsIsolatePerItem:
             "the retired doc_id-keyed ghosts_by_collection shape is back"
         )
 
-    def test_doc_indexer_registers_even_when_the_prune_fails(self) -> None:
-        """Registration must not be stranded behind a prune failure — the
-        chunks and hooks are already committed by that point."""
+    def test_doc_indexer_registers_unconditionally_at_small_doc_tail(self) -> None:
+        """nexus-tbkk1: supersedes test_doc_indexer_registers_even_when_
+        the_prune_fails. That test pinned "a prune failure must not
+        strand catalog registration" by asserting no ``raise`` sat
+        between the (isolated, try/except-wrapped) prune's warning
+        marker and ``_register_in_catalog``. The prune it isolated
+        against is DELETED dead code (RDR-102 D2 made its where-clause
+        permanently unable to match a real chunk row — see
+        ``nexus.doc_indexer._identity_where``'s docstring), so there is
+        no longer a prune failure mode to isolate registration from.
+
+        This test pins the STRONGER surviving invariant directly:
+        registration runs unconditionally between the small-doc
+        branch's dead-prune-deletion marker and the completion stamp —
+        no intervening ``try``/``except`` can strand it.
+        """
         from pathlib import Path
 
         src = Path("src/nexus/doc_indexer.py").read_text()
-        guard = src.index("stale_chunk_prune_failed_registration_still_running")
-        register = src.index("_register_in_catalog(metadatas_list", guard)
-        between = src[guard:register]
-        assert "raise" not in between, (
-            "the prune failure path must fall through to registration"
+        # nexus-tbkk1's "stale-chunk prune ... DELETED" comment appears at
+        # all three deleted prune sites verbatim; rindex the LAST one
+        # (index_pdf's small-doc branch, the only one that precedes
+        # _register_in_catalog) rather than the first (_index_document's).
+        marker = src.rindex(
+            "nexus-tbkk1: stale-chunk prune via _identity_where's source_path"
+        )
+        register = src.index("_register_in_catalog(metadatas_list", marker)
+        between = src[marker:register]
+        assert "try:" not in between and "raise" not in between, (
+            "a try/except (or a raise) reappeared between the deleted "
+            "prune site and catalog registration in index_pdf's "
+            "small-doc branch — registration must run unconditionally, "
+            "never isolated behind a swallowable failure"
         )

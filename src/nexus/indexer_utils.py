@@ -102,60 +102,28 @@ def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> 
     return [h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))]
 
 
-def prune_orphan_candidates(doc_id: str, candidates: Iterable[str]) -> list[str]:
-    """Resolve a catalog reader and apply :func:`orphaned_chashes`, with a
-    principled fallback for the one case that function cannot see: NO
-    catalog reader available at all.
-
-    nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04): the three
-    ``doc_indexer.py`` prune sites and ``pipeline_stages._prune_stale_
-    chunks`` used to gate the whole union-guard call on
-    ``if doc_id: ...`` — falling back to an UNCONDITIONAL delete whenever
-    *doc_id* was empty. ``_register_or_lookup_doc_id``'s own docstring
-    is explicit that ``""`` is returned "only when an unexpected error
-    occurs" (a transient registration failure), not only when the
-    catalog is genuinely absent — so a healthy catalog experiencing one
-    bad request on this run degraded silently to the exact unguarded
-    delete this bead exists to close (the P2 incident class). This
-    function separates the two cases on the READER's own availability,
-    which the empty-doc_id string cannot distinguish by itself:
-
-    * No reader at all (a genuinely uninitialized/absent catalog) —
-      nothing tracks cross-document manifest sharing in that state, so
-      the pre-tp8yk unconditional-delete behaviour is preserved (there
-      is no "other document" a delete could be wrong about).
-    * A reader IS available (the catalog is healthy) but *doc_id* is
-      ``""`` — routes through :func:`orphaned_chashes` anyway.
-      Self-exclusion degrades gracefully: with no real *doc_id* to
-      exclude, a candidate referenced by ANY live document (including
-      one this run simply failed to identify itself as) is correctly
-      kept; a candidate referenced by nothing is correctly deleted.
-      Never silently degrades to unconditional delete on a healthy
-      catalog.
-
-    Args:
-        doc_id: the resolved (or empty-string) doc_id for this run.
-        candidates: chashes to test (typically ``stale_ids``).
-
-    Returns:
-        The subset of *candidates* safe to delete.
-    """
-    cands = list(candidates)
-    if not cands:
-        return []
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-
-    try:
-        reader = make_catalog_reader()
-    except Exception:  # noqa: BLE001 — reader construction failure: same fail-safe posture as a read failure below
-        reader = None
-    if reader is None:
-        _log.warning(
-            "prune_union_guard_no_catalog_unconditional_delete",
-            doc_id=doc_id, candidates=len(cands),
-        )
-        return cands
-    return orphaned_chashes(reader, doc_id, cands)
+# nexus-tbkk1 (2026-08-05, substantive-critic Significant #2):
+# prune_orphan_candidates DELETED. It was a THIN wrapper around
+# orphaned_chashes (above) built specifically for the tp8yk D3 fix at
+# the three doc_indexer.py prune sites and pipeline_stages._prune_
+# stale_chunks — its own docstring named exactly those four call sites
+# as its reason to exist ("the three doc_indexer.py prune sites and
+# pipeline_stages._prune_stale_chunks used to gate..."). nexus-tbkk1
+# deleted all four of those call sites (RDR-102 D2 made their
+# source_path-keyed candidate queries permanently unable to match any
+# real chunk row), leaving this wrapper with ZERO production callers —
+# only orphaned_chashes remains live, called directly by mcp_infra.
+# _sweep_superseded_vectors. Falsified by deletion (nexus-tbkk1 fix
+# round): the dedicated unit test file tests/test_indexer_utils_
+# prune_orphan_candidates.py is deleted alongside it; the union-guard
+# LOGIC it wrapped (orphaned_chashes) remains fully covered by
+# tests/db/test_http_catalog_integration.py::TestPruneUnionGuard and
+# tests/integration/test_tp8yk_manifest_never_outruns_chunks.py. If a
+# future caller (e.g. nexus-afudo's indexer.py/indexer_utils.py sites)
+# needs this exact "no-reader-at-all falls back to unconditional
+# delete" shape, recover it from git history rather than resurrecting
+# dead code speculatively — it may not even be the right shape for a
+# different candidate population.
 
 
 def find_repo_root(path: Path) -> Path | None:

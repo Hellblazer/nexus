@@ -935,9 +935,24 @@ def pipeline_index_pdf(
         if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
             post_pass_ok = False
 
-    # 3. Stale chunk pruning.
-    if not _prune_stale_chunks(col, str(pdf_path), content_hash, corpus=corpus, doc_id=doc_id):
-        post_pass_ok = False
+    # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
+    # to query T3 via nexus.doc_indexer._identity_where's source_path
+    # fallback, which RDR-102 D2 (2026-05-02) made permanently unable to
+    # match any real chunk row (make_chunk_metadata dropped source_path
+    # entirely). The real cross-document dedup/prune protection is
+    # mcp_infra._sweep_superseded_vectors (manifest-diff based), proven
+    # end-to-end at tests/integration/test_tp8yk_manifest_never_outruns_
+    # chunks.py::test_union_guard_keeps_shared_chunk_at_the_production_
+    # wiring.
+    #
+    # SIGNAL NARROWING (both reviewers, nexus-tbkk1 fix round): the
+    # deleted step's own try/except used to set post_pass_ok=False (and
+    # so preserve this run's checkpoint for retry, see below) on a T3
+    # QUERY failure during the prune window — that specific signal is
+    # gone. Narrow: passes 1/2 above already probe the same T3
+    # collection, so a genuinely degraded service is still very likely
+    # caught there; only a failure window unique to the (now-removed)
+    # prune's own query timing is silently lost.
 
     state = db.get_pipeline_state(content_hash)
     total_chunks = state["chunks_uploaded"] if state else 0
@@ -1144,82 +1159,35 @@ def _update_chunk_metadata(
     return True
 
 
-def _prune_stale_chunks(
-    col: Any, pdf_path: str, content_hash: str, *, corpus: str = "", doc_id: str = "",
-) -> bool:
-    """Delete chunks from T3 that belong to a previous version of the same PDF.
-
-    Returns True on success, False on failure.  Query and delete errors are
-    handled separately so a delete failure reports how many stale chunks
-    remain (nexus-tcwm).
-
-    nexus-dcym: when *corpus* is supplied and the catalog already
-    registered the file, the chunk lookup keys on ``doc_id``. Empty or
-    missing entries fall back to the legacy ``source_path`` lookup.
-
-    nexus-tp8yk D3: candidates are always routed through
-    ``indexer_utils.prune_orphan_candidates`` (the shared union guard)
-    before deletion — identical chunk text collapses to ONE T3 row
-    shared across every document that contains it, so a chunk found
-    here is not necessarily unreferenced by some OTHER live document.
-    nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04): this used
-    to gate the guard on ``if doc_id:``, falling back to an unconditional
-    delete whenever *doc_id* was empty — including a TRANSIENT
-    registration failure on an otherwise-healthy catalog, not only a
-    genuinely absent one. ``prune_orphan_candidates`` makes that
-    distinction itself (on catalog-reader availability, not on *doc_id*),
-    so this call site no longer needs to.
-    """
-    from nexus.doc_indexer import _identity_where  # noqa: PLC0415  — circular-dep avoidance (nexus.doc_indexer)
-    stale_ids: list[str] = []
-    offset = 0
-    where_filter = _identity_where(pdf_path, corpus)
-
-    # Phase 1: query for stale chunks
-    try:
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where=where_filter,
-                include=["metadatas"],
-                limit=300,
-                offset=offset,
-            )
-            batch_ids = batch.get("ids", [])
-            batch_metas = batch.get("metadatas", [])
-            for eid, meta in zip(batch_ids, batch_metas):
-                if meta.get("content_hash") != content_hash:
-                    stale_ids.append(eid)
-            if len(batch_ids) < 300:
-                break
-            offset += 300
-    except Exception as exc:  # noqa: BLE001 - best-effort stale-prune query; logged via log.warning, returns False
-        _log.warning("stale_prune_query_failed", pdf_path=pdf_path, error=str(exc))
-        return False
-
-    if not stale_ids:
-        return True
-
-    from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
-
-    stale_ids = prune_orphan_candidates(doc_id, stale_ids)
-    if not stale_ids:
-        return True
-
-    # Phase 2: delete stale chunks in batches of MAX_RECORDS_PER_WRITE=300.
-    # A single unbounded col.delete(ids=stale_ids) violates the ChromaDB
-    # Cloud quota on re-indexes that drop >300 chunks (indexing review I4).
-    try:
-        for i in range(0, len(stale_ids), 300):
-            batch = stale_ids[i:i + 300]
-            _vector_with_retry(col.delete, ids=batch)
-        _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
-        return True
-    except Exception as exc:  # noqa: BLE001 - best-effort stale-prune delete; logged via log.warning, returns False
-        _log.warning(
-            "stale_prune_delete_failed",
-            pdf_path=pdf_path,
-            stale_count=len(stale_ids),
-            error=str(exc),
-        )
-        return False
+# nexus-tbkk1: _prune_stale_chunks DELETED as dead code. It queried T3
+# via nexus.doc_indexer._identity_where's source_path fallback, which
+# RDR-102 D2 (2026-05-02, commit 83ac62c7) made permanently unable to
+# match any real chunk row — make_chunk_metadata dropped source_path
+# from chunk metadata entirely, so every chunk this pipeline writes
+# carries no source_path key (empirically confirmed zero-source_path
+# across a representative T3 sample — code__1-1, docs__1-1,
+# knowledge__knowledge/dt-papers/augur-oracle-papers/interpretability —
+# see nexus.doc_indexer._identity_where's docstring). The where-clause
+# always matched zero rows in production; the union-guard LOGIC it
+# exercised (nexus.indexer_utils.orphaned_chashes) remains live — called
+# directly by mcp_infra._sweep_superseded_vectors — and is covered by
+# tests/db/test_http_catalog_integration.py::TestPruneUnionGuard. Its
+# thin wrapper prune_orphan_candidates (built specifically for this
+# call site and its three siblings, all now deleted) was ALSO deleted
+# in this same fix round (zero production callers survived) — see
+# indexer_utils.py's deletion comment. This closes only the
+# doc_indexer.py/pipeline_stages.py HALF of RDR-102 D2's "Phase 5b"
+# 4-site dead-code class — indexer.py/indexer_utils.py sibling sites
+# (nx index repo's code/prose paths) are STILL LIVE, unaudited by this
+# bead, tracked as nexus-afudo. Automatic (fires-on-every-reindex)
+# replacement protection for THIS pipeline is mcp_infra._sweep_
+# superseded_vectors (manifest-diff based, fires from the same
+# fire_batch/fire_document hook chain this pipeline already calls),
+# proven end-to-end at tests/integration/test_tp8yk_manifest_never_
+# outruns_chunks.py::test_union_guard_keeps_shared_chunk_at_the_
+# production_wiring — but it cannot see a legacy row whose owning
+# document's manifest never referenced it. nx t3 gc (RDR-108 Phase 4
+# chash-vs-manifest sweep, src/nexus/commands/t3.py:219) is the
+# comprehensive but manual/operator-triggered backstop for that
+# population; no one-time sweep was run as part of closing this bead
+# (production mutation, Hal-gated).

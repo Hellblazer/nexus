@@ -182,14 +182,72 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
 
     RDR-108 Phase 3 retired ``doc_id`` from chunk metadata (catalog
     manifest is authoritative); ``content_hash`` is now the canonical
-    staleness key. Pre-Phase-3 chunks still carry ``doc_id`` in stored
-    metadata, but those reads are handled by Phase 4 retargeted readers.
-    Pass ``content_hash`` only for staleness checks — pruning by
-    content_hash is incorrect because matching chunks are by definition
-    not stale; the legacy ``source_path`` fallback is retained for
-    Phase-4-rewritten prune sites that consult the catalog manifest
-    when present and fall back to source_path for catalog-absent
-    callers (nexus-dyxe, shipped 2026-05-10 in PR #624).
+    staleness key. Pass ``content_hash`` for staleness checks — pruning
+    by content_hash is incorrect because matching chunks are by
+    definition not stale.
+
+    nexus-tbkk1: the no-``content_hash`` (``source_path``) branch is DEAD
+    for every stale-chunk *prune* purpose it was written for, in THIS
+    module and pipeline_stages.py specifically. RDR-102 D2 (2026-05-02,
+    commit 83ac62c7) hard-removed ``source_path`` from
+    ``make_chunk_metadata`` — the sole factory every doc_indexer.py /
+    pipeline_stages.py chunk-metadata build routes through — so no chunk
+    WRITTEN since then carries this key, and
+    ``{"source_path": file_path}`` matches zero rows for any such chunk.
+    Empirically corroborated, not just inferred from the writer-side
+    proof: a read-only ``field>=!`` boundary-value existence probe
+    (validated against a present-field control before use) against six
+    representative live collections — code__1-1 (32172 chunks, this
+    repo, continuously reindexed), docs__1-1 (4666, this repo's own
+    docs), knowledge__knowledge (1339), and three external-corpus
+    collections indexed once and rarely re-touched (knowledge__dt-papers
+    7253, knowledge__augur-oracle-papers 1602, knowledge__interpretability
+    299) — found ZERO rows carrying a ``source_path`` key anywhere
+    (nexus-tbkk1 fix round, 2026-08-05). This is a representative sample,
+    not an exhaustive one; it does not prove every collection in the
+    store is clean, only that the population is not the large, easily-
+    found kind RDR-102 D2's "defense-in-depth" framing (rdr-102-phase4-
+    completion.md:159) might suggest.
+
+    RDR-102 §D2 named FOUR sites for this same dead-code class, deferred
+    to "Phase 5b": ``doc_indexer.py:109`` (this function), plus THREE
+    SIBLING sites in ``indexer.py``/``indexer_utils.py`` that this bead
+    did NOT touch and does NOT claim closed —
+    ``indexer.py``'s ``_prune_misclassified_in_collection`` legacy
+    ``source_path`` fallback (serves ``nx index repo``'s code/prose
+    paths) and ``indexer_utils.check_staleness``'s source_path fallback
+    are STILL LIVE, unaudited by this bead, and still under active
+    nexus-ou4tb fail-loud maintenance — tracked as nexus-afudo.
+    Only the doc_indexer.py/pipeline_stages.py HALF of Phase 5b closes
+    here: the four prune call sites that used to take this branch in
+    THOSE two files (``_index_document``, ``_index_pdf_incremental``,
+    ``index_pdf``'s small-doc branch, and pipeline_stages.
+    ``_prune_stale_chunks``) are deleted.
+
+    What replaces the deleted prunes' automatic (fires-on-every-reindex)
+    protection, honestly: ``mcp_infra._sweep_superseded_vectors``
+    (manifest-diff based — compares a re-indexed document's OWN
+    before/after manifest chash sets) covers the common case and is
+    proven end-to-end at tests/integration/test_tp8yk_manifest_never_
+    outruns_chunks.py::test_union_guard_keeps_shared_chunk_at_the_
+    production_wiring — but it structurally CANNOT see a legacy row
+    whose owning document's manifest doesn't reference it (no "before"
+    set to diff against). The comprehensive backstop for THAT population
+    is ``nx t3 gc`` (RDR-108 Phase 4, chash-vs-manifest orphan sweep,
+    ``src/nexus/commands/t3.py:219``) — broader than source_path-keyed
+    pruning (catches any orphan cause), but manual/operator-triggered
+    with a 30-day orphan-window default, not automatic. No one-time
+    ``nx t3 gc`` sweep was run as part of closing this bead (production
+    mutation, Hal-gated); confirm one has happened since 2026-08-05, or
+    schedule it, before treating this deletion's edge risk as resolved.
+
+    The ONE surviving caller of this branch — ``index_pdf``'s streaming-
+    path ``return_metadata=True`` metadata read (fetching page/title/
+    author for the return value, not a prune) — is independently broken
+    by the identical gap (it also always sees zero rows) and is tracked
+    separately (nexus-w6wp0) rather than fixed here; nexus-tbkk1's scope
+    is the stale-chunk *prune* sites in doc_indexer.py/pipeline_stages.py
+    only.
     """
     if content_hash:
         return {"content_hash": content_hash}
@@ -1413,49 +1471,25 @@ def _index_document(
             _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
 
-    # Prune stale chunks from a previous (larger) version of this file.
-    # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
-    # nexus-dcym: doc_id keying so a re-index after rename still
-    # detects the prior chunk set. The catalog hook for this corpus
-    # registered the file before this point on prior indexes; on a
-    # first-ever index there is no prior chunk set so the where filter
-    # never matches and the legacy source_path branch is harmless.
-    prune_where = _identity_where(sp, corpus)
-    current_ids_set = set(ids)
-    stale_ids: list[str] = []
-    offset = 0
-    while True:
-        batch = _vector_with_retry(
-            col.get,
-            where=prune_where,
-            include=[],
-            limit=300,
-            offset=offset,
-        )
-        batch_ids = batch.get("ids", [])
-        stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
-        if len(batch_ids) < 300:
-            break
-        offset += 300
-    if stale_ids:
-        # nexus-tp8yk D3: union guard — identical chunk text collapses to
-        # ONE T3 row shared across every document that contains it, so
-        # "not in THIS document's manifest" is not "unreferenced" without
-        # checking every OTHER document. Fail-open: an unprovable orphan
-        # is kept, never deleted. nexus-tp8yk D3 substantive-critic
-        # SIGNIFICANT (2026-08-04): route through the shared helper
-        # UNCONDITIONALLY — it distinguishes "no catalog at all" (legacy
-        # unconditional delete preserved) from "catalog healthy, doc_id
-        # transiently unresolved" (guard still runs) on its own; gating
-        # on `if _catalog_doc_id_for_batch:` here would silently
-        # re-degrade a transient registration failure to an unguarded
-        # delete, the exact P2 incident class this bead exists to close.
-        from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
-        orphan_ids = prune_orphan_candidates(_catalog_doc_id_for_batch, stale_ids)
-        if orphan_ids:
-            # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-            for i in range(0, len(orphan_ids), 300):
-                _vector_with_retry(col.delete, ids=orphan_ids[i:i + 300])
+    # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
+    # fallback DELETED as dead code. RDR-102 D2 (2026-05-02) removed
+    # source_path from make_chunk_metadata — every chunk written above
+    # carries no source_path, so a `col.get(where={"source_path": ...})`
+    # query here always matched zero rows in production; discovered and
+    # documented at nexus-tp8yk's test_index_pdf_prune_union_guard_wired_
+    # at_call_site (superseded by nexus-tbkk1's dead-code-deletion tests).
+    # This closes only the doc_indexer.py/pipeline_stages.py HALF of
+    # RDR-102 D2's "Phase 5b" 4-site class — indexer.py/indexer_utils.py
+    # sibling sites are STILL LIVE, unaudited (nexus-afudo). Automatic
+    # replacement protection is mcp_infra._sweep_superseded_vectors
+    # (manifest-diff based, fires on every hooks.fire_batch/fire_document
+    # call above), proven end-to-end at tests/integration/test_tp8yk_
+    # manifest_never_outruns_chunks.py::test_union_guard_keeps_shared_
+    # chunk_at_the_production_wiring — NOT comprehensive for legacy rows
+    # a manifest never referenced; nx t3 gc (chash-vs-manifest, src/
+    # nexus/commands/t3.py:219) is the comprehensive but manual/operator-
+    # triggered backstop. Full evidence + defense-in-depth discussion:
+    # _identity_where's docstring above.
 
     # nexus-tp8yk D2a: explicit completion stamp, replacing the dead
     # manifest_complete ride (see the comment above `hooks.fire_batch`).
@@ -1659,43 +1693,19 @@ def _index_pdf_incremental(
             _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
 
-    # Prune stale chunks from a previous (larger) version of this file.
-    # nexus-dcym: prefer doc_id when the catalog already registered this
-    # file in a prior run; first-time indexes have no prior chunk set
-    # so the legacy source_path branch is harmless.
-    col = t3.get_or_create_collection(collection_name)
-    prune_where = _identity_where(str(file_path), corpus)
-    current_ids_set = set(ids_all)
-    stale_ids: list[str] = []
-    offset = 0
-    while True:
-        batch = _vector_with_retry(
-            col.get,
-            where=prune_where,
-            include=[],
-            limit=300,
-            offset=offset,
-        )
-        batch_ids = batch.get("ids", [])
-        stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
-        if len(batch_ids) < 300:
-            break
-        offset += 300
-    if stale_ids:
-        # nexus-tp8yk D3: union guard — identical chunk text collapses to
-        # ONE T3 row shared across every document that contains it, so
-        # "not in THIS document's manifest" is not "unreferenced" without
-        # checking every OTHER document. Fail-open: an unprovable orphan
-        # is kept, never deleted. nexus-tp8yk D3 substantive-critic
-        # SIGNIFICANT (2026-08-04): route through the shared helper
-        # UNCONDITIONALLY — see the identical rationale on the
-        # _index_document prune site above.
-        from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
-        orphan_ids = prune_orphan_candidates(_catalog_doc_id_for_batch, stale_ids)
-        if orphan_ids:
-            # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-            for i in range(0, len(orphan_ids), 300):
-                _vector_with_retry(col.delete, ids=orphan_ids[i:i + 300])
+    # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
+    # fallback DELETED as dead code — same rationale as _index_document's
+    # former prune block above (RDR-102 D2 removed source_path from
+    # make_chunk_metadata; this where-clause always matched zero rows).
+    # Closes only the doc_indexer.py/pipeline_stages.py HALF of RDR-102
+    # D2's "Phase 5b" — indexer.py/indexer_utils.py siblings are STILL
+    # LIVE, unaudited (nexus-afudo). Automatic replacement protection is
+    # mcp_infra._sweep_superseded_vectors, proven end-to-end at tests/
+    # integration/test_tp8yk_manifest_never_outruns_chunks.py::
+    # test_union_guard_keeps_shared_chunk_at_the_production_wiring — not
+    # comprehensive for manifest-absent legacy rows; nx t3 gc (src/nexus/
+    # commands/t3.py:219) is the comprehensive manual backstop. Full
+    # evidence: _identity_where's docstring above.
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
@@ -2305,61 +2315,20 @@ def index_pdf(
             _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
 
-    # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the
-    # entry; first-time indexes harmlessly use source_path).
-    # nexus-ou4tb: the prune reads and deletes through the vector client,
-    # which now RAISES on a degraded service instead of reading empty. That is
-    # the right client contract, but this prune sits between two commits that
-    # have already happened — the new chunks are upserted and
-    # hooks.fire_document has fired — and BEFORE catalog registration. Letting
-    # it propagate would leave a document whose chunks are live and whose
-    # catalog registration never ran: a NEW partial-commit state that the old
-    # silent swallow happened to hide.
-    #
-    # Registration is the more important of the two (an unregistered document
-    # is invisible to every catalog-routed query; a stale chunk left one cycle
-    # longer is a duplicate that the next successful prune removes). So the
-    # prune is isolated and registration always runs. The failure is logged
-    # loudly rather than swallowed — the point of the bead is that nobody
-    # finds out silently, not that nothing may ever degrade.
-    try:
-        prune_where = _identity_where(str(pdf_path), corpus)
-        current_ids_set = set(ids)
-        stale_ids: list[str] = []
-        offset = 0
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where=prune_where,
-                include=[],
-                limit=300,
-                offset=offset,
-            )
-            batch_ids = batch.get("ids", [])
-            stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
-            if len(batch_ids) < 300:
-                break
-            offset += 300
-        if stale_ids:
-            # nexus-tp8yk D3: union guard — identical chunk text collapses
-            # to ONE T3 row shared across every document that contains it,
-            # so "not in THIS document's manifest" is not "unreferenced"
-            # without checking every OTHER document. Fail-open: an
-            # unprovable orphan is kept, never deleted. nexus-tp8yk D3
-            # substantive-critic SIGNIFICANT (2026-08-04): route through
-            # the shared helper UNCONDITIONALLY — see the identical
-            # rationale on the _index_document prune site above.
-            from nexus.indexer_utils import prune_orphan_candidates  # noqa: PLC0415 — deferred to avoid circular import
-            orphan_ids = prune_orphan_candidates(_catalog_doc_id_for_batch, stale_ids)
-            if orphan_ids:
-                # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-                for i in range(0, len(orphan_ids), 300):
-                    _vector_with_retry(col.delete, ids=orphan_ids[i:i + 300])
-    except Exception:  # noqa: BLE001 — prune must not strand catalog registration
-        _log.warning(
-            "stale_chunk_prune_failed_registration_still_running",
-            pdf=str(pdf_path), collection=col_name, exc_info=True,
-        )
+    # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
+    # fallback DELETED as dead code — same rationale as _index_document's
+    # and _index_pdf_incremental's former prune blocks (RDR-102 D2
+    # removed source_path from make_chunk_metadata; this where-clause
+    # always matched zero rows). Closes only the doc_indexer.py/
+    # pipeline_stages.py HALF of RDR-102 D2's "Phase 5b" — indexer.py/
+    # indexer_utils.py siblings are STILL LIVE, unaudited (nexus-afudo).
+    # Automatic replacement protection is mcp_infra._sweep_superseded_
+    # vectors, proven end-to-end at tests/integration/test_tp8yk_
+    # manifest_never_outruns_chunks.py::test_union_guard_keeps_shared_
+    # chunk_at_the_production_wiring — not comprehensive for
+    # manifest-absent legacy rows; nx t3 gc (src/nexus/commands/t3.py:219)
+    # is the comprehensive manual backstop. Full evidence: _identity_
+    # where's docstring above.
 
     # nexus-tp8yk D2a: explicit completion stamp, replacing the dead
     # manifest_complete ride (see the comment above `hooks.fire_batch`).

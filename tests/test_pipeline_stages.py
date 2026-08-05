@@ -20,7 +20,6 @@ from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunnin
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     _enrich_metadata_from_extraction,
-    _prune_stale_chunks,
     _update_chunk_metadata,
     chunker_loop,
     extractor_loop,
@@ -658,14 +657,48 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
-    def test_stale_chunk_pruning(self, db) -> None:
-        # nexus-tp8yk D3: pipeline_index_pdf auto-registers a real catalog
-        # doc_id when none is supplied (nexus.doc_indexer._register_or_
-        # lookup_doc_id, called internally), so the prune's union guard now
-        # queries docs_for_chashes for "old_hash_0" — a fake, non-hex test
-        # id the real engine's chash validation would reject. Stub the
-        # reader so the guard sees what it would in a real corpus: nothing
-        # else references this chash, i.e. genuinely orphaned -> deleted.
+    def test_stale_chunk_pruning_post_pass_removed_as_dead_code(self, db) -> None:
+        """nexus-tbkk1: the stale-chunk-pruning post-pass (formerly
+        ``_prune_stale_chunks``, called from ``pipeline_index_pdf`` after
+        the metadata-enrichment and table_regions post-passes) is DELETED
+        dead code, not merely runtime-unreachable.
+
+        This test replaces ``test_stale_chunk_pruning`` and
+        ``test_stale_chunk_pruning_kept_when_shared_with_another_
+        document`` (nexus-tp8yk D3), which asserted the prune's union
+        guard correctly distinguished a genuinely-orphaned stale chash
+        from one still referenced by another live document. Both tests
+        only ever passed because their ``MagicMock col.get`` ignored the
+        ``where=`` argument entirely and served the seeded stale row
+        regardless — a green suite that was never evidence the where
+        clause the production code actually issues
+        (``{"source_path": pdf_path}``, via ``nexus.doc_indexer.
+        _identity_where``) matches anything real. RDR-102 D2
+        (2026-05-02) removed ``source_path`` from ``make_chunk_metadata``
+        entirely, so it never does; the prune's real chunk-fetch query
+        was permanently a zero-row no-op in production, which is why
+        nexus-tbkk1 deletes it outright rather than "fixing" the where
+        clause.
+
+        The union-guard LOGIC these superseded tests exercised
+        (``indexer_utils.orphaned_chashes``) is untouched by this
+        deletion and remains covered by tests/db/test_http_catalog_
+        integration.py::TestPruneUnionGuard. Its thin wrapper
+        ``prune_orphan_candidates`` — built specifically for this call
+        site and its three siblings, all now deleted — was ALSO deleted
+        in this same fix round (zero production callers survived; see
+        ``nexus.indexer_utils``'s deletion comment), along with its
+        now-pointless dedicated test file. The real cross-document prune
+        protection (``mcp_infra._sweep_superseded_vectors``, which calls
+        ``orphaned_chashes`` directly) is proven at tests/integration/
+        test_tp8yk_manifest_never_outruns_chunks.py::test_union_guard_
+        keeps_shared_chunk_at_the_production_wiring.
+
+        Kill control: seed a legacy-shaped stale row (mismatched
+        content_hash, source_path metadata) that the OLD post-pass would
+        have deleted. If the post-pass call were reintroduced, ``col.
+        delete`` would fire and this assertion would fail.
+        """
         with patch(
             "nexus.catalog.factory.make_catalog_reader",
             return_value=MagicMock(docs_for_chashes=MagicMock(return_value={})),
@@ -674,32 +707,6 @@ class TestPipelineIndexPdf:
                 db,
                 col_get_return={"ids": ["abc123_0", "abc123_1", "old_hash_0"], "metadatas": [
                     {"content_hash": "abc123_full", "source_path": "/a.pdf"},
-                    {"content_hash": "abc123_full", "source_path": "/a.pdf"},
-                    {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
-                fake_result=_er(1),
-                fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
-                content_hash="abc123_full")
-        col.delete.assert_called_once()
-        ids = col.delete.call_args.kwargs.get("ids", col.delete.call_args[1].get("ids", []))
-        assert "old_hash_0" in ids and "abc123_0" not in ids
-
-    def test_stale_chunk_pruning_kept_when_shared_with_another_document(self, db) -> None:
-        """nexus-tp8yk D3 kill-control-adjacent: the union guard's OTHER
-        branch — a stale chash still referenced by a DIFFERENT live
-        document must survive, never deleted. Falsifies a guard that
-        always returns "orphaned" regardless of docs_for_chashes' answer.
-        """
-        with patch(
-            "nexus.catalog.factory.make_catalog_reader",
-            return_value=MagicMock(
-                docs_for_chashes=MagicMock(
-                    return_value={"old_hash_0": ["some-other-live-doc"]},
-                ),
-            ),
-        ):
-            _, col = _run_with_col(
-                db,
-                col_get_return={"ids": ["abc123_0", "old_hash_0"], "metadatas": [
                     {"content_hash": "abc123_full", "source_path": "/a.pdf"},
                     {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
                 fake_result=_er(1),
@@ -926,33 +933,14 @@ def test_update_chunk_metadata(get_exc, upd_exc, expected) -> None:
     assert _update_chunk_metadata(t3, col, "docs__test", "abc123", lambda m: True) is expected
 
 
-@pytest.mark.parametrize("get_exc,get_ret,del_exc,expected,del_called", [
-    pytest.param(Exception("connection reset"), None, None, False, False, id="query_failure"),
-    pytest.param(None, {"ids": ["old1", "old2"], "metadatas": [
-        {"content_hash": "stale", "source_path": "/doc.pdf"},
-        {"content_hash": "stale", "source_path": "/doc.pdf"}]},
-        Exception("quota exceeded"), False, True, id="delete_failure"),
-    pytest.param(None, {"ids": ["old1"], "metadatas": [{"content_hash": "stale"}]},
-        None, True, True, id="success"),
-])
-def test_prune_stale_chunks(get_exc, get_ret, del_exc, expected, del_called) -> None:
-    # nexus-tp8yk D3 substantive-critic SIGNIFICANT (2026-08-04):
-    # _prune_stale_chunks now ALWAYS routes candidates through
-    # indexer_utils.prune_orphan_candidates (no more `if doc_id:` skip),
-    # which resolves a REAL catalog reader when one is available — this
-    # test's subject is the query/delete PAGINATION mechanics, not
-    # catalog union-guard behavior (owned by test_indexer_utils_prune_
-    # orphan_candidates.py / the doc_indexer.py D3 tests), so declare "no
-    # catalog" explicitly rather than accidentally depending on whatever
-    # the autouse T2 substrate's docs_for_chashes happens to say about
-    # these synthetic non-hex ids.
-    with patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
-        col = MagicMock()
-        col.get = MagicMock(side_effect=get_exc) if get_exc else MagicMock(return_value=get_ret)
-        if del_exc:
-            col.delete = MagicMock(side_effect=del_exc)
-        assert _prune_stale_chunks(col, "/doc.pdf", "new_hash") is expected
-        (col.delete.assert_called if del_called else col.delete.assert_not_called)()
+# nexus-tbkk1: test_prune_stale_chunks (a parametrized unit test of the
+# query/delete pagination mechanics of nexus.pipeline_stages.
+# _prune_stale_chunks) DELETED along with the function it tested — see
+# test_stale_chunk_pruning_post_pass_removed_as_dead_code above for the
+# full rationale and the tests that still cover the surviving, unrelated
+# machinery (indexer_utils.orphaned_chashes union guard, its now-deleted
+# prune_orphan_candidates wrapper's fate; mcp_infra._sweep_superseded_
+# vectors real protection).
 
 
 def test_pipeline_data_kept_on_enrichment_failure(db) -> None:
