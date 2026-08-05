@@ -971,3 +971,426 @@ def test_identity_drop_summary_surfaces_drops(runner, repo_dir, mock_reg, monkey
     )
     assert "nx catalog reconcile" in result.output
     assert "manifest-verify" in result.output
+
+
+# ── nexus-7f5qj: identity-drop / manifest-write-failure / completion-
+# refusal collector wiring for the SINGLE-FILE nx index pdf / nx index md
+# commands — previously ZERO wiring existed (the collector-check helper
+# was only reachable from index_repo_cmd's batch path), so a catalog-
+# register failure during ``nx index pdf <file>`` / ``nx index md <file>``
+# left chunks written and searchable but with no catalog Document/tumbler,
+# while the command printed "Indexed N chunk(s)." and exited 0. Same class
+# as pbawi acceptance item 3 (fixed on the ``nx dt index`` surface by
+# nexus-tp8yk D2, pinned by nexus-2xu6t's tests) — this bead closes the
+# sibling gap and extracts the now-thrice-needed pattern into
+# ``nexus.commands._helpers`` (see test_commands_helpers_identity_drop.py
+# for the helper's own unit tests).
+#
+# Two layers, mirroring the split already established for ``nx index
+# repo`` (this file) and ``nx dt index`` (test_commands_dt.py::
+# TestIdentityDropSummary):
+#   * ``TestPdfMdIdentityDropSummaryWiring`` — collector -> exit-code
+#     wiring, isolated from the register mechanism (monkeypatches the
+#     collector getters directly, same idiom as
+#     ``test_identity_drop_summary_surfaces_drops`` above).
+#   * ``TestPdfMdIdentityDropRegisterThrow`` — drives the REAL
+#     ``_register_or_lookup_doc_id`` swallow through a broken catalog
+#     writer, proving the register-failure -> collector -> CLI exit code
+#     link end to end (mirrors test_commands_dt.py::TestIdentityDropSummary
+#     and tests/test_doc_indexer.py::
+#     test_preflight_register_failure_feeds_identity_drop_collector).
+#
+# Streaming-route note (2xu6t lesson): the collector-population mechanism
+# itself is already proven correct on BOTH the non-streaming batch path
+# (tests/test_doc_indexer.py::test_preflight_register_failure_feeds_
+# identity_drop_collector) and the streaming path
+# (tests/test_pipeline_stages.py::TestPipelineIndexPdf::
+# test_streaming_register_failure_feeds_identity_drop_collector) — neither
+# of which this bead touches (no doc_indexer.py / pipeline_stages.py
+# production diff). What is NEW here is the CLI-layer reset+check+raise
+# wiring in index_pdf_cmd / index_md_cmd, and that wiring reads the SAME
+# process-global collector regardless of which internal route populated
+# it — it is route-agnostic by construction (emit_identity_drop_summary
+# calls get_manifest_identity_drops() etc. with no knowledge of streaming
+# vs non-streaming). The non-streaming register-throw test below
+# (``fake_pdf`` is unopenable-by-pymupdf bytes, same fixture shape as
+# ``sample_pdf`` in test_doc_indexer.py) therefore proves the CLI wiring
+# end-to-end without needing to re-derive the streaming-route fixture
+# plumbing (fake pipeline-engine DB, PDFExtractor/PDFChunker patches) a
+# second time at the CLI layer — that plumbing is exercised, unmodified
+# and unaffected by this diff, by test_pipeline_stages.py already.
+
+
+class TestPdfMdIdentityDropSummaryWiring:
+    """Collector -> exit-code wiring, isolated from the register
+    mechanism. Mirrors ``test_identity_drop_summary_surfaces_drops`` /
+    ``test_manifest_write_failure_summary_surfaces_failures`` above.
+    """
+
+    def test_pdf_silent_when_no_problems(self, runner, fake_pdf):
+        with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT):
+            result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+        assert result.exit_code == 0, result.output
+        assert "WITHOUT a catalog document identity" not in result.output
+        assert "catalog manifest write failed" not in result.output
+
+    def test_md_silent_when_no_problems(self, runner, fake_md):
+        with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
+            result = runner.invoke(main, ["index", "md", str(fake_md)])
+        assert result.exit_code == 0, result.output
+        assert "WITHOUT a catalog document identity" not in result.output
+        assert "catalog manifest write failed" not in result.output
+
+    def test_pdf_identity_drop_exits_nonzero_and_names_file(
+        self, runner, fake_pdf, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_identity_drops",
+            lambda: [{"collection": "docs__default", "batch_size": 3}],
+        )
+        with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT):
+            result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+        assert result.exit_code != 0, result.output
+        assert "WITHOUT a catalog document identity" in result.output
+        assert str(fake_pdf) in result.output, result.output
+        assert "nx catalog reconcile" in result.output
+
+    def test_md_identity_drop_exits_nonzero_and_names_file(
+        self, runner, fake_md, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_identity_drops",
+            lambda: [{"collection": "docs__default", "batch_size": 2}],
+        )
+        with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
+            result = runner.invoke(main, ["index", "md", str(fake_md)])
+        assert result.exit_code != 0, result.output
+        assert "WITHOUT a catalog document identity" in result.output
+        assert str(fake_md) in result.output, result.output
+        assert "nx catalog reconcile" in result.output
+
+    def test_pdf_manifest_write_failure_exits_nonzero_and_names_file(
+        self, runner, fake_pdf, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_write_failures",
+            lambda: ["1.9.0"],
+        )
+        with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT):
+            result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+        assert result.exit_code != 0, result.output
+        assert "WARNING: catalog manifest write failed" in result.output
+        assert str(fake_pdf) in result.output, result.output
+
+    def test_md_manifest_write_failure_exits_nonzero_and_names_file(
+        self, runner, fake_md, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_write_failures",
+            lambda: ["1.9.0"],
+        )
+        with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
+            result = runner.invoke(main, ["index", "md", str(fake_md)])
+        assert result.exit_code != 0, result.output
+        assert "WARNING: catalog manifest write failed" in result.output
+        assert str(fake_md) in result.output, result.output
+
+
+class TestPdfMdIdentityDropRegisterThrow:
+    """Real end-to-end proof: a genuine ``_register_or_lookup_doc_id``
+    swallow (broken catalog writer) feeds the collector and the CLI fails
+    loud. Fixtures/idioms mirror
+    ``test_commands_dt.py::TestIdentityDropSummary``.
+    """
+
+    @staticmethod
+    def _voyage_double():
+        from voyageai.object.contextualized_embeddings import (
+            ContextualizedEmbeddingsObject,
+            ContextualizedEmbeddingsResult,
+        )
+
+        client = MagicMock()
+
+        def _fake_cce(inputs, model, input_type):
+            batch = inputs[0]
+            cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
+            cce_item.embeddings = [[0.1, 0.2] for _ in batch]
+            result = MagicMock(spec=ContextualizedEmbeddingsObject)
+            result.results = [cce_item]
+            return result
+
+        client.contextualized_embed.side_effect = _fake_cce
+        return client
+
+    @staticmethod
+    def _empty_t3():
+        t3 = MagicMock()
+        t3.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value={"ids": [], "metadatas": []}),
+        )
+        return t3
+
+    @staticmethod
+    def _t3_with_readback_chunk():
+        """Like ``_empty_t3()`` but ``.get()`` returns one fake row.
+
+        Only the STREAMING route's ``return_metadata=True`` branch needs
+        this (nexus-w6wp0): it does an extra post-upload T3 query,
+        content_hash-scoped when ``doc_id`` is empty (the register-throw
+        case), to build the CLI's pages/title/author summary. An always-
+        empty ``.get()`` (``_empty_t3()``) makes that query find nothing
+        for a real write, raising ``IndexingError`` ("chunks committed
+        but metadata read found none") BEFORE this test's own identity-
+        drop check ever runs — an artifact of the double's simplicity,
+        not of the code under test (the non-streaming route derives
+        metadata from in-memory chunk data instead, so ``_empty_t3()``
+        alone is sufficient there).
+        """
+        t3 = MagicMock()
+        t3.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value={
+                "ids": ["fake-chash-0"],
+                "metadatas": [{"page_number": 1, "title": "", "source_author": ""}],
+            }),
+        )
+        return t3
+
+    @staticmethod
+    def _broken_catalog(*, register_raises: bool):
+        reader = MagicMock()
+        reader.by_file_path.return_value = None
+        reader.by_source_uri.return_value = None
+        reader.curator_owner_tumbler_by_name.return_value = "1.99"
+        reader.find_by_file_path.return_value = MagicMock(tumbler="1.99.1")
+        writer = MagicMock()
+        if register_raises:
+            writer.register.side_effect = RuntimeError(
+                "integrity constraint violation",
+            )
+        else:
+            writer.register.return_value = "1.99.1"
+        return reader, writer
+
+    def test_md_register_throw_exits_nonzero_names_file(
+        self, runner, home, monkeypatch,
+    ):
+        from nexus.cli import main as cli_main
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        md = home / "orphan.md"
+        md.write_text("# Orphan\n\nSome real prose body for orphan.\n")
+
+        reader, writer = self._broken_catalog(register_raises=True)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            result = runner.invoke(cli_main, ["index", "md", str(md)])
+
+        assert result.exit_code != 0, result.output
+        assert str(md) in result.output, result.output
+        assert "orphaned" in result.output.lower(), result.output
+        assert "nx catalog reconcile" in result.output
+
+    def test_md_register_ok_summary_unchanged(self, runner, home, monkeypatch):
+        from nexus.cli import main as cli_main
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        md = home / "healthy.md"
+        md.write_text("# Healthy\n\nSome real prose body for healthy.\n")
+
+        reader, writer = self._broken_catalog(register_raises=False)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.doc_indexer._fence_begin"), \
+             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            result = runner.invoke(cli_main, ["index", "md", str(md)])
+
+        assert result.exit_code == 0, result.output
+        assert "orphaned" not in result.output.lower(), result.output
+        assert "WITHOUT a catalog document identity" not in result.output
+
+    def test_pdf_register_throw_nonstreaming_exits_nonzero_names_file(
+        self, runner, home, monkeypatch,
+    ):
+        """Non-streaming (batch/single-flush) route: ``pymupdf.open``
+        cannot parse the fake bytes, so ``index_pdf`` falls through to
+        ``_index_document`` (same fixture shape and rationale as
+        ``sample_pdf`` in test_doc_indexer.py)."""
+        from tests.test_doc_indexer import pdf_extract_patches_ctx
+
+        from nexus.cli import main as cli_main
+
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+        pdf = home / "orphan.pdf"
+        pdf.write_bytes(b"fake pdf bytes for testing")
+
+        reader, writer = self._broken_catalog(register_raises=True)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             pdf_extract_patches_ctx(), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            result = runner.invoke(cli_main, ["index", "pdf", str(pdf)])
+
+        assert result.exit_code != 0, result.output
+        assert str(pdf) in result.output, result.output
+        assert "orphaned" in result.output.lower(), result.output
+        assert "nx catalog reconcile" in result.output
+
+    def test_pdf_register_ok_summary_unchanged(self, runner, home, monkeypatch):
+        from tests.test_doc_indexer import pdf_extract_patches_ctx
+
+        from nexus.cli import main as cli_main
+
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+        pdf = home / "healthy.pdf"
+        pdf.write_bytes(b"fake pdf bytes for testing")
+
+        reader, writer = self._broken_catalog(register_raises=False)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.doc_indexer._fence_begin"), \
+             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             pdf_extract_patches_ctx(), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            result = runner.invoke(cli_main, ["index", "pdf", str(pdf)])
+
+        assert result.exit_code == 0, result.output
+        assert "orphaned" not in result.output.lower(), result.output
+        assert "WITHOUT a catalog document identity" not in result.output
+
+    def test_pdf_register_throw_streaming_exits_nonzero_names_file(
+        self, runner, home, monkeypatch,
+    ):
+        """Coordinator review follow-up (2026-08-05, T2 [21484]): the
+        non-streaming test above exercises the MINORITY route only —
+        ``_STREAMING_THRESHOLD = 0`` (doc_indexer.py) means every REAL,
+        pymupdf-openable PDF routes through ``pipeline_index_pdf``
+        (streaming) unconditionally; the non-streaming batch/single-flush
+        fallback is reached only when pymupdf cannot open the file at
+        all. Forcing ``--streaming always`` drives the CLI through the
+        DOMINANT route without needing genuinely valid PDF bytes (``use_
+        streaming`` short-circuits True on ``streaming == "always"``
+        before the pymupdf-openability probe even matters — doc_indexer.py
+        ~2172). PDFExtractor/PDFChunker mocked at the pipeline seam
+        (``nexus.pipeline_stages.PDFExtractor`` / ``PDFChunker``), same
+        idiom as tests/test_pipeline_stages.py's ``_P_EXT``/``_P_CHK``/
+        ``_er``/``_fx``/``_tc`` helpers (reused here, not re-derived) —
+        this is the exact 2xu6t-lesson class: a fixture that accidentally
+        exercises only the fallback path while the production-forced
+        route goes unpinned. The pipeline-coordination ``HttpPipelineDB``
+        is left unmocked (defaults to the real local engine this repo's
+        test suite already boots for T2 — see ``tests/conftest.py``'s
+        ``ensure_engine``); only the catalog reader/writer, T3 vector
+        write, and PDF extraction are doubled, mirroring the non-streaming
+        test's scope.
+
+        CliRunner is always non-tty, so ``index_pdf_cmd`` always takes its
+        ``return_metadata=True`` branch regardless of flags (``monitor or
+        not sys.stdout.isatty()`` — patching ``sys.stdout.isatty`` does
+        NOT help here: CliRunner installs its own capture stream around
+        the invocation, after any pre-invoke monkeypatch on the original
+        ``sys.stdout`` object). That branch does an EXTRA post-upload T3
+        query (nexus-w6wp0), content_hash-scoped when ``doc_id`` is empty
+        (the register-throw case) — an always-empty ``.get()`` double
+        (``_empty_t3()``) makes that query find nothing for a real write,
+        raising ``IndexingError`` ("chunks committed but metadata read
+        found none") BEFORE this test's own identity-drop check ever
+        runs, an artifact of the double's simplicity, not of the code
+        under test. Fixed by ``_t3_with_readback_chunk()`` instead, which
+        answers that query with one fake row. That display-metadata path
+        already has its own dedicated coverage
+        (test_index_pdf_indexing_error_exits_nonzero_with_clean_message
+        above); this test's job is the identity-drop wiring, unaffected
+        by which T3 double the metadata read satisfies itself with.
+        """
+        from tests.test_doc_indexer import pdf_extract_patches_ctx
+        from tests.test_pipeline_stages import _P_CHK, _P_EXT, _er, _fx, _tc
+
+        from nexus.cli import main as cli_main
+
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+        pdf = home / "orphan_streaming.pdf"
+        pdf.write_bytes(b"fake pdf bytes for testing")
+
+        reader, writer = self._broken_catalog(register_raises=True)
+
+        fake_result = _er(2)
+        fake_chunks = _tc(
+            ("chunk one", 0, {"page_number": 1, "chunk_type": "text"}),
+        )
+
+        with patch(_P_EXT) as ext_cls, patch(_P_CHK) as chk_cls, \
+             patch("nexus.doc_indexer.make_t3", return_value=self._t3_with_readback_chunk()), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+             pdf_extract_patches_ctx(), \
+             patch("voyageai.Client", return_value=self._voyage_double()):
+            ext_cls.return_value.extract.side_effect = _fx(
+                fake_result.metadata["page_count"], fake_result,
+            )
+            chk_cls.return_value.chunk.return_value = fake_chunks
+            result = runner.invoke(
+                cli_main, ["index", "pdf", str(pdf), "--streaming", "always"],
+            )
+
+        assert result.exit_code != 0, result.output
+        assert str(pdf) in result.output, result.output
+        assert "orphaned" in result.output.lower(), result.output
+        assert "nx catalog reconcile" in result.output
+
+
+# ── nexus-7f5qj AC4: --dir batch mode audit ─────────────────────────────────
+
+def test_pdf_dir_batch_identity_drop_surfaces_as_failure_entry(runner, home):
+    """A per-file identity drop during ``--dir`` batch indexing raises no
+    exception (same as the single-file case — the register swallow never
+    propagates), so the existing per-file ``except Exception`` isolation
+    never sees it. Symmetric fix: reset+check per file, folded into the
+    existing ``failures`` list/summary convention rather than aborting the
+    batch (nx index pdf --dir has no pre-existing non-zero-exit-on-
+    failures convention at all — see nexus-7f5qj DEVIATIONS; this test
+    pins visibility, not a new exit-code contract for the batch as a
+    whole)."""
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+    (d / "b.pdf").write_bytes(b"fake pdf b")
+
+    calls = {"n": 0}
+
+    def _fake_index_pdf(path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            from nexus.mcp_infra import _record_manifest_identity_drop
+            _record_manifest_identity_drop("docs__default", 2)
+        return 2
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_fake_index_pdf):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert calls["n"] == 2, "both files must still be processed"
+    assert "2 chunks" in result.output
+    assert "1 failure(s)" in result.output, result.output
+    assert "identity" in result.output.lower()

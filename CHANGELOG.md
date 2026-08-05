@@ -83,6 +83,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in its own output.
 
 ### Fixed
+- **`nx index pdf` / `nx index md` no longer report success when the catalog
+  register failed** (nexus-7f5qj): a register failure during the single-file
+  commands silently orphaned chunks — written and searchable but with no
+  catalog identity — while the command exited 0 with a success-shaped
+  summary (the same class fixed for `nx dt index` under nexus-pbawi/tp8yk).
+  Both commands (and `--dir` batch entries, folded into the per-file
+  failures list) now report a distinct "indexed WITHOUT a catalog document
+  identity" outcome naming the file and remedy, and exit non-zero — proven
+  on both the streaming and non-streaming PDF routes. The
+  reset/check/raise pattern is now one shared helper used by all four
+  ingest commands.
 - **`nx index pdf` streaming metadata was silently empty** (nexus-w6wp0):
   streaming-pipeline summary/`--json` metadata (pages, title, author) came
   back empty for any PDF routed through the streaming pipeline — the chunk
@@ -163,9 +174,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - the three post-commit prune sites route through a shared `orphaned_chashes()`
     union guard (the one `_sweep_superseded_vectors` already had), so a prune can
     no longer delete T3 rows another live document's manifest references (D3).
-- **BEHAVIOR CHANGE — `nx index` / `nx dt index` exit codes**: both commands now
-  exit **non-zero** when a run had manifest write failures, document identity
-  drops, or fence-completion refusals. Previously these were stderr warnings with
+- **BEHAVIOR CHANGE — `nx index repo` / `nx dt index` exit codes**: both
+  commands now exit **non-zero** when a run had manifest write failures,
+  document identity drops, or fence-completion refusals. (`nx index pdf` /
+  `nx index md` gained the same contract separately — see the nexus-7f5qj
+  entry below.) Previously these were stderr warnings with
   exit 0, which is how partially-populated documents shipped as "success". Scripts
   that treat any non-zero exit as fatal will now surface real damage instead of
   masking it; an *unconfirmed* completion stamp (engine cannot verify either way)

@@ -681,23 +681,16 @@ def index_cmd(
     touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
 
-    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note): zero the completion-
-    # refusal collector so the end-of-run summary reflects only this run's
-    # refusals — mirrors nx index repo's reset_manifest_write_failures().
-    #
-    # nexus-tp8yk D2b: also zero the manifest-write-failure and identity-
-    # drop collectors (index_repo_cmd's parity — full nx index reset()
-    # triple), so this run's exit-code check below reflects only THIS
-    # run's problems, not leftover state from an earlier call in the same
-    # process.
-    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
-        reset_complete_refusals,
-        reset_manifest_identity_drops,
-        reset_manifest_write_failures,
-    )
-    reset_complete_refusals()
-    reset_manifest_write_failures()
-    reset_manifest_identity_drops()
+    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note) + nexus-tp8yk D2b: zero
+    # the completion-refusal / manifest-write-failure / identity-drop
+    # collectors (index_repo_cmd's parity — full nx index reset() triple),
+    # so this run's exit-code check below reflects only THIS run's
+    # problems, not leftover state from an earlier call in the same
+    # process. nexus-7f5qj: delegates to the shared commands._helpers
+    # reset helper (this was the first of what became four near-identical
+    # copies; see that module for the extraction rationale).
+    from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+    reset_identity_drop_collectors()
     # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l): must be bound
     # before the per-record try/except below reaches its `except
     # IndexRunVerifyRefused` clause.
@@ -892,13 +885,16 @@ def index_cmd(
             "'nx catalog update <tumbler> --source-uri x-devonthink-item://<UUID>'.",
         )
 
-    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34): a
-    # completion stamp REFUSED by the engine's fail-closed verify means the
-    # manifest was written but the document is NOT actually whole in T3 —
-    # index_state stays 'indexing'. Silently folding this into a clean
-    # "Indexed N record(s)." summary reproduces, one layer up, the exact
-    # silent-success shape the fence exists to close. Mirrors
-    # _emit_manifest_write_failure_summary in commands/index.py.
+    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34) +
+    # nexus-tp8yk D2b: a completion stamp REFUSED by the engine's
+    # fail-closed verify, a manifest write failure, or an identity drop
+    # used to leave rc=0 (WARNING-only, or silently folded into a clean
+    # "Indexed N record(s)." summary) — reproducing, one layer up, the
+    # exact silent-success shape the fence exists to close. nexus-7f5qj:
+    # delegates to the shared commands._helpers collector-check (see that
+    # module for the per-collector rationale this docstring used to carry
+    # inline, including WHY the write-failure line says "document(s)" and
+    # not "record(s)" despite this command's own convention elsewhere).
     #
     # substantive-critic SIGNIFICANT (2026-08-02, T2
     # nexus/5xn3k6-critique-2026-08-02 [21355]): a refused record still has
@@ -910,58 +906,27 @@ def index_cmd(
     # keyed on doc_id, not per-record uuid), so this states the overlap as
     # a count relationship rather than naming which of the indexed records
     # it is.
-    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal)
-        get_complete_refusals,
-        get_manifest_identity_drops,
-        get_manifest_write_failures,
+    from nexus.commands._helpers import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal/failure/drop)
+        emit_identity_drop_summary,
+        raise_identity_drop_exception,
     )
-    refused = get_complete_refusals()
-    if refused:
-        click.echo(
-            f"  WARNING: {len(refused)} of the {indexed} indexed above had "
-            f"completion refused by the engine's fail-closed verify (fence "
-            f"left at 'indexing') — NOT fully indexed. Re-index or --force "
-            f"to retry.",
-            # nexus-5xn3k.6 code-review-expert NIT (2026-08-02): matches
-            # commands/index.py's _emit_manifest_write_failure_summary
-            # stream placement — all WARNING-level summary lines go to
-            # stderr, not stdout.
-            err=True,
-        )
-
-    # nexus-tp8yk D2b: mirrors commands/index.py's index_repo_cmd — a
-    # completion refusal, a manifest write failure, or an identity drop
-    # used to leave rc=0 (WARNING-only). Refusal != unconfirmed: a
-    # pre-fence engine's None sentinel still warns at rc 0, untouched by
-    # this bead — only a POSITIVE engine verdict or a write/identity
-    # failure fails the run.
-    write_failed = get_manifest_write_failures()
-    if write_failed:
-        click.echo(
-            f"  WARNING: catalog manifest write failed for {len(write_failed)} "
-            f"document(s) — they will not appear in catalog-aware queries. "
-            f"Run 'nx catalog reconcile' to repair.",
-            err=True,
-        )
-    identity_drops = get_manifest_identity_drops()
-    if identity_drops:
-        n_chunks = sum(d["batch_size"] for d in identity_drops)
-        cols = sorted({d["collection"] for d in identity_drops})
-        click.echo(
-            f"  WARNING: {len(identity_drops)} chunk batch(es) ({n_chunks} "
-            f"chunks; collection(s): {', '.join(cols)}) were indexed "
-            f"WITHOUT a catalog document identity — their manifests were "
-            f"not written and the documents will not appear in "
-            f"catalog-aware queries. Run 'nx catalog reconcile' to repair.",
-            err=True,
-        )
-    if refused or write_failed or identity_drops:
-        raise click.ClickException(
-            "one or more records had manifest write failures, identity "
-            "drops, or completion refusals this run — see the WARNING "
-            "lines above. Run 'nx catalog manifest-verify <tumbler>' to "
-            "inspect a specific record, or re-index with --force."
-        )
+    if emit_identity_drop_summary(
+        indexed_count=indexed,
+        # nexus-7f5qj code-review follow-up (T2 [21484]): preserve this
+        # command's ORIGINAL print order exactly (refused, then
+        # write-failed, then identity-drops) — the extraction's default
+        # order matches index_repo_cmd's instead. No test pinned the
+        # order for either caller, but matching it keeps the "behavior-
+        # preserving refactor" claim exact.
+        order=("refused", "write_failed", "identity_drops"),
+    ):
+        # nexus-tp8yk D2b: mirrors commands/index.py's index_repo_cmd — a
+        # completion refusal, a manifest write failure, or an identity
+        # drop used to leave rc=0. Refusal != unconfirmed: a pre-fence
+        # engine's None sentinel still warns at rc 0, untouched by this
+        # bead — only a POSITIVE engine verdict or a write/identity
+        # failure fails the run.
+        raise_identity_drop_exception(subject="record")
 
 
 def _gather_records(
