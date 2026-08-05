@@ -1110,7 +1110,7 @@ def _check_git_hooks() -> list[HealthResult]:
     from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END  # noqa: PLC0415 — deferred to avoid circular import
     _effective_hooks_dir = _ghm.effective_hooks_dir
     from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.repos import list_repos_dual_with_catalog_roots  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
@@ -1147,10 +1147,30 @@ def _check_git_hooks() -> list[HealthResult]:
     # paths come from ``owners WHERE owner_type='repo'``; the registry
     # provides legacy installs that have not yet been re-indexed.
     cat = None
+    repos: list[str] = []
+    # nexus-cw262 (round-2 critique, T2 21456 moderate finding): a single
+    # list_repos_dual_with_catalog_roots call now serves BOTH the walk list
+    # (``repos``, CATALOG ∪ registry union) and the attribution set
+    # (``catalog_repo_roots``, catalog-only) from ONE
+    # cat.list_owners_by_type("repo") round trip. Pre-fix this was two
+    # independent calls (list_repos_dual, then a second list_owners_by_type
+    # inline below); a transient failure of the SECOND call alone silently
+    # degraded catalog_repo_roots to empty, misattributing a genuinely
+    # catalog-owned dead owner as a legacy repos.json entry — a narrow,
+    # self-healing (next doctor run) but real recurrence of the population-
+    # mismatch class this same bead's round-1 fix closed for the common case.
+    catalog_repo_roots: set[str] = set()
+    # nexus-cw262 round-3 critique (T2 21467 Significant-2): the SAME call
+    # also yields the owner-deactivate capability signal now — "unknown"
+    # (not "available") is the safe default until proven otherwise, so a
+    # failed/empty read never accidentally claims a route that may not
+    # exist on the connected engine.
+    deactivate_capability = "unknown"
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
         cat = make_catalog_reader()
-        repos = list_repos_dual(cat=cat, registry_path=registry_path)
+        repos, catalog_repo_roots, deactivate_capability = list_repos_dual_with_catalog_roots(
+            cat=cat, registry_path=registry_path)
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         # RDR-137 followup IMP-20 (nexus-43qgm.20): exc_info=True so
         # the operator sees the traceback alongside the error message
@@ -1160,25 +1180,8 @@ def _check_git_hooks() -> list[HealthResult]:
             "doctor_registry_load_failed", error=str(exc), exc_info=True,
         )
         repos = []
-
-    # nexus-7kl32 code-review finding 3 (population mismatch): the loop
-    # below walks the CATALOG ∪ registry union (``repos``), but
-    # ``nx catalog owners --census`` classifies catalog owners only — a
-    # dead owner whose ONLY registration is the legacy ``repos.json`` file
-    # would warn here yet never appear in the census output the warning
-    # points at. Attribute each dead path to its source (once, up front —
-    # not per-repo) so the vanished-owner branch below can say which verb
-    # actually covers it.
-    catalog_repo_roots: set[str] = set()
-    if cat is not None:
-        try:
-            catalog_repo_roots = {
-                o.get("repo_root") for o in cat.list_owners_by_type("repo")
-                if o.get("repo_root")
-            }
-        except Exception:  # noqa: BLE001 — attribution is best-effort; the primary check must survive its failure
-            _log.debug("doctor_git_hooks_catalog_attribution_failed", exc_info=True)
-            catalog_repo_roots = set()
+        catalog_repo_roots = set()
+        deactivate_capability = "unknown"
 
     if not repos:
         results.append(HealthResult(
@@ -1257,18 +1260,44 @@ def _check_git_hooks() -> list[HealthResult]:
                 if vanished:
                     if str(repo_path) in catalog_repo_roots:
                         # A catalog owner — nx catalog owners --census
-                        # covers it (same list_owners_by_type("repo") read).
+                        # covers it (same list_repos_dual_with_catalog_roots
+                        # round trip built this attribution set above).
+                        #
+                        # nexus-cw262 round-3 critique (T2 21467
+                        # Significant-2): the mutation arm's ACTUAL
+                        # availability depends on which engine build this
+                        # tenant is connected to — the live cloud engine at
+                        # authorship time genuinely predates the route. Name
+                        # the census unconditionally (it always works, engine
+                        # floor or not) but qualify the mutation arm honestly
+                        # per the capability signal computed above, rather
+                        # than claiming it unconditionally.
+                        fix = ["nx catalog owners --census — inspects dead owners"]
+                        if deactivate_capability == "available":
+                            fix.append(
+                                "--execute deactivate --no-dry-run --confirm "
+                                "deregisters eligible ones (nexus-cw262)"
+                            )
+                        elif deactivate_capability == "unavailable":
+                            fix.append(
+                                "the --execute deactivate mutation arm requires "
+                                "an engine build carrying the nexus-cw262 "
+                                "owner-deactivate route (not yet deployed here); "
+                                "re-run after the connected engine is upgraded"
+                            )
+                        else:  # "unknown" — no owners response to read the signal from
+                            fix.append(
+                                "whether --execute deactivate is available on the "
+                                "connected engine could not be confirmed this run "
+                                "(nexus-cw262)"
+                            )
                         results.append(HealthResult(
                             label="git hooks", ok=False, warn=True,
                             detail=(
                                 f"{repo_path} — owner root no longer exists "
                                 "on disk (dead owner)"
                             ),
-                            fix_suggestions=[
-                                "nx catalog owners --census — inspects dead "
-                                "owners (read-only; deregistration not yet "
-                                "available, tracked as nexus-cw262)"
-                            ],
+                            fix_suggestions=fix,
                         ))
                     else:
                         # code-review SIGNIFICANT (nexus-7kl32, critic
@@ -4199,7 +4228,16 @@ def _check_next_seq_drift() -> list[HealthResult]:
         cat = make_catalog_reader()
         if cat is None:
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        owners = cat.list_owners()
+        # nexus-cw262 (round-3 critique, T2 21467 Significant-3): list_owners()
+        # defaults to excluding deactivated owners now that the flag exists —
+        # include_deactivated=True preserves this check's PRIOR coverage
+        # (every owner, always) rather than silently narrowing it. Mirrors
+        # CatalogRepository.sweepNextSeqDrift's own deliberate choice to keep
+        # covering deactivated owners: "a deactivated owner can still receive
+        # late-arriving writes via an explicit tumbler_prefix (e.g. ETL
+        # replay)" — next_seq drift-floor visibility is orthogonal to owner
+        # liveness, same as the engine-side sweep this check watches.
+        owners = cat.list_owners(include_deactivated=True)
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_next_seq_check_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]

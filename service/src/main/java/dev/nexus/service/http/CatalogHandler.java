@@ -62,6 +62,8 @@ import java.util.*;
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
+ *   POST  /v1/catalog/owners/deactivate  soft-delete an owner (nexus-cw262 -- excluded from list/by_type by default)
+ *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
  *   GET   /v1/catalog/collections/list   list collections
@@ -177,6 +179,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
                 case "/owners/show"           -> handleOwnerShow(exchange, tenant, method);
                 case "/owners/by_type"        -> handleOwnerByType(exchange, tenant, method);
+                case "/owners/deactivate"     -> handleOwnerDeactivate(exchange, tenant, method);
+                case "/owners/reactivate"     -> handleOwnerReactivate(exchange, tenant, method);
 
                 // ── Collections ───────────────────────────────────────────────
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
@@ -1114,10 +1118,49 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
+    /**
+     * GET /v1/catalog/owners/list[?include_deactivated=true] — nexus-cw262: the
+     * audit escape hatch. Default (param absent or any value other than
+     * {@code "true"}) excludes deactivated owners.
+     */
     private void handleOwnerList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        var owners = repo.listOwners(tenant);
+        boolean includeDeactivated = "true".equals(queryParam(exchange, "include_deactivated"));
+        var owners = repo.listOwners(tenant, includeDeactivated);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    /**
+     * POST /v1/catalog/owners/deactivate {"tumbler_prefix": X} — nexus-cw262: the
+     * 7kl32 dead-owner GC mutation arm's engine half. Soft-delete, mirrors {@code
+     * /delete}'s shape (idempotent 0-return; reversible). Response: {@code
+     * {"deactivated": 0|1}}.
+     */
+    private void handleOwnerDeactivate(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String prefix = (String) body.get("tumbler_prefix");
+        if (prefix == null || prefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler_prefix' required\"}"); return;
+        }
+        int deactivated = repo.deactivateOwner(tenant, prefix);
+        HttpUtil.send(exchange, 200, "{\"deactivated\":" + deactivated + "}");
+    }
+
+    /**
+     * POST /v1/catalog/owners/reactivate {"tumbler_prefix": X} — nexus-cw262: the
+     * explicit manual-correction path (clears deactivated_at without a full
+     * re-registration). Response: {@code {"reactivated": 0|1}}.
+     */
+    private void handleOwnerReactivate(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String prefix = (String) body.get("tumbler_prefix");
+        if (prefix == null || prefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler_prefix' required\"}"); return;
+        }
+        int reactivated = repo.reactivateOwner(tenant, prefix);
+        HttpUtil.send(exchange, 200, "{\"reactivated\":" + reactivated + "}");
     }
 
     /**
@@ -1691,7 +1734,12 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(owner));
     }
 
-    /** POST /v1/catalog/owners/by_type — list owners filtered by owner_type. */
+    /**
+     * POST /v1/catalog/owners/by_type {"owner_type": X, "include_deactivated": bool}
+     * — list owners filtered by owner_type. nexus-cw262: {@code include_deactivated}
+     * defaults false (excludes deactivated owners) — this is the exact read path the
+     * 7kl32 census and doctor's git-hooks dead-owner attribution both use.
+     */
     private void handleOwnerByType(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -1699,7 +1747,9 @@ public final class CatalogHandler implements HttpHandler {
         if (ownerType == null || ownerType.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"owner_type required\"}"); return;
         }
-        var owners = repo.ownersByType(tenant, ownerType);
+        Object includeDeactivatedRaw = body.get("include_deactivated");
+        boolean includeDeactivated = includeDeactivatedRaw instanceof Boolean b && b;
+        var owners = repo.ownersByType(tenant, ownerType, includeDeactivated);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
     }
 

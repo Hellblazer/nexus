@@ -60,9 +60,17 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
         # Patch at definition site (nexus.repos) because health.py
         # imports lazily inside _check_hooks — no module-level
         # symbol exists to patch on nexus.health itself.
+        #
+        # nexus-cw262: health.py's git-hooks check now calls
+        # list_repos_dual_with_catalog_roots directly (one round trip
+        # serving both the walk list and the catalog-only attribution set,
+        # instead of a second independent list_owners_by_type call) —
+        # patch that function, not the list_repos_dual wrapper it no
+        # longer goes through. catalog_repo_roots=set() mirrors this
+        # fixture's mock_reg-only (no catalog) setup.
         patch(
-            "nexus.repos.list_repos_dual",
-            side_effect=lambda **_: list(mock_reg.all()),
+            "nexus.repos.list_repos_dual_with_catalog_roots",
+            side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
         ),
     ]
     if callable(cred):
@@ -397,9 +405,12 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.
         patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
+        # nexus-cw262: health.py's git-hooks check now calls
+        # list_repos_dual_with_catalog_roots directly; the old
+        # list_repos_dual wrapper is no longer on that path.
         patch(
-            "nexus.repos.list_repos_dual",
-            side_effect=lambda **_: list(mock_reg.all()),
+            "nexus.repos.list_repos_dual_with_catalog_roots",
+            side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
         ),
         # Unconditional service probe (critique finding 2) — stub it green.
         patch("nexus.db.http_vector_client._get", return_value=[]),
@@ -436,9 +447,12 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.
         patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
+        # nexus-cw262: health.py's git-hooks check now calls
+        # list_repos_dual_with_catalog_roots directly; the old
+        # list_repos_dual wrapper is no longer on that path.
         patch(
-            "nexus.repos.list_repos_dual",
-            side_effect=lambda **_: list(mock_reg.all()),
+            "nexus.repos.list_repos_dual_with_catalog_roots",
+            side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
         ),
         patch("nexus.db.make_t3", return_value=_StubServiceClient()),
         # Unconditional service probe (critique finding 2) — stub it green.

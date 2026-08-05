@@ -560,14 +560,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             raise
         return result if result and result.get("tumbler_prefix") else None
 
-    def list_owners_by_type(self, owner_type: str) -> list[dict]:
-        """Return all owners of the given type.
+    def list_owners_by_type(self, owner_type: str, *, include_deactivated: bool = False) -> list[dict]:
+        """Return owners of the given type.
 
-        Backs repos.py:list_repos_dual which previously queried
-        ``SELECT repo_root FROM owners WHERE owner_type='repo'`` directly.
-        Uses POST /v1/catalog/owners/by_type endpoint (nexus-qnp5s).
+        Backs repos.py:list_repos_dual_with_catalog_roots which previously
+        queried ``SELECT repo_root FROM owners WHERE owner_type='repo'``
+        directly. Uses POST /v1/catalog/owners/by_type endpoint (nexus-qnp5s).
+
+        ``include_deactivated`` (nexus-cw262): default False excludes
+        deactivated owners -- this is the exact read path the 7kl32 census
+        and doctor's git-hooks dead-owner attribution both use, so the
+        default-exclusion here is what makes deactivation actually stop the
+        re-surfacing debris. Pass True for the audit escape hatch.
         """
-        result = self._post("/owners/by_type", {"owner_type": owner_type})
+        result = self._post("/owners/by_type", {
+            "owner_type": owner_type,
+            "include_deactivated": include_deactivated,
+        })
         return result.get("owners", []) if result else []
 
     def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
@@ -908,16 +917,30 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         all_colls = self.list_collections()
         return [c for c in all_colls if c.get("owner_id") == owner_id]
 
-    def list_owners(self) -> list[dict]:
-        """Return all owners for this tenant.
+    def list_owners(self, *, include_deactivated: bool = False) -> list[dict]:
+        """Return owners for this tenant.
 
         Backs commands/catalog.py owners_cmd which previously queried
         ``SELECT tumbler_prefix, name, owner_type, repo_hash, description FROM owners``
         directly.  Uses GET /v1/catalog/owners/list (nexus-xnz0o).
         Returns list of dicts with keys: tumbler_prefix, name, owner_type,
         repo_hash, description, repo_root, head_hash.
+
+        ``include_deactivated`` (nexus-cw262): default False excludes owners
+        the 7kl32 GC mutation arm has deactivated -- that exclusion is the
+        entire point of the deactivate route (dead owners stop appearing in
+        doctor's git-hooks walk and the census). Pass True for the audit
+        escape hatch; the returned dicts then also carry ``deactivated_at``
+        (ISO timestamp string, or ``None`` for still-active rows).
         """
-        result = self._get("/owners/list")
+        # nexus-cw262: `_get` drops any param whose value is falsy/empty
+        # (`params.items() if v is not None and v != ""`), and a bare Python
+        # `False` would otherwise round-trip as the query string "False" --
+        # not the lowercase "true" CatalogHandler.handleOwnerList checks for.
+        # Omitting the param entirely on the (far more common) False path
+        # keeps every existing plain `nx catalog owners` call unaffected.
+        params = {"include_deactivated": "true"} if include_deactivated else {}
+        result = self._get("/owners/list", **params)
         return result.get("owners", []) if result else []
 
     def distinct_doc_collections(self) -> list[str]:
@@ -1269,6 +1292,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def delete_document(self, tumbler: Tumbler | str) -> bool:
         result = self._post("/delete", {"tumbler": str(tumbler)})
         return bool(result.get("deleted", 0) > 0 if result else False)
+
+    def deactivate_owner(self, tumbler_prefix: str) -> bool:
+        """Soft-delete an owner (nexus-cw262: the 7kl32 dead-owner GC
+        mutation arm's engine call). Reversible -- see :meth:`reactivate_owner`
+        and CatalogRepository.upsertOwner's automatic clear-on-reregister.
+        Idempotent: a second call on an already-deactivated (or never-
+        existent) prefix returns False, mirroring :meth:`delete_document`'s
+        idempotent-zero contract.
+        """
+        result = self._post("/owners/deactivate", {"tumbler_prefix": str(tumbler_prefix)})
+        return bool(result.get("deactivated", 0) > 0 if result else False)
+
+    def reactivate_owner(self, tumbler_prefix: str) -> bool:
+        """Clear an owner's deactivated flag (nexus-cw262). The explicit
+        manual-correction path; a live re-registration through
+        :meth:`register_owner` / ``ensure_owner_for_repo`` already does this
+        automatically. Idempotent: already-active returns False.
+        """
+        result = self._post("/owners/reactivate", {"tumbler_prefix": str(tumbler_prefix)})
+        return bool(result.get("reactivated", 0) > 0 if result else False)
 
     def delete_many(self, tumblers: list[Tumbler | str]) -> set[str]:
         """Batch-tombstone N documents; returns the subset of *tumblers*

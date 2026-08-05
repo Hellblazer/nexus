@@ -253,6 +253,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/owners/head_hash", "handleOwnerHeadHash"),
         neither("/owners/show", "handleOwnerShow"),
         collectionExempt("/owners/by_type", "handleOwnerByType", ADMIN_SCALE),
+        // nexus-cw262: response is a flat scalar map ({"deactivated": N} /
+        // {"reactivated": N}) -- no JSON array of items (not collectionReturning)
+        // and the request body carries only a single tumbler_prefix scalar, no id
+        // list (not idListAccepting). Same shape as /delete above.
+        neither("/owners/deactivate", "handleOwnerDeactivate"),
+        neither("/owners/reactivate", "handleOwnerReactivate"),
 
         // ── Collections ───────────────────────────────────────────────────
         neither("/collections/upsert", "handleCollectionUpsert"),

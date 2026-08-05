@@ -4104,4 +4104,122 @@ class CatalogRepositoryTest {
         List<Map<String, Object>> nodes = (List<Map<String, Object>>) graph.get("nodes");
         return tumblersOf(nodes).stream().filter(t -> !"8.1".equals(t)).toList();
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-cw262 — owner deactivate/reactivate (soft-delete), the 7kl32
+    // dead-owner GC mutation arm's engine half.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(320)
+    void deactivateOwner_excludesFromDefaultListOwnersAndByType_visibleWithIncludeDeactivated() {
+        final String T = "cat-tenant-cw262-a";
+        repo.upsertOwner(T, Map.of(
+            "tumbler_prefix", "1",
+            "name", "dead-repo",
+            "owner_type", "repo",
+            "repo_root", "/tmp/dead-repo"));
+
+        // Sanity: visible before deactivation, on both read paths this bead touches.
+        assertThat(repo.listOwners(T)).extracting(o -> o.get("tumbler_prefix")).contains("1");
+        assertThat(repo.ownersByType(T, "repo")).extracting(o -> o.get("tumbler_prefix")).contains("1");
+
+        int n = repo.deactivateOwner(T, "1");
+        assertThat(n).as("deactivateOwner reports the row it actually flipped").isEqualTo(1);
+
+        // The entire point: default reads now exclude it.
+        assertThat(repo.listOwners(T)).extracting(o -> o.get("tumbler_prefix")).doesNotContain("1");
+        assertThat(repo.ownersByType(T, "repo")).extracting(o -> o.get("tumbler_prefix")).doesNotContain("1");
+
+        // include_deactivated=true (the audit escape hatch) still sees it, with
+        // deactivated_at populated so a caller can tell WHICH rows are dead.
+        var all = repo.listOwners(T, true);
+        var found = all.stream().filter(o -> "1".equals(o.get("tumbler_prefix"))).findFirst();
+        assertThat(found).isPresent();
+        assertThat(found.get().get("deactivated_at")).isNotNull();
+
+        var allByType = repo.ownersByType(T, "repo", true);
+        assertThat(allByType).anySatisfy(o -> {
+            assertThat(o.get("tumbler_prefix")).isEqualTo("1");
+            assertThat(o.get("deactivated_at")).isNotNull();
+        });
+    }
+
+    @Test @Order(321)
+    void deactivateOwner_isIdempotent_secondCallReturnsZero() {
+        final String T = "cat-tenant-cw262-b";
+        repo.upsertOwner(T, Map.of("tumbler_prefix", "1", "name", "idem-repo", "owner_type", "repo"));
+        assertThat(repo.deactivateOwner(T, "1")).isEqualTo(1);
+        // AND deactivated_at IS NULL guard: double-deactivate is a no-op, does
+        // not reset the timestamp (same idempotency contract as deleteDocument).
+        assertThat(repo.deactivateOwner(T, "1")).isEqualTo(0);
+    }
+
+    @Test @Order(322)
+    void deactivateOwner_unknownPrefix_returnsZero() {
+        assertThat(repo.deactivateOwner("cat-tenant-cw262-c", "999.999")).isEqualTo(0);
+    }
+
+    @Test @Order(323)
+    void reactivateOwner_clearsFlag_ownerVisibleAgainInDefaultList() {
+        final String T = "cat-tenant-cw262-d";
+        repo.upsertOwner(T, Map.of("tumbler_prefix", "1", "name", "resurrected-repo", "owner_type", "repo"));
+        assertThat(repo.deactivateOwner(T, "1")).isEqualTo(1);
+        assertThat(repo.listOwners(T)).extracting(o -> o.get("tumbler_prefix")).doesNotContain("1");
+
+        int n = repo.reactivateOwner(T, "1");
+        assertThat(n).as("reactivateOwner reports the row it actually flipped").isEqualTo(1);
+        assertThat(repo.listOwners(T)).extracting(o -> o.get("tumbler_prefix")).contains("1");
+
+        // Idempotent the other direction too: already-active is a no-op.
+        assertThat(repo.reactivateOwner(T, "1")).isEqualTo(0);
+    }
+
+    @Test @Order(324)
+    void upsertOwner_onExistingDeactivatedOwner_reactivatesAutomatically() {
+        // The self-heal contract ownerUpdateSet documents: a live re-registration
+        // through the normal `nx index repo` path is affirmative evidence the
+        // owner is back in use, so it clears deactivated_at with no separate
+        // /owners/reactivate call needed.
+        final String T = "cat-tenant-cw262-e";
+        repo.upsertOwner(T, Map.of(
+            "tumbler_prefix", "1", "name", "revived-repo", "owner_type", "repo",
+            "repo_hash", "revived-hash"));
+        assertThat(repo.deactivateOwner(T, "1")).isEqualTo(1);
+        assertThat(repo.listOwners(T)).extracting(o -> o.get("tumbler_prefix")).doesNotContain("1");
+
+        // Converge-on-identity re-registration (same name+owner_type, no
+        // explicit tumbler_prefix) -- the exact path a re-cloned/remounted
+        // repo takes through `nx index repo`.
+        repo.upsertOwner(T, Map.of(
+            "name", "revived-repo", "owner_type", "repo", "repo_hash", "revived-hash",
+            "description", "back from the dead"));
+
+        assertThat(repo.listOwners(T)).extracting(o -> o.get("tumbler_prefix")).contains("1");
+        var revived = repo.listOwners(T).stream()
+            .filter(o -> "1".equals(o.get("tumbler_prefix"))).findFirst();
+        assertThat(revived).isPresent();
+        assertThat(revived.get().get("deactivated_at")).isNull();
+        assertThat(revived.get().get("description")).isEqualTo("back from the dead");
+    }
+
+    @Test @Order(325)
+    void deactivateOwner_rlsIsolation_cannotDeactivateAnotherTenantsOwner() {
+        final String TA = "cat-tenant-cw262-rls-a";
+        final String TB = "cat-tenant-cw262-rls-b";
+        repo.upsertOwner(TB, Map.of("tumbler_prefix", "1", "name", "tenant-b-repo", "owner_type", "repo"));
+
+        // TENANT A attempting to deactivate TENANT B's owner prefix must affect
+        // nothing: FORCE ROW LEVEL SECURITY scopes the UPDATE's WHERE to tenant
+        // A's own rows, so the cross-tenant tumbler_prefix simply matches no row.
+        int n = repo.deactivateOwner(TA, "1");
+        assertThat(n).isEqualTo(0);
+
+        // Tenant B's owner remains active and visible in its own tenant scope --
+        // the no-op above did not leak a partial/cross-tenant mutation either.
+        assertThat(repo.listOwners(TB)).extracting(o -> o.get("tumbler_prefix")).contains("1");
+        var b = repo.listOwners(TB, true).stream()
+            .filter(o -> "1".equals(o.get("tumbler_prefix"))).findFirst();
+        assertThat(b).isPresent();
+        assertThat(b.get().get("deactivated_at")).isNull();
+    }
 }

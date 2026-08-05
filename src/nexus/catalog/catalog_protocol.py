@@ -216,6 +216,12 @@ class CatalogWriter(Protocol):
     def delete_document(self, tumbler) -> object:  # canonical
         ...
 
+    def deactivate_owner(self, tumbler_prefix) -> object:  # canonical (nexus-cw262)
+        ...
+
+    def reactivate_owner(self, tumbler_prefix) -> object:  # canonical (nexus-cw262)
+        ...
+
     def register_collection(self, name, *, content_type=..., owner_id=..., embedding_model=..., model_version=..., display_name=...) -> object:  # canonical
         ...
 
@@ -294,6 +300,8 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "link_if_absent",
     "unlink",
     "delete_document",
+    "deactivate_owner",
+    "reactivate_owner",
     "register_collection",
     "delete_collection_projection",
     "supersede_collection",

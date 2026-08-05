@@ -471,6 +471,14 @@ public final class CatalogRepository {
         if (!converged || o.containsKey("description")) upd.put(CATALOG_OWNERS.DESCRIPTION, EX_OWN_DESC);
         if (!converged || o.containsKey("repo_root"))   upd.put(CATALOG_OWNERS.REPO_ROOT, EX_OWN_ROOT);
         if (!converged || o.containsKey("head_hash"))   upd.put(CATALOG_OWNERS.HEAD_HASH, EX_OWN_HEAD);
+        // nexus-cw262: any live upsert (register/converge) is affirmative evidence the
+        // owner is in active use again — clear deactivated_at unconditionally, the same
+        // way a repo that was census-flagged path_vanished and later remounted/re-cloned
+        // self-heals back into the default owner list the next time `nx index repo`
+        // registers into it. Explicit `POST /owners/reactivate` exists for the no-write
+        // correction case (Hal manually undoing a batch deactivation); this is the
+        // automatic path.
+        upd.put(CATALOG_OWNERS.DEACTIVATED_AT, null);
         return upd;
     }
 
@@ -548,19 +556,34 @@ public final class CatalogRepository {
         }));
     }
 
-    /** Return all owners for tenant as list of maps. */
+    /** Return all ACTIVE (non-deactivated) owners for tenant as list of maps. */
     public List<Map<String, Object>> listOwners(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
+        return listOwners(tenant, false);
+    }
+
+    /**
+     * Return owners for tenant as list of maps (nexus-cw262: {@code
+     * includeDeactivated} audit option). Default read path ({@code
+     * includeDeactivated=false}, what {@link #listOwners(String)} and
+     * {@code GET /v1/catalog/owners/list} use) excludes deactivated owners
+     * — the entire point of the deactivate route is that a dead owner
+     * stops appearing here, so doctor's git-hooks walk and the 7kl32
+     * census stop re-surfacing the same debris every run.
+     */
+    public List<Map<String, Object>> listOwners(String tenant, boolean includeDeactivated) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition cond = includeDeactivated ? DSL.trueCondition() : CATALOG_OWNERS.DEACTIVATED_AT.isNull();
             // nexus-0ehwe item 3: next_seq on the LIST too — the drift check
             // must be able to sweep EVERY owner without N round trips.
-            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+            return ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
                        CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH,
-                       CATALOG_OWNERS.NEXT_SEQ)
+                       CATALOG_OWNERS.NEXT_SEQ, CATALOG_OWNERS.DEACTIVATED_AT)
                .from(CATALOG_OWNERS)
+               .where(cond)
                .fetch()
                .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7(),
-                                  r.value8()))
-        );
+                                  r.value8(), r.value9()));
+        });
     }
 
     /** Find owner by repo_hash. Returns null if not found. */
@@ -1486,6 +1509,17 @@ public final class CatalogRepository {
      *         the owners that were actually drifted (and successfully floored);
      *         {@code checked} counts owners actually examined (one deleted between the
      *         list and its probe is skipped and not counted).
+     *
+     * <p>nexus-cw262 audit: this sweep queries {@code CATALOG_OWNERS.TUMBLER_PREFIX}
+     * directly (not via {@link #listOwners(String)} / {@link #ownersByType}), so it is
+     * unaffected by those methods' new default deactivated-owner exclusion and
+     * deliberately continues to cover EVERY owner regardless of {@code
+     * deactivated_at}. next_seq drift-floor repair is orthogonal to owner
+     * liveness/visibility — a deactivated owner can still receive late-arriving
+     * writes via an explicit tumbler_prefix (e.g. ETL replay), and floor convergence
+     * is monotonic/idempotent either way, so excluding deactivated owners here would
+     * only reintroduce the exact invisible-drift failure mode this sweep exists to
+     * close, for no offsetting benefit.
      */
     public Map<String, Object> sweepNextSeqDrift(String tenant) {
         List<String> prefixes = tenantScope.withTenant(tenant, ctx ->
@@ -4903,15 +4937,66 @@ public final class CatalogRepository {
         });
     }
 
-    /** Return owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
+    /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
     public List<Map<String, Object>> ownersByType(String tenant, String ownerType) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
-                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH)
+        return ownersByType(tenant, ownerType, false);
+    }
+
+    /**
+     * Return owners filtered by owner_type (nexus-cw262: {@code includeDeactivated}
+     * audit option — same default-exclusion contract as {@link #listOwners(String,
+     * boolean)}). This is the exact read path the 7kl32 census (`nx catalog owners
+     * --census`, via {@code list_owners_by_type("repo")}) and doctor's git-hooks
+     * dead-owner attribution both use — excluding deactivated owners by default is
+     * the entire point of the deactivate route.
+     */
+    public List<Map<String, Object>> ownersByType(String tenant, String ownerType, boolean includeDeactivated) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition cond = CATALOG_OWNERS.OWNER_TYPE.eq(ownerType);
+            if (!includeDeactivated) cond = cond.and(CATALOG_OWNERS.DEACTIVATED_AT.isNull());
+            return ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH,
+                       CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.DEACTIVATED_AT)
                .from(CATALOG_OWNERS)
-               .where(CATALOG_OWNERS.OWNER_TYPE.eq(ownerType))
+               .where(cond)
                .fetch()
-               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
+               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7(),
+                                  r.value8()));
+        });
+    }
+
+    /**
+     * Deactivate one owner (nexus-cw262: the 7kl32 dead-owner GC mutation arm's engine
+     * half). Sets {@code deactivated_at = NOW()}, mirroring {@link #deleteDocument}'s
+     * tombstone shape exactly (plain UPDATE, not the {@code nexus.document_trash}/
+     * {@code purge_trash} SQL-function idiom — owners have no purge/GC counterpart,
+     * so there is nothing for a stored function to add over a direct UPDATE).
+     * {@code AND deactivated_at IS NULL}: idempotent, double-deactivate does not
+     * reset the timestamp. Returns the row count actually updated (0 = already
+     * deactivated or the prefix does not exist in this tenant).
+     */
+    public int deactivateOwner(String tenant, String tumblerPrefix) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.update(CATALOG_OWNERS)
+               .set(CATALOG_OWNERS.DEACTIVATED_AT, DSL.currentOffsetDateTime())
+               .where(CATALOG_OWNERS.TUMBLER_PREFIX.eq(tumblerPrefix).and(CATALOG_OWNERS.DEACTIVATED_AT.isNull()))
+               .execute()
+        );
+    }
+
+    /**
+     * Reactivate one owner (nexus-cw262) — clears {@code deactivated_at}. The
+     * explicit manual-correction path (Hal undoing a batch deactivation without
+     * re-registering); {@link #upsertOwner} already clears the flag automatically
+     * on any live re-registration, so this route exists for the no-write case.
+     * Returns the row count actually updated (0 = already active or the prefix
+     * does not exist in this tenant).
+     */
+    public int reactivateOwner(String tenant, String tumblerPrefix) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.update(CATALOG_OWNERS)
+               .set(CATALOG_OWNERS.DEACTIVATED_AT, (OffsetDateTime) null)
+               .where(CATALOG_OWNERS.TUMBLER_PREFIX.eq(tumblerPrefix).and(CATALOG_OWNERS.DEACTIVATED_AT.isNotNull()))
+               .execute()
         );
     }
 
@@ -5079,6 +5164,21 @@ public final class CatalogRepository {
      * <p>Backs the Python {@code owners_with_roots()} HttpCatalogClient method.
      * Replaces direct SQLite:
      * {@code SELECT tumbler_prefix, repo_root FROM owners WHERE repo_root != ''}
+     *
+     * <p>nexus-cw262 (code-review, catalog owner soft-delete): deliberately
+     * NOT filtered on {@code deactivated_at IS NULL}, unlike {@link
+     * #listOwners(String, boolean)} / {@link #ownersByType(String, String,
+     * boolean)}'s default exclusion. Same rationale as {@link
+     * #sweepNextSeqDrift}'s deliberate all-owners coverage: this method backs
+     * {@code reconcile-stale}'s {@code owner_roots} lookup, which resolves
+     * zero-count DOCUMENTS' on-disk provenance (the {@code owner_root_gone}
+     * classification) — a document can still be live and registered under an
+     * owner that was independently deactivated (e.g. Hal ran {@code --execute
+     * deactivate} on a debris owner that, unknown to that pass, still had a
+     * stray live document). Filtering this method would make that
+     * document's path resolution silently vanish, regressing reconcile-stale's
+     * ability to classify it at all — the same failure mode excluding
+     * deactivated owners here would reintroduce.
      */
     public List<Map<String, Object>> ownersWithRoots(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
@@ -5924,6 +6024,34 @@ public final class CatalogRepository {
                                                   Long nextSeq) {
         Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head);
         m.put("next_seq", nextSeq == null ? 0L : nextSeq);
+        return m;
+    }
+
+    /**
+     * nexus-cw262: {@code listOwners(tenant, includeDeactivated)} overload — carries
+     * BOTH next_seq and deactivated_at. An overload rather than a signature change to
+     * the 8-arg (nextSeq-only) form above for the same reason that one is itself an
+     * overload of the 7-arg base: {@code ownerRow} has many callers and most have
+     * neither next_seq nor deactivated_at in scope.
+     */
+    private static Map<String, Object> ownerRow(String prefix, String name, String type,
+                                                  String repo, String desc, String root, String head,
+                                                  Long nextSeq, OffsetDateTime deactivatedAt) {
+        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head, nextSeq);
+        m.put("deactivated_at", deactivatedAt);
+        return m;
+    }
+
+    /**
+     * nexus-cw262: {@code ownersByType(tenant, type, includeDeactivated)} overload —
+     * deactivated_at without next_seq (the {@code /owners/by_type} route never
+     * selected next_seq; not changing that here).
+     */
+    private static Map<String, Object> ownerRow(String prefix, String name, String type,
+                                                  String repo, String desc, String root, String head,
+                                                  OffsetDateTime deactivatedAt) {
+        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head);
+        m.put("deactivated_at", deactivatedAt);
         return m;
     }
 

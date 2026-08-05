@@ -532,10 +532,14 @@ class TestDoctorDeadOwnerRendering:
     ):
         """The catalog-owned counterpart of the legacy-only test above:
         when the dead owner IS a catalog row, `nx catalog owners --census`
-        genuinely covers it (same list_owners_by_type("repo") read this
-        check uses for attribution), so the suggestion should say so —
-        honestly, as an inspection step, not as a claimed fix (finding 2:
-        census is read-only, no mutation arm exists yet)."""
+        genuinely covers it (same list_repos_dual_with_catalog_roots round
+        trip this check uses for attribution), so the suggestion should say
+        so. nexus-cw262: the mutation arm now exists (--execute deactivate)
+        and is named UNCONDITIONALLY only when the connected engine is
+        confirmed capable — this fake carries a ``deactivated_at`` key
+        (round-3 critique T2 21467 Significant-2's capability signal),
+        simulating a cw262-deployed engine. The pre-cw262-engine case (no
+        such key) is covered separately below."""
         dead_repo = tmp_path / "bench-index-XXXXXX.catalog-owned" / "w2"
         self._seed_registry(monkeypatch, tmp_path, dead_repo)
 
@@ -543,7 +547,10 @@ class TestDoctorDeadOwnerRendering:
             def list_owners_by_type(self, owner_type):
                 if owner_type != "repo":
                     return []
-                return [{"tumbler_prefix": "1.99", "repo_root": str(dead_repo)}]
+                return [{
+                    "tumbler_prefix": "1.99", "repo_root": str(dead_repo),
+                    "deactivated_at": None,
+                }]
 
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_reader",
@@ -555,12 +562,58 @@ class TestDoctorDeadOwnerRendering:
         r = next(x for x in results if x.label == "git hooks")
         assert "legacy repos.json" not in r.detail
         assert any(
-            "owners" in s and "census" in s and "nexus-cw262" in s
-            for s in r.fix_suggestions
+            "owners" in s and "census" in s for s in r.fix_suggestions
         ), r.fix_suggestions
-        assert any("read-only" in s for s in r.fix_suggestions), (
-            "the suggestion must not imply --census fixes anything — it is "
-            f"diagnosis-only: {r.fix_suggestions}"
+        assert any(
+            "--execute deactivate --no-dry-run --confirm" in s
+            and "nexus-cw262" in s
+            for s in r.fix_suggestions
+        ), (
+            f"a CONFIRMED-capable engine must name the mutation arm "
+            f"unconditionally: {r.fix_suggestions}"
+        )
+
+    def test_vanished_catalog_owner_engine_predates_route_gives_honest_wording(
+        self, tmp_path, monkeypatch
+    ):
+        """nexus-cw262 round-3 critique (T2 21467 Significant-2): the live
+        cloud engine at authorship time genuinely predates the
+        owner-deactivate route. A fake owner dict with NO ``deactivated_at``
+        key (the wire shape a pre-cw262 engine actually returns) must make
+        the fix_suggestion say the route requires an engine upgrade — never
+        claim --execute deactivate works unconditionally against an engine
+        that cannot serve it."""
+        dead_repo = tmp_path / "bench-index-XXXXXX.pre-cw262-engine" / "w2"
+        self._seed_registry(monkeypatch, tmp_path, dead_repo)
+
+        class _FakeCatalogReaderNoCapability:
+            def list_owners_by_type(self, owner_type):
+                if owner_type != "repo":
+                    return []
+                # No "deactivated_at" key at all -- the pre-cw262 wire shape.
+                return [{"tumbler_prefix": "1.99", "repo_root": str(dead_repo)}]
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda: _FakeCatalogReaderNoCapability(),
+        )
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks()
+        r = next(x for x in results if x.label == "git hooks")
+        assert any(
+            "requires an engine build" in s and "not yet deployed" in s
+            for s in r.fix_suggestions
+        ), (
+            f"an engine confirmed NOT to carry the route must get honest "
+            f"wording, not a claim the mutation arm works: {r.fix_suggestions}"
+        )
+        assert not any(
+            "--execute deactivate --no-dry-run --confirm" in s
+            for s in r.fix_suggestions
+        ), (
+            f"must never claim the destructive command works against an "
+            f"engine confirmed to lack the route: {r.fix_suggestions}"
         )
 
     def test_exists_probe_raising_os_error_degrades_instead_of_crashing(
@@ -646,3 +699,84 @@ class TestDoctorDeadOwnerRendering:
         r = next(x for x in results if x.label == "git hooks")
         assert r.ok is True
         assert "could not check" not in r.detail
+
+    def test_catalog_owner_attribution_reuses_the_walk_round_trip(self, tmp_path, monkeypatch):
+        """nexus-cw262 round-2 critique (T2 21456 moderate finding): the
+        attribution set (catalog_repo_roots) used to come from an
+        INDEPENDENT second cat.list_owners_by_type("repo") call, separate
+        from the one list_repos_dual already made to build the walk list —
+        a transient failure of just the second call silently misattributed
+        a genuinely catalog-owned dead owner as a legacy repos.json entry.
+        Fixed by list_repos_dual_with_catalog_roots: ONE round trip serves
+        both. This pins the non-regression: exactly one call, not two."""
+        dead_repo = tmp_path / "bench-index-XXXXXX.single-trip" / "w2"
+        self._seed_registry(monkeypatch, tmp_path, dead_repo)
+
+        calls = {"n": 0}
+
+        class _CountingCatalogReader:
+            def list_owners_by_type(self, owner_type):
+                calls["n"] += 1
+                if owner_type != "repo":
+                    return []
+                return [{"tumbler_prefix": "1.99", "repo_root": str(dead_repo)}]
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda: _CountingCatalogReader(),
+        )
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks()
+        r = next(x for x in results if x.label == "git hooks")
+
+        # Non-vacuity: the attribution still resolves correctly (catalog
+        # branch, not legacy) — proves the single call actually served ALL
+        # THREE consumers (walk list, attribution set, capability signal —
+        # round 3), not that attribution silently degraded to empty.
+        # This fake's owner dict carries no "deactivated_at" key, so the
+        # capability signal reads "unavailable" and the wording is the
+        # honest engine-floor variant (dedicated coverage: test_vanished_
+        # catalog_owner_engine_predates_route_gives_honest_wording) — this
+        # test only pins the round-trip count and the census mention.
+        assert "legacy repos.json" not in r.detail
+        joined = " ".join(r.fix_suggestions)
+        assert "census" in joined and "nexus-cw262" in joined, r.fix_suggestions
+        assert calls["n"] == 1, (
+            f"list_owners_by_type called {calls['n']} times — expected exactly 1 "
+            "(the walk list and the attribution set must share one round trip)"
+        )
+
+    def test_catalog_reader_construction_failure_degrades_without_crashing(
+        self, tmp_path, monkeypatch
+    ):
+        """The cat=None pre-init guard (round-2 critique T2 21456, noted gap:
+        no test in the fix round exercised this path). If make_catalog_reader
+        itself raises (e.g. StorageModeFlagError for a stranded
+        NX_STORAGE_BACKEND_CATALOG=sqlite install), the outer except in
+        _check_git_hooks must catch it, degrade repos/catalog_repo_roots to
+        empty (registry-only), and never crash `nx doctor` with an
+        UnboundLocalError or any other propagated exception."""
+        from nexus.db.storage_mode import StorageModeFlagError
+
+        present_repo = tmp_path / "reader-construction-failure"
+        present_repo.mkdir()
+        self._seed_registry(monkeypatch, tmp_path, present_repo)
+
+        def _boom():
+            raise StorageModeFlagError("simulated stranded sqlite catalog flag")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", _boom)
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks()  # must not raise
+
+        # repos degraded to empty (list_repos_dual_with_catalog_roots's own
+        # exception path never ran -- make_catalog_reader raised BEFORE it
+        # could be called, so the outer except in _check_git_hooks is what
+        # catches this, not the inner best-effort try inside repos.py).
+        no_repos = [r for r in results if r.label == "git hooks" and "no repos registered" in r.detail]
+        assert no_repos, (
+            f"expected the 'no repos registered' fallback when catalog-reader "
+            f"construction itself raises: {[r.detail for r in results if r.label == 'git hooks']}"
+        )

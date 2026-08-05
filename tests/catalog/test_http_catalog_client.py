@@ -187,6 +187,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_complete_index_run_body: dict[str, Any] = {}
     last_fail_index_run_body: dict[str, Any] = {}
 
+    #: nexus-cw262: last bodies POSTed to /owners/deactivate, /owners/reactivate.
+    last_owner_deactivate_body: dict[str, Any] = {}
+    last_owner_reactivate_body: dict[str, Any] = {}
+    #: nexus-cw262 round-3 critique: last body POSTed to /owners/by_type.
+    last_owners_by_type_body: dict[str, Any] = {}
+
     @classmethod
     def reset_log(cls) -> None:
         cls.get_ops = []
@@ -202,6 +208,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_begin_index_run_many_body = {}
         cls.last_complete_index_run_body = {}
         cls.last_fail_index_run_body = {}
+        cls.last_owner_deactivate_body = {}
+        cls.last_owner_reactivate_body = {}
+        cls.last_owners_by_type_body = {}
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -656,6 +665,16 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
         elif op == "/owners/head_hash":
             self._send_json({"updated": 1})
+        elif op == "/owners/deactivate":
+            # nexus-cw262: mirrors CatalogHandler.handleOwnerDeactivate's
+            # {"deactivated": 0|1} envelope.
+            FakeCatalogHandler.last_owner_deactivate_body = body
+            self._send_json({"deactivated": 1})
+        elif op == "/owners/reactivate":
+            # nexus-cw262: mirrors CatalogHandler.handleOwnerReactivate's
+            # {"reactivated": 0|1} envelope.
+            FakeCatalogHandler.last_owner_reactivate_body = body
+            self._send_json({"reactivated": 1})
         elif op == "/collections/upsert":
             self._send_json({"ok": True})
         elif op == "/collections/supersede":
@@ -699,13 +718,21 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"entries": {i: _entry_dict(tumbler=i) for i in ids}})
         elif op == "/owners/by_type":
+            # nexus-cw262 round-3 critique (T2 21467 Significant-4): stash
+            # the whole body (not just owner_type) so a test can assert the
+            # ACTUAL wire value of include_deactivated the client sent,
+            # rather than a response shape that would pass identically
+            # whether the client serialized it correctly, wrong, or dropped
+            # it entirely.
+            FakeCatalogHandler.last_owners_by_type_body = body
             owner_type = body.get("owner_type")
             if not owner_type:
                 self._send_json({"error": "owner_type required"}, 400)
             else:
-                self._send_json({"owners": [
-                    {"tumbler_prefix": "1.1", "name": "myrepo", "owner_type": owner_type},
-                ]})
+                owner_row = {"tumbler_prefix": "1.1", "name": "myrepo", "owner_type": owner_type}
+                if body.get("include_deactivated"):
+                    owner_row["deactivated_at"] = "2026-08-05T00:00:00Z"
+                self._send_json({"owners": [owner_row]})
         elif op == "/purge-trash":
             # nexus-3ck2g E3: mirrors CatalogHandler.handlePurgeTrash —
             # {older_than_days: int >= 1 (default 30), dry_run: bool
@@ -1359,6 +1386,50 @@ class TestHttpCatalogClientRoundTrip:
         client._get = _fake_get  # type: ignore[method-assign]
         result2 = client.lookup_doc_id_by_collection_and_path("code__x", "missing.py")
         assert result2 == ""
+
+    def test_deactivate_owner_and_reactivate_owner_wire_shape(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """nexus-cw262: POST /owners/deactivate -> {"deactivated": N} and
+        POST /owners/reactivate -> {"reactivated": N}, unwrapped to bool
+        (mirrors delete_document's ``deleted`` > 0 -> bool contract)."""
+        assert client.deactivate_owner("1.1") is True
+        assert FakeCatalogHandler.last_owner_deactivate_body == {"tumbler_prefix": "1.1"}
+
+        assert client.reactivate_owner("1.1") is True
+        assert FakeCatalogHandler.last_owner_reactivate_body == {"tumbler_prefix": "1.1"}
+
+    def test_list_owners_by_type_include_deactivated_threads_through_body(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """nexus-cw262: default False is NOT omitted from the POST body (unlike
+        the GET-based list_owners' query-param omission) -- /owners/by_type is a
+        POST, so a plain JSON `false` round-trips fine and CatalogHandler's
+        ``includeDeactivatedRaw instanceof Boolean b && b`` reads it correctly
+        either way.
+
+        nexus-cw262 round-3 critique (T2 21467 Significant-4): the original
+        version of this test asserted only ``isinstance(owners, list)``, which
+        passes identically whether ``include_deactivated`` serialized
+        correctly, wrong, or was silently dropped -- a vacuous non-regression
+        guard. Assert the ACTUAL wire body FakeCatalogHandler captured
+        (mirrors the file's own deactivate/reactivate wire-shape tests,
+        which already capture+assert posted bodies) and, on the response
+        side, that a True round-trip actually changes what comes back --
+        the ``deactivated_at`` key FakeCatalogHandler only adds when it
+        received a truthy ``include_deactivated``.
+        """
+        owners = client.list_owners_by_type("repo")
+        assert FakeCatalogHandler.last_owners_by_type_body == {
+            "owner_type": "repo", "include_deactivated": False,
+        }
+        assert "deactivated_at" not in owners[0]
+
+        owners_audited = client.list_owners_by_type("repo", include_deactivated=True)
+        assert FakeCatalogHandler.last_owners_by_type_body == {
+            "owner_type": "repo", "include_deactivated": True,
+        }
+        assert owners_audited[0]["deactivated_at"] == "2026-08-05T00:00:00Z"
 
     def test_relation_counts_journey(self, client: HttpCatalogClient) -> None:
         # RDR-159 P-1a: POST /verify/relation-counts → {"counts": {rel: n}};

@@ -358,27 +358,66 @@ def _diff_fields(a: RepoRecord, b: RepoRecord) -> dict[str, dict[str, str]]:
     return diffs
 
 
-def list_repos_dual(
-    *, cat: "CatalogReader", registry_path: Path,
-) -> list[str]:
-    """Enumerate every known repo path (catalog ∪ registry), sorted.
+#: nexus-cw262 round-3 critique (T2 21467 Significant-2): tri-state
+#: capability signal, never a bare bool — "unknown" (empty owners response,
+#: no signal either way) must stay distinguishable from a CONFIRMED absence,
+#: same non-vacuity discipline as every other doctor probe in this codebase.
+OwnerDeactivateCapability = str  # "available" | "unavailable" | "unknown"
 
-    Catalog source: ``owners WHERE owner_type='repo'`` projected via
-    ``repo_root``.  Registry source: ``RepoRegistry.all()``.  Union is
-    a set merge (deterministic via ``sorted``); paths the catalog
-    knows about that the registry does NOT (or vice versa) are
-    surfaced via a single DEBUG event so cutover-progress is observable
-    without one source overriding the other.
 
-    Used by ``health.py``'s git-hook check and by any other consumer
-    that needs to iterate every registered repo.  When ``registry_path``
-    does not exist (post-Phase-5 install), returns the catalog set
-    alone; the DEBUG event is suppressed so the steady state is silent.
+def owner_deactivate_capability(owners: list[dict]) -> "OwnerDeactivateCapability":
+    """Infer whether the connected engine carries the nexus-cw262
+    owner-deactivate route family, from owner dicts a caller ALREADY fetched
+    (``list_owners`` / ``list_owners_by_type``) — no extra network call, and
+    critically no writer construction just to answer "is this route
+    available" (the census's own report-first discipline: never construct a
+    catalog writer for a read-only report).
+
+    Same absent-vs-null idiom as the vw594 F3 / manifest_verify_all
+    precedent (``index_state`` key presence distinguishing a pre-route
+    engine from a post-route one that happens to return null): once
+    catalog-022's soft-delete column + the engine's ``ownerRow`` overloads
+    exist, EVERY owner dict ``CatalogRepository.listOwners`` / ``.ownersByType``
+    returns carries a literal ``"deactivated_at"`` key (null for active
+    owners, an ISO timestamp for deactivated ones) — an engine that predates
+    them never adds the key at all, regardless of value. Checking KEY
+    PRESENCE (not truthiness) on any row is therefore a reliable wire-shape
+    signal, reachable from data the caller needed to fetch anyway.
+
+    Returns ``"available"`` (confirmed present on at least one row),
+    ``"unavailable"`` (a non-empty response with the key on NO row — a
+    pre-cw262 engine), or ``"unknown"`` (owners is empty; no row to read the
+    signal from either way — NOT the same as a confirmed absence).
     """
-    # RDR-146 P1.2: ``cat`` may be None when the catalog is uninitialised
-    # (the reader factory returns None). Fall back to the registry-only set
-    # rather than dereferencing a missing handle.
+    if not owners:
+        return "unknown"
+    if any("deactivated_at" in o for o in owners):
+        return "available"
+    return "unavailable"
+
+
+def list_repos_dual_with_catalog_roots(
+    *, cat: "CatalogReader", registry_path: Path,
+) -> tuple[list[str], set[str], "OwnerDeactivateCapability"]:
+    """Same enumeration as :func:`list_repos_dual`, plus the catalog-only
+    ``repo_root`` subset — from the SAME ``cat.list_owners_by_type("repo")``
+    call (nexus-cw262 round-2 critique, T2 21456 finding). ``health.py``'s
+    git-hooks dead-owner attribution block used to issue an INDEPENDENT
+    second ``list_owners_by_type`` round trip just to rebuild this same set;
+    a transient failure of that second call (service restart / network blip
+    mid-doctor-run) silently degraded ``catalog_repo_roots`` to empty and
+    misattributed a genuinely catalog-owned dead owner as a legacy
+    ``repos.json`` entry, pointing its fix_suggestion at a file with no such
+    entry. One round trip serves both the union and the attribution set —
+    and, since round 3 (T2 21467 Significant-2), the owner-deactivate
+    capability signal too (:func:`owner_deactivate_capability`), so a
+    THIRD consumer (the doctor fix_suggestion naming ``--execute deactivate``)
+    rides the same call rather than adding a fourth independent one.
+
+    Returns ``(sorted_union, catalog_repo_roots, deactivate_capability)``.
+    """
     cat_paths: set[str] = set()
+    capability: "OwnerDeactivateCapability" = "unknown"
     if cat is not None:
         # nexus-qnp5s: list_owners_by_type() is implemented on both SQLite
         # Catalog and HttpCatalogClient — no raw _db access.
@@ -391,7 +430,9 @@ def list_repos_dual(
         # with it, blinding doctor's stanza-drift check entirely. The union
         # must degrade to registry-only, not to nothing.
         try:
-            for o in cat.list_owners_by_type("repo"):
+            owners = cat.list_owners_by_type("repo")
+            capability = owner_deactivate_capability(owners)
+            for o in owners:
                 rr = o.get("repo_root") or ""
                 if rr:
                     cat_paths.add(rr)
@@ -411,7 +452,38 @@ def list_repos_dual(
             both_count=len(cat_paths & reg_paths),
         )
 
-    return sorted(cat_paths | reg_paths)
+    return sorted(cat_paths | reg_paths), cat_paths, capability
+
+
+def list_repos_dual(
+    *, cat: "CatalogReader", registry_path: Path,
+) -> list[str]:
+    """Enumerate every known repo path (catalog ∪ registry), sorted.
+
+    Catalog source: ``owners WHERE owner_type='repo'`` projected via
+    ``repo_root``.  Registry source: ``RepoRegistry.all()``.  Union is
+    a set merge (deterministic via ``sorted``); paths the catalog
+    knows about that the registry does NOT (or vice versa) are
+    surfaced via a single DEBUG event so cutover-progress is observable
+    without one source overriding the other.
+
+    Used by ``health.py``'s git-hook check and by any other consumer
+    that needs to iterate every registered repo.  When ``registry_path``
+    does not exist (post-Phase-5 install), returns the catalog set
+    alone; the DEBUG event is suppressed so the steady state is silent.
+
+    Thin wrapper over :func:`list_repos_dual_with_catalog_roots` (nexus-cw262)
+    — a caller that also needs the catalog-only attribution subset (health.py)
+    should call that directly instead of pairing this with its own second
+    ``list_owners_by_type`` call.
+    """
+    # RDR-146 P1.2: ``cat`` may be None when the catalog is uninitialised
+    # (the reader factory returns None). Fall back to the registry-only set
+    # rather than dereferencing a missing handle — preserved by delegation:
+    # list_repos_dual_with_catalog_roots handles the same None guard.
+    union, _catalog_repo_roots, _capability = list_repos_dual_with_catalog_roots(
+        cat=cat, registry_path=registry_path)
+    return union
 
 
 __all__ = (
@@ -419,5 +491,7 @@ __all__ = (
     "from_catalog",
     "from_registry",
     "list_repos_dual",
+    "list_repos_dual_with_catalog_roots",
+    "owner_deactivate_capability",
     "read_dual",
 )
