@@ -1122,7 +1122,7 @@ class TestStatsCommand:
         assert "Topics:" not in text.output
         js = runner.invoke(main, ["catalog", "stats", "--json"])
         assert js.exit_code == 0
-        assert "taxonomy" not in json.loads(js.output)
+        assert "taxonomy" not in json.loads(js.stdout)
 
 
 class TestDiscoveryTools:
