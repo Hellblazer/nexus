@@ -62,10 +62,22 @@ release process unseen. This gate builds the wheel under test, then on a
 scrubbed-env virgin HOME: local init (engine sha256+sig-verified, portable PG,
 bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG
 registration asserted, semantic search returns both sentinels, doctor with
-zero ✗ / zero ⚠ / an EMPTY warnings allowlist. Must end
-`FRESH-INSTALL MVV PASSED`. `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the
-416MB model download across runs. Every new fresh-box warning is a decision:
-fix it or allowlist it in the script WITH a rationale + bead reference.
+zero ✗ / zero ⚠ / warnings checked against the script's allowlist. Must end
+`FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
+`FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
+runs. Every new fresh-box warning is a decision: fix it or allowlist it in
+the script WITH a rationale + bead reference.
+
+This step's plain invocation is the LOCAL WHEEL layer only (dependencies
+resolve from this checkout's `uv.lock`/wheel metadata). It cannot reproduce a
+defect living in dependency RESOLUTION at a fresh `uv tool install` — that
+was nexus-l2ku5 (`mcp>=1.0` unbounded resolved `mcp` 2.0.0 straight off PyPI,
+killing both MCP servers for 4 days while every gate ran pinned to the dev
+venv). `tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]` (nexus-796zn)
+installs the real PyPI artifact via `uv tool install conexus[==X.Y.Z]` in the
+identical scrubbed sandbox and belongs to the POST-publish shakedown, not
+this pre-tag battery (nothing is on PyPI yet at this point in the checklist)
+— see T2 `nexus/shakedown-playbook` §2 S1.
 
 **`--package-upgrade` — the fix-delivery gate (GH #1402, nexus-cfgo9).** Proves
 what 6.10.0 shipped without: that an EXISTING install upgrading the package

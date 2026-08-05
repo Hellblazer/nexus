@@ -16,6 +16,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower bounds, never silently dropped (nexus-h1zu0).
 
 ### Added
+- **`tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]`** (nexus-796zn): the
+  fresh-install gate can now install the PUBLISHED artifact from PyPI via
+  `uv tool install` in its scrubbed sandbox — exercising dependency
+  RESOLUTION at the uv-tool layer where nexus-l2ku5 lived for four days
+  invisible to every lock-pinned gate (verified counterfactually: against
+  the pre-fix 7.0.x world the mode hard-fails at the MCP handshake leg).
+  The install step is `env -i` scrubbed so ambient `UV_TOOL_DIR`/`XDG_*`
+  overrides can never redirect it into the live install; the mcp<2
+  dist-info tripwire runs in both modes; the banner and PASSED line name
+  the layer unambiguously. The local-wheel default (pre-tag release
+  battery) is unchanged; `--published` is the post-publish shakedown layer.
 - **`nx catalog owners --execute deactivate` / `--execute reactivate`**
   (nexus-cw262): the engine owner-deactivate surface. Soft-deletes registered
   repo owners whose root path is confirmed vanished with zero live documents,

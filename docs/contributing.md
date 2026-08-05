@@ -254,7 +254,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    uv run pytest                                             # unit suite (no API keys)
    tests/e2e/local-service-gate.sh                           # integration incl. the local-service functional gate
    tests/e2e/migration-rehearsal/run.sh --package-upgrade    # ONE-engine convergence MVV (nexus-cfgo9)
-   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs)
+   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs), LOCAL WHEEL layer
    ```
    All must pass. Bare `uv run pytest -m integration` is not enough on its
    own: the local-service round-trip family self-provisions inside
@@ -314,11 +314,32 @@ Every step below is **required**. Missing any one of them has caused problems in
    ```
    The virgin-journey gate (nexus-nolqs): wheel under test → scrubbed-env
    virgin HOME → local init (ladder converged) → store/index with
-   engine-catalog registration asserted → search → doctor (zero ✗, empty
-   warnings allowlist). Complements the upgrade-axis gates (rehearsal,
-   era-hop, guided) which all start from a populated install — the
-   2026-07-21 fresh-box defect class was invisible to every one of them.
-   Must end `FRESH-INSTALL MVV PASSED`.
+   engine-catalog registration asserted → search → doctor (zero ✗,
+   warnings allowlist reviewed for new drift). Complements the upgrade-axis
+   gates (rehearsal, era-hop, guided) which all start from a populated
+   install — the 2026-07-21 fresh-box defect class was invisible to every
+   one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
+   release-battery layer)`.
+
+   This is the LOCAL WHEEL layer: it builds and installs the tree under
+   test, so it proves the release candidate works, but it resolves
+   dependencies from `uv.lock`/the wheel's own metadata, not PyPI. It does
+   NOT exercise a fresh `uv tool install`'s independent resolution — that
+   is a separate, POST-publish layer:
+   ```bash
+   ./tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]   # omit X.Y.Z for latest
+   ```
+   `--published` installs the ACTUAL PyPI artifact via
+   `uv tool install conexus[==X.Y.Z]`, isolated to a scrubbed sandbox HOME
+   exactly like the default layer (never touches the live `~/.local/share/uv`
+   or `~/.local/bin`). This is the layer nexus-l2ku5 broke (`mcp>=1.0`
+   resolved `mcp` 2.0.0 fresh from PyPI and killed both MCP servers for 4
+   days while every pre-existing gate ran pinned to the dev venv's
+   `uv.lock` and saw nothing) — it belongs to the POST-publish shakedown
+   (T2 `nexus/shakedown-playbook` §2 S1), not this pre-tag battery, since
+   there is nothing on PyPI yet to install at this point in the checklist.
+   Run it manually after a tag publishes to verify what PyPI is actually
+   serving; see the shakedown playbook for the standing T1 trigger.
 
 7b. **Run the sandbox smoke** (~2 min)
    ```bash
