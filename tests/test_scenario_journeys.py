@@ -103,7 +103,7 @@ def test_store_put_is_searchable_and_catalogued(t2_service_env) -> None:
         "--corpus", "knowledge", "--json",
     ])
     assert search.exit_code == 0, search.output
-    hits = json.loads(search.output)
+    hits = json.loads(search.stdout)
     assert any(h.get("title") == title for h in hits), (
         f"expected {title!r} among search hits: {[h.get('title') for h in hits]}"
     )
@@ -145,7 +145,7 @@ def test_index_md_creates_doc_level_content_with_catalog_registration(t2_service
         "--corpus", "docs__scenario2", "--json",
     ])
     assert search.exit_code == 0, search.output
-    hits = json.loads(search.output)
+    hits = json.loads(search.stdout)
     assert hits, "expected at least one search hit for the freshly indexed doc"
     returned_chashes = {h["chash"] for h in hits}
 
@@ -216,7 +216,7 @@ def test_index_repo_routes_code_to_code_corpus(t2_service_env, tmp_path: Path) -
         "--corpus", "code", "--json",
     ])
     assert code_search.exit_code == 0, code_search.output
-    code_hits = json.loads(code_search.output)
+    code_hits = json.loads(code_search.stdout)
     assert any("ring_buffer.py" in h.get("title", "") for h in code_hits), (
         f"expected ring_buffer.py among code-corpus hits: "
         f"{[h.get('title') for h in code_hits]}"
@@ -236,7 +236,7 @@ def test_index_repo_routes_code_to_code_corpus(t2_service_env, tmp_path: Path) -
     # T2 nexus/test-suite-compression-P2-reduced-critique FINDING IN
     # PASSING; out of scope here). Assert the exact documented output
     # shape rather than silently skipping the check on a non-JSON payload.
-    stripped = knowledge_search.output.strip()
+    stripped = knowledge_search.stdout.strip()
     if stripped == "No results.":
         pass  # zero-hits contract, asserted explicitly above
     else:
@@ -284,7 +284,7 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
         "--corpus", combined_corpus, "--json",
     ])
     assert wombat_search.exit_code == 0, wombat_search.output
-    wombat_hits = json.loads(wombat_search.output)
+    wombat_hits = json.loads(wombat_search.stdout)
     assert any(
         h.get("title") == "scenario4-wombat-note" and h["collection"].startswith("knowledge__")
         for h in wombat_hits
@@ -295,7 +295,7 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
         "--corpus", combined_corpus, "--json",
     ])
     assert octopus_search.exit_code == 0, octopus_search.output
-    octopus_hits = json.loads(octopus_search.output)
+    octopus_hits = json.loads(octopus_search.stdout)
     assert any(
         h["collection"].startswith("docs__scenario4__") for h in octopus_hits
     ), f"expected the docs__scenario4 octopus doc among combined-corpus hits: {octopus_hits}"

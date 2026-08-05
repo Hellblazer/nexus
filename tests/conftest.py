@@ -243,23 +243,60 @@ def pytest_sessionfinish(session, exitstatus):
 # is every worker's ``TestReport`` replayed through the standard
 # ``pytest_runtest_logreport`` hook as results come back (the same
 # mechanism that powers xdist's live per-worker progress output), which
-# is exactly what populates ``terminalreporter.stats``. Each ``TestReport``
-# carries ``report.keywords``, a dict of every marker on the item
-# (truthy-valued) — the same signal ``-m`` selection reads — so filtering
-# stats on ``report.keywords.get("scenario")`` reconstructs both which
-# tests were selected AND their outcomes from data the controller
-# genuinely has, in every mode (serial, ``-n N``, ``--splits``/``--group``
-# — a pytest-split shard's own process populates ``terminalreporter.stats``
-# from its own locally-run tests the same way a serial run does).
+# is exactly what populates ``terminalreporter.stats`` — the reconstruction
+# below is built entirely from that, in every mode (serial, ``-n N``,
+# ``--splits``/``--group`` — a pytest-split shard's own process populates
+# ``terminalreporter.stats`` from its own locally-run tests the same way a
+# serial run does). The FIRST cut filtered on ``report.keywords.get
+# ("scenario")`` — the same signal ``-m`` selection reads — reasoning it was
+# "a dict of every marker on the item". That reasoning had a bug, found and
+# fixed the same day; see below.
 #
-# ``item.get_closest_marker("scenario")`` is called separately below
-# (harmlessly a no-op on an xdist controller, where ``session.items`` is
-# empty; meaningful on serial/no-xdist runs) purely to keep a live,
-# non-comment consumer of the marker in this file — that is what makes
-# ``tests/test_marker_selection_coverage.py`` treat ``scenario`` as wired
-# (path 2: programmatic consumption) even though it runs in the default
-# loop with no explicit ``-m scenario`` invocation anywhere. It is NOT
-# part of this guard's actual selection/outcome logic; see above.
+# ``pytest_collection_modifyitems`` below stamps every item's own
+# ``get_closest_marker("scenario")`` verdict into ``user_properties`` — a
+# live, non-comment ``get_closest_marker("scenario")`` consumer, which is
+# what makes ``tests/test_marker_selection_coverage.py`` treat ``scenario``
+# as wired (path 2: programmatic consumption) even though it runs in the
+# default loop with no explicit ``-m scenario`` invocation anywhere.
+#
+# FALSE-POSITIVE FOUND 2026-08-05 (nexus-test-cleanup CI red, test-lint
+# job): the first cut of this guard filtered
+# ``terminalreporter.stats`` reports on ``report.keywords.get("scenario")``.
+# ``TestReport.keywords`` is NOT "markers on the item" — empirically it is
+# ``dict(item.keywords)``, which ALSO contains a truthy entry for every
+# token pytest derives from the node's own name, including each
+# ``@pytest.mark.parametrize`` id. ``tests/test_marker_selection_coverage.py``
+# parametrizes ``test_marker_is_wired_to_a_real_invocation`` over every
+# declared marker NAME — one of which is the literal string ``"scenario"``
+# (since ``scenario`` is itself a declared marker) — so its
+# ``[scenario]`` id collides with the real ``@pytest.mark.scenario`` keyword
+# with NO actual scenario mark applied. In ``test-lint`` (no service jar,
+# no ``NX_T2_SUBSTRATE_EXPECTED``) every test — including that one — is
+# legitimately skipped by the autouse ``_pin_t2_substrate`` fixture, and
+# the false-positive keyword match read that one unrelated lint-test skip
+# as "a scenario journey silently degraded", tripping the budget=0 guard
+# on a job that runs zero real ``scenario`` tests (deselected by ``-m
+# lint``). Reproduced directly: a throwaway
+# ``@pytest.mark.parametrize("marker", ["scenario"])`` test shows
+# ``"scenario" in item.keywords`` True with ``item.get_closest_marker
+# ("scenario")`` False.
+#
+# FIX: stamp the real verdict onto ``item.user_properties`` at collection
+# time (a plain list of ``(name, value)`` tuples that IS part of the
+# standard ``TestReport`` — including across an xdist worker -> controller
+# relay) instead of relying on ``report.keywords``, which cannot
+# distinguish an applied mark from an accidental name/parametrize-id
+# substring. This runs during COLLECTION, which happens in every process
+# that collects tests — the controller included on a serial/pytest-split
+# run, workers only under true ``-n`` xdist — so it is populated in every
+# execution mode this guard needs to reason about.
+_SCENARIO_PROPERTY = "nx_scenario_marked"
+
+
+def pytest_collection_modifyitems(items) -> None:
+    for item in items:
+        if item.get_closest_marker("scenario") is not None:
+            item.user_properties.append((_SCENARIO_PROPERTY, True))
 
 
 def _is_xdist_worker(session) -> bool:
@@ -285,11 +322,18 @@ def _scenario_outcomes_from_terminalreporter(terminalreporter) -> dict[str, str]
     at ``setup`` and never gets a ``call`` report, so ``skipped`` is taken
     from whichever phase carries it; a ``teardown`` failure after a
     passing ``call`` must not read as a clean pass.
+
+    Filters on ``report.user_properties`` (stamped by
+    ``pytest_collection_modifyitems`` above), NOT ``report.keywords`` —
+    the latter also carries a truthy entry for every token pytest derives
+    from the item's own name/parametrize id, which false-positived on
+    ``test_marker_is_wired_to_a_real_invocation[scenario]`` (see the
+    module comment above for the reproduction).
     """
     outcomes: dict[str, str] = {}
     for reports in terminalreporter.stats.values():
         for report in reports:
-            if not getattr(report, "keywords", {}).get("scenario"):
+            if not dict(getattr(report, "user_properties", ())).get(_SCENARIO_PROPERTY):
                 continue
             nodeid = getattr(report, "nodeid", None)
             if nodeid is None:
@@ -327,14 +371,6 @@ def _check_scenario_non_vacuity(session) -> None:
     """
     if _is_xdist_worker(session):
         return
-    # See module comment: a live, non-comment get_closest_marker("scenario")
-    # consumer for tests/test_marker_selection_coverage.py's path-2 wiring
-    # check. Not used for selection/outcome logic below (session.items is
-    # empty on an xdist controller — see module comment).
-    _ = {
-        item.nodeid for item in session.items
-        if item.get_closest_marker("scenario") is not None
-    }
     terminalreporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if terminalreporter is None:
         # No terminal reporter registered (e.g. -p no:terminalreporter) —
