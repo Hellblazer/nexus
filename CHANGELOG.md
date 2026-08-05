@@ -83,6 +83,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in its own output.
 
 ### Fixed
+- **`nx dt index --dt-content` no longer aborts the whole batch on a
+  chunk-landing or completion-refusal fault** (nexus-hb10j):
+  `ChunkLandingUnverifiedError` and `IndexRunVerifyRefused` fell through the
+  non-file-backed ingest path's narrower except tuple and escaped the loop
+  uncaught, aborting the entire `--dt-content` run on the first affected
+  record. Now collect-and-continue as a per-record failed entry, with the
+  run-level identity-drop gate still driving the non-zero exit.
 - **`nx index pdf` / `nx index md` no longer report success when the catalog
   register failed** (nexus-7f5qj): a register failure during the single-file
   commands silently orphaned chunks — written and searchable but with no
