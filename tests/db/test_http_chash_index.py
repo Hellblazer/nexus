@@ -388,15 +388,12 @@ class TestDeleteCollection:
 
 
 class TestDistinctCollections:
-    def test_distinct_collections_returns_all(self, store):
+    def test_distinct_collections_empty_then_populated(self, store):
+        assert store.distinct_collections() == set()
         store.upsert(chash="c1", collection="col_a")
         store.upsert(chash="c2", collection="col_b")
         store.upsert(chash="c3", collection="col_a")
-        result = store.distinct_collections()
-        assert result == {"col_a", "col_b"}
-
-    def test_distinct_collections_empty(self, store):
-        assert store.distinct_collections() == set()
+        assert store.distinct_collections() == {"col_a", "col_b"}
 
 
 class TestRenameCollection:
@@ -428,10 +425,8 @@ class TestDeleteStale:
 
 
 class TestIsEmpty:
-    def test_is_empty_true_when_no_rows(self, store):
+    def test_is_empty_before_and_after_upsert(self, store):
         assert store.is_empty() is True
-
-    def test_is_empty_false_after_upsert(self, store):
         store.upsert(chash="c1", collection="col_a")
         assert store.is_empty() is False
 
@@ -446,22 +441,11 @@ class TestCountForCollection:
         assert store.count_for_collection("col_c") == 0
 
 
-class TestAuth:
-    def test_bad_token_raises(self, fake_server):
-        """Wrong token must raise, not silently succeed.
-
-        Post-mixin-adoption (nexus-f2qvx.3): both ``base_url`` and
-        ``_token`` are explicitly pinned here (a test double), so a 401
-        does NOT self-heal-and-retry to a bare ``httpx.HTTPStatusError``
-        — ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses
-        to re-resolve when both halves are pinned (nothing it could
-        change would fix a fully-pinned endpoint) and raises
-        ``RuntimeError`` instead. Either way, the call must not succeed.
-        """
-        s = HttpChashIndex(base_url=fake_server, _token="wrong-token")
-        with pytest.raises(RuntimeError, match="cannot self-heal"):
-            s.upsert(chash="c1", collection="col_a")
-        s.close()
+# TestAuth (test_bad_token_raises) moved to the store-parametrized auth
+# contract in test_t2_store_crud_contract.py (test-suite-compression P1d) —
+# chash_index, plan_library, and telemetry all adopt
+# RefreshableHttpStoreMixin and raise the identical "cannot self-heal"
+# RuntimeError for a fully-pinned wrong-token store.
 
 
 class TestKeywordOnlyToken:

@@ -233,21 +233,19 @@ def store(fake_server):
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 class TestPutGet:
-    def test_put_returns_uuid(self, store):
-        id_ = store.put("hello scratch content", tags="a,b")
-        assert isinstance(id_, str)
-        assert len(id_) == 36  # UUID format
+    # test_put_returns_uuid / test_get_absent_returns_none moved to the
+    # store-parametrized contract in test_t2_store_crud_contract.py
+    # (test-suite-compression P1d) — memory, plan_library, and scratch all
+    # share the same synthetic-identifier put/get/delete shape.
 
-    def test_get_returns_entry(self, store):
+    def test_get_returns_entry_with_session_id(self, store):
+        """Store-specific detail beyond the generic contract: the returned
+        entry carries the OWNING session_id verbatim (content/id round-trip
+        itself is covered by the shared crud-contract journey)."""
         id_ = store.put("get me content", tags="t1")
         result = store.get(id_)
         assert result is not None
-        assert result["id"] == id_
-        assert result["content"] == "get me content"
         assert result["session_id"] == SESSION
-
-    def test_get_absent_returns_none(self, store):
-        assert store.get("nonexistent-uuid-1234") is None
 
     def test_get_increments_access_count(self, store):
         id_ = store.put("access count test content")
@@ -348,15 +346,16 @@ class TestFlagUnflag:
 
 
 class TestDelete:
-    def test_delete_returns_true(self, store):
+    # test_delete_returns_true / test_delete_twice_returns_false moved to
+    # the store-parametrized contract in test_t2_store_crud_contract.py
+    # (test-suite-compression P1d).
+
+    def test_delete_removes_entry(self, store):
+        """Store-specific detail beyond the generic contract: a deleted
+        entry is truly gone from get(), not merely reported deleted."""
         id_ = store.put("delete me content")
         assert store.delete(id_) is True
         assert store.get(id_) is None
-
-    def test_delete_twice_returns_false(self, store):
-        id_ = store.put("delete twice test")
-        store.delete(id_)
-        assert store.delete(id_) is False
 
     def test_delete_wrong_session_returns_false(self, fake_server):
         store_a = HttpScratchStore(

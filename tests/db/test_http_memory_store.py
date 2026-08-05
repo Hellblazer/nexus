@@ -396,15 +396,11 @@ def store(fake_server: str):
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 class TestPutGet:
-    def test_put_returns_id(self, store: HttpMemoryStore) -> None:
-        row_id = store.put("proj-a", "entry-1", "hello world", ttl=30)
-        assert isinstance(row_id, int)
-        assert row_id > 0
-
-    def test_put_upsert_returns_same_id(self, store: HttpMemoryStore) -> None:
-        id1 = store.put("proj-a", "entry-u", "original", ttl=30)
-        id2 = store.put("proj-a", "entry-u", "updated", ttl=30)
-        assert id1 == id2
+    # test_put_returns_id / test_put_upsert_returns_same_id / test_get_by_id /
+    # test_get_missing_returns_none moved to the store-parametrized contract
+    # in test_t2_store_crud_contract.py (test-suite-compression P1d) —
+    # memory, plan_library, and scratch all share the same synthetic-
+    # identifier put/get/upsert/delete shape.
 
     def test_get_by_project_title(self, store: HttpMemoryStore) -> None:
         store.put("proj-b", "t1", "content b1", ttl=30)
@@ -412,16 +408,6 @@ class TestPutGet:
         assert entry is not None
         assert entry["title"] == "t1"
         assert entry["content"] == "content b1"
-
-    def test_get_by_id(self, store: HttpMemoryStore) -> None:
-        row_id = store.put("proj-c", "id-entry", "id content", ttl=30)
-        entry = store.get(id=row_id)
-        assert entry is not None
-        assert entry["id"] == row_id
-
-    def test_get_missing_returns_none(self, store: HttpMemoryStore) -> None:
-        result = store.get(project="no-such-proj", title="no-such-title")
-        assert result is None
 
     def test_get_requires_id_or_project_title(self, store: HttpMemoryStore) -> None:
         with pytest.raises(ValueError):
@@ -509,6 +495,9 @@ class TestListAndAll:
 
 
 class TestDelete:
+    # test_delete_by_id moved to the store-parametrized contract in
+    # test_t2_store_crud_contract.py (test-suite-compression P1d).
+
     def test_delete_by_project_title(self, store: HttpMemoryStore) -> None:
         store.put("dp", "del1", "c", ttl=30)
         deleted = store.delete(project="dp", title="del1")
@@ -516,12 +505,6 @@ class TestDelete:
         # Second delete returns False
         deleted2 = store.delete(project="dp", title="del1")
         assert deleted2 is False
-
-    def test_delete_by_id(self, store: HttpMemoryStore) -> None:
-        row_id = store.put("di", "did1", "c", ttl=30)
-        deleted = store.delete(id=row_id)
-        assert deleted is True
-        assert store.get(id=row_id) is None
 
     def test_delete_requires_id_or_project_title(self, store: HttpMemoryStore) -> None:
         with pytest.raises(ValueError):
@@ -619,49 +602,43 @@ class TestPutOrMerge:
 
 
 class TestNormalization:
-    def test_last_accessed_empty_string_when_never_accessed_before_get(self, store: HttpMemoryStore) -> None:
-        """Before first GET, last_accessed is "" (Java server sends "" for NULL rows)."""
-        # Directly check via get_all which doesn't track access
-        store.put("norm", "n1", "content", ttl=30)
-        entries = store.get_all("norm")
-        assert len(entries) == 1
-        # last_accessed should be "" (never accessed via get/resolve, just inserted)
-        assert entries[0]["last_accessed"] == ""
+    """Shape/normalization invariants of a single PUT+GET round-trip,
+    consolidated into one journey (test-suite-compression P1d, P1c's
+    scenario-collapse methodology — every original assertion survives,
+    now packed into fewer test-function bodies) — was 5 single-assertion
+    tests each doing its own isolated put+get for one invariant."""
 
-    def test_id_is_int(self, store: HttpMemoryStore) -> None:
-        row_id = store.put("norm", "n2", "content", ttl=30)
+    def test_put_get_shape_invariants(self, store: HttpMemoryStore) -> None:
+        import re
+
+        # Before first GET, last_accessed is "" (Java server sends "" for
+        # NULL rows) — checked via get_all, which doesn't track access.
+        row_id = store.put("norm", "n1", "content", ttl=30)
+        pre_access = store.get_all("norm")
+        assert len(pre_access) == 1
+        assert pre_access[0]["last_accessed"] == ""
+
+        # id must be int.
         entry = store.get(id=row_id)
         assert entry is not None
         assert isinstance(entry["id"], int)
 
-    def test_tags_always_present_when_not_specified(self, store: HttpMemoryStore) -> None:
-        """Critical #2: tags must always be present as '' when not specified at insert time."""
-        store.put("norm", "n3", "content with no tags", ttl=30)
-        entry = store.get(project="norm", title="n3")
-        assert entry is not None
-        # tags key must be present and be an empty string (never None or missing)
+        # Critical #2: tags must always be present as '' when not specified.
         assert "tags" in entry, "tags key must always be present in entry dict"
         assert entry["tags"] == ""
 
-    def test_access_count_increments_on_get(self, store: HttpMemoryStore) -> None:
-        """Significant #5: access_count must increment on each GET call."""
-        store.put("norm", "n4", "access tracking content", ttl=30)
-        e1 = store.get(project="norm", title="n4")
-        e2 = store.get(project="norm", title="n4")
-        assert e1 is not None and e2 is not None
-        assert e2["access_count"] > e1["access_count"], (
-            "access_count must increment on each GET"
-        )
-
-    def test_timestamp_format_utc_second_precision(self, store: HttpMemoryStore) -> None:
-        """Significant #4: timestamp must be UTC second-precision ISO with trailing Z."""
-        import re
-        store.put("norm", "n5", "timestamp format test", ttl=30)
-        entry = store.get(project="norm", title="n5")
-        assert entry is not None
+        # Significant #4: timestamp is UTC second-precision ISO with trailing Z.
         ts = entry["timestamp"]
         assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts), (
             f"timestamp must match yyyy-MM-dd'T'HH:mm:ss'Z', got: {ts!r}"
+        )
+
+        # Significant #5: access_count must increment on each GET call.
+        e1 = store.get(project="norm", title="n1")
+        e2 = store.get(project="norm", title="n1")
+        assert e1 is not None and e2 is not None
+        assert e2["access_count"] > e1["access_count"], (
+            "access_count must increment on each GET"
         )
 
 

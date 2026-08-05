@@ -20,7 +20,9 @@ import re
 
 import pytest
 
-from tests.conftest import (
+pytestmark = pytest.mark.lint
+
+from tests.conftest import (  # noqa: E402
     _MODE_LINT_EXCLUDE_FILES,
     _MODE_LINT_EXCLUDE_NODEIDS,
 )
