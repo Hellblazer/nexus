@@ -1146,6 +1146,7 @@ def _check_git_hooks() -> list[HealthResult]:
     # legacy ``repos.json`` fallback via the dual-read shim. Catalog
     # paths come from ``owners WHERE owner_type='repo'``; the registry
     # provides legacy installs that have not yet been re-indexed.
+    cat = None
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
         cat = make_catalog_reader()
@@ -1159,6 +1160,25 @@ def _check_git_hooks() -> list[HealthResult]:
             "doctor_registry_load_failed", error=str(exc), exc_info=True,
         )
         repos = []
+
+    # nexus-7kl32 code-review finding 3 (population mismatch): the loop
+    # below walks the CATALOG ∪ registry union (``repos``), but
+    # ``nx catalog owners --census`` classifies catalog owners only — a
+    # dead owner whose ONLY registration is the legacy ``repos.json`` file
+    # would warn here yet never appear in the census output the warning
+    # points at. Attribute each dead path to its source (once, up front —
+    # not per-repo) so the vanished-owner branch below can say which verb
+    # actually covers it.
+    catalog_repo_roots: set[str] = set()
+    if cat is not None:
+        try:
+            catalog_repo_roots = {
+                o.get("repo_root") for o in cat.list_owners_by_type("repo")
+                if o.get("repo_root")
+            }
+        except Exception:  # noqa: BLE001 — attribution is best-effort; the primary check must survive its failure
+            _log.debug("doctor_git_hooks_catalog_attribution_failed", exc_info=True)
+            catalog_repo_roots = set()
 
     if not repos:
         results.append(HealthResult(
@@ -1211,11 +1231,72 @@ def _check_git_hooks() -> list[HealthResult]:
                         detail=f"{repo_path} — not installed",
                         fix_suggestions=[f"nx hooks install {repo_path}"],
                     ))
-            except Exception:  # noqa: BLE001 — git-hook probe is best-effort; degrade to 'could not check'
-                results.append(HealthResult(
-                    label="git hooks", ok=True,
-                    detail=f"{repo_path} — could not check",
-                ))
+            except Exception as exc:  # noqa: BLE001 — git-hook probe is best-effort; degrade to an HONEST signal, never a silent ok=True (nexus-9t86i / nexus-7kl32: a check that could not read state must never render ✓)
+                # nexus-7kl32: the dominant cause of a probe failure here is
+                # a dead owner — a registered repo whose root no longer
+                # exists on disk (bench-index sandboxes, throwaway probe
+                # checkouts, stale worktrees; the u8n4r-era debris
+                # population). That case gets its own honest wording; any
+                # other probe failure still degrades honestly, just without
+                # the dead-owner framing. Either way this is now ok=False,
+                # warn=True (soft warning ⚠, never fatal — RDR-129 B4) so a
+                # dead owner never again renders as a signal-free green.
+                try:
+                    vanished = not repo_path.exists()
+                except OSError:
+                    # code-review IMPORTANT (nexus-7kl32): .exists() itself
+                    # can raise (e.g. a permission-denied path component) —
+                    # the sibling classifier
+                    # (catalog_cmds.owners._classify_owner_root) guards this
+                    # identical risk. Degrade to the generic could-not-check
+                    # branch instead of letting it crash `nx doctor` — the
+                    # whole point of this fix was to STOP creating new crash
+                    # surfaces out of probe failures.
+                    vanished = False
+
+                if vanished:
+                    if str(repo_path) in catalog_repo_roots:
+                        # A catalog owner — nx catalog owners --census
+                        # covers it (same list_owners_by_type("repo") read).
+                        results.append(HealthResult(
+                            label="git hooks", ok=False, warn=True,
+                            detail=(
+                                f"{repo_path} — owner root no longer exists "
+                                "on disk (dead owner)"
+                            ),
+                            fix_suggestions=[
+                                "nx catalog owners --census — inspects dead "
+                                "owners (read-only; deregistration not yet "
+                                "available, tracked as nexus-cw262)"
+                            ],
+                        ))
+                    else:
+                        # code-review SIGNIFICANT (nexus-7kl32, critic
+                        # finding 2): a legacy repos.json-only entry is NOT
+                        # visible to the census (catalog owners only) —
+                        # pointing at it here would be exactly the
+                        # misleading-rendering class this bead exists to
+                        # eliminate, just relocated. Its actual remedy also
+                        # differs: repos.json is a local, directly editable
+                        # file, not a catalog row.
+                        results.append(HealthResult(
+                            label="git hooks", ok=False, warn=True,
+                            detail=(
+                                f"{repo_path} — owner root no longer exists "
+                                "on disk (dead owner; legacy repos.json "
+                                "entry — not covered by `nx catalog owners "
+                                "--census`, which classifies catalog owners "
+                                "only)"
+                            ),
+                            fix_suggestions=[
+                                f"remove the stale entry from {registry_path}"
+                            ],
+                        ))
+                else:
+                    results.append(HealthResult(
+                        label="git hooks", ok=False, warn=True,
+                        detail=f"{repo_path} — could not check ({exc})",
+                    ))
 
     return results
 

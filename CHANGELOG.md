@@ -15,7 +15,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot fully enumerate (fetch failure / per-dim ceiling) are named loudly as
   lower bounds, never silently dropped (nexus-h1zu0).
 
+### Added
+- **`nx catalog owners --census [--json]`** (nexus-7kl32): read-only
+  classification of every registered repo owner's root path — healthy /
+  path-vanished / path-exists-empty / unreadable (unreadable never defaults to
+  healthy). Deregistration of dead owners is not yet possible (the engine has
+  no owner-deactivate surface — tracked as nexus-cw262); the census says so
+  in its own output.
+
 ### Fixed
+- **`nx doctor` no longer renders dead owners as green** (nexus-7kl32): the
+  git-hooks check's "could not check" state — including ~24 owner directories
+  that no longer exist on this install — rendered as `ok=True`, dominating
+  the shakedown signal-density census (24 of 25 vacuous greens). Probe
+  failures now render as honest warnings (never fatal; healthy-owner exit
+  semantics unchanged), with per-source remedies: catalog-owned dead owners
+  point at the new census verb, legacy `repos.json`-only entries point at the
+  registry file to edit. A permission-denied path component no longer crashes
+  doctor.
 - **RDR-102 "Phase 5b" fully closed — the remaining `source_path` fallbacks
   deleted** (nexus-afudo): the three sibling sites nexus-tbkk1 left live —
   `indexer.py`'s `_prune_misclassified_in_collection` legacy prune loop and

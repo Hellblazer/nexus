@@ -948,6 +948,18 @@ The `Next page: --offset N` hint printed when more rows exist means "more entrie
 
 `stats`, `owners`, and `delete` remain standard catalog management. Run `nx catalog COMMAND --help` for details.
 
+### nx catalog owners --census
+
+```
+nx catalog owners --census [--json]
+```
+
+Read-only classification of every registered repo owner's on-disk `repo_root` (nexus-7kl32): `healthy` (root exists, has content), `path_vanished` (root does not exist at all — the bench-index-sandbox / throwaway-probe-checkout / stale-worktree debris population), `path_exists_empty` (root is still there but has been emptied out), or `unreadable` (existence/contents could not be confirmed, e.g. a permission error — deliberately never folded into `healthy`, same honesty principle as `nx doctor`'s git-hooks fix below). Owners with no `repo_root` set are reported separately and excluded from all four buckets.
+
+Diagnosis-only this round — there is no mutation arm. The catalog owner registry carries no soft-delete column and no engine route exists yet to deregister or tombstone a dead owner row (tracked as nexus-cw262); both the human report and `--json`'s `mutation_status`/`mutation_note` say so explicitly rather than implying a working fix exists.
+
+`nx doctor`'s git-hooks check (a `path_vanished`/`path_exists_empty` owner used to render there as a signal-free `ok=True` "could not check") now points a dead CATALOG owner at this verb — but a dead owner registered only in the legacy `repos.json` file is invisible to this census (catalog owners only); doctor's suggestion for that case is to edit `repos.json` directly instead.
+
 ### nx catalog backfill-owner-id (removed)
 
 Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
