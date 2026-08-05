@@ -19,16 +19,13 @@ Full cross-language end-to-end is in tests/db/test_http_chash_integration.py
 """
 from __future__ import annotations
 
-import json
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 
 from nexus.db.t2.http_chash_index import DEFAULT_TENANT, HttpChashIndex
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-chash-service-token-abc"
 
@@ -41,39 +38,10 @@ _STORE_LOCK = threading.Lock()
 TENANT = DEFAULT_TENANT
 
 
-class _FakeChashHandler(BaseHTTPRequestHandler):
+class _FakeChashHandler(FakeT2HandlerBase):
     """In-process stub of ChashHandler (Java)."""
 
-    def log_message(self, fmt, *args):  # suppress server log noise
-        pass
-
-    def _check_auth(self) -> bool:
-        auth   = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant header"})
-            return False
-        return True
-
-    def _body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length)
-        return json.loads(raw) if raw else {}
-
-    def _send(self, status: int, data: Any) -> None:
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _qs(self) -> dict[str, str]:
-        parsed = parse_qs(urlparse(self.path).query)
-        return {k: v[0] for k, v in parsed.items()}
+    TOKEN = TOKEN
 
     def do_POST(self):  # noqa: N802
         if not self._check_auth():
@@ -227,21 +195,11 @@ class _FakeChashHandler(BaseHTTPRequestHandler):
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def fake_server():
     """Start an in-process fake ChashHandler server; yield base_url."""
-    port   = _free_port()
-    server = HTTPServer(("127.0.0.1", port), _FakeChashHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{port}"
-    server.shutdown()
+    with fake_http_server(_FakeChashHandler) as url:
+        yield url
 
 
 @pytest.fixture(autouse=True)

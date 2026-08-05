@@ -110,12 +110,12 @@ class TestFlushGrainOutcomeEquivalence:
         from http.server import HTTPServer
 
         from nexus.db.t2.http_chash_index import HttpChashIndex
+        from tests.db._fake_t2_server import free_port as _free_port
         from tests.db.test_http_chash_index import (
             _STORE,
             _STORE_LOCK,
             TOKEN,
             _FakeChashHandler,
-            _free_port,
         )
 
         port = _free_port()

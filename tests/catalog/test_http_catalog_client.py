@@ -723,39 +723,42 @@ def start_fake_server() -> tuple[HTTPServer, str]:
 # ── _resolve_config tests ─────────────────────────────────────────────────────
 
 class TestResolveConfig:
-    def test_missing_port_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_error_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Missing port
         monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
             _resolve_config()
 
-    def test_non_integer_port_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Non-integer port
         monkeypatch.setenv("NX_SERVICE_PORT", "not_a_port")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         with pytest.raises(RuntimeError, match="NX_SERVICE_PORT must be an integer"):
             _resolve_config()
 
-    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Missing token
         monkeypatch.setenv("NX_SERVICE_PORT", "9090")
         monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
         with pytest.raises(RuntimeError, match="NX_SERVICE_TOKEN"):
             _resolve_config()
 
-    def test_valid_config_returns_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_valid_config_returns_tuple_with_default_host(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("NX_SERVICE_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", "9090")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok123")
         host, port, token = _resolve_config()
-        assert host == "10.0.0.1"
+        assert host == "10.0.0.1", "explicit host must be honored"
         assert port == 9090
         assert token == "tok123"
 
-    def test_default_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default host applies when NX_SERVICE_HOST is unset.
         monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
         monkeypatch.setenv("NX_SERVICE_PORT", "9090")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         host, _, _ = _resolve_config()
-        assert host == "127.0.0.1"
+        assert host == "127.0.0.1", "default host must be 127.0.0.1 when unset"
 
 
 # ── HttpCatalogClient round-trip tests ───────────────────────────────────────
@@ -778,29 +781,32 @@ def client(fake_server: str):
 
 
 class TestHttpCatalogClientRoundTrip:
-    def test_is_initialized(self, client: HttpCatalogClient) -> None:
+    def test_client_basic_info_reads(self, client: HttpCatalogClient) -> None:
         assert client.is_initialized() is True
-
-    def test_stats(self, client: HttpCatalogClient) -> None:
         s = client.stats()
         assert s["doc_count"] == 7
-
-    def test_doc_count(self, client: HttpCatalogClient) -> None:
         assert client.doc_count() == 7
 
-    def test_register_returns_tumbler(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.tumbler import Tumbler
+    def test_register_returns_tumbler_and_has_no_bib_fields(
+        self, client: HttpCatalogClient
+    ) -> None:
         # Positional owner+title as in Catalog.register signature
         t = client.register("1.1", "My Paper", content_type="paper")
         assert isinstance(t, Tumbler)
         assert str(t) == "1.1.1"
 
-    def test_register_many_pages_and_preserves_order(
+        # register() must NOT accept bib_year/bib_authors — CatalogEntry has none.
+        import inspect
+        from nexus.catalog.http_catalog_client import HttpCatalogClient as HCC
+        sig = inspect.signature(HCC.register)
+        assert "bib_year" not in sig.parameters
+        assert "bib_authors" not in sig.parameters
+
+    def test_register_many_pages_and_falls_back_per_doc_on_page_failure(
         self, client: HttpCatalogClient
     ) -> None:
         # nexus-9dvqy: 2500 docs page at 1000 (1000+1000+500); tumblers come
         # back aligned 1:1 with docs in input order across the concatenation.
-        from nexus.catalog.tumbler import Tumbler
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(2500)]
         page_sizes: list[int] = []
 
@@ -822,32 +828,27 @@ class TestHttpCatalogClientRoundTrip:
         assert [str(t) for t in out[:3]] == ["1.1.1", "1.1.2", "1.1.3"]
         assert str(out[-1]) == "1.1.2500"
 
-    def test_register_many_page_failure_falls_back_per_doc(
-        self, client: HttpCatalogClient
-    ) -> None:
         # nexus-9dvqy: a whole-page failure must not sink the run — it falls
         # back to per-doc register() (POST /doc/register), preserving per-file
         # isolation and still returning aligned tumblers.
-        from nexus.catalog.tumbler import Tumbler
-        docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
+        docs2 = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
         single_calls: list[str] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post_fallback(path: str, body: dict | None = None) -> Any:
             if path == "/doc/register_many":
                 raise RuntimeError("500 batch failed")
             assert path == "/doc/register"
             single_calls.append(body["file_path"])
             return {"tumbler": f"1.1.{len(single_calls)}"}
 
-        client._post = _fake_post  # type: ignore[method-assign]
-        out = client.register_many("1.1", docs)
+        client._post = _fake_post_fallback  # type: ignore[method-assign]
+        out2 = client.register_many("1.1", docs2)
 
-        # Fell back to one register() per doc, in order, aligned tumblers.
         assert single_calls == ["0.py", "1.py", "2.py"]
-        assert [str(t) for t in out] == ["1.1.1", "1.1.2", "1.1.3"]
-        assert all(isinstance(t, Tumbler) for t in out)
+        assert [str(t) for t in out2] == ["1.1.1", "1.1.2", "1.1.3"]
+        assert all(isinstance(t, Tumbler) for t in out2)
 
-    def test_update_many_pages_and_preserves_order(
+    def test_update_many_pages_falls_back_and_handles_empty(
         self, client: HttpCatalogClient
     ) -> None:
         # nexus-xedhp: 2500 updates page at 1000 (1000+1000+500); counts come
@@ -868,32 +869,28 @@ class TestHttpCatalogClientRoundTrip:
         assert len(out) == 2500
         assert all(c == 1 for c in out)
 
-    def test_update_many_page_failure_falls_back_per_doc(
-        self, client: HttpCatalogClient
-    ) -> None:
-        # nexus-xedhp: a whole-page failure must not sink the run — it falls
-        # back to per-doc update() (POST /update), preserving per-file
-        # isolation, mirroring register_many's precedent.
-        updates = [{"tumbler": f"1.1.{i}", "head_hash": "abc"} for i in range(3)]
+        # a whole-page failure must not sink the run — it falls back to
+        # per-doc update() (POST /update), preserving per-file isolation.
+        updates2 = [{"tumbler": f"1.1.{i}", "head_hash": "abc"} for i in range(3)]
         single_calls: list[str] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post_fallback(path: str, body: dict | None = None) -> Any:
             if path == "/update_many":
                 raise RuntimeError("500 batch failed")
             assert path == "/update"
             single_calls.append(body["tumbler"])
             return {"updated": 1}
 
-        client._post = _fake_post  # type: ignore[method-assign]
-        out = client.update_many(updates)
+        client._post = _fake_post_fallback  # type: ignore[method-assign]
+        out2 = client.update_many(updates2)
 
         assert single_calls == ["1.1.0", "1.1.1", "1.1.2"]
-        assert out == [1, 1, 1]
+        assert out2 == [1, 1, 1]
 
-    def test_update_many_empty_returns_empty(self, client: HttpCatalogClient) -> None:
+        # Empty input short-circuits with no request.
         assert client.update_many([]) == []
 
-    def test_delete_many_pages_and_returns_deleted_set(
+    def test_delete_many_pages_falls_back_and_handles_empty(
         self, client: HttpCatalogClient
     ) -> None:
         # nexus-xedhp: 2500 tumblers page at 1000 (1000+1000+500).
@@ -912,48 +909,36 @@ class TestHttpCatalogClientRoundTrip:
         assert page_sizes == [1000, 1000, 500]
         assert out == set(tumblers)
 
-    def test_delete_many_page_failure_falls_back_per_doc(
-        self, client: HttpCatalogClient
-    ) -> None:
-        # nexus-xedhp: a whole-page failure must not sink the run — it falls
-        # back to per-doc delete_document() (POST /delete).
-        tumblers = ["1.1.0", "1.1.1", "1.1.2"]
+        # a whole-page failure must not sink the run — it falls back to
+        # per-doc delete_document() (POST /delete).
+        tumblers2 = ["1.1.0", "1.1.1", "1.1.2"]
         single_calls: list[str] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post_fallback(path: str, body: dict | None = None) -> Any:
             if path == "/delete_many":
                 raise RuntimeError("500 batch failed")
             assert path == "/delete"
             single_calls.append(body["tumbler"])
             return {"deleted": 1}
 
-        client._post = _fake_post  # type: ignore[method-assign]
-        out = client.delete_many(tumblers)
+        client._post = _fake_post_fallback  # type: ignore[method-assign]
+        out2 = client.delete_many(tumblers2)
 
-        assert single_calls == tumblers
-        assert out == set(tumblers)
+        assert single_calls == tumblers2
+        assert out2 == set(tumblers2)
 
-    def test_delete_many_empty_returns_empty(self, client: HttpCatalogClient) -> None:
+        # Empty input short-circuits with no request.
         assert client.delete_many([]) == set()
 
-    def test_register_no_bib_fields(self, client: HttpCatalogClient) -> None:
-        """register() must NOT accept bib_year/bib_authors — CatalogEntry has none."""
-        import inspect
-        from nexus.catalog.http_catalog_client import HttpCatalogClient as HCC
-        sig = inspect.signature(HCC.register)
-        assert "bib_year" not in sig.parameters
-        assert "bib_authors" not in sig.parameters
-
-    def test_resolve_returns_entry(self, client: HttpCatalogClient) -> None:
+    def test_resolve_returns_entry_or_none_on_404(
+        self, client: HttpCatalogClient, fake_server: str,
+    ) -> None:
         entry = client.resolve("1.1.1")
         assert entry is not None
         assert entry.title == "Test Doc"
 
-    def test_resolve_404_returns_none(self, monkeypatch: pytest.MonkeyPatch, fake_server: str) -> None:
-        """resolve() must return None (not raise) for 404."""
-        import httpx
+        # resolve() must return None (not raise) for 404.
         with HttpCatalogClient(base_url=fake_server, _token="test_tok") as c:
-            # Patch _get to simulate a 404
             def _fake_get(path, **params):
                 resp = httpx.Response(404, json={"error": "not found"})
                 raise httpx.HTTPStatusError("not found", request=None, response=resp)
@@ -961,14 +946,15 @@ class TestHttpCatalogClientRoundTrip:
             result = c.resolve("9.9.9")
             assert result is None
 
-    def test_resolve_sends_follow_alias_true_by_default(
+    def test_resolve_alias_following_journey(
         self, client: HttpCatalogClient,
     ) -> None:
         """nexus-fguo5: resolve() declared follow_alias=True but never sent
         it on the wire. The fake decodes the SAME boolParam semantics the
-        real engine's handleShow uses, so this fails red against the
-        pre-fix client (which sent no follow_alias param at all -> the
-        fake's raw="" -> decoded False, not True)."""
+        real engine's handleShow uses, so the wire-value assertions below
+        fail red against the pre-fix client (which sent no follow_alias
+        param at all -> the fake's raw="" -> decoded False, not True)."""
+        # Default is follow_alias=True, sent on the wire.
         FakeCatalogHandler.last_show_follow_alias = None
         try:
             client.resolve("1.1.1")
@@ -976,9 +962,7 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             FakeCatalogHandler.last_show_follow_alias = None
 
-    def test_resolve_sends_follow_alias_false_when_requested(
-        self, client: HttpCatalogClient,
-    ) -> None:
+        # follow_alias=False is sent verbatim.
         FakeCatalogHandler.last_show_follow_alias = None
         try:
             client.resolve("1.1.1", follow_alias=False)
@@ -986,12 +970,9 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             FakeCatalogHandler.last_show_follow_alias = None
 
-    def test_resolve_follows_alias_to_canonical_target(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        """With follow_alias=True (the default) and a seeded alias chain,
-        the returned entry's tumbler is the RESOLVED target, mirroring
-        CatalogRepository.getDocument(..., followAlias=True)."""
+        # With follow_alias=True (the default) and a seeded alias chain, the
+        # returned entry's tumbler is the RESOLVED target, mirroring
+        # CatalogRepository.getDocument(..., followAlias=True).
         FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
         try:
             entry = client.resolve("2.2.2")
@@ -1000,11 +981,8 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             FakeCatalogHandler.show_alias_map = {}
 
-    def test_resolve_does_not_follow_alias_when_false(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        """follow_alias=False is byte-identical to a pre-fix client: the
-        alias is never followed, even though one is registered."""
+        # follow_alias=False is byte-identical to a pre-fix client: the
+        # alias is never followed, even though one is registered.
         FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
         try:
             entry = client.resolve("2.2.2", follow_alias=False)
@@ -1013,12 +991,9 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             FakeCatalogHandler.show_alias_map = {}
 
-    def test_resolve_alias_returns_canonical_target(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        """resolve_alias() was an accidental identity function before
-        nexus-fguo5 (resolve() dropped follow_alias on the floor). With the
-        wire fixed, it returns the resolved target tumbler."""
+        # resolve_alias() was an accidental identity function before
+        # nexus-fguo5 (resolve() dropped follow_alias on the floor). With
+        # the wire fixed, it returns the resolved target tumbler.
         FakeCatalogHandler.show_alias_map = {"2.2.2": "3.3.3"}
         try:
             target = client.resolve_alias("2.2.2")
@@ -1026,56 +1001,48 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             FakeCatalogHandler.show_alias_map = {}
 
-    def test_resolve_alias_returns_same_tumbler_when_no_alias(
-        self, client: HttpCatalogClient,
-    ) -> None:
+        # No alias registered -> resolve_alias() is the identity.
         target = client.resolve_alias("1.1.1")
         assert str(target) == "1.1.1"
 
-    def test_find_returns_list(self, client: HttpCatalogClient) -> None:
+    def test_find_and_all_documents(self, client: HttpCatalogClient) -> None:
         results = client.find("test query")
         assert len(results) >= 1
         assert results[0].title == "Test Doc"
 
-    def test_all_documents(self, client: HttpCatalogClient) -> None:
         docs = client.all_documents()
         assert len(docs) == 2
         assert docs[1].title == "Second"
 
-    def test_link_returns_bool(self, client: HttpCatalogClient) -> None:
+    def test_link_create_semantics(self, client: HttpCatalogClient) -> None:
         # Canonical Catalog.link() takes positional created_by and returns bool.
-        # Migrated from old client-specific sig (created_by was kw-only with default).
         result = client.link("1.1.1", "1.1.2", "cites", "test-suite")
         assert isinstance(result, bool)
 
-    def test_link_returns_true_when_created(self, client: HttpCatalogClient) -> None:
         FakeCatalogHandler.link_created = True
         try:
             assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is True
         finally:
             FakeCatalogHandler.link_created = True
 
-    def test_link_returns_false_when_merged(self, client: HttpCatalogClient) -> None:
-        # njrcn.3: created=False (ON CONFLICT merged an existing link) → link() returns
-        # False, mirroring canonical (True=new, False=merged). This is the branch that
-        # changed meaning (was result['ok'], now result['created']).
+        # njrcn.3: created=False (ON CONFLICT merged an existing link) → link()
+        # returns False, mirroring canonical (True=new, False=merged). This is
+        # the branch that changed meaning (was result['ok'], now result['created']).
         FakeCatalogHandler.link_created = False
         try:
             assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is False
         finally:
             FakeCatalogHandler.link_created = True
 
-    def test_link_returns_false_on_response_without_created(
-        self, client: HttpCatalogClient
-    ) -> None:
-        # Version-skew lock: a service that omits 'created' (old JAR) → bool(None) → False.
+        # Version-skew lock: a service that omits 'created' (old JAR) →
+        # bool(None) → False.
         FakeCatalogHandler.link_created = None  # omit the key
         try:
             assert client.link("1.1.1", "1.1.2", "cites", "test-suite") is False
         finally:
             FakeCatalogHandler.link_created = True
 
-    # ── RDR-168 P3 wire-semantics regressions (substantive-critic Criticals) ──────
+    # ── RDR-168 P3 wire-semantics regression (substantive-critic Critical) ────
 
     def test_all_documents_content_type_does_not_loop(
         self, client: HttpCatalogClient
@@ -1092,9 +1059,7 @@ class TestHttpCatalogClientRoundTrip:
         assert len(docs) == 1500
         assert FakeCatalogHandler.get_ops.count("/list") == 1
 
-    def test_link_if_absent_skips_when_link_present(
-        self, client: HttpCatalogClient
-    ) -> None:
+    def test_link_if_absent_journey(self, client: HttpCatalogClient) -> None:
         """Existing link → skip (return False), NO /link write (no overwrite).
 
         Canonical link_if_absent is INSERT-OR-SKIP; the service POST /link is an UPSERT
@@ -1105,10 +1070,7 @@ class TestHttpCatalogClientRoundTrip:
         assert result is False
         assert "/link" not in FakeCatalogHandler.post_ops
 
-    def test_link_if_absent_writes_when_absent_and_serializes_params(
-        self, client: HttpCatalogClient
-    ) -> None:
-        """Absent link → write, with every caller param serialized onto the payload."""
+        # Absent link → write, with every caller param serialized onto the payload.
         FakeCatalogHandler.reset_log()
         result = client.link_if_absent(
             FakeCatalogHandler.link_absent_from, "1.1.2", "cites", "indexer",
@@ -1122,21 +1084,23 @@ class TestHttpCatalogClientRoundTrip:
         assert body["to_span"] == "chash:bb"
         assert body["allow_dangling"] is True
 
-    def test_bulk_unlink_dry_run_returns_real_count_without_deleting(
-        self, client: HttpCatalogClient
-    ) -> None:
-        """dry_run=True returns the would-delete count via link_query, no /unlink POST."""
+    def test_bulk_unlink_journey(self, client: HttpCatalogClient) -> None:
+        # dry_run=True returns the would-delete count via link_query, no /unlink POST.
         FakeCatalogHandler.reset_log()
         n = client.bulk_unlink(link_type="cites", dry_run=True)
         assert n == 1  # the fake /link_query reports one matching link
         assert "/unlink" not in FakeCatalogHandler.post_ops
 
-    def test_bulk_unlink_requires_a_filter(self, client: HttpCatalogClient) -> None:
-        """Canonical parity: no filter and not dry_run → ValueError (guard against mass delete)."""
+        # Canonical parity: no filter and not dry_run → ValueError (guard against
+        # mass delete).
         with pytest.raises(ValueError, match="at least one filter"):
             client.bulk_unlink()
 
-    def test_links_from_uses_direction_out(self, client: HttpCatalogClient) -> None:
+        # bulk_unlink POSTs to /unlink (the same handler as unlink).
+        n = client.bulk_unlink(link_type="cites")
+        assert n == 1  # fake server returns {"deleted": 1}
+
+    def test_links_query_journey(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=out
         links = client.links_from("1.1.1")
         assert len(links) == 1
@@ -1144,33 +1108,48 @@ class TestHttpCatalogClientRoundTrip:
         assert links[0].link_type == "cites"
         assert str(links[0].to_tumbler) == "1.1.2"
 
-    def test_links_from_forwards_link_types_server_side(self, client: HttpCatalogClient) -> None:
-        # njrcn.5: link_types is forwarded to the server-side IN filter (the fake mirrors
-        # it), so a matching set returns the link and a non-matching set returns nothing —
-        # no client-side over-fetch-then-filter.
+        # njrcn.5: link_types is forwarded to the server-side IN filter (the fake
+        # mirrors it), so a matching set returns the link and a non-matching set
+        # returns nothing — no client-side over-fetch-then-filter.
         assert len(client.links_from("1.1.1", link_types=["cites", "relates"])) == 1
         assert client.links_from("1.1.1", link_types=["implements"]) == []
 
-    def test_links_to_uses_direction_in(self, client: HttpCatalogClient) -> None:
         # GET /links?tumbler=X&direction=in
-        links = client.links_to("1.1.2")
-        assert len(links) == 1
-        # Return-type parity: typed CatalogLink (attribute access), like local Catalog.
-        assert links[0].link_type == "cites"
-        assert str(links[0].from_tumbler) == "1.1.3"
+        links_to = client.links_to("1.1.2")
+        assert len(links_to) == 1
+        assert links_to[0].link_type == "cites"
+        assert str(links_to[0].from_tumbler) == "1.1.3"
 
-    def test_link_query(self, client: HttpCatalogClient) -> None:
-        links = client.link_query(link_type="cites")
-        assert len(links) == 1
-        assert links[0].link_type == "cites"  # typed CatalogLink, not dict
+        link_query_results = client.link_query(link_type="cites")
+        assert len(link_query_results) == 1
+        assert link_query_results[0].link_type == "cites"  # typed CatalogLink, not dict
 
-    def test_get_manifests_returns_typed_rows(self, client: HttpCatalogClient) -> None:
+    def test_manifest_write_get_and_chash_lookup(
+        self, client: HttpCatalogClient
+    ) -> None:
         # Return-type parity: batch get_manifests yields list[ManifestRow] per doc_id
         # (search_engine.py prefers this over the per-doc loop in service mode).
         by_doc = client.get_manifests(["1.1.1"])
         assert "1.1.1" in by_doc
         assert by_doc["1.1.1"][0].chash == CHASH_A
         assert by_doc["1.1.1"][0].position == 0
+
+        # Must send 'rows' key not 'chunks'.
+        client.write_manifest("1.1.1", [{"position": 0, "chash": CHASH_A}])
+
+        # GET /manifest/get?doc_id=X → response key 'rows'
+        rows = client.get_manifest("1.1.1")
+        assert len(rows) == 1
+        # Return-type parity: typed ManifestRow (attribute access), like local Catalog.
+        assert rows[0].chash == CHASH_A
+        assert rows[0].position == 0
+
+        # Pulls chashes from manifest rows (not a separate endpoint).
+        chashes = client.get_chunk_chashes("1.1.1")
+        assert CHASH_A in chashes
+
+        chashes2 = client.chashes_for_collection("code__test__v1")
+        assert CHASH_A in chashes2
 
     def test_get_manifests_pages_over_1000_doc_ids(
         self, client: HttpCatalogClient
@@ -1304,66 +1283,95 @@ class TestHttpCatalogClientRoundTrip:
         assert str(entries["doc-0"].tumbler) == "1.9.0"
         assert str(entries["doc-2499"].tumbler) == "1.9.499"
 
-    def test_graph_post_traverse(self, client: HttpCatalogClient) -> None:
+    def test_graph_and_graph_many(self, client: HttpCatalogClient) -> None:
         # graph() must POST /traverse (not GET)
         result = client.graph("1.1.1")
         assert isinstance(result, dict)
         assert "nodes" in result
         assert "edges" in result
 
-    def test_graph_many_post_traverse(self, client: HttpCatalogClient) -> None:
-        result = client.graph_many(["1.1.1", "1.1.2"])
-        assert isinstance(result, dict)
-        assert "nodes" in result
+        result_many = client.graph_many(["1.1.1", "1.1.2"])
+        assert isinstance(result_many, dict)
+        assert "nodes" in result_many
 
-    def test_delete_document_uses_post(self, client: HttpCatalogClient) -> None:
+    def test_docs_for_chashes_journey(self, client: HttpCatalogClient) -> None:
+        # nexus-h8rf6.3: the wire response is {"tumblers": [tumbler_string, ...]}
+        # — a flat list from SELECT DISTINCT doc_id WHERE chash IN (...), NOT a
+        # per-chash map. The client reconstructs the dict shape (matching local
+        # Catalog.docs_for_chashes) via a second get_manifests() round-trip that
+        # intersects each candidate doc's manifest chashes against the request.
+        # Pre-fix this returned the flat list directly, which crashed every
+        # ``by_chash.items()`` consumer (build_staleness_cache et al.) with
+        # AttributeError, silently degrading every service-mode index run to a
+        # full re-chunk + re-embed.
+        result = client.docs_for_chashes([CHASH_A])
+        assert isinstance(result, dict)
+        assert result == {CHASH_A: ["1.1.1"]}
+
+        assert client.docs_for_chashes([]) == {}
+
+    # ── nexus-h8rf6.3: return-type regression pins ───────────────────────────
+    #
+    # Three call sites previously returned the WRONG wire-adjacent type
+    # (bool instead of int, None instead of int, None instead of ""),
+    # each silently breaking a caller's truthiness/count/sentinel check.
+
+    def test_h8rf6_return_type_regression_pins(
+        self, client: HttpCatalogClient
+    ) -> None:
         # POST /delete with body {tumbler: ...} → {"deleted": 1}
         result = client.delete_document("1.1.1")
         assert result is True
 
-    def test_write_manifest_uses_rows_key(self, client: HttpCatalogClient) -> None:
-        # Must send 'rows' key not 'chunks'
-        client.write_manifest("1.1.1", [{"position": 0, "chash": CHASH_A}])
+        # pre-fix this returned a bool (deleted > 0), so
+        # commands/catalog_cmds/links.py's "Removed {removed} link(s)" echoed
+        # "Removed True link(s)" and mcp/catalog.py's {"removed": removed}
+        # returned a bool instead of a count.
+        removed = client.unlink("1.1.1", "1.1.2", "cites")
+        assert removed == 1
+        assert type(removed) is int
 
-    def test_get_manifest_returns_rows(self, client: HttpCatalogClient) -> None:
-        # GET /manifest/get?doc_id=X → response key 'rows'
-        rows = client.get_manifest("1.1.1")
-        assert len(rows) == 1
-        # Return-type parity: typed ManifestRow (attribute access), like local Catalog.
-        assert rows[0].chash == CHASH_A
-        assert rows[0].position == 0
+        # pre-fix this returned None, so indexer.py's
+        # ``if rowcount == 0: _log.warning(...)`` (lost-write detector) could
+        # never fire in service mode.
+        updated = client.set_owner_head_hash("1.1", "deadbeef")
+        assert updated == 1
+        assert type(updated) is int
 
-    def test_get_chunk_chashes_from_manifest(self, client: HttpCatalogClient) -> None:
-        # Pulls chashes from manifest rows (not a separate endpoint)
-        chashes = client.get_chunk_chashes("1.1.1")
-        assert CHASH_A in chashes
+        # local Catalog's documented contract is "" (never None) on no-match;
+        # align the service client to match.
+        def _fake_get(path: str, **params: object) -> dict:
+            return {"documents": []}
+        client._get = _fake_get  # type: ignore[method-assign]
+        result2 = client.lookup_doc_id_by_collection_and_path("code__x", "missing.py")
+        assert result2 == ""
 
-    def test_chashes_for_collection(self, client: HttpCatalogClient) -> None:
-        chashes = client.chashes_for_collection("code__test__v1")
-        assert CHASH_A in chashes
-
-    def test_relation_counts_unwraps_counts_and_casts_int(
-        self, client: HttpCatalogClient,
-    ) -> None:
+    def test_relation_counts_journey(self, client: HttpCatalogClient) -> None:
         # RDR-159 P-1a: POST /verify/relation-counts → {"counts": {rel: n}};
         # client unwraps the "counts" key and casts to int.
         counts = client.relation_counts(["nexus.memory", "nexus.plans"])
         assert counts == {"nexus.memory": 42, "nexus.plans": 42}
 
-    def test_relation_counts_empty_short_circuits(
-        self, client: HttpCatalogClient,
-    ) -> None:
         assert client.relation_counts([]) == {}
 
-    def test_manifest_backfill_returns_stamped_count(
+    def test_manifest_backfill_and_verify_journey(
         self, client: HttpCatalogClient,
     ) -> None:
         # RDR-159 P-1b: POST /manifest/backfill → {"stamped": n}
         assert client.manifest_backfill() == 7
 
-    def test_manifest_orphans_returns_count_and_sample(
-        self, client: HttpCatalogClient,
-    ) -> None:
+        # RUNFENCE (nexus-5xn3k.3) round trips.
+        FakeCatalogHandler.reset_log()
+        FakeCatalogHandler.manifest_verify_response = {"referenced": 3, "present": 1, "missing": 2}
+        result = client.manifest_verify("1.1.1")
+        assert result == {"referenced": 3, "present": 1, "missing": 2}
+        assert FakeCatalogHandler.last_manifest_verify_doc_id == "1.1.1"
+
+        result_all = client.manifest_verify_all()
+        assert result_all["count"] == 1
+        assert result_all["collections"][0]["referenced"] == 5
+
+    def test_manifest_orphans_journey(self, client: HttpCatalogClient) -> None:
         # RDR-159 P-1b: GET /manifest/orphans?dim= → {dim, count, orphans}
         result = client.manifest_orphans(384, limit=100)
         assert result["dim"] == 384
@@ -1371,37 +1379,15 @@ class TestHttpCatalogClientRoundTrip:
         assert len(result["orphans"]) == 2
         assert result["orphans"][0]["doc_id"] == "1.1.1"
 
-    def test_manifest_orphans_rejects_unsupported_dim(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        import pytest as _pytest
-        with _pytest.raises(ValueError, match="dim must be one of"):
+        with pytest.raises(ValueError, match="dim must be one of"):
             client.manifest_orphans(512)
 
-    def test_manifest_orphans_rejects_nonpositive_limit(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        import pytest as _pytest
-        with _pytest.raises(ValueError, match="limit must be > 0"):
+        with pytest.raises(ValueError, match="limit must be > 0"):
             client.manifest_orphans(384, limit=0)
 
-    # ── RUNFENCE (nexus-5xn3k.3) round trips ─────────────────────────────
-
-    def test_manifest_verify_returns_counts(self, client: HttpCatalogClient) -> None:
-        FakeCatalogHandler.reset_log()
-        FakeCatalogHandler.manifest_verify_response = {"referenced": 3, "present": 1, "missing": 2}
-        result = client.manifest_verify("1.1.1")
-        assert result == {"referenced": 3, "present": 1, "missing": 2}
-        assert FakeCatalogHandler.last_manifest_verify_doc_id == "1.1.1"
-
-    def test_manifest_verify_all_returns_collections_and_count(
-        self, client: HttpCatalogClient,
+    def test_index_run_lifecycle_happy_path(
+        self, client: HttpCatalogClient
     ) -> None:
-        result = client.manifest_verify_all()
-        assert result["count"] == 1
-        assert result["collections"][0]["referenced"] == 5
-
-    def test_begin_index_run_posts_all_four_fields(self, client: HttpCatalogClient) -> None:
         FakeCatalogHandler.reset_log()
         client.begin_index_run("1.1.1", "abc123", "run-1", "docs__o__v1")
         assert FakeCatalogHandler.last_begin_index_run_body == {
@@ -1409,9 +1395,7 @@ class TestHttpCatalogClientRoundTrip:
             "run_id": "run-1", "collection": "docs__o__v1",
         }
 
-    def test_begin_index_run_many_posts_docs_and_collection(self, client: HttpCatalogClient) -> None:
-        """nexus-vw594 F1: the batch begin-many round trip."""
-        FakeCatalogHandler.reset_log()
+        # nexus-vw594 F1: the batch begin-many round trip.
         docs = [
             {"doc_id": "1.1.1", "content_hash": "abc", "run_id": "run-1"},
             {"doc_id": "1.1.2", "content_hash": "def", "run_id": "run-1"},
@@ -1422,12 +1406,13 @@ class TestHttpCatalogClientRoundTrip:
         }
         assert result == {"docs": 2, "failed_doc_ids": []}
 
-    def test_complete_index_run_returns_counts_and_flagged(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        FakeCatalogHandler.reset_log()
-        result = client.complete_index_run("1.1.1", "abc123", 2)
-        assert result == {"referenced": 2, "present": 2, "missing": 0, "flagged": False}
+        result_complete = client.complete_index_run("1.1.1", "abc123", 2)
+        assert result_complete == {"referenced": 2, "present": 2, "missing": 0, "flagged": False}
+
+        client.fail_index_run("1.1.1", "MinerU OOM")
+        assert FakeCatalogHandler.last_fail_index_run_body == {
+            "doc_id": "1.1.1", "error": "MinerU OOM",
+        }
 
     def test_complete_index_run_409_raises_typed_exception_with_counts(
         self, client: HttpCatalogClient,
@@ -1461,13 +1446,6 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             FakeCatalogHandler.complete_index_run_conflict = False
 
-    def test_fail_index_run_posts_doc_id_and_error(self, client: HttpCatalogClient) -> None:
-        FakeCatalogHandler.reset_log()
-        client.fail_index_run("1.1.1", "MinerU OOM")
-        assert FakeCatalogHandler.last_fail_index_run_body == {
-            "doc_id": "1.1.1", "error": "MinerU OOM",
-        }
-
     def test_service_catalog_writer_dispatches_index_run_ops_end_to_end(
         self, fake_server: str,
     ) -> None:
@@ -1496,72 +1474,21 @@ class TestHttpCatalogClientRoundTrip:
         finally:
             writer.close()
 
-    def test_docs_for_chashes_returns_dict_shape(self, client: HttpCatalogClient) -> None:
-        # nexus-h8rf6.3: the wire response is {"tumblers": [tumbler_string, ...]}
-        # — a flat list from SELECT DISTINCT doc_id WHERE chash IN (...), NOT a
-        # per-chash map. The client reconstructs the dict shape (matching local
-        # Catalog.docs_for_chashes) via a second get_manifests() round-trip that
-        # intersects each candidate doc's manifest chashes against the request.
-        # Pre-fix this returned the flat list directly, which crashed every
-        # ``by_chash.items()`` consumer (build_staleness_cache et al.) with
-        # AttributeError, silently degrading every service-mode index run to a
-        # full re-chunk + re-embed.
-        result = client.docs_for_chashes([CHASH_A])
-        assert isinstance(result, dict)
-        assert result == {CHASH_A: ["1.1.1"]}
-
-    def test_docs_for_chashes_empty_input_returns_empty_dict(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        assert client.docs_for_chashes([]) == {}
-
-    def test_unlink_returns_int_count(self, client: HttpCatalogClient) -> None:
-        # nexus-h8rf6.3: pre-fix this returned a bool (deleted > 0), so
-        # commands/catalog_cmds/links.py's "Removed {removed} link(s)" echoed
-        # "Removed True link(s)" and mcp/catalog.py's {"removed": removed}
-        # returned a bool instead of a count.
-        removed = client.unlink("1.1.1", "1.1.2", "cites")
-        assert removed == 1
-        assert type(removed) is int
-
-    def test_set_owner_head_hash_returns_int_count(self, client: HttpCatalogClient) -> None:
-        # nexus-h8rf6.3: pre-fix this returned None, so indexer.py's
-        # ``if rowcount == 0: _log.warning(...)`` (lost-write detector) could
-        # never fire in service mode.
-        updated = client.set_owner_head_hash("1.1", "deadbeef")
-        assert updated == 1
-        assert type(updated) is int
-
-    def test_lookup_doc_id_by_collection_and_path_miss_returns_empty_string(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        # nexus-h8rf6.3: local Catalog's documented contract is "" (never
-        # None) on no-match; align the service client to match.
-        def _fake_get(path: str, **params: object) -> dict:
-            return {"documents": []}
-        client._get = _fake_get  # type: ignore[method-assign]
-        result = client.lookup_doc_id_by_collection_and_path("code__x", "missing.py")
-        assert result == ""
-
-    def test_list_collections(self, client: HttpCatalogClient) -> None:
+    def test_collections_list_and_supersede(self, client: HttpCatalogClient) -> None:
         colls = client.list_collections()
         assert len(colls) == 1
 
-    def test_supersede_collection_returns_the_rowcount(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        """nexus-cecqy: the engine returns {"updated": N} and the client used to
-        DISCARD it, asserting only `result is None` — wire shape, not behaviour.
-
-        That discard is what let `nx catalog rename-collection` announce
-        "Emitted CollectionSuperseded(...)" after an UPDATE that touched ZERO
-        rows: service-mode rename DELETEs the old registry row, so the
-        follow-up `WHERE name = old` matches nothing. ZERO is the meaningful
-        value, and it was the one being thrown away.
-
-        (The fake has been returning {"updated": 5} the whole time — the count
-        was available and unused.)
-        """
+        # nexus-cecqy: the engine returns {"updated": N} and the client used to
+        # DISCARD it, asserting only `result is None` — wire shape, not behaviour.
+        #
+        # That discard is what let `nx catalog rename-collection` announce
+        # "Emitted CollectionSuperseded(...)" after an UPDATE that touched ZERO
+        # rows: service-mode rename DELETEs the old registry row, so the
+        # follow-up `WHERE name = old` matches nothing. ZERO is the meaningful
+        # value, and it was the one being thrown away.
+        #
+        # (The fake has been returning {"updated": 5} the whole time — the
+        # count was available and unused.)
         assert client.supersede_collection("old__coll", "new__coll") == 5
 
     @pytest.mark.parametrize(
@@ -1629,54 +1556,43 @@ class TestHttpCatalogClientRoundTrip:
         client.register_collection(*a, **kw)  # type: ignore[arg-type]
         return sent
 
-    def test_bare_register_derives_legacy_true_for_nonconformant_name(
+    def test_legacy_grandfathered_derivation_journey(
         self, client: HttpCatalogClient,
     ) -> None:
-        """The BARE ``register_collection(name)`` shape — by construction the
-        non-conformant branch of every call site's conformance fork — must send
-        ``legacy_grandfathered=True``. It used to send the kwarg's False
-        default, so non-conformant names landed un-flagged in service mode.
-
-        The engine infers nothing (``upsertCollection`` binds the caller's
-        value), so whatever this sends IS the stored flag.
-        """
         from nexus.corpus import is_conformant_collection_name
 
+        # The BARE ``register_collection(name)`` shape — by construction the
+        # non-conformant branch of every call site's conformance fork — must
+        # send ``legacy_grandfathered=True``. It used to send the kwarg's
+        # False default, so non-conformant names landed un-flagged in
+        # service mode. The engine infers nothing (``upsertCollection`` binds
+        # the caller's value), so whatever this sends IS the stored flag.
         name = "docs__cecqy-legacy"
         # Non-vacuity: the fix is only observable on a non-conformant name.
         assert not is_conformant_collection_name(name)
-
         assert self._upsert_body(client, name)["legacy_grandfathered"] is True
 
-    def test_bare_register_derives_legacy_false_for_conformant_name(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        """The other half of the derivation. Pins against a 'fix' that blanket-
-        flags every bare registration True — the conformant case was correct by
-        accident at the old False default, which is what hid the defect."""
-        from nexus.corpus import is_conformant_collection_name
+        # The other half of the derivation. Pins against a 'fix' that
+        # blanket-flags every bare registration True — the conformant case
+        # was correct by accident at the old False default, which is what
+        # hid the defect.
+        conformant_name = "docs__cecqy-conf__stub-docs-1024__v1"
+        assert is_conformant_collection_name(conformant_name)
+        assert self._upsert_body(client, conformant_name)["legacy_grandfathered"] is False
 
-        name = "docs__cecqy-conf__stub-docs-1024__v1"
-        assert is_conformant_collection_name(name)
-
-        assert self._upsert_body(client, name)["legacy_grandfathered"] is False
-
-    def test_explicit_kwarg_overrides_the_derivation(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        """Deriving must not take the override away: a caller that must force
-        the flag still can, in BOTH directions."""
+        # Deriving must not take the override away: a caller that must force
+        # the flag still can, in BOTH directions.
         forced_on = self._upsert_body(
-            client, "docs__cecqy-conf__stub-docs-1024__v1", legacy_grandfathered=True,
+            client, conformant_name, legacy_grandfathered=True,
         )
         assert forced_on["legacy_grandfathered"] is True
 
         forced_off = self._upsert_body(
-            client, "docs__cecqy-legacy", legacy_grandfathered=False,
+            client, name, legacy_grandfathered=False,
         )
         assert forced_off["legacy_grandfathered"] is False
 
-    def test_rename_collection(self, client: HttpCatalogClient) -> None:
+    def test_rename_collection_journey(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)
         FakeCatalogHandler.last_rename_body = {}
         n = client.rename_collection("old__coll", "new__coll")
@@ -1684,73 +1600,55 @@ class TestHttpCatalogClientRoundTrip:
         # nexus-gaou3: default rename omits cross_model (server 409s an existing target).
         assert "cross_model" not in FakeCatalogHandler.last_rename_body
 
-    def test_rename_collection_cross_model_sets_flag(self, client: HttpCatalogClient) -> None:
-        # nexus-gaou3: the deliberate cross-model repoint sends cross_model:true so the
-        # server takes the RDR-162 COPY branch instead of 409ing the existing target.
+        # nexus-gaou3: the deliberate cross-model repoint sends cross_model:true
+        # so the server takes the RDR-162 COPY branch instead of 409ing the
+        # existing target.
         FakeCatalogHandler.last_rename_body = {}
         client.rename_collection("old__coll", "new__coll", cross_model=True)
         assert FakeCatalogHandler.last_rename_body.get("cross_model") is True
 
-    def test_rename_collection_cascade_cross_model_in_body(self, client: HttpCatalogClient) -> None:
         FakeCatalogHandler.last_rename_body = {}
         client.rename_collection_cascade("old__coll", "new__coll", cross_model=True)
         assert FakeCatalogHandler.last_rename_body.get("cross_model") is True
 
-    def test_rename_collection_plain_collision_raises(self, client: HttpCatalogClient) -> None:
         # nexus-gaou3: a plain rename onto an existing target gets a 409 from the
         # server; the client must surface it (not swallow it into a 0 count).
-        import httpx
-
         FakeCatalogHandler.rename_conflicts = True
         try:
             with pytest.raises(httpx.HTTPStatusError):
                 client.rename_collection("old__coll", "new__coll")
+
+            # nexus-gaou3: cross_model=True takes the RDR-162 repoint branch
+            # even when the server would 409 a plain rename — no exception,
+            # repoint count returned.
+            n2 = client.rename_collection("old__coll", "new__coll", cross_model=True)
+            assert n2 == 3
         finally:
             FakeCatalogHandler.rename_conflicts = False
 
-    def test_rename_collection_cross_model_bypasses_collision(self, client: HttpCatalogClient) -> None:
-        # nexus-gaou3: cross_model=True takes the RDR-162 repoint branch even when
-        # the server would 409 a plain rename — no exception, repoint count returned.
-        FakeCatalogHandler.rename_conflicts = True
-        try:
-            n = client.rename_collection("old__coll", "new__coll", cross_model=True)
-            assert n == 3
-        finally:
-            FakeCatalogHandler.rename_conflicts = False
-
-    def test_bulk_unlink_uses_unlink_route(self, client: HttpCatalogClient) -> None:
-        # bulk_unlink POSTs to /unlink (the same handler as unlink)
-        n = client.bulk_unlink(link_type="cites")
-        assert n == 1  # fake server returns {"deleted": 1}
-
-    def test_update_documents_collection_batch(self, client: HttpCatalogClient) -> None:
-        # Canonical Catalog.update_documents_collection_batch() takes pairs: list[tuple[str,str]].
-        # Migrated from old client-specific sig (tumblers list + collection string).
+    def test_owner_registration_and_misc_writes(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # Canonical Catalog.update_documents_collection_batch() takes pairs:
+        # list[tuple[str,str]]. Migrated from old client-specific sig
+        # (tumblers list + collection string).
         n = client.update_documents_collection_batch(
             [("1.1.1", "new__coll"), ("1.1.2", "new__coll")]
         )
         assert n == 2
 
-    def test_register_owner(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.tumbler import Tumbler
         # Uses POST /owners/upsert
         t = client.register_owner(name="acme")
         assert isinstance(t, Tumbler)
 
-    def test_ensure_owner_for_repo(self, client: HttpCatalogClient) -> None:
-        from nexus.catalog.tumbler import Tumbler
-        t = client.ensure_owner_for_repo(repo="/tmp/myrepo")
-        assert isinstance(t, Tumbler)
+        t2 = client.ensure_owner_for_repo(repo="/tmp/myrepo")
+        assert isinstance(t2, Tumbler)
 
-    def test_set_owner_head_hash(self, client: HttpCatalogClient) -> None:
         # POST /owners/head_hash {tumbler_prefix, head_hash}
-        client.set_owner_head_hash("1.1", "abc123def456")
+        client.set_owner_head_hash("1.1", "abc123def456")  # must not raise
 
-    def test_resync_chunk_count_is_noop(self, client: HttpCatalogClient) -> None:
         # Must not raise
         client.resync_chunk_count_cache("1.1.1")
-
-
 # ── Guarded methods ───────────────────────────────────────────────────────────
 
 class TestGuardedMethods:

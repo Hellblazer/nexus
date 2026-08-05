@@ -33,7 +33,10 @@ _POLLUTED = {
 #: on the "nothing resolvable" error text, and a lease-tier test that env-first
 #: resolution short-circuits before it can run.
 _CANARIES = [
-    "tests/db/test_http_telemetry_store.py::TestConfigErrors::test_missing_port_raises",
+    # test-suite-compression P1b (2026-08-05): the memory/telemetry
+    # missing-port test moved to a shared parametrized suite — this is the
+    # telemetry case of it.
+    "tests/db/test_t2_store_config_contract.py::test_missing_port_raises[telemetry]",
     "tests/db/test_om64x_stale_port_recovery.py::TestRecoverEndpointFromLease",
     "tests/db/test_om64x_stale_port_recovery.py::TestTokenStoreRecovery",
     "tests/db/test_om64x_stale_port_recovery.py::TestScratchStoreRecovery",

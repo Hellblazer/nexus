@@ -32,16 +32,14 @@ The fake server:
 
 from __future__ import annotations
 
-import json
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 
 from nexus.db.t2.http_memory_store import DEFAULT_TENANT, HttpMemoryStore
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-service-token-xyz"
 
@@ -82,45 +80,10 @@ def _make_entry(project: str, title: str, content: str, **kwargs: Any) -> dict[s
     }
 
 
-class _FakeMemoryHandler(BaseHTTPRequestHandler):
+class _FakeMemoryHandler(FakeT2HandlerBase):
     """Faithful in-process stub of MemoryHandler (Java)."""
 
-    def log_message(self, fmt, *args):  # suppress server log noise in tests
-        pass
-
-    def _check_auth(self) -> bool:
-        auth = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant header"})
-            return False
-        return True
-
-    def _send(self, status: int, body: Any, no_content: bool = False) -> None:
-        self.send_response(status)
-        if no_content:
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        payload = json.dumps(body).encode()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length == 0:
-            return {}
-        return json.loads(self.rfile.read(length))
-
-    def _params(self) -> dict[str, str]:
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        return {k: v[0] for k, v in qs.items()}
+    TOKEN = TOKEN
 
     def _op(self) -> str:
         return urlparse(self.path).path.replace("/v1/memory", "")
@@ -409,17 +372,8 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
 @pytest.fixture(scope="module")
 def fake_server():
     """Start the fake HTTP server on a free port. Module-scoped for speed."""
-    # Bind on port 0 to get a free port
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    server = HTTPServer(("127.0.0.1", port), _FakeMemoryHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{port}"
-    server.shutdown()
+    with fake_http_server(_FakeMemoryHandler) as url:
+        yield url
 
 
 @pytest.fixture(autouse=True)
@@ -712,24 +666,11 @@ class TestNormalization:
 
 
 class TestAuthAndConfig:
-    def test_missing_port_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # nexus-aqbrk: see the identical note in
-        # tests/db/test_http_telemetry_store.py::TestConfigErrors. NX_SERVICE_URL
-        # / NX_SERVICE_HOST are higher-priority resolution tiers, so leaving
-        # either set makes the endpoint resolve and this assertion unreachable
-        # under the engine substrate, where t2_service_env re-sets URL + TOKEN
-        # after the conftest scrub.
-        for var in ("NX_SERVICE_URL", "NX_SERVICE_HOST",
-                    "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
-            monkeypatch.delenv(var, raising=False)
-        with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
-            HttpMemoryStore()
-
-    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NX_SERVICE_PORT", "19999")
-        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
-        with pytest.raises(RuntimeError, match="NX_SERVICE_TOKEN"):
-            HttpMemoryStore()
+    # test_missing_port_raises / test_missing_token_raises moved to the
+    # shared parametrized suite in test_t2_store_config_contract.py
+    # (test-suite-compression P1b) — HttpMemoryStore and HttpTelemetryStore
+    # both adopt RefreshableHttpStoreMixin and raise the identical
+    # RuntimeError shape on unresolvable NX_SERVICE_PORT / NX_SERVICE_TOKEN.
 
     def test_close_is_idempotent(self, fake_server: str) -> None:
         s = HttpMemoryStore(base_url=fake_server, _token=TOKEN)

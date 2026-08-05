@@ -47,29 +47,20 @@ class TestIsVectorServiceMode:
         monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
         assert is_vector_service_mode() is True
 
-    def test_sqlite_returns_false(self, monkeypatch):
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "sqlite")
-        assert is_vector_service_mode() is False
-
-    def test_service_lowercase_returns_true(self, monkeypatch):
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
-        assert is_vector_service_mode() is True
-
-    def test_service_uppercase_returns_true(self, monkeypatch):
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "SERVICE")
-        assert is_vector_service_mode() is True
-
-    def test_service_mixed_case_returns_true(self, monkeypatch):
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "Service")
-        assert is_vector_service_mode() is True
-
-    def test_whitespace_stripped(self, monkeypatch):
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "  service  ")
-        assert is_vector_service_mode() is True
-
-    def test_unknown_value_returns_false(self, monkeypatch):
-        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "postgres")
-        assert is_vector_service_mode() is False
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("sqlite", False),
+            ("service", True),
+            ("SERVICE", True),
+            ("Service", True),
+            ("  service  ", True),  # whitespace stripped
+            ("postgres", False),  # unknown value
+        ],
+    )
+    def test_value_truthiness(self, monkeypatch, value, expected):
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", value)
+        assert is_vector_service_mode() is expected, (value, expected)
 
 
 # ── singleton ────────────────────────────────────────────────────────────────
@@ -81,23 +72,19 @@ class TestSingleton:
     def teardown_method(self):
         reset_http_vector_client_for_tests()
 
-    def test_get_http_vector_client_returns_instance(self, monkeypatch):
+    def test_singleton_lifecycle(self, monkeypatch):
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
         client = get_http_vector_client()
         assert isinstance(client, HttpVectorClient)
 
-    def test_singleton_same_object(self, monkeypatch):
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        a = get_http_vector_client()
+        # Repeated calls return the SAME object.
         b = get_http_vector_client()
-        assert a is b
+        assert client is b
 
-    def test_reset_clears_singleton(self, monkeypatch):
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        a = get_http_vector_client()
+        # reset_http_vector_client_for_tests() forces a fresh instance.
         reset_http_vector_client_for_tests()
-        b = get_http_vector_client()
-        assert a is not b
+        c = get_http_vector_client()
+        assert client is not c
 
 
 # ── HttpVectorClient methods (mocked HTTP) ───────────────────────────────────
@@ -126,7 +113,7 @@ class TestUpsertChunks:
         client.upsert_chunks("col", [], [])
         assert posted == []
 
-    def test_posts_to_upsert_chunks_endpoint(self, monkeypatch):
+    def test_posts_to_upsert_chunks_endpoint_with_default_metadata(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
         def fake_post(path, body, *, tenant="default", timeout=120):
@@ -140,69 +127,43 @@ class TestUpsertChunks:
         assert body["collection"] == "my-col"
         assert body["ids"] == ["id1", "id2"]
         assert body["documents"] == ["text1", "text2"]
+        # Default metadatas are empty dicts, one per id, when omitted.
+        assert body["metadatas"] == [{}, {}]
         # nexus-rvfwj: the upsert path alone gets the long CCE-batch timeout.
         assert timeout == 600
 
-    def test_default_metadatas_are_empty_dicts(self, monkeypatch):
-        client = HttpVectorClient()
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append(body)
-            return {"upserted": 1}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client.upsert_chunks("col", ["id1"], ["text1"])
-        assert calls[0]["metadatas"] == [{}]
-
-    def test_upsert_with_embeddings_ignores_embeddings(self, monkeypatch):
-        """Seam B: embeddings arg is discarded; server embeds server-side."""
-        client = HttpVectorClient()
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append(body)
-            return {"upserted": 1}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        # Pass embeddings — they should NOT appear in the POST body
-        client.upsert_chunks_with_embeddings(
-            "col", ["id1"], ["text1"], [[0.1, 0.2]]
-        )
-        assert "embeddings" not in calls[0]
-
-    def test_upsert_chunks_without_embeddings_omits_key(self, monkeypatch):
-        """Default Seam B path: no embeddings field → server embeds."""
+    def test_embeddings_seam_b_behavior(self, monkeypatch):
+        """Seam B: upsert_chunks_with_embeddings discards the caller's
+        embeddings (server embeds server-side); upsert_chunks omits the
+        key by default but sends supplied vectors verbatim when passed
+        (nexus-hxry2 same-model passthrough); skip_existing is a
+        deprecated no-op that must not prune the passthrough embeddings
+        or invoke the client-side existing_ids probe (RDR-181 bead
+        nexus-f0r8p.5)."""
         client = HttpVectorClient()
         calls = []
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: calls.append(body) or {"upserted": 1},
+            lambda path, body, **kw: calls.append(body) or {"upserted": len(body.get("ids", []))},
         )
-        client.upsert_chunks("col", ["id1"], ["text1"])
-        assert "embeddings" not in calls[0]
 
-    def test_upsert_chunks_passthrough_sends_embeddings(self, monkeypatch):
-        """nexus-hxry2 same-model passthrough: supplied vectors ARE sent so the
-        service stores them verbatim and skips the re-embed."""
-        client = HttpVectorClient()
-        calls = []
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: calls.append(body) or {"upserted": 2},
-        )
+        # Pass embeddings via upsert_chunks_with_embeddings — they should
+        # NOT appear in the POST body (server re-embeds).
+        client.upsert_chunks_with_embeddings("col", ["id1"], ["text1"], [[0.1, 0.2]])
+        assert "embeddings" not in calls[-1]
+
+        # Default Seam B path via upsert_chunks: no embeddings field → server embeds.
+        client.upsert_chunks("col", ["id1"], ["text1"])
+        assert "embeddings" not in calls[-1]
+
+        # Passthrough: supplied vectors ARE sent so the service stores them
+        # verbatim and skips the re-embed.
         vecs = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
-        client.upsert_chunks(
-            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs
-        )
-        assert calls[0]["embeddings"] == vecs
+        client.upsert_chunks("col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs)
+        assert calls[-1]["embeddings"] == vecs
 
-    def test_skip_existing_no_longer_prunes_embeddings(self, monkeypatch):
-        """RDR-181 bead nexus-f0r8p.5: skip_existing is a deprecated no-op —
-        the full batch (including supplied embeddings) is always sent, and
-        the client-side existing_ids probe is never invoked anymore."""
-        client = HttpVectorClient()
-        calls = []
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: calls.append(body) or {"upserted": 2},
-        )
+        # skip_existing no longer prunes the batch or probes existing_ids —
+        # the full batch (including supplied embeddings) is always sent.
         probe_calls = []
 
         def _tracked_existing_ids(col, ids):
@@ -210,29 +171,17 @@ class TestUpsertChunks:
             return {"id1"}
 
         monkeypatch.setattr(client, "existing_ids", _tracked_existing_ids)
-        vecs = [[0.1], [0.2]]
+        vecs2 = [[0.1], [0.2]]
         client.upsert_chunks(
-            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs, skip_existing=True
+            "col", ["id1", "id2"], ["t1", "t2"], embeddings=vecs2, skip_existing=True
         )
         assert probe_calls == []
-        assert calls[0]["ids"] == ["id1", "id2"]
-        assert calls[0]["embeddings"] == vecs
+        assert calls[-1]["ids"] == ["id1", "id2"]
+        assert calls[-1]["embeddings"] == vecs2
 
 
 class TestSearch:
-    def test_returns_list_flat(self, monkeypatch):
-        client = HttpVectorClient()
-        fake_results = [
-            {"id": "c1", "content": "hello", "distance": 0.1, "collection": "col"}
-        ]
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: fake_results
-        )
-        results = client.search("hello world", ["col"], n_results=5)
-        assert results == fake_results
-
-    def test_structured_returns_dict(self, monkeypatch):
+    def test_search_result_shapes_and_where_filter(self, monkeypatch):
         client = HttpVectorClient()
         fake_results = [
             {"id": "c1", "content": "hello", "distance": 0.1, "collection": "col",
@@ -242,6 +191,11 @@ class TestSearch:
             "nexus.db.http_vector_client._post",
             lambda path, body, **kw: fake_results
         )
+        # Flat (default) shape.
+        results = client.search("hello world", ["col"], n_results=5)
+        assert results == fake_results
+
+        # structured=True unpacks into a dict of parallel lists.
         result = client.search("hello", ["col"], structured=True)
         assert isinstance(result, dict)
         assert result["ids"] == ["c1"]
@@ -249,8 +203,7 @@ class TestSearch:
         assert result["collections"] == ["col"]
         assert result["tumblers"] == ["1.2"]
 
-    def test_where_filter_passed_in_body(self, monkeypatch):
-        client = HttpVectorClient()
+        # where= is forwarded in the body; absent when not passed.
         calls = []
         def fake_post(path, body, **kw):
             calls.append(body)
@@ -259,15 +212,8 @@ class TestSearch:
         client.search("q", ["c"], where={"topic": "ml"})
         assert calls[0]["where"] == {"topic": "ml"}
 
-    def test_no_where_not_in_body(self, monkeypatch):
-        client = HttpVectorClient()
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append(body)
-            return []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         client.search("q", ["c"])
-        assert "where" not in calls[0]
+        assert "where" not in calls[1]
 
 
 class TestPut:
@@ -304,7 +250,7 @@ class TestExistingIdsAndGetByIdStayTruncationSafe:
     requests a single id. Regression-pin that neither regressed while
     fixing the stub's shared default."""
 
-    def test_existing_ids_pages_at_300_with_limit_matching_batch(self, monkeypatch):
+    def test_existing_ids_paging_and_get_by_id_journey(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
         def fake_post(path, body, **kw):
@@ -318,35 +264,33 @@ class TestExistingIdsAndGetByIdStayTruncationSafe:
         assert calls[1][1]["limit"] == 50 == len(calls[1][1]["ids"])
         assert found == set(ids)
 
-    def test_existing_ids_partial_hit_is_not_mistaken_for_truncation(self, monkeypatch):
-        """A batch of 157 ids where only 5 actually exist must return
-        exactly those 5 — no truncation warning, no assertion failure."""
-        client = HttpVectorClient()
-        def fake_post(path, body, **kw):
+        # A batch of 157 ids where only 5 actually exist must return
+        # exactly those 5 — no truncation warning, no assertion failure.
+        def fake_post_partial(path, body, **kw):
             return {"ids": body["ids"][:5]}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        ids = [f"id{i:04d}" for i in range(157)]
-        found = client.existing_ids("col", ids)
-        assert found == set(ids[:5])
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_partial)
+        ids2 = [f"id{i:04d}" for i in range(157)]
+        found2 = client.existing_ids("col", ids2)
+        assert found2 == set(ids2[:5])
 
-    def test_get_by_id_requests_a_single_id(self, monkeypatch):
-        client = HttpVectorClient()
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append(body)
+        # get_by_id only ever requests a single id (never batched).
+        calls2 = []
+        def fake_post_single(path, body, **kw):
+            calls2.append(body)
             return {"ids": ["id1"], "documents": ["text"], "metadatas": [{}]}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_single)
         client.get_by_id("col", "id1")
-        assert calls[0]["ids"] == ["id1"]
+        assert calls2[0]["ids"] == ["id1"]
 
 
 class TestGetById:
-    def test_returns_flat_t3database_shape_when_found(self, monkeypatch):
+    def test_get_by_id_flat_shape_and_absence_handling(self, monkeypatch):
+        client = HttpVectorClient()
+
         # nexus-ij9hg: get_by_id must return T3Database's FLAT shape
         # (id + content + flat metadata), NOT id/document/nested-metadata.
         # The old nested shape silently emptied store_get content in service
         # mode (the nexus-7zuzz divergence class).
-        client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {
@@ -369,43 +313,36 @@ class TestGetById:
         assert "document" not in result
         assert "metadata" not in result
 
-    def test_returns_none_when_not_found(self, monkeypatch):
-        client = HttpVectorClient()
+        # Not found: empty response -> None.
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {"ids": [], "documents": [], "metadatas": []}
         )
-        result = client.get_by_id("col", "missing-id")
-        assert result is None
+        assert client.get_by_id("col", "missing-id") is None
 
-    def test_returns_none_on_service_error(self, monkeypatch):
-        client = HttpVectorClient()
+        # Service error -> None (never raises).
         def raise_err(p, b, **kw):
             raise VectorServiceError("404 not found")
         monkeypatch.setattr("nexus.db.http_vector_client._post", raise_err)
-        result = client.get_by_id("col", "any-id")
-        assert result is None
+        assert client.get_by_id("col", "any-id") is None
 
 
 class TestDeleteById:
-    def test_returns_true_when_deleted(self, monkeypatch):
+    def test_delete_by_id_result_journey(self, monkeypatch):
         client = HttpVectorClient()
+
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {"deleted": 1}
         )
         assert client.delete_by_id("col", "id1") is True
 
-    def test_returns_false_when_not_found(self, monkeypatch):
-        client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {"deleted": 0}
         )
         assert client.delete_by_id("col", "id1") is False
 
-    def test_returns_false_on_service_error(self, monkeypatch):
-        client = HttpVectorClient()
         def raise_err(p, b, **kw):
             raise VectorServiceError("500 error")
         monkeypatch.setattr("nexus.db.http_vector_client._post", raise_err)
@@ -413,7 +350,7 @@ class TestDeleteById:
 
 
 class TestListCollections:
-    def test_returns_list(self, monkeypatch):
+    def test_list_collections_shape_and_error_handling(self, monkeypatch):
         # RDR-156 P3 (nexus-70r3c.12): list_collections is served by
         # GET /v1/vectors/stats and returns the {name, count} T3Database
         # parity shape. Full stats/fallback behavior is covered in
@@ -428,19 +365,16 @@ class TestListCollections:
         result = client.list_collections()
         assert result == [{"name": "knowledge__nexus__model__v1", "count": 7}]
 
-    def test_returns_empty_on_service_error(self, monkeypatch):
-        client = HttpVectorClient()
         def raise_err(p, **kw):
             raise VectorServiceError("error")
         monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
-        result = client.list_collections()
-        assert result == []
+        assert client.list_collections() == []
 
 
 class TestUpdateChunks:
     """RDR-152 nexus-enehl: update_chunks routes to /v1/vectors/update-metadata."""
 
-    def test_posts_to_update_metadata_endpoint(self, monkeypatch):
+    def test_posts_to_update_metadata_endpoint_empty_and_tenant(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
         def fake_post(path, body, **kw):
@@ -459,8 +393,7 @@ class TestUpdateChunks:
         assert body["ids"] == ["id1", "id2"]
         assert body["metadatas"] == [{"frecency_score": 0.5}, {"frecency_score": 0.8}]
 
-    def test_empty_ids_is_noop(self, monkeypatch):
-        client = HttpVectorClient()
+        # Empty ids is a no-op — no request sent.
         posted = []
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
@@ -469,15 +402,15 @@ class TestUpdateChunks:
         client.update_chunks("col", [], [])
         assert posted == []
 
-    def test_tenant_forwarded(self, monkeypatch):
-        client = HttpVectorClient(tenant="my-tenant")
-        calls = []
-        def fake_post(path, body, *, tenant="default"):
-            calls.append(tenant)
+        # Tenant is forwarded to _post.
+        tenant_client = HttpVectorClient(tenant="my-tenant")
+        tenant_calls = []
+        def fake_post_tenant(path, body, *, tenant="default"):
+            tenant_calls.append(tenant)
             return {"updated": 1}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client.update_chunks("col", ["id1"], [{"k": "v"}])
-        assert calls == ["my-tenant"]
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_tenant)
+        tenant_client.update_chunks("col", ["id1"], [{"k": "v"}])
+        assert tenant_calls == ["my-tenant"]
 
     def test_batches_at_300(self, monkeypatch):
         """update_chunks MUST batch at 300 to match the service quota validator."""
@@ -507,8 +440,10 @@ class TestGetCollection:
     """RDR-152 nexus-enehl: get_collection raises the substrate-neutral
     CollectionNotFoundError when absent (RDR-155 P4b P0c raiser)."""
 
-    def test_returns_stub_when_collection_exists(self, monkeypatch):
+    def test_get_collection_stub_and_not_found_paths(self, monkeypatch):
         from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.errors import CollectionNotFoundError
+
         client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
@@ -517,9 +452,6 @@ class TestGetCollection:
         stub = client.get_collection("code__repo__model__v1")
         assert isinstance(stub, _ServiceCollectionStub)
 
-    def test_raises_not_found_when_absent(self, monkeypatch):
-        from nexus.errors import CollectionNotFoundError
-        client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda path, **kw: [{"name": "other__col__model__v1", "id": "uuid-2"}]
@@ -527,9 +459,6 @@ class TestGetCollection:
         with pytest.raises(CollectionNotFoundError):
             client.get_collection("code__repo__model__v1")
 
-    def test_raises_not_found_on_empty_list(self, monkeypatch):
-        from nexus.errors import CollectionNotFoundError
-        client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda path, **kw: []
@@ -537,9 +466,6 @@ class TestGetCollection:
         with pytest.raises(CollectionNotFoundError):
             client.get_collection("any__col__model__v1")
 
-    def test_raises_not_found_on_service_error(self, monkeypatch):
-        from nexus.errors import CollectionNotFoundError
-        client = HttpVectorClient()
         def raise_err(path, **kw):
             raise VectorServiceError("connection refused")
         monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
@@ -974,7 +900,7 @@ class TestFindIdsByTitle:
     AttributeError in service mode. Mirrors ids_for_source's where-filter
     pagination pattern (nexus-vhyua)."""
 
-    def test_paginates_and_collects(self, monkeypatch):
+    def test_paginates_collects_and_handles_no_matches(self, monkeypatch):
         # Two pages (300 then 2) -> single flat id list; second short page ends it.
         pages = [
             {"ids": [f"id{i}" for i in range(300)]},
@@ -994,33 +920,32 @@ class TestFindIdsByTitle:
         assert calls[0][1]["where"] == {"title": "doc.md"}
         assert all(c[0] == "/v1/vectors/get" for c in calls)
 
-    def test_no_matches_returns_empty(self, monkeypatch):
+        # No matches -> empty list.
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {"ids": []},
         )
-        client = HttpVectorClient()
         assert client.find_ids_by_title("col", "missing.md") == []
 
-    def test_404_first_page_returns_empty(self, monkeypatch):
-        def fake_post(path, body, **kw):
+    def test_404_first_page_returns_empty_but_mid_pagination_error_reraises(
+        self, monkeypatch
+    ):
+        def fake_post_404(path, body, **kw):
             raise VectorServiceError("not found", code=404)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_404)
         client = HttpVectorClient()
         assert client.find_ids_by_title("missing-col", "doc.md") == []
 
-    def test_mid_pagination_error_reraises(self, monkeypatch):
         # A 500 on page 2 (after ids collected) must NOT be masked as "no more
         # matches" — else `nx store delete --title` would under-delete and
         # report success.
-        def fake_post(path, body, **kw):
+        def fake_post_mid_error(path, body, **kw):
             if body["offset"] == 0:
                 return {"ids": [f"id{i}" for i in range(300)]}
             raise VectorServiceError("server error", code=500)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client = HttpVectorClient()
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_mid_error)
         with pytest.raises(VectorServiceError):
             client.find_ids_by_title("col", "doc.md")
 
@@ -1039,7 +964,7 @@ class TestBatchDelete:
         HttpVectorClient().batch_delete("col", [])
         assert posted == []
 
-    def test_deletes_via_store_delete(self, monkeypatch):
+    def test_deletes_via_store_delete_and_batches_at_300(self, monkeypatch):
         calls = []
 
         def fake_post(path, body, **kw):
@@ -1053,20 +978,19 @@ class TestBatchDelete:
         assert calls[0][1]["ids"] == ["id1", "id2"]
         assert calls[0][1]["collection"] == "col"
 
-    def test_batches_at_300(self, monkeypatch):
-        calls = []
+        calls2 = []
 
-        def fake_post(path, body, **kw):
-            calls.append(body["ids"])
+        def fake_post_batched(path, body, **kw):
+            calls2.append(body["ids"])
             return {"deleted": len(body["ids"])}
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_batched)
         ids = [f"id{i:04d}" for i in range(350)]
         HttpVectorClient().batch_delete("col", ids)
-        assert len(calls) == 2
-        assert len(calls[0]) == 300
-        assert len(calls[1]) == 50
-        assert sorted(x for batch in calls for x in batch) == sorted(ids)
+        assert len(calls2) == 2
+        assert len(calls2[0]) == 300
+        assert len(calls2[1]) == 50
+        assert sorted(x for batch in calls2 for x in batch) == sorted(ids)
 
 
 class TestListStore:
@@ -1076,7 +1000,7 @@ class TestListStore:
     find_ids_by_title, just unreported because the CLI test fixtures mock
     the whole T3 client (bare MagicMock, no spec=)."""
 
-    def test_returns_flat_entries(self, monkeypatch):
+    def test_returns_flat_entries_and_forwards_paging(self, monkeypatch):
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {
@@ -1090,7 +1014,6 @@ class TestListStore:
             {"id": "id2", "title": "b.md"},
         ]
 
-    def test_passes_limit_and_offset(self, monkeypatch):
         calls = []
 
         def fake_post(path, body, **kw):
@@ -1103,18 +1026,17 @@ class TestListStore:
         assert calls[0]["offset"] == 100
         assert calls[0]["collection"] == "col"
 
-    def test_404_returns_empty(self, monkeypatch):
-        def fake_post(path, body, **kw):
+    def test_404_returns_empty_but_other_errors_reraise(self, monkeypatch):
+        def fake_post_404(path, body, **kw):
             raise VectorServiceError("nf", code=404)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_404)
         assert HttpVectorClient().list_store("missing-col") == []
 
-    def test_non_404_error_reraises(self, monkeypatch):
-        def fake_post(path, body, **kw):
+        def fake_post_500(path, body, **kw):
             raise VectorServiceError("server error", code=500)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_500)
         with pytest.raises(VectorServiceError):
             HttpVectorClient().list_store("col")
 
@@ -1124,7 +1046,7 @@ class TestCollectionInfo:
     `nx store list`'s total-count display, `nx collection info`, and
     `nx collection reindex` in service mode."""
 
-    def test_returns_count_for_existing_collection(self, monkeypatch):
+    def test_collection_info_counts_and_error_mapping(self, monkeypatch):
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda p, **kw: {"count": 42},
@@ -1133,7 +1055,7 @@ class TestCollectionInfo:
         assert info["count"] == 42
         assert info["metadata"] == {}
 
-    def test_raises_keyerror_when_zero_count(self, monkeypatch):
+        # A collection reporting zero count is treated as absent (KeyError).
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda p, **kw: {"count": 0},
@@ -1141,19 +1063,19 @@ class TestCollectionInfo:
         with pytest.raises(KeyError):
             HttpVectorClient().collection_info("missing-col")
 
-    def test_raises_keyerror_on_404(self, monkeypatch):
-        def raise_err(p, **kw):
+        # 404 maps to KeyError too (substrate-neutral "not found").
+        def raise_404(p, **kw):
             raise VectorServiceError("not found", code=404)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
+        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_404)
         with pytest.raises(KeyError):
             HttpVectorClient().collection_info("missing-col")
 
-    def test_reraises_non_404_service_error(self, monkeypatch):
-        def raise_err(p, **kw):
+        # Non-404 service errors are NOT mapped to KeyError — they propagate.
+        def raise_500(p, **kw):
             raise VectorServiceError("server error", code=500)
 
-        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
+        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_500)
         with pytest.raises(VectorServiceError):
             HttpVectorClient().collection_info("col")
 
@@ -1354,7 +1276,9 @@ class TestGetEmbeddings:
     degraded on EVERY service-mode search while this raised
     NotImplementedError."""
 
-    def test_posts_to_get_embeddings_endpoint(self, monkeypatch):
+    def test_get_embeddings_shapes(self, monkeypatch):
+        import numpy as np
+
         client = HttpVectorClient()
         calls = []
 
@@ -1370,31 +1294,26 @@ class TestGetEmbeddings:
             "collection": "knowledge__x__minilm-l6-v2-384__v1",
             "ids": ["a", "b"],
         }
-        import numpy as np
-
         assert result.dtype == np.float32
         assert result.shape == (2, 2)
         assert result[1][1] == np.float32(0.4)
 
-    def test_missing_ids_dropped_chroma_parity(self, monkeypatch):
         # The service omits ids it cannot find; N < len(ids) is the caller's
         # shape-mismatch signal — same semantics as the Chroma path.
-        client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             _make_mock_post({"ids": ["a"], "embeddings": [[0.1, 0.2]]}),
         )
-        result = client.get_embeddings("col", ["a", "missing"])
-        assert result.shape == (1, 2)
+        result_partial = client.get_embeddings("col", ["a", "missing"])
+        assert result_partial.shape == (1, 2)
 
-    def test_empty_result_shape(self, monkeypatch):
-        client = HttpVectorClient()
+        # Empty result shape.
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
             _make_mock_post({"ids": [], "embeddings": []}),
         )
-        result = client.get_embeddings("col", ["x"])
-        assert result.shape[0] == 0
+        result_empty = client.get_embeddings("col", ["x"])
+        assert result_empty.shape[0] == 0
 
 
 class TestGetEmbeddingsBatching:
@@ -1854,29 +1773,20 @@ class TestServiceModeDefault:
     were inert in default environments and every indexing run paid Voyage
     twice (client embed discarded, server re-embed)."""
 
-    def test_unset_defaults_to_service_mode(self, monkeypatch):
+    def test_default_and_opt_out_truthiness(self, monkeypatch):
         from nexus.db.http_vector_client import is_vector_service_mode
 
         monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
-        assert is_vector_service_mode() is True
-
-    def test_explicit_service_is_service_mode(self, monkeypatch):
-        from nexus.db.http_vector_client import is_vector_service_mode
+        assert is_vector_service_mode() is True, "unset must default to service mode"
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
-        assert is_vector_service_mode() is True
-
-    def test_empty_string_treated_as_unset(self, monkeypatch):
-        from nexus.db.http_vector_client import is_vector_service_mode
+        assert is_vector_service_mode() is True, "explicit service must stay service mode"
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "")
-        assert is_vector_service_mode() is True
-
-    def test_chroma_opts_out(self, monkeypatch):
-        from nexus.db.http_vector_client import is_vector_service_mode
+        assert is_vector_service_mode() is True, "empty string must be treated as unset"
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
-        assert is_vector_service_mode() is False
+        assert is_vector_service_mode() is False, "chroma must be the explicit opt-out"
 
 
 # ── RDR-001 nexus-kf679: managed-endpoint failure reframing ───────────────────

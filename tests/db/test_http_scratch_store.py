@@ -30,17 +30,15 @@ is in tests/db/test_http_scratch_store_integration.py (marked integration).
 
 from __future__ import annotations
 
-import json
 import os
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import pytest
 
 from nexus.db.http_scratch_store import DEFAULT_TENANT, HttpScratchStore
 from nexus.db.t1 import publish_t1_session_lease
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-scratch-token-abc123"
 SESSION = "test-session-unit"
@@ -74,20 +72,13 @@ def _make_entry(id: str, content: str, session_id: str, **kwargs: Any) -> dict[s
     }
 
 
-class _FakeScratchHandler(BaseHTTPRequestHandler):
+class _FakeScratchHandler(FakeT2HandlerBase):
     """Faithful in-process stub of ScratchHandler (Java)."""
 
-    def log_message(self, fmt, *args):
-        pass  # suppress test noise
+    TOKEN = TOKEN
 
     def _check_auth(self) -> bool:
-        auth = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant"})
+        if not super()._check_auth():
             return False
         # nexus-g5hzk: optional require-minted-session gate, mirroring the
         # Java AuthFilter — active only when a test sets _REQUIRED_T1_TOKEN.
@@ -96,18 +87,6 @@ class _FakeScratchHandler(BaseHTTPRequestHandler):
             self._send(401, {"error": "unauthorized"})
             return False
         return True
-
-    def _send(self, status: int, body: Any) -> None:
-        self.send_response(status)
-        payload = json.dumps(body).encode()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        return json.loads(self.rfile.read(length)) if length else {}
 
     def do_POST(self):  # noqa: N802
         if not self._check_auth():
@@ -232,21 +211,11 @@ class _FakeScratchHandler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def fake_server():
     """Start the fake T1 HTTP server for the module, tear down after."""
-    port = _free_port()
-    server = HTTPServer(("127.0.0.1", port), _FakeScratchHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{port}"
-    server.shutdown()
+    with fake_http_server(_FakeScratchHandler) as url:
+        yield url
 
 
 @pytest.fixture

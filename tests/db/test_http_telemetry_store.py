@@ -19,18 +19,16 @@ Full cross-language end-to-end is in tests/db/test_http_telemetry_store_integrat
 """
 from __future__ import annotations
 
-import json
-import socket
 import threading
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 
 from nexus.db.t2.http_telemetry_store import DEFAULT_TENANT, HttpTelemetryStore
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-telemetry-token-abc"
 PAST_TS = "2024-01-15T10:30:00Z"
@@ -66,39 +64,10 @@ def _clear_all() -> None:
         IMPORT_LOG.clear()
 
 
-class _FakeTelemetryHandler(BaseHTTPRequestHandler):
+class _FakeTelemetryHandler(FakeT2HandlerBase):
     """In-process stub of TelemetryHandler (Java)."""
 
-    def log_message(self, fmt, *args):
-        pass
-
-    def _check_auth(self) -> bool:
-        auth   = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant header"})
-            return False
-        return True
-
-    def _body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length)
-        return json.loads(raw) if raw else {}
-
-    def _send(self, status: int, data: Any) -> None:
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _qs(self) -> dict[str, str]:
-        parsed = parse_qs(urlparse(self.path).query)
-        return {k: v[0] for k, v in parsed.items()}
+    TOKEN = TOKEN
 
     def do_POST(self):
         if not self._check_auth():
@@ -452,14 +421,8 @@ class _FakeTelemetryHandler(BaseHTTPRequestHandler):
 @pytest.fixture(scope="module")
 def fake_server():
     """Start the fake TelemetryHandler server on a random free port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    srv = HTTPServer(("127.0.0.1", port), _FakeTelemetryHandler)
-    t   = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{port}"
-    srv.shutdown()
+    with fake_http_server(_FakeTelemetryHandler) as url:
+        yield url
 
 
 @pytest.fixture(autouse=True)
@@ -946,29 +909,11 @@ class TestImportDoNothing:
         assert len(rows) >= 1
 
 
-class TestConfigErrors:
-    def test_missing_port_raises(self, monkeypatch):
-        # nexus-aqbrk: NX_SERVICE_URL / NX_SERVICE_HOST must go too. They are
-        # HIGHER-PRIORITY tiers than NX_SERVICE_PORT in
-        # nexus.db.service_endpoint's resolution order, so leaving either set
-        # means the endpoint resolves and the store never reaches the
-        # missing-port complaint this asserts. The conftest scrub strips all
-        # four, but under the engine substrate ``t2_service_env`` re-sets URL
-        # and TOKEN afterwards so the T2 Http*Stores can find the test engine
-        # — making the no-endpoint path unreachable BY CONSTRUCTION. The test
-        # previously got its precondition by accident, from the sqlite arm
-        # having no service_url at all.
-        for var in ("NX_SERVICE_URL", "NX_SERVICE_HOST",
-                    "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
-            monkeypatch.delenv(var, raising=False)
-        with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
-            HttpTelemetryStore()
-
-    def test_missing_token_raises(self, monkeypatch, fake_server):
-        # base_url provided but no NX_SERVICE_TOKEN
-        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
-        with pytest.raises(RuntimeError, match="NX_SERVICE_TOKEN"):
-            HttpTelemetryStore(base_url=fake_server)
+# TestConfigErrors (test_missing_port_raises / test_missing_token_raises)
+# moved to the shared parametrized suite in test_t2_store_config_contract.py
+# (test-suite-compression P1b) — HttpMemoryStore and HttpTelemetryStore both
+# adopt RefreshableHttpStoreMixin and raise the identical RuntimeError shape
+# on unresolvable NX_SERVICE_PORT / NX_SERVICE_TOKEN.
 
 
 class TestRetentionMarkers:

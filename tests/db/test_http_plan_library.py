@@ -16,16 +16,14 @@ Full cross-language end-to-end is in tests/db/test_http_plan_library_integration
 """
 from __future__ import annotations
 
-import json
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 
 from nexus.db.t2.http_plan_library import DEFAULT_TENANT, HttpPlanLibrary
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-plan-service-token-xyz"
 
@@ -78,42 +76,13 @@ def _make_plan(
     }
 
 
-class _FakePlanHandler(BaseHTTPRequestHandler):
+class _FakePlanHandler(FakeT2HandlerBase):
     """In-process stub of PlanHandler (Java)."""
 
-    def log_message(self, fmt, *args):  # suppress server log noise
-        pass
-
-    def _check_auth(self) -> bool:
-        auth   = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant header"})
-            return False
-        return True
-
-    def _body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length)
-        return json.loads(raw) if raw else {}
-
-    def _send(self, status: int, data: Any) -> None:
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    TOKEN = TOKEN
 
     def _parsed_path(self):
         return urlparse(self.path)
-
-    def _qs(self) -> dict[str, str]:
-        parsed = parse_qs(urlparse(self.path).query)
-        return {k: v[0] for k, v in parsed.items()}
 
     def do_POST(self):
         if not self._check_auth():
@@ -415,14 +384,8 @@ class _FakePlanHandler(BaseHTTPRequestHandler):
 @pytest.fixture(scope="module")
 def fake_server():
     """Start the fake PlanHandler server on a random free port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    srv = HTTPServer(("127.0.0.1", port), _FakePlanHandler)
-    t   = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{port}"
-    srv.shutdown()
+    with fake_http_server(_FakePlanHandler) as url:
+        yield url
 
 
 @pytest.fixture(autouse=True)
