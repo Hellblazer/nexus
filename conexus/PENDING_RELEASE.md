@@ -30,4 +30,11 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.2.0)
 
-(empty — v7.2.0 shipped everything; add entries as develop drifts from the new pin)
+- `conexus/skills/test-authoring/SKILL.md` — NEW reference skill: nexus
+  test-suite layer routing (-n auto / -m lint / integration / scenario
+  journeys) + authoring directives from the 2026-08-05 compression arc.
+  Until released, sessions get the same guidance from `tests/AGENTS.md` and
+  root `AGENTS.md` (already live on develop), so the gap is informational,
+  not protective.
+- `conexus/registry.yaml` — standalone_skills entry for `test-authoring`
+  (same change, same informational-only gap).
