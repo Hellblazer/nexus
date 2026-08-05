@@ -3657,6 +3657,51 @@ public final class CatalogRepository {
     }
 
     /**
+     * POST /v1/catalog/index-run/begin-many — batch {@code index_state='indexing'}
+     * stamp for N documents in ONE HTTP round trip (nexus-vw594 F1). Same
+     * idempotent, NOT-a-lock semantics as {@link #beginIndexRun} — each doc
+     * gets its own {@link #beginIndexRun} call (its own transaction), so a
+     * single bad {@code doc_id} in the batch does not abort the rest
+     * (writeManifestMany's per-doc isolation pattern). The round trip this
+     * closes is the HTTP one: the ChunkBatcher flush-grain repo path
+     * (indexer.py) stages an entire upload batch's worth of files and would
+     * otherwise pay one {@code /index-run/begin} round trip PER FILE instead
+     * of once per FLUSH.
+     *
+     * <p>{@code collection} is batch-wide (one ChunkBatcher flush is always a
+     * single collection) and, like {@link #beginIndexRun}'s parameter, is
+     * accepted for log correlation only.
+     *
+     * @return {@code {docs: <succeeded count>, failed_doc_ids: [...]}}
+     */
+    public Map<String, Object> beginIndexRunMany(String tenant, List<Map<String, Object>> docs, String collection) {
+        int ok = 0;
+        List<String> failed = new ArrayList<>();
+        if (docs != null) {
+            for (Map<String, Object> d : docs) {
+                String docId = s(d, "doc_id");
+                String contentHash = s(d, "content_hash");
+                String runId = s(d, "run_id");
+                try {
+                    if (docId == null || docId.isBlank()) {
+                        throw new IllegalArgumentException("'doc_id' required");
+                    }
+                    beginIndexRun(tenant, docId, contentHash, runId, collection);
+                    ok++;
+                } catch (Exception e) {
+                    log.warn("event=index_run_begin_many_doc_failed tenant={} doc_id={} error={}",
+                              tenant, docId, e.getMessage());
+                    failed.add(docId == null ? "" : docId);
+                }
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("docs", ok);
+        result.put("failed_doc_ids", failed);
+        return result;
+    }
+
+    /**
      * POST /v1/catalog/index-run/complete — the load-bearing FAIL-CLOSED
      * verify-then-stamp (memo §3.3, amended by the .1 critique, T2 21350).
      * In ONE transaction: run {@code nexus.manifest_verify(docId)}; refuse

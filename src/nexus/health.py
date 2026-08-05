@@ -3341,6 +3341,16 @@ def _check_dangling_manifests() -> list[HealthResult]:
 #: this comment instead.
 _STALE_INDEXING_THRESHOLD_HOURS = 6.0
 
+#: v7.1.0 tag time (UTC) — the first PUBLIC release carrying the CLIENT-side
+#: index-run fence (nexus-5xn3k.3, commit 4b0c5fb5). nexus-vw594 F3 / root
+#: cause of nexus-biq4x: used ONLY to distinguish a quiescent-but-fence-aware
+#: corpus (nothing indexed since the fence shipped — expected, still
+#: ok=True) from the nexus-vw594 coverage-gap signature (a document indexed
+#: AFTER this date carries no fence stamp, because its producer never calls
+#: begin/complete at all — see the investigation memo, T2
+#: nx memory get -p nexus -t "vw594-investigation-2026-08-04").
+_FENCE_RELEASE_DT = datetime(2026, 8, 2, 22, 26, 0, tzinfo=UTC)
+
 
 def _check_stale_indexing_runs() -> list[HealthResult]:
     """Name documents stranded in ``index_state='indexing'`` beyond a
@@ -3383,16 +3393,43 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     now = datetime.now(UTC)
     stale: list[tuple[str, str]] = []  # (identifier, age)
     checked = 0
+    # nexus-vw594 F3 (root cause of nexus-biq4x): a THIRD population,
+    # distinct from both "checked" (real index_state, non-null) and the old
+    # binary's silent skip. A row where the wire reported the
+    # ``index_state`` key at all (``index_state_reported``) but its value
+    # is NULL is NOT the same evidence as a key genuinely absent — see
+    # CatalogEntry.index_state_reported's docstring.
+    reported_null = 0
+    not_reported = 0
+    newest_reported_null_dt: datetime | None = None
     try:
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
         # doctor currently pays for the full-corpus walk TWICE per run.
         for entry in cat.all_documents(limit=0):
+            reported = bool(getattr(entry, "index_state_reported", True))
             state = getattr(entry, "index_state", None)
+            if not reported:
+                # Genuinely pre-fence engine — the wire never carried the
+                # key. Unknown, not evidence either way.
+                not_reported += 1
+                continue
             if state is None:
-                # Legacy row or a pre-fence engine (memo §6) — unknown, not
-                # evidence either way. Excluded from `checked` too: it must
-                # not count as "one document this check actually assessed."
+                # Fence-aware engine, but this document has never been
+                # stamped (unfenced producer, or simply not re-indexed
+                # since the fence shipped — §_FENCE_RELEASE_DT below tells
+                # these two apart).
+                reported_null += 1
+                indexed_at = str(getattr(entry, "indexed_at", "") or "")
+                if indexed_at:
+                    try:
+                        ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        ia_dt = None
+                    if ia_dt is not None and (
+                        newest_reported_null_dt is None or ia_dt > newest_reported_null_dt
+                    ):
+                        newest_reported_null_dt = ia_dt
                 continue
             checked += 1
             if state != "indexing":
@@ -3416,40 +3453,96 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
         _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
 
-    if checked == 0:
-        # NON-VACUITY: an engine that predates the fence (memo §6) omits
-        # index_state entirely on every row, so nothing above ever
-        # increments `checked`. Say so rather than render an all-clear
-        # this check cannot actually support.
-        return [HealthResult(
-            label=label, ok=True,
-            detail="skipped (engine does not report index_state — predates "
-                   "the index-run fence)",
-        )]
-    if not stale:
+    # nexus-vw594 F3 fix-round CRITICAL (substantive-critic, T2
+    # nexus/vw594-critique-2026-08-05 [21445]): this check MUST run
+    # UNCONDITIONALLY — never nested inside `if checked == 0`. The prior
+    # shape nested the reported_null/vw594-signature detection inside
+    # that guard, so a mixed corpus where ONE document has a genuine
+    # fenced run (checked > 0 — e.g. the very first `nx index repo` post-
+    # deploy) fell through to the generic "none (N checked)" ok=True
+    # branch WITHOUT EVER INSPECTING reported_null, even when a SECOND
+    # document in the same corpus was reported-but-NULL and indexed
+    # after the fence shipped. That is nexus-biq4x's silent-green bug
+    # reborn under a new trigger (checked > 0 instead of "engine predates
+    # the fence"); the critic reproduced it against this function with a
+    # real 2-doc mixed fixture. `results` collects every WARN-worthy
+    # finding independently; the summary branches below only run when
+    # NONE fired.
+    results: list[HealthResult] = []
+
+    if (
+        reported_null > 0
+        and newest_reported_null_dt is not None
+        and newest_reported_null_dt > _FENCE_RELEASE_DT
+    ):
+        # The vw594 signature: a document landed AFTER the fence existed
+        # with no stamp at all — an unfenced producer wrote it. Never
+        # ok=True for this (nexus-biq4x's misdiagnosis was exactly
+        # rendering this case as a green pre-fence skip).
+        results.append(HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{reported_null} document(s) report index_state but it "
+                "is NULL on every one of them, and at least one was "
+                f"indexed {newest_reported_null_dt.isoformat()} — after "
+                f"the fence's {_FENCE_RELEASE_DT.isoformat()} release. "
+                "The fence engine is live; a producer wrote this document "
+                "without ever calling index-run begin/complete "
+                "(nexus-vw594 coverage gap), not a pre-fence engine."
+            ),
+            fix_suggestions=[
+                "nx index <path> --force   (re-index through a fenced producer)",
+            ],
+        ))
+
+    if stale:
+        names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
+        if len(stale) > 10:
+            names += f"; +{len(stale) - 10} more"
+        results.append(HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"{len(stale)} document(s) stranded in index_state='indexing' "
+                f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
+                "SAFE (re-indexing never skips an 'indexing' document, "
+                "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
+                "intervening run — check for a stuck run or a rolling deploy "
+                "that split a begin/complete pair across engine versions."
+            ),
+            fix_suggestions=[
+                "nx index <path> --force   (clears the fence on a clean run)",
+            ],
+        ))
+
+    if results:
+        return results
+
+    # Nothing WARN-worthy found — build the single honest ok=True summary.
+    if checked > 0:
         return [HealthResult(
             label=label, ok=True,
             detail=f"none ({checked} fenced document(s) checked)",
         )]
-
-    names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
-    if len(stale) > 10:
-        names += f"; +{len(stale) - 10} more"
+    if reported_null > 0:
+        # Quiescent: the fence is live but nothing has run through it yet
+        # (fresh install, or a stable corpus untouched since the fence
+        # shipped — catalog-020 does not retro-populate by design).
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"fence live, 0 stale runs ({reported_null} document(s) "
+                   "report index_state but none has run through the fence yet)",
+        )]
+    # NON-VACUITY: a genuinely pre-fence engine omits index_state entirely
+    # on every row (not_reported > 0 and nothing else), or the corpus
+    # scanned had nothing to say at all. Either way there is nothing this
+    # check can assess — say so rather than render an all-clear it cannot
+    # actually support.
     return [HealthResult(
-        label=label,
-        ok=False,
-        warn=True,
-        detail=(
-            f"{len(stale)} document(s) stranded in index_state='indexing' "
-            f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
-            "SAFE (re-indexing never skips an 'indexing' document, "
-            "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
-            "intervening run — check for a stuck run or a rolling deploy "
-            "that split a begin/complete pair across engine versions."
-        ),
-        fix_suggestions=[
-            "nx index <path> --force   (clears the fence on a clean run)",
-        ],
+        label=label, ok=True,
+        detail="skipped (engine does not report index_state — predates "
+               "the index-run fence)",
     )]
 
 

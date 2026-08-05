@@ -195,6 +195,18 @@ class CatalogEntry:
     index_content_hash: str = ""
     index_run_id: str = ""
     index_started_at: str = ""
+    # nexus-vw594 F3 (root cause of nexus-biq4x): whether the wire payload
+    # carried an ``index_state`` KEY at all, independent of its value.
+    # ``dict.get("index_state")`` on its own returns ``None`` for BOTH
+    # "key absent" (a genuinely pre-fence engine) and "key present, value
+    # JSON null" (a fence-aware engine reporting a document the fence has
+    # never stamped) — the two are operationally opposite (unsupported vs.
+    # unfenced) but collapse to the identical Python value. Defaults to
+    # ``True``: every hand-built ``CatalogEntry`` (tests, and any future
+    # construction site that never touches the wire) is presumed to be
+    # reporting a real value unless the wire-parsing path
+    # (``_to_entry``) explicitly says otherwise.
+    index_state_reported: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -225,6 +237,7 @@ class CatalogEntry:
             "index_content_hash": self.index_content_hash,
             "index_run_id": self.index_run_id,
             "index_started_at": self.index_started_at,
+            "index_state_reported": self.index_state_reported,
         }
 
 

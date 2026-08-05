@@ -243,6 +243,12 @@ def _to_entry(d: dict) -> CatalogEntry:
         index_content_hash=d.get("index_content_hash") or "",
         index_run_id=d.get("index_run_id") or "",
         index_started_at=d.get("index_started_at") or "",
+        # nexus-vw594 F3 (root cause of nexus-biq4x): "index_state" in d
+        # distinguishes "key absent" (pre-fence engine — d.get() would
+        # also return None here) from "key present, value null" (a
+        # fence-aware engine with nothing stamped yet). d.get() alone
+        # cannot tell these apart; this dict-membership check is the fix.
+        index_state_reported="index_state" in d,
     )
 
 
@@ -653,6 +659,33 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # unreachable verify (_manifest_is_fully_present, doc_indexer.py) owns
     # that fail-open+WARNING contract itself.
     # ══════════════════════════════════════════════════════════════════════
+
+    def begin_index_run_many(
+        self, docs: list[dict], collection: str,
+    ) -> dict:
+        """POST /v1/catalog/index-run/begin-many — batch ``index_state=
+        'indexing'`` stamp for N documents in ONE round trip (nexus-vw594
+        F1). *docs* is ``[{"doc_id": ..., "content_hash": ..., "run_id":
+        ...}, ...]`` — same idempotent, NOT-a-lock semantics as
+        :meth:`begin_index_run` (memo §3.5 T0), batched so the ChunkBatcher
+        flush-grain repo path pays ONE round trip per FLUSH instead of one
+        per FILE (the ``indexer.py`` ``:3631`` cost objection this closes).
+
+        Returns ``{}`` on a 404 (pre-fence engine, engine-floor-tolerated:
+        logged at WARNING) — same sentinel-vs-empty-success distinction as
+        :meth:`begin_index_run`'s single-doc 404 handling. Any other
+        transport failure propagates; the caller (:func:`nexus.doc_indexer.
+        _fence_begin_many`) wraps this in its own advisory fail-open catch.
+        """
+        try:
+            return self._post("/index-run/begin-many", {
+                "docs": docs, "collection": collection,
+            }) or {}
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                _log.warning("index_run_begin_many_engine_floor", doc_count=len(docs))
+                return {}
+            raise
 
     def begin_index_run(
         self, doc_id: str, content_hash: str, run_id: str, collection: str,

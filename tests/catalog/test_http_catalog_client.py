@@ -183,6 +183,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     complete_index_run_conflict: bool = False
     #: last bodies POSTed to the 3 index-run routes, for call-site assertions.
     last_begin_index_run_body: dict[str, Any] = {}
+    last_begin_index_run_many_body: dict[str, Any] = {}
     last_complete_index_run_body: dict[str, Any] = {}
     last_fail_index_run_body: dict[str, Any] = {}
 
@@ -198,6 +199,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_manifest_verify_doc_id = ""
         cls.complete_index_run_conflict = False
         cls.last_begin_index_run_body = {}
+        cls.last_begin_index_run_many_body = {}
         cls.last_complete_index_run_body = {}
         cls.last_fail_index_run_body = {}
 
@@ -611,6 +613,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunBegin.
             FakeCatalogHandler.last_begin_index_run_body = body
             self._send_json({"ok": True})
+        elif op == "/index-run/begin-many":
+            # nexus-vw594 F1: mirrors CatalogHandler.handleIndexRunBeginMany's
+            # {docs, failed_doc_ids} success shape.
+            FakeCatalogHandler.last_begin_index_run_many_body = body
+            docs = body.get("docs") or []
+            self._send_json({"docs": len(docs), "failed_doc_ids": []})
         elif op == "/index-run/complete":
             # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunComplete's
             # 200 {referenced, present, missing, flagged} success shape and
@@ -1400,6 +1408,19 @@ class TestHttpCatalogClientRoundTrip:
             "doc_id": "1.1.1", "content_hash": "abc123",
             "run_id": "run-1", "collection": "docs__o__v1",
         }
+
+    def test_begin_index_run_many_posts_docs_and_collection(self, client: HttpCatalogClient) -> None:
+        """nexus-vw594 F1: the batch begin-many round trip."""
+        FakeCatalogHandler.reset_log()
+        docs = [
+            {"doc_id": "1.1.1", "content_hash": "abc", "run_id": "run-1"},
+            {"doc_id": "1.1.2", "content_hash": "def", "run_id": "run-1"},
+        ]
+        result = client.begin_index_run_many(docs, "code__o__v1")
+        assert FakeCatalogHandler.last_begin_index_run_many_body == {
+            "docs": docs, "collection": "code__o__v1",
+        }
+        assert result == {"docs": 2, "failed_doc_ids": []}
 
     def test_complete_index_run_returns_counts_and_flagged(
         self, client: HttpCatalogClient,

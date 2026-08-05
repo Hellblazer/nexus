@@ -94,6 +94,7 @@ class ChunkBatcher:
         on_file_complete: Callable[[str, object], None] | None = None,
         on_file_failed: Callable[[str, str, object], None] | None = None,
         on_batch_complete: "Callable[[str, list[str], list[str], list[dict], list[tuple[str, object]]], None] | None" = None,
+        on_batch_begin: "Callable[[str, list[tuple[str, object]]], None] | None" = None,
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
         flush_concurrency: int = 1,
@@ -108,6 +109,15 @@ class ChunkBatcher:
         #: flush-grain hooks (taxonomy/chash run per upload batch, not per
         #: file). Runs unlocked, before the per-file completions.
         self._on_batch_complete = on_batch_complete or (lambda _c, _i, _d, _m, _fc: None)
+        #: nexus-vw594 F1: the symmetric counterpart, fired ONCE PER FLUSH
+        #: BEFORE the network upload (``self._flush`` below) instead of
+        #: after — the seam for the index-run fence's begin stamp
+        #: (RUNFENCE memo §3.5 T0 ordering: begin before the first byte
+        #: lands, complete only after the last). Same ``(path, context)``
+        #: shape as ``on_batch_complete`` so a caller can extract the same
+        #: per-file ``catalog_doc_id`` / ``content_hash`` pair from either.
+        #: Best-effort: a failure here must never block the actual upload.
+        self._on_batch_begin = on_batch_begin or (lambda _c, _fc: None)
         self._max_chunks = max_chunks
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
@@ -337,6 +347,28 @@ class ChunkBatcher:
         """
         import time  # noqa: PLC0415 — leaf util; keep module import surface minimal
 
+        # nexus-vw594 F1: compute the SAME (path, context) shape on_batch_complete
+        # uses below, but BEFORE the flush — self._files entries for these
+        # paths are stable for the lifetime of this call (add() forbids
+        # re-staging an unsettled file), so this read is safe to reuse
+        # after the flush too instead of re-acquiring the lock.
+        with self._lock:
+            file_contexts = [
+                (path, self._files[path].context)
+                for path in pend.file_counts
+                if path in self._files
+            ]
+        if file_contexts:
+            try:
+                self._on_batch_begin(collection, file_contexts)
+            except Exception:  # noqa: BLE001 — advisory: the fence begin stamp must never block the upload
+                _log.warning(
+                    "chunk_batch_begin_callback_failed",
+                    collection=collection,
+                    chunks=len(pend.ids),
+                    exc_info=True,
+                )
+
         error: str | None = None
         t0 = time.monotonic()
         try:
@@ -366,12 +398,6 @@ class ChunkBatcher:
             )
         elapsed = time.monotonic() - t0
         if error is None:
-            with self._lock:
-                file_contexts = [
-                    (path, self._files[path].context)
-                    for path in pend.file_counts
-                    if path in self._files
-                ]
             try:
                 self._on_batch_complete(
                     collection, pend.ids, pend.documents, pend.metadatas,

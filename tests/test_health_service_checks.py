@@ -1595,12 +1595,21 @@ class TestCheckStaleIndexingRuns:
     aggregate.
     """
 
-    def _entry(self, *, index_state, index_started_at="", source_uri="", tumbler=""):
+    def _entry(
+        self, *, index_state, index_started_at="", source_uri="", tumbler="",
+        index_state_reported=True, indexed_at="",
+    ):
         return type("E", (), {
             "index_state": index_state,
             "index_started_at": index_started_at,
             "source_uri": source_uri,
             "tumbler": tumbler,
+            # nexus-vw594 F3: defaults to True (matches CatalogEntry's own
+            # default) — a fence-aware engine reporting the key. Pass
+            # False to simulate a genuinely pre-fence engine that never
+            # sends the key at all.
+            "index_state_reported": index_state_reported,
+            "indexed_at": indexed_at,
         })()
 
     def _cat(self, entries):
@@ -1653,13 +1662,21 @@ class TestCheckStaleIndexingRuns:
         assert "none" in r.detail
 
     def test_checked_zero_is_skipped_not_clean(self, monkeypatch) -> None:
-        """NON-VACUITY: an engine that predates the fence reports
-        index_state=None on every row; that must never render as a clean
-        'none (0 checked)' pass."""
-        entries = [self._entry(index_state=None)]
+        """NON-VACUITY: an engine that predates the fence never sends the
+        index_state KEY at all (index_state_reported=False); that must
+        never render as a clean 'none (0 checked)' pass.
+
+        nexus-vw594 F3 / nexus-biq4x: this is now the genuinely-unsupported
+        case, distinct from a fence-aware engine reporting the key with a
+        NULL value (see TestDoctorFenceCoverageDistinction below) — the
+        two used to be indistinguishable through dict.get() and collapsed
+        onto this exact message for both, which was nexus-biq4x's bug.
+        """
+        entries = [self._entry(index_state=None, index_state_reported=False)]
         r = self._run(monkeypatch, entries)
         assert r.ok is True
         assert "skipped" in r.detail
+        assert "predates the index-run fence" in r.detail
         assert "none (" not in r.detail
 
     def test_catalog_unavailable_degrades_to_skip(self, monkeypatch) -> None:
@@ -1671,6 +1688,144 @@ class TestCheckStaleIndexingRuns:
         r = h._check_stale_indexing_runs()[0]
         assert r.ok is True
         assert "no catalog" in r.detail
+
+
+class TestDoctorFenceCoverageDistinction:
+    """nexus-vw594 F3 (production test #4, root cause of nexus-biq4x):
+    ``_check_stale_indexing_runs`` must distinguish "index_state reported
+    but NULL on every row" (a fence-aware engine that simply has nothing
+    stamped) from "index_state key never sent" (a genuinely pre-fence
+    engine) — ``dict.get("index_state")`` alone cannot tell these apart
+    (both read as Python ``None``), which is exactly what let a fully
+    fence-aware, 100%-uncovered production install (the nexus-vw594
+    incident) render as a green pre-fence skip.
+
+    KILL CONTROL (documented per the task's TDD contract, not a separate
+    test — verified manually during implementation, 2026-08-04): reverting
+    the ``index_state_reported`` disambiguation in ``_to_entry``
+    (http_catalog_client.py) — i.e. dropping the
+    ``index_state_reported="index_state" in d`` line so the field always
+    defaults ``True`` regardless of wire shape — collapses this test back
+    onto the OLD behaviour: ``test_reported_null_after_fence_release_warns``
+    goes from WARN to a false "skipped ... predates the fence" (still
+    passes as a *string* match against the wrong branch, which is why the
+    stronger regression signal is `test_checked_zero_is_skipped_not_clean`
+    above going RED — with the revert, an ``index_state_reported=False``
+    fixture entry no longer has any way to reach ``not_reported`` at all,
+    since the flag is gone from the wire-parsing path; that fixture then
+    falls into ``reported_null`` and this file's WARN test starts
+    asserting on the SAME code path as the pre-fence test, which is the
+    coverage-gap regression this test exists to catch).
+    """
+
+    def _entry(self, *, index_state, indexed_at="", index_state_reported=True, source_uri="", tumbler=""):
+        return type("E", (), {
+            "index_state": index_state,
+            "index_started_at": "",
+            "indexed_at": indexed_at,
+            "index_state_reported": index_state_reported,
+            "source_uri": source_uri,
+            "tumbler": tumbler,
+        })()
+
+    def _cat(self, entries):
+        class _Cat:
+            def all_documents(self, limit=0):
+                return list(entries)
+        return _Cat()
+
+    def _run(self, monkeypatch, entries):
+        return self._run_all(monkeypatch, entries)[0]
+
+    def _run_all(self, monkeypatch, entries):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(entries), raising=False,
+        )
+        return h._check_stale_indexing_runs()
+
+    def test_reported_null_after_fence_release_warns(self, monkeypatch) -> None:
+        """The vw594 signature: index_state reported-but-NULL on the WHOLE
+        corpus, with at least one document indexed AFTER the fence's
+        release date — an unfenced producer wrote it. Must WARN, never
+        ok=True, and must NOT reuse the pre-fence "predates" wording (that
+        wording asserts something false: this engine DOES report the
+        fence field)."""
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T16:03:00+00:00",
+                source_uri="chroma://code__nexus/foo.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False
+        assert r.warn is True
+        assert "predates the index-run fence" not in r.detail
+        assert "coverage gap" in r.detail or "never calling" in r.detail
+
+    def test_reported_null_before_fence_release_stays_ok_with_honest_message(self, monkeypatch) -> None:
+        """Quiescent case (nexus-biq4x's own prescribed fix): the fence is
+        live but nothing has run through it yet (fresh install / stable
+        corpus). Stays ok=True — but with the "fence live" signal, never
+        the misleading pre-fence message."""
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-07-01T00:00:00+00:00",
+                source_uri="chroma://code__nexus/foo.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "predates the index-run fence" not in r.detail
+        assert "fence live" in r.detail
+
+    def test_mixed_corpus_checked_and_reported_null_both_warn(self, monkeypatch) -> None:
+        """CRITICAL regression (substantive-critic, T2
+        nexus/vw594-critique-2026-08-05 [21445], repro:
+        scratchpad/verify_mixed.py): the vw594-signature check used to be
+        nested inside ``if checked == 0``, so a mixed corpus — one
+        document with a genuine fenced run (checked > 0, e.g. the first
+        ``nx index repo`` after deploy) PLUS a second, unrelated document
+        that reports index_state but was never stamped after the fence
+        shipped — fell through to the generic ok=True "none (N checked)"
+        branch without the reported_null population ever being
+        inspected. That is nexus-biq4x's silent-green bug reborn under a
+        NEW trigger (checked > 0 instead of "engine predates the fence").
+        This fixture is deliberately NON-uniform (one checked doc, one
+        reported_null doc) — every fixture before this one in this class
+        was uniform, which is exactly why 7/7 green was false confidence.
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-03T00:00:00+00:00",
+                source_uri="chroma://code__nexus/checked.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T16:03:00+00:00",
+                source_uri="chroma://code__nexus/unfenced.py",
+            ),
+        ]
+        results = self._run_all(monkeypatch, entries)
+        warns = [r for r in results if r.warn]
+        assert warns, (
+            f"expected at least one WARN result from a mixed checked+"
+            f"reported_null corpus, got: {results}"
+        )
+        assert any(r.ok is False for r in warns)
+        assert not any("none (" in r.detail and r.ok for r in results), (
+            "the checked>0 summary must not silently supersede the "
+            f"reported_null WARN: {results}"
+        )
+        assert any(
+            "predates the index-run fence" not in r.detail
+            and ("coverage gap" in r.detail or "never calling" in r.detail)
+            for r in warns
+        )
 
 
 # ── nexus-0ehwe item 4: tumbler allocator drift ──────────────────────────────

@@ -369,6 +369,43 @@ def _fence_begin(doc_id: str, content_hash: str, collection: str) -> None:
             close()
 
 
+def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
+    """Advisory: batch-stamp ``index_state='indexing'`` for every doc in one
+    upload FLUSH, ONE round trip (nexus-vw594 F1) instead of paying
+    :func:`_fence_begin`'s one-call-per-file cost across an entire
+    ``ChunkBatcher`` flush. *pairs* is ``[(doc_id, content_hash), ...]``;
+    callers are expected to have already dropped entries with an empty
+    ``doc_id`` (no catalog handle for that file). A single ``run_id`` is
+    shared across every entry so the whole flush correlates as one run in
+    the logs — mirrors :func:`_fence_begin`'s per-call ``uuid4()``, just
+    minted once instead of once per doc.
+
+    Same fail-open contract as :func:`_fence_begin`: never raises —
+    indexing must proceed even when the catalog write itself fails."""
+    if not pairs:
+        return
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from uuid import uuid4  # noqa: PLC0415 — deferred import: branch-local
+
+    run_id = uuid4().hex
+    w = None
+    try:
+        w = make_catalog_writer()
+        w.begin_index_run_many(
+            docs=[
+                {"doc_id": doc_id, "content_hash": content_hash, "run_id": run_id}
+                for doc_id, content_hash in pairs
+            ],
+            collection=collection,
+        )
+    except Exception:  # noqa: BLE001 — boundary catch: begin is an advisory write; indexing must proceed (memo §3.4 fail-open contract)
+        _log.warning("index_run_begin_many_failed", collection=collection, doc_count=len(pairs))
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+
+
 def _fence_fail(doc_id: str, error: str) -> None:
     """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
     own exception (the reason this is being called) must always propagate

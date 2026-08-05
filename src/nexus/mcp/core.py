@@ -2619,6 +2619,17 @@ def store_put(
                 exc_info=True,
             )
 
+        # nexus-vw594 F2: producer #10 (MCP store_put / nx store put).
+        # content_hash is the same full-digest value single_chunk_manifest_
+        # metadata already derived (chunk_text_hash IS content_hash for a
+        # single-chunk store — see that function's docstring). Fence begin
+        # BEFORE the vector put, mirroring every other producer's T0
+        # ordering (memo §3.5); this path was previously entirely unfenced.
+        content_hash = manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
+        if catalog_doc_id:
+            from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin(catalog_doc_id, content_hash, col_name)
+
         # nexus-b6enc C2: the catalog row is registered BEFORE t3.put, so
         # a put failure (engine skew / timeout / 500) would strand a ghost
         # row — chunk_count=0, zero manifest, zero chunks — while the
@@ -2637,6 +2648,18 @@ def store_put(
                 catalog_doc_id=catalog_doc_id,
             )
         except Exception as put_exc:
+            # nexus-vw594 F2 fix-round IMPORTANT (code-review-expert, T1
+            # scratch d9173ec9): a dedup-hit store_put (catalog_row_minted
+            # False, so the compensation below never fires — the row is
+            # pre-existing, not a ghost) that then fails t3.put leaves the
+            # fence stuck at 'indexing' forever with only the 6h doctor
+            # sweep as signal. Stamp 'failed' unconditionally, mirroring
+            # every doc_indexer producer's own except-block pattern
+            # (_fence_fail never raises, so the original exception always
+            # propagates unmasked below regardless of rollback outcome).
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(put_exc))
             if catalog_doc_id and catalog_row_minted:
                 rollback_minted_catalog_entry(
                     catalog_doc_id, original_error=str(put_exc),
@@ -2655,6 +2678,17 @@ def store_put(
                 store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit non-"Stored:" result below
                 manifest_error = str(manifest_exc)
+                # nexus-vw594 F2 fix-round IMPORTANT: the vector put
+                # already succeeded (t3.put above), so this is NOT a
+                # dedup-hit-then-put-failure wedge — but the fence began
+                # 'indexing' and the manifest write (this producer's only
+                # completion path — no manifest_complete ride is possible
+                # since store_put_manifest_direct's own write already
+                # failed) never happened either. Stamp 'failed' so the row
+                # does not sit silently at 'indexing' with only the 6h
+                # doctor sweep as signal.
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, manifest_error)
                 import structlog  # noqa: PLC0415 — branch-local logging
                 structlog.get_logger().warning(
                     "store_put_manifest_direct_failed",
@@ -2698,9 +2732,16 @@ def store_put(
         # chash, manifest) see MCP ``store_put`` as a single-document
         # batch.
         _hooks.fire_single(doc_id, col_name, content)
+        # nexus-vw594 F2: manifest_complete rides this existing call
+        # through manifest_write_batch_hook's write_manifest_many
+        # completion stamp (the SAME manifest rows store_put_manifest_
+        # direct above already wrote — an idempotent re-UPSERT), no extra
+        # round trip. store_put is single-chunk by construction so the
+        # file-atomicity claim always holds.
         _hooks.fire_batch(
             [doc_id], col_name, [content], None, manifest_metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
         # RDR-089 document-grain chain — plain sync call (FastMCP wraps
         # this @mcp.tool() body in a thread pool at the framework level;

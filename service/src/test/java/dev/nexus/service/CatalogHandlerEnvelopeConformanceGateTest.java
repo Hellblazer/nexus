@@ -219,6 +219,15 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/manifest/verify", "handleManifestVerify"),
         collectionOk("/manifest/verify_all", "handleManifestVerifyAll"),
         neither("/index-run/begin", "handleIndexRunBegin"),
+        // idListOk (nexus-vw594 F1): same shape as /manifest/write_many
+        // above — a list of FULL {doc_id, content_hash, run_id} objects,
+        // not bare identifiers, but MAX_BATCH_DOC_IDS is enforced and
+        // write_many's identical shape is classified idListOk, so this
+        // follows the same precedent. Response {docs, failed_doc_ids} is
+        // NOT collectionReturning for the same reason write_many's
+        // identical failed_doc_ids field isn't: its length is bounded by
+        // the already-capped docs input, not a server-side page.
+        idListOk("/index-run/begin-many", "handleIndexRunBeginMany"),
         neither("/index-run/complete", "handleIndexRunComplete"),
         neither("/index-run/fail", "handleIndexRunFail"),
 

@@ -2222,6 +2222,15 @@ def _index_pdf_file(
     ):
         return len(ids)
 
+    # nexus-vw594 F1: producer #9 (nx index repo, PDF path, legacy
+    # per-file fallback — reached when the ChunkBatcher rejects the file
+    # or is absent). Fence begin BEFORE the upload, mirroring
+    # doc_indexer.py's single-flush producers; this path was previously
+    # entirely unfenced.
+    if catalog_doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+        _fence_begin(catalog_doc_id, content_hash_hex, collection_name)
+
     with _stage("upload"):
         db.upsert_chunks_with_embeddings(
             collection_name=collection_name,
@@ -2242,9 +2251,14 @@ def _index_pdf_file(
             from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             hooks = HookRegistry()
             install_default_hooks(hooks)
+        # nexus-vw594 F1: this file's whole chunk set lands in the ONE
+        # upsert above (file-atomic) — manifest_complete rides this
+        # existing call through manifest_write_batch_hook's
+        # write_manifest_many completion stamp, no extra round trip.
         hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
         )
         for _did, _doc in zip(ids, documents):
             hooks.fire_single(_did, collection_name, _doc)
@@ -3579,6 +3593,38 @@ def _run_index(
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
 
+        def _fire_flush_grain_begin(
+            collection: str, _file_contexts: list,
+        ) -> None:
+            # nexus-vw594 F1: the RUNFENCE begin-many stamp for the repo-index
+            # hot path. Fired by ChunkBatcher's on_batch_begin callback
+            # BEFORE the network upsert (memo §3.5 T0 ordering) — this is
+            # the "TOP of the flush, before the upload" call site the
+            # investigation memo (T2 nexus/vw594-investigation-2026-08-04)
+            # names, expressed as ChunkBatcher's symmetric on_batch_begin/
+            # on_batch_complete split rather than literally inlined into
+            # _batch_flush's body: the flush closure only ever sees the
+            # flattened chunk arrays, never per-file catalog_doc_id, so the
+            # fence-relevant identity has to come from the SAME file_contexts
+            # extraction _fire_flush_grain_hooks below already does for the
+            # completion ride. ONE begin-many round trip per FLUSH (not per
+            # file) — the exact cost the :3631-era comment objected to.
+            pairs: list[tuple[str, str]] = []
+            for _path, _c in _file_contexts:
+                if not isinstance(_c, dict):
+                    continue
+                _cdid = _c.get("catalog_doc_id")
+                if not _cdid:
+                    continue
+                _metas_c = _c.get("metadatas")
+                _chash = _metas_c[0].get("content_hash", "") if _metas_c else ""
+                if _chash:
+                    pairs.append((_cdid, _chash))
+            if not pairs:
+                return
+            from nexus.doc_indexer import _fence_begin_many  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin_many(pairs, collection)
+
         def _fire_flush_grain_hooks(
             collection: str, _ids: list, _docs: list, _metas: list,
             _file_contexts: list,
@@ -3628,8 +3674,12 @@ def _run_index(
             # nexus-5xn3k.4 RUNFENCE C2: ChunkBatcher is file-atomic (every
             # file's whole chunk set lands in one flush — see the write_many
             # call-site comments), so the completion claim is sound here.
-            # No per-file begin call (memo's explicit design: no extra round
-            # trips on this hot path) — only the ride-along complete map.
+            # No PER-FILE begin call here (memo's explicit design: no extra
+            # round trips on this hot path) — the begin-many stamp for this
+            # flush already fired once, in _fire_flush_grain_begin above via
+            # ChunkBatcher's on_batch_begin, before the upload even started
+            # (nexus-vw594 F1). This closure only carries the ride-along
+            # complete map.
             _manifest_complete: dict[str, str] = {}
             for _path, _c in _file_contexts:
                 if not isinstance(_c, dict):
@@ -3707,6 +3757,7 @@ def _run_index(
             on_file_complete=_fire_deferred_hooks,
             on_file_failed=_batched_file_failed,
             on_batch_complete=_fire_flush_grain_hooks,
+            on_batch_begin=_fire_flush_grain_begin,
             max_chunks=_cap_for,
             # 3 concurrent flushes: inside the 10-concurrent-writes
             # per-collection service quota with headroom; the 3midv

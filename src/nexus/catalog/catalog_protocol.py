@@ -243,6 +243,9 @@ class CatalogWriter(Protocol):
     def begin_index_run(self, doc_id, content_hash, run_id, collection) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
         ...
 
+    def begin_index_run_many(self, docs, collection) -> object:  # canonical (RUNFENCE, nexus-vw594 F1)
+        ...
+
     def complete_index_run(self, doc_id, content_hash, chunk_count) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
         ...
 
@@ -311,6 +314,7 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     # write silently raise AttributeError, which a bare `except Exception`
     # upstream turns into a feature that no-ops forever.
     "begin_index_run",
+    "begin_index_run_many",
     "complete_index_run",
     "fail_index_run",
 )

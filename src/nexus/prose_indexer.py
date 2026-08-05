@@ -264,6 +264,15 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return len(ids)
 
+    # nexus-vw594 F1: producer #6 (nx index repo, prose/rdr, legacy
+    # per-file fallback — reached when the ChunkBatcher rejects the file
+    # or is absent). Fence begin BEFORE the upload, mirroring
+    # doc_indexer.py's single-flush producers; this path was previously
+    # entirely unfenced.
+    if catalog_doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+        _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+
     with _stage("upload"):
         ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
             collection_name=ctx.corpus,
@@ -280,9 +289,13 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         # single-shape consumers on CLI ingest. Own stage bucket
         # (nexus-cfc72): under concurrent indexing these serialize on
         # LockedHookRegistry, and lock-wait must not read as upload time.
+        # nexus-vw594 F1: file-atomic upload above — manifest_complete
+        # rides this existing call through manifest_write_batch_hook's
+        # write_manifest_many completion stamp, no extra round trip.
         ctx.hooks.fire_batch(
             ids, ctx.corpus, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
         for _did, _doc in zip(ids, documents):
             ctx.hooks.fire_single(_did, ctx.corpus, _doc)

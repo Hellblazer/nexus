@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **RUNFENCE coverage gap — the index-run fence had recorded zero runs for 99%
+  of the corpus** (nexus-vw594): `_fence_begin` existed only on the PDF/md/dt
+  ingest paths; the repo code/prose indexers and MCP `store_put` (10,439 of
+  10,544 documents) never stamped a run, so `index_state` was NULL corpus-wide
+  and doctor's stale-run check could never fire. Fixed via a new engine batch
+  route (`POST /v1/catalog/index-run/begin-many`, one round trip per flush),
+  fence stamping on every producer (ChunkBatcher `on_batch_begin` hot path,
+  the three legacy per-file paths, and `store_put` begin/complete/fail), a
+  doctor check that distinguishes unstamped-but-fence-aware from genuinely
+  pre-fence engines (closes nexus-biq4x: absent-vs-null no longer conflated,
+  and the check now evaluates its findings unconditionally instead of only on
+  an all-quiet corpus), and a mechanized AST tripwire so a future producer
+  cannot ship unfenced. Pre-existing NULL rows are deliberately not backfilled.
+  The engine half requires the paired engine release; older engines degrade
+  with a recorded advisory signal, not a failure.
 - **Manifests can no longer outrun their chunks at index time** (nexus-tp8yk, the
   producer of 184 of the 188 nexus-55l58 dangling manifest rows): the single-flush
   PDF and md/prose index paths built the RUNFENCE manifest from the *intended*

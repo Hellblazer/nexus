@@ -54,6 +54,7 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
  *   GET   /v1/catalog/manifest/verify_all per-collection referenced/present/missing, every live doc
  *   POST  /v1/catalog/index-run/begin    stamp index_state='indexing' (idempotent, NOT a lock)
+ *   POST  /v1/catalog/index-run/begin-many batch index_state='indexing' for N docs, ONE round trip (nexus-vw594 F1)
  *   POST  /v1/catalog/index-run/complete FAIL-CLOSED verify-then-stamp index_state='complete'
  *   POST  /v1/catalog/index-run/fail     stamp index_state='failed'
  *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
@@ -161,6 +162,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/verify"       -> handleManifestVerify(exchange, tenant, method);
                 case "/manifest/verify_all"   -> handleManifestVerifyAll(exchange, tenant, method);
                 case "/index-run/begin"       -> handleIndexRunBegin(exchange, tenant, method);
+                case "/index-run/begin-many"  -> handleIndexRunBeginMany(exchange, tenant, method);
                 case "/index-run/complete"    -> handleIndexRunComplete(exchange, tenant, method);
                 case "/index-run/fail"        -> handleIndexRunFail(exchange, tenant, method);
 
@@ -1939,6 +1941,29 @@ public final class CatalogHandler implements HttpHandler {
         String collection  = (String) body.get("collection");
         repo.beginIndexRun(tenant, docId, contentHash, runId, collection);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
+    }
+
+    /**
+     * POST /v1/catalog/index-run/begin-many  {docs: [{doc_id, content_hash, run_id}], collection}
+     * Batch idempotent index_state='indexing' stamp (nexus-vw594 F1) — one HTTP
+     * round trip covering an entire ChunkBatcher flush instead of one round
+     * trip per file. See {@link CatalogRepository#beginIndexRunMany}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleIndexRunBeginMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("docs");
+        List<Map<String, Object>> docs = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof Map<?, ?>).map(o -> (Map<String, Object>) o).toList()
+            : List.of();
+        if (docs.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        String collection = (String) body.get("collection");
+        var result = repo.beginIndexRunMany(tenant, docs, collection);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /**
