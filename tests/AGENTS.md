@@ -85,6 +85,37 @@ entries linked from it):
   module docstring for the full account.) If a session.items-based census
   genuinely needs to run once per PR rather than once per shard, that is a
   CI-wiring problem, not a marker-reclassification one.
+- **`session.items` shrinks under `--splits`/`--group` too, not just `-m lint`**
+  (nexus-vdti6, 2026-08-06). CI's real PR-gating `test` job runs
+  `pytest tests/ --splits 4 --group N` (pytest-split); its
+  `pytest_collection_modifyitems` does `items[:] = group.selected` — the
+  identical `session.items`-mutation mechanism `-m`/`-k` deselection uses. A
+  session.items-based census left in the default loop (the nexus-8x4le fix
+  above) still only ever sees its own shard (~20-25% of the corpus) under
+  that real invocation — catching a violation depends on it landing in the
+  same shard as the census, not on genuine whole-corpus coverage. Two-part
+  fix, both mandatory for any session.items-based census, present or future:
+  1. **Structural honesty**: call
+     `tests.conftest.partial_session_view_reason(request)` at the top of the
+     census and `pytest.skip(reason)` on a non-`None` return — never
+     silently scan a proven-partial `session.items`. It fires
+     deterministically whenever `--splits`/`--group` is active, plus a
+     generic floor (50% of the raw pre-deselection count, tracked by
+     `tests/conftest.py`'s `pytest_itemcollected` hook) for any OTHER future
+     shrink mechanism. Exempts a developer's own `-k` narrowing — that is a
+     normal local convenience run, not shard-blindness under a new name.
+  2. **CI coverage**: the `pytest (mode-declarations census)` job
+     (`.github/workflows/ci.yml`, job id `test-mode-census`) runs the whole
+     `tests/` corpus with `NX_CENSUS_ONLY_JOB=1` and no `--splits`/`--group`,
+     so the guard above sees a trustworthy view and the census actually
+     executes. That env var makes `tests/conftest.py` SKIP-MARK (not
+     deselect) every test outside `_CENSUS_ONLY_ALLOWED_MODULES`, so
+     `session.items` stays the full collected corpus while the ~11.7k
+     non-census tests never reach fixture setup (skip fires in
+     `pytest_runtest_setup` before `item.setup()`) — no engine substrate, PG,
+     or service jar needed. Add a new session.items-based census's module
+     name to `_CENSUS_ONLY_ALLOWED_MODULES` instead of standing up a second
+     dedicated job.
 
 ## Engine substrate: jar freshness
 

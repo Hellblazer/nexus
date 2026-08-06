@@ -293,10 +293,168 @@ def pytest_sessionfinish(session, exitstatus):
 _SCENARIO_PROPERTY = "nx_scenario_marked"
 
 
+# ── partial-view guard for session.items-based censuses (nexus-vdti6,
+# 2026-08-06) ──────────────────────────────────────────────────────────────
+#
+# WHY: test_mode_declarations_are_explicit.py's census reads
+# request.session.items to scan every collected test for an undeclared
+# voyage-mode reference. CI's real PR-gating `test` job runs
+# `pytest tests/ --splits 4 --group N` (pytest-split); pytest_split/
+# plugin.py:168 does `items[:] = group.selected` inside its OWN
+# pytest_collection_modifyitems -- the identical session.items-mutation
+# mechanism `-m`/`-k` deselection uses (the same mechanism nexus-8x4le's
+# `-m lint` blind spot exploited). Under that real invocation the census
+# only ever sees its own shard (~20-25% of the corpus): enforcement was
+# shard-placement luck, not real coverage. This section makes that state
+# structurally impossible to mistake for enforcement -- ANY
+# session.items-based census can call partial_session_view_reason(request)
+# and, on a non-None return, refuse (skip -- "cannot determine anything
+# either way", never a silent pass and never a false FAIL) instead of
+# scanning a proven-partial view.
+_raw_collected_count = 0
+
+
+def pytest_itemcollected(item: pytest.Item) -> None:
+    """Count every item as pytest collects it, strictly BEFORE any
+    ``pytest_collection_modifyitems`` hook runs.
+
+    ``-m``/``-k`` deselection (``_pytest/mark/__init__.py``, itself
+    ``@hookimpl(tryfirst=True)``) and pytest-split's shard selection
+    (``@hookimpl(trylast=True)``) are both ``pytest_collection_
+    modifyitems`` hookimpls; a conftest-level hook of the SAME name would
+    have no guaranteed order against either. ``pytest_itemcollected`` fires
+    per-item during the collection phase itself, before
+    ``pytest_collection_modifyitems`` is invoked at all, so this count
+    sidesteps hook-ordering entirely rather than depending on it.
+
+    A path-scoped invocation (e.g. ``pytest tests/upgrade/``) is already
+    reflected here: only items under that path get collected in the first
+    place, so the baseline matches the invocation's own intended scope, not
+    the whole repo -- a narrow path-scoped run does not, by itself, look
+    like a partial view below.
+    """
+    global _raw_collected_count
+    _raw_collected_count += 1
+
+
+# Below this ratio of (session.items after all deselection) / (raw
+# collected count), a session.items-based census cannot see enough of the
+# corpus to mean anything. 50% is generous headroom over both known shrink
+# mechanisms: `-m lint` collapses to ~6% (803/13101) and a pytest-split
+# shard to ~20-25% (2796/13101) -- either trips this floor by a wide
+# margin. The normal default-loop reduction from
+# `-m 'not integration and not slow and not lint'` alone measures ~90%
+# (11733/13101, reproduced live 2026-08-06) and stays comfortably above it.
+_SESSION_VIEW_SANITY_FLOOR = 0.5
+
+
+def partial_session_view_reason(request: pytest.FixtureRequest) -> str | None:
+    """Return a reason if *request.session.items* is a proven-partial view,
+    or ``None`` if it is trustworthy enough for a session.items-based
+    census to scan.
+
+    Two signals, checked in order:
+
+    1. pytest-split shard mode. ``PytestSplitPlugin`` registers iff BOTH
+       ``--splits`` and ``--group`` are set (``pytest_split.plugin.
+       pytest_configure``), and its ``pytest_collection_modifyitems`` does
+       ``items[:] = group.selected`` -- the exact mechanism nexus-vdti6 was
+       filed for. Deterministic; no count heuristics needed.
+    2. A generic floor against the raw pre-deselection count from
+       ``pytest_itemcollected`` above, guarding any OTHER future
+       session.items-shrinking mechanism ("the same class could affect any
+       future session.items-based census", nexus-vdti6's own framing).
+       Skipped entirely when ``-k`` was passed: a developer's deliberate
+       keyword narrowing that happens to still select a session.items-based
+       census is a normal targeted run, not shard-blindness reappearing
+       under a new name, and must not false-alarm.
+
+    A test whose OWN selection was deselected (``-m lint``, an unrelated
+    ``-k``) never calls this at all -- it simply does not run, which is the
+    correct, unproblematic case; this function only ever fires for a
+    census that DID run.
+    """
+    config = request.config
+    if config.getoption("splits", default=None) and config.getoption(
+        "group", default=None
+    ):
+        return (
+            f"pytest-split active (--splits={config.getoption('splits')} "
+            f"--group={config.getoption('group')}): session.items is one "
+            "shard of the corpus, not the whole thing (nexus-vdti6) -- a "
+            "session.items-based census cannot enforce anything meaningful "
+            "here. Enforcement runs in the dedicated non-sharded CI job "
+            "instead (see .github/workflows/ci.yml, NX_CENSUS_ONLY_JOB)."
+        )
+    if config.getoption("keyword", default=""):
+        return None
+    raw = _raw_collected_count
+    final = len(request.session.items)
+    if raw <= 0:
+        return None
+    ratio = final / raw
+    if ratio < _SESSION_VIEW_SANITY_FLOOR:
+        return (
+            f"session.items shrank to {final}/{raw} items ({ratio:.0%}, "
+            f"floor {_SESSION_VIEW_SANITY_FLOOR:.0%}) by some mechanism "
+            "other than --splits/--group or -k -- refusing to scan a "
+            "proven-partial view rather than pass vacuously."
+        )
+    return None
+
+
+# ── dedicated non-sharded CI job support (nexus-vdti6 candidate 1) ─────────
+#
+# The new `pytest (mode-declarations census)` job needs request.session.
+# items to be the REAL full default-loop corpus (so the guard above finds
+# it trustworthy), but must not pay to EXECUTE ~11.7k tests' fixtures
+# (engine substrate, PG, service jar -- the ~25min the sharded `test`
+# matrix already pays 4x for). Narrowing via `-k`/`-m` is not an option --
+# that shrinks session.items through the exact items[:] = selected
+# mechanism this whole guard exists to catch. SKIP-marking instead of
+# deselecting keeps every item in session.items (collection is untouched)
+# while making every non-census item's setup an near-instant `Skipped`
+# with NO fixture resolution: `_pytest/skipping.py`'s skip check is
+# `@hookimpl(tryfirst=True)` on `pytest_runtest_setup` and raises before
+# `_pytest/runner.py`'s own `pytest_runtest_setup` (the one that calls
+# `item.setup()` and instantiates fixtures) ever runs -- verified against
+# the installed pytest source, not assumed.
+_NX_CENSUS_ONLY_ENV = "NX_CENSUS_ONLY_JOB"
+
+# Every module this dedicated job exists to run for real. Extend this
+# alongside any future session.items-based census (see tests/AGENTS.md's
+# session.items rule) so the same job covers every "same-pattern sibling"
+# without spinning up a second dedicated job per census.
+_CENSUS_ONLY_ALLOWED_MODULES: frozenset[str] = frozenset({
+    "test_mode_declarations_are_explicit.py",
+})
+
+
+def _skip_mark_everything_but_census(items) -> None:
+    for item in items:
+        module_name = item.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
+        if module_name in _CENSUS_ONLY_ALLOWED_MODULES:
+            continue
+        item.add_marker(
+            pytest.mark.skip(
+                reason=(
+                    f"{_NX_CENSUS_ONLY_ENV}: this job exists solely to give "
+                    "session.items-based censuses a real, unsharded view of "
+                    "the full corpus; every non-census test is skip-marked "
+                    "(not deselected -- session.items stays the full "
+                    "collected count) rather than executed."
+                )
+            )
+        )
+
+
 def pytest_collection_modifyitems(items) -> None:
     for item in items:
         if item.get_closest_marker("scenario") is not None:
             item.user_properties.append((_SCENARIO_PROPERTY, True))
+
+    if os.environ.get(_NX_CENSUS_ONLY_ENV):
+        _skip_mark_everything_but_census(items)
 
 
 def _is_xdist_worker(session) -> bool:

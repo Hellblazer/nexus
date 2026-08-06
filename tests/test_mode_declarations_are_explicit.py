@@ -61,13 +61,17 @@ import ast
 import inspect
 import pathlib
 import re
+import subprocess
+import sys
 
 import pytest
 
 from tests.conftest import (
     _MODE_LINT_EXCLUDE_FILES,
     _MODE_LINT_EXCLUDE_NODEIDS,
+    partial_session_view_reason,
 )
+from tests import conftest as _conftest
 
 VOYAGE_RE = re.compile(r"voyage-(context|code)-3")
 
@@ -75,9 +79,20 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _TESTS_DIR = _REPO_ROOT / "tests"
 
 
-def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
+def _scan_offenders(items: list) -> list[str]:
+    """Return nodeids of *items* that reference a voyage embedder name
+    without declaring cloud mode, and are not exempted.
+
+    Pure function of *items* -- deliberately takes no ``request``/``config``
+    so it can be unit-tested against a synthetic item list independent of
+    the partial-view guard in ``test_mode_declarations_are_explicit``. It is
+    exactly as vacuous on a shrunk item list as the pre-nexus-vdti6 census
+    was on one shard of CI's real ``--splits``/``--group`` matrix; see
+    ``test_scan_offenders_is_vacuous_on_a_shrunk_item_list`` below for the
+    kill control that proves it, and why the guard runs BEFORE this.
+    """
     offenders: list[str] = []
-    for item in request.session.items:
+    for item in items:
         func = getattr(item, "function", None)
         if func is None:
             continue
@@ -102,6 +117,17 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
         if "cloud_mode" in fixturenames:
             continue
         offenders.append(nodeid)
+    return offenders
+
+
+def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
+    # STRUCTURAL HONESTY (nexus-vdti6): refuse loud rather than silently
+    # scan a proven-partial request.session.items -- see
+    # partial_session_view_reason's docstring in tests/conftest.py.
+    if (reason := partial_session_view_reason(request)) is not None:
+        pytest.skip(reason)
+
+    offenders = _scan_offenders(request.session.items)
 
     if offenders:
         sample = "\n  ".join(offenders[:20])
@@ -362,4 +388,233 @@ def test_mode_lint_exclude_files_all_resolve() -> None:
         + "\n  ".join(dead)
         + "\n\nRetarget if the file was renamed, or delete the entry and "
         "lower `_MODE_LINT_EXCLUDE_FILES_CEILING` if it is gone."
+    )
+
+
+# ── partial-view guard tests (nexus-vdti6) ─────────────────────────────────
+#
+# Fast unit coverage for tests.conftest.partial_session_view_reason,
+# independent of any real pytest invocation shape. The slower subprocess
+# probe further down proves the REAL --splits/--group wiring; these prove
+# the decision function's logic in isolation, including the exemptions
+# (-k, no-baseline) that must NOT false-alarm.
+
+
+class _FakeConfig:
+    def __init__(self, options: dict[str, object]) -> None:
+        self._options = options
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return self._options.get(name, default)
+
+
+class _FakeSession:
+    def __init__(self, items: list) -> None:
+        self.items = items
+
+
+class _FakeRequest:
+    def __init__(self, config: _FakeConfig, items: list) -> None:
+        self.config = config
+        self.session = _FakeSession(items)
+
+
+def test_partial_session_view_reason_flags_pytest_split_shard() -> None:
+    """Signal 1: --splits/--group present -> loud refusal, regardless of
+    how many items survived selection. This is the EXACT condition CI's
+    real `test` matrix job runs under (nexus-vdti6's root cause).
+    """
+    config = _FakeConfig({"splits": 4, "group": 3, "keyword": ""})
+    request = _FakeRequest(config, items=list(range(2796)))
+    reason = partial_session_view_reason(request)
+    assert reason is not None
+    assert "pytest-split" in reason
+    assert "nexus-vdti6" in reason
+
+
+def test_partial_session_view_reason_none_for_full_default_loop_view() -> None:
+    """No --splits/--group, no -k, and session.items close to the raw
+    collected count (the normal default-loop shape -- `-m 'not integration
+    and not slow and not lint'` trims ~10%, reproduced live 2026-08-06:
+    11733/13101) -> trustworthy, no refusal.
+    """
+    saved = _conftest._raw_collected_count
+    _conftest._raw_collected_count = 13101
+    try:
+        config = _FakeConfig({"splits": None, "group": None, "keyword": ""})
+        request = _FakeRequest(config, items=list(range(11733)))
+        assert partial_session_view_reason(request) is None
+    finally:
+        _conftest._raw_collected_count = saved
+
+
+def test_partial_session_view_reason_exempts_deliberate_keyword_narrowing() -> None:
+    """-k narrows session.items to almost nothing but must NOT false-alarm
+    -- a developer targeting one test by keyword is a normal local
+    convenience run, not shard-blindness reappearing under a new name.
+    """
+    saved = _conftest._raw_collected_count
+    _conftest._raw_collected_count = 13101
+    try:
+        config = _FakeConfig(
+            {"splits": None, "group": None, "keyword": "mode_declarations"}
+        )
+        request = _FakeRequest(config, items=list(range(3)))
+        assert partial_session_view_reason(request) is None
+    finally:
+        _conftest._raw_collected_count = saved
+
+
+def test_partial_session_view_reason_flags_generic_shrink_below_floor() -> None:
+    """No --splits/--group, no -k, but session.items shrank below the
+    sanity floor anyway (some OTHER future session.items-shrinking
+    mechanism) -> loud refusal. This is the generic net nexus-vdti6 asked
+    for: "the same class could affect any future session.items-based
+    census."
+    """
+    saved = _conftest._raw_collected_count
+    _conftest._raw_collected_count = 13101
+    try:
+        config = _FakeConfig({"splits": None, "group": None, "keyword": ""})
+        request = _FakeRequest(config, items=list(range(800)))  # ~6%
+        reason = partial_session_view_reason(request)
+        assert reason is not None
+        assert "800/13101" in reason
+    finally:
+        _conftest._raw_collected_count = saved
+
+
+def test_partial_session_view_reason_inert_with_no_raw_baseline() -> None:
+    """A raw baseline of 0 (e.g. this guard called outside a real
+    collection cycle) must not false-alarm -- absence of evidence is not
+    evidence of a shrink.
+    """
+    saved = _conftest._raw_collected_count
+    _conftest._raw_collected_count = 0
+    try:
+        config = _FakeConfig({"splits": None, "group": None, "keyword": ""})
+        request = _FakeRequest(config, items=[])
+        assert partial_session_view_reason(request) is None
+    finally:
+        _conftest._raw_collected_count = saved
+
+
+def _fake_offender_func() -> None:
+    assert MODEL_NAME == "voyage-context-3"  # noqa: F821 -- source text only, never called
+
+
+def _fake_clean_func() -> None:
+    assert True
+
+
+class _FakeItem:
+    def __init__(
+        self, function, nodeid: str, fixturenames: tuple[str, ...] = ()
+    ) -> None:
+        self.function = function
+        self.nodeid = nodeid
+        self.fixturenames = fixturenames
+
+
+def test_scan_offenders_is_vacuous_on_a_shrunk_item_list() -> None:
+    """KILL CONTROL: prove `_scan_offenders` alone -- with no guard in
+    front of it -- is exactly as blind on a shrunk item list as the
+    pre-nexus-vdti6 census was on one shard of CI's real pytest-split
+    matrix.
+
+    A real offender exists in the full corpus (represented here) but the
+    shrunk view handed to the scan doesn't include it -- `_scan_offenders`
+    reports a clean pass on the partial list even though a violation
+    exists elsewhere. This is the exact failure mode
+    `partial_session_view_reason` exists to intercept BEFORE the scan
+    runs; `test_mode_declarations_are_explicit` calls the guard first
+    specifically so this vacuous-pass shape never reaches a real CI
+    report.
+    """
+    offender_item = _FakeItem(
+        _fake_offender_func, nodeid="tests/test_x.py::test_uses_voyage"
+    )
+    clean_item = _FakeItem(
+        _fake_clean_func, nodeid="tests/test_y.py::test_unrelated"
+    )
+
+    full_view = [offender_item, clean_item]
+    shrunk_view = [clean_item]  # the offender landed in a DIFFERENT shard
+
+    assert _scan_offenders(full_view) == ["tests/test_x.py::test_uses_voyage"]
+    assert _scan_offenders(shrunk_view) == []  # <- the vacuous pass
+
+
+def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> None:
+    """Integration proof (nexus-vdti6): actually invoke pytest with
+    --splits/--group against this file -- the same flag pytest-split uses
+    in CI's real `test` matrix job (.github/workflows/ci.yml) -- and
+    confirm the census SKIPS with the guard's reason rather than silently
+    running a partial scan.
+
+    Deliberately a REAL subprocess `--splits`/`--group` invocation, not a
+    `--collect-only` probe or an xdist (`-n auto`) run: nexus-8x4le's
+    earlier fix validated with `-n auto` x3 and that shape does NOT
+    reproduce CI's real invocation -- xdist workers each collect the FULL
+    item list locally (session.items unmutated), whereas pytest-split
+    genuinely shrinks it. Repeating that same validation mistake here is
+    exactly what this bead was filed to correct, so this probe uses the
+    real flags CI's `test` job actually passes.
+    """
+    # This test's OWN nodeid must be excluded from the scoped invocation
+    # below -- otherwise landing this same test in one of the 4 groups
+    # would recursively re-spawn 4 more subprocesses from inside itself
+    # (reproduced directly: group 4/4 hung for the full 120s timeout on the
+    # first version of this probe, which scoped the whole file with no
+    # exclusion).
+    # Derived, not hardcoded: pytest does NOT error on an unmatched
+    # --deselect, so a file/function rename with a stale literal here would
+    # silently reintroduce the self-recursion this exclusion exists to
+    # prevent (code-review suggestion, nexus-vdti6).
+    _self_file = pathlib.Path(__file__)
+    _self_nodeid = (
+        _self_file.relative_to(_self_file.parents[1]).as_posix()
+        + "::"
+        + test_mode_declarations_census_skips_loud_under_real_pytest_split_shard.__name__
+    )
+    found_shard = False
+    for group in range(1, 5):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_mode_declarations_are_explicit.py",
+                "--deselect",
+                _self_nodeid,
+                "--splits",
+                "4",
+                "--group",
+                str(group),
+                "-q",
+                "-rs",
+                "--no-header",
+            ],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = proc.stdout + proc.stderr
+        if "test_mode_declarations_are_explicit" not in output:
+            continue  # this test landed in a different group -- fine
+        found_shard = True
+        assert "pytest-split active" in output, (
+            f"group {group}/4: the census ran but was not skipped with the "
+            f"partial-view guard's reason -- guard did not fire under a "
+            f"real --splits/--group invocation:\n{output}"
+        )
+        assert proc.returncode == 0, (
+            f"group {group}/4: expected a clean (skip-only) exit, got "
+            f"{proc.returncode}:\n{output}"
+        )
+    assert found_shard, (
+        "test_mode_declarations_are_explicit never appeared in any of the "
+        "4 --splits groups -- pytest-split's algorithm or invocation shape "
+        "changed; this probe needs updating"
     )

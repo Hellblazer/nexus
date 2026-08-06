@@ -578,6 +578,96 @@ jobs:
       - name: Run lint-marked tests
         run: uv run pytest -m lint -q
 
+  test-mode-census:
+    # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band
+    # merge across the 4 shard processes, more plumbing for no benefit over
+    # this precedent; candidate 3 — reverting to a filesystem/AST-only
+    # census, explicitly scoped OUT by this census's own design because it
+    # needs pytest's fixture-resolution machinery (item.fixturenames) to
+    # catch class/module-scoped `pytestmark = pytest.mark.usefixtures
+    # ("cloud_mode")`, which an AST re-implementation would have to
+    # reimplement with real edge-case risk — see
+    # test_mode_declarations_are_explicit.py's module docstring).
+    #
+    # WHY THIS JOB EXISTS: test_mode_declarations_are_explicit.py's census
+    # reads request.session.items — the collected-and-selected test list —
+    # to scan the WHOLE default-loop corpus for undeclared voyage-mode
+    # references. CI's real PR-gating `test` job above runs
+    # `pytest tests/ --splits 4 --group N` (pytest-split);
+    # pytest_split/plugin.py:168 does `items[:] = group.selected` inside
+    # its own pytest_collection_modifyitems — the IDENTICAL session.items-
+    # mutation mechanism `-m`/`-k` deselection uses (the same mechanism
+    # nexus-8x4le's `-m lint` blind spot exploited). Under that real
+    # invocation the census only ever saw its own shard (~20-25% of the
+    # corpus): enforcement was shard-placement luck, not real coverage.
+    # tests/conftest.py's partial_session_view_reason guard now makes the
+    # census SKIP (never silently scan a partial view) whenever
+    # --splits/--group is active — which is unconditionally true in the
+    # sharded `test` matrix above. THIS job is where the census actually
+    # runs for real: no --splits/--group, so its own guard sees a
+    # trustworthy view.
+    #
+    # HOW IT STAYS CHEAP WITHOUT THE ENGINE SUBSTRATE: this job still needs
+    # request.session.items to be the REAL full corpus (~13.1k raw / ~11.7k
+    # default-loop items, measured live 2026-08-06), which means COLLECTING
+    # the whole tests/ tree — but collecting is not the same as EXECUTING.
+    # NX_CENSUS_ONLY_JOB=1 (tests/conftest.py's pytest_collection_
+    # modifyitems) SKIP-MARKS every item outside
+    # _CENSUS_ONLY_ALLOWED_MODULES instead of deselecting it — deselection
+    # would shrink session.items through the exact mechanism this whole
+    # guard exists to catch. A skip decision fires in `_pytest/skipping.py`'s
+    # `pytest_runtest_setup` (`@hookimpl(tryfirst=True)`), which raises
+    # BEFORE `_pytest/runner.py`'s own `pytest_runtest_setup` — the one that
+    # calls `item.setup()` and instantiates fixtures — ever runs, so the
+    # ~11.7k skip-marked tests never touch the engine substrate, PG, or the
+    # service jar. Measured locally: collection alone is ~8s (11733/13101
+    # items); this job pays that plus per-item skip overhead for the
+    # rest, not fixture/engine cost — no service-jar / PG-bundle / docling
+    # provisioning steps below, unlike the `test` matrix.
+    name: pytest (mode-declarations census)
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: success() && needs.changes.outputs.code == 'true'
+    timeout-minutes: 10
+    env:
+      # NX_CENSUS_ONLY_JOB skip-marks (not deselects) every `scenario`-marked
+      # test along with everything else outside
+      # _CENSUS_ONLY_ALLOWED_MODULES, which trips tests/conftest.py's OWN
+      # scenario non-vacuity guard (`_check_scenario_non_vacuity`) — it reads
+      # a mass scenario-skip as a silently degraded engine substrate, which
+      # is exactly right for the `test` matrix but a false positive here:
+      # this job deliberately runs no scenario journeys by design (reproduced
+      # locally 2026-08-06 — the guard's own documented override exists for
+      # precisely this "deliberately substrate-less" shape).
+      NX_SCENARIO_SKIP_BUDGET: "999"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          # See the `test` matrix's identical comment: the bundled cache
+          # restores only ~1 MB of metadata, not the wheel cache itself.
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run the mode-declarations census against the FULL unsharded corpus
+        # No --splits/--group, no -m/-k: partial_session_view_reason's
+        # Signal 1 (pytest-split active) does not fire here, and Signal 2's
+        # ratio stays at the normal ~90% default-loop reduction — so the
+        # census actually scans request.session.items instead of skipping.
+        run: NX_CENSUS_ONLY_JOB=1 uv run pytest tests/ -q
+
   pytest-gate:
     # nexus-n0ful: required-check fan-in over the sharded `test` matrix.
     #
@@ -617,7 +707,7 @@ jobs:
     # skip).
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint]
+    needs: [changes, test, test-lint, test-mode-census]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -628,10 +718,12 @@ jobs:
           code="${{ needs.changes.outputs.code }}"
           test_result="${{ needs.test.result }}"
           test_lint_result="${{ needs.test-lint.result }}"
+          test_mode_census_result="${{ needs.test-mode-census.result }}"
 
           echo "changes job result: $changes_result (code=$code)"
           echo "test matrix result: $test_result"
           echo "test-lint result: $test_lint_result"
+          echo "test-mode-census result: $test_mode_census_result"
 
           if [ "$changes_result" != "success" ]; then
             echo "::error::the doc-only predicate job (changes) did not succeed ($changes_result) — cannot prove whether the pytest matrix was needed, failing loud instead of guessing"
@@ -648,6 +740,10 @@ jobs:
                 echo "::error::code changed but the lint-marker leg (test-lint) reported '$test_lint_result' instead of success"
                 exit 1
               fi
+              if [ "$test_mode_census_result" != "success" ]; then
+                echo "::error::code changed but the mode-declarations census leg (test-mode-census) reported '$test_mode_census_result' instead of success — nexus-vdti6: this is the ONLY leg that gives the RDR-109 census a real, unsharded view of the corpus"
+                exit 1
+              fi
               ;;
             false)
               case "$test_result" in
@@ -661,6 +757,13 @@ jobs:
                 success|skipped) ;;
                 *)
                   echo "::error::doc-only diff but the lint-marker leg (test-lint) reported '$test_lint_result' instead of skipped/success"
+                  exit 1
+                  ;;
+              esac
+              case "$test_mode_census_result" in
+                success|skipped) ;;
+                *)
+                  echo "::error::doc-only diff but the mode-declarations census leg (test-mode-census) reported '$test_mode_census_result' instead of skipped/success"
                   exit 1
                   ;;
               esac
