@@ -178,6 +178,19 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh
    gh pr create --base main --title "release: conexus X.Y.Z"
    ```
    Wait for CI green. Then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA for the optional `source.sha` pin in Step 8a).
+
+   The `git push -u origin release/vX.Y.Z` step above is exempt from the
+   push-gated review-coverage check (`git_add_all_redirects_to_explicit_paths.py`,
+   nexus-4av2n round 2) — every `release/*` destination branch push allows
+   through with a loud INFO line rather than denying, since the release
+   branch's own `chore(release): ...` commit carries no bead id and this
+   push is PR-gated to main plus a human releaser by policy already, not
+   the review boundary. Tag pushes (`vX.Y.Z`, `engine-service-vX.Y.Z`) at
+   Step 8 are exempt the same way. If a push under a name that is NOT
+   `release/*` or a recognized tag shape gets denied here, that is the
+   gate doing its job — write a review-completed marker or use
+   `NX_REVIEW_GATE_OVERRIDE=1` deliberately, do not treat it as a release
+   process bug.
 8. **Tag the merge commit IMMEDIATELY after PR lands.**
    ```
    git checkout main && git pull
