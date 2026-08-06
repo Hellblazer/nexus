@@ -68,9 +68,17 @@ public final class PgContainerHelper {
      *       failed startup recreates the whole container (fresh initdb)
      *       instead of flaking the class.</li>
      * </ul>
+     *
+     * <p>Returns a {@link FailFastPostgreSQLContainer} (nexus-soqa8, hardening (c) of
+     * nexus-lgdy1): a foreign server squatting the published port — e.g. a leaked host
+     * Postgres from the atexit-only-teardown class of bug — rejects the container's
+     * credentials with a deterministic auth SQLSTATE, and this fails in one attempt
+     * instead of burning the full ~120s connect-retry budget on a connection that will
+     * never succeed. See {@link FailFastPostgreSQLContainer}'s class doc for the full
+     * mechanism.
      */
     public static PostgreSQLContainer<?> newContainer() {
-        return new PostgreSQLContainer<>(
+        return new FailFastPostgreSQLContainer(
             DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"))
             .withDatabaseName(DATABASE)
             .withUsername(USERNAME)
