@@ -10,6 +10,50 @@ to be explicit.
 
 Implementation: grep + ``request.fixturenames`` introspection. AST-shape
 analysis is out of scope (RDR-109 §Phase 1, step 4).
+
+MUST STAY IN THE DEFAULT LOOP -- do not mark this file ``lint`` (nexus-8x4le,
+2026-08-05). Every OTHER repo-structure census reclassified to the ``lint``
+marker by 37a53f3c (``test_storage_boundary_lint.py``, ``test_no_new_sqlite.py``,
+``test_private_handle_access_census.py``, etc.) walks the FILESYSTEM directly
+(``SRC.rglob("*.py")``), so its census is invocation-independent -- it sees the
+same files whether pytest was invoked with ``-m lint`` or the full default
+selection. ``test_mode_declarations_are_explicit`` is structurally different:
+its census is ``request.session.items``, i.e. whatever THIS pytest invocation
+happened to collect and select, specifically because it needs pytest's own
+fixture-resolution machinery (``item.fixturenames``) to know whether a test
+truly opts into ``cloud_mode`` (including via class/module ``pytestmark =
+pytest.mark.usefixtures(...)``) -- a AST-only re-implementation was explicitly
+scoped OUT above. A prior fix attempt (3d9f07ad) added
+``pytestmark = pytest.mark.lint`` here on the theory that this is "just
+another repo-structure census". It is not: CI's ``test-lint`` job runs
+``pytest -m lint``, and pytest's own ``-m``/``-k`` deselection mutates
+``session.items`` in place (confirmed empirically: 11733 default-loop items
+collapse to 803 under ``-m lint``) -- so a lint-marked copy of this test can
+only ever see the ~800 other lint-bucket tests, permanently blind to
+voyage-token references anywhere else in the ~11.7k-test default corpus this
+guard exists to police. That blind spot was not hypothetical: while
+lint-marked, this census missed a real, live RDR-109 violation that had
+landed in ``tests/test_health_service_checks.py`` shortly before the
+reclassification (see the ``nexus-8x4le`` entry in
+``_MODE_LINT_EXCLUDE_NODEIDS`` below, added once the census was restored to
+the default loop and caught it for the first time).
+
+The original xdist-flake hypothesis this bead was filed under (partition-
+blindness or item-ordering divergence across ``-n auto`` workers) was
+independently disproven: a serial run and an ``-n 2`` run of a full default
+collection, probed at ``pytest_collection_finish`` before any test executes,
+produced IDENTICAL ``session.items`` counts (11733) and IDENTICAL offender
+lists both times. ``request.session.items`` reflects the SAME fully-collected,
+fully-deselected list in every worker process (xdist workers each perform
+their own full local collection and the controller cross-checks they agree;
+a genuine mismatch aborts the run with its own loud error, not a subtle test
+failure). The observed "passes serially, fails under -n auto" pattern earlier
+on 2026-08-05 is fully explained by the tree changing between runs -- commit
+dbd2cb46 (08:59:44) landed the real offender shortly after 37a53f3c
+(08:08:13) introduced the ``-n auto`` dev loop; any full-default-loop
+invocation (serial OR parallel) run after that commit would deterministically
+fail, and any run before it would deterministically pass. Nothing about xdist
+itself was ever broken here.
 """
 from __future__ import annotations
 
@@ -20,9 +64,7 @@ import re
 
 import pytest
 
-pytestmark = pytest.mark.lint
-
-from tests.conftest import (  # noqa: E402
+from tests.conftest import (
     _MODE_LINT_EXCLUDE_FILES,
     _MODE_LINT_EXCLUDE_NODEIDS,
 )
@@ -179,7 +221,14 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # nexus-bm8dd (2026-07-31): 36 -> 35. TestUpdateSourcePath was deleted with the
 # retired source_path-keyed methods, so its exclusion pointed at nothing. Removing
 # a dead slot is not a new grant.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 35
+# 35 -> 36 (nexus-8x4le, 2026-08-05): +1,
+# test_health_service_checks.py::TestCheckChashConformanceReport::
+# test_fully_routable_collections_still_render_plain_clean — reason
+# "string-literal-as-name", found by the whole-session census once it was
+# restored to the default loop (a mistaken lint-bucket reclassification had
+# blinded it to everything outside ~800 lint-marked tests; see the module
+# docstring above). Rationale in conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 36
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

@@ -67,9 +67,24 @@ entries linked from it):
   reduction, not 40–50%. An honest "left alone" verdict beats a forced merge.
 - **O(repo) meta-tests go in the lint bucket** (`pytestmark = pytest.mark.lint`),
   which is excluded from the hot loop but PR-gated by CI's `test-lint` job.
-  Whole-repo census tests are also xdist-unsafe by nature — lint bucket solves
-  both. Expensive shared computation inside one (e.g. an AST scan of
-  `src/nexus`) gets a `functools.cache`d single scan.
+  Expensive shared computation inside one (e.g. an AST scan of `src/nexus`)
+  gets a `functools.cache`d single scan.
+- **The lint bucket is only safe for FILESYSTEM-scanned censuses** (`rglob`
+  over `src/`/`tests/` — `test_storage_boundary_lint.py`,
+  `test_no_new_sqlite.py`, `test_private_handle_access_census.py`, etc.),
+  never for a `request.session.items`-scanned one. `-m lint`/`-k` deselection
+  mutates `session.items` in place, so a census reading it sees only the
+  ~800 lint-bucket tests, not the ~11.7k-test default corpus — permanently
+  blind to anything outside the bucket, silently, with no error. (Corrected
+  2026-08-05, nexus-8x4le: `test_mode_declarations_are_explicit.py` was
+  wrongly reclassified under the "whole-repo census tests are xdist-unsafe
+  by nature" reading of this rule; it isn't xdist-unsafe — a serial run and
+  an `-n 2` run of a full default collection produced identical
+  `session.items` — and the reclassification caused it to miss a real,
+  live violation for as long as it stayed lint-marked. See that file's
+  module docstring for the full account.) If a session.items-based census
+  genuinely needs to run once per PR rather than once per shard, that is a
+  CI-wiring problem, not a marker-reclassification one.
 
 ## Engine substrate: jar freshness
 

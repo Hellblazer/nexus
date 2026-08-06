@@ -1405,6 +1405,21 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # class, same as test_catalog_path.py above).
     "tests/test_doc_indexer.py::TestSectionTypeInPipeline::test_markdown_chunks_has_section_type",
     "tests/test_doc_indexer.py::TestSectionTypeInPipeline::test_markdown_chunks_section_classified",
+    # nexus-8x4le (2026-08-05): landed with the RDR-180 chash-conformance
+    # doctor check (dbd2cb46, nexus-du2dw) — reason "string-literal-as-name".
+    # ``test_fully_routable_collections_still_render_plain_clean`` builds a
+    # FAKE T3 client whose ``collection_names`` fixture is
+    # ``["knowledge__x__bge-base-en-v15-768__v1", "code__y__voyage-code-3__v1"]``
+    # purely to exercise the routability-enrichment probe's "all collections
+    # route to a known dim" branch; the voyage token is a segment of a
+    # conformant RDR-103 collection NAME fed to a fake, never to a real
+    # embedder. No Voyage credential or client is constructed anywhere in
+    # ``TestCheckChashConformanceReport``. Found via the whole-session
+    # census once it was restored to the default loop (see the module
+    # docstring above ``_MODE_LINT_EXCLUDE_FILES``/here for why this census
+    # cannot live in the lint bucket) — the test itself is not new-broken,
+    # it was simply never checked while the census sat mis-scoped.
+    "tests/test_health_service_checks.py::TestCheckChashConformanceReport::test_fully_routable_collections_still_render_plain_clean",
 })
 
 
