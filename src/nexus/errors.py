@@ -287,3 +287,40 @@ class IndexRunVerifyRefused(NexusError):
         if server_detail:
             message = f"{message} (engine: {server_detail})"
         super().__init__(message)
+
+
+#: NexusError subclasses that a per-record/per-file BATCH loop (``nx dt
+#: index``, ``nx index pdf --dir``) must catch, log, and continue past —
+#: never let escape and abort the whole batch (nexus-rlkgu; recurrence-
+#: prevention for the nexus-2fyb / nexus-qo84l / nexus-9800y / nexus-hb10j
+#: class of bug: a per-record ingest loop's narrow except tuple let a
+#: newly-introduced NexusError subclass propagate uncaught, killing the
+#: rest of the batch instead of just the offending record).
+#:
+#: This is the ONE place a per-record-raisable NexusError subclass is
+#: added; every per-record loop catch site references this tuple by name
+#: (or uses a broad ``except Exception``, safe by construction) instead of
+#: repeating a per-exception except clause. tests/test_rlkgu_per_record_
+#: catch_tripwire.py is the mechanical enforcement:
+#:
+#:  1. every per-record/per-file loop in src/nexus/commands/dt.py and
+#:     src/nexus/commands/index.py that calls an index_*-family function
+#:     must catch this tuple (by name), a broad Exception, or be in that
+#:     test's explicit allowlist with a reason;
+#:  2. EVERY NexusError subclass defined in this module must be
+#:     classified — either a member of this tuple, or listed in that
+#:     test's command-level allowlist with a reason explaining why it is
+#:     NOT per-record-raisable. A newly-added, unclassified NexusError
+#:     subclass fails that test at introduction time — the tripwire's
+#:     whole point is to make that classification decision mandatory
+#:     rather than something the next per-record loop author has to
+#:     remember to go check four call sites for.
+#:
+#: doc_indexer's per-record ingest paths (index_pdf / index_markdown) are
+#: the origin of both current members: ChunkLandingUnverifiedError fires
+#: from ``_upsert_skip_reembed`` before any manifest row is committed;
+#: IndexRunVerifyRefused fires from the RUNFENCE completion-verify gate.
+PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
+    ChunkLandingUnverifiedError,
+    IndexRunVerifyRefused,
+)

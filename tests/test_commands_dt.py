@@ -782,6 +782,245 @@ class TestDtContentExceptionHandling:
         assert result.exit_code == 0, result.output
 
 
+# ── nexus-cy4oy: handler-BODY coverage for PER_RECORD_SURVIVABLE_EXCEPTIONS ─
+#
+# substantive-critic CRITICAL (round-2 review of nexus-rlkgu, T2 [21492]):
+# the AST tripwire (tests/test_rlkgu_per_record_catch_tripwire.py) inspects
+# except-clause TYPES, not handler BODIES. Its gates went green on a dt.py
+# dispatch shaped `if isinstance(exc, IndexRunVerifyRefused): ... else: #
+# assumes ChunkLandingUnverifiedError` — a hypothetical THIRD
+# PER_RECORD_SURVIVABLE_EXCEPTIONS member would hit the else branch, access
+# an attribute it doesn't have (.collection/.count), raise AttributeError
+# INSIDE the handler, and escape the try/except — occurrence-4 of the
+# nexus-2fyb/qo84l/9800y/hb10j class reproduced with both AST gates green.
+# dt.py's dispatch is now TOTAL (explicit isinstance branch per known type
+# + a generic final else with no attribute assumptions); the two test
+# classes below are the handler-body coverage the AST gates structurally
+# cannot give:
+#
+# * TestAllTupleMembersSurviveTheRealPerRecordPath — registry-driven
+#   (iterates the REAL nexus.errors.PER_RECORD_SURVIVABLE_EXCEPTIONS tuple,
+#   not hand-enumerated pytest functions) so a future third REAL member
+#   gets this coverage automatically as long as _MEMBER_KWARGS stays in
+#   sync (enforced by test_member_kwargs_registry_covers_every_tuple_member).
+# * TestGenericFallbackHandlesUnknownTupleMember — the actual kill control:
+#   monkeypatches in a SYNTHETIC third member with neither known shape and
+#   proves the generic else branch survives it. Manually verified during
+#   implementation: reverting dt.py's total dispatch back to the binary
+#   if/else form (`if isinstance(exc, IndexRunVerifyRefused): ... else:
+#   <ChunkLandingUnverifiedError-shaped access>`) turns both tests in that
+#   class RED with an AttributeError escaping the handler; restoring the
+#   fix turns them green again (see the developer's T1 scratch write-back
+#   for the exact revert/restore transcript).
+
+from nexus.errors import (  # noqa: E402 — grouped with this section's test-only imports
+    ChunkLandingUnverifiedError,
+    IndexRunVerifyRefused,
+    NexusError as _NexusError,
+)
+
+_MEMBER_KWARGS: dict[type, dict] = {
+    ChunkLandingUnverifiedError: {
+        "collection": "docs__dt-test__voyage-context-3__v1", "count": 3,
+    },
+    IndexRunVerifyRefused: {
+        "doc_id": "1.99.1", "referenced": 5, "present": 3, "missing": 2,
+        "chunk_count": 5,
+    },
+}
+
+
+def test_member_kwargs_registry_covers_every_tuple_member() -> None:
+    """Completeness guard for the registry itself: a new
+    PER_RECORD_SURVIVABLE_EXCEPTIONS member with no _MEMBER_KWARGS entry
+    would silently skip the mechanical real-path drive-through below —
+    this fails loud instead of silently under-covering."""
+    from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS
+
+    missing = [
+        c.__name__ for c in PER_RECORD_SURVIVABLE_EXCEPTIONS
+        if c not in _MEMBER_KWARGS
+    ]
+    assert not missing, (
+        "PER_RECORD_SURVIVABLE_EXCEPTIONS member(s) with no _MEMBER_KWARGS "
+        f"registry entry in this test file — add one: {missing}"
+    )
+
+
+class TestAllTupleMembersSurviveTheRealPerRecordPath:
+    """Registry-driven: iterates the REAL production
+    ``PER_RECORD_SURVIVABLE_EXCEPTIONS`` tuple (not hand-enumerated test
+    functions) and drives EACH member through both per-record branches,
+    proving collect-and-continue. A future third REAL member is covered
+    automatically as long as ``_MEMBER_KWARGS`` is kept in sync."""
+
+    from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS as _MEMBERS
+
+    @pytest.mark.parametrize(
+        "member_cls", list(_MEMBERS), ids=lambda c: c.__name__,
+    )
+    def test_dt_content_branch_collects_and_continues(
+        self, runner, fake_selectors, monkeypatch, member_cls,
+    ) -> None:
+        from nexus.cli import main
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+        kwargs = _MEMBER_KWARGS[member_cls]
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise member_cls(**kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"{member_cls.__name__} escaped the handler as a raw "
+            f"traceback: {result.exception!r}"
+        )
+        assert "1 failed" in result.output, result.output
+        assert "U-BAD" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
+
+    @pytest.mark.parametrize(
+        "member_cls", list(_MEMBERS), ids=lambda c: c.__name__,
+    )
+    def test_file_backed_branch_collects_and_continues(
+        self, runner, monkeypatch, member_cls,
+    ) -> None:
+        from nexus.cli import main
+
+        kwargs = _MEMBER_KWARGS[member_cls]
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+
+        seq = [
+            lambda *a, **kw: (_ for _ in ()).throw(member_cls(**kwargs)),
+            lambda *a, **kw: 4,
+        ]
+
+        def _dispatch(*a, **kw):
+            return seq.pop(0)(*a, **kw)
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _dispatch)
+
+        result = runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"{member_cls.__name__} escaped the handler as a raw "
+            f"traceback: {result.exception!r}"
+        )
+        assert not seq, "U2 was never dispatched — the batch aborted after U1's exception"
+        assert "1 failed" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output
+
+
+class _SyntheticThirdMember(_NexusError):
+    """Test-only third ``PER_RECORD_SURVIVABLE_EXCEPTIONS`` member — NEVER
+    added to the real production tuple. Deliberately carries neither
+    ``ChunkLandingUnverifiedError``'s ``(.collection, .count)`` nor
+    ``IndexRunVerifyRefused``'s field set: a handler whose fallback branch
+    blindly assumes either shape raises ``AttributeError`` on this class."""
+
+    def __init__(self, *, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"synthetic third member: {detail}")
+
+
+class TestGenericFallbackHandlesUnknownTupleMember:
+    """THE kill control for nexus-cy4oy: monkeypatches
+    ``nexus.errors.PER_RECORD_SURVIVABLE_EXCEPTIONS`` to include a
+    synthetic third member with an incompatible shape, raises it from the
+    per-record helper, and proves dt.py's generic final ``else`` branch
+    (type name + ``str(exc)``, no attribute assumptions) survives it —
+    collect-and-continue, not a crash. dt.py's deferred
+    ``from nexus.errors import (..., PER_RECORD_SURVIVABLE_EXCEPTIONS)``
+    re-imports the name fresh on every ``index_cmd()`` call, so patching
+    the module attribute before ``runner.invoke`` is picked up by the
+    ``except PER_RECORD_SURVIVABLE_EXCEPTIONS`` clause at call time."""
+
+    def test_dt_content_branch(self, runner, fake_selectors, monkeypatch) -> None:
+        from nexus.cli import main
+        import nexus.errors as errors_mod
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+        monkeypatch.setattr(
+            errors_mod, "PER_RECORD_SURVIVABLE_EXCEPTIONS",
+            (*errors_mod.PER_RECORD_SURVIVABLE_EXCEPTIONS, _SyntheticThirdMember),
+        )
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise _SyntheticThirdMember(detail="unknown-shape")
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"the synthetic third member escaped the handler: {result.exception!r}"
+        )
+        assert "1 failed" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
+        assert "synthetic third member: unknown-shape" in result.output, result.output
+
+    def test_file_backed_branch(self, runner, monkeypatch) -> None:
+        from nexus.cli import main
+        import nexus.errors as errors_mod
+
+        monkeypatch.setattr(
+            errors_mod, "PER_RECORD_SURVIVABLE_EXCEPTIONS",
+            (*errors_mod.PER_RECORD_SURVIVABLE_EXCEPTIONS, _SyntheticThirdMember),
+        )
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+
+        seq = [
+            lambda *a, **kw: (_ for _ in ()).throw(
+                _SyntheticThirdMember(detail="unknown-shape"),
+            ),
+            lambda *a, **kw: 4,
+        ]
+
+        def _dispatch(*a, **kw):
+            return seq.pop(0)(*a, **kw)
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _dispatch)
+
+        result = runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"the synthetic third member escaped the handler: {result.exception!r}"
+        )
+        assert not seq, "U2 was never dispatched — the batch aborted after U1's exception"
+        assert "1 failed" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "synthetic third member: unknown-shape" in result.output, result.output
+
+
 # ── nexus-2xu6t: nx dt index must NOT report success when the catalog ───────
 # register failed (pbawi acceptance item 3) ──────────────────────────────────
 
