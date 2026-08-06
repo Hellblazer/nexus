@@ -61,7 +61,6 @@ No direct-mode fallback — a service/PG outage is always fatal for callers.
 from __future__ import annotations
 
 import contextlib
-import errno
 import os
 import re
 import shutil
@@ -70,6 +69,7 @@ import socket
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -82,6 +82,7 @@ from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
     exit_if_process_unowned,
+    pid_alive,
     ttl_for_tier,
 )
 
@@ -495,21 +496,15 @@ def _port_accepting(host: str, port: int, timeout: float = 0.5) -> bool:
 
 
 # ── Pid helpers ────────────────────────────────────────────────────────────────
-
-
-def _pid_is_alive(pid: int) -> bool:
-    """Return True if signalling pid 0 to *pid* succeeds."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError as exc:
-        return exc.errno != errno.ESRCH
-    return True
+#
+# ``_pid_is_alive`` used to be defined here, diverged from the
+# process-table primitive's own liveness probe (nexus-oyo2g review finding
+# 3 — AGENTS.md's "no per-tier lifecycle copy" rule). Now a re-export of
+# ``service_registry.pid_alive`` under this module's historical name, so
+# every existing call site and every test that patches
+# ``nexus.daemon.storage_service_daemon._pid_is_alive`` keeps working
+# unchanged.
+_pid_is_alive = pid_alive
 
 
 # ── Version helper ─────────────────────────────────────────────────────────────
@@ -1535,11 +1530,94 @@ def _supervise_until_stopped(
     return exit_code
 
 
-def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
-    """Send SIGTERM to the running storage-service supervisor.
+@dataclass(frozen=True)
+class StopOutcome:
+    """Outcome of :func:`stop_storage_service` (nexus-oyo2g).
 
-    Returns the supervisor PID that was signalled, or ``None`` if no live
-    lease is found (already stopped).
+    Honest-output contract: a lease MISS from ``ServiceRegistry.discover()``
+    is a discovery gap, never proof nothing is running (a TTL-expired lease
+    on a stalled-but-alive supervisor is indistinguishable from a genuinely
+    stopped service at the registry layer — the lz3f2/f9y78 stall
+    signature). ``source`` names HOW this outcome was reached so a caller
+    (the CLI) can print an honest message instead of a blanket "already
+    stopped" whenever nothing was signalled from the lease.
+
+    - ``"lease"``: a fresh lease named a live, signal-able process;
+      signalled from it.
+    - ``"process_table"``: the lease named nothing signal-able — either it
+      was absent entirely, or (``lease_seen=True``) it WAS found but
+      carried no usable pid (a malformed or legacy-shaped record) — and
+      the OS process table (ground truth) found live processes belonging
+      to this config_dir instead.
+    - ``"none"``: nothing was signalled from the lease AND the process
+      table confirms nothing is running — genuinely already stopped.
+    - ``"process_table_unavailable"``: nothing was signalled from the
+      lease, and the process table itself could not be read (no ``ps``
+      and no ``/proc``) — degrades to the pre-nexus-oyo2g behaviour but
+      says so, rather than silently claiming the same clean "already
+      stopped".
+
+    ``lease_seen`` is True whenever ``ServiceRegistry.discover()`` found a
+    record at all, INDEPENDENT of ``source`` — a caller (the CLI) needs
+    this to avoid saying "no lease found" when a lease WAS found but had
+    no usable pid info (nexus-oyo2g review finding 2: ``source ==
+    "process_table"``/``"none"`` alone conflates "lease truly absent" with
+    "lease present but unusable", which is a different, honest-output-
+    relevant fact).
+
+    ``pids`` always includes every pid this call signalled (lease-named and/
+    or tree-swept); ``stubborn`` is the subset still alive after the
+    SIGTERM->SIGKILL escalation — a non-empty ``stubborn`` means the caller
+    must NOT treat this as a clean stop.
+
+    ``sweep_verified`` is True only when the phase-2/3 process-table sweep
+    actually ran (``sweep_matching_processes(...).available``). It is False
+    whenever the process table could not be read at all — INCLUDING the
+    case where the lease branch already signalled something, so ``source``
+    stays ``"lease"`` and the pids list is non-empty. Without this field
+    that case is indistinguishable from a fully-verified clean stop: the
+    docstring above calls the tree-completion sweep "not optional even on
+    the lease-found path", so silently dropping its own verification
+    status when it fails to run would contradict that claim (nexus-oyo2g
+    review round 2, Significant finding 2). A caller MUST treat
+    ``sweep_verified=False`` as "the tree-completion check could not run",
+    regardless of what ``source``/``pids`` otherwise say.
+    """
+
+    pids: tuple[int, ...]
+    stubborn: tuple[int, ...]
+    source: str
+    lease_seen: bool = False
+    sweep_verified: bool = True
+
+    @property
+    def already_stopped(self) -> bool:
+        return not self.pids
+
+
+def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
+    """Stop the running storage-service SUPERVISOR + ENGINE tree.
+
+    Three phases, all converging on the same tree-sweep (nexus-oyo2g):
+
+    1. Lease found + fresh: signal what the lease names (``supervisor_pid``
+       via a direct SIGTERM/SIGKILL escalation, or the raw endpoint pid via
+       ``safe_killpg``).
+    2. Lease MISS: ``ServiceRegistry.discover()`` returning ``None`` is a
+       discovery gap, not a liveness oracle — a TTL-expired lease (15s) on
+       a stalled-but-alive supervisor looks identical to "stopped" here.
+       Fall back to the OS process table (``service_registry.
+       sweep_matching_processes``) instead of concluding "already stopped"
+       from absence alone.
+    3. ALWAYS: sweep the process table once more for any storage-service
+       process (supervisor or engine) still alive for *config_dir*, and
+       terminate it too. The engine child can survive the supervisor's own
+       SIGTERM (PDEATHSIG is not universally effective — inactive on
+       macOS, and requires the child to have armed it) — verifying no tree
+       member is left is not optional even on the lease-found path.
+
+    Never reports "already stopped" while a matching process exists; see
+    :class:`StopOutcome`.
 
     Freshness gate (mirrors stop_t3_daemon CRITICAL P3 guard): only trust
     ``supervisor_pid`` from the lease payload when ``registry.discover()``
@@ -1549,6 +1627,11 @@ def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
     ``ServiceRegistry.discover()`` already reaps expired leases (returning
     None for stale ones), a non-None return is the freshness proxy.
     """
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        storage_service_stack_matcher,
+        sweep_matching_processes,
+    )
+
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         config_dir = nexus_config_dir()
@@ -1557,42 +1640,116 @@ def stop_storage_service(*, config_dir: Path | None = None) -> int | None:
     scope = str(os.getuid())
     # Freshness gate: discover() reaps stale leases; non-None means live.
     record = registry.discover(scope)
-    if record is None:
-        _log.info("storage_service_stop_noop", reason="no_live_lease")
-        return None
+    # Independent of what gets signalled below: did discover() find a
+    # record AT ALL? (nexus-oyo2g review finding 2 — a record present but
+    # carrying no usable pid is a DIFFERENT fact from no record existing,
+    # and the CLI must not conflate the two.)
+    lease_seen = record is not None
 
-    supervisor_pid = record.payload.get("supervisor_pid")
-    pid_to_signal = record.endpoint.get("pid")
+    signalled: list[int] = []
+    source = "none"
 
-    # Only trust supervisor_pid from a FRESH lease (guaranteed above by
-    # discover()'s TTL reap), and only when the process is still alive.
-    if isinstance(supervisor_pid, int) and supervisor_pid > 0 and _pid_is_alive(supervisor_pid):
-        _log.info("storage_service_stopping_supervisor", supervisor_pid=supervisor_pid)
-        try:
-            os.kill(supervisor_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
-        while time.monotonic() < deadline:
-            if not _pid_is_alive(supervisor_pid):
-                break
-            time.sleep(0.1)
-        if _pid_is_alive(supervisor_pid):
+    if record is not None:
+        supervisor_pid = record.payload.get("supervisor_pid")
+        pid_to_signal = record.endpoint.get("pid")
+
+        # Only trust supervisor_pid from a FRESH lease (guaranteed above by
+        # discover()'s TTL reap), and only when the process is still alive.
+        if isinstance(supervisor_pid, int) and supervisor_pid > 0 and _pid_is_alive(supervisor_pid):
+            source = "lease"
+            _log.info("storage_service_stopping_supervisor", supervisor_pid=supervisor_pid)
             try:
-                os.kill(supervisor_pid, signal.SIGKILL)
+                os.kill(supervisor_pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
-        return supervisor_pid
+            deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
+            while time.monotonic() < deadline:
+                if not _pid_is_alive(supervisor_pid):
+                    break
+                time.sleep(0.1)
+            if _pid_is_alive(supervisor_pid):
+                try:
+                    os.kill(supervisor_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            signalled.append(supervisor_pid)
+        elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
+            source = "lease"
+            from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            safe_killpg(pid_to_signal, signal.SIGTERM)
+            # Clean up the lease record.
+            with contextlib.suppress(Exception):
+                registry.relinquish(record)
+            _log.info("storage_service_stopped", pid=pid_to_signal)
+            signalled.append(pid_to_signal)
 
-    # No live supervisor: signal the service process group directly.
-    if isinstance(pid_to_signal, int) and pid_to_signal > 0:
-        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-        safe_killpg(pid_to_signal, signal.SIGTERM)
-        # Clean up the lease record.
-        with contextlib.suppress(Exception):
-            registry.relinquish(record)
-        _log.info("storage_service_stopped", pid=pid_to_signal)
-        return pid_to_signal
+    # Phase 2/3: consult the process table. Runs even after a lease-based
+    # signal above (tree-signalling requirement — the engine child can
+    # survive the supervisor's own SIGTERM), and is the ONLY signal source
+    # on a lease MISS (a miss proves nothing about liveness, nexus-oyo2g).
+    matcher = storage_service_stack_matcher(config_dir)
+    sweep = sweep_matching_processes(
+        matcher, exclude_pid=os.getpid(), grace_s=_GRACEFUL_STOP_TIMEOUT,
+    )
 
-    _log.info("storage_service_stop_noop", reason="no_live_pid")
-    return None
+    if not sweep.available:
+        _log.warning("storage_service_stop_process_table_unavailable", error=sweep.error)
+        if not signalled:
+            _log.info(
+                "storage_service_stop_noop",
+                reason="process_table_unavailable",
+                lease_seen=lease_seen,
+            )
+            return StopOutcome(
+                pids=(), stubborn=(), source="process_table_unavailable",
+                lease_seen=lease_seen, sweep_verified=False,
+            )
+        return StopOutcome(
+            pids=tuple(signalled), stubborn=(), source=source, lease_seen=lease_seen,
+            sweep_verified=False,
+        )
+
+    # Captured BEFORE the sweep extends `signalled`, so the log reason below
+    # can distinguish "the lease produced nothing to signal, the sweep is
+    # doing all the work" from "the lease already signalled something and
+    # this sweep is only tree-completion" — a lease-miss-shaped case can
+    # still have lease_seen=True (a malformed/legacy record was found but
+    # had no usable pid; nexus-oyo2g review finding 2).
+    had_lease_signal = bool(signalled)
+
+    if sweep.pids:
+        if not had_lease_signal:
+            source = "process_table"
+        if had_lease_signal:
+            sweep_reason = "tree_completion"
+        elif lease_seen:
+            sweep_reason = "lease_present_but_unusable"
+        else:
+            sweep_reason = "lease_confirmed_absent"
+        _log.info(
+            "storage_service_stop_process_table_sweep",
+            pids=list(sweep.pids), stubborn=list(sweep.stubborn),
+            reason=sweep_reason,
+        )
+        if sweep.stubborn:
+            _log.warning(
+                "storage_service_stop_stubborn_survivors", pids=list(sweep.stubborn),
+            )
+        signalled.extend(p for p in sweep.pids if p not in signalled)
+
+    if not signalled:
+        _log.info(
+            "storage_service_stop_noop",
+            reason="lease_present_but_unusable_no_processes" if lease_seen
+            else "no_live_lease_no_processes",
+            lease_seen=lease_seen,
+        )
+        return StopOutcome(
+            pids=(), stubborn=(), source="none", lease_seen=lease_seen,
+            sweep_verified=True,
+        )
+
+    return StopOutcome(
+        pids=tuple(signalled), stubborn=sweep.stubborn, source=source,
+        lease_seen=lease_seen, sweep_verified=True,
+    )

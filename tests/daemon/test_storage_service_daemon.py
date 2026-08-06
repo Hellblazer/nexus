@@ -18,6 +18,7 @@ and Java JAR; they are excluded from the default unit suite.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -25,11 +26,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.daemon.service_registry import (
+    LeaseRecord,
     ServiceRegistry,
     ServiceSupervisor,
     StaleOwnerError,
 )
 from nexus.daemon.storage_service_daemon import (
+    StopOutcome,
     StorageServiceStartError,
     StorageServiceSupervisor,
     _MAX_UNHEALTHY_HEARTBEATS,
@@ -1111,13 +1114,291 @@ class TestCycleStorageServiceToCurrent:
         )
 
 
+def _write_stale_or_fresh_lease(
+    config_dir: Path,
+    *,
+    supervisor_pid: int | None,
+    engine_pid: int | None,
+    age_s: float,
+    ttl: float = 15.0,
+) -> None:
+    """Write a ``storage_service_addr.<uid>`` lease record directly, with
+    ``heartbeat_epoch`` stamped *age_s* seconds in the past — no fake clock
+    or sleep needed to simulate a TTL-expired-but-alive-supervisor lease
+    (nexus-oyo2g repro a/b/c: ``age_s > ttl`` is the lz3f2/f9y78 stall
+    signature; ``age_s < ttl`` is an ordinary live lease).
+    """
+    scope = str(os.getuid())
+    record = LeaseRecord(
+        scope_key=scope,
+        generation=1,
+        owner_token="test-owner-token",
+        heartbeat_epoch=time.time() - age_s,
+        ttl=ttl,
+        endpoint={"pid": engine_pid} if engine_pid is not None else {},
+        version="0.0.0-test",
+        payload={"supervisor_pid": supervisor_pid} if supervisor_pid is not None else {},
+    )
+    (config_dir / f"storage_service_addr.{scope}").write_text(record.to_json())
+
+
 class TestRunStorageSupervisorFunction:
     """Tests for the module-level start/stop helper functions."""
 
     def test_stop_noop_when_no_lease(self, config_dir: Path) -> None:
-        """stop_storage_service returns None if no lease is present."""
-        result = stop_storage_service(config_dir=config_dir)
-        assert result is None
+        """No lease AND no matching OS process => genuinely already
+        stopped (StopOutcome.already_stopped, source='none'). This is the
+        ONLY case allowed to report 'already stopped' (nexus-oyo2g)."""
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert isinstance(outcome, StopOutcome)
+        assert outcome.already_stopped
+        assert outcome.source == "none"
+        assert outcome.pids == ()
+
+    def test_lease_miss_with_live_stack_is_not_reported_stopped(
+        self, config_dir: Path,
+    ) -> None:
+        """REPRO (a) FALSE ALL-CLEAR (nexus-oyo2g): a TTL-expired lease
+        (age_s=20 > ttl=15) on a supervisor+engine pair that are STILL
+        ALIVE per the process table must never read as 'already stopped'.
+
+        Falsifies the pre-fix code: ``stop_storage_service`` used to
+        return ``None`` (source: registry.discover() -> None ->
+        immediate 'no_live_lease' noop) the instant the lease record was
+        unreadable/expired, WITHOUT ever consulting the process table.
+        This assertion (``not outcome.already_stopped``) fails against
+        that code and passes only once the lease-miss fallback exists.
+        """
+        supervisor_pid, engine_pid = 970101, 970102
+        _write_stale_or_fresh_lease(
+            config_dir, supervisor_pid=supervisor_pid, engine_pid=engine_pid,
+            age_s=20.0, ttl=15.0,
+        )
+        rows = [
+            (supervisor_pid, 60,
+             f"nx daemon service start --foreground --config-dir {config_dir}"),
+            (engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g"),
+        ]
+        terminated: list[list[int]] = []
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+            side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert not outcome.already_stopped, (
+            "a TTL-expired lease on a live supervisor+engine must never "
+            f"read as 'already stopped'; got {outcome}"
+        )
+        assert outcome.source == "process_table"
+        assert sorted(outcome.pids) == sorted([supervisor_pid, engine_pid])
+        assert terminated and sorted(terminated[0]) == sorted(
+            [supervisor_pid, engine_pid],
+        ), (
+            "both the supervisor AND the engine must actually be signalled "
+            f"(the stop&&start no-op repro b depends on real termination, "
+            f"not just an honest label); got {terminated}"
+        )
+
+    def test_lease_miss_with_no_live_processes_is_genuinely_stopped(
+        self, config_dir: Path,
+    ) -> None:
+        """A stale/absent lease with NOTHING alive in the process table IS
+        'already stopped' — the fallback must not manufacture false
+        positives on an ordinary clean stop."""
+        _write_stale_or_fresh_lease(
+            config_dir, supervisor_pid=970103, engine_pid=970104, age_s=99.0,
+        )
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert outcome.already_stopped
+        assert outcome.source == "none"
+
+    def test_fresh_lease_tree_sweep_catches_surviving_engine(
+        self, config_dir: Path,
+    ) -> None:
+        """Tree-signalling requirement (nexus-oyo2g): even with a FRESH
+        lease naming a supervisor that dies cleanly from SIGTERM, the
+        ENGINE CHILD surviving that SIGTERM (PDEATHSIG not effective —
+        e.g. macOS) must still be found and terminated. Falsifies the
+        pre-fix code, which signalled ONLY ``supervisor_pid`` and returned
+        immediately — the engine pid never appears in any kill call."""
+        supervisor_pid, engine_pid = 970105, 970106
+        _write_stale_or_fresh_lease(
+            config_dir, supervisor_pid=supervisor_pid, engine_pid=engine_pid,
+            age_s=1.0, ttl=15.0,
+        )
+        # The supervisor dies cleanly off the direct os.kill in the
+        # lease-found branch; the engine survives independently and is
+        # only found by the tree-sweep's process-table scan.
+        rows = [
+            (engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g"),
+        ]
+        terminated: list[list[int]] = []
+        with patch(
+            "nexus.daemon.storage_service_daemon._pid_is_alive",
+            # 1st call: initial "is it alive" check -> True, enter the
+            # signal branch. 2nd call: the post-SIGTERM wait loop -> False,
+            # the supervisor died cleanly, break immediately (no real
+            # sleep). 3rd call: the post-loop SIGKILL-escalation check ->
+            # False, no escalation needed.
+            side_effect=[True, False, False],
+        ), patch(
+            "nexus.daemon.storage_service_daemon.os.kill",
+        ), patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            return_value=rows[0][2],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+            side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert engine_pid in outcome.pids, (
+            f"the surviving engine child must be signalled too: {outcome}"
+        )
+        assert terminated == [[engine_pid]], (
+            f"the tree-sweep must terminate the surviving engine: {terminated}"
+        )
+
+    def test_stubborn_survivor_is_reported_not_silently_dropped(
+        self, config_dir: Path,
+    ) -> None:
+        """REPRO (c) DOUBLE-SPAWN precondition: a frozen (SIGSTOPped)
+        supervisor does not act on SIGTERM, so even the SIGKILL escalation
+        inside terminate_pids can race a slow reaper. The outcome must
+        surface any pid still alive after the escalation as 'stubborn' —
+        never silently claim a clean stop while a survivor might still be
+        running (which is what invites the double-spawn race)."""
+        supervisor_pid, engine_pid = 970107, 970108
+        _write_stale_or_fresh_lease(
+            config_dir, supervisor_pid=supervisor_pid, engine_pid=engine_pid,
+            age_s=30.0, ttl=15.0,
+        )
+        rows = [
+            (supervisor_pid, 60,
+             f"nx daemon service start --foreground --config-dir {config_dir}"),
+            (engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g"),
+        ]
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+            return_value=[supervisor_pid],  # SIGKILL didn't reap it in time
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert not outcome.already_stopped
+        assert supervisor_pid in outcome.stubborn, (
+            f"a survivor of the SIGKILL escalation must be reported, "
+            f"never silently dropped: {outcome}"
+        )
+
+    def test_process_table_unavailable_degrades_honestly(
+        self, config_dir: Path,
+    ) -> None:
+        """When neither 'ps' nor '/proc' is available, the fallback must
+        say so rather than silently reusing the old 'already stopped'
+        wording for a check it never actually performed."""
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows",
+            side_effect=RuntimeError("no ps, no /proc"),
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert outcome.source == "process_table_unavailable"
+        assert outcome.already_stopped
+
+    # -- code review round 2 (T2 [21508]) finding 2: present-but-unusable
+    #    lease must not be reported as "no lease found" ------------------
+
+    def test_present_but_unusable_lease_falls_back_to_process_table(
+        self, config_dir: Path,
+    ) -> None:
+        """A lease record IS present (fresh, well within TTL) but carries
+        NO usable pid info at all (malformed/legacy shape — no
+        supervisor_pid, no endpoint pid). This must be distinguished from
+        a genuine lease MISS: ``lease_seen`` is True even though the
+        signal source ends up being the process table, because a lease
+        WAS discovered — it was just unusable, not absent."""
+        _write_stale_or_fresh_lease(
+            config_dir, supervisor_pid=None, engine_pid=None, age_s=1.0,
+            ttl=15.0,
+        )
+        engine_pid = 970201
+        rows = [(engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g")]
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            return_value=rows[0][2],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids", return_value=[],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert outcome.lease_seen is True, (
+            f"a lease record WAS discovered (even though unusable): {outcome}"
+        )
+        assert outcome.source == "process_table"
+        assert engine_pid in outcome.pids
+
+    def test_present_but_unusable_lease_with_no_processes_still_marks_lease_seen(
+        self, config_dir: Path,
+    ) -> None:
+        """Same malformed-lease precondition, but nothing is found in the
+        process table either — genuinely nothing to signal, but a
+        (malformed) lease WAS present, so ``lease_seen`` must stay True,
+        never silently collapsing to 'no lease at all'."""
+        _write_stale_or_fresh_lease(
+            config_dir, supervisor_pid=None, engine_pid=None, age_s=1.0,
+            ttl=15.0,
+        )
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert outcome.already_stopped
+        assert outcome.source == "none"
+        assert outcome.lease_seen is True, (
+            f"a (malformed) lease WAS present: {outcome}"
+        )
+
+    def test_true_lease_miss_has_lease_seen_false(
+        self, config_dir: Path,
+    ) -> None:
+        """Baseline contrast: a genuine lease MISS (no record on disk at
+        all) must report ``lease_seen=False`` — never conflated with the
+        present-but-unusable case above."""
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+        ):
+            outcome = stop_storage_service(config_dir=config_dir)
+        assert outcome.lease_seen is False
+
+    # -- code review round 2 finding 3: pid_alive consolidation ----------
+
+    def test_pid_is_alive_is_the_shared_primitive_not_a_local_copy(self) -> None:
+        """storage_service_daemon._pid_is_alive must be THE SAME function
+        object as service_registry.pid_alive (a re-export, not a
+        semantically-diverged duplicate) — the exact bug class
+        AGENTS.md's 'no per-tier lifecycle copy' rule exists to prevent."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        from nexus.daemon.service_registry import pid_alive
+        assert ssd_mod._pid_is_alive is pid_alive, (
+            "storage_service_daemon._pid_is_alive has drifted from the "
+            "shared service_registry.pid_alive primitive"
+        )
 
     def test_pg_credentials_read_on_start(
         self, config_dir: Path, creds_path: Path

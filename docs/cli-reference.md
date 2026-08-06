@@ -2420,14 +2420,16 @@ accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
 
-> **Known limitation (nexus-oyo2g):** `nx daemon service stop` decides what to
-> signal from the discovery lease (15s TTL). A supervisor whose heartbeat has
-> stalled is alive and serving while invisible to that check, so `stop` can
-> report "already stopped" having signalled nothing — and a following `start`
-> short-circuits once the heartbeat revives. `nx upgrade`'s engine convergence
-> is immune (it sweeps the stack from the process table, 7.0.0); if a manual
-> `stop && start` doesn't take, check `nx doctor` for a stale-supervisor
-> process-skew warning.
+> **Fixed (nexus-oyo2g):** `nx daemon service stop` used to decide what to
+> signal purely from the discovery lease (15s TTL) — a supervisor whose
+> heartbeat had stalled was alive and serving while invisible to that check,
+> so `stop` could report "already stopped" having signalled nothing, and a
+> following `start` would short-circuit once the heartbeat revived. `stop`
+> now falls back to the OS process table (the same mechanism `nx upgrade`'s
+> engine convergence already used) whenever the lease is absent, and always
+> sweeps for a surviving engine child even after a lease-named supervisor is
+> signalled — it never reports "already stopped" while a matching process is
+> still running.
 
 | Flag | Description |
 |------|-------------|

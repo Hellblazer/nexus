@@ -172,9 +172,15 @@ class TestStatusSurface:
 class TestStopPgClarity:
     def _invoke_stop(self, config_dir: Path, args: list[str], *,
                      pg_up: bool = True, stop_pid: int | None = 999):
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = (
+            StopOutcome(pids=(stop_pid,), stubborn=(), source="lease")
+            if stop_pid is not None
+            else StopOutcome(pids=(), stubborn=(), source="none")
+        )
         with patch(
             "nexus.daemon.storage_service_daemon.stop_storage_service",
-            return_value=stop_pid,
+            return_value=outcome,
         ), patch(
             "nexus.daemon.storage_service_daemon._port_accepting",
             return_value=pg_up,
@@ -390,9 +396,10 @@ class TestStopAlreadyStoppedAdvisory:
         read as a state report, not as an effect of this command."""
         config_dir = tmp_path / "cfg"
         _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
         with patch(
             "nexus.daemon.storage_service_daemon.stop_storage_service",
-            return_value=None,
+            return_value=StopOutcome(pids=(), stubborn=(), source="none"),
         ), patch(
             "nexus.daemon.storage_service_daemon._port_accepting",
             return_value=True,
@@ -404,3 +411,284 @@ class TestStopAlreadyStoppedAdvisory:
         assert "already stopped" in result.output
         assert "Postgres is still running on 127.0.0.1:5499" in result.output
         assert "left running" not in result.output
+
+
+class TestStopReviewRound2Clarity:
+    """nexus-oyo2g code review round 2 (T2 [21508]) findings 1 and 2."""
+
+    def test_stop_reports_every_signalled_pid_not_just_the_first(
+        self, tmp_path: Path,
+    ) -> None:
+        """Finding 1: a multi-pid StopOutcome (e.g. a lease-named
+        supervisor PLUS a tree-swept surviving engine child) must have
+        every pid in the message — printing only ``pids[0]`` is a partial
+        truth for a command whose whole point here is honest reporting."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(pids=(111, 222), stubborn=(), source="lease")
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+        assert "111" in result.output and "222" in result.output, (
+            f"both signalled pids must be visible: {result.output}"
+        )
+
+    def test_process_table_source_with_lease_seen_never_says_no_lease(
+        self, tmp_path: Path,
+    ) -> None:
+        """Finding 2: source="process_table" + lease_seen=True (a lease
+        WAS found, it just had no usable pid — a malformed/legacy record)
+        must not be worded as "No storage service lease found", which
+        would misrepresent a present-but-unusable lease as an absent
+        one."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(333,), stubborn=(), source="process_table", lease_seen=True,
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+        lowered = result.output.lower()
+        assert "lease was found" in lowered, result.output
+        assert "no storage service lease was found" not in lowered, result.output
+        assert "333" in result.output
+
+    def test_process_table_source_without_lease_seen_says_no_lease(
+        self, tmp_path: Path,
+    ) -> None:
+        """Contrast case: a genuine lease MISS (lease_seen=False) keeps
+        the original "no lease found" wording — the fix must not lose the
+        original honest case while adding the new one."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(444,), stubborn=(), source="process_table", lease_seen=False,
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+        assert "no storage service lease was found" in result.output.lower()
+
+    def test_none_source_with_lease_seen_says_lease_was_found_but_unusable(
+        self, tmp_path: Path,
+    ) -> None:
+        """Finding 2, the source="none" side: a malformed lease found but
+        nothing at all to signal (no process-table matches either) must
+        still say a lease was found, not "No storage service lease
+        found"."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(), stubborn=(), source="none", lease_seen=True,
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+        lowered = result.output.lower()
+        assert "already stopped" in lowered
+        assert "lease was found but had no usable" in lowered, result.output
+        assert "no storage service lease found and no matching" not in lowered
+
+
+class TestStopReviewRound3ExitCodes:
+    """nexus-oyo2g substantive-critique round 2 (T2 [21510]) findings.
+
+    CRITICAL: exit code is the only machine-parseable signal
+    `service_stop_cmd` has (no --json). The bead's own documented remedy,
+    `nx daemon service stop && nx daemon service start`, silently
+    proceeds to `start` whenever `stop` exits 0 — so an UNVERIFIED stop
+    (a stubborn survivor, or a process table that could not be checked
+    with nothing signalled) must break that chain with a non-zero exit.
+    """
+
+    def test_stubborn_survivor_exits_nonzero(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(555,), stubborn=(555,), source="lease",
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code != 0, (
+            f"a stubborn survivor must break the stop&&start chain via a "
+            f"non-zero exit code: {result.output}"
+        )
+        assert "555" in result.output
+        assert "FAILED" in result.output
+
+    def test_process_table_unavailable_with_nothing_signalled_exits_nonzero(
+        self, tmp_path: Path,
+    ) -> None:
+        """repro-c-adjacent: no lease, and the process table itself could
+        not even be checked — 'already stopped' was never actually
+        confirmed. This must not exit 0 either."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(), stubborn=(), source="process_table_unavailable",
+            lease_seen=False, sweep_verified=False,
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code != 0, (
+            f"an unverifiable stop must not exit 0: {result.output}"
+        )
+        assert "could not" in result.output.lower()
+
+    def test_clean_stop_still_exits_zero(self, tmp_path: Path) -> None:
+        """Regression guard: a genuinely clean, fully-verified stop must
+        NOT be caught by the new non-zero-exit branches."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(pids=(999,), stubborn=(), source="lease")
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+
+    def test_already_stopped_clean_still_exits_zero(
+        self, tmp_path: Path,
+    ) -> None:
+        """A genuine, fully-verified 'nothing to stop' must also stay
+        exit 0 — only UNVERIFIED outcomes are new failures."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(pids=(), stubborn=(), source="none")
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+
+    def test_lease_success_with_unavailable_sweep_stays_exit_zero_but_caveats(
+        self, tmp_path: Path,
+    ) -> None:
+        """Significant finding 2: when the lease branch already signalled
+        something but the tree-completion sweep could not run at all
+        (source stays "lease"), this is NOT one of the two Critical
+        non-zero-exit cases (something WAS verifiably signalled from a
+        live lease) — but the message must still admit the sweep never
+        ran, per finding 2."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(777,), stubborn=(), source="lease", sweep_verified=False,
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        assert result.exit_code == 0, result.output
+        assert "777" in result.output
+        assert "could not be checked" in result.output, (
+            f"the sweep-unavailable caveat must be visible: {result.output}"
+        )
+
+    def test_process_table_unavailable_message_has_no_redundant_caveat(
+        self, tmp_path: Path,
+    ) -> None:
+        """The generic sweep_verified caveat must not duplicate the
+        dedicated process_table_unavailable message."""
+        config_dir = tmp_path / "cfg"
+        _write_creds(config_dir)
+        from nexus.daemon.storage_service_daemon import StopOutcome
+        outcome = StopOutcome(
+            pids=(), stubborn=(), source="process_table_unavailable",
+            lease_seen=False, sweep_verified=False,
+        )
+        with patch(
+            "nexus.daemon.storage_service_daemon.stop_storage_service",
+            return_value=outcome,
+        ), patch(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            return_value=False,
+        ):
+            result = CliRunner().invoke(main, [
+                "daemon", "service", "stop", "--config-dir", str(config_dir),
+            ])
+        # The GENERIC sweep_verified caveat text ("could not be ruled out")
+        # is distinct from the dedicated process_table_unavailable message
+        # and the exit-failure message (both legitimately mention "could
+        # not be checked" — that overlap is fine); what must NOT happen is
+        # the generic caveat block firing on top of them.
+        assert "could not be ruled out" not in result.output.lower(), (
+            f"the generic sweep_verified caveat must be suppressed when "
+            f"source is already process_table_unavailable: {result.output}"
+        )
