@@ -462,7 +462,8 @@ class TestMergeCommits:
         _git("checkout", "-q", "-b", "feature/x", cwd=repo)
         _commit(repo, "src/feature.py", "feat: feature work (nexus-mrg12)")
         _git("checkout", "-q", "develop", cwd=repo)
-        _git("merge", "-q", "--no-ff", "feature/x", "-m", "Merge feature/x into develop", cwd=repo)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-ff",
+             "feature/x", "-m", "Merge feature/x into develop", cwd=repo)
         fake_bin = _fake_nx(tmp_path)  # both sources empty
         out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
         assert out["permissionDecision"] == "deny", out
@@ -476,7 +477,8 @@ class TestMergeCommits:
         _git("checkout", "-q", "-b", "feature/x", cwd=repo)
         _commit(repo, "src/feature.py", "feat: feature work (nexus-mrg12)")
         _git("checkout", "-q", "develop", cwd=repo)
-        _git("merge", "-q", "--no-ff", "feature/x", "-m", "Merge feature/x into develop", cwd=repo)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-ff",
+             "feature/x", "-m", "Merge feature/x into develop", cwd=repo)
         tip = _git_out("rev-parse", "HEAD", cwd=repo)
         fake_bin = _fake_nx(
             tmp_path,
