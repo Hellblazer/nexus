@@ -922,6 +922,39 @@ def _record_superseded_sweep_skip(doc_id: str, collection: str | None, reason: s
         )
 
 
+# nexus-2t63u round 2 (substantive-critic observation 4): a per-process
+# collector for ``doc_indexer._register_or_lookup_doc_id``'s
+# ``physical_collection`` reconciliation, mirroring the
+# ``_SUPERSEDED_SWEEP_SWEPT_TOTAL`` shape exactly (single int, not a list —
+# a reconciliation is a single per-document event, no per-item detail worth
+# retaining beyond the WARNING log line already emitted at the reconcile
+# site). A ``--dir`` batch that mass-retargets --collection by accident
+# should surface that count in the run's own summary line, not require the
+# operator to scroll back through WARNING-level structlog output to notice.
+_reconciled_collections_lock = threading.Lock()
+_RECONCILED_COLLECTIONS_COUNT = 0
+
+
+def get_reconciled_collections_count() -> int:
+    """Count of ``physical_collection`` reconciliations this process/run."""
+    with _reconciled_collections_lock:
+        return _RECONCILED_COLLECTIONS_COUNT
+
+
+def reset_reconciled_collections_count() -> None:
+    """Clear the collector (CLI callers reset at the start of an indexing
+    run, mirroring ``reset_superseded_sweep_stats``)."""
+    global _RECONCILED_COLLECTIONS_COUNT
+    with _reconciled_collections_lock:
+        _RECONCILED_COLLECTIONS_COUNT = 0
+
+
+def _record_physical_collection_reconciled() -> None:
+    global _RECONCILED_COLLECTIONS_COUNT
+    with _reconciled_collections_lock:
+        _RECONCILED_COLLECTIONS_COUNT += 1
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -1196,7 +1229,13 @@ def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
             chunk_count=refused.chunk_count,
             path="per_doc",
             note="manifest rows written; completion stamp refused — "
-                 "doc is NOT fully indexed, index_state left as-was",
+                 "doc is NOT fully indexed, index_state left as-was. "
+                 "A candidate cause (nexus-2t63u): a stale "
+                 "catalog_documents.physical_collection from a prior run "
+                 "targeting a different collection makes manifest_verify "
+                 "check the wrong collection and misreport present "
+                 "chunks as missing — check via 'nx catalog show "
+                 f"{doc_id}'.",
         )
         _record_complete_refusal(doc_id)
         return
@@ -1323,7 +1362,13 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                         missing=_r.get("missing"),
                         chunk_count=_r.get("chunk_count"),
                         note="manifest rows written; completion stamp refused — "
-                             "doc is NOT fully indexed, index_state left as-was",
+                             "doc is NOT fully indexed, index_state left as-was. "
+                             "A candidate cause (nexus-2t63u): a stale "
+                             "catalog_documents.physical_collection from a "
+                             "prior run targeting a different collection "
+                             "makes manifest_verify check the wrong "
+                             "collection and misreport present chunks as "
+                             f"missing — check via 'nx catalog show {_rid}'.",
                     )
                     if _rid:
                         _record_complete_refusal(_rid)

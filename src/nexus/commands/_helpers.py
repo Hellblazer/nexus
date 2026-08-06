@@ -138,6 +138,7 @@ def reset_identity_drop_collectors() -> None:
         reset_complete_refusals,
         reset_manifest_identity_drops,
         reset_manifest_write_failures,
+        reset_reconciled_collections_count,
         reset_superseded_sweep_stats,
     )
 
@@ -148,6 +149,9 @@ def reset_identity_drop_collectors() -> None:
     # three collectors above, added here (not a parallel function) so
     # every existing call site picks up sweep-skip visibility for free.
     reset_superseded_sweep_stats()
+    # nexus-2t63u round 2: same shape again, for physical_collection
+    # reconciliation visibility.
+    reset_reconciled_collections_count()
 
 
 def _emit_write_failed_warning() -> bool:

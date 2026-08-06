@@ -140,6 +140,61 @@ class TestBatchIndexProgress:
         assert "3 pdfs" in result.output.lower()
 
 
+class TestBatchIndexReconciliationSummary:
+    """nexus-2t63u round 2 (critic recommendation, non-blocking add before
+    commit): the ``--dir`` batch Summary line must surface a mass mistaken
+    ``--collection`` retarget as a count, not require the operator to
+    scroll back through WARNING-level structlog output to notice it.
+
+    Pins the accumulation subtlety the critic's probe falsified empirically:
+    ``reset_identity_drop_collectors()`` (which also resets the
+    reconciliation collector) fires PER FILE inside the ``--dir`` loop, so
+    a naive single read of ``get_reconciled_collections_count()`` taken
+    AFTER the loop would see only the LAST file's count — undercounting a
+    2-of-3 reconciling batch to 1. The fix accumulates a running total
+    inside the loop instead.
+    """
+
+    def test_two_of_three_files_reconcile_collections_summary_shows_count(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """alpha.pdf and beta.pdf each simulate a successful
+        ``physical_collection`` reconciliation (mirroring what
+        ``doc_indexer._register_or_lookup_doc_id``'s real reconcile branch
+        does via ``_record_physical_collection_reconciled()`` — the mocked
+        ``index_pdf`` call stands in for that whole production call, so the
+        collector is populated the same way production would populate it,
+        at the same point in the per-file sequence); gamma.pdf does not.
+        The naive post-loop-read alternative the critic falsified would
+        report "1 collection reconciliation(s)" here (only gamma.pdf's —
+        actually zero — or beta.pdf's count, depending on reset timing);
+        the fix must report exactly 2.
+        """
+        from nexus.mcp_infra import _record_physical_collection_reconciled
+
+        def index_with_reconcile(path, **kwargs):
+            if path.name in ("alpha.pdf", "beta.pdf"):
+                _record_physical_collection_reconciled()
+            return 5
+
+        with patch("nexus.doc_indexer.index_pdf", side_effect=index_with_reconcile):
+            result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
+
+        assert result.exit_code == 0, result.output
+        assert "2 collection reconciliation(s), see WARNINGs above" in result.output, result.output
+
+    def test_no_reconciliations_summary_carries_no_suffix(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """Success-path regression: no reconciliations -> no suffix at all
+        (not "0 collection reconciliation(s)")."""
+        with patch("nexus.doc_indexer.index_pdf", side_effect=_mock_index_pdf):
+            result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
+
+        assert result.exit_code == 0, result.output
+        assert "collection reconciliation" not in result.output
+
+
 # ── Error handling ───────────────────────────────────────────────────────────
 
 

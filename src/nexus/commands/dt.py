@@ -789,7 +789,7 @@ def index_cmd(
                             present=exc.present,
                             missing=exc.missing,
                         )
-                        failed.append((uuid, path, _index_run_refused_message(exc)))
+                        failed.append((uuid, path, _index_run_refused_message(exc, target_collection=dt_collection)))
                     elif isinstance(exc, ChunkLandingUnverifiedError):
                         _log.error(
                             "dt_content_chunk_landing_unverified",
@@ -896,7 +896,7 @@ def index_cmd(
                     present=exc.present,
                     missing=exc.missing,
                 )
-                failed.append((uuid, path, _index_run_refused_message(exc)))
+                failed.append((uuid, path, _index_run_refused_message(exc, target_collection=resolved_collection)))
             elif isinstance(exc, ChunkLandingUnverifiedError):
                 _log.error(
                     "dt_index_chunk_landing_unverified",

@@ -747,6 +747,86 @@ def _register_or_lookup_doc_id(
 
         existing = reader.by_file_path(owner, fp)
         if existing is not None:
+            # nexus-2t63u: reconcile a stale ``physical_collection`` EARLY,
+            # before the tumbler is returned and threaded into this run's
+            # chunk/manifest writes. Without this, a path-based re-index
+            # into a DIFFERENT --collection lands chunks correctly in the
+            # NEW collection, but the engine's ``writeManifestRows`` /
+            # ``appendManifestChunks`` stamp EVERY manifest row's
+            # ``collection`` from ``catalog_documents.physical_collection``
+            # (read unconditionally at manifest-write time — see
+            # ``CatalogRepository.writeManifestRows``/``appendManifestChunks``
+            # on the engine side) — so the manifest keeps pointing at the
+            # OLD collection. ``manifest_verify`` then joins against the
+            # WRONG collection and reports live, present chunks as
+            # "missing", tripping the RUNFENCE completion refusal
+            # (``IndexRunVerifyRefused``) BEFORE ``_catalog_pdf_hook`` — the
+            # only other writer of this field — ever runs (it sits at the
+            # tail of ``index_pdf``, reached only on a non-refused
+            # completion). Every subsequent run reproduces the identical
+            # counts: a self-perpetuating wedge (T2
+            # nexus/nexus-2t63u-debug-2026-08-06).
+            #
+            # This mirrors what ``_catalog_pdf_hook`` already does at the
+            # tail (``writer.update(existing.tumbler,
+            # physical_collection=collection_name, ...)``); it only moves
+            # that reconciliation ahead of the manifest write, which is the
+            # ordering the engine's stamp requires. Contrast the
+            # ``source_uri`` branch above, which RAISES
+            # ``SourceUriCollectionMismatchError`` on this same divergence —
+            # a ``--source-uri`` + ``--collection`` pair that disagrees with
+            # the document's home is an explicit, deliberate move. A plain
+            # ``by_file_path`` re-index under a new ``--collection`` is the
+            # common, intentional retarget case instead, so this branch
+            # reconciles rather than refusing (nexus-2t63u DESIGN CHOICE,
+            # Option A — orchestrator comment on the bead, per the
+            # debugger's A/B handoff in T2 [21558]).
+            if existing.physical_collection != physical_collection:
+                # nexus-ir68m (code-review Important #1 / substantive-critic
+                # CRITICAL, round 2, empirically proven by the critic's
+                # probe): this write is ADVISORY, isolated in its own narrow
+                # try/except — never the outer function's broad ``except
+                # Exception: return ""`` below. A tumbler this branch already
+                # RESOLVED (``existing`` is a live document) must never be
+                # discarded because of a transient reconcile-write failure;
+                # doing so hands ``index_pdf`` doc_id="", which skips BOTH
+                # ``_fence_begin`` and ``_fence_complete`` (both gated on
+                # ``if _catalog_doc_id_for_batch:``) and drops the WHOLE run
+                # out of RUNFENCE — reintroducing the exact un-fenced-
+                # completion gap RDR-102/nexus-5xn3k/nexus-tp8yk closed, in
+                # service of fixing a DIFFERENT bug. Mirrors ``_fence_begin``'s
+                # established fail-open advisory-write contract: log and
+                # proceed with the tumbler under its CURRENT (old) stamp —
+                # the run then either completes honestly against the old
+                # collection or refuses with the now-honest mismatch message
+                # (``_index_run_refused_message``'s ``target_collection``
+                # lookup) — both outcomes honest, neither unfenced.
+                try:
+                    writer.update(existing.tumbler, physical_collection=physical_collection)
+                except Exception:  # noqa: BLE001 — boundary catch: advisory write, must never discard an already-resolved tumbler (nexus-ir68m fail-open contract)
+                    _log.warning(
+                        "doc_physical_collection_reconcile_write_failed",
+                        tumbler=str(existing.tumbler),
+                        file_path=fp,
+                        old_collection=existing.physical_collection,
+                        new_collection=physical_collection,
+                    )
+                else:
+                    _log.warning(
+                        "doc_physical_collection_reconciled",
+                        tumbler=str(existing.tumbler),
+                        file_path=fp,
+                        old_collection=existing.physical_collection,
+                        new_collection=physical_collection,
+                    )
+                    # nexus-2t63u round 2 (substantive-critic observation
+                    # 4): count successful reconciliations so a batch run's
+                    # own summary line can surface "N collection
+                    # reconciliation(s)" instead of requiring the operator
+                    # to notice a mass mistaken --collection retarget by
+                    # scrolling back through WARNING-level structlog output.
+                    from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+                    _record_physical_collection_reconciled()
             return str(existing.tumbler)
 
         # nexus-u8n4r: refuse registration when the identity about to be
