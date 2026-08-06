@@ -151,6 +151,43 @@ def catalog_documents_for_collection(reader: object, collection: str) -> list:
     return list(reader.list_by_collection(collection) or [])
 
 
+def is_note_shaped(entry: object) -> bool:
+    """True when *entry* is a manifest-less MCP ``store_put`` / ``nx store
+    put`` note rather than an indexed (file-backed) document.
+
+    A note's catalog row carries no ``file_path`` (store_put origin, not
+    an indexed file) and stamps its single T3 chunk's natural id — the
+    full content hash — into ``meta["doc_id"]`` at write time
+    (``catalog/store_hook.py::single_chunk_manifest_metadata`` +
+    ``catalog_store_hook_tracked``).
+
+    THE single identity predicate for "is this a note" across the
+    codebase — :func:`live_note_chashes`, :func:`non_complete_documents`,
+    and ``nx catalog doctor --store-put-integrity``'s ghost lookup all
+    read the SAME shape. Extracted here (nexus-cotmr) so another call
+    site does not re-derive it independently — a divergent re-derivation
+    is exactly the failure class this predicate exists to prevent (two
+    definitions of "note" silently drifting apart). Deliberately NOT
+    used by ``health.py``'s RUNFENCE stale-fence check: notes are fenced
+    producers since nexus-cotmr fenced the CLI store path (MCP was
+    fenced by vw594/F2), so a note-shaped exemption there would mask
+    real fence regressions (critique T2 [21535]).
+
+    Args:
+        entry: a catalog entry (``CatalogEntry`` or any duck-typed
+            fixture exposing ``file_path`` and ``meta``). Attributes are
+            read via ``getattr`` with safe defaults so hand-built test
+            fixtures that omit one or both fields do not raise.
+
+    Returns:
+        True when *entry* has no ``file_path`` AND a truthy
+        ``meta["doc_id"]``.
+    """
+    if getattr(entry, "file_path", ""):
+        return False  # has a source file: indexed content, not a note
+    return bool((getattr(entry, "meta", None) or {}).get("doc_id", ""))
+
+
 def live_note_chashes(documents) -> set[str]:
     """Chashes of manifest-less notes among *documents* that a
     T3-deleting sweep must NEVER treat as orphans (nexus-39upx hazard 2
@@ -195,8 +232,8 @@ def live_note_chashes(documents) -> set[str]:
     """
     notes: set[str] = set()
     for e in documents or []:
-        if getattr(e, "file_path", ""):
-            continue  # has a source file: indexed content, not a note
+        if not is_note_shaped(e):
+            continue
         chash = (getattr(e, "meta", None) or {}).get("doc_id", "")
         if chash:
             notes.add(chash)
@@ -263,7 +300,7 @@ def non_complete_documents(documents) -> list:
     """
     out = []
     for e in documents or []:
-        if not getattr(e, "file_path", "") and (getattr(e, "meta", None) or {}).get("doc_id", ""):
+        if is_note_shaped(e):
             continue  # note-shaped: live_note_chashes's exemption already covers it
         if not getattr(e, "index_state_reported", True):
             continue  # pre-RUNFENCE engine: floor-tolerant, no signal to act on

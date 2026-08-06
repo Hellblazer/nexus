@@ -103,6 +103,21 @@ def put_cmd(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
     )
 
+    # nexus-cotmr / nexus-tafjk: producer coverage gap — CLI `nx store
+    # put` reached index_state=NULL forever (never begin, never a
+    # manifest_complete ride) even though F2 (commit f55435eb) already
+    # fenced the MCP store_put entry point and its own AST-tripwire
+    # allowlist claimed "MCP store_put / nx store put" coverage the code
+    # never delivered for the CLI half. Mirror MCP core.py's store_put
+    # F2 pattern VERBATIM: content_hash is the same full-digest value
+    # single_chunk_manifest_metadata already derived (chunk_text_hash IS
+    # content_hash for a single-chunk store); fence begin BEFORE db.put,
+    # matching the memo's T0-before-first-chunk-upsert ordering.
+    content_hash = manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
+    if catalog_doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+        _fence_begin(catalog_doc_id, content_hash, col_name)
+
     # nexus-b6enc C2: the catalog row is registered BEFORE db.put — on a
     # put failure, delete the row minted IN THIS CALL (never a
     # pre-existing dedup target) so no ghost row survives, then surface
@@ -120,6 +135,13 @@ def put_cmd(
             catalog_doc_id=catalog_doc_id,
         )
     except Exception as put_exc:
+        # nexus-cotmr: mirrors MCP F2's dedup-hit-then-put-failure fix —
+        # stamp 'failed' unconditionally so the fence does not wedge at
+        # 'indexing' with only the 6h doctor sweep as signal. _fence_fail
+        # never raises, so the rollback + re-raise below are unaffected.
+        if catalog_doc_id:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+            _fence_fail(catalog_doc_id, str(put_exc))
         if catalog_doc_id and catalog_row_minted:
             _rollback_minted_catalog_entry(
                 catalog_doc_id, original_error=str(put_exc),
@@ -135,6 +157,15 @@ def put_cmd(
             _store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
         except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit error below
             manifest_error = str(manifest_exc)
+            # nexus-cotmr: the vector put already succeeded (db.put
+            # above), so this is not the dedup-hit-then-put-failure
+            # wedge above — but the fence began 'indexing' and this is
+            # the only completion path (no manifest_complete ride is
+            # possible: the direct write above already failed). Stamp
+            # 'failed' so the row does not sit silently at 'indexing'
+            # with only the 6h doctor sweep as signal.
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+            _fence_fail(catalog_doc_id, manifest_error)
             # CRE Minor 5: structlog twin of the MCP path's
             # store_put_manifest_direct_failed — the ClickException below
             # reaches the interactive user but must also reach structured
@@ -166,10 +197,22 @@ def put_cmd(
     # hook short-circuits and the catalog row ships with chunk_count=0
     # (the same regression class as nexus-zq79 / 4.32.4 fixed for
     # `nx index repo`).
+    # nexus-cotmr F2 (mirrors MCP core.py::store_put verbatim):
+    # manifest_complete rides this existing call through
+    # manifest_write_batch_hook's write_manifest_many completion stamp
+    # (the SAME manifest rows _store_put_manifest_direct above already
+    # wrote — an idempotent re-UPSERT), no extra round trip. Passed
+    # unconditionally, same as the MCP path: if the direct write above
+    # already failed, this ride is the hook's own (idempotent) retry —
+    # success here still lands 'complete' (correct, the data did land);
+    # a repeat failure is swallowed by fire_batch's per-hook isolation
+    # and the fence stays at the 'failed' stamp _fence_fail already
+    # wrote above, never silently 'indexing' forever either way.
     hooks.fire_store_chains(
         [doc_id], col_name, [content],
         metadatas=manifest_metadatas,
         catalog_doc_id=catalog_doc_id,
+        manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
     )
     if manifest_error:
         # CRE Imp 3: 'nx catalog reconcile' is a verified no-op for this

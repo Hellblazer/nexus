@@ -1065,6 +1065,7 @@ def _run_store_put_integrity() -> dict:
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
+    from nexus.indexer_utils import is_note_shaped  # noqa: PLC0415 — command-local import (nexus.indexer_utils)
 
     try:
         cat = _cat_cmd._get_catalog()
@@ -1075,10 +1076,12 @@ def _run_store_put_integrity() -> dict:
             "checked": 0, "drift": [], "ghosts": [],
         }
     try:
-        docs = [
-            e for e in cat.all_documents(content_type="knowledge")
-            if not e.file_path and (e.meta or {}).get("doc_id")
-        ]
+        # nexus-cotmr (substantive-critic Significant finding): this is
+        # the store_put-origin identity predicate — same shape as
+        # indexer_utils.is_note_shaped (file_path=="" AND meta.doc_id
+        # truthy), now consolidated onto that single function instead of
+        # a fourth independent re-derivation.
+        docs = [e for e in cat.all_documents(content_type="knowledge") if is_note_shaped(e)]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
