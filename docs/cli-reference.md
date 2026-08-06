@@ -134,6 +134,7 @@ catalog identity.
 | `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
 | `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
+| `--allow-degraded-extraction` | Accept extracted text that fails the post-extraction quality gate (nexus-wi1uv, see [Post-Extraction Quality Gate](#post-extraction-quality-gate) below) instead of failing the run |
 
 ### PDF Extraction Backends
 
@@ -193,6 +194,68 @@ aggressively, so set it generously (several GB).
 ```bash
 nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)
 nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not installed)
+```
+
+#### Post-extraction quality gate
+
+`--extractor docling` is the documented recovery when MinerU OOM-fails on a
+formula-dense page — but on some pages Docling (and, less often, MinerU)
+can complete "successfully" while producing **space-stripped, unsearchable
+text**: words run together (`istheasetofthe`), with heavy raw-LaTeX noise.
+Nothing about the run looked wrong — it reported success, the chunks were
+indexed and embedded — the document just could not be found by search
+(nexus-wi1uv).
+
+Every extraction (MinerU, Docling, and the PyMuPDF fallback alike) now
+passes through one post-extraction sanity gate before chunking: three cheap
+signals — whitespace ratio, mean token length, and the fraction of
+abnormally long tokens — computed on the raw extracted text and compared
+against thresholds calibrated against real extracted text (clean prose,
+legitimately dense math/formula notation, and code-identifier-dense prose,
+so the gate does not reject real papers for being equation- or
+algorithm-heavy). A document whose signals cross the thresholds **fails the
+run** naming the failing signal(s), the measured value, and the remedy:
+
+```
+PDF paper.pdf failed the post-extraction quality gate (extraction_method=docling):
+whitespace_ratio=0.0114 < floor 0.05. This is the space-stripped-garbage failure
+mode (nexus-wi1uv) — the extracted text is likely unsearchable if indexed.
+Remedy: retry with `--extractor mineru` (formula-aware, often avoids the
+corruption), or if this document is legitimately dense/unusual and you have
+reviewed the extracted text, rerun with `--allow-degraded-extraction` to
+index it anyway.
+```
+
+**Blast radius of a failure differs by command.** `nx index pdf` (single
+file or `--dir`) fails just that invocation/file — `--dir` continues the
+rest of the batch and exits non-zero listing every failure. `nx dt index`
+contains a gate failure to the offending record (per-record batch
+isolation, same as any other recoverable indexing error) and continues the
+rest of the run. `nx index repo` contains it to the offending PDF too —
+the rest of the repo (code, prose, other PDFs, RDR docs) still indexes —
+but a non-zero count of gated PDFs still fails the overall `nx index repo`
+run's exit code (after post-processing completes), naming the count and
+the per-file remedy below.
+
+**Non-spaced scripts (CJK).** `str.split()` cannot segment Han, Hiragana,
+Katakana, or Hangul text — a real Chinese/Japanese/Korean document has no
+inter-word ASCII spaces and would otherwise look identical to the
+space-stripped-garbage signature on every signal. The gate detects
+non-spaced-script-dominant text and **skips** evaluation for it (logged at
+INFO as `extraction_quality_gate_skipped`) rather than force-fitting a
+threshold that cannot discriminate for that input — a mixed document
+(e.g. English section headers in an otherwise-CJK paper) is unaffected as
+long as CJK characters are not the dominant script.
+
+Pass `--allow-degraded-extraction` only after reviewing the extraction (or
+for a document you've confirmed genuinely trips the heuristic) — the run
+logs a WARNING so the override is visible immediately, AND every chunk of
+the document is stamped `quality_gate_overridden: true` in its persisted
+T3 metadata, so a later shakedown/audit has a durable handle on which
+documents were accepted with known-degraded text:
+
+```bash
+nx search "" --corpus docs --where quality_gate_overridden=true --files
 ```
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every

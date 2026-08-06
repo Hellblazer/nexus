@@ -256,6 +256,49 @@ class TestBatchIndexErrors:
         # drive the batch-wide exit code non-zero.
         assert result.exit_code != 0, result.output
 
+    def test_quality_gate_failure_lands_in_failures_bucket(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """nexus-wi1uv: a per-file post-extraction quality-gate failure
+        (the space-stripped-garbage signature) is a plain ``ExtractionQualityError``
+        (a ``NexusError``, not a ``RuntimeError``) — the batch loop's
+        generic ``except Exception`` isolation must catch it exactly like
+        any other per-file failure: batch continues, failure named in the
+        list, batch-wide exit non-zero (nexus-uqq9z contract)."""
+        from nexus.errors import ExtractionQualityError
+
+        call_count = 0
+
+        def fail_second(path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise ExtractionQualityError(
+                    "PDF failed the post-extraction quality gate: "
+                    "whitespace_ratio=0.0114 < floor 0.05"
+                )
+            return 5
+
+        with patch("nexus.doc_indexer.index_pdf", side_effect=fail_second):
+            result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
+
+        assert call_count == 3, "batch isolation: all 3 files must still be attempted"
+        assert result.exit_code != 0, result.output
+        assert "quality gate" in result.output
+        assert "1 of 3 file(s) failed" in result.output, result.output
+
+    def test_allow_degraded_extraction_flag_threads_through_batch(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        with patch("nexus.doc_indexer.index_pdf", return_value=5) as m:
+            result = runner.invoke(
+                main, ["index", "pdf", "--dir", str(pdf_dir), "--allow-degraded-extraction"],
+            )
+        assert result.exit_code == 0, result.output
+        assert m.call_args is not None
+        _, kw = m.call_args
+        assert kw.get("allow_degraded_extraction") is True
+
     def test_empty_directory(
         self, runner: CliRunner, empty_dir: Path,
     ) -> None:

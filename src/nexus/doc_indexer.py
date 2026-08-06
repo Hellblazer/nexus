@@ -1794,6 +1794,7 @@ def _pdf_chunks(
     on_formula_oom: str = "fail",
     git_meta: dict | None = None,
     doc_id: str = "",
+    allow_degraded_extraction: bool = False,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
@@ -1808,6 +1809,11 @@ def _pdf_chunks(
     *extractor* selects the PDF extraction backend (``"auto"``, ``"docling"``,
     or ``"mineru"``).
 
+    *allow_degraded_extraction* (nexus-wi1uv) forwarded to
+    :meth:`PDFExtractor.extract` — bypasses the post-extraction quality
+    gate that fails loud on space-stripped/garbage extraction output.
+    Default ``False``.
+
     *git_meta* — flat ``git_*`` provenance dict. When ``None`` the function
     auto-detects via :func:`nexus.indexer_utils.detect_git_metadata` from
     ``pdf_path``. Pass an explicit value when the caller has already
@@ -1820,6 +1826,7 @@ def _pdf_chunks(
         git_meta = detect_git_metadata(pdf_path)
     result = PDFExtractor().extract(
         pdf_path, extractor=extractor, on_formula_oom=on_formula_oom,
+        allow_degraded=allow_degraded_extraction,
     )
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
@@ -1889,6 +1896,7 @@ def _pdf_chunks(
             bib_venue=bib.get("venue", ""),
             bib_citation_count=bib.get("citation_count", 0),
             extraction_method=result.metadata.get("extraction_method", ""),
+            quality_gate_overridden=bool(result.metadata.get("quality_gate_overridden", False)),
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -1996,6 +2004,7 @@ def index_pdf(
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
     on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
+    allow_degraded_extraction: bool = False,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -2044,6 +2053,16 @@ def index_pdf(
     for any hit regardless of whether a callback is given; the callback
     exists so the CLI can fold a count into its run summary without a
     second catalog round-trip.
+
+    Pass *allow_degraded_extraction=True* (nexus-wi1uv) to bypass the
+    post-extraction text-quality gate (see
+    :func:`nexus.pdf_extractor.assess_extraction_quality`) that otherwise
+    fails loud on space-stripped/garbage extraction output — e.g. docling
+    completing "successfully" on a formula-dense page but running every
+    word together. Default ``False``; surfaced as
+    ``--allow-degraded-extraction`` on ``nx index pdf``. Threaded to both
+    the streaming pipeline and the batch/incremental path below, since
+    either can be selected depending on *streaming* and page count.
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
@@ -2186,6 +2205,7 @@ def index_pdf(
                 doc_id=doc_id,
                 hooks=hooks,
                 source_uri=source_uri,
+                allow_degraded_extraction=allow_degraded_extraction,
             )
             # nexus-y8qtj: end-of-run fork check. Best-effort, always runs;
             # the callback (if any) lets the CLI fold a count into its
@@ -2374,7 +2394,10 @@ def index_pdf(
 
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
-    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom, doc_id=doc_id)
+    chunk_fn = partial(
+        _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom,
+        doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
+    )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
         return _empty_meta if return_metadata else 0

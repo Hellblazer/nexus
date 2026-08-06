@@ -298,6 +298,12 @@ def _nexus_error_subclass_names(errors_file: pathlib.Path = ERRORS_FILE) -> set[
 #: catching drift in EITHER direction.
 _RECORD_LEVEL: frozenset[str] = frozenset({
     "ChunkLandingUnverifiedError", "IndexRunVerifyRefused",
+    # nexus-wi1uv (occurrence 5 of the wrapper-gap class, caught by this
+    # tripwire pre-merge): fires from PDFExtractor.extract() deep inside
+    # index_pdf -> _pdf_chunks, reachable from dt.py's nx dt index
+    # per-record loop for any .pdf record. One gated PDF must fail that
+    # record only, never abort the rest of the batch.
+    "ExtractionQualityError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,

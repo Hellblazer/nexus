@@ -796,9 +796,29 @@ def index_repo_cmd(
         # rc 0 — see _stamp_index_run_complete's None-sentinel handling,
         # untouched by this bead): only a POSITIVE engine verdict (a
         # refusal) or a write/identity failure triggers this.
+        # nexus-wi1uv round-2 (code-review-expert + substantive-critic
+        # Critical): a PDF failing the post-extraction quality gate is
+        # contained per-file inside index_repository (never aborts the
+        # run — see indexer._contain_extraction_quality_gate), but a
+        # "clean" rc=0 for a run that skipped N documents is exactly the
+        # tp8yk "clean but wrong" class the manifest_problems_detected
+        # check above exists to prevent. Checked AFTER taxonomy
+        # post-processing (like manifest_problems_detected) so the rest
+        # of the run's useful work still completes before the non-zero
+        # exit.
+        pdf_quality_gate_failed = (stats or {}).get("pdf_quality_gate_failed", 0)
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             raise_identity_drop_exception(subject="document")
+        if pdf_quality_gate_failed:
+            raise click.ClickException(
+                f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "
+                f"quality gate (nexus-wi1uv) — see the WARNING line(s) above "
+                f"for the affected file(s). Retry an individual file with "
+                f"'nx index pdf --allow-degraded-extraction <file>' to accept "
+                f"the extraction deliberately, or 'nx index pdf <file>' after "
+                f"fixing the underlying extraction (e.g. --extractor mineru)."
+            )
 
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:
@@ -1299,7 +1319,22 @@ def _index_run_refused_message(exc) -> str:
         "document in a different --collection than this run targets."
     ),
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None) -> None:
+@click.option(
+    "--allow-degraded-extraction",
+    "allow_degraded_extraction",
+    is_flag=True,
+    default=False,
+    help=(
+        "Accept extracted text that fails the post-extraction quality gate "
+        "(nexus-wi1uv) — e.g. docling completing on a formula-dense page "
+        "but running words together ('istheasetofthe'). By default that "
+        "gate FAILS the run rather than silently indexing unsearchable "
+        "garbage. Pass this flag only after reviewing the extraction (or "
+        "for a document you know legitimately trips the heuristic) — the "
+        "run is marked loudly in the summary when this override is used."
+    ),
+)
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -1313,6 +1348,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         ChunkLandingUnverifiedError,
         CredentialsMissingError,
+        ExtractionQualityError,
         IndexingError,
         IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
@@ -1463,6 +1499,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     pdf, corpus=corpus, collection_name=collection,
                     force=force, enrich=enrich, extractor=extractor,
                     on_formula_oom=on_formula_oom, streaming=streaming,
+                    allow_degraded_extraction=allow_degraded_extraction,
                 )
                 elapsed = _time.monotonic() - t0
                 total_chunks += n
@@ -1581,8 +1618,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "")
-        except (ImportError, RuntimeError) as e:
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction)
+        except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -1658,7 +1695,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
-                             source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+                             source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
+                             allow_degraded_extraction=allow_degraded_extraction)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this
             # is NOT an (ImportError, RuntimeError) — it fell through the
@@ -1667,7 +1705,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # completion stamp. Clean fail-loud ClickException, never
             # folded into a success summary.
             raise click.ClickException(_index_run_refused_message(e)) from e
-        except (ImportError, RuntimeError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -1688,12 +1726,13 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     else:
         try:
             n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
-                          source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+                          source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
+                          allow_degraded_extraction=allow_degraded_extraction)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
             raise click.ClickException(_index_run_refused_message(e)) from e
-        except (ImportError, RuntimeError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user

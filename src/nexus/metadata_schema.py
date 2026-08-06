@@ -122,6 +122,20 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # (markdown/code/prose never pass this kwarg); ``normalize`` drops
     # the empty default so those chunks stay under the cap.
     "extraction_method",
+    # nexus-wi1uv round-2 (code-review-expert + substantive-critic
+    # Critical, both independently, 2026-08-06): whether this chunk was
+    # indexed under ``--allow-degraded-extraction`` after failing the
+    # post-extraction quality gate. Without this the override was
+    # transient-only (CLI echo + structlog WARNING at index time,
+    # discarded once the process exits) — a deliberately-degraded
+    # document became indistinguishable from a silent failure one
+    # shakedown cycle later, reproducing this bead's own complaint
+    # shape. Searchable via ``where=quality_gate_overridden=true`` so a
+    # shakedown/audit has a durable handle on which documents were
+    # accepted with known-degraded text. ``False`` default is dropped by
+    # ``normalize`` (see Step 2e) so the common healthy-extraction chunk
+    # spends no metadata budget on it.
+    "quality_gate_overridden",
 })
 
 #: Allowed content_type values. Replaces the old overlapping pair
@@ -135,12 +149,14 @@ CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 #: dropped ``source_path``, and RDR-101 Phase 5c / RDR-108 Phase 3 dropped
 #: ``corpus``, ``store_type``, ``git_meta``, ``doc_id``, ``chunk_index``,
 #: ``chunk_count`` — nexus-1oguj then ADDED ``extraction_method`` back in
-#: as canonical (not cargo). ``ALLOWED_TOP_LEVEL`` sits at 27 of 32 today
-#: (verify via ``len(ALLOWED_TOP_LEVEL)`` — this comment drifts, the code
-#: doesn't). The ``bib_*`` placeholder-drop and ``extraction_source`` /
-#: ``extraction_method`` omitted-when-empty filters in :func:`normalize`
+#: as canonical (not cargo), and nexus-wi1uv then added
+#: ``quality_gate_overridden``. ``ALLOWED_TOP_LEVEL`` sits at 28 of 32
+#: today (verify via ``len(ALLOWED_TOP_LEVEL)`` — this comment drifts,
+#: the code doesn't). The ``bib_*`` placeholder-drop and
+#: ``extraction_source`` / ``extraction_method`` / ``quality_gate_
+#: overridden`` omitted-when-empty/False filters in :func:`normalize`
 #: keep typical chunks well under the cap (no-bib + no-git + no-DT-source
-#: + non-PDF ≈ 20 keys).
+#: + non-PDF + non-degraded ≈ 20 keys).
 MAX_SAFE_TOP_LEVEL_KEYS: int = 32
 
 #: Git provenance sub-keys — packed into ``git_meta`` as a JSON string.
@@ -237,6 +253,15 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
     if not normalised.get("extraction_method", ""):
         normalised.pop("extraction_method", None)
 
+    # Step 2e: drop the nexus-wi1uv quality_gate_overridden key when
+    # False (the common case — a chunk indexed under a healthy
+    # extraction, or a non-PDF content_type that never sets it). Only
+    # chunks written under ``--allow-degraded-extraction`` after an
+    # actual gate failure keep the key, so it never costs the common
+    # chunk a metadata slot.
+    if not normalised.get("quality_gate_overridden", False):
+        normalised.pop("quality_gate_overridden", None)
+
     # Step 3: stamp content_type.
     normalised["content_type"] = content_type
 
@@ -331,6 +356,10 @@ def make_chunk_metadata(
     # text. Empty default is dropped by normalize; only PDF callers pass
     # a real value.
     extraction_method: str = "",
+    # nexus-wi1uv round-2. True only for a chunk indexed under
+    # --allow-degraded-extraction after failing the post-extraction
+    # quality gate. False default is dropped by normalize.
+    quality_gate_overridden: bool = False,
 ) -> dict[str, Any]:
     """Build a complete chunk metadata dict and route through
     :func:`normalize` so it's safe to write directly to T3.
@@ -370,6 +399,7 @@ def make_chunk_metadata(
         "session_id": session_id,
         "extraction_source": extraction_source,
         "extraction_method": extraction_method,
+        "quality_gate_overridden": quality_gate_overridden,
     }
     return normalize(raw, content_type=content_type)
 

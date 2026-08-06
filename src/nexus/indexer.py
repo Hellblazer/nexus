@@ -1928,6 +1928,40 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 _TRANSIENT_UPSERT_CODES = frozenset({502, 503, 504})
 
 
+def _contain_extraction_quality_gate(
+    fn: "Callable[[], int]", file: "Path", failed: list[str],
+) -> int:
+    """Run per-file PDF index ``fn``; on ``ExtractionQualityError`` (nexus-wi1uv's
+    post-extraction quality gate), log an ERROR naming the file + remedy,
+    append *file* to *failed*, and return 0 (file NOT written this run)
+    instead of propagating.
+
+    Round-2 review finding (code-review-expert + substantive-critic
+    Critical, both independently): pre-fix, ``run_file_loop``'s
+    first-exception-cancels-all contract meant ONE PDF tripping the
+    quality gate during ``nx index repo`` aborted the ENTIRE run —
+    cancelling all not-yet-started code/prose/PDF/RDR files, not just the
+    offending PDF. Same containment shape as :func:`_contain_transient_
+    upsert` (same layer, same file), but for a PERMANENT per-document
+    condition rather than a transient upsert blip — so this does not
+    retry next run the way a deferred transient upsert does; the file
+    stays quality-gate-failed until explicitly re-indexed with
+    ``nx index pdf --allow-degraded-extraction <file>``.
+    """
+    from nexus.errors import ExtractionQualityError  # noqa: PLC0415 — circular-dep avoidance: nexus.errors
+
+    try:
+        return fn()
+    except ExtractionQualityError as exc:
+        _log.error(
+            "index_file_quality_gate_failed",
+            file=str(file), error=str(exc),
+            remedy=f"nx index pdf --allow-degraded-extraction {file}",
+        )
+        failed.append(str(file))
+        return 0
+
+
 def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
     """Run per-file index ``fn``; on a TRANSIENT upsert 5xx (gateway/pool), log
     and return 0 (file deferred to staleness) instead of propagating. Permanent
@@ -3840,10 +3874,21 @@ def _run_index(
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
     _log.debug("indexing PDF files", count=len(pdf_files))
 
+    # nexus-wi1uv round-2 (code-review-expert + substantive-critic Critical,
+    # both independently): one PDF tripping the post-extraction quality
+    # gate must fail THAT file, never cancel the rest of this run's
+    # code/prose/PDF/RDR files via run_file_loop's first-exception-
+    # cancels-all contract. Collected here so the summary + stats key
+    # below can report it (and index_repo_cmd can drive a non-zero exit).
+    _quality_gate_failed: list[str] = []
+
     def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
         # nexus-7yfe6: same transient-upsert containment as prose (direct path).
-        return _contain_transient_upsert(lambda: _index_pdf_file(
+        # nexus-wi1uv: quality-gate containment nests inside — extraction
+        # (where the gate fires) happens before the vector upload (where a
+        # transient 5xx fires), so the inner wrapper sees it first.
+        return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(lambda: _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -3855,13 +3900,34 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
             batcher=_batcher,
-        ), file)
+        ), file, _quality_gate_failed), file)
 
     _pdf_written = run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
     _files_written += _pdf_written
+    if _quality_gate_failed:
+        # nexus-wi1uv: same "WARNING: N file(s) FAILED ... (see logs)" shape
+        # as the batcher.failed_files block below (duoak 2C) — informational
+        # during the run; index_repo_cmd converts a non-zero count into a
+        # non-zero exit (uqq9z-equivalent for this exception class) after
+        # post-processing completes, at the same point manifest_problems_
+        # detected does today.
+        _log.error(
+            "index_pdf_quality_gate_failures",
+            count=len(_quality_gate_failed),
+            files=sorted(_quality_gate_failed)[:20],
+        )
+        if on_phase is not None:
+            on_phase(
+                f"WARNING: {len(_quality_gate_failed)} PDF(s) FAILED the "
+                f"post-extraction quality gate (nexus-wi1uv, see logs): "
+                + ", ".join(sorted(_quality_gate_failed)[:5])
+                + ("…" if len(_quality_gate_failed) > 5 else "")
+                + " — retry with 'nx index pdf --allow-degraded-extraction "
+                "<file>' to accept the extraction deliberately."
+            )
 
     # Index RDR markdown files → rdr__ (nexus-3lswy: 4th run_file_loop
     # category, same wiring as prose — batched register_many/doc_id
@@ -4144,6 +4210,11 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # nexus-wi1uv round-2: count of PDFs that failed the post-extraction
+        # quality gate this run (contained per-file, never aborted the run).
+        # index_repo_cmd uses this to drive a non-zero exit after
+        # post-processing completes.
+        "pdf_quality_gate_failed": len(_quality_gate_failed),
         # nexus-tevzq: per-collection-kind attribution for the caller's
         # discover gate. Keys match the collection-name content_type prefix
         # (RDR-103 shape). prose+pdf both land in docs__.

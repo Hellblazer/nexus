@@ -16,6 +16,29 @@ class IndexingError(NexusError):
     """Error during document indexing pipeline."""
 
 
+class ExtractionQualityError(NexusError):
+    """Post-extraction text-quality gate failed (nexus-wi1uv).
+
+    Raised by :func:`nexus.pdf_extractor._enforce_extraction_quality` when
+    extracted PDF text trips the calibrated whitespace/token-length
+    signals that flag the space-stripped-garbage failure mode (MinerU or
+    Docling completing but producing unsearchable output, e.g.
+    "istheasetofthe"). The documented recovery is to retry with a
+    different extractor, or pass ``--allow-degraded-extraction`` to accept
+    the degraded output deliberately.
+
+    A per-record-raisable member of :data:`PER_RECORD_SURVIVABLE_
+    EXCEPTIONS` below (round-2 review). ``__init__`` accepts *message* as
+    a plain keyword so ``tests/test_commands_dt.py``'s registry-driven
+    ``_MEMBER_KWARGS``-style construction (``member_cls(**kwargs)``) works
+    without special-casing — the base ``Exception.__init__`` accepts only
+    positional args, which that construction pattern cannot supply.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class CredentialsMissingError(NexusError):
     """A required API key or credential is absent."""
 
@@ -317,10 +340,17 @@ class IndexRunVerifyRefused(NexusError):
 #:     remember to go check four call sites for.
 #:
 #: doc_indexer's per-record ingest paths (index_pdf / index_markdown) are
-#: the origin of both current members: ChunkLandingUnverifiedError fires
+#: the origin of the first two members: ChunkLandingUnverifiedError fires
 #: from ``_upsert_skip_reembed`` before any manifest row is committed;
 #: IndexRunVerifyRefused fires from the RUNFENCE completion-verify gate.
+#: ExtractionQualityError (nexus-wi1uv occurrence 5 of this exact class,
+#: caught by this tripwire before it shipped) fires from
+#: ``PDFExtractor.extract()``, deep inside ``index_pdf`` -> ``_pdf_chunks``
+#: -- reached by dt.py's ``nx dt index`` per-record loop for any
+#: ``.pdf``-suffixed record. One PDF tripping the post-extraction quality
+#: gate must fail THAT record, never abort the rest of the batch.
 PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     ChunkLandingUnverifiedError,
     IndexRunVerifyRefused,
+    ExtractionQualityError,
 )

@@ -84,6 +84,45 @@ def test_index_repo_registers_and_indexes(runner, repo_dir, home):
     assert "Done" in result.output
 
 
+def test_index_repo_pdf_quality_gate_failures_exit_nonzero(runner, repo_dir, mock_reg):
+    """nexus-wi1uv round-2 (code-review-expert + substantive-critic
+    Critical): PDF(s) that failed the post-extraction quality gate are
+    contained per-file inside index_repository (indexer._contain_
+    extraction_quality_gate) -- the run itself must still complete and
+    report a non-zero exit, naming the count + remedy, rather than a
+    silent rc=0 for a run that quietly skipped documents."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3, "pdf_quality_gate_failed": 2},
+    )
+    assert result.exit_code != 0, result.output
+    assert "2 PDF(s) failed the post-extraction quality gate" in result.output
+    assert "--allow-degraded-extraction" in result.output
+    # "Done." (the rest of the run, incl. post-processing) still printed --
+    # the exception fires LAST, after useful work completes.
+    assert "Done." in result.output
+
+
+def test_index_repo_no_pdf_quality_gate_failures_exit_zero(runner, repo_dir, mock_reg):
+    """Regression: the new stats key must not itself flip a clean run non-zero."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3, "pdf_quality_gate_failed": 0},
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_index_repo_pdf_quality_gate_key_absent_exit_zero(runner, repo_dir, mock_reg):
+    """Backward compat: an older/mocked index_repository return dict with
+    no pdf_quality_gate_failed key at all must not be treated as a
+    failure (.get default of 0)."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3},
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_reg):
     result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0
@@ -286,6 +325,65 @@ def test_index_pdf_force_dry_run_mutual_exclusion(runner, fake_pdf):
     result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force", "--dry-run"])
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output.lower()
+
+
+def test_index_pdf_allow_degraded_extraction_flag_defaults_false(runner, fake_pdf):
+    """nexus-wi1uv: the override must be opt-in, not the default posture."""
+    with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("allow_degraded_extraction") is False
+
+
+def test_index_pdf_allow_degraded_extraction_flag_threads_through(runner, fake_pdf):
+    with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT) as m:
+        result = runner.invoke(
+            main, ["index", "pdf", str(fake_pdf), "--allow-degraded-extraction"],
+        )
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("allow_degraded_extraction") is True
+
+
+def test_index_pdf_quality_gate_failure_exits_nonzero_with_remedy(runner, fake_pdf):
+    """nexus-wi1uv: a post-extraction quality-gate failure (the space-
+    stripped-garbage signature) must surface as a clean ClickException —
+    non-zero exit, no raw traceback — naming both remedies (retry with a
+    different extractor, or --allow-degraded-extraction)."""
+    from nexus.errors import ExtractionQualityError
+
+    def _raise(*args, **kwargs):
+        raise ExtractionQualityError(
+            "PDF doc.pdf failed the post-extraction quality gate "
+            "(extraction_method=docling): whitespace_ratio=0.0114 < floor "
+            "0.05. Remedy: retry with `--extractor mineru`, or rerun with "
+            "`--allow-degraded-extraction` to index it anyway."
+        )
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+
+    assert result.exit_code != 0, result.output
+    assert "quality gate" in result.output
+    assert "--allow-degraded-extraction" in result.output
+    assert "Traceback (most recent call last)" not in result.output
+
+
+def test_index_pdf_monitor_quality_gate_failure_exits_nonzero(runner, fake_pdf):
+    """Same gate failure on the --monitor/non-tty branch (a separate
+    index_pdf call site with its own except clause)."""
+    from nexus.errors import ExtractionQualityError
+
+    def _raise(*args, **kwargs):
+        raise ExtractionQualityError("PDF doc.pdf failed the post-extraction quality gate: boom")
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--monitor"])
+
+    assert result.exit_code != 0, result.output
+    assert "quality gate" in result.output
+    assert "Traceback (most recent call last)" not in result.output
 
 
 def test_index_md_force_flag(runner, fake_md):

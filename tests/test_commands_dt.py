@@ -815,6 +815,7 @@ class TestDtContentExceptionHandling:
 
 from nexus.errors import (  # noqa: E402 — grouped with this section's test-only imports
     ChunkLandingUnverifiedError,
+    ExtractionQualityError,
     IndexRunVerifyRefused,
     NexusError as _NexusError,
 )
@@ -826,6 +827,17 @@ _MEMBER_KWARGS: dict[type, dict] = {
     IndexRunVerifyRefused: {
         "doc_id": "1.99.1", "referenced": 5, "present": 3, "missing": 2,
         "chunk_count": 5,
+    },
+    # nexus-wi1uv round-2 (code-review-expert + substantive-critic
+    # Critical, both independently, 2026-08-06): PDF post-extraction
+    # quality-gate failures must survive nx dt index's per-record loop
+    # exactly like the two members above.
+    ExtractionQualityError: {
+        "message": (
+            "PDF paper.pdf failed the post-extraction quality gate "
+            "(extraction_method=docling): whitespace_ratio=0.0114 < "
+            "floor 0.05."
+        ),
     },
 }
 

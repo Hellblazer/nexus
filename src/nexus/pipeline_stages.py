@@ -72,11 +72,19 @@ def extractor_loop(
     extractor: str = "auto",
     on_formula_oom: str = "fail",
     extraction_done: threading.Event | None = None,
+    allow_degraded_extraction: bool = False,
 ) -> ExtractionResult:
     """Extract pages to the pipeline buffer via the on_page streaming callback.
 
     On resume, if all pages are already in the buffer, skips re-extraction
     entirely and returns the stored ExtractionResult metadata.
+
+    *allow_degraded_extraction* (nexus-wi1uv) forwarded to
+    :meth:`PDFExtractor.extract`. When the post-extraction quality gate
+    raises, pages already streamed to the pipeline buffer stay written but
+    the run is marked failed by :func:`pipeline_index_pdf`'s
+    ``first_exc``/``clear_orphan_wal`` handling below — no garbage chunks
+    ever reach the chunker/uploader stages.
     """
     state = db.get_pipeline_state(content_hash)
     pages_extracted_at_start = state["pages_extracted"] if state else 0
@@ -133,7 +141,10 @@ def extractor_loop(
     ext = PDFExtractor()
     try:
         try:
-            result = ext.extract(pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page)
+            result = ext.extract(
+                pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
+                allow_degraded=allow_degraded_extraction,
+            )
         except PipelineCancelled:
             return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
 
@@ -705,6 +716,7 @@ def pipeline_index_pdf(
     doc_id: str = "",
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
+    allow_degraded_extraction: bool = False,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -713,6 +725,13 @@ def pipeline_index_pdf(
     - Tag table-page chunks
     - Correct chunk_count to the final total
     - Prune stale chunks from a previous version
+
+    *allow_degraded_extraction* (nexus-wi1uv): forwarded to
+    ``extractor_loop``/``PDFExtractor.extract``. Default ``False`` — a
+    document whose extraction fails the post-extraction quality gate
+    raises inside the extractor stage, which this function's
+    ``first_exc`` handling turns into a failed pipeline run (fence marked
+    failed, orphan WAL cleared) rather than a completed one.
 
     Args:
         force: Break the partial-ingest deadlock (nexus-9ji). When True,
@@ -832,6 +851,7 @@ def pipeline_index_pdf(
             extractor_loop, pdf_path, content_hash, db, cancel,
             extractor=extractor, on_formula_oom=on_formula_oom,
             extraction_done=extraction_done,
+            allow_degraded_extraction=allow_degraded_extraction,
         )
         chunk_future = pool.submit(
             chunker_loop, content_hash, db, cancel, embed_fn,
@@ -1064,21 +1084,37 @@ def _enrich_metadata_from_extraction(
         or pdf_path.stem.replace("_", " ").replace("-", " ")
     )
 
-    # `title`, `source_author`, and (nexus-1oguj) `extraction_method` are
-    # the only extraction-dependent fields in ALLOWED_TOP_LEVEL — the
-    # other fields below (source_date, format, page_count, pdf_subject,
-    # pdf_keywords, is_image_pdf, has_formulas) are dropped by
-    # metadata_schema.normalize() so writing them costs cycles for no
-    # payload. Keep this dict minimal.
+    # `title`, `source_author`, (nexus-1oguj) `extraction_method`, and
+    # (nexus-wi1uv round-2) `quality_gate_overridden` are the only
+    # extraction-dependent fields in ALLOWED_TOP_LEVEL — the other fields
+    # below (source_date, format, page_count, pdf_subject, pdf_keywords,
+    # is_image_pdf, has_formulas) are dropped by metadata_schema.normalize()
+    # so writing them costs cycles for no payload. Keep this dict minimal.
+    #
+    # nexus-wi1uv round-2 CORRECTION: the historical comment here claimed
+    # "t3.update_chunks re-runs metadata_schema.normalize() before
+    # writing" for the empty-extraction_method case. VERIFIED FALSE for
+    # the production path: HttpVectorClient.update_chunks (src/nexus/db/
+    # http_vector_client.py) posts the raw metadata dict straight to
+    # /v1/vectors/update-metadata with no client-side normalize() call —
+    # only the LOCAL/in-memory T3Database.update_chunks normalizes, which
+    # is not the serving path in either mode post-RDR-155-P4a. Harmless
+    # for extraction_method (a PDF's value is never empty by the time
+    # this post-pass runs, so the drop-when-empty branch was dead code
+    # via THIS call site regardless), but NOT harmless for quality_gate_
+    # overridden, whose False default is the COMMON case for every
+    # streamed PDF — merging it in unconditionally would silently stamp
+    # every healthy document with an explicit False, defeating the
+    # sparse-key design in metadata_schema.normalize(). So: build this
+    # dict conditionally instead of trusting a downstream normalize that
+    # does not run on this path.
     enrichment = {
         "title": source_title,
         "source_author": meta.get("pdf_author", ""),
         "extraction_method": meta.get("extraction_method", ""),
     }
-    # An empty extraction_method here is safe to merge as-is: t3.update_chunks
-    # re-runs metadata_schema.normalize() before writing, which is what
-    # actually drops the empty-string default — no local emptiness check
-    # needed in this dict.
+    if meta.get("quality_gate_overridden", False):
+        enrichment["quality_gate_overridden"] = True
 
     try:
         all_ids: list[str] = []

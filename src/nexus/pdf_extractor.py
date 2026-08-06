@@ -31,6 +31,8 @@ import tempfile
 import httpx
 import structlog
 
+from nexus.errors import ExtractionQualityError
+
 try:
     from mineru.cli.common import do_parse
 except ImportError:
@@ -417,6 +419,337 @@ class ExtractionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# ── Post-extraction quality gate (nexus-wi1uv) ──────────────────────────────
+#
+# Motivating incident (nexus-5xn3k, 2026-07-31): ``nx index pdf --extractor
+# docling`` completed on a real 69-page paper and reported success while
+# producing SPACE-STRIPPED text — "istheasetofthe", "aspartofasequenceofinput"
+# — plus heavy raw-LaTeX noise. Nothing in the pipeline flagged it; the
+# garbage was indexed, embedded, and paid for. docling is documented as the
+# SAFE recovery when MinerU OOM-fails on formula-dense pages ("--extractor
+# docling: formula-stripped, but always completes"). A loud MinerU failure is
+# strictly safer than a silent quality collapse that then looks like success.
+#
+# Three cheap, dependency-free signals over the raw extracted text, computed
+# once per document before chunking:
+#   - whitespace_ratio  — fraction of characters that are whitespace. Space
+#     stripping collapses this toward zero (words run together).
+#   - mean_token_len     — mean length of whitespace-split tokens. Space
+#     stripping merges many words into a few enormous "tokens"; explodes.
+#   - long_token_fraction — fraction of tokens longer than
+#     ``_LONG_TOKEN_CHARS`` characters. A second, more robust view of the
+#     same run-together-words signature (robust to a doc with one or two
+#     genuinely long tokens skewing the mean).
+# All three are computed over `str.split()` tokens (whitespace-delimited) —
+# no lexicon, no network, no new dependency, per the bead's dependency-free
+# constraint.
+#
+# CALIBRATION (2026-08-06, round 2 — revised after code-review-expert +
+# substantive-critic independently found the round-1 calibration unsafe
+# on three axes; see nx memory get -p nexus -t nexus-wi1uv-implementation
+# for the full evidence table, both rounds):
+#
+#   HEALTHY corpus (18 real/representative samples):
+#     - 5 fixture PDFs (tests/fixtures/{bft-to-smr,tc-sql,
+#       distributed-bloom-filter,virgo,fireflies-tocs}.pdf), extracted with
+#       BOTH docling and PyMuPDF (10 whole-document samples).
+#     - 2 dense-notation regions carved out of those same fixtures
+#       (tc-sql's IES(FO) relational-calculus derivation; virgo's
+#       cryptographic-commitment section) — real extractor output, not
+#       synthetic, chosen specifically to probe the "dense math/formula
+#       notation" false-positive hazard the bead names.
+#     - 1 sample hydrated from T3 (knowledge__dt-papers): the Appendix H
+#       attention-mechanism proofs from "Zoology" — nexus-5xn3k's OWN
+#       incident paper, post-repair (a legitimate, heavy-LaTeX MinerU
+#       extraction) — plus prose from knowledge__probe-mineru. This is the
+#       exact document that motivated this bead, at its most formula-dense.
+#     - 1 short (130-char) real-prose sample — round-2: the critic proved
+#       a *short* extract needs the SAME protection as a long one; this is
+#       its healthy control.
+#     - 2 code-identifier-dense passages (systems-paper-with-algorithm-
+#       listing prose, and pseudocode/algorithm-listing style, both built
+#       from this repo's own real identifiers) — round-2: the critic's
+#       Significant finding that dense identifiers can trip
+#       long_token_fraction on LEGITIMATE text, the exact "dense-notation"
+#       hazard class the bead itself named but round-1 only tested via
+#       LaTeX.
+#   Measured ranges (round-2): whitespace_ratio 0.0799-0.2395;
+#   mean_token_len 4.38-13.12; long_token_fraction 0.0000-0.25. The
+#   code-identifier samples set the long_token_fraction high (0.20-0.25)
+#   and pulled whitespace_ratio down to its new low (0.0799) — round-1's
+#   dense-LaTeX-only calibration had not exercised this axis at all.
+#
+#   NON-SPACED-SCRIPT (CJK) — round-2, substantive-critic Significant:
+#   ``str.split()`` cannot segment Han/Hiragana/Katakana/Hangul text at
+#   all (no inter-word ASCII spaces), so a real CJK document is
+#   STRUCTURALLY IDENTICAL to the space-stripped-garbage signature on all
+#   three signals (measured on a real Chinese-prose sample: whitespace_
+#   ratio=0.0, mean_token_len=399, long_token_fraction=1.0 — i.e. it would
+#   have failed unconditionally). Not a calibration-threshold problem —
+#   the signals are simply not meaningful for these scripts. Detected via
+#   :func:`_non_spaced_script_fraction` and SKIPPED (passed=True,
+#   ``skipped_reason`` set, logged) rather than force-fit into a
+#   threshold that cannot discriminate for this input class. See
+#   :data:`_NON_SPACED_SCRIPT_FRACTION_THRESHOLD`.
+#
+#   GARBAGE corpus (14 samples): every healthy sample above with spaces
+#   stripped per line (``line.replace(" ", "")`` — preserves line/paragraph
+#   breaks, strips only intra-line word-boundary spaces), reproducing the
+#   incident's reported signature verbatim (run this box's extractor over a
+#   fixture, strip spaces, and the output reads exactly like
+#   "istheasetofthe"). Includes the 130-char short sample stripped to 111
+#   chars — round-2's boundary-behavior proof (see below). Measured
+#   ranges: whitespace_ratio 0.0000-0.0218; mean_token_len 52.09-840.44 for
+#   the >=20-token samples, mean_token_len=111.0 (n_tokens=1) for the short
+#   one. long_token_fraction 0.3366-1.0 (code-identifier samples are NOT
+#   in the garbage corpus — they are real legitimate text, calibrated as
+#   healthy above).
+#
+# THRESHOLDS (round-2):
+_WHITESPACE_RATIO_FLOOR = 0.05
+_MEAN_TOKEN_LEN_CEILING = 20.0
+# Round-2 (was 0.10): the critic reproduced a 0.42 long_token_fraction on
+# synthetic code-identifier-dense text — a real false positive at the
+# round-1 threshold. This repo's OWN identifiers, worked into realistic
+# prose (not a worst-case "nothing but identifiers" adversarial sample),
+# measured 0.20-0.25 (see HEALTHY corpus above) — comfortably under the
+# revised 0.5 ceiling, itself still 2x above the critic's reported 0.42
+# and ~20x above the real-dense-LaTeX healthy ceiling (0.0246). Raising
+# this ceiling loses ZERO garbage-detection power: every garbage sample in
+# the corpus is independently caught by whitespace_ratio AND/OR
+# mean_token_len (verified — see the calibration script referenced in the
+# T2 record), so long_token_fraction is corroborating, not load-bearing.
+_LONG_TOKEN_FRACTION_CEILING = 0.5
+_LONG_TOKEN_CHARS = 20
+# Round-2 (substantive-critic Significant #4): the round-1 char-based
+# floor (500 chars, auto-pass below it) reproduced the incident's own
+# signature UNDETECTED at 169 chars — short garbage still yields >=1 real
+# chunk, so "defer to the zero-chunks check downstream" was FALSE for
+# this case, not just imprecise. Replaced with a TOKEN-count floor that
+# applies ONLY to the two signals that need enough samples to be
+# statistically meaningful (whitespace_ratio, long_token_fraction) — a
+# single genuinely-long legitimate token (a URL, a DOI) can otherwise
+# swing a ratio over few tokens by chance. mean_token_len does NOT wait
+# for this floor: it is computed and compared whenever there is at least
+# one token, because it is meaningful even at n=1 (a single 100+-char
+# glued-together "word" is unambiguous regardless of how few tokens
+# surround it) and its calibration margin (7x between the healthy ceiling
+# 7.01 and the garbage floor 52.09, confirmed down to n_tokens=1 in the
+# 169-char boundary case: mean_token_len=111.0) does not depend on a
+# large sample. This is what makes the 169-char repro fail post-fix.
+_MIN_TOKENS_FOR_RATIO_SIGNALS = 20
+
+#: Non-spaced-script (CJK) codepoint ranges — round-2, substantive-critic
+#: Significant #5. Han (+ CJK Ext-A), Hiragana, Katakana, Hangul: scripts
+#: written without inter-word ASCII spaces, where str.split() cannot
+#: segment tokens at all.
+_NON_SPACED_SCRIPT_RANGES: tuple[tuple[int, int], ...] = (
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0x3400, 0x4DBF),   # CJK Unified Ideographs Extension A
+    (0x3040, 0x309F),   # Hiragana
+    (0x30A0, 0x30FF),   # Katakana
+    (0xAC00, 0xD7A3),   # Hangul Syllables
+)
+
+#: Fraction of non-whitespace characters that must fall in a non-spaced
+#: script before the whitespace/token signals are skipped as unreliable.
+#: A real Chinese-prose calibration sample measured ~1.0 (essentially
+#: every non-whitespace char is Han); 0.3 leaves wide margin for a mixed
+#: CJK+Latin document (e.g. English section headers in an otherwise-CJK
+#: paper) while still catching a CJK-dominant one.
+_NON_SPACED_SCRIPT_FRACTION_THRESHOLD = 0.3
+
+
+def _non_spaced_script_fraction(text: str) -> float:
+    """Fraction of non-whitespace characters in *text* belonging to a
+    script conventionally written without inter-word spaces (CJK).
+
+    Pure/cheap — a single pass over the text, no dependency. Returns 0.0
+    for empty or all-whitespace input.
+    """
+    non_ws_count = 0
+    hits = 0
+    for c in text:
+        if c.isspace():
+            continue
+        non_ws_count += 1
+        cp = ord(c)
+        if any(lo <= cp <= hi for lo, hi in _NON_SPACED_SCRIPT_RANGES):
+            hits += 1
+    return hits / non_ws_count if non_ws_count else 0.0
+
+
+@dataclass
+class ExtractionQualityReport:
+    """Cheap post-extraction text-quality signals (nexus-wi1uv).
+
+    See the module-level comment above :data:`_WHITESPACE_RATIO_FLOOR` for
+    the calibration evidence behind the thresholds ``passed`` is computed
+    from.
+    """
+
+    whitespace_ratio: float
+    mean_token_len: float
+    long_token_fraction: float
+    n_tokens: int
+    n_chars: int
+    passed: bool
+    failing_signals: list[str] = field(default_factory=list)
+    #: Round-2: non-empty when the signals were skipped as unreliable for
+    #: this input (currently: non-spaced-script/CJK dominance) rather than
+    #: evaluated and passed. ``passed`` is always True when this is set —
+    #: a capability-honest skip, never treated as a silent clean pass of
+    #: an actually-evaluated document.
+    skipped_reason: str = ""
+
+
+def assess_extraction_quality(text: str) -> ExtractionQualityReport:
+    """Compute the post-extraction quality signals for *text*.
+
+    Pure function — no I/O, no dependency beyond the stdlib — so it is
+    testable in isolation from any PDF backend. Called once per document on
+    the full extracted text, before chunking.
+    """
+    n_chars = len(text)
+    if n_chars == 0:
+        # Nothing to judge; the separately-enforced "chunker produced zero
+        # chunks despite non-empty text" check (doc_indexer._pdf_chunks)
+        # covers genuinely empty extraction.
+        return ExtractionQualityReport(
+            whitespace_ratio=1.0, mean_token_len=0.0, long_token_fraction=0.0,
+            n_tokens=0, n_chars=0, passed=True, failing_signals=[],
+        )
+
+    tokens = text.split()
+    n_tokens = len(tokens)
+
+    script_frac = _non_spaced_script_fraction(text)
+    if script_frac >= _NON_SPACED_SCRIPT_FRACTION_THRESHOLD:
+        # Round-2: whitespace/token signals are structurally meaningless
+        # for a non-spaced script — skip rather than force-fit a
+        # threshold, and say so (never a silent pass indistinguishable
+        # from "evaluated and clean").
+        return ExtractionQualityReport(
+            whitespace_ratio=0.0, mean_token_len=float(n_chars), long_token_fraction=1.0,
+            n_tokens=n_tokens, n_chars=n_chars, passed=True, failing_signals=[],
+            skipped_reason=(
+                f"non-spaced-script dominant ({script_frac:.0%} of non-whitespace "
+                f"chars) — whitespace/token signals are not meaningful for this "
+                f"script (e.g. CJK); skipped rather than evaluated"
+            ),
+        )
+
+    whitespace_chars = sum(1 for c in text if c.isspace())
+    whitespace_ratio = whitespace_chars / n_chars
+
+    if n_tokens == 0:
+        # Non-empty text with zero whitespace-delimited tokens is itself
+        # the degenerate case this gate exists to catch (the entire
+        # document collapsed into unbroken run-on text).
+        mean_token_len = float(n_chars)
+        long_token_fraction = 1.0
+    else:
+        token_lens = [len(t) for t in tokens]
+        mean_token_len = sum(token_lens) / n_tokens
+        long_token_fraction = sum(1 for tok_len in token_lens if tok_len > _LONG_TOKEN_CHARS) / n_tokens
+
+    failing: list[str] = []
+    # mean_token_len is UNCONDITIONAL (any n_tokens >= 1) — see the
+    # round-2 comment above _MIN_TOKENS_FOR_RATIO_SIGNALS for why this is
+    # the signal that must not wait for a sample-size floor.
+    if n_tokens >= 1 and mean_token_len > _MEAN_TOKEN_LEN_CEILING:
+        failing.append(
+            f"mean_token_len={mean_token_len:.2f} > ceiling {_MEAN_TOKEN_LEN_CEILING}"
+        )
+    if n_tokens >= _MIN_TOKENS_FOR_RATIO_SIGNALS:
+        if whitespace_ratio < _WHITESPACE_RATIO_FLOOR:
+            failing.append(
+                f"whitespace_ratio={whitespace_ratio:.4f} < floor {_WHITESPACE_RATIO_FLOOR}"
+            )
+        if long_token_fraction > _LONG_TOKEN_FRACTION_CEILING:
+            failing.append(
+                f"long_token_fraction={long_token_fraction:.4f} > ceiling {_LONG_TOKEN_FRACTION_CEILING}"
+            )
+
+    return ExtractionQualityReport(
+        whitespace_ratio=whitespace_ratio,
+        mean_token_len=mean_token_len,
+        long_token_fraction=long_token_fraction,
+        n_tokens=n_tokens,
+        n_chars=n_chars,
+        passed=not failing,
+        failing_signals=failing,
+    )
+
+
+def _enforce_extraction_quality(
+    result: "ExtractionResult", pdf_path: Path, *, allow_degraded: bool,
+) -> None:
+    """Gate *result* against :func:`assess_extraction_quality`.
+
+    Raises :class:`~nexus.errors.ExtractionQualityError` (fail loud, per the
+    module docstring above) unless *allow_degraded* is True, in which case
+    the failure is logged at WARNING (loud in the run output, per the
+    bead's "must mark the run output loudly when used" requirement) and
+    extraction proceeds with the degraded text.
+
+    Round-2: a ``skipped_reason`` (non-spaced-script/CJK dominance) always
+    passes regardless of *allow_degraded* — logged at INFO (capability-
+    honest note, not a warning or an error; the signals were never
+    evaluated, so there is nothing to override).
+    """
+    report = assess_extraction_quality(result.text)
+    result.metadata["quality_gate_passed"] = report.passed
+    if report.skipped_reason:
+        _log.info(
+            "extraction_quality_gate_skipped",
+            path=str(pdf_path),
+            reason=report.skipped_reason,
+        )
+        return
+    if report.passed:
+        return
+
+    reasons = "; ".join(report.failing_signals)
+    method = result.metadata.get("extraction_method", "unknown")
+    if allow_degraded:
+        result.metadata["quality_gate_overridden"] = True
+        _log.warning(
+            "extraction_quality_degraded_override",
+            path=str(pdf_path),
+            extraction_method=method,
+            failing_signals=report.failing_signals,
+            whitespace_ratio=report.whitespace_ratio,
+            mean_token_len=report.mean_token_len,
+            long_token_fraction=report.long_token_fraction,
+        )
+        _progress(
+            f"  WARNING: {pdf_path.name} failed the extraction quality gate "
+            f"({reasons}) — indexing anyway (--allow-degraded-extraction)."
+        )
+        return
+
+    _log.error(
+        "extraction_quality_gate_failed",
+        path=str(pdf_path),
+        extraction_method=method,
+        failing_signals=report.failing_signals,
+        whitespace_ratio=report.whitespace_ratio,
+        mean_token_len=report.mean_token_len,
+        long_token_fraction=report.long_token_fraction,
+    )
+    raise ExtractionQualityError(
+        f"PDF {pdf_path.name} failed the post-extraction quality gate "
+        f"(extraction_method={method}): {reasons}. This is the "
+        f"space-stripped-garbage failure mode (nexus-wi1uv) — the extracted "
+        f"text is likely unsearchable if indexed. Remedy: retry with "
+        f"`--extractor mineru` (formula-aware, often avoids the corruption), "
+        f"or if this document is legitimately dense/unusual and you have "
+        f"reviewed the extracted text, rerun with "
+        f"`--allow-degraded-extraction` to index it anyway."
+    )
+
+
 class PDFExtractor:
     """Extract PDF text via Docling with PyMuPDF normalized fallback.
 
@@ -449,6 +782,7 @@ class PDFExtractor:
         extractor: str = "auto",
         on_formula_oom: str = "fail",
         on_page: Callable[[int, str, dict], None] | None = None,
+        allow_degraded: bool = False,
     ) -> ExtractionResult:
         """Extract text from *pdf_path*. Returns ExtractionResult.
 
@@ -471,6 +805,18 @@ class PDFExtractor:
         ``on_page(page_index, page_text, page_metadata)``.
         ``page_metadata`` contains ``"page_number"`` (1-based) and
         ``"text_length"``.
+
+        *allow_degraded* (nexus-wi1uv) bypasses the post-extraction quality
+        gate (see :func:`assess_extraction_quality`). Every backend routes
+        through this one method, so the gate applies uniformly to MinerU,
+        Docling, and PyMuPDF output — no extractor is special-cased. Default
+        ``False``: a document whose extracted text trips the gate's
+        thresholds (the space-stripped-garbage signature — see the
+        function's calibration docstring) raises
+        :class:`~nexus.errors.ExtractionQualityError` rather than being
+        silently indexed as unsearchable garbage. Pass ``True`` to accept
+        degraded output deliberately for a specific document (surfaced as
+        ``--allow-degraded-extraction`` on the CLI).
         """
         if extractor not in ("auto", "docling", "mineru"):
             raise ValueError(
@@ -490,6 +836,26 @@ class PDFExtractor:
                 f"PDF not found or not a regular file: {pdf_path}"
             )
 
+        result = self._extract_dispatch(
+            pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
+        )
+        _enforce_extraction_quality(result, pdf_path, allow_degraded=allow_degraded)
+        return result
+
+    def _extract_dispatch(
+        self,
+        pdf_path: Path,
+        *,
+        extractor: str,
+        on_formula_oom: str,
+        on_page: Callable[[int, str, dict], None] | None,
+    ) -> ExtractionResult:
+        """Backend routing for :meth:`extract`, pre-quality-gate.
+
+        Split out (nexus-wi1uv) so ``extract()`` has exactly one gated exit
+        point instead of gating each of this method's several ``return``
+        statements individually.
+        """
         if extractor == "docling":
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
