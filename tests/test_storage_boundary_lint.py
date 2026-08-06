@@ -593,7 +593,11 @@ def test_dual_population_baseline_locked():
         f"{result.sqlite_allowlisted_connects} != allowlist sum "
         f"{sum(SQLITE_CONNECT_ALLOWLIST.values())}"
     )
-    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 3
+    # 3 -> 2 at nexus-ay18d: health.py's PRAGMA integrity_check / FTS5
+    # write-shaped probe was ported off SQLite entirely (asks the engine's
+    # GET /version for the Liquibase changelog fingerprint instead), not
+    # merely relabelled — one fewer sqlite3.connect site in src/.
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 2
     # ZERO violations: every direct construction / connect outside the
     # named allowlists fails CI here — the enforcement teeth.
     assert result.total_violations == 0, (

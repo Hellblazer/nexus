@@ -16,9 +16,11 @@ asserts the debt is ZERO:
   EXPLICIT NAMED allowlists in ``storage_boundary_lint.py`` (per-file
   exact counts, reason beside each entry) — growing one is a reviewed
   edit to that file, never a comment.
-* NO ``sqlite3.connect`` anywhere in ``src/`` beyond the three READ-ONLY
+* NO ``sqlite3.connect`` anywhere in ``src/`` beyond the two READ-ONLY
   frozen-migration-source diagnostics named in
-  ``storage_boundary_lint.SQLITE_CONNECT_ALLOWLIST``.
+  ``storage_boundary_lint.SQLITE_CONNECT_ALLOWLIST`` (down from three at
+  nexus-ay18d — health.py's write-shaped PRAGMA/FTS5 probe was ported off
+  SQLite onto the engine's GET /version instead).
 * ``ALTER TABLE`` text appears only at the named PG/Liquibase sites in
   :data:`PG_ALTER_TABLE_ALLOWLIST` — every survivor is Postgres DDL
   prose (changeset recipes, admin-SQL allowlist patterns), not SQLite.
@@ -80,7 +82,7 @@ PG_ALTER_TABLE_ALLOWLIST: dict[str, int] = {
     # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex
     # + docstring.
     "src/nexus/db/admin_sql.py": 2,
-    # PG/Liquibase RLS syntax in a comment (health.py:1673).
+    # PG/Liquibase RLS syntax in a comment (near _check_rls_present).
     "src/nexus/health.py": 1,
     # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text.
     "src/nexus/upgrade_ladder/rungs/chash_rekey.py": 1,
@@ -180,8 +182,9 @@ def test_no_unallowlisted_sqlite_connect_anywhere() -> None:
         "removed (good!) — lower its SQLITE_CONNECT_ALLOWLIST entry so the "
         "ledger stays exact."
     )
-    # The terminal survivor set is exactly the three read-only diagnostics.
-    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 3
+    # The terminal survivor set is exactly the two read-only diagnostics
+    # (3 -> 2 at nexus-ay18d).
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 2
     # Liveness: an allowlist entry naming a dead file is a free slot a
     # future connect could squat in without review.
     dead = sorted(

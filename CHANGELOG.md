@@ -83,6 +83,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in its own output.
 
 ### Fixed
+- **`nx doctor`'s three SQLite-era checks no longer report vacuous greens**
+  (nexus-ay18d, nexus-vl8lk): the always-on T2 integrity sweep,
+  `--check-schema`, and `--check-plan-library` all still probed the retired
+  SQLite substrate and passed unconditionally on every PG-backed install.
+  The integrity sweep is retired and reborn as "T2 schema applied" — the
+  engine's `GET /version` Liquibase changelog fingerprint, capability-honest
+  about managed/cloud installs that withhold schema fields by design (absent
+  vs null, never a false clean). `--check-schema` reports the same
+  fingerprint verbosely (exit 2 = engine unreachable, exit 1 = schema error
+  or zero applied changesets). `--check-plan-library` runs the whole-library
+  census over `HttpPlanLibrary.list_plans` with the authored / backfilled /
+  non-dimensional bucketing and the global-builtin floor reinstated; the
+  300-row page cap is a named note, never a silent undercount. The frozen
+  on-disk SQLite file, when present, is its own informational line item
+  decoupled from the schema verdict. Fix hints name the live
+  `nx plan reseed` (the retired `nx catalog setup` reference is gone —
+  `tests/e2e/release-sandbox.sh` had been silently swallowing its failure
+  via `|| true`, so the sandbox's plan seeding half works again too).
 - **`nx index pdf --dir` now exits non-zero on any per-file failure**
   (nexus-uqq9z) — real extraction/pipeline errors and catalog-identity drops
   alike. Previously the batch always exited 0 regardless of how many files

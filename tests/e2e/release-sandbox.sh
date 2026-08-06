@@ -218,13 +218,21 @@ case "$MODE" in
         echo "  nx upgrade (apply):"
         nx upgrade 2>&1 | sed 's/^/    /' || true
         echo
-        # nx catalog setup seeds 12 builtin plan templates that
+        # nx plan reseed seeds the builtin plan templates that
         # --check-plan-library verifies. Without this step the doctor
         # check fails on every fresh sandbox — that is "you forgot the
         # second setup step", not "something is genuinely broken." Make
         # smoke green-green-green when the install is healthy.
-        echo "  nx catalog setup (seeds plan library + initializes catalog):"
-        nx catalog setup 2>&1 | tail -5 | sed 's/^/    /' || true
+        #
+        # nexus-vl8lk: this used to be `nx catalog setup`, which is
+        # RETIRED (raises ClickException — the catalog is engine-owned,
+        # nothing left here to set up) and had been silently swallowed by
+        # `|| true` ever since, so the seeding half of this step had
+        # already stopped running before --check-plan-library was ported
+        # off its N/A stub. `nx plan reseed` is the live equivalent —
+        # idempotent, routes through HttpPlanLibrary in every mode.
+        echo "  nx plan reseed (seeds plan library):"
+        nx plan reseed 2>&1 | tail -5 | sed 's/^/    /' || true
         echo
         # A gate that PRINTS a failure and exits 0 is not a gate. This loop
         # detected failures correctly (set -euo pipefail at the top makes the
@@ -279,8 +287,10 @@ case "$MODE" in
         nx upgrade 2>&1 | sed 's/^/  /' || true
 
         echo
-        echo "── 1/11 nx catalog setup (seeds plan library) ──"
-        nx catalog setup 2>&1 | tail -5 | sed 's/^/  /' || true
+        echo "── 1/11 nx plan reseed (seeds plan library) ──"
+        # nexus-vl8lk: was `nx catalog setup` (retired, raised, swallowed by
+        # `|| true`) — see the smoke arm's comment above for the full story.
+        nx plan reseed 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
         echo "── 2/11 nx index repo ($REPO_ROOT) ──"

@@ -338,6 +338,13 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
 # ── Index log ───────────────────────────────────────────────────────────────
 
 def test_doctor_index_log_not_created_yet(runner, mock_reg):
+    """nexus-ay18d fix-round finding: this assertion previously passed via
+    an UNRELATED check's "not created yet" wording — the now-retired
+    ``_check_t2_integrity``'s fresh-box detail, present ANYWHERE in the
+    full doctor output because the assertion is a blanket substring check,
+    not scoped to the index-log section. The index-log check's own
+    no-activity wording never actually said "not created yet". Pinned to
+    the real message instead."""
     with tempfile.TemporaryDirectory() as tmpdir:
         fake_home = Path(tmpdir)
         (fake_home / ".config" / "nexus").mkdir(parents=True, exist_ok=True)
@@ -345,7 +352,7 @@ def test_doctor_index_log_not_created_yet(runner, mock_reg):
             patch.object(Path, "home", return_value=fake_home),
         ])
     assert "index log" in result.output
-    assert "not created yet" in result.output
+    assert "no index activity recorded yet" in result.output
 
 
 # ── Single-database check ───────────────────────────────────────────────────

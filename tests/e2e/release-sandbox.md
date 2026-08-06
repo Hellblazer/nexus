@@ -35,7 +35,7 @@ Reinstall the tool venv, create a fresh isolated `$HOME`, then run from `/tmp`:
 - `nx --version` (sanity)
 - `nx upgrade --dry-run` (preview migrations)
 - `nx upgrade` (apply)
-- `nx catalog setup` (initialize catalog + seed 12 builtin plan templates)
+- `nx plan reseed` (seed the builtin plan templates; catalog itself is engine-owned, nothing to initialize client-side)
 - `nx doctor --check-schema` (T2 schema sanity)
 - `nx doctor --check-plan-library` (builtin plan count)
 - `nx doctor --check-taxonomy` (topic_links invariant)
@@ -56,7 +56,7 @@ Reinstall + drop into a sandbox bash subshell with `HOME=$SANDBOX`. Use for hand
 
 ```bash
 ./tests/e2e/release-sandbox.sh shell
-(sandbox) nx catalog setup
+(sandbox) nx plan reseed
 (sandbox) nx index repo /path/to/test-repo
 (sandbox) nx search "..."
 (sandbox) exit       # normal exit restores your real $HOME
@@ -74,7 +74,7 @@ Full ensemble pipeline check. Reinstall + sandbox setup + every nx surface in se
 
 Sequence (each step prefixed with `── N/9 ──`):
 
-1. `nx catalog setup` — seeds plan library + catalog
+1. `nx plan reseed` — seeds plan library (catalog is engine-owned)
 2. `nx index repo $REPO_ROOT` — code chunker, embedder, T3 write, code__ collection
 3. `nx index pdf tests/fixtures/tc-sql.pdf --collection knowledge__shakedown` — PDF pipeline (Docling/MinerU/PyMuPDF), prose chunker, CCE embeddings, bib enricher, auto-linker
 4. `nx index rdr` — RDR indexer + status reconciliation hook

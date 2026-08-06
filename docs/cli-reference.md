@@ -1997,24 +1997,32 @@ The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing l
 nx doctor --check-schema          # Report where the T2 schema lives
 ```
 
-The `--check-schema` flag (RDR-076; service-backed since RDR-152) reports
-that the T2 schema lives in Postgres and is Liquibase-managed by the
-nexus-service, applied at startup. The local-SQLite table/index/FTS5 census
-this check used to run died with the `=sqlite` opt-out (RDR-158 P3,
-nexus-7bomn); it now always prints the service-backed N/A message and
-validates nothing (nexus-p0clh).
+The `--check-schema` flag (RDR-076; service-backed since RDR-152) validates
+that the T2 schema is actually applied. The local-SQLite table/index/FTS5
+census this check used to run died with the `=sqlite` opt-out (RDR-158 P3,
+nexus-7bomn); nexus-p0clh replaced it with an unconditional N/A stub that
+validated nothing. nexus-vl8lk PORTED it: the check now asks the engine's
+`GET /version` for the applied Liquibase changelog fingerprint
+(`schema_latest_id` / `schema_changeset_count` / `schema_error`) and renders
+an honest verdict — OK with the changeset count, FAIL on `schema_error` or
+zero applied changesets, exit 2 (state UNKNOWN) when the engine is
+unreachable, or an explicit N/A when the endpoint withholds the fingerprint
+by design (managed/cloud service).
 
 ```
-nx doctor --check-plan-library    # Report where the plan library lives
+nx doctor --check-plan-library    # Report plan-library dimensional health
 ```
 
-The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) originally
-bucketed every row in the local `plans` table into authored / backfilled /
-non-dimensional and enforced the RDR-078 builtin floor. That local-SQLite
-dimensional census died with the `=sqlite` opt-out (RDR-158 P3, nexus-7bomn);
-the flag now always prints "Plan library is service-backed (Postgres) —
-local SQLite dimensional census N/A in service mode" and reports nothing
-else — no builtin-floor exit code, no `nx plan repair` hint (that command
+The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) buckets
+every row in the plan library into authored / backfilled / non-dimensional
+and enforces the RDR-078 builtin floor. The local-SQLite census this check
+used to run died with the `=sqlite` opt-out (RDR-158 P3, nexus-7bomn);
+nexus-p0clh replaced it with an unconditional N/A stub that validated
+nothing. nexus-vl8lk PORTED it: the check now reads the live plan library
+via `HttpPlanLibrary.list_plans` (no new engine route) and renders the same
+census against real service data — exit 1 when the global-tier builtin
+count is below the floor (fix: `nx plan reseed`), exit 2 (counts UNKNOWN)
+when the service is unreachable. No `nx plan repair` hint (that command
 group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
 
 ```

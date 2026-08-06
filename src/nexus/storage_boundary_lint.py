@@ -41,7 +41,9 @@ ratchet):
   deleted as a storage substrate (NO-SQLITE directive, Hal 2026-07-18; T2
   ``nexus/directive-no-sqlite-pg-everywhere``), so a new connect anywhere —
   including ``db/`` — is a hard violation. The named allowlist holds the
-  three read-only frozen-migration-source diagnostics, nothing else.
+  two read-only frozen-migration-source diagnostics, nothing else
+  (down from three at nexus-ay18d — health.py's write-shaped probe was
+  ported off SQLite entirely, not just relabelled).
 * ``voyageai.Client`` keeps the path-prefix allowlist (``db/`` legitimately
   owns the Voyage EF + T3 embed path) plus the named allowlist for the
   three legacy non-service Phase-4 deletion targets outside it.
@@ -251,14 +253,20 @@ BANLIST: tuple[tuple[str, str], ...] = (
 #: The only ``sqlite3.connect`` sites allowed anywhere in ``src/``:
 #: diagnostics against the frozen SQLite migration source (RDR-176 Gap 2 —
 #: a downgrade must find the local ``.db`` files intact, and these probes
-#: must work with no engine running). Two are READ-ONLY (``mode=ro`` URIs);
-#: the health integrity probe is a documented WRITE-SHAPED exception — the
-#: FTS5 integrity-check pseudo-command requires a writable connection
-#: (verified empirically: it fails "attempt to write a readonly database"
-#: under ``mode=ro``), so it takes the WAL writer slot without modifying
-#: content (residual disposition tracked on the health-probe bead). SQLite
-#: as a storage SUBSTRATE is deleted (RDR-158 P4 / RDR-186); a new connect
-#: is a hard violation, not a number to bump.
+#: must work with no engine running). Both survivors are READ-ONLY
+#: (``mode=ro`` URIs). SQLite as a storage SUBSTRATE is deleted (RDR-158 P4
+#: / RDR-186); a new connect is a hard violation, not a number to bump.
+#:
+#: health.py's entry (the PRAGMA integrity_check + FTS5 write-shaped probe)
+#: was REMOVED at nexus-ay18d: the check it backed (``_check_t2_integrity``)
+#: validated a fossil on a migrated box and passed vacuously on a fresh
+#: PG-only box (the file never exists in that install shape). It was ported
+#: to :func:`nexus.health.probe_t2_schema_fingerprint`, which asks the
+#: engine's existing ``GET /version`` for the applied Liquibase changelog
+#: fingerprint instead of opening the frozen file — no ``sqlite3.connect``
+#: left in health.py. The ratchet moves 3 -> 2 (down, per the exact-ledger
+#: discipline below); it must never move back up without a fresh Hal
+#: decision recorded on a bead.
 #:
 #: GRANULARITY (zero-review Sig-2, stated plainly): these allowlists budget
 #: per-FILE counts, not per-site identities — swapping a file's legitimate
@@ -269,11 +277,6 @@ BANLIST: tuple[tuple[str, str], ...] = (
 SQLITE_CONNECT_ALLOWLIST: dict[str, int] = {
     # mode=ro URI probe of a legacy source db (schema presence sniff).
     "src/nexus/db/__init__.py": 1,
-    # PRAGMA integrity_check + FTS5 integrity-check diagnostic on the
-    # frozen source — must operate when the engine/daemon is offline.
-    # NOT read-only: the FTS5 checking command needs a writable
-    # connection (see the allowlist docstring above).
-    "src/nexus/health.py": 1,
     # nx doctor read-only (mode=ro URI) inspection of the frozen
     # migration source.
     "src/nexus/commands/doctor.py": 1,

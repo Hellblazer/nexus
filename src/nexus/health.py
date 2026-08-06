@@ -6,14 +6,13 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import structlog
 
@@ -1558,97 +1557,219 @@ def _check_mineru_server() -> list[HealthResult]:
     )]
 
 
-# RDR-129 B4 (nexus-uq8a4): the FTS5 integrity probe
-# (``INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')``) is a
-# *write* — it needs ``memory.db``'s single WAL writer slot. A legitimate
-# concurrent writer (typically an active ``nx index repo``) holds that slot,
-# and the probe would block to ``busy_timeout`` and then report a hard red X
-# for a database that is perfectly healthy, just busy. We give each attempt a
-# bounded ``busy_timeout`` and retry briefly; on continued contention we emit a
-# SOFT WARN (the DB is fine) rather than a hard failure. A genuine corruption
-# (a non-lock error, or a failing ``PRAGMA integrity_check``) still hard-fails.
-_INTEGRITY_BUSY_TIMEOUT_MS: int = 2000
-_INTEGRITY_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.25, 0.5)
+#: Label for the ported T2 schema-fingerprint check (nexus-ay18d). Deliberately
+#: DISTINCT from doctor.py's opt-in "T2 schema check" (`--check-schema`,
+#: nexus-vl8lk) — same underlying probe (:func:`probe_t2_schema_fingerprint`),
+#: different consumer: this one runs UNCONDITIONALLY in every `nx doctor`
+#: sweep (cheap, single HTTP call), the flag is a deliberate, verbose,
+#: exit-code-bearing report an operator asks for explicitly. Mirrors the
+#: `_CHASH_CONFORMANCE_REPORT_LABEL` precedent (RDR-180, nexus-du2dw) for
+#: keeping two call sites of the same probe honestly distinguishable.
+_T2_SCHEMA_LABEL = "T2 schema applied"
+
+#: Label for the frozen-migration-source advisory (nexus-ay18d). Purely
+#: informational — never gates `nx doctor`'s exit code — emitted only when
+#: the file is present (mirrors ``_check_engine_convergence``'s "return []
+#: when not applicable" convention: silence, not a result, when absent).
+_LEGACY_T2_SOURCE_LABEL = "legacy T2 migration source"
 
 
-def _is_lock_error(exc: BaseException) -> bool:
-    """True when *exc* is transient writer-slot contention, not corruption.
+@dataclass(frozen=True)
+class T2SchemaFingerprint:
+    """Result of probing the engine's ``GET /version`` for the Liquibase
+    changelog fingerprint (bead nexus-ay18d / nexus-vl8lk).
 
-    Mirrors the discriminator the retired T2 bootstrap-migration retry used
-    (``database is locked`` / ``database is busy``, including the
-    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked");
-    the retry died with ``db/migrations.py`` (RDR-158 P4 Stage 4,
-    nexus-i711w) but the lock-vs-corruption distinction is still the point.
+    ``reachable=False`` means the service endpoint could not be resolved or
+    ``/version`` could not be reached/parsed — :attr:`unreachable_detail`
+    carries the cause. ``reachable=True, reported=False`` means the endpoint
+    answered but carried NONE of ``schema_latest_id`` / ``schema_changeset_count``
+    / ``schema_error`` — the documented managed/cloud omission-by-design
+    (``nexus.db.managed_endpoint`` module docstring: "schema_latest_id /
+    schema_changeset_count / schema_error remain absent on the managed
+    endpoint BY DESIGN"), or an engine predating the nexus-pebfx.4 fields.
+    Distinguishing "key absent" from "key present but null" (rather than a
+    blanket ``.get()``) is the same lesson nexus-vw594 F3 named for
+    ``index_state_reported``: an absent key is UNKNOWN, not evidence of
+    anything, and must never collapse into the same branch as a populated
+    field reading zero.
     """
-    msg = str(exc).lower()
-    return "locked" in msg or "busy" in msg
+
+    reachable: bool
+    reported: bool
+    latest_id: str | None = None
+    changeset_count: int | None = None
+    schema_error: str | None = None
+    unreachable_detail: str = ""
 
 
-def _check_t2_integrity() -> list[HealthResult]:
-    import time  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+def probe_t2_schema_fingerprint(
+    *,
+    base_url: str | None = None,
+    timeout: float = 5.0,
+    http_get: Callable[[str, float], object] | None = None,
+) -> T2SchemaFingerprint:
+    """Ask the engine's already-existing ``GET /version`` (Java
+    ``VersionHandler``) for the applied Liquibase changelog fingerprint.
+
+    PORT decision (nexus-ay18d / nexus-vl8lk): both beads' own text names
+    "Liquibase changeset state" as the honest Postgres-side answer to what
+    the retired SQLite ``PRAGMA integrity_check`` used to ask. The route
+    already ships on every engine at the current floor
+    (``REQUIRED_ENGINE_VERSION``, well past nexus-pebfx.4, which introduced
+    these fields) — no new engine route was added for this fix.
+
+    Shared by TWO consumers, one probe: :func:`_check_t2_schema_applied`
+    (this module's always-on ``nx doctor`` sweep, terse ``HealthResult``)
+    and ``nexus.commands.doctor._run_check_schema`` (the opt-in
+    ``--check-schema`` verbose report with exit codes). Keeping the HTTP
+    call + absent-vs-null interpretation in ONE place means the two
+    consumers can never independently drift on what "schema applied" means.
+
+    Args:
+        base_url: Override the resolved service base URL (test injection;
+            mirrors :func:`nexus.db.managed_endpoint.probe_managed_service`'s
+            own ``base_url`` param). ``None`` resolves via
+            :func:`nexus.db.service_endpoint.resolve_service_endpoint`.
+        timeout: HTTP timeout in seconds.
+        http_get: Injectable ``(url, timeout) -> httpx.Response`` callable
+            (test injection). ``None`` uses ``httpx.get``.
+
+    Never raises — any resolution/transport/parse failure degrades to
+    ``reachable=False`` so BOTH callers can render an honest warning instead
+    of crashing `nx doctor` (the "WARN, never ok=True, for ANY exception
+    here" lesson from nexus-du2dw's chash-conformance-report review).
+    """
+    try:
+        import httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
+
+        resolved_base_url = base_url
+        if resolved_base_url is None:
+            from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred to avoid circular import
+
+            resolved_base_url, _token = resolve_service_endpoint()
+
+        get = http_get if http_get is not None else (
+            lambda u, t: httpx.get(u, timeout=t)
+        )
+        resp = get(f"{resolved_base_url.rstrip('/')}/version", timeout)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — boundary fallback — must degrade, never crash `nx doctor`
+        return T2SchemaFingerprint(reachable=False, reported=False, unreachable_detail=str(exc))
+
+    if not isinstance(body, dict):
+        return T2SchemaFingerprint(reachable=False, reported=False, unreachable_detail=f"/version returned non-object body: {body!r}")
+
+    reported = any(k in body for k in ("schema_latest_id", "schema_changeset_count", "schema_error"))
+    if not reported:
+        return T2SchemaFingerprint(reachable=True, reported=False)
+
+    count_raw = body.get("schema_changeset_count")
+    count = int(count_raw) if isinstance(count_raw, (int, float)) and not isinstance(count_raw, bool) else None
+    return T2SchemaFingerprint(
+        reachable=True,
+        reported=True,
+        latest_id=body.get("schema_latest_id"),
+        changeset_count=count,
+        schema_error=body.get("schema_error"),
+    )
+
+
+def _check_t2_schema_applied() -> list[HealthResult]:
+    """T2 schema-applied check (nexus-ay18d), PORTED off the retired SQLite
+    ``PRAGMA integrity_check`` / FTS5-rebuild probe.
+
+    WHY THE OLD CHECK DIED (nexus-ay18d): ``_check_t2_integrity`` opened
+    ``default_db_path()`` — the frozen SQLite migration source, per RDR-158
+    P4 never the live store in ANY mode since T2 moved to Postgres — with
+    no service-mode branch. On a legacy file present it validated a fossil
+    under the "T2 integrity" label; on a fresh PG-only box (the file never
+    exists) it returned ``ok=True, detail="not created yet"`` having
+    examined nothing — a clean pass that measured nothing, permanently
+    vacuous on every supported install shape (WAVE-2 finding, bead notes).
+
+    WHY THIS IS A PORT, NOT A RETIRE-WITH-NO-REPLACEMENT: Postgres has no
+    lightweight client-observable equivalent to SQLite's ``PRAGMA
+    integrity_check`` (that would need ``pg_amcheck`` wired through a NEW
+    engine route — explicitly out of scope for this fix; adding a route is
+    option (c) DEFER-LOUD, not needed here). But the bead's own suggested
+    fix — "Postgres has its own answer - Liquibase changeset state" — is
+    already served by the engine's existing ``GET /version`` handshake
+    (:func:`probe_t2_schema_fingerprint`), so this check now asks THAT: is
+    the schema Liquibase actually applied readable and non-empty. This is a
+    narrower question than on-disk corruption, but it is a REAL,
+    non-vacuous answer sourced from the live store, which is strictly more
+    honest than the false attribution the old check produced.
+
+    Capability-honest degrade: unreachable engine -> soft WARN (never
+    silent ok=True); a managed/cloud endpoint that withholds the fingerprint
+    by design -> ok=True, explicitly labelled "not exposed", never
+    conflated with "checked and healthy".
+
+    Legacy-file advisory: DECOUPLED from the verdict above. When
+    ``default_db_path()`` still exists on disk (a migration-era install
+    that has not been cleaned up), this reports a SEPARATE, purely
+    informational entry under :data:`_LEGACY_T2_SOURCE_LABEL` — always
+    ``ok=True`` — naming it a frozen rollback artifact, never claiming
+    anything about the live store. No file present -> no entry at all
+    (mirrors ``_check_engine_convergence``'s "not applicable" convention).
+    """
+    results: list[HealthResult] = []
+    label = _T2_SCHEMA_LABEL
+
+    fp = probe_t2_schema_fingerprint()
+    if not fp.reachable:
+        results.append(HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"SKIPPED (T2 engine unreachable: {fp.unreachable_detail}) — "
+                "see 'Storage service health' above for the underlying cause."
+            ),
+        ))
+    elif not fp.reported:
+        results.append(HealthResult(
+            label=label,
+            ok=True,
+            detail=(
+                "not exposed by this endpoint (managed/cloud service "
+                "withholds the schema fingerprint by design, or the engine "
+                "predates the /version schema fields)"
+            ),
+        ))
+    elif fp.schema_error:
+        results.append(HealthResult(
+            label=label, ok=False,
+            detail=f"engine reported schema_error: {fp.schema_error}",
+        ))
+    elif not fp.changeset_count:
+        # Non-vacuity (nexus-kmo9h class): an engine that answers but
+        # reports zero applied changesets is not a healthy schema state,
+        # even though it is not a transport/read error either.
+        results.append(HealthResult(
+            label=label, ok=False,
+            detail=f"schema_changeset_count={fp.changeset_count!r} — Liquibase applied nothing",
+        ))
+    else:
+        results.append(HealthResult(
+            label=label, ok=True,
+            detail=f"{fp.changeset_count} changeset(s) applied, latest={fp.latest_id}",
+        ))
 
     db_path = default_db_path()
-    if not db_path.exists():
-        return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
+    if db_path.exists():
+        results.append(HealthResult(
+            label=_LEGACY_T2_SOURCE_LABEL,
+            ok=True,
+            detail=(
+                f"frozen pre-migration SQLite file present at {db_path} — a "
+                "downgrade/rollback artifact, not live data; T2 is Postgres "
+                "in every mode since RDR-158 P4"
+            ),
+        ))
 
-    try:
-        conn = sqlite3.connect(str(db_path))  # frozen-source-integrity-write: NOT mode=ro — the FTS5 integrity-check pseudo-command below requires a writable connection (checking command, no content change); named in SQLITE_CONNECT_ALLOWLIST with the write-shaped exception documented
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_INTEGRITY_BUSY_TIMEOUT_MS}")
-            rows = conn.execute("PRAGMA integrity_check").fetchall()
-            pragma_ok = len(rows) == 1 and rows[0][0] == "ok"
-            if not pragma_ok:
-                issues = "; ".join(r[0] for r in rows[:3])
-                return [HealthResult(label="T2 integrity", ok=False, detail=f"PRAGMA: {issues}")]
-
-            # FTS5 integrity probe — a write that takes the WAL writer slot.
-            # Retry on transient lock contention; a non-lock error is genuine
-            # FTS5 corruption and must hard-fail immediately.
-            sleeps = _INTEGRITY_RETRY_SLEEPS_BETWEEN
-            max_attempts = len(sleeps) + 1
-            fts_ok = False
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    conn.execute(
-                        "INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"
-                    )
-                    fts_ok = True
-                    break
-                except sqlite3.OperationalError as exc:
-                    if not _is_lock_error(exc):
-                        return [HealthResult(label="T2 integrity", ok=False, detail=f"FTS5: {exc}")]
-                    # Clear any partial transaction so the retry re-reads a
-                    # fresh snapshot (handles SQLITE_BUSY_SNAPSHOT too).
-                    try:
-                        conn.rollback()
-                    except sqlite3.Error:
-                        pass
-                    if attempt == max_attempts:
-                        # Transient writer-lock contention, not corruption.
-                        # Stays SOFT by design — and *stays* soft even after
-                        # RDR-129's single-daemon enforcement ships: a lock
-                        # here post-P2 indicates a single-daemon invariant
-                        # violation (a second daemon, or a direct writer
-                        # bypassing the daemon), which the A3 daemon census
-                        # reports as a hard error. The two are complementary;
-                        # keeping B4 soft means the drop metric is never lost
-                        # to a hard fail. Do NOT flip this to a hard failure
-                        # without understanding that relationship (RDR-129 §B4).
-                        return [HealthResult(
-                            label="T2 integrity",
-                            ok=False,
-                            warn=True,
-                            detail="FTS5: busy (write in progress, retry)",
-                        )]
-                    time.sleep(sleeps[attempt - 1])
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        return [HealthResult(label="T2 integrity", ok=False, detail=f"could not open: {exc}")]
-
-    if pragma_ok and fts_ok:
-        return [HealthResult(label="T2 integrity", ok=True, detail="PRAGMA ok, FTS5 ok")]
-    return [HealthResult(label="T2 integrity", ok=False, detail="check failed")]
+    return results
 
 
 def _check_t2_dropped_writes() -> list[HealthResult]:
@@ -4410,7 +4531,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())
-    results.extend(_check_t2_integrity())
+    results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())
 
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import

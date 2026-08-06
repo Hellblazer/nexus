@@ -3,17 +3,20 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 
 from nexus.health import (
     _check_orphan_t1,
-    _check_t2_integrity,
     _check_t2_dropped_writes,
+    _check_t2_schema_applied,
     _check_orphan_checkpoints,
+    _LEGACY_T2_SOURCE_LABEL,
+    _T2_SCHEMA_LABEL,
     HealthResult,
+    T2SchemaFingerprint,
 )
 from nexus.db.t2 import T2Database
 
@@ -43,101 +46,161 @@ def _run_orphan_t1(sessions_dir: Path) -> tuple[bool, list[HealthResult]]:
     return ok, results
 
 
-# ── Step 6: T2 integrity ────────────────────────────────────────────────────
+# ── T2 schema applied (nexus-ay18d PORT off SQLite PRAGMA integrity) ────────
 
-class TestCheckT2Integrity:
-    def _run(self, db_path: Path) -> tuple[bool, list[HealthResult]]:
-        with patch("nexus.health.default_db_path", return_value=db_path):
-            results = _check_t2_integrity()
+class _FakeResponse:
+    """Minimal ``httpx.Response`` stand-in for
+    :func:`nexus.health.probe_t2_schema_fingerprint`'s injectable
+    ``http_get`` — always a 200; non-200 behavior is exercised via the
+    ``http_get`` callable raising directly (see
+    ``test_unreachable_engine_is_soft_warn_never_vacuous_ok``)."""
+
+    def __init__(self, body: dict):
+        self._body = body
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict:
+        return self._body
+
+
+class TestCheckT2SchemaApplied:
+    def _run(self, db_path: Path, http_get=None) -> tuple[bool, list[HealthResult]]:
+        from contextlib import ExitStack
+
+        from nexus import health
+
+        real_probe = health.probe_t2_schema_fingerprint
+        with ExitStack() as stack:
+            stack.enter_context(patch("nexus.health.default_db_path", return_value=db_path))
+            if http_get is not None:
+                stack.enter_context(patch(
+                    "nexus.health.probe_t2_schema_fingerprint",
+                    lambda: real_probe(base_url="http://127.0.0.1:1", http_get=http_get),
+                ))
+            results = _check_t2_schema_applied()
         ok = all(r.ok for r in results)
         return ok, results
 
-    def test_db_not_exists(self, tmp_path):
-        ok, results = self._run(tmp_path / "nonexistent.db")
-        assert ok is True and "not created yet" in results[0].detail
+    def _schema_result(self, results: list[HealthResult]) -> HealthResult:
+        matches = [r for r in results if r.label == _T2_SCHEMA_LABEL]
+        assert matches, f"no {_T2_SCHEMA_LABEL!r} result in {results!r}"
+        return matches[0]
 
+    def test_healthy_engine_reports_ok(self, tmp_path):
+        """Real PG install: /version reports a real changeset count, no
+        error — the honest, non-vacuous PASS."""
+        http_get = lambda url, timeout: _FakeResponse(
+            {"schema_latest_id": "vectors-014", "schema_changeset_count": 209}
+        )
+        ok, results = self._run(tmp_path / "nonexistent.db", http_get=http_get)
+        r = self._schema_result(results)
+        assert ok is True
+        assert r.ok is True
+        assert "209 changeset" in r.detail
+        assert "vectors-014" in r.detail
+        # No legacy-source advisory when the file is absent (fresh box).
+        assert not [x for x in results if x.label == _LEGACY_T2_SOURCE_LABEL]
 
-    def test_non_lock_fts_error_stays_hard(self, tmp_path, monkeypatch):
-        """A non-lock OperationalError on the FTS5 probe (genuine FTS
-        corruption) is a HARD failure, distinct from transient contention."""
-        import sqlite3 as _sqlite3
-
-        from nexus import health
-
-        db_path = tmp_path / "memory.db"
-        db_path.write_text("placeholder")  # only .exists() matters here
-
-        class _Cursor:
-            def __init__(self, rows):
-                self._rows = rows
-
-            def fetchall(self):
-                return self._rows
-
-        class _FakeConn:
-            def execute(self, sql, *args):
-                if sql.startswith("PRAGMA busy_timeout"):
-                    return _Cursor([])
-                if sql == "PRAGMA integrity_check":
-                    return _Cursor([("ok",)])
-                if "INSERT INTO memory_fts" in sql:
-                    raise _sqlite3.OperationalError("malformed database schema")
-                return _Cursor([])
-
-            def rollback(self):
-                pass
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(health.sqlite3, "connect", lambda *a, **k: _FakeConn())
-        ok, results = self._run(db_path)
-        r = results[0]
+    def test_engine_reports_schema_error_is_hard_fail(self, tmp_path):
+        """The engine itself could not read its changelog — a genuine,
+        engine-sourced failure signal, not a client-side guess."""
+        http_get = lambda url, timeout: _FakeResponse(
+            {"schema_latest_id": None, "schema_changeset_count": None, "schema_error": "connection refused"}
+        )
+        ok, results = self._run(tmp_path / "nonexistent.db", http_get=http_get)
+        r = self._schema_result(results)
         assert ok is False
         assert r.ok is False
         assert r.warn is False
-        assert "FTS5" in r.detail
+        assert "connection refused" in r.detail
 
-    def test_lock_fts_error_via_fake_conn_is_soft(self, tmp_path, monkeypatch):
-        """The discriminator at the FTS5 layer: a lock OperationalError on the
-        probe → soft WARN even when surfaced through a stand-in connection."""
-        import sqlite3 as _sqlite3
+    def test_zero_changesets_is_hard_fail_non_vacuity(self, tmp_path):
+        """A reachable engine reporting zero applied changesets is NOT a
+        healthy schema — the non-vacuity guard (nexus-kmo9h class)."""
+        http_get = lambda url, timeout: _FakeResponse(
+            {"schema_latest_id": None, "schema_changeset_count": 0}
+        )
+        ok, results = self._run(tmp_path / "nonexistent.db", http_get=http_get)
+        r = self._schema_result(results)
+        assert ok is False
+        assert "applied nothing" in r.detail
 
-        from nexus import health
+    def test_managed_endpoint_omits_fields_is_honest_na(self, tmp_path):
+        """The managed/cloud endpoint withholds the fingerprint BY DESIGN
+        (nexus.db.managed_endpoint docstring) — absent keys, not null
+        values. Reported ok=True but explicitly labelled "not exposed",
+        never conflated with "checked and healthy"."""
+        http_get = lambda url, timeout: _FakeResponse(
+            {"app_version": "1.0-SNAPSHOT", "release_version": "0.1.65"}
+        )
+        ok, results = self._run(tmp_path / "nonexistent.db", http_get=http_get)
+        r = self._schema_result(results)
+        assert ok is True
+        assert "not exposed" in r.detail
 
-        db_path = tmp_path / "memory.db"
-        db_path.write_text("placeholder")
+    def test_unreachable_engine_is_soft_warn_never_vacuous_ok(self, tmp_path):
+        """Engine unreachable — the fresh-box false-clean this bead exists
+        to close. MUST be warn=True, never a silent ok=True."""
+        def _boom(url, timeout):
+            raise ConnectionError("refused")
 
-        monkeypatch.setattr(health, "_INTEGRITY_RETRY_SLEEPS_BETWEEN", (0.0,))
-
-        class _Cursor:
-            def __init__(self, rows):
-                self._rows = rows
-
-            def fetchall(self):
-                return self._rows
-
-        class _FakeConn:
-            def execute(self, sql, *args):
-                if sql == "PRAGMA integrity_check":
-                    return _Cursor([("ok",)])
-                if "INSERT INTO memory_fts" in sql:
-                    raise _sqlite3.OperationalError("database is locked")
-                return _Cursor([])
-
-            def rollback(self):
-                pass
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(health.sqlite3, "connect", lambda *a, **k: _FakeConn())
-        ok, results = self._run(db_path)
-        r = results[0]
+        ok, results = self._run(tmp_path / "nonexistent.db", http_get=_boom)
+        r = self._schema_result(results)
         assert ok is False
         assert r.ok is False
         assert r.warn is True
-        assert "busy" in r.detail.lower()
+        assert "unreachable" in r.detail.lower()
+
+    def test_fresh_box_no_file_no_legacy_advisory(self, tmp_path, monkeypatch):
+        """A fresh PG-only install (WAVE-2 finding): no SQLite file ever
+        existed. Only the schema-applied result renders — no legacy-source
+        noise for an install shape that never had SQLite."""
+        monkeypatch.setattr(
+            "nexus.health.probe_t2_schema_fingerprint",
+            lambda: T2SchemaFingerprint(reachable=False, reported=False, unreachable_detail="no service"),
+        )
+        with patch("nexus.health.default_db_path", return_value=tmp_path / "nonexistent.db"):
+            results = _check_t2_schema_applied()
+        assert len(results) == 1
+        assert results[0].label == _T2_SCHEMA_LABEL
+
+    def test_legacy_file_present_is_informational_advisory_only(self, tmp_path, monkeypatch):
+        """A migration-era install with the frozen SQLite file still on
+        disk gets a SEPARATE, purely informational advisory — decoupled
+        from (and never gating) the schema-applied verdict."""
+        monkeypatch.setattr(
+            "nexus.health.probe_t2_schema_fingerprint",
+            lambda: T2SchemaFingerprint(
+                reachable=True, reported=True, latest_id="vectors-014", changeset_count=209,
+            ),
+        )
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("placeholder")
+        with patch("nexus.health.default_db_path", return_value=db_path):
+            results = _check_t2_schema_applied()
+        labels = {r.label: r for r in results}
+        assert labels[_T2_SCHEMA_LABEL].ok is True
+        advisory = labels[_LEGACY_T2_SOURCE_LABEL]
+        assert advisory.ok is True  # purely informational — never gates
+        assert "rollback artifact" in advisory.detail
+        assert str(db_path) in advisory.detail
+
+    def test_legacy_file_present_does_not_flip_a_failing_verdict(self, tmp_path, monkeypatch):
+        """The advisory is decoupled: a legacy file's presence must not
+        mask (or be masked by) a genuine schema_error on the live engine."""
+        monkeypatch.setattr(
+            "nexus.health.probe_t2_schema_fingerprint",
+            lambda: T2SchemaFingerprint(reachable=True, reported=True, schema_error="boom"),
+        )
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("placeholder")
+        with patch("nexus.health.default_db_path", return_value=db_path):
+            results = _check_t2_schema_applied()
+        labels = {r.label: r for r in results}
+        assert labels[_T2_SCHEMA_LABEL].ok is False
+        assert labels[_LEGACY_T2_SOURCE_LABEL].ok is True
 
 
 # ── T2 best-effort write drops (RDR-129 B4, nexus-uq8a4) ────────────────────
@@ -187,7 +250,11 @@ class TestCheckT2DroppedWrites:
 # daemon the count can only be zero, and the fix it suggested named
 # `nx daemon t2 stop` / `ensure-running`. The single-writer invariant it guarded
 # is now Postgres's, not a pid count's. The soft live-contention signal it was
-# complementary to (_check_t2_integrity) is unaffected and still covered above.
+# complementary to (the SQLite FTS5-busy WARN, formerly `_check_t2_integrity`)
+# was itself retired at nexus-ay18d — the replacement,
+# `_check_t2_schema_applied`, asks the engine directly and has no
+# write-lock-contention case to be soft about (see TestCheckT2SchemaApplied
+# above).
 
 
 # ── Orphan checkpoints ──────────────────────────────────────────────────────
