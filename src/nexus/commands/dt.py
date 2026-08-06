@@ -1033,8 +1033,14 @@ def index_cmd(
         # write-failed, then identity-drops) — the extraction's default
         # order matches index_repo_cmd's instead. No test pinned the
         # order for either caller, but matching it keeps the "behavior-
-        # preserving refactor" claim exact.
-        order=("refused", "write_failed", "identity_drops"),
+        # preserving refactor" claim exact. nexus-39upx hazard 4:
+        # appended at the end so this surface also gets sweep
+        # visibility — an explicit order that predates a check must not
+        # silently opt that surface out of it.
+        order=(
+            "refused", "write_failed", "identity_drops",
+            "superseded_swept", "superseded_sweep_skipped",
+        ),
     ):
         # nexus-tp8yk D2b: mirrors commands/index.py's index_repo_cmd — a
         # completion refusal, a manifest write failure, or an identity

@@ -102,6 +102,222 @@ def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> 
     return [h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))]
 
 
+def catalog_documents_for_collection(reader: object, collection: str) -> list:
+    """Server-scoped catalog document fetch for *collection*.
+
+    nexus-39upx round 2 SIGNIFICANT 1: the ORIGINAL ``live_note_chashes``
+    called ``reader.all_documents(content_type="knowledge")`` — an
+    UNSCOPED fetch of every ``content_type="knowledge"`` document across
+    the whole tenant (every ``knowledge__*`` collection, not just this
+    one), filtered down to *collection* client-side. ``list_by_collection``
+    is the server-side-filtered equivalent already used elsewhere
+    (``catalog/manifest_backfill.py``, ``catalog/orphan_backfill.py``):
+    same unbounded-when-limit-omitted contract as ``all_documents``'s
+    ``content_type`` branch (``CatalogHandler.handleList``'s ``collection``
+    query param, ``filterLimit=0`` when the caller sends no explicit
+    limit) — one HTTP round trip, no truncation — just scoped to ONE
+    physical collection instead of the entire tenant, and returning
+    every content_type registered under it (in practice a single
+    physical_collection carries one content_type by the RDR-103 naming
+    convention, so this is a strict narrowing, not a behavior change for
+    any conformant collection).
+
+    This is the single collection-wide catalog read shared by
+    :func:`live_note_chashes` (RDR-145 notes) and
+    :func:`non_complete_documents` (nexus-g6k6b RUNFENCE precondition) —
+    fetch once, derive both from the same list, and (via
+    :class:`CollectionDocumentsCache`) fetch it at most once per batch
+    reindex sharing a collection rather than once per orphan-triggering
+    document.
+
+    RAISES on failure — deliberately, never a silent empty list. See
+    ``live_note_chashes``'s docstring for why a swallowed read here is
+    the nexus-kgos1 failure shape one hazard over.
+
+    Args:
+        reader: a catalog READER exposing ``list_by_collection(collection)
+            -> list[CatalogEntry]``. Read op — routed through the
+            write-only proxy it raises AttributeError, same class of
+            hazard as nexus-kgos1, so this must be the reader, never
+            the writer/write-proxy. ``None`` raises immediately.
+        collection: physical collection to fetch.
+    """
+    if reader is None:
+        raise RuntimeError(
+            "catalog_documents_for_collection: no catalog reader "
+            "available — cannot read catalog documents for a T3 sweep "
+            "safety check"
+        )
+    return list(reader.list_by_collection(collection) or [])
+
+
+def live_note_chashes(documents) -> set[str]:
+    """Chashes of manifest-less notes among *documents* that a
+    T3-deleting sweep must NEVER treat as orphans (nexus-39upx hazard 2
+    / RDR-145).
+
+    ``catalog-003-soft-delete.xml``'s ``nexus.live_chunks`` view (and its
+    ``purge_trash`` sibling) encode the standing contract: "a chunk is
+    live if it has NO manifest rows at all (a note chunk written by MCP
+    ``store_put`` / ``nx store put``) OR has at least one live-doc
+    manifest row." A manifest-diff sweep (``orphaned_chashes`` above, or
+    ``nx t3 gc``'s ``chashes_for_collection`` diff) only ever sees the
+    SECOND half of that OR: both ``docs_for_chashes`` and
+    ``chashes_for_collection`` query ``catalog_document_chunks``, so a
+    chash with ZERO manifest rows — a legitimate note — is
+    indistinguishable from a chash that fell out of a live document's
+    manifest via re-index. Both simply read as "not referenced".
+
+    A note's catalog row carries no ``file_path`` (store_put origin, not
+    an indexed file) and stamps its single T3 chunk's natural id — the
+    full content hash — into ``meta["doc_id"]`` at write time
+    (``catalog/store_hook.py::single_chunk_manifest_metadata`` +
+    ``catalog_store_hook_tracked``; the SAME field the ``nx catalog
+    doctor --store-put-integrity`` check reads for its own ghost
+    lookup).
+
+    Pure function (nexus-39upx round 2 SIGNIFICANT 1: no I/O) — callers
+    fetch *documents* once via :func:`catalog_documents_for_collection`
+    (typically through :class:`CollectionDocumentsCache` when the same
+    collection is swept for multiple documents in one batch) and pass
+    the SAME list here and to :func:`non_complete_documents`.
+
+    Args:
+        documents: catalog entries already scoped to one physical
+            collection (e.g. the return of
+            ``catalog_documents_for_collection(reader, collection)``).
+
+    Returns:
+        The set of chashes belonging to manifest-less notes among
+        *documents*. Empty when none are note-shaped (the common case
+        for code__/docs__/rdr__ collections, which are index-origin
+        only).
+    """
+    notes: set[str] = set()
+    for e in documents or []:
+        if getattr(e, "file_path", ""):
+            continue  # has a source file: indexed content, not a note
+        chash = (getattr(e, "meta", None) or {}).get("doc_id", "")
+        if chash:
+            notes.add(chash)
+    return notes
+
+
+def non_complete_documents(documents) -> list:
+    """Documents among *documents* whose RUNFENCE ``index_state`` is not
+    ``'complete'`` (nexus-g6k6b — nexus-39upx round 2 CRITICAL).
+
+    Bead nexus-39upx's own comment thread (Hal, 2026-08-02 11:23),
+    verbatim, is the binding requirement this implements: "PRECONDITION
+    ON OPTION (b) from the 5xn3k RUNFENCE design... The corpus-wide
+    sweep (b) MUST filter on ``index_state = 'complete'``. Sweeping a
+    document that is mid-index would delete chunks an in-flight run has
+    already written but has not yet manifested... Treat this as a
+    stated requirement on (b), not a nice-to-have."
+
+    ``nx t3 gc``'s alive-set (``chashes_for_collection``) is a
+    COLLECTION-level union of every live document's manifest — post-RDR-108
+    a T3 chunk carries no ``doc_id`` at all, so an orphan CANDIDATE
+    (a chash referenced by no current manifest row) cannot be attributed
+    back to the specific document that most recently owned it. The
+    conservative, structurally-honest way to implement "exclude chunks
+    belonging to a non-complete document" when candidates cannot be
+    attributed to individual documents is a collection-level circuit
+    breaker: if this collection contains ANY document that is not
+    ``'complete'``, no candidate in the collection can be PROVEN safe,
+    so the caller must refuse (or require an explicit operator
+    override) rather than delete anything.
+
+    Classification, per Hal's follow-up comment (2026-08-02 17:02) —
+    honored verbatim, not paraphrased down:
+      - Note-shaped documents (the same ``file_path==""`` +
+        ``meta["doc_id"]`` shape :func:`live_note_chashes` protects) are
+        EXCLUDED from this list. Hal: "store_put-origin documents NEVER
+        carry index_state (registered exclusion on nexus-5xn3k, accepted
+        design)... That is the conservative direction (their chunks are
+        never swept: over-retention, not deletion) and is correct" —
+        i.e. notes are ALREADY, separately, unconditionally protected;
+        re-flagging them here would make every knowledge collection
+        holding even one note permanently refuse gc, which is not the
+        behavior "over-retention... is correct" describes.
+      - Every OTHER document with ``index_state`` != ``'complete'``
+        counts, INCLUDING ``None`` (reported explicitly as null).
+        Hal: "do not 'fix' it by widening the filter to NULL — NULL
+        means unknown, and sweeping unknown-state docs is exactly the
+        mid-index-deletion hazard the precondition exists to prevent."
+        This covers ``'indexing'`` (live), ``'failed'`` (a run that
+        fenced a failure — its manifest may be a partial, mid-truncation
+        artifact of ``atomic_manifest_replace``'s first-batch replace,
+        same hazard shape as ``'indexing'``), and ``None`` (unknown —
+        never assumed safe).
+      - A document whose ``index_state`` was never REPORTED at all
+        (``index_state_reported=False`` — a pre-RUNFENCE engine that
+        does not have the column) is EXCLUDED from this list: the same
+        floor-tolerance stance the RUNFENCE arc used everywhere else
+        (``doc_indexer._index_run_fresh`` et al) — an engine that
+        cannot answer the question behaves exactly as it did before
+        this check existed, never a refusal the operator cannot act on.
+
+    Pure function (no I/O) — see :func:`live_note_chashes` for the
+    fetch-once-reuse-twice rationale.
+    """
+    out = []
+    for e in documents or []:
+        if not getattr(e, "file_path", "") and (getattr(e, "meta", None) or {}).get("doc_id", ""):
+            continue  # note-shaped: live_note_chashes's exemption already covers it
+        if not getattr(e, "index_state_reported", True):
+            continue  # pre-RUNFENCE engine: floor-tolerant, no signal to act on
+        if getattr(e, "index_state", None) != "complete":
+            out.append(e)
+    return out
+
+
+class CollectionDocumentsCache:
+    """Memoizes :func:`catalog_documents_for_collection` for the
+    lifetime of one instance (nexus-39upx round 2 SIGNIFICANT 1).
+
+    ``_sweep_superseded_vectors`` (``mcp_infra.py``) is called once per
+    orphan-triggering document inside ``_manifest_write_loop``'s
+    per-batch loop — a batch reindex over many documents sharing one
+    collection would otherwise re-fetch the WHOLE collection's catalog
+    documents once per document that happens to have dropped a chash.
+    The bead's own corpus data (SHAKEOUT-7.1.1) measured ~20% orphan
+    rates in heavily-reindexed collections: a 1000-document batch
+    reindex in such a collection would trip the fetch roughly 200 times
+    with zero reuse. Construct ONE instance per ``(reader, collection)``
+    pair — once per ``_manifest_write_loop`` call — and share it across
+    every document processed in that call.
+
+    Caches a raised exception too (re-raised verbatim on every
+    subsequent :meth:`get` within the SAME batch) rather than
+    re-attempting a call that already failed once this batch — a
+    transient catalog outage should not be retried once per document
+    either; each caller's own fail-open/fail-loud handling still fires
+    per document, just against the same cached failure.
+    """
+
+    __slots__ = ("_reader", "_collection", "_value", "_error", "_done")
+
+    def __init__(self, reader: object, collection: str) -> None:
+        self._reader = reader
+        self._collection = collection
+        self._value: list | None = None
+        self._error: Exception | None = None
+        self._done = False
+
+    def get(self) -> list:
+        if not self._done:
+            self._done = True
+            try:
+                self._value = catalog_documents_for_collection(self._reader, self._collection)
+            except Exception as exc:  # noqa: BLE001 — cached and re-raised verbatim below, never swallowed
+                self._error = exc
+        if self._error is not None:
+            raise self._error
+        assert self._value is not None
+        return self._value
+
+
 # nexus-tbkk1 (2026-08-05, substantive-critic Significant #2):
 # prune_orphan_candidates DELETED. It was a THIN wrapper around
 # orphaned_chashes (above) built specifically for the tp8yk D3 fix at

@@ -126,7 +126,7 @@ def t2_handle() -> Iterator[Any]:
 
 
 def reset_identity_drop_collectors() -> None:
-    """Zero the three post-store-hook failure collectors for a fresh run.
+    """Zero the post-store-hook failure collectors for a fresh run.
 
     Call once at the start of an index run (or once per file, for a loop
     that wants per-file attribution — see ``index_pdf_cmd``'s ``--dir``
@@ -138,11 +138,16 @@ def reset_identity_drop_collectors() -> None:
         reset_complete_refusals,
         reset_manifest_identity_drops,
         reset_manifest_write_failures,
+        reset_superseded_sweep_stats,
     )
 
     reset_manifest_write_failures()
     reset_manifest_identity_drops()
     reset_complete_refusals()
+    # nexus-39upx hazard 4: same reset-before/check-after shape as the
+    # three collectors above, added here (not a parallel function) so
+    # every existing call site picks up sweep-skip visibility for free.
+    reset_superseded_sweep_stats()
 
 
 def _emit_write_failed_warning() -> bool:
@@ -227,14 +232,68 @@ def _emit_refused_warning(*, indexed_count: int) -> bool:
     return True
 
 
+def _emit_superseded_swept_info() -> bool:
+    """nexus-39upx hazard 4: chunks the in-band superseded-vector sweep
+    already deleted this run — purely informational (a SUCCESSFUL
+    cleanup, not a problem), so this always returns ``False`` and never
+    trips the batch fail-loud gate below."""
+    import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
+
+    from nexus.mcp_infra import get_superseded_sweep_stats  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
+
+    swept = get_superseded_sweep_stats().get("swept", 0)
+    if swept:
+        click.echo(
+            f"  swept {swept} superseded T3 chunk(s) left behind by a "
+            f"changed re-index (nexus-39upx)"
+        )
+    return False
+
+
+def _emit_superseded_sweep_skipped_warning() -> bool:
+    """nexus-39upx hazard 4: the sweep could not verify orphanhood or
+    note-safety for one or more documents this run — old/superseded T3
+    rows (nexus-gtltb-class: still fully searchable, since vector search
+    reads T3, not the manifest) may remain. Capability-honest: this
+    collector exists so that state is never silent. Returns ``True`` iff
+    any skip was recorded, so it counts toward the batch's non-zero exit
+    (uqq9z/7f5qj strictness direction — a sweep that could not run is
+    treated the same as any other identity-drop-class problem, not
+    swallowed as housekeeping)."""
+    import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
+
+    from nexus.mcp_infra import get_superseded_sweep_stats  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
+
+    skips = get_superseded_sweep_stats().get("skipped", [])
+    if not skips:
+        return False
+    reasons = sorted({s["reason"] for s in skips})
+    click.echo(
+        f"  WARNING: superseded-chunk sweep skipped for {len(skips)} "
+        f"document(s) ({', '.join(reasons)}) — old/superseded T3 rows "
+        f"may still be searchable. Re-index, or run "
+        f"'nx t3 gc -c COLLECTION' once the underlying issue clears.",
+        err=True,
+    )
+    return True
+
+
 _IDENTITY_DROP_CHECKS = {
     "write_failed": lambda indexed_count: _emit_write_failed_warning(),
     "identity_drops": lambda indexed_count: _emit_identity_drops_warning(),
     "refused": lambda indexed_count: _emit_refused_warning(indexed_count=indexed_count),
+    "superseded_swept": lambda indexed_count: _emit_superseded_swept_info(),
+    "superseded_sweep_skipped": lambda indexed_count: _emit_superseded_sweep_skipped_warning(),
 }
 # Default sequence matches index_repo_cmd's pre-extraction order (also
-# used, fresh, by index_pdf_cmd / index_md_cmd — nexus-7f5qj).
-_DEFAULT_ORDER = ("write_failed", "identity_drops", "refused")
+# used, fresh, by index_pdf_cmd / index_md_cmd — nexus-7f5qj). The two
+# nexus-39upx entries are appended (not test-pinned anywhere upstream,
+# same "no test pinned the print order" precedent the docstring above
+# already documents for the first three).
+_DEFAULT_ORDER = (
+    "write_failed", "identity_drops", "refused",
+    "superseded_swept", "superseded_sweep_skipped",
+)
 
 
 def emit_identity_drop_summary(
@@ -267,11 +326,33 @@ def emit_identity_drop_summary(
 
 
 def raise_identity_drop_exception(*, subject: str = "document") -> None:
-    """Raise the standard fail-loud ``ClickException`` for a BATCH run
+    """Raise the fail-loud ``ClickException`` for a BATCH run
     (``nx index repo`` / ``nx dt index``) that recorded manifest write
-    failures, identity drops, or completion refusals — verbatim wording
-    both call sites already used before this extraction. Call only after
+    failures, identity drops, completion refusals, and/or (nexus-39upx
+    round 2 SIGNIFICANT 2) a superseded-chunk sweep skip. Call only after
     :func:`emit_identity_drop_summary` returned ``True``.
+
+    The message names ONLY the cause(s) that actually fired this run and
+    the matching remedy for each — nexus-39upx round 2 (substantive-
+    critique, T2 21515): the ORIGINAL wording named all three write-class
+    causes and the ``nx catalog manifest-verify`` remedy UNCONDITIONALLY,
+    which was accurate for the three write-class collectors this
+    function was written for but became misleading once a fourth,
+    housekeeping-only trigger (a sweep that could not verify orphan/note
+    safety, no write ever failed) joined the same fail-loud gate: a run
+    tripping ONLY that condition would exit non-zero pointing an operator
+    at ``manifest-verify`` for a document whose manifest was never in
+    question. The WARNING line ``_emit_superseded_sweep_skipped_warning``
+    prints above already names the correct remedy
+    (``nx t3 gc -c COLLECTION``); this exception now matches it instead
+    of contradicting it.
+
+    Reads the SAME four collectors ``emit_identity_drop_summary`` just
+    printed from — nothing resets between that call and this one, so the
+    state is identical. If reached with none of the four populated (the
+    two-unit-test degenerate case, or any future caller that raises
+    without checking first), falls back to the ORIGINAL generic wording
+    verbatim — a defensive floor, not a real production path.
 
     For a SINGLE-FILE command where one failure means one orphaned
     document, use :func:`raise_identity_drop_exception_for_file` instead
@@ -280,12 +361,58 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached on a fail-loud exit
+        get_complete_refusals,
+        get_manifest_identity_drops,
+        get_manifest_write_failures,
+        get_superseded_sweep_stats,
+    )
+
+    write_failed = bool(get_manifest_write_failures())
+    identity_dropped = bool(get_manifest_identity_drops())
+    refused = bool(get_complete_refusals())
+    sweep_skipped = bool(get_superseded_sweep_stats().get("skipped"))
+    any_write_class = write_failed or identity_dropped or refused
+
+    if not any_write_class and not sweep_skipped:
+        raise click.ClickException(
+            f"one or more {subject}s had manifest write failures, "
+            f"identity drops, or completion refusals this run — see "
+            f"the WARNING lines above. Run 'nx catalog manifest-verify "
+            f"<tumbler>' to inspect a specific {subject}, or re-index "
+            f"with --force."
+        )
+
+    causes = []
+    if write_failed:
+        causes.append("manifest write failures")
+    if identity_dropped:
+        causes.append("identity drops")
+    if refused:
+        causes.append("completion refusals")
+    if sweep_skipped:
+        causes.append("a superseded-chunk sweep skip")
+    cause_text = (
+        causes[0] if len(causes) == 1
+        else ", ".join(causes[:-1]) + f", and {causes[-1]}"
+    )
+
+    remedies = []
+    if any_write_class:
+        remedies.append(
+            f"Run 'nx catalog manifest-verify <tumbler>' to inspect a "
+            f"specific {subject}, or re-index with --force"
+        )
+    if sweep_skipped:
+        remedies.append(
+            "re-index, or run 'nx t3 gc -c COLLECTION' once the "
+            "underlying sweep issue clears"
+        )
+    remedy_text = "; ".join(remedies) + "."
+
     raise click.ClickException(
-        f"one or more {subject}s had manifest write failures, "
-        f"identity drops, or completion refusals this run — see "
-        f"the WARNING lines above. Run 'nx catalog manifest-verify "
-        f"<tumbler>' to inspect a specific {subject}, or re-index "
-        f"with --force."
+        f"one or more {subject}s had {cause_text} this run — see the "
+        f"WARNING lines above. {remedy_text}"
     )
 
 
