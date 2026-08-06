@@ -231,10 +231,14 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
-            // Close the embedder's native ONNX session + tokenizer once. doc and
-            // qry routers share the SAME embedder instance, so closing one is
-            // sufficient (a second close is harmless — close() swallows it).
+            // doc and qry routers share the SAME local embedder instance (the
+            // native ONNX session + tokenizer), so closing one is sufficient for
+            // THAT resource (a second close is harmless — close() swallows it).
+            // But each router owns its OWN CceEmbedder with its OWN bounded
+            // virtual-thread executor for the parallel per-chunk fan-out
+            // (nexus-9okyk) — both routers must be closed to shut both down.
             docEmbedRouter.close();
+            qryEmbedRouter.close();
             ds.close();
         }));
 

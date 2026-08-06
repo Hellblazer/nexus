@@ -364,6 +364,11 @@ public final class EmbedderRouter implements Embedder {
         if (localEmbedder != null) {
             try { localEmbedder.close(); } catch (Exception ignored) {}
         }
-        // VoyageEmbedder and CceEmbedder are stateless HTTP clients; no close needed
+        // VoyageEmbedder instances are stateless HTTP clients; no close needed.
+        // CceEmbedder (nexus-9okyk) owns a bounded virtual-thread executor for its
+        // parallel per-chunk fan-out — must be shut down with this router.
+        if (cceEmbedder != null) {
+            try { cceEmbedder.close(); } catch (Exception ignored) {}
+        }
     }
 }
