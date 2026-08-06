@@ -18,6 +18,7 @@ from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import _pdf_chunks, _sha256, index_pdf
 from nexus.indexer import _git_metadata, _index_pdf_file
 from nexus.pdf_extractor import PDFExtractor
+from tests._mineru_rearm import mineru_importorskip
 from tests.conftest import set_credentials
 
 
@@ -473,12 +474,28 @@ class TestFormulaPreservationOnRealPdf:
         of model weights into ``~/.cache/huggingface`` and per-page
         inference runs for several minutes even on warm cache. Default
         ``pytest`` deselects this (see pyproject.toml addopts); run
-        explicitly with ``uv run pytest -m slow``. The release-sandbox
-        shakedown step 3b still exercises MinerU end-to-end through the
-        production ``nx index pdf`` path on every release run, so this
-        marker does not regress the user-facing fail-loud regression
-        guard's reach — it only avoids paying the model-download cost in
-        CI, where ``mineru[all]`` is already a default-dep install.
+        explicitly with ``uv run pytest -m slow``.
+
+        nexus-6xkdu: this docstring previously claimed the release-sandbox
+        shakedown covered this path "on every release run" -- false twice
+        over (nothing invoked the shakedown, and its indexing steps ran
+        under ``|| true`` so a broken MinerU could not have failed it
+        either way). As of nexus-6xkdu, ``tests/e2e/release-sandbox.sh
+        shakedown`` step 3b actually exercises this path through the
+        production ``nx index pdf`` command and can fail the run (the
+        ``|| true`` is gone), and the release process (AGENTS.md "Cutting
+        a release" / docs/contributing.md § Release Process) invokes the
+        shakedown UNCONDITIONALLY on every release (nexus-7g40u: a
+        diff-based trigger was tried and rejected -- MinerU/docling
+        version drift lands via ``uv.lock`` alone, with no matching
+        ``pyproject.toml`` pin to diff against, so any trigger list is
+        under-inclusive by construction) so that coverage is real rather
+        than aspirational. This
+        `-m slow` test itself is not part of the default suite and is not
+        currently invoked by the shakedown or any CI leg (the nightly
+        `-m slow` gate, local-service-gate-nightly.yml, explicitly
+        DESELECTS it -- nexus-s6dei deferred that decision here). It runs
+        only on an explicit developer `uv run pytest -m slow` today.
 
         nexus-2fyb code-review (round 2): inequalities were the original bug
         shape. ``meta_count > 0`` shipped formula_count=0 silently; even
@@ -490,9 +507,14 @@ class TestFormulaPreservationOnRealPdf:
         (regression). This is the only assertion shape that doesn't
         smuggle the original failure mode back in.
 
-        Skipped when MinerU is not importable in the dev environment.
+        Skipped when MinerU is not importable, UNLESS ``NX_MINERU_EXPECTED``
+        is set in the environment, in which case a missing import fails
+        loudly instead (nexus-6xkdu re-arm; mirrors
+        NX_T2_SUBSTRATE_EXPECTED). Nothing sets this var today -- it is
+        infrastructure for an explicit invocation that expects mineru to
+        be present, not something the shakedown or CI currently wires.
         """
-        pytest.importorskip("mineru.cli.common")
+        mineru_importorskip()
         from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
 
         result = PDFExtractor().extract(self._FIXTURE, extractor="auto")

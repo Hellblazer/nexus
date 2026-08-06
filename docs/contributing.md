@@ -354,6 +354,23 @@ Every step below is **required**. Missing any one of them has caused problems in
    suspect a step-ordering regression before reaching for `--force`
    (AGENTS.md § Cutting a release, step 6).
 
+7c. **Run the sandbox shakedown** (~5-10 min warm cache, +10-15 min cold)
+   ```bash
+   ./tests/e2e/release-sandbox.sh shakedown
+   ```
+   Required on every release. Smoke (7b) only reinstalls and runs `nx
+   doctor` checks; it never calls `nx index pdf`, so it cannot catch an
+   indexing regression. The shakedown does — including MinerU end-to-end
+   through the production `nx index pdf` path (step 3b of 11, the
+   `bft-to-smr.pdf` formula fixture) — and it is the ONLY gate that does:
+   the slow-marked `test_mineru_path_preserves_formulas` pytest test is
+   not part of any default or scheduled run (nexus-6xkdu). Cold cache
+   pays MinerU's ~2-3 GB model download once. All four indexing steps
+   (2, 3a, 3b, 4) can fail the run — the `|| true` that previously made
+   them theatre was removed at nexus-6xkdu — and the run ends with an
+   explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on
+   any failure.
+
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
    state to main (§ Git Workflow above); branching off main would release main's stale tree with

@@ -194,6 +194,16 @@ Required when the release touches the **upgrade path** an installed user travers
 
 Runnable from any baseline (nexus-a3nqp): it detects stanza drift at runtime and cross-checks `nx doctor`'s drift claim against the actual stanza byte-diff, so a doctor false-positive/negative fails the run. Must end with `12/12 PASS`. `./tests/e2e/upgrade-shakeout.sh reset` cleans the sandbox.
 
+### 6c. Run sandbox shakedown (~5-10 min warm / +10-15 min cold)
+
+Required on every release (nexus-6xkdu: a diff-based trigger list was rejected — MinerU/docling version drift lands via `uv.lock` alone with no matching pyproject.toml pin to diff, so any trigger list is under-inclusive by construction; see nexus-7g40u).
+
+```bash
+./tests/e2e/release-sandbox.sh shakedown
+```
+
+Smoke (step 6) never calls `nx index pdf`; this is the only pre-tag gate that exercises MinerU end-to-end through the production indexing path (step 3b of 11, the `bft-to-smr.pdf` formula fixture) — the slow-marked `test_mineru_path_preserves_formulas` pytest test runs in no default or scheduled suite (nexus-6xkdu). Must end `SHAKEDOWN PASSED`; a `SHAKEDOWN FAILED` verdict or non-zero exit halts the release. All four indexing steps (2, 3a, 3b, 4) can now fail the run — the `|| true` that previously made them unable to redden the run was removed at nexus-6xkdu.
+
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
 Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), release commits go through a PR. CI gates the bump before it lands on main. No more direct-to-main exception.

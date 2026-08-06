@@ -274,6 +274,15 @@ case "$MODE" in
         echo "[3/3] Shakedown: full pipeline ensemble (running from /tmp, NX_LOCAL=1)"
         cd /tmp
 
+        # nexus-6xkdu: the four indexing steps (2, 3a, 3b, 4) previously ran
+        # under `|| true`, so a broken indexer — including a broken MinerU
+        # path — could not turn this run red. Collect-and-continue rather
+        # than abort-on-first: a failure here does not forfeit the
+        # diagnostic value of the remaining steps (search, T2, T1, catalog
+        # readback), but it DOES turn the final verdict FAILED. Mirrors the
+        # SMOKE_FAILED pattern in the smoke arm above.
+        SHAKEDOWN_FAILED=()
+
         echo
         echo "── T1 sniff: BEFORE ──"
         T1_DIR_PARENT="${TMPDIR%/}"; [[ -z "$T1_DIR_PARENT" ]] && T1_DIR_PARENT=/tmp
@@ -294,12 +303,18 @@ case "$MODE" in
 
         echo
         echo "── 2/11 nx index repo ($REPO_ROOT) ──"
-        nx index repo "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
+        if ! nx index repo "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /'; then
+            echo "  [FAIL] nx index repo exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("2/11 nx index repo")
+        fi
 
         echo
         echo "── 3a/11 nx index pdf (tc-sql.pdf — Docling path, no formulas) ──"
-        nx index pdf "$REPO_ROOT/tests/fixtures/tc-sql.pdf" \
-            --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /' || true
+        if ! nx index pdf "$REPO_ROOT/tests/fixtures/tc-sql.pdf" \
+                --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /'; then
+            echo "  [FAIL] nx index pdf (tc-sql.pdf, Docling path) exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("3a/11 nx index pdf (Docling path)")
+        fi
 
         echo
         echo "── 3b/11 nx index pdf (bft-to-smr.pdf — MinerU path, formulas) ──"
@@ -313,12 +328,25 @@ case "$MODE" in
         # fixture available (~440 KB). First MinerU run downloads ~2-3 GB
         # of models, so this step pays the model-download cost on cold
         # sandbox runs.
-        nx index pdf "$REPO_ROOT/tests/fixtures/bft-to-smr.pdf" \
-            --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /' || true
+        #
+        # nexus-6xkdu: this step used to run under `|| true`, which is the
+        # reason the "shakedown covers MinerU end-to-end" docstrings
+        # scattered across the pytest suite were false — the step could not
+        # fail even when MinerU itself was broken. Now propagated: a
+        # non-zero exit here is collected into SHAKEDOWN_FAILED and turns
+        # the final verdict red.
+        if ! nx index pdf "$REPO_ROOT/tests/fixtures/bft-to-smr.pdf" \
+                --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /'; then
+            echo "  [FAIL] nx index pdf (bft-to-smr.pdf, MinerU path) exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("3b/11 nx index pdf (MinerU path)")
+        fi
 
         echo
         echo "── 4/11 nx index rdr ──"
-        nx index rdr "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
+        if ! nx index rdr "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /'; then
+            echo "  [FAIL] nx index rdr exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("4/11 nx index rdr")
+        fi
 
         echo
         echo "── 5/11 nexus-e5uw greenfield acceptance: no deprecated chunk keys ──"
@@ -446,6 +474,13 @@ case "$MODE" in
 
         echo
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
+        if (( ${#SHAKEDOWN_FAILED[@]} )); then
+            echo >&2
+            echo "SHAKEDOWN FAILED: ${#SHAKEDOWN_FAILED[@]} indexing step(s) exited non-zero:" >&2
+            printf '  %s\n' "${SHAKEDOWN_FAILED[@]}" >&2
+            exit 1
+        fi
+        echo "SHAKEDOWN PASSED: all indexing steps green."
         ;;
 
     service)
