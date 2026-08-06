@@ -59,17 +59,22 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
+import time
 
 import pytest
 
 from tests.conftest import (
     _MODE_LINT_EXCLUDE_FILES,
     _MODE_LINT_EXCLUDE_NODEIDS,
+    _SESSION_ITEMS_CENSUS_TEST_NODEIDS,
     partial_session_view_reason,
+    pytest_runtest_setup as _guard_pytest_runtest_setup,
 )
 from tests import conftest as _conftest
 
@@ -124,6 +129,18 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
     # STRUCTURAL HONESTY (nexus-vdti6): refuse loud rather than silently
     # scan a proven-partial request.session.items -- see
     # partial_session_view_reason's docstring in tests/conftest.py.
+    #
+    # BELT-AND-BRACES ONLY (nexus-vdti6, CI red 2026-08-06): the PRIMARY
+    # guard is now tests/conftest.py's `pytest_runtest_setup` hookimpl,
+    # which fires before this test's own fixtures (including the autouse
+    # engine substrate) are ever resolved -- see that hook's docstring for
+    # why a check here, AFTER fixture setup, is too late to avoid an
+    # unnecessary engine boot (and, under real --splits/--group CI shards,
+    # too late to avoid a real port collision). This line should be
+    # unreachable in practice; it stays only as a fallback for the case
+    # where a future edit adds a new session.items-based census test and
+    # forgets to also register its nodeid in
+    # `_SESSION_ITEMS_CENSUS_TEST_NODEIDS`.
     if (reason := partial_session_view_reason(request)) is not None:
         pytest.skip(reason)
 
@@ -414,9 +431,17 @@ class _FakeSession:
 
 
 class _FakeRequest:
-    def __init__(self, config: _FakeConfig, items: list) -> None:
+    def __init__(
+        self, config: _FakeConfig, items: list, nodeid: str = ""
+    ) -> None:
         self.config = config
         self.session = _FakeSession(items)
+        # Only used by the pytest_runtest_setup hook tests below --
+        # partial_session_view_reason itself never reads this. A real
+        # pytest.Item and a real request both expose .config / .session in
+        # this exact shape (Node.__init__ sets both directly), so this
+        # fake doubles as a stand-in for either.
+        self.nodeid = nodeid
 
 
 def test_partial_session_view_reason_flags_pytest_split_shard() -> None:
@@ -499,6 +524,75 @@ def test_partial_session_view_reason_inert_with_no_raw_baseline() -> None:
         _conftest._raw_collected_count = saved
 
 
+# ── pytest_runtest_setup pre-fixture hook tests (nexus-vdti6, CI red
+# 2026-08-06) ────────────────────────────────────────────────────────────
+#
+# The in-body `partial_session_view_reason` call above only prevents a
+# VACUOUS SCAN. It runs too late to prevent an unnecessary (and, under a
+# real --splits/--group CI shard, collision-prone) engine-substrate boot,
+# because by the time a test's body executes, its fixtures -- including
+# the autouse engine substrate -- have already been resolved. These tests
+# cover the REAL fix: tests/conftest.py's `pytest_runtest_setup` hookimpl,
+# which fires before ANY fixture setup for a registered census test.
+
+
+def test_pytest_runtest_setup_hook_skips_registered_census_under_partial_view() -> None:
+    """The hook raises Skipped for a registered census nodeid when the
+    partial-view guard fires -- BEFORE any fixture would be touched (this
+    call itself never resolves a fixture; `item.setup()` is never invoked
+    here at all, which is the structural proof: there is no code path
+    between this hook and a fixture, so a real pytest.Item literally cannot
+    reach `item.setup()` if this hook already raised).
+    """
+    nodeid = next(iter(_SESSION_ITEMS_CENSUS_TEST_NODEIDS))
+    config = _FakeConfig({"splits": 4, "group": 2, "keyword": ""})
+    item = _FakeRequest(config, items=list(range(2796)), nodeid=nodeid)
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _guard_pytest_runtest_setup(item)
+    assert "pytest-split" in str(excinfo.value)
+
+
+def test_pytest_runtest_setup_hook_does_not_skip_registered_census_under_full_view() -> None:
+    """Sanity check requested alongside the CI fix: the SAME pre-fixture
+    hook must NOT skip the census when the view is trustworthy -- e.g. the
+    dedicated `test-mode-census` CI job's own invocation (no --splits/
+    --group, session.items close to the raw collected count). A hook that
+    skipped unconditionally would silently defeat the whole point of that
+    job (it exists specifically so the census executes for real).
+    """
+    saved = _conftest._raw_collected_count
+    _conftest._raw_collected_count = 13101
+    try:
+        nodeid = next(iter(_SESSION_ITEMS_CENSUS_TEST_NODEIDS))
+        config = _FakeConfig({"splits": None, "group": None, "keyword": ""})
+        item = _FakeRequest(config, items=list(range(11733)), nodeid=nodeid)
+        # No exception -- the hook must return normally, letting pytest
+        # proceed to real fixture setup and then the test body.
+        _guard_pytest_runtest_setup(item)
+    finally:
+        _conftest._raw_collected_count = saved
+
+
+def test_pytest_runtest_setup_hook_ignores_non_census_items() -> None:
+    """A shrunk session.items on an UNREGISTERED test must not skip it --
+    the hook is scoped to `_SESSION_ITEMS_CENSUS_TEST_NODEIDS`, not every
+    test in the file. Every other test in this module (the ratchet/
+    liveness checks, these very guard tests) must keep running normally
+    under --splits/--group; only the one registered census reads
+    session.items and needs the pre-empt.
+    """
+    config = _FakeConfig({"splits": 4, "group": 1, "keyword": ""})
+    item = _FakeRequest(
+        config,
+        items=list(range(3)),
+        nodeid="tests/test_mode_declarations_are_explicit.py::test_mode_lint_exclude_files_ratchet",
+    )
+    # No exception -- an unregistered nodeid is untouched by this hook
+    # regardless of how partial its session.items looks.
+    _guard_pytest_runtest_setup(item)
+
+
 def _fake_offender_func() -> None:
     assert MODEL_NAME == "voyage-context-3"  # noqa: F821 -- source text only, never called
 
@@ -560,6 +654,22 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
     genuinely shrinks it. Repeating that same validation mistake here is
     exactly what this bead was filed to correct, so this probe uses the
     real flags CI's `test` job actually passes.
+
+    ``NX_TEST_T2_SUBSTRATE=none`` on the nested invocation (the same
+    convention ``tests/db/test_i711w_sqlite_substrate_retired.py`` uses for
+    a substrate-free subprocess probe): this test's PURPOSE is to prove
+    collection/skip semantics, not engine behavior, and passing it makes
+    the "no engine boot" kill control below a STRUCTURAL guarantee rather
+    than a hopeful empirical one -- with it set, `_pin_t2_substrate`
+    returns immediately for every test in the nested run (census included),
+    so nothing in that subprocess can attempt an engine boot regardless of
+    which items land in which group. Before this env var was added here
+    (nexus-vdti6, CI red 2026-08-06, develop run 31061260804), the nested
+    invocation's own engine boot collided with the outer CI shard job's
+    already-bound engine port and failed loudly; the REAL fix is the
+    pre-fixture `pytest_runtest_setup` hook in tests/conftest.py (see its
+    docstring), and this env var additionally keeps THIS specific probe
+    fast and side-effect-free on top of that.
     """
     # This test's OWN nodeid must be excluded from the scoped invocation
     # below -- otherwise landing this same test in one of the 4 groups
@@ -577,8 +687,66 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
         + "::"
         + test_mode_declarations_census_skips_loud_under_real_pytest_split_shard.__name__
     )
+    # Engine-boot KILL CONTROL (nexus-vdti6): _engine_substrate.py's
+    # ensure_engine() creates a `nexus_t2_substrate_pg_*` temp dir on every
+    # boot (tempfile.mkdtemp(prefix=...)). With NX_TEST_T2_SUBSTRATE=none
+    # in effect nothing in the nested run may boot an engine at all -- so
+    # the absence of any NEW such dir after each call is a structural
+    # proof, not a timing guess. A generous 8s ceiling backs it up (a real
+    # engine boot is documented elsewhere in this repo as ~10s minimum for
+    # the JAR+PG combination alone; collecting and running one small file
+    # with no engine involved measured well under 4s locally).
+    _pg_tmp_prefix = "nexus_t2_substrate_pg_"
+    _census_nodeid = (
+        "tests/test_mode_declarations_are_explicit.py"
+        "::test_mode_declarations_are_explicit"
+    )
+
+    def _group_contains_census(group: int) -> bool:
+        # `--collect-only` prints one nodeid per line and is unaffected by
+        # WHERE a skip() call reports its location -- unlike the real run's
+        # `-rs` summary below (a skip raised from tests/conftest.py's
+        # pytest_runtest_setup hook reports as "tests/conftest.py:LINE:
+        # <reason>", NOT the item's own nodeid; reproduced directly while
+        # building this probe -- the first cut here matched on
+        # "test_mode_declarations_are_explicit" appearing anywhere in a REAL
+        # run's output, which silently stopped proving anything the moment
+        # the skip moved from the test body to the pre-fixture hook).
+        # Collection never executes a test body, so no engine boot risk
+        # here regardless of NX_TEST_T2_SUBSTRATE.
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_mode_declarations_are_explicit.py",
+                "--deselect",
+                _self_nodeid,
+                "--splits",
+                "4",
+                "--group",
+                str(group),
+                "--collect-only",
+                "-q",
+                "--no-header",
+            ],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return _census_nodeid in probe.stdout
+
     found_shard = False
     for group in range(1, 5):
+        if not _group_contains_census(group):
+            continue  # census landed in a different group -- fine
+        found_shard = True
+
+        tmp_before = {
+            p for p in pathlib.Path(tempfile.gettempdir()).glob(f"{_pg_tmp_prefix}*")
+        }
+        started = time.monotonic()
         proc = subprocess.run(
             [
                 sys.executable,
@@ -596,14 +764,31 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
                 "--no-header",
             ],
             cwd=_REPO_ROOT,
+            env={**os.environ, "NX_TEST_T2_SUBSTRATE": "none"},
             capture_output=True,
             text=True,
             timeout=120,
         )
+        elapsed = time.monotonic() - started
+        tmp_after = {
+            p for p in pathlib.Path(tempfile.gettempdir()).glob(f"{_pg_tmp_prefix}*")
+        }
+        new_pg_dirs = tmp_after - tmp_before
+        assert not new_pg_dirs, (
+            f"group {group}/4: a new {_pg_tmp_prefix}* dir appeared "
+            f"({new_pg_dirs}) -- something in the nested invocation booted "
+            f"an engine despite NX_TEST_T2_SUBSTRATE=none. That is exactly "
+            f"the class of collision that made this probe fail under real "
+            f"CI (develop run 31061260804)."
+        )
+        assert elapsed < 8.0, (
+            f"group {group}/4: nested invocation took {elapsed:.1f}s -- "
+            f"well over the few-seconds ceiling for a substrate-free "
+            f"single-file run, suggesting something DID pay an engine-boot "
+            f"cost even though no {_pg_tmp_prefix}* dir was left behind."
+        )
+
         output = proc.stdout + proc.stderr
-        if "test_mode_declarations_are_explicit" not in output:
-            continue  # this test landed in a different group -- fine
-        found_shard = True
         assert "pytest-split active" in output, (
             f"group {group}/4: the census ran but was not skipped with the "
             f"partial-view guard's reason -- guard did not fire under a "
@@ -617,4 +802,61 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
         "test_mode_declarations_are_explicit never appeared in any of the "
         "4 --splits groups -- pytest-split's algorithm or invocation shape "
         "changed; this probe needs updating"
+    )
+
+
+def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None:
+    """Regression test for a SECOND bug found while fixing nexus-vdti6 (CI
+    red 2026-08-06), caught in review before the `test-mode-census` job
+    ever ran on real CI: without `NX_TEST_T2_SUBSTRATE=none` in that job's
+    env, the census would have hit `t2_service_env`'s own PRE-EXISTING
+    graceful skip ("engine substrate: service JAR not provisioned on CI"),
+    which fires whenever `GITHUB_ACTIONS=='true'` AND
+    `NX_T2_SUBSTRATE_EXPECTED` is unset AND no jar exists -- exactly the
+    `test-mode-census` job's shape (it deliberately provisions no jar).
+    That would make the census silently SKIP on every real run of that job:
+    reporting green while never executing its scan at all -- the identical
+    vacuous-pass shape nexus-vdti6 exists to eliminate, just relocated from
+    "shard-blind" to "substrate-skipped".
+
+    Proof: simulate the job's exact env combination (`GITHUB_ACTIONS=true`,
+    `NX_TEST_T2_SUBSTRATE=none`, no --splits/--group so the partial-view
+    guard is not in play here) against ONLY the census test, and confirm it
+    actually EXECUTES its scan (PASSED, not SKIPPED) -- proving
+    `NX_TEST_T2_SUBSTRATE=none` makes the substrate-skip path unreachable
+    regardless of `GITHUB_ACTIONS` or jar presence, since `_pin_t2_
+    substrate` returns before ever calling `t2_service_env` (see
+    tests/conftest.py). Selecting the single test by nodeid on the command
+    line -- not `-k` -- is itself a form of collection scoping (like a
+    path-scoped run), so `partial_session_view_reason`'s own guard sees a
+    1/1 view and does not fire; this test is entirely about the SEPARATE
+    substrate-skip path, not the partial-view guard.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_mode_declarations_are_explicit.py"
+            "::test_mode_declarations_are_explicit",
+            "-q",
+            "-rs",
+            "--no-header",
+        ],
+        cwd=_REPO_ROOT,
+        env={**os.environ, "GITHUB_ACTIONS": "true", "NX_TEST_T2_SUBSTRATE": "none"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+    assert "service JAR not provisioned" not in output, (
+        "the census hit the engine-substrate graceful skip under the "
+        "test-mode-census job's exact env shape (GITHUB_ACTIONS=true, no "
+        "jar) -- NX_TEST_T2_SUBSTRATE=none did not bypass it as expected:\n"
+        + output
+    )
+    assert "1 passed" in output, (
+        f"expected the census to execute and pass for real under this env "
+        f"shape, got:\n{output}"
     )

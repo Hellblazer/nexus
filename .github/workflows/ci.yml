@@ -640,6 +640,33 @@ jobs:
       # locally 2026-08-06 — the guard's own documented override exists for
       # precisely this "deliberately substrate-less" shape).
       NX_SCENARIO_SKIP_BUDGET: "999"
+      # NX_TEST_T2_SUBSTRATE=none (nexus-vdti6, caught in review 2026-08-06,
+      # BEFORE ever going red — this job has never actually run on CI yet):
+      # this job provisions NO service jar (unlike the `test` matrix, on
+      # purpose — the whole point is avoiding that cost) and sets no
+      # NX_T2_SUBSTRATE_EXPECTED. Without this var, the autouse
+      # `_pin_t2_substrate` fixture would still run for the ONE test that
+      # actually executes here (the census itself is NOT skip-marked —
+      # it's the allowed module) and hit `t2_service_env`'s own PRE-EXISTING
+      # graceful skip ("engine substrate: service JAR not provisioned on
+      # CI"), which fires whenever GITHUB_ACTIONS=='true' (always true on a
+      # runner) AND NX_T2_SUBSTRATE_EXPECTED is unset AND no jar exists —
+      # exactly this job's shape. That would make the census SILENTLY SKIP
+      # on every real CI run of this job, reporting green while never
+      # executing its scan at all: the identical vacuous-pass class
+      # nexus-vdti6 exists to eliminate, just relocated from "shard-blind"
+      # to "substrate-skipped". The census reads request.session.items and
+      # inspect.getsource() only — it needs no T2 store whatsoever, so
+      # `=none` is the correct fix, not a workaround (see
+      # `_pin_t2_substrate`'s own `NX_TEST_T2_SUBSTRATE=none` branch in
+      # tests/conftest.py, which returns before ever calling
+      # `t2_service_env`, bypassing the jar check entirely rather than
+      # requiring a jar to exist). Verified locally: NX_TEST_T2_SUBSTRATE=
+      # none makes the substrate-skip path unreachable regardless of
+      # GITHUB_ACTIONS or jar state (see
+      # test_mode_declarations_census_executes_for_real_under_ci_env_shape
+      # in tests/test_mode_declarations_are_explicit.py).
+      NX_TEST_T2_SUBSTRATE: "none"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 

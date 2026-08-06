@@ -403,6 +403,68 @@ def partial_session_view_reason(request: pytest.FixtureRequest) -> str | None:
     return None
 
 
+# Every session.items-based census test whose partial-view guard must be
+# evaluated PRE-FIXTURE (see pytest_runtest_setup below), keyed by full
+# nodeid. Extend alongside `_CENSUS_ONLY_ALLOWED_MODULES` for a future
+# sibling census -- add the SPECIFIC test nodeid(s) that call
+# `partial_session_view_reason`, not the whole module (a module's ratchet/
+# liveness siblings don't read session.items and must never be skipped by
+# this hook).
+_SESSION_ITEMS_CENSUS_TEST_NODEIDS: frozenset[str] = frozenset({
+    "tests/test_mode_declarations_are_explicit.py"
+    "::test_mode_declarations_are_explicit",
+})
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Evaluate the partial-view guard BEFORE any fixture -- including the
+    autouse engine-substrate fixture -- is resolved for a registered
+    session.items-based census test.
+
+    WHY THIS MUST RUN PRE-FIXTURE, NOT INSIDE THE TEST BODY (nexus-vdti6,
+    CI red 2026-08-06, develop run 31061260804): the first cut called
+    `partial_session_view_reason(request)` as the FIRST LINE of
+    `test_mode_declarations_are_explicit`'s own body. By the time a test's
+    body executes, `_pytest/runner.py`'s `pytest_runtest_setup` has ALREADY
+    called `item.setup()`, which resolves every fixture the item depends
+    on -- including the autouse `_pin_t2_substrate` fixture, which boots
+    the engine substrate for EVERY test unless `NX_TEST_T2_SUBSTRATE=none`.
+    Locally this was invisible (the box happily absorbed a second engine
+    boot from the subprocess probe's nested pytest invocation); under a
+    REAL `--splits`/`--group` CI shard, the nested invocation's engine boot
+    collided with the outer shard job's already-bound engine ("service did
+    not bind port 42279") and FAILED loudly during fixture setup, before
+    the in-body skip ever ran -- the test errored instead of skipping
+    cleanly. That is backwards twice over: it breaks CI, and even where it
+    doesn't, a shrunk-view census should be CHEAP (no engine boot at all),
+    not merely non-fatal -- paying a ~10s engine boot per shard just to
+    immediately skip defeats the "structural honesty AND cheap" point of
+    nexus-vdti6's guard.
+
+    This mirrors `_pytest/skipping.py`'s own approach exactly:
+    `@hookimpl(tryfirst=True)` on `pytest_runtest_setup` runs before
+    `_pytest/runner.py`'s `pytest_runtest_setup` (the one that calls
+    `item.setup()`), so a `pytest.skip()` raised here pre-empts fixture
+    resolution entirely -- the SAME mechanism `NX_CENSUS_ONLY_JOB`'s
+    skip-marking already relies on (see `_skip_mark_everything_but_census`
+    below), just applied per-invocation via a runtime hook instead of a
+    collection-time marker (this hook must run on every invocation --
+    including the sharded `test` matrix and a plain local `-n auto` run --
+    not just the one `NX_CENSUS_ONLY_JOB` job).
+
+    Scoped to `_SESSION_ITEMS_CENSUS_TEST_NODEIDS` so it can never
+    misfire on an unrelated test -- `item` and `item.session` expose the
+    same `.config` / `.session.items` shape `partial_session_view_reason`
+    already accepts, so no adapter is needed.
+    """
+    if item.nodeid not in _SESSION_ITEMS_CENSUS_TEST_NODEIDS:
+        return
+    reason = partial_session_view_reason(item)
+    if reason is not None:
+        pytest.skip(reason)
+
+
 # ── dedicated non-sharded CI job support (nexus-vdti6 candidate 1) ─────────
 #
 # The new `pytest (mode-declarations census)` job needs request.session.
