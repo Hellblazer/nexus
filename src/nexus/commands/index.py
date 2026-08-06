@@ -1499,6 +1499,22 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             click.echo(f"  {len(failures)} failure(s):")
             for fp, err in failures:
                 click.echo(f"    {fp.name}: {err}")
+            # nexus-uqq9z: the batch used to exit 0 regardless of how many
+            # files landed in `failures` (real exceptions AND, since
+            # nexus-7f5qj, identity drops) — "reporting success" at the
+            # batch level while individual files were visibly broken. The
+            # per-file isolation above is unchanged (every file is still
+            # attempted and the failures list still prints exactly as
+            # before); this only adds the batch-wide fail-loud exit. NOTE:
+            # this contract is deliberately STRICTER than `nx dt index`'s
+            # run-level exit (which fires only on the collector classes via
+            # raise_identity_drop_exception, not on plain per-record
+            # exceptions) — any entry in `failures` fails the batch here.
+            # Raising dt to match is tracked separately (see the bead filed
+            # from the uqq9z critique).
+            raise click.ClickException(
+                f"{len(failures)} of {total} file(s) failed — see list above"
+            )
         return
 
     # Normalize --collection through t3_collection_name() so bare names like

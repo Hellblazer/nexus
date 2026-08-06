@@ -83,6 +83,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in its own output.
 
 ### Fixed
+- **`nx index pdf --dir` now exits non-zero on any per-file failure**
+  (nexus-uqq9z) — real extraction/pipeline errors and catalog-identity drops
+  alike. Previously the batch always exited 0 regardless of how many files
+  failed. Per-file isolation unchanged (every file still attempted, the
+  failures list still prints); only the batch's exit code and a trailing
+  `N of M file(s) failed — see list above` line are new. This contract is
+  deliberately stricter than `nx dt index`'s run-level exit; raising dt to
+  match is tracked separately (nexus-56ndn).
 - **`nx dt index --dt-content` no longer aborts the whole batch on a
   chunk-landing or completion-refusal fault** (nexus-hb10j):
   `ChunkLandingUnverifiedError` and `IndexRunVerifyRefused` fell through the

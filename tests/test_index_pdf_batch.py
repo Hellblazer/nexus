@@ -166,6 +166,51 @@ class TestBatchIndexErrors:
         assert call_count == 3
         # Failure mentioned in output
         assert "fail" in result.output.lower() or "error" in result.output.lower()
+        # nexus-uqq9z: a batch with any per-file failure must exit non-zero
+        # — pre-fix this stayed rc=0 (a script/CI job keying on the exit
+        # code never noticed the extraction failure).
+        assert result.exit_code != 0, result.output
+
+    def test_batch_exits_nonzero_when_one_of_several_files_fails(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """nexus-uqq9z: the batch-wide non-zero-exit contract, mirroring
+        ``nx dt index``'s run-level fail-loud behavior. Both the failing
+        and the succeeding files must still be processed (batch isolation
+        is unchanged — only the exit code changes), the failures list
+        must still show the failure, and a trailing count line must name
+        how many of the total failed."""
+        call_count = 0
+
+        def fail_first(path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("boom")
+            return 5
+
+        with patch("nexus.doc_indexer.index_pdf", side_effect=fail_first):
+            result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
+
+        # All 3 files attempted — batch isolation preserved.
+        assert call_count == 3
+        assert result.exit_code != 0, result.output
+        assert "1 failure(s)" in result.output
+        assert "boom" in result.output
+        # The count-line naming N of M files failed.
+        assert "1 of 3 file(s) failed" in result.output, result.output
+        assert "see list above" in result.output.lower(), result.output
+
+    def test_batch_exit_zero_when_all_files_succeed(
+        self, runner: CliRunner, pdf_dir: Path,
+    ) -> None:
+        """Success-path regression: no failures → rc stays 0, no count
+        line printed."""
+        with patch("nexus.doc_indexer.index_pdf", side_effect=_mock_index_pdf):
+            result = runner.invoke(main, ["index", "pdf", "--dir", str(pdf_dir)])
+
+        assert result.exit_code == 0, result.output
+        assert "file(s) failed" not in result.output
 
     def test_conflict_running_lands_in_failures_bucket(
         self, runner: CliRunner, pdf_dir: Path,
@@ -207,6 +252,9 @@ class TestBatchIndexErrors:
         assert "1 failure(s)" in result.output
         assert "already running" in result.output
         assert "resume window" in result.output
+        # nexus-uqq9z: a conflict landing in the failures bucket must also
+        # drive the batch-wide exit code non-zero.
+        assert result.exit_code != 0, result.output
 
     def test_empty_directory(
         self, runner: CliRunner, empty_dir: Path,

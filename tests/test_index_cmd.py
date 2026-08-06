@@ -1366,10 +1366,11 @@ def test_pdf_dir_batch_identity_drop_surfaces_as_failure_entry(runner, home):
     propagates), so the existing per-file ``except Exception`` isolation
     never sees it. Symmetric fix: reset+check per file, folded into the
     existing ``failures`` list/summary convention rather than aborting the
-    batch (nx index pdf --dir has no pre-existing non-zero-exit-on-
-    failures convention at all — see nexus-7f5qj DEVIATIONS; this test
-    pins visibility, not a new exit-code contract for the batch as a
-    whole)."""
+    batch. nexus-uqq9z: the batch now ALSO exits non-zero once any file
+    lands in the failures list (identity drops included), mirroring
+    ``nx dt index``'s run-level fail-loud behavior — the batch itself
+    still processes every file (isolation unchanged), only the exit code
+    is new."""
     d = home / "pdfs"
     d.mkdir()
     (d / "a.pdf").write_bytes(b"fake pdf a")
@@ -1389,8 +1390,9 @@ def test_pdf_dir_batch_identity_drop_surfaces_as_failure_entry(runner, home):
             main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
         )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert calls["n"] == 2, "both files must still be processed"
     assert "2 chunks" in result.output
     assert "1 failure(s)" in result.output, result.output
     assert "identity" in result.output.lower()
+    assert "1 of 2 file(s) failed" in result.output, result.output

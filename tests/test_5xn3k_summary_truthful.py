@@ -658,8 +658,12 @@ class TestSingleFileRefusalRendering:
             )
         with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
             result = runner.invoke(main, ["index", "pdf", "--dir", str(home)])
-        # --dir isolates per-file failures — the batch itself still exits 0.
-        assert result.exit_code == 0, result.output
+        # --dir isolates per-file failures (the file itself is still fully
+        # attempted and the refusal wording still renders) but nexus-uqq9z
+        # makes the batch as a whole exit non-zero once any file lands in
+        # the failures bucket — mirrors ``nx dt index``'s run-level
+        # fail-loud contract.
+        assert result.exit_code != 0, result.output
         assert "completion REFUSED" in result.output
         assert "NOT fully indexed" in result.output
         assert "referenced=5" in result.output
