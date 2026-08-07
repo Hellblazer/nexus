@@ -168,7 +168,7 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
 
         @property
         def stats(self) -> dict:
-            return {"flushes": 0.0, "flush_seconds": 0.0}
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
     with _service_mode_patches(db), \
          patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
@@ -230,7 +230,7 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
 
         @property
         def stats(self) -> dict:
-            return {"flushes": 0.0, "flush_seconds": 0.0}
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
     with _service_mode_patches(db), \
          patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):

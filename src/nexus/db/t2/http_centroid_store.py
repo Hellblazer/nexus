@@ -31,6 +31,8 @@ ERROR-TRANSLATION CONTRACT (Phase-1 gate O2):
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -83,6 +85,46 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
             # to the fake transport, keeping the same timeout.
             self._client.close()
             self._client = httpx.Client(timeout=_DEFAULT_TIMEOUT_S, transport=_transport)
+        # nexus-2mb6n: per-store-instance cache for the run-constant centroid
+        # envelope reads (get_by_collection / get_foreign). This store lives
+        # for the whole indexing run (HttpTaxonomyStore lazily constructs
+        # and keeps exactly one instance — see that class's ``_centroid``
+        # property), so caching HERE — keyed on (collection, kind) — amortizes
+        # across every flush instead of one HTTP round trip per flush for
+        # data that never changes mid-run. Cleared by any mutation
+        # (upsert/delete_ids/purge) THROUGH THIS SAME INSTANCE — see
+        # :meth:`_invalidate_centroid_cache`.
+        #
+        # PER-KEY locking (review round 2, reviewer Important-1): the first
+        # cut held ONE process-wide lock across the full fetch — including
+        # ``_send``'s gateway-retry envelope, worst case ~90s — so a slow
+        # miss on one key blocked a HIT on an already-warm, unrelated key.
+        # ``_centroid_cache_guard`` is held only BRIEFLY (a dict lookup, or
+        # get-or-create of a per-key lock) and never across a fetch;
+        # ``_centroid_key_locks[key]`` is the one actually held during
+        # ``fetch()``, so concurrent requests for DIFFERENT keys never
+        # contend, while concurrent requests for the SAME key still
+        # single-flight (see :meth:`_cached_envelope`).
+        #
+        # FETCH-EPOCH guard (review round 2 recurrence, critic-reproduced
+        # empirically): per-key locking on its own opened a SAME-PROCESS
+        # race the coarse single-lock predecessor didn't have — a reader
+        # can be mid-fetch (holding only its own key_lock, not the guard)
+        # when a WRITER thread's ``upsert``/``delete_ids``/``purge`` runs
+        # and invalidates; the reader's in-flight fetch then still caches
+        # its (now pre-mutation, stale) result after the writer's clear
+        # has already happened. ``_centroid_cache_epoch`` closes this:
+        # bumped by every invalidation, checked by every fetch before it
+        # writes the cache (see :meth:`_cached_envelope` /
+        # :meth:`_invalidate_centroid_cache`). This guards the SAME-PROCESS
+        # race specifically; cross-process staleness (another process
+        # mutating via a different store instance, hence a different
+        # epoch counter) remains an accepted limitation with its own
+        # separate rationale — see :meth:`_invalidate_centroid_cache`.
+        self._centroid_cache: dict[tuple[str, str], dict[str, list[Any]]] = {}
+        self._centroid_cache_guard = threading.Lock()
+        self._centroid_key_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._centroid_cache_epoch = 0
 
     # ── Internal helpers ────────────────────────────────────────────────────────
     #
@@ -109,18 +151,75 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
         if not records:
             return
         self._post("/upsert", {"records": records})
+        self._invalidate_centroid_cache()
 
     def delete_ids(self, collection: str, topic_ids: list[int]) -> int:
         """Delete centroids by topic_id within a collection. Returns rows deleted."""
         if not topic_ids:
             return 0
         r = self._post("/delete", {"collection": collection, "topic_ids": topic_ids})
+        self._invalidate_centroid_cache()
         return int(r.get("deleted", 0))
 
     def purge(self, collection: str) -> int:
         """Remove every centroid for a collection. Returns rows deleted."""
         r = self._post("/purge", {"collection": collection})
+        self._invalidate_centroid_cache()
         return int(r.get("deleted", 0))
+
+    def _invalidate_centroid_cache(self) -> None:
+        """Clear every cached ``get_by_collection``/``get_foreign`` envelope
+        and bump the fetch epoch (nexus-2mb6n).
+
+        Blanket clear, not a narrower per-collection evict: a mutation to
+        collection A's centroids also changes what ``get_foreign(B)``
+        returns for every OTHER collection B (``get_foreign`` is "every
+        centroid NOT in this collection", so A's rows are IN that set for
+        every B != A). A per-collection evict would leave every other
+        collection's cached foreign-set stale. The cache is small (a
+        handful of collections, two kinds each) so clearing all of it costs
+        nothing and cannot under-invalidate.
+
+        SAME-PROCESS mid-fetch race — GUARDED (review round 2 recurrence,
+        critic-reproduced empirically), not merely accepted: because reads
+        hold only ``_centroid_key_locks[key]`` (not this coarse guard)
+        DURING their fetch, a reader can be mid-flight when a writer
+        thread's ``upsert``/``delete_ids``/``purge`` runs concurrently on
+        this SAME store instance. Without a guard the reader would then
+        cache its already-stale (pre-mutation) result right after this
+        method's clear — undoing the invalidation. The fix: bumping
+        ``self._centroid_cache_epoch`` here (below) gives every
+        invalidation a distinct generation number; :meth:`_cached_envelope`
+        records the epoch it saw BEFORE calling ``fetch()`` and refuses to
+        write the cache if the epoch moved while the fetch was in flight
+        (the fetched data is still returned to that ONE caller — just
+        never poisons the cache for subsequent callers). Proven by
+        ``test_mid_fetch_invalidation_does_not_poison_cache_epoch_guard``.
+
+        CROSS-PROCESS staleness — remains an ACCEPTED limitation, NOT
+        conflated with the above (review round 2, Important-3): a
+        DIFFERENT process running ``nx taxonomy rebuild``/``discover``
+        mutates through its OWN ``HttpCentroidStore`` instance, with its
+        own independent epoch counter — this process's epoch never moves,
+        so the guard above cannot and does not detect it. Any assignments
+        this run computes for the remainder of its life may be against
+        pre-rebuild centroids; self-heals on the NEXT run (a fresh store
+        instance, fresh cache, fresh epoch). Accepted because: taxonomy
+        rebuilds are rare, operator-initiated, manual operations, not a
+        routine concurrent pattern against a live indexing run; and a real
+        cross-process fix needs a SERVER-SIDE generation/version counter
+        this route does not expose today (the critic explicitly RULED OUT
+        ``/meta/last_count`` as a viable proxy — it reflects assignment
+        counts, not centroid generation). Candidate follow-up: rides the
+        nexus-lns3o server-side compute-and-assign engine route as a
+        design rider — moving cosine compute server-side removes the
+        client-side cache (and this whole cross-process staleness
+        question) entirely, rather than bolting a server-side version
+        probe onto a cache that may not survive that migration.
+        """
+        with self._centroid_cache_guard:
+            self._centroid_cache.clear()
+            self._centroid_cache_epoch += 1
 
     # ── ANN reads ─────────────────────────────────────────────────────────────────
 
@@ -204,8 +303,17 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
         ``ids`` are ``"{collection}:{topic_id}"`` (the oracle centroid id at
         ``catalog_taxonomy.py:_centroid_records_for``); ``metadatas`` carry
         ``{topic_id, label, collection, doc_count}``.
+
+        CACHED per store instance, keyed on ``(collection, "same")``
+        (nexus-2mb6n) — this is the run-constant read
+        ``compute_assignments`` makes on every flush (195x/reindex measured,
+        T2 nexus/flush-tail-attribution-2026-08-07). Invalidated by any
+        ``upsert``/``delete_ids``/``purge`` through this same instance.
         """
-        return self._envelope(self._get("/by_collection", {"collection": collection}))
+        return self._cached_envelope(
+            collection, "same",
+            lambda: self._envelope(self._get("/by_collection", {"collection": collection})),
+        )
 
     def get_foreign(self, collection: str) -> dict[str, list[Any]]:
         """All centroids in collections OTHER than ``collection`` (cross-collection
@@ -214,8 +322,80 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
 
         Serves ``compute_cross_links`` (``$ne`` directly) and ``project_against``
         (``$in`` by filtering this foreign set to the target collections).
+
+        CACHED per store instance, keyed on ``(collection, "foreign")``
+        (nexus-2mb6n) — see :meth:`get_by_collection`'s docstring for why.
         """
-        return self._envelope(self._get("/foreign", {"collection": collection}))
+        return self._cached_envelope(
+            collection, "foreign",
+            lambda: self._envelope(self._get("/foreign", {"collection": collection})),
+        )
+
+    def _cached_envelope(
+        self,
+        collection: str,
+        kind: str,
+        fetch: Callable[[], dict[str, list[Any]]],
+    ) -> dict[str, list[Any]]:
+        """Fetch-once-per-(collection, kind), thread-safe (nexus-2mb6n).
+
+        PER-KEY locking (review round 2 — the original single process-wide
+        lock held across the full fetch let one slow miss block every OTHER
+        key's cache HIT behind it):
+
+        1. Fast path — check the cache under the short-held GUARD lock
+           only (``_centroid_cache_guard``). A hit returns immediately;
+           the guard is never held across a network call, so a hit for
+           key A can never be blocked by an in-flight fetch for key B.
+        2. On a miss, get-or-create THIS key's own lock (also under the
+           brief guard) and release the guard.
+        3. Acquire the PER-KEY lock for the actual fetch. A second thread
+           requesting the SAME key blocks here (single-flight preserved —
+           the batched indexer's ``flush_concurrency=3`` flush workers can
+           race on the same cold key); a thread requesting a DIFFERENT key
+           is unaffected — it has its own lock.
+        4. Re-check the cache under the guard once the per-key lock is
+           held (a concurrent same-key racer may have already populated
+           it while we waited); also record the CURRENT
+           ``_centroid_cache_epoch`` here, BEFORE calling ``fetch()``.
+        5. FETCH-EPOCH guard (review round 2 recurrence, critic-reproduced
+           empirically): after ``fetch()`` returns, re-check the epoch
+           under the guard. If it is unchanged, cache the result — normal
+           path. If a writer's ``upsert``/``delete_ids``/``purge`` bumped
+           the epoch WHILE this fetch was in flight, the fetched data may
+           be stale (computed against pre-mutation centroids); it is
+           returned to THIS caller (still the freshest data this call
+           could get) but deliberately NOT written to the cache, so it
+           can never poison a LATER caller. The next call for this key
+           re-fetches for real.
+
+        On a fetch failure the exception propagates and NOTHING is cached
+        (honest fallback: a cache miss always means a real fetch, a failed
+        fetch is never silently remembered as empty). See
+        :meth:`_invalidate_centroid_cache`'s docstring for the epoch
+        guard's scope (same-process only) versus the still-accepted
+        cross-process staleness case.
+        """
+        key = (collection, kind)
+        with self._centroid_cache_guard:
+            cached = self._centroid_cache.get(key)
+            if cached is not None:
+                return cached
+            key_lock = self._centroid_key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._centroid_cache_guard:
+                cached = self._centroid_cache.get(key)
+                if cached is not None:
+                    return cached
+                epoch_before = self._centroid_cache_epoch
+            result = fetch()
+            with self._centroid_cache_guard:
+                if self._centroid_cache_epoch == epoch_before:
+                    self._centroid_cache[key] = result
+                # else: an invalidation landed mid-fetch — do NOT cache a
+                # result that may be stale relative to it (nexus-2mb6n
+                # round 2 recurrence). The caller still gets `result`.
+            return result
 
     @staticmethod
     def _envelope(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:

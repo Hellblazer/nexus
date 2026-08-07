@@ -2510,6 +2510,36 @@ def test_drain_markers_on_phase_none_safe():
     assert _drain_batcher_with_markers(b, None) == 1
 
 
+def test_drain_markers_prints_per_flush_not_cumulative_g2(monkeypatch):
+    """nexus-lde88 G2: pre-fix, the printed "(Xs" was
+    time.monotonic() - t0 — CUMULATIVE since the drain started — so three
+    consecutive flushes of different individual durations still each
+    printed the SAME growing number, never their own cost. Uneven
+    per-flush costs (10s, then 50s) must print 10.0s then 50.0s, not
+    10.0s then 60.0s."""
+    from nexus import indexer as idx
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(idx.time, "monotonic", lambda: t["now"])
+
+    class _UnevenBatcher(_StubBatcher):
+        def drain(self, on_progress=None):
+            for i, delta in enumerate((10.0, 50.0), start=1):
+                t["now"] += delta
+                if on_progress is not None:
+                    on_progress(i, self._flushes)
+            return self._flushes
+
+    phases: list[str] = []
+    b = _UnevenBatcher({"chunks": 2, "collections": 1, "in_flight": 0}, flushes=2)
+    idx._drain_batcher_with_markers(b, phases.append)
+
+    assert "flush 1/2 complete (10.0s" in phases[1], phases[1]
+    assert "flush 2/2 complete (50.0s" in phases[2], phases[2]
+    # The pre-fix bug would have printed cumulative 10.0s then 60.0s here.
+    assert "60.0s" not in phases[2]
+
+
 class TestQuarantineLifecycle:
     """nexus-xukbj (soft delete): orphans MOVE to the quarantine sibling
     (never a recurring refusal warning — the mr89x nag this replaced);

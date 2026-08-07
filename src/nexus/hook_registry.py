@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from typing import Any, Callable
 
 import structlog
@@ -164,6 +165,7 @@ class HookRegistry:
         catalog_doc_id: str = "",
         grain: str = "all",
         manifest_complete: dict[str, str] | None = None,
+        hook_timings: dict[str, float] | None = None,
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -200,12 +202,24 @@ class HookRegistry:
         silent-truncation bug the fence exists to close; multi-batch
         documents use the explicit ``/index-run/complete`` call instead.
         Threaded only to hooks that declare the parameter.
+
+        *hook_timings* (nexus-lde88 G4) — when supplied, per-hook wall
+        seconds are ACCUMULATED into ``hook_timings[hook.__name__]``
+        (``+=``, not overwrite — a caller reusing one dict across several
+        ``fire_batch`` calls gets a running total). Optional: ``None``
+        (default) skips timing entirely, no ``time.monotonic()`` calls
+        paid on the hot path unless a caller asks. This is how the
+        flush-grain bucket (taxonomy + manifest, both ``batch_grain =
+        "flush"``) can be split back out by hook name instead of staying
+        one merged total.
         """
         if not doc_ids:
             return
         for hook in self._batch:
             if grain != "all" and getattr(hook, "batch_grain", "file") != grain:
                 continue
+            hook_name = getattr(hook, "__name__", "?")
+            _t0 = time.monotonic() if hook_timings is not None else 0.0
             try:
                 kwargs: dict = {}
                 if id(hook) in self._batch_with_catalog_doc_id:
@@ -219,7 +233,6 @@ class HookRegistry:
                 else:
                     hook(doc_ids, collection, contents, embeddings, metadatas)
             except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
-                hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_store_batch_hook_failed",
                     hook=hook_name,
@@ -231,6 +244,11 @@ class HookRegistry:
                     hook_name=hook_name,
                     error=str(exc),
                 )
+            finally:
+                if hook_timings is not None:
+                    hook_timings[hook_name] = (
+                        hook_timings.get(hook_name, 0.0) + (time.monotonic() - _t0)
+                    )
 
     # ── Document-grain chain ─────────────────────────────────────────────────
 

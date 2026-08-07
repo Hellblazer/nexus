@@ -125,7 +125,21 @@ class ChunkBatcher:
         self._files: dict[str, _FileState] = {}
         self._failed_files: dict[str, str] = {}
         self._flush_count = 0
+        #: FULL flush wall: upload (self._flush) + on_batch_complete
+        #: (flush-grain hooks) + the per-file callback chain
+        #: (nexus-lde88 G3 — previously stopped before the hooks, so
+        #: this under-reported flush cost by ~4x against the real wall).
         self._flush_seconds = 0.0
+        #: The self._flush(...) network write ALONE — what "flush_seconds"
+        #: used to (mis)represent as the whole flush. Kept as its own
+        #: counter so both numbers stay available (nexus-lde88 G3).
+        self._upload_seconds = 0.0
+        #: The file-settlement bookkeeping block (state.outstanding
+        #: decrement + _settle_file_locked, under self._lock) — review
+        #: round 2 (both reviewers, critic-proven: 0.03s injected delay
+        #: there showed up as 0.0000s across every other bucket AND in
+        #: flush_seconds). Its own counter closes that gap.
+        self._settle_seconds = 0.0
         #: duoak follow-up: >1 dispatches flushes to a bounded pool so
         #: neither staging workers nor drain() serialize the network
         #: calls. 1 (default) = synchronous v1 behavior. Ceiling should
@@ -157,11 +171,25 @@ class ChunkBatcher:
 
     @property
     def stats(self) -> dict[str, float]:
-        """Flush-count / cumulative flush seconds (--debug-timing report)."""
+        """Flush-count / cumulative flush seconds (--debug-timing report).
+
+        ``flush_seconds`` is the FULL flush wall — the sum of every
+        attributed phase (``upload_seconds`` + flush-grain hooks +
+        ``settle_seconds`` + file-grain hooks; the latter two are not
+        separately exposed here, only via the per-flush
+        ``chunk_flush_complete`` event's ``flush_hook_s``/``settle_s``/
+        ``file_hook_s`` fields). ``upload_seconds`` is the network write
+        alone (nexus-lde88 G3 — the two used to be conflated under one
+        name that only ever measured the upload leg). ``settle_seconds``
+        is the file-settlement bookkeeping block alone (review round 2 —
+        previously silently excluded from ``flush_seconds`` entirely).
+        """
         with self._lock:
             return {
                 "flushes": float(self._flush_count),
                 "flush_seconds": self._flush_seconds,
+                "upload_seconds": self._upload_seconds,
+                "settle_seconds": self._settle_seconds,
             }
 
     @property
@@ -344,6 +372,19 @@ class ChunkBatcher:
         half independently. A batch too big for the gateway timeout
         self-tunes down; a genuinely poisoned file is isolated to itself
         (only it fails). Depth is naturally log2(files).
+
+        Emits ONE ``chunk_flush_complete`` structlog event per completed
+        flush (nexus-lde88 G1) with complete per-flush attribution —
+        ``upload_s`` (the network write alone), ``flush_hook_s``
+        (``on_batch_complete`` — taxonomy/manifest/aspect), ``settle_s``
+        (the file-settlement bookkeeping block — review round 2), and
+        ``file_hook_s`` (the per-file completion callbacks). These four
+        SUM to the full flush wall — no attribution gap between them (the
+        round-2 fix: settle_s used to be silently excluded from all four
+        AND from ``flush_seconds``, see ``test_partition_sums_to_wall``).
+        No event fires on the bisect path (a bisected batch never
+        completes as itself; each half fires its own event when IT
+        completes).
         """
         import time  # noqa: PLC0415 — leaf util; keep module import surface minimal
 
@@ -382,9 +423,11 @@ class ChunkBatcher:
                     files=len(pend.file_counts),
                     error=str(exc),
                 )
+                upload_elapsed = time.monotonic() - t0
                 with self._lock:
                     self._flush_count += 1
-                    self._flush_seconds += time.monotonic() - t0
+                    self._upload_seconds += upload_elapsed
+                    self._flush_seconds += upload_elapsed
                 for half in self._split(pend):
                     self._flush_batch(collection, half)
                 return
@@ -396,8 +439,15 @@ class ChunkBatcher:
                 files=len(pend.file_counts),
                 error=error,
             )
-        elapsed = time.monotonic() - t0
+        # nexus-lde88 G3: upload_elapsed is the network write ALONE, stopping
+        # here — BEFORE the hooks below. This used to be the only number
+        # tracked (as "flush_seconds"), under-reporting true flush cost by
+        # ~4x. flush_hook_elapsed / file_hook_elapsed close that gap.
+        upload_elapsed = time.monotonic() - t0
+
+        flush_hook_elapsed = 0.0
         if error is None:
+            _hook_t0 = time.monotonic()
             try:
                 self._on_batch_complete(
                     collection, pend.ids, pend.documents, pend.metadatas,
@@ -410,17 +460,47 @@ class ChunkBatcher:
                     chunks=len(pend.ids),
                     exc_info=True,
                 )
+            flush_hook_elapsed = time.monotonic() - _hook_t0
+
+        # nexus-lde88 review round 2 (both reviewers; critic-proven: a 0.03s
+        # delay injected into this block showed up in NEITHER upload_s,
+        # flush_hook_s, NOR file_hook_s — the reported sum read 0.0000s
+        # against a real wall of 0.0401s). Timed on its own now so
+        # flush_seconds (below) is the genuinely TRUE wall, not a sum with
+        # a silent gap in it.
+        _settle_t0 = time.monotonic()
         settled: list[_Settled] = []
         with self._lock:
             self._flush_count += 1
-            self._flush_seconds += elapsed
             for path, count in pend.file_counts.items():
                 state = self._files[path]
                 state.outstanding -= count
                 if error is not None and state.failed is None:
                     state.failed = error
                 self._settle_file_locked(path, settled)
+        settle_elapsed = time.monotonic() - _settle_t0
+
+        _file_hook_t0 = time.monotonic()
         self._invoke_callbacks(settled)
+        file_hook_elapsed = time.monotonic() - _file_hook_t0
+
+        with self._lock:
+            self._upload_seconds += upload_elapsed
+            self._settle_seconds += settle_elapsed
+            self._flush_seconds += (
+                upload_elapsed + flush_hook_elapsed + settle_elapsed + file_hook_elapsed
+            )
+
+        _log.info(
+            "chunk_flush_complete",
+            collection=collection,
+            chunks=len(pend.ids),
+            files=len(pend.file_counts),
+            upload_s=round(upload_elapsed, 3),
+            flush_hook_s=round(flush_hook_elapsed, 3),
+            settle_s=round(settle_elapsed, 3),
+            file_hook_s=round(file_hook_elapsed, 3),
+        )
 
     @staticmethod
     def _split(pend: _Pending) -> "list[_Pending]":

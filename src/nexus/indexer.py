@@ -2931,11 +2931,41 @@ def _drain_batcher_with_markers(
             parts.append(f"{pend['in_flight']} in-flight batches")
         on_phase(f"Flushing {' + '.join(parts)}…")
 
+        # nexus-lde88 G2: the printed "(Xs" used to be time.monotonic() - t0
+        # — CUMULATIVE since the drain started, not this flush's own
+        # duration — so three consecutive flushes printed the identical
+        # cumulative-so-far number and read as per-flush timing. Track the
+        # PREVIOUS flush's timestamp and print the per-flush delta instead;
+        # the rate/ETA projection below still needs the cumulative wall,
+        # so that arithmetic is unchanged.
+        #
+        # CAVEAT (review round 2, Suggestion): this delta is exact only at
+        # ``flush_concurrency=1`` — the ChunkBatcher default here is >1 (3,
+        # via ``_run_index``'s batcher construction), so ``on_progress``
+        # fires in the ORDER concurrent flushes complete
+        # (``as_completed()`` in ``ChunkBatcher.drain``), not the order
+        # they started. The delta is therefore the time between two
+        # JOINER OBSERVATIONS at this callback, not necessarily that one
+        # flush's own individual wall-clock duration — e.g. three flushes
+        # that ran mostly in parallel and land within a tight window print
+        # small deltas that don't individually represent ~1/3 of the real
+        # per-flush cost each. Still strictly more honest than the old
+        # cumulative-since-drain-start number (which was wrong in the same
+        # direction for EVERY flush, not just under concurrency), and
+        # exact at concurrency=1 (the drain-phase default when
+        # ``flush_pool`` is unset). For the ACTUAL per-flush attribution
+        # under concurrency, use the per-flush ``chunk_flush_complete``
+        # structlog event (nexus-lde88 G1) instead of this progress line.
+        _last_flush_t = [t0]
+
         def progress(done: int, total: int) -> None:
             # nexus-zedf7: rolling rate + projected remaining, so an hour of
             # legitimate server-side embedding never reads as a hang.
-            elapsed = time.monotonic() - t0
-            line = f"  flush {done}/{total} complete ({elapsed:.1f}s"
+            now = time.monotonic()
+            elapsed = now - t0  # cumulative — feeds the rate/ETA projection only
+            per_flush = now - _last_flush_t[0]
+            _last_flush_t[0] = now
+            line = f"  flush {done}/{total} complete ({per_flush:.1f}s"
             if 0 < done < total and elapsed > 0:
                 rate = done / elapsed
                 line += f", {rate * 60:.1f} flushes/min"
@@ -3602,6 +3632,13 @@ def _run_index(
             "file": 0.0, "flush": 0.0,
             "file_batch": 0.0, "file_single": 0.0, "file_document": 0.0,
         }
+        # nexus-lde88 G4: "flush" above stayed as the merged total (taxonomy +
+        # manifest + aspect-enqueue, indistinguishable from one number). This
+        # dict carries the SAME total split by name — taxonomy/manifest come
+        # straight from HookRegistry.fire_batch's own hook_timings= (it knows
+        # each hook's __name__), aspect_enqueue is timed separately below
+        # since it isn't dispatched through the registry.
+        _flush_hook_by_name: dict[str, float] = {}
         _hook_seconds_lock = threading.Lock()
 
         def _fire_deferred_hooks(_path: str, context: object) -> None:
@@ -3747,14 +3784,25 @@ def _run_index(
                 if _chash:
                     _manifest_complete[_cdid] = _chash
             _t0 = time.monotonic()
+            # nexus-lde88 G4: hook_timings= gets the registry's own per-hook
+            # (taxonomy_assign_batch_hook / manifest_write_batch_hook) split
+            # for free — the registry already resolves each hook's
+            # __name__ for its failure-logging path; this just times around
+            # the same call instead of merging both into one bucket.
+            _batch_hook_timings: dict[str, float] = {}
             reg.fire_batch(
                 agg_ids, collection, agg_docs,
                 [[] for _ in agg_ids], agg_metas,
                 grain="flush",
                 manifest_complete=_manifest_complete or None,
+                hook_timings=_batch_hook_timings,
             )
             with _hook_seconds_lock:
                 _hook_seconds["flush"] += time.monotonic() - _t0
+                for _hname, _hsecs in _batch_hook_timings.items():
+                    _flush_hook_by_name[_hname] = (
+                        _flush_hook_by_name.get(_hname, 0.0) + _hsecs
+                    )
 
             # nexus-nj4ch: batched aspect-extraction enqueue, replacing the
             # per-file fire_document(...) call this closure's file-grain
@@ -3798,8 +3846,12 @@ def _run_index(
                 ):
                     from nexus.aspect_worker import _ensure_aspect_worker  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
                     _ensure_aspect_worker()
+            _aspect_elapsed = time.monotonic() - _t_aspect
             with _hook_seconds_lock:
-                _hook_seconds["flush"] += time.monotonic() - _t_aspect
+                _hook_seconds["flush"] += _aspect_elapsed
+                _flush_hook_by_name["aspect_enqueue"] = (
+                    _flush_hook_by_name.get("aspect_enqueue", 0.0) + _aspect_elapsed
+                )
 
         # Shared with HttpVectorClient's internal upsert paging (nexus-nf3n7) so
         # the batcher flush cap and the client's oversize-fallback page size are
@@ -4004,23 +4056,46 @@ def _run_index(
     if _batcher is not None:
         _drain_batcher_with_markers(_batcher, on_phase)
         _bstats = _batcher.stats
+        # nexus-lde88 G3: "flush_seconds" is now the FULL flush wall (upload
+        # + hooks); "upload_seconds" is the network write alone — the number
+        # the old "flush_seconds" name silently under-reported by ~4x while
+        # calling itself "upload". Both are reported explicitly, never
+        # conflated under one name.
+        _upload_s = _bstats["upload_seconds"]
+        _flush_wall_s = _bstats["flush_seconds"]
+        # nexus-lde88 G4: taxonomy/manifest/aspect used to merge into one
+        # "flush-grain" number — split by hook name (see _flush_hook_by_name
+        # above). .get(..., 0.0) covers a hook that never fired this run
+        # (e.g. no extractor configured for any collection -> no aspect
+        # enqueues) without pretending it ran for 0.0s of real work.
+        _taxonomy_s = _flush_hook_by_name.get("taxonomy_assign_batch_hook", 0.0)
+        _manifest_s = _flush_hook_by_name.get("manifest_write_batch_hook", 0.0)
+        _aspect_s = _flush_hook_by_name.get("aspect_enqueue", 0.0)
         _log.info(
             "index_chunk_batch_stats",
             flushes=int(_bstats["flushes"]),
-            flush_seconds=round(_bstats["flush_seconds"], 1),
+            upload_seconds=round(_upload_s, 1),
+            flush_wall_seconds=round(_flush_wall_s, 1),
             file_batch_seconds=round(_hook_seconds["file_batch"], 1),
             file_single_seconds=round(_hook_seconds["file_single"], 1),
             file_document_seconds=round(_hook_seconds["file_document"], 1),
+            flush_taxonomy_seconds=round(_taxonomy_s, 1),
+            flush_manifest_seconds=round(_manifest_s, 1),
+            flush_aspect_seconds=round(_aspect_s, 1),
         )
         if on_phase is not None and _bstats["flushes"]:
             on_phase(
                 f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
-                f"{_bstats['flush_seconds']:.1f}s upload; hooks "
+                f"{_upload_s:.1f}s upload ({_flush_wall_s:.1f}s full flush "
+                f"wall); hooks "
                 f"{_hook_seconds['file']:.1f}s file-grain "
                 f"(batch={_hook_seconds['file_batch']:.1f}s "
                 f"single={_hook_seconds['file_single']:.1f}s "
                 f"document={_hook_seconds['file_document']:.1f}s) + "
-                f"{_hook_seconds['flush']:.1f}s flush-grain"
+                f"{_hook_seconds['flush']:.1f}s flush-grain "
+                f"(taxonomy={_taxonomy_s:.1f}s "
+                f"manifest={_manifest_s:.1f}s "
+                f"aspect={_aspect_s:.1f}s)"
             )
         _batch_failures = _batcher.failed_files
         if _batch_failures:
