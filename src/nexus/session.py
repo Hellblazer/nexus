@@ -164,8 +164,9 @@ def resolve_explicit_session_id() -> str | None:
     or writes a DIFFERENT session's data while believing it addressed the
     one it named -- a session-isolation violation this codebase already
     treats as security-relevant on the MCP side (see
-    :mod:`nexus.daemon.t1_lease`'s locked RF-2 protocol and
-    ``mcp/core.py``'s ``t1_session_unresolved`` branch). The bare
+    :func:`nexus.db.t1.publish_t1_session_lease` / ``read_t1_session_lease``'s
+    session-id-keyed lease and ``mcp/core.py``'s ``t1_session_unresolved``
+    branch). The bare
     invocation with nothing set in env -- including when
     ``current_session`` happens to resolve something -- is not making
     that claim, so it is exempt and keeps the existing shared-identity

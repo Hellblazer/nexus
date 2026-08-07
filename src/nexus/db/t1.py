@@ -931,8 +931,10 @@ def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
     trusted forever, including one abandoned by a prior MCP session that
     exited uncleanly (SIGKILL/OOM) or one whose token had long since expired
     server-side. That directly contradicted this module's own design intent
-    to mirror :func:`nexus.daemon.t1_lease.discover_t1_lease`'s "liveness is
-    lease freshness (TTL), not pid" pattern.
+    to mirror the "liveness is lease freshness (TTL), not pid" pattern
+    ``nexus.daemon.service_registry.ServiceRegistry`` uses (formerly also
+    followed by ``nexus.daemon.t1_lease.discover_t1_lease``, retired
+    nexus-8zfwv 2026-08-07 alongside the ``t1_addr.*`` format it read).
 
     Now: a lease past its stored ``expires_at`` (see
     :func:`publish_t1_session_lease`), or one that fails to parse as the new

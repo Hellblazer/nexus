@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import json
-import socket
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +29,12 @@ def test_health_refresh_endpoint(client):
     assert resp.status_code == 200
 
 
-# ── Session scanner tests ────────────────────────────────────────────────────
+# ── Session scanner tests (nexus-8zfwv: t1_session_lease.* port) ────────────
+#
+# Ported off the RDR-149 P4 ``t1_addr.*`` ``ServiceRegistry`` lease format:
+# ``T1LeasePublisher``, the only thing that ever published it, is retired
+# (deleted at ff744321). T1 is one shared nexus-service now, so a session's
+# lease carries only a bearer token + expiry -- no host/port/pid to scan.
 
 def test_scan_sessions_empty_dir(tmp_path):
     results = scan_sessions_sync(tmp_path)
@@ -44,57 +46,43 @@ def test_scan_sessions_no_dir():
     assert results == []
 
 
-def _write_t1_lease(config_dir: Path, session_id: str, host: str, port: int,
-                    *, heartbeat_epoch: float, ttl: float = 30.0,
-                    server_pid: int = 4242) -> None:
-    """Write a RDR-149 T1 lease record at ``t1_addr.<session_id>``."""
-    from nexus.daemon.service_registry import LeaseRecord
+def _write_t1_session_lease(config_dir: Path, session_id: str, *, expires_at: float) -> None:
+    """Write a live lease via the REAL publisher (nexus.db.t1), never a
+    hand-built filename -- the test must read the SAME file shape the
+    production code writes."""
+    import time
 
-    record = LeaseRecord(
-        scope_key=session_id,
-        generation=1,
-        owner_token="tok",
-        heartbeat_epoch=heartbeat_epoch,
-        ttl=ttl,
-        endpoint={"host": host, "port": port, "server_pid": server_pid},
-        version="1.0.0",
-        payload={"session_id": session_id, "server_pid": server_pid},
-    )
-    (config_dir / f"t1_addr.{session_id}").write_text(record.to_json())
+    from nexus.db.t1 import publish_t1_session_lease
+
+    ttl_seconds = expires_at - time.time()
+    publish_t1_session_lease(session_id, "tok", config_dir, ttl_seconds=ttl_seconds)
 
 
 def test_scan_sessions_live_session(tmp_path):
-    """A fresh lease (recent heartbeat) is detected as alive (RDR-149 P4)."""
+    """A fresh lease (well inside its TTL) is detected as alive."""
     import time
-    _write_t1_lease(tmp_path, "sess-A", "127.0.0.1", 0, heartbeat_epoch=time.time())
+    _write_t1_session_lease(tmp_path, "sess-A", expires_at=time.time() + 3600.0)
     results = scan_sessions_sync(tmp_path)
     assert len(results) == 1
     assert results[0].session_id == "sess-A"
-    assert results[0].pid_alive is True
+    assert results[0].fresh is True
 
 
 def test_scan_sessions_dead_pid(tmp_path):
-    """An expired lease (heartbeat older than TTL) is not alive (RDR-149 P4)."""
+    """An expired lease (past its expires_at) is not alive."""
     import time
-    _write_t1_lease(
-        tmp_path, "sess-stale", "127.0.0.1", 12345,
-        heartbeat_epoch=time.time() - 1000.0, ttl=30.0,
-    )
+    _write_t1_session_lease(tmp_path, "sess-stale", expires_at=time.time() - 1000.0)
     results = scan_sessions_sync(tmp_path)
     assert len(results) == 1
-    assert results[0].pid_alive is False
+    assert results[0].fresh is False
 
 
 def test_session_info_fields():
     info = SessionInfo(
         session_id="s1",
-        host="127.0.0.1",
-        port=8080,
-        pid=1234,
-        pid_alive=True,
-        tcp_reachable=False,
-        created_at="2026-01-01T00:00:00",
+        expires_at=1234567890.0,
+        fresh=True,
     )
     assert info.session_id == "s1"
-    assert info.pid_alive is True
-    assert info.tcp_reachable is False
+    assert info.expires_at == 1234567890.0
+    assert info.fresh is True

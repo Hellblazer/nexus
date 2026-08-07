@@ -30,7 +30,7 @@ Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode
 
 ### T1 sub-agent contract (RDR-105)
 
-T1 is service-backed and session-id scoped (`resolve_active_session_id()`, whose tier-4 fallback reads the flat file `~/.config/nexus/current_session`), leased through `daemon/t1_lease.py` (RDR-149 P4) and published by the MCP lifespan. T2 is the cross-process shared bus, over PG via the engine (multi-process-safe by construction, not SQLite+WAL).
+T1 is service-backed and session-id scoped (`resolve_active_session_id()`, whose tier-4 fallback reads the flat file `~/.config/nexus/current_session`), leased via `db/t1.py`'s `t1_session_lease.<session_id>` flat file (`publish_t1_session_lease` / `read_t1_session_lease`), published and refreshed by the MCP lifespan. The RDR-149 P4 `daemon/t1_lease.py` / `ServiceRegistry(tier="t1")` lease leg is retired (nexus-8zfwv, 2026-08-07) — T1 no longer rides the daemon-lifecycle primitive. T2 is the cross-process shared bus, over PG via the engine (multi-process-safe by construction, not SQLite+WAL).
 
 - **Agent-tool sub-agents** (in-process Task dispatches) share T1 with their parent via the parent's MCP scratch tool. No separate T1 instance.
 - **`claude -p` sub-processes default to `owned`** mode: their MCP resolves its own session and leases its own T1 scope. Sealed from the parent; internally consistent for the subprocess's own Bash tools and sub-agents.

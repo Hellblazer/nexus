@@ -145,13 +145,19 @@ uid-scoped Postgres, T3 uid-scoped pgvector, all behind the nexus-service) but s
 (`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
 election, ungraceful-death reap, restart fencing, self-heal re-assert, and
 version-skew cycling all live in that one primitive, parameterized by tier
-and scope. Each surviving tier is a thin consumer: T1 via `daemon/t1_lease.py`
-(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), and the
-storage service via `daemon/storage_service_daemon.py`. Both per-tier daemons
-that used to sit here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b)
-and `daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w) — the service
-supervises every tier now. Liveness is **lease freshness (TTL),
-not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
+and scope. The surviving tiers on this primitive are the storage service
+(`daemon/storage_service_daemon.py`) and the aspect-worker
+(`daemon/aspect_worker_daemon.py`). Three per-tier daemons that used to sit
+here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b),
+`daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w), and
+`daemon/t1_lease.py` (the RDR-149 P4 `ServiceRegistry(tier="t1")` MCP-lifespan
+publisher, re-keyed transient `server_pid` → session-id, retired
+nexus-8zfwv 2026-08-07). T1 does not ride this primitive at all any more —
+its live session lease is a standalone flat file
+(`nexus.db.t1.publish_t1_session_lease`, `t1_session_lease.<session_id>`),
+outside `ServiceRegistry`, with no election flock and no re-key protocol.
+Liveness for the tiers that DO ride the primitive is **lease freshness
+(TTL), not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
 MinerU (`daemon/mineru_lifecycle.py`, nexus-1qdb9) consumes the substrate's
 public `election()` spawn guard rather than a full lease: the PDF pipeline's
 `ensure_mineru_running()` elects exactly one spawner per config dir across

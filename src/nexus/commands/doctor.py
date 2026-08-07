@@ -1356,10 +1356,12 @@ def _run_check_mineru() -> None:
     "check_t1",
     is_flag=True,
     default=False,
-    help="Diagnose T1 session-id lease presence + reachability "
-         "(RDR-149 P4). Resolves the active session-id and probes its "
-         "lease at ~/.config/nexus/t1_addr.<session_id>. Exits 1 when a "
-         "session-id resolves but the lease is missing or unreachable.",
+    help="Diagnose T1 session lease presence + freshness. Resolves the "
+         "active session-id and checks its lease at "
+         "~/.config/nexus/t1_session_lease.<session_id>. Exits 1 only "
+         "when a session-id resolves AND a lease file exists AND it is "
+         "expired/corrupt; a resolved session with no lease file at all "
+         "is informational (a bare CLI legitimately has none).",
 )
 @click.option(
     "--check-t3-legacy-metadata",
@@ -1785,34 +1787,44 @@ def _run_check_resources() -> None:
 
 
 def _run_check_t1() -> None:
-    """Diagnostic: T1 session-id lease presence + reachability (RDR-149 P4).
+    """Diagnostic: T1 session lease presence + freshness.
 
-    .. note::
-       Imports ``_tcp_probe_alive`` lazily from ``nexus.mcp.core`` to
-       avoid pulling FastMCP / chromadb / corpus into the doctor's
-       cold-start path.
+    Ported (nexus-8zfwv, 2026-08-07) off the RDR-149 P4 ``t1_addr.*``
+    ``ServiceRegistry`` lease -- ``T1LeasePublisher``, the only thing that
+    ever published that format, is retired (deleted at ff744321); every
+    reader of it was permanently stale. The live cross-process "session has
+    a live T1 scope" signal is now the lease file
+    ``nexus.db.t1.publish_t1_session_lease`` writes: a small JSON object
+    ``{token, expires_at}`` at ``~/.config/nexus/t1_session_lease.<session_id>``,
+    written by the MCP lifespan on mint + on every periodic refresh, and
+    cleared on clean teardown. There is no host:port to TCP-probe any more
+    -- T1 is one shared nexus-service, not a per-session chroma.
 
-    Three outcomes:
+    Four outcomes:
 
-    * **Healthy.** A session-id resolves and its live lease at
-      ``~/.config/nexus/t1_addr.<session_id>`` yields a host:port that
-      responds to a TCP probe.
-    * **Missing lease under a resolved session.** A session-id resolves
-      but no live lease is discoverable. Common causes: (a) the MCP
-      server crashed before the lifespan published the lease, (b) the
-      lease aged out (the MCP server died ungracefully and its heartbeat
-      stopped), (c) the MCP server is still booting.
     * **No session-id resolves.** Neither ``NX_SESSION_ID`` nor
-      ``~/.config/nexus/current_session`` is set; ``nx scratch`` from
-      this shell will fail-loud (T1 is PG-only, nexus-4lkmz — there is
-      no in-process opt-out).
-
-    Exit code:
-      * 0: healthy or "no session-id resolves" (informational).
-      * 1: session-id resolves but the lease is absent or unreachable.
+      ``~/.config/nexus/current_session`` is set. Informational, exit 0
+      (T1 is PG-only, nexus-4lkmz -- there is no in-process opt-out to
+      fall back to).
+    * **Session resolves, no lease file.** A bare ``nx`` shell legitimately
+      has no lease of its own -- the MCP lifespan mints one at session
+      start; a bare CLI invocation uses its own dedicated CLI scope
+      instead (see ``nexus.db.t1``'s CLI-dedicated-session path). This is
+      NOT a failure. Informational, exit 0.
+    * **Session resolves, lease present and fresh.** Healthy. Exit 0.
+    * **Session resolves, lease present but expired/corrupt.** Stale
+      litter from an ungraceful owner death -- only clean teardown
+      (``clear_t1_session_lease``) removes this file; nothing else sweeps
+      it (see ``nx doctor``'s orphan-T1-lease health check, which DOES
+      reap these). Exit 1.
     """
-    from nexus.daemon.t1_lease import discover_t1_lease  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.mcp.core import _tcp_probe_alive  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    import json as _json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    import time  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    from nexus.db.t1 import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        _t1_session_lease_path,
+        read_t1_session_lease,
+    )
     from nexus.session import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         _nexus_config_dir_at_import,
         resolve_active_session_id,
@@ -1832,41 +1844,50 @@ def _run_check_t1() -> None:
         return
 
     config_dir = _nexus_config_dir_at_import()
-    addr = discover_t1_lease(session_id, config_dir=config_dir)
-    record_name = f"t1_addr.{session_id}"
-    if addr is None:
-        click.echo(
-            f"[✗] T1: session {session_id!r} resolves but no live lease "
-            f"at {config_dir / record_name}."
-        )
-        click.echo(
-            "    The MCP server's lifespan publishes this lease at "
-            "session start and heartbeats it. Causes:\n"
-            "      - The MCP server crashed before the lifespan "
-            "published it (check ~/.config/nexus/logs/mcp.log).\n"
-            "      - The MCP server died ungracefully and its lease "
-            "aged out (TTL).\n"
-            "      - The MCP server is still booting; retry shortly."
-        )
-        raise click.exceptions.Exit(1)
+    lease_path = _t1_session_lease_path(session_id, config_dir)
 
-    host, port = addr
-    if _tcp_probe_alive(host, port, timeout=1.0):
+    if not lease_path.exists():
         click.echo(
-            f"[✓] T1: lease {record_name} -> "
-            f"{host}:{port} (chroma reachable)"
+            f"[ ] T1: session {session_id!r} resolves but no lease at "
+            f"{lease_path}"
+        )
+        click.echo(
+            "    Informational: a bare `nx` shell legitimately has no "
+            "lease of its own. The MCP lifespan mints one at session "
+            "start; a bare CLI invocation uses its own dedicated scope "
+            "instead. NOTE: this state cannot distinguish 'no MCP session "
+            "was ever started' from 'the MCP server crashed before its "
+            "first mint' -- if a live MCP session SHOULD exist for this "
+            "session id, treat this as a symptom: check `nx daemon "
+            "service status` and reconnect the MCP server (/mcp)."
+        )
+        return
+
+    token = read_t1_session_lease(session_id, config_dir)
+    if token is not None:
+        detail = ""
+        try:
+            data = _json.loads(lease_path.read_text(encoding="utf-8"))
+            expires_at = float(data["expires_at"])
+            detail = f" (expires in {int(expires_at - time.time())}s)"
+        except (OSError, _json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+        click.echo(
+            f"[✓] T1: lease {lease_path.name} for session {session_id!r} "
+            f"is fresh{detail}"
         )
         return
 
     click.echo(
-        f"[✗] T1: lease {record_name} -> {host}:{port} "
-        "but TCP probe failed."
+        f"[✗] T1: lease {lease_path.name} for session {session_id!r} "
+        "exists but is expired or unreadable."
     )
     click.echo(
-        "    The lease points at a chroma that is not listening. "
-        "The MCP server may have died ungracefully. Restart Claude "
-        "Code; the next MCP startup will publish a fresh lease "
-        "and spawn a fresh chroma."
+        "    Stale litter from an ungraceful owner death -- only clean "
+        "teardown clears this file, so it can outlive its session. "
+        f"Reap it via `nx doctor` (the orphan-T1-lease check reaps "
+        f"expired leases automatically), or remove it directly: "
+        f"rm {lease_path}"
     )
     raise click.exceptions.Exit(1)
 

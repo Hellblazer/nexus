@@ -29,26 +29,22 @@ from unittest.mock import patch
 import pytest
 
 
-def _discover_t1_endpoint(config_dir, scope_key) -> tuple[str, int] | None:
-    """RDR-149 P4 test helper: read the live T1 lease for ``scope_key``
-    (a session-id or a transient server_pid) and return ``(host, port)``.
-
-    Replaces the legacy ``read_t1_addr_for(claude_pid)`` probe now that T1
-    rides the leased registry instead of the ``host:port`` addr file.
-    """
-    from nexus.daemon.service_registry import ServiceRegistry
-
-    registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
-    record = registry.discover(str(scope_key))
-    if record is None:
-        return None
-    host = record.endpoint.get("host")
-    port = record.endpoint.get("port")
-    if host is None or port is None:
-        return None
-    return host, port
-
-
+# NO _discover_t1_endpoint (nexus-8zfwv, 2026-08-07): drove
+# ``ServiceRegistry(tier="t1")``, the ``t1_addr.*`` lease format nothing
+# publishes any more (T1LeasePublisher retired, deleted at ff744321) --
+# and had zero callers even on develop tip (confirmed by grep against
+# MERGE_HEAD). T1Database's own discovery gate never had an "addr file"
+# leg reading this format either way (RDR-155 P4b already cut
+# ``_init_new_discovery`` down before nexus-4lkmz narrowed it further --
+# see ``nexus.db.t1.T1Database``), so this helper was exercising nothing.
+#
+# ``_publish_t1_session_lease`` below SURVIVES the same audit: unlike its
+# sibling it has a real caller,
+# ``TestT1DatabaseIsolatedLegRetired.test_isolated_hard_fails_even_with_a_live_session_lease``,
+# which needs a genuinely live alternate discovery signal to prove
+# isolation still outranks it (nexus-4lkmz). It already routes through
+# ``ServiceRegistry.publish`` directly rather than the deleted
+# ``T1LeasePublisher`` wrapper (nexus-yfh5x).
 def _publish_t1_session_lease(
     config_dir, session_id, host, port, *, server_pid=4242, claude_pid=None
 ):
