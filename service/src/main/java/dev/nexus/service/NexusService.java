@@ -91,6 +91,12 @@ public final class NexusService {
     private final dev.nexus.service.http.RekeyJobs rekeyJobs;
 
     /**
+     * nexus-tyxnh: owns the post-commit purge-trash VACUUM executor; shut down in
+     * {@link #stop()} alongside {@code sweepScheduler} and {@code rekeyJobs}.
+     */
+    private final CatalogRepository catalogRepo;
+
+    /**
      * Convenience constructor: no vector backend (original signature for existing tests).
      * The {@code /v1/vectors/*} routes answer 503 (explicit refusal, never a 404 or NPE).
      *
@@ -257,7 +263,7 @@ public final class NexusService {
         var remapRepo     = new RemapRepository(tenantScope);
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
-        var catalogRepo   = new CatalogRepository(tenantScope);
+        this.catalogRepo  = new CatalogRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
@@ -393,12 +399,13 @@ public final class NexusService {
         this.sweepScheduler.scheduleAtFixedRate(
             () -> {
                 try {
-                    OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC)
-                        .minusHours(SWEEP_TTL_HOURS);
+                    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+                    OffsetDateTime cutoff = now.minusHours(SWEEP_TTL_HOURS);
                     var tenants = new java.util.LinkedHashSet<String>();
                     tenants.add(DEFAULT_TENANT);
                     tenants.addAll(tokenStore.listKnownTenants());
                     int total = 0;
+                    int totalSessionTokens = 0;
                     for (String tenant : tenants) {
                         try {
                             int deleted = scratchRepo.sweepTenant(tenant, cutoff);
@@ -409,9 +416,23 @@ public final class NexusService {
                             log.warn("event=t1_scheduled_sweep_tenant_failed tenant={} error={}",
                                 tenant, ex.getMessage(), ex);
                         }
+                        // nexus-t23zk: expired session_tokens backstop, riding the SAME
+                        // per-tenant loop and schedule as the scratch sweep above (one
+                        // extra query per tenant, no new thread). closeSession alone
+                        // leaves a permanent row behind whenever a minting process dies
+                        // without calling it (crashed MCP, killed dispatch, reboot) —
+                        // inert (auth checks expires_at live) but otherwise never deleted.
+                        try {
+                            int sessionDeleted = tokenStore.sweepExpiredSessions(tenant, now.toInstant());
+                            totalSessionTokens += sessionDeleted;
+                        } catch (Exception ex) {
+                            log.warn("event=t1_scheduled_session_sweep_tenant_failed tenant={} error={}",
+                                tenant, ex.getMessage(), ex);
+                        }
                     }
-                    log.info("event=t1_scheduled_sweep_complete tenants={} total_deleted={}",
-                        tenants.size(), total);
+                    log.info("event=t1_scheduled_sweep_complete tenants={} total_deleted={} "
+                            + "total_session_tokens_deleted={}",
+                        tenants.size(), total, totalSessionTokens);
                 } catch (Exception ex) {
                     log.warn("event=t1_scheduled_sweep_failed error={}", ex.getMessage(), ex);
                 }
@@ -426,10 +447,12 @@ public final class NexusService {
         log.info("event=service_started port={}", getPort());
     }
 
-    /** Stop the HTTP server, TTL sweep scheduler and rekey job pool immediately. */
+    /** Stop the HTTP server, TTL sweep scheduler, rekey job pool, and purge-trash
+     *  VACUUM executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
         rekeyJobs.close();
+        catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");
     }
