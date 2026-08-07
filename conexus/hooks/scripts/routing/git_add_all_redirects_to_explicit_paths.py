@@ -214,6 +214,61 @@ never-before-queried bead ids in one push -- the real 2026-07-31 shape),
 which a first-pass cache does not help regardless of polarity, so it would
 add complexity without closing the gap the deadline fix already closes.
 Left here as an available future optimization, not a rejected one.
+
+REPO-SCOPE GUARD (nexus-vscgz, 2026-08-07): rules 2 (push-to-main,
+nexus-vduer) and 3 (review-coverage gate, nexus-4av2n) are NEXUS-REPO
+POLICY -- personal standing rules about THIS project's release-branch
+discipline and review coverage. This hook, however, ships in a plugin
+installed GLOBALLY, so its PreToolUse:Bash matcher runs in every repo a
+session touches. EVIDENCE (2026-08-07): in ChiralBehaviors/inviscid (a
+hobby repo -- `master` default branch, no `develop`, no marketplace
+surface) rule 2 blocked a plain `git push origin master` with the
+nexus-vduer deny message; the operator had to reach for the
+`# routing-allow:` escape in a repo that has never heard of nexus-vduer.
+
+``_repo_scope_is_nexus(cwd)`` gates rules 2+3 only -- rule 1 (the
+wildcard-add check) is a personal, repo-agnostic standing rule
+(`feedback_no_git_add_all.md`) and stays GLOBAL, unaffected by this guard.
+Two signals, OR'd (nexus-w3apo: the first cut consulted Signal B only
+when Signal A was fully undeterminable, so a nexus checkout with a
+renamed/local origin basename resolved determinately-wrong and silently
+lost the vduer guard inside nexus itself -- substantive-critic Critical,
+reproduced end-to-end):
+
+  - Signal A: ``git remote get-url origin``, normalized (lowercased, a
+    trailing ``/`` stripped BEFORE the trailing ``.git`` -- order matters
+    for ``.../nexus.git/`` -- then split on BOTH ``/`` and ``:`` so an
+    scp-style remote (``git@github.com:Hellblazer/nexus.git``) and an
+    https/local-path remote resolve their last path component the same
+    way). Match iff that last component is ``nexus`` -- true for Hal's
+    real origin, the https clone form, forks, and a local bare-repo path
+    whose basename is ``nexus`` (what this file's own test fixtures use
+    to opt in).
+  - Signal B: does ``<toplevel>/conexus/.claude-plugin/plugin.json``
+    exist? A distinctive marker of this repo, present in linked worktrees
+    too. Consulted whenever Signal A did not MATCH (missing origin,
+    failed call, or a non-``nexus`` basename alike).
+
+Known, accepted residual risks (stated, not defended further): an
+unrelated repo literally named ``nexus`` gets nexus policy (basename
+match); a push using a raw URL or a remote named other than ``origin``
+in a checkout that also lacks the marker is treated as foreign. Cost of
+the OR (vs the first cut's short-circuit): a foreign repo's push now
+pays one extra git call (``rev-parse --show-toplevel``, 2s cap) plus an
+``isfile`` — once per hook invocation, push commands only.
+
+Any failure / undeterminable state resolves to False (NOT nexus). This is
+deliberately fail-OPEN for foreign repos: the whole point of this guard is
+that a repo it has never heard of must not be governed by rules that
+assume it is nexus -- the inverse of every OTHER fail-open in this file,
+which exists to avoid bricking a push this project's own policy should
+allow. The scope check runs ONLY when the command actually contains a
+``git push`` segment: rule 1 needs no git subprocess at all, and paying
+for `remote get-url` on every Bash call would burn into the <300ms budget
+for the common non-push case for no reason. When a push segment exists and
+the repo is NOT nexus, rules 2 and 3 are skipped entirely -- the command is
+treated exactly as though it carried no push segments, so only rule 1 can
+still fire.
 """
 from __future__ import annotations
 
@@ -328,6 +383,62 @@ def _upstream_branch(cwd: str) -> str | None:
         return None
     ref = r.stdout.strip()          # "origin/main"
     return ref.split("/", 1)[1] if "/" in ref else (ref or None)
+
+
+def _url_last_path_component(url: str) -> str:
+    """Normalize *url* and return its last path component, lowercased
+    (nexus-vscgz). Handles https/ssh URLs
+    (``https://github.com/Hellblazer/nexus.git``), scp-style remotes
+    (``git@github.com:Hellblazer/nexus.git``), and local bare-repo paths
+    (``/tmp/x/nexus``) uniformly: strip a trailing ``/``, THEN a trailing
+    ``.git``, then any ``/`` that strip exposed, then split on BOTH ``/``
+    and ``:`` so the scp-style host:path separator and an ordinary path
+    separator yield the same last segment. The slash strip must come FIRST:
+    ``.../nexus.git/`` otherwise keeps its ``.git`` suffix (endswith
+    misses) and a genuine nexus remote reads as foreign — review finding,
+    reproduced live.
+    """
+    s = url.strip().lower().rstrip("/")
+    if s.endswith(".git"):
+        s = s[: -len(".git")]
+    s = s.rstrip("/")
+    parts = [p for p in re.split(r"[/:]", s) if p]
+    return parts[-1] if parts else ""
+
+
+def _repo_scope_is_nexus(cwd: str) -> bool:
+    """True iff *cwd* is (a checkout of) the nexus repo (nexus-vscgz).
+
+    See the module docstring's REPO-SCOPE GUARD section for the two-signal
+    OR and why every undeterminable case resolves to False -- fail OPEN for
+    foreign repos, the opposite direction of this file's other fail-opens
+    (which protect a push nexus policy should allow, not exempt one it
+    shouldn't).
+
+    The two signals are an OR, not primary-then-fallback (nexus-w3apo,
+    substantive-critic Critical on the first cut): Signal A resolving
+    DETERMINATELY to a non-``nexus`` basename must still consult the
+    marker, or a genuine nexus checkout with a renamed/local origin
+    (scratch clone, mirror -- the exact shape this file's own test
+    fixtures use) silently loses the vduer guard INSIDE nexus, the one
+    direction this scoping must never fail. Both git calls carry an
+    explicit 2s timeout (review finding: `_git_out`'s bare 10s default is
+    unbounded by the wall-clock discipline the nexus-4av2n round-3 work
+    exists to enforce, inside a hook with a 5s PreToolUse ceiling).
+    """
+    origin_url = _git_out(cwd, "remote", "get-url", "origin", timeout=2)
+    if origin_url is not None and _url_last_path_component(origin_url) == "nexus":
+        return True
+    # Origin missing, unreadable, or named something else -- the marker
+    # file decides. Present in linked worktrees too.
+    toplevel = _git_out(cwd, "rev-parse", "--show-toplevel", timeout=2)
+    if toplevel is None:
+        return False
+    marker = os.path.join(toplevel, "conexus", ".claude-plugin", "plugin.json")
+    try:
+        return os.path.isfile(marker)
+    except OSError:
+        return False
 
 
 def _targets_protected(tokens: list[str], cwd: str) -> bool:
@@ -1140,6 +1251,12 @@ def body(payload: dict[str, Any]) -> None:
         # Only pay for the git subprocesses when the cheap check missed.
         cwd = str(payload.get("cwd") or "") or os.getcwd()
         push_segments = _push_tokens(command)
+        if push_segments and not _repo_scope_is_nexus(cwd):
+            # nexus-vscgz: rules 2 (push-to-main) and 3 (review-coverage)
+            # are nexus-repo policy, not a global standing rule -- no-op
+            # in any other repo. Treated as if there were no push segments
+            # at all; rule 1 (wildcard add) is untouched by this branch.
+            push_segments = []
         push_to_main = any(_targets_protected(t, cwd) for t in push_segments)
         if push_segments and not push_to_main:
             non_tag_segments = [t for t in push_segments if not _is_pure_tag_push(t)]

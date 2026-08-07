@@ -96,7 +96,21 @@ rules:
       cross-plugin; a fifth needs consolidation or a successor-RDR budget
       revision, and the cap is on rule COUNT (measured latency was ~147ms
       against the 300ms budget for the first two checks, i.e. not binding
-      — but that is not this change's call to make).
+      — but that is not this change's call to make). REPO SCOPE
+      (nexus-vscgz): rules (2) and (3) are NEXUS-REPO POLICY, not a global
+      standing rule -- this plugin installs globally, so without a scope
+      check both fired in every repo a session touched (evidence 2026-08-07:
+      rule 2 blocked `git push origin master` in a hobby repo with no
+      `develop`, no marketplace surface, and no relationship to nexus-vduer
+      at all). `_repo_scope_is_nexus` gates (2)+(3) on an OR of two
+      signals: the origin remote's URL basename is `nexus`, OR the conexus
+      plugin marker file exists at the toplevel (nexus-w3apo: an OR, not
+      primary-then-fallback, so a nexus checkout with a renamed/local
+      origin keeps its guard); any undeterminable state resolves to
+      NOT-nexus (fail open for foreign repos). Rule (1)
+      (wildcard `git add`) stays global and unaffected -- it enforces a
+      personal, repo-agnostic rule (feedback_no_git_add_all.md), not
+      anything nexus-specific.
     escape_token: "# routing-allow:"
     fail_closed: false
   subagent_git_write_requires_orchestrator:

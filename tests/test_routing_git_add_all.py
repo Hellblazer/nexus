@@ -43,8 +43,15 @@ def _decision(proc):
     return json.loads(proc.stdout)["hookSpecificOutput"]
 
 
-def _bash(cmd: str) -> dict:
-    return {"tool_name": "Bash", "tool_input": {"command": cmd}}
+def _bash(cmd: str, cwd: str | None = None) -> dict:
+    payload: dict = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+    if cwd is not None:
+        payload["cwd"] = cwd
+    return payload
+
+
+def _git(*args: str, cwd) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +130,20 @@ def test_escape_allows():
         "git add -A  # routing-allow: scripted bootstrap of fresh repo"
     )))
     assert d["permissionDecision"] == "allow"
+
+
+# nexus-vscgz: rule 1 (wildcard `git add`) is a personal, repo-agnostic
+# standing rule (feedback_no_git_add_all.md) -- unlike rules 2/3, it must
+# stay global and deny in a repo that is NOT nexus-scoped.
+
+
+def test_git_add_dash_A_denies_in_a_non_nexus_repo(tmp_path):
+    work = tmp_path / "some-other-repo"
+    work.mkdir()
+    _git("init", "-q", "--initial-branch=master", cwd=work)
+    _git("remote", "add", "origin", "https://example.com/someone/otherproject.git", cwd=work)
+    d = _decision(_run(_bash("git add -A", str(work))))
+    assert d["permissionDecision"] == "deny", d
 
 
 # Malformed

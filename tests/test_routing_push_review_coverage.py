@@ -67,8 +67,14 @@ def _isolate_log(tmp_path, monkeypatch):
 def repo(tmp_path):
     """A real origin + work clone on `develop`, upstream tracked, with a
     single initial commit already pushed -- so any FURTHER commits are
-    exactly the outgoing range this hook checks."""
-    origin = tmp_path / "origin.git"
+    exactly the outgoing range this hook checks.
+
+    nexus-vscgz: the bare origin is deliberately named `nexus.git` (basename
+    `nexus` once the `.git` suffix is stripped) so `_repo_scope_is_nexus`'s
+    Signal A recognizes this fixture as nexus-scoped -- otherwise rule 3
+    (this whole file's subject) now no-ops here by design.
+    """
+    origin = tmp_path / "nexus.git"
     origin.mkdir()
     _git("init", "-q", "--bare", "--initial-branch=develop", cwd=origin)
 
@@ -664,6 +670,48 @@ class TestMalformedAndFastPaths:
     def test_non_push_command_allows(self, repo):
         out = _decision(_run("git status", repo, path=_NO_NX_PATH))
         assert out["permissionDecision"] == "allow", out
+
+
+@pytest.fixture
+def foreign_repo(tmp_path):
+    """Like `repo`, but deliberately NOT nexus-scoped (nexus-vscgz): the
+    bare origin's basename is `otherproject`, not `nexus`, and no conexus
+    plugin marker exists anywhere under tmp_path."""
+    origin = tmp_path / "otherproject.git"
+    origin.mkdir()
+    _git("init", "-q", "--bare", "--initial-branch=develop", cwd=origin)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    _git("init", "-q", "--initial-branch=develop", cwd=work)
+    _git("remote", "add", "origin", str(origin), cwd=work)
+    (work / "README.md").write_text("init\n")
+    _git("add", "README.md", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init", cwd=work)
+    _git("push", "-q", "-u", "origin", "develop", cwd=work)
+    return work
+
+
+class TestRepoScope:
+    """nexus-vscgz: rule 3 is nexus-repo policy, not a global standing rule
+    -- a foreign repo pushing a gated-path commit with zero coverage
+    anywhere must be ALLOWED, which today (pre-fix) would deny."""
+
+    def test_foreign_repo_gated_commit_with_no_marker_is_allowed(self, foreign_repo, tmp_path):
+        _commit(foreign_repo, "src/x.py", "feat: x, no bead id, no marker anywhere")
+        fake_bin = _fake_nx(tmp_path)  # would deny in a nexus-scoped repo
+        out = _decision(_run("git push", foreign_repo, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "allow", out
+
+    def test_foreign_repo_gated_commit_with_no_nx_on_path_is_allowed(self, foreign_repo):
+        """Confirms the ALLOW is because the repo is out of scope, not
+        because the unreachable-nx capability-gap warn path happened to
+        also allow -- no `nx` on PATH at all, and still a plain allow with
+        no coverage-gap warning."""
+        _commit(foreign_repo, "src/x.py", "feat: x, no bead id, no marker anywhere")
+        out = _decision(_run("git push", foreign_repo, path=_NO_NX_PATH))
+        assert out["permissionDecision"] == "allow", out
+        assert not out.get("additionalContext"), out
 
 
 class TestRegistryStillAtCap:
