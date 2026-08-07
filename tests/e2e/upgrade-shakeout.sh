@@ -191,12 +191,12 @@ _step "3/12 nx hooks install (writes the baseline stanza)"
 (cd "$FAKE_REPO" && git init -q && git config user.email t@t.invalid && git config user.name T)
 HOME="$SANDBOX" nx hooks install "$FAKE_REPO" >/dev/null
 HOOK_OLD=$(cat "$FAKE_REPO/.git/hooks/post-commit")
-echo "$HOOK_OLD" | grep -q '# >>> nexus managed begin >>>' || _die "baseline hook missing sentinel"
+[[ "$HOOK_OLD" == *'# >>> nexus managed begin >>>'* ]] || _die "baseline hook missing sentinel"
 # The pgrep guard shipped in 5.0.1; whether the baseline already carries it
 # depends on FROM_VERSION. Do NOT presume a pre-guard baseline — the script
 # detects stanza drift at runtime (step 7) so it stays runnable from any
 # baseline, including the latest stable. (nexus-a3nqp)
-if echo "$HOOK_OLD" | grep -q 'pgrep -f'; then
+if [[ "$HOOK_OLD" == *'pgrep -f'* ]]; then
     _pass "baseline stanza installed (already has pgrep guard — expecting a clean upgrade)"
 else
     _pass "baseline stanza installed (pre-pgrep-guard — expecting drift on upgrade)"
@@ -228,9 +228,9 @@ _step "6/12 nx doctor stanza-drift report (captured for cross-check)"
 # catalog proxy raises, fixed in src/nexus/repos.py. The step-1 seeding is
 # sufficient; nothing extra is needed here.)
 DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1 || true)"
-if echo "$DOCTOR_OUT" | grep -qi 'stanza drift'; then
+if [[ "${DOCTOR_OUT,,}" == *'stanza drift'* ]]; then
     DRIFT_REPORTED=1
-    echo "$DOCTOR_OUT" | grep -q 'nx hooks update' \
+    [[ "$DOCTOR_OUT" == *'nx hooks update'* ]] \
         || _die "doctor reported drift but omitted the 'nx hooks update' fix suggestion"
     _pass "doctor reports stanza drift + names 'nx hooks update' as the fix"
 else
@@ -244,7 +244,8 @@ fi
 # dead end. This is the live counterpart to the source-level pin in
 # tests/upgrade/test_verb_demotion.py: that one reads the module's strings,
 # this one reads what a shipped install actually says to a real user.
-if echo "$DOCTOR_OUT" | grep -qE 'nx (guided-upgrade|migrate-to-service|migration-audit|collection backfill-hash|hooks update-all)'; then
+_DEMOTED_VERB_RE='nx (guided-upgrade|migrate-to-service|migration-audit|collection backfill-hash|hooks update-all)'
+if [[ "$DOCTOR_OUT" =~ $_DEMOTED_VERB_RE ]]; then
     _die "nx doctor advertised a DEMOTED verb as a remedy. Output:\n$DOCTOR_OUT"
 fi
 _pass "nx doctor names no demoted verb (the story is nx upgrade + nx doctor)"
@@ -253,7 +254,7 @@ _pass "nx doctor names no demoted verb (the story is nx upgrade + nx doctor)"
 _step "7/12 nx hooks update refreshes the stanza in place"
 HOME="$SANDBOX" nx hooks update "$FAKE_REPO" >/dev/null
 HOOK_NEW=$(cat "$FAKE_REPO/.git/hooks/post-commit")
-echo "$HOOK_NEW" | grep -q '# >>> nexus managed begin >>>' \
+[[ "$HOOK_NEW" == *'# >>> nexus managed begin >>>'* ]] \
     || _die "after update, sentinel block missing"
 SENTINEL_COUNT=$(echo "$HOOK_NEW" | grep -c '# >>> nexus managed begin >>>' || true)
 [[ "$SENTINEL_COUNT" == "1" ]] || _die "expected 1 sentinel block, found $SENTINEL_COUNT"
@@ -270,8 +271,8 @@ if [[ "$HOOK_NEW" != "$HOOK_OLD" ]]; then STANZA_CHANGED=1; else STANZA_CHANGED=
 if [[ "$STANZA_CHANGED" == "1" ]]; then
     # When the baseline predated the pgrep guard, the refreshed stanza must
     # now carry it — the concrete 5.0.1 migration this script was born to guard.
-    if ! echo "$HOOK_OLD" | grep -q 'pgrep -f'; then
-        echo "$HOOK_NEW" | grep -q 'pgrep -f' \
+    if [[ "$HOOK_OLD" != *'pgrep -f'* ]]; then
+        [[ "$HOOK_NEW" == *'pgrep -f'* ]] \
             || _die "stanza changed but pgrep guard still absent after update"
     fi
     _pass "stanza drift detected + reconciled (doctor and byte-diff agree)"
@@ -288,7 +289,7 @@ _pass "nx hooks update is idempotent"
 # ── 8. nx doctor: drift resolved ─────────────────────────────────────────────
 _step "8/12 nx doctor should NOT report drift after update"
 DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1 || true)"
-if echo "$DOCTOR_OUT" | grep -qi 'stanza drift'; then
+if [[ "${DOCTOR_OUT,,}" == *'stanza drift'* ]]; then
     _die "drift warning persists after nx hooks update. Output:\n$DOCTOR_OUT"
 fi
 _pass "drift resolved"
@@ -335,11 +336,11 @@ PJEOF
 
 # nx doctor with CLAUDE_PLUGIN_ROOT set to OLD plugin should surface the drift.
 DOCTOR_OUT="$(CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN_ROOT" HOME="$SANDBOX" nx doctor 2>&1 || true)"
-echo "$DOCTOR_OUT" | grep -qi 'plugin name' \
+[[ "${DOCTOR_OUT,,}" == *'plugin name'* ]] \
     || _die "nx doctor did not surface plugin-name drift. Output:\n$DOCTOR_OUT"
-echo "$DOCTOR_OUT" | grep -q '/plugin install conexus@nexus-plugins' \
+[[ "$DOCTOR_OUT" == *'/plugin install conexus@nexus-plugins'* ]] \
     || _die "doctor warning missing /plugin install hint"
-echo "$DOCTOR_OUT" | grep -q '/reload-plugins' \
+[[ "$DOCTOR_OUT" == *'/reload-plugins'* ]] \
     || _die "doctor warning missing /reload-plugins hint"
 _pass "nx doctor names both /plugin install and /reload-plugins migration commands"
 # (The structlog warning at every MCP startup is covered by unit test

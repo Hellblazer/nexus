@@ -14,9 +14,16 @@
 # T2/T3 state, or anything tagged "ships to users".
 #
 # Modes:
-#   smoke     — install + activate + post-install canary checks. ~2 min.
-#   shakedown — full ensemble: smoke + index repo/pdf/rdr + search/query/T1/T2 +
-#               link graph readback + T1 turd sniff. ~5–10 min.
+#   smoke     — install + activate + self-provision (engine + PG + bge-768
+#               embedder) + post-install canary checks. ~4–6 min (cold cache
+#               pays the native binary + PG bundle + ~416 MB ONNX download;
+#               warm cache is faster).
+#   shakedown — full ensemble: smoke + index a bounded fixture repo/pdf/rdr +
+#               search/query/T1/T2 + link graph readback + T1 turd sniff.
+#               ~15–30 min (bounded fixture corpus, nexus-m7kcv — the
+#               unbounded full-repo index this used to run was ~2.5h at
+#               sandbox local-embed speed and was never actually a routine
+#               gate step in practice).
 #   shell     — install + activate + drop into a subshell with sandbox env.
 #               Exit the subshell to tear down (HOME restored automatically).
 #   tmux      — install + activate + launch Claude Code in tmux against
@@ -38,6 +45,124 @@ shift || true
 
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
+# critic Significant 5 (T2 [21599]): this machine's /bin/bash is confirmed
+# 3.2.57, and a stripped-PATH LaunchAgent/cron invocation context has
+# already been proven (elsewhere in this repo's e2e suite) to reach that
+# bash instead of a Homebrew bash4+ on an interactive PATH. Under 3.2,
+# bash4-only constructs (${VAR,,} lowercasing, associative arrays) fail at
+# PARSE time with "bad substitution" — a cryptic failure mode, not a
+# graceful one. Guard early so this script fails loud with a clear message
+# instead, before any such construct (present or future) is reached. This
+# guard line itself is deliberately 3.2-parseable (arithmetic + indexed
+# arrays predate bash4) so the check can run under the very shell it is
+# rejecting.
+(( BASH_VERSINFO[0] >= 4 )) || _die "bash >= 4 required (found $BASH_VERSION) — invoke with an explicit bash4+ (e.g. /opt/homebrew/bin/bash $0 ...), not a stripped-PATH default"
+
+# ── Local-service helpers (RDR-157 P4.2 / nexus-596jm) ──────────────────────
+# Shared by the `service` mode below AND by `_provision_local_service` (used
+# by smoke/shakedown). Factored out rather than duplicated per-mode.
+_svc_field() {  # $1 = json key
+    nx daemon service status --json 2>/dev/null \
+        | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" \
+        2>/dev/null || true
+}
+
+_svc_teardown() {
+    echo "  ── teardown (nx daemon service stop --with-pg) ──"
+    nx daemon service stop --with-pg 2>&1 | tail -3 | sed 's/^/    /' || true
+
+    # CRITICAL (substantive-critic, T2 [21599], script-side mitigation —
+    # product-side fix tracked separately as nexus-f7t9e): `--with-pg`
+    # silently no-ops when pg_credentials does not exist yet
+    # (daemon.py service_stop_cmd: `if not creds_path.exists(): return`),
+    # but pg_provision.provision() starts postgres (_start_cluster) BEFORE
+    # writing credentials (_write_credentials) — three subprocess calls
+    # (_create_db, _create_vector_extension, _create_roles) sit in that
+    # gap. A crash mid-provision (elevated likelihood on this machine per
+    # the documented pipe-degradation history) leaves a live postmaster
+    # the command above cannot discover (no lease, no creds) — a leak the
+    # NEXT run's --keep-existing warm-cache reuse then collides with
+    # (orphaned process holding the old port/PGDATA). Fall back to direct
+    # discovery, scoped strictly to the SANDBOX HOME's own PGDATA so this
+    # never touches a real install's Postgres.
+    local pgdata="$HOME/.config/nexus/postgres"
+    if [[ -f "$pgdata/postmaster.pid" ]]; then
+        echo "  [fallback] postmaster.pid still present under sandbox PGDATA after 'stop --with-pg' (credentials-write race) — stopping it directly"
+        local pg_ctl_bin="$HOME/.config/nexus/pg-bundle/bundle/bin/pg_ctl"
+        if [[ -x "$pg_ctl_bin" ]]; then
+            echo "    using bundled pg_ctl: $pg_ctl_bin"
+            "$pg_ctl_bin" -D "$pgdata" stop -m fast 2>&1 | sed 's/^/    /' || true
+        elif command -v pg_ctl >/dev/null 2>&1; then
+            echo "    using PATH pg_ctl: $(command -v pg_ctl)"
+            pg_ctl -D "$pgdata" stop -m fast 2>&1 | sed 's/^/    /' || true
+        else
+            local pm_pid
+            pm_pid=$(head -1 "$pgdata/postmaster.pid" 2>/dev/null || true)
+            if [[ -n "$pm_pid" ]]; then
+                echo "    no pg_ctl available anywhere — killing postmaster pid $pm_pid directly"
+                # SIGINT = PG fast shutdown, matching the pg_ctl -m fast
+                # branches above (SIGTERM is smart shutdown: waits on clients).
+                kill -INT "$pm_pid" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # nexus-m7kcv (second half): the formula-routing PDF indexer (shakedown
+    # step 3b) lazily spawns a `mineru-api --host 127.0.0.1` daemon under
+    # the sandbox HOME that outlives a plain teardown — observed leaked
+    # after a TERM-killed test run. Match on the live process's own command
+    # path (not just the process name) so this only ever targets a process
+    # actually rooted under THIS sandbox HOME, never a real install's
+    # mineru-api.
+    local mineru_pid mineru_cmd
+    for mineru_pid in $(pgrep -f "mineru-api" 2>/dev/null || true); do
+        mineru_cmd=$(ps -p "$mineru_pid" -o command= 2>/dev/null || true)
+        if [[ "$mineru_cmd" == *"$HOME"* ]]; then
+            echo "  [fallback] terminating leftover sandbox mineru-api (pid $mineru_pid)"
+            kill "$mineru_pid" 2>/dev/null || true
+        fi
+    done
+}
+
+# nexus-596jm: smoke and shakedown exercise substrate steps (plan reseed,
+# index repo/pdf/rdr, cross-corpus search, T2 roundtrip) and doctor checks
+# (--check-schema, --check-plan-library, bare doctor's vector-service row)
+# that need a live storage service — but neither mode ever provisioned one.
+# Those steps became fail-capable this cycle (6xkdu removed `|| true` from
+# the indexing steps; fe6452a4 de-theatred doctor), so running them against
+# an unprovisioned sandbox HOME is now a structural red, not a genuine
+# defect signal: ServiceEndpointUnresolvableError with nothing behind it.
+#
+# Mirrors tests/e2e/fresh-install-mvv.sh's provisioning mechanics: plain
+# `nx init` in LOCAL mode self-provisions the native binary + PG bundle +
+# bge-768 embedder with zero manual positioning, so this stays self-
+# contained — no dependence on the live install's config/lease (the live
+# box is cloud-mode and must not be touched). NEXUS_SERVICE_BIN /
+# NEXUS_PG_BUNDLE / NEXUS_SERVICE_TAG, if already exported by the caller,
+# flow straight through (this script does not `env -i` scrub the way the
+# MVV's virgin-box layer does), so a warm cache avoids re-downloading the
+# signed binary + PG bundle + ~416 MB bge-768 ONNX on every run; combine
+# with --keep-existing to preserve that cache across invocations of this
+# script. Shares `_svc_field` / `_svc_teardown` above with the `service`
+# mode below rather than each mode duplicating its own copy.
+#
+# Provisioning failure is always loud (_die), never a skip-pass. Teardown is
+# installed as the EXIT trap BEFORE `nx init` runs (mirrors the MVV's
+# `trap cleanup EXIT` set before its own install step) so a failure mid-
+# provisioning still tears down whatever got partially started; `nx daemon
+# service stop --with-pg` is a no-op-safe call even when nothing came up.
+_provision_local_service() {
+    echo "  ── self-provisioning local service (nexus-596jm) ──"
+    trap '_svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+    if ! nx init -y --no-autostart 2>&1 | sed 's/^/    /'; then
+        _die "nx init did not reach serving inside the sandbox (self-provisioning failed — see remedy above)"
+    fi
+    local health
+    health=$(_svc_field health)
+    [[ "$health" == "ok" ]] || _die "service not serving after provisioning: /health=$health (expected ok)"
+    echo "    [ok] local service serving, /health=ok"
+}
+
 _print_help() {
     # printf rather than here-doc: bash here-docs hang in some non-
     # interactive shell contexts (Claude Code harness, certain CI
@@ -47,12 +172,19 @@ _print_help() {
         "Usage: $0 <mode> [options]" \
         "" \
         "Modes:" \
-        "  smoke      Reinstall + activate + run nx upgrade --dry-run + nx doctor checks." \
-        "             Verifies the wheel install + migrations + health surface. ~2 min." \
-        "  shakedown  Full ensemble: smoke + nx index repo/pdf/rdr + cross-corpus search" \
-        "             + T2 memory roundtrip + T1 scratch use + catalog link readback +" \
-        "             T1 turd sniff. Exercises every pipeline against a fresh install." \
-        "             ~5–10 min on warm cache, +10–15 min if MinerU models are not yet downloaded." \
+        "  smoke      Reinstall + activate + self-provision local service (engine + PG +" \
+        "             bge-768 embedder) + run nx upgrade --dry-run + nx doctor checks." \
+        "             Verifies the wheel install + migrations + health surface." \
+        "             ~4–6 min (cold cache pays the native binary + PG bundle + ~416 MB" \
+        "             ONNX download; warm cache with --keep-existing is faster)." \
+        "  shakedown  Full ensemble: smoke + nx index a bounded fixture repo/pdf/rdr +" \
+        "             cross-corpus search + T2 memory roundtrip + T1 scratch use +" \
+        "             catalog link readback + T1 turd sniff. Exercises every pipeline" \
+        "             against a fresh install." \
+        "             ~15–30 min on warm cache, +10–15 min if MinerU models are not yet" \
+        "             downloaded. Repo indexing (step 2/11) uses a hard-coded ~36-file" \
+        "             fixture subset, not the full nexus tree (nexus-m7kcv — the full" \
+        "             tree at sandbox local-embed speed is ~2.5h)." \
         "             Probes tc-sql.pdf (Docling path) AND bft-to-smr.pdf (MinerU path)." \
         "  shell      Reinstall + activate + drop into a subshell with HOME=\$SANDBOX." \
         "             Use this for manual nx index, nx search, etc. Exit normally to" \
@@ -207,9 +339,10 @@ case "$MODE" in
         # pattern shakedown uses below; tests/e2e/run.sh has the long
         # explanation.
         export NX_LOCAL=1
-        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE VOYAGE_API_KEY
         echo "[3/3] Smoke checks (running from /tmp, NX_LOCAL=1):"
         cd /tmp
+        _provision_local_service
         echo "  nx --version: $(nx --version)"
         echo
         echo "  nx upgrade --dry-run:"
@@ -270,9 +403,10 @@ case "$MODE" in
         # Force local mode so the shakedown does not contact ChromaDB Cloud
         # even if the parent shell has CHROMA_* set. Mirrors tests/e2e/run.sh.
         export NX_LOCAL=1
-        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE VOYAGE_API_KEY
         echo "[3/3] Shakedown: full pipeline ensemble (running from /tmp, NX_LOCAL=1)"
         cd /tmp
+        _provision_local_service
 
         # nexus-6xkdu: the four indexing steps (2, 3a, 3b, 4) previously ran
         # under `|| true`, so a broken indexer — including a broken MinerU
@@ -302,8 +436,80 @@ case "$MODE" in
         nx plan reseed 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 2/11 nx index repo ($REPO_ROOT) ──"
-        if ! nx index repo "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /'; then
+        echo "── 2/11 nx index repo (bounded fixture corpus) ──"
+        # nexus-m7kcv (Hal-approved gate-scope decision, 2026-08-07):
+        # indexing the FULL repo at sandbox local-embed speed (bge-768
+        # ONNX, no Voyage key in the sandbox — ~2.8 chunks/s) is ~2.5h, so
+        # this step was never actually completing inside anything
+        # resembling a routine gate run ("shakedown scope" only in name —
+        # vacuous-era affordability). Build a deterministic, explicitly
+        # hard-coded fixture subset instead: a representative slice of
+        # src/nexus/catalog (all 17 files — the module this shakedown's
+        # own step 11 exercises via catalog doctor), a sample of
+        # src/nexus/commands, and a handful of docs/*.md including one
+        # AGENTS.md. Hard-coded rather than globbed so the corpus stays
+        # reproducible run-to-run and reviewable in a diff — a glob would
+        # silently pull in whatever the tree grows to.
+        FIXTURE_FILES=(
+            src/nexus/catalog/__init__.py
+            src/nexus/catalog/auto_linker.py
+            src/nexus/catalog/catalog_protocol.py
+            src/nexus/catalog/catalog_spans.py
+            src/nexus/catalog/chunk_quarantine.py
+            src/nexus/catalog/collection_name.py
+            src/nexus/catalog/dt_link_generator.py
+            src/nexus/catalog/factory.py
+            src/nexus/catalog/http_catalog_client.py
+            src/nexus/catalog/link_generator.py
+            src/nexus/catalog/manifest_backfill.py
+            src/nexus/catalog/manifest_heal.py
+            src/nexus/catalog/orphan_backfill.py
+            src/nexus/catalog/store_hook.py
+            src/nexus/catalog/tumbler.py
+            src/nexus/catalog/types.py
+            src/nexus/catalog/write_priority.py
+            src/nexus/commands/catalog.py
+            src/nexus/commands/daemon.py
+            src/nexus/commands/doctor.py
+            src/nexus/commands/index.py
+            src/nexus/commands/init.py
+            src/nexus/commands/memory.py
+            src/nexus/commands/scratch.py
+            src/nexus/commands/search_cmd.py
+            src/nexus/commands/store.py
+            src/nexus/commands/upgrade.py
+            docs/architecture.md
+            docs/catalog.md
+            docs/cli-reference.md
+            docs/configuration.md
+            docs/contributing.md
+            docs/getting-started.md
+            docs/repo-indexing.md
+            docs/storage-tiers.md
+            AGENTS.md
+        )
+        FIXTURE_DIR="$SANDBOX/shakedown-fixture"
+        rm -rf "$FIXTURE_DIR"
+        for f in "${FIXTURE_FILES[@]}"; do
+            src="$REPO_ROOT/$f"
+            [[ -f "$src" ]] || _die "shakedown fixture file missing from repo: $f (FIXTURE_FILES in $0 is stale — update it)"
+            dest="$FIXTURE_DIR/$f"
+            mkdir -p "$(dirname "$dest")"
+            cp "$src" "$dest"
+        done
+        # nx index repo refuses a path with no .git (nexus-git-guard), so
+        # the fixture needs a real (throwaway) repo, not just loose files.
+        # Stage by the same explicit FIXTURE_FILES list used to populate
+        # the tree — never a blanket `git add -A` — so a stray file
+        # dropped into $FIXTURE_DIR by a future edit can't silently widen
+        # the indexed corpus.
+        (cd "$FIXTURE_DIR" \
+            && git init -q \
+            && git add "${FIXTURE_FILES[@]}" \
+            && git -c user.email=shakedown@nexus.local -c user.name=shakedown \
+                   commit -q -m "shakedown fixture snapshot")
+        echo "  fixture: ${#FIXTURE_FILES[@]} files under $FIXTURE_DIR"
+        if ! nx index repo "$FIXTURE_DIR" 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index repo exited non-zero" >&2
             SHAKEDOWN_FAILED+=("2/11 nx index repo")
         fi
@@ -384,15 +590,54 @@ case "$MODE" in
 
         echo
         echo "── 6/11 cross-corpus search ──"
-        nx search "catalog link graph" -m 3 2>&1 | tail -10 | sed 's/^/  /' || true
+        # critic Significant 2 (T2 [21599]): de-theatre — the sandbox now
+        # has a real, provisioned service and (since the fixture corpus
+        # above) real indexed content to find, so an empty result here is
+        # a genuine search/embed-pipeline signal, not "the sandbox happens
+        # to be empty". "catalog link graph" is chosen to land in the
+        # step-2 fixture (docs/catalog.md, docs/storage-tiers.md,
+        # docs/architecture.md all use that exact phrase; it also appears
+        # in a handful of RDR docs indexed by step 4, so hits may come
+        # from either corpus — the assert is "the pipeline finds indexed
+        # content", not fixture-exclusivity). `nx search` exits 0 even on
+        # zero hits (not an error condition for interactive use), so the
+        # check is on the literal "No results." text — but a NON-ZERO
+        # exit (real search/embed failure) must land in the verdict too,
+        # not trip errexit past the collect-and-continue convention.
+        if ! SEARCH_OUT=$(nx search "catalog link graph" -m 3 2>&1); then
+            echo "$SEARCH_OUT" | tail -10 | sed 's/^/  /'
+            echo "  [FAIL] nx search exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("6/11 nx search (non-zero exit)")
+        else
+            echo "$SEARCH_OUT" | tail -10 | sed 's/^/  /'
+            if [[ "$SEARCH_OUT" == *"No results."* ]]; then
+                echo "  [FAIL] cross-corpus search returned no hits (expected indexed-content hits)" >&2
+                SHAKEDOWN_FAILED+=("6/11 nx search (no hits)")
+            fi
+        fi
 
         echo
         echo "── 7/11 T2 memory roundtrip ──"
         SHAKE_TS=$(date +%s)
-        nx memory put "shakedown marker $SHAKE_TS" \
-            --project nexus_shakedown --title shakedown.md 2>&1 | tail -2 | sed 's/^/  /' || true
-        nx memory get --project nexus_shakedown --title shakedown.md 2>&1 \
-            | head -3 | sed 's/^/  /' || true
+        if ! nx memory put "shakedown marker $SHAKE_TS" \
+                --project nexus_shakedown --title shakedown.md 2>&1 | tail -2 | sed 's/^/  /'; then
+            echo "  [FAIL] nx memory put exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("7/11 nx memory put")
+        fi
+        if ! MEMORY_GET_OUT=$(nx memory get --project nexus_shakedown --title shakedown.md 2>&1); then
+            # || true: head is an early-exit consumer — under pipefail a
+            # SIGPIPE'd echo would abort the script BEFORE the [FAIL]
+            # bookkeeping below (nexus-6zxfb, same class as nexus-i66g4).
+            echo "$MEMORY_GET_OUT" | head -3 | sed 's/^/  /' || true
+            echo "  [FAIL] nx memory get exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("7/11 nx memory get (non-zero exit)")
+        else
+            echo "$MEMORY_GET_OUT" | head -3 | sed 's/^/  /' || true
+            if [[ "$MEMORY_GET_OUT" != *"$SHAKE_TS"* ]]; then
+                echo "  [FAIL] T2 memory get did not return the marker written above" >&2
+                SHAKEDOWN_FAILED+=("7/11 nx memory get roundtrip")
+            fi
+        fi
 
         echo
         echo "── 8/11 T1 scratch use (write + readback) ──"
@@ -410,7 +655,7 @@ case "$MODE" in
         # readback is still impossible without a real session — that's
         # tested by the cc-validation harness.
         SCRATCH_OUT=$(NX_T1_ISOLATED=1 nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
-        if echo "$SCRATCH_OUT" | grep -qE "Stored:"; then
+        if [[ "$SCRATCH_OUT" == *"Stored:"* ]]; then
             echo "  put: ok ($SCRATCH_OUT)"
         else
             echo "  put: [WARN] unexpected output — $SCRATCH_OUT"
@@ -419,6 +664,11 @@ case "$MODE" in
 
         echo
         echo "── 9/11 catalog stats (registry + link graph readback) ──"
+        # Deliberately informational-only, not fail-capable (unlike 6/7
+        # above): `nx catalog stats` has no pass/fail contract of its own
+        # to assert on — it's a readback for human eyeballing, and the
+        # collections-drift release gate that DOES have a fail contract
+        # over the same catalog state runs explicitly at 11/11 below.
         nx catalog stats 2>&1 | head -15 | sed 's/^/  /' || true
 
         echo
@@ -431,13 +681,23 @@ case "$MODE" in
         # never invoked it, so the release gate was blind to all three and
         # `|| true` meant even the flag-scoped checks could not redden the
         # run. Fail-capable now, per the 6xkdu de-theatre precedent.
+        #
+        # nexus-u88vu: this used to call `_fail`, which is undefined anywhere
+        # in this script — the first honest doctor red died with rc=127
+        # "_fail: command not found" instead of reporting the failure.
+        # Route through the same SHAKEDOWN_FAILED collect-and-continue
+        # convention (6xkdu) every other fail-capable step in this arm
+        # already uses, so a doctor red produces an explicit verdict line
+        # rather than crashing the script.
         if ! nx doctor 2>&1 | sed 's/^/  /'; then
-            _fail "nx doctor reported failures in the release sandbox"
+            echo "  [FAIL] nx doctor exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("10/11 nx doctor")
         fi
         for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  $check:"
             if ! nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /'; then
-                _fail "nx doctor $check failed in the release sandbox"
+                echo "  [FAIL] nx doctor $check exited non-zero" >&2
+                SHAKEDOWN_FAILED+=("10/11 nx doctor $check")
             fi
         done
 
@@ -488,11 +748,11 @@ case "$MODE" in
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
         if (( ${#SHAKEDOWN_FAILED[@]} )); then
             echo >&2
-            echo "SHAKEDOWN FAILED: ${#SHAKEDOWN_FAILED[@]} indexing step(s) exited non-zero:" >&2
+            echo "SHAKEDOWN FAILED: ${#SHAKEDOWN_FAILED[@]} release-gate step(s) exited non-zero:" >&2
             printf '  %s\n' "${SHAKEDOWN_FAILED[@]}" >&2
             exit 1
         fi
-        echo "SHAKEDOWN PASSED: all indexing steps green."
+        echo "SHAKEDOWN PASSED: all release-gate steps green."
         ;;
 
     service)
@@ -504,7 +764,7 @@ case "$MODE" in
         # idempotent on re-run, and tears down cleanly.
         export NX_LOCAL=1
         export NX_STORAGE_BACKEND=service
-        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE VOYAGE_API_KEY
         echo "[3/3] Service E2E (LOCAL mode, fresh sandbox HOME=$SANDBOX):"
         cd /tmp
 
@@ -533,22 +793,12 @@ case "$MODE" in
             _die "no PostgreSQL: put initdb/pg_ctl on PATH (with pgvector) or set NEXUS_PG_BUNDLE to a ship-alongside bundle"
         fi
 
-        # A field extractor for `nx daemon service status --json`. Keeps the
-        # assertions below honest: we parse the actual health/port/pid, not just
-        # exit codes (a stale lease can outlive a dead JVM for up to the TTL,
-        # so "the command exited 0" is NOT proof of serving).
-        _svc_field() {  # $1 = json key
-            nx daemon service status --json 2>/dev/null \
-                | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" \
-                2>/dev/null || true
-        }
-
-        # ── Teardown trap: once the service is up, ANY exit (including _die /
-        #    SIGTERM) must stop the JVM + PG, never orphan them. ──
-        _svc_teardown() {
-            echo "  ── teardown (nx daemon service stop --with-pg) ──"
-            nx daemon service stop --with-pg 2>&1 | tail -3 | sed 's/^/    /' || true
-        }
+        # `_svc_field` / `_svc_teardown` are defined once near the top of this
+        # script (shared with `_provision_local_service`, used by smoke/
+        # shakedown) — keeps the actual health/port/pid parsing honest in one
+        # place rather than duplicated per-mode (a stale lease can outlive a
+        # dead JVM for up to the TTL, so "the command exited 0" is NOT proof
+        # of serving).
 
         # ── The one command: fresh-install -> serving, zero manual steps. ──
         echo
