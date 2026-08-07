@@ -275,7 +275,14 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # restored to the default loop (a mistaken lint-bucket reclassification had
 # blinded it to everything outside ~800 lint-marked tests; see the module
 # docstring above). Rationale in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 36
+# 36 -> 37 (nexus-sghyo, 2026-08-07): +1,
+# test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs —
+# reason "string-literal-as-name". The `cloud_mode` fixture this test used
+# to declare was dropped (it collided with the now-retired non-service
+# client-embedding leg); the voyage-code-3 string it still references is a
+# fabricated metadata literal for a seeded fake chunk, never a real
+# embedder call. Rationale in conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 37
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

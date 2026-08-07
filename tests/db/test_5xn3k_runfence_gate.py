@@ -381,7 +381,13 @@ def _extraction_result(page_count: int = 2):
 
 
 def _extract_side_effect(page_count: int, result):
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
+    # nexus-wi1uv added `allow_degraded` to PDFExtractor.extract()'s real
+    # signature (pdf_extractor.py:785) and pipeline_stages.py's
+    # extractor_loop now always passes it (line ~145); accept and ignore
+    # it here so this fake keeps matching the real call shape — this
+    # gate's PDF-quality-gate behavior is out of scope (module docstring's
+    # "Registered items explicitly NOT covered here").
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
         for i in range(page_count):
             if on_page:
                 on_page(i, f"Page {i} runfence gate content.", {"page_number": i + 1})

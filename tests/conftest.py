@@ -1644,6 +1644,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # cannot live in the lint bucket) — the test itself is not new-broken,
     # it was simply never checked while the census sat mis-scoped.
     "tests/test_health_service_checks.py::TestCheckChashConformanceReport::test_fully_routable_collections_still_render_plain_clean",
+    # nexus-sghyo PORT (2026-08-07): "string-literal-as-name". The test
+    # manually seeds a fake misclassified chunk with a hardcoded
+    # ``"embedding_model": "voyage-code-3"`` metadata literal to simulate
+    # a pre-existing stale record — no embedder is constructed, and the
+    # `cloud_mode` fixture it used to carry was dropped because it made
+    # this test collide with the now-retired non-service-embedding leg
+    # (indexer.py's CredentialsMissingError). The prune/migration
+    # behaviour under test is embedding-model-independent.
+    "tests/test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs",
 })
 
 
