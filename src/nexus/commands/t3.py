@@ -251,12 +251,23 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     "only pass this once you've confirmed the collection really is fully "
     "orphaned, not a fresh/mis-scoped tenant or an unbackfilled manifest.",
 )
+@click.option(
+    "--allow-incomplete-index-state",
+    is_flag=True,
+    default=False,
+    help="Override the RUNFENCE index-state refusal (nexus-g6k6b). "
+    "DANGEROUS: only pass this once you've confirmed no reindex is "
+    "concurrently running against this collection (an in-flight or "
+    "fence-failed document's chunks are not garbage — they are a run "
+    "in progress or a documented-damaged state with its own remedy).",
+)
 def gc_cmd(
     collection: str,
     orphan_window: str,
     dry_run: bool,
     yes: bool,
     allow_empty_manifest_set: bool,
+    allow_incomplete_index_state: bool,
 ) -> None:
     """Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4).
 
@@ -301,6 +312,16 @@ def gc_cmd(
     Reconciliation of the two paths is tracked in nexus-e5aw.
 
     \b
+    RUNFENCE precondition (nexus-g6k6b): if any document registered
+    under ``--collection`` is not ``index_state='complete'`` (actively
+    ``'indexing'``, fenced ``'failed'``, or explicitly unresolved/NULL —
+    excluding manifest-less notes, which are separately and always
+    protected), a ``--no-dry-run --yes`` run REFUSES rather than risk
+    deleting chunks an in-flight or fence-damaged reindex has not yet
+    re-manifested. Pass ``--allow-incomplete-index-state`` once you have
+    confirmed no reindex is concurrently running.
+
+    \b
     Examples:
       nx t3 gc -c knowledge__delos --dry-run                # report only
       nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # actually GC
@@ -333,6 +354,61 @@ def gc_cmd(
     except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
         click.echo(f"Failed to read catalog manifest: {exc}")
         raise click.exceptions.Exit(1)
+
+    # nexus-39upx hazard 2 (RDR-145) + nexus-g6k6b (RUNFENCE precondition):
+    # chashes_for_collection only sees chashes with a manifest row. A
+    # store_put / nx store put NOTE never gets one — RDR-145 defers
+    # manifest-backed identity for notes, and catalog-003-soft-delete.xml's
+    # live_chunks view treats a manifest-less chunk as live BY DESIGN — so
+    # a note's chash is indistinguishable from a chash that fell out of a
+    # live document's manifest via re-index; both simply read "not
+    # referenced" above. Separately, Hal's 2026-08-02 comment on this bead
+    # is a BINDING requirement: the corpus-wide sweep must filter on
+    # index_state='complete', since sweeping a document that is mid-index
+    # (or fence-failed) could delete chunks an in-flight run has already
+    # written but has not yet manifested.
+    #
+    # ONE fetch (catalog_documents_for_collection) serves BOTH guards.
+    # Deliberately FAILS LOUD on lookup failure, not fail-open: this is
+    # the operator-driven --yes path, and an unverifiable note/index-state
+    # set must refuse the run rather than risk deleting live content.
+    from nexus.indexer_utils import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.indexer_utils)
+        catalog_documents_for_collection,
+        live_note_chashes,
+        non_complete_documents,
+    )
+
+    try:
+        collection_documents = catalog_documents_for_collection(cat, collection)
+    except Exception as exc:  # noqa: BLE001 — boundary catch; refuses the run rather than risk deleting live content
+        click.echo(
+            f"Failed to verify manifest-less note protection / index-run "
+            f"state for {collection!r}: {exc}. Refusing to compute orphan "
+            f"candidates without it — a store_put/nx store put note's "
+            f"chash is indistinguishable from a genuine re-index orphan "
+            f"without this check (nexus-39upx hazard 2 / nexus-g6k6b)."
+        )
+        raise click.exceptions.Exit(1)
+
+    note_chashes = live_note_chashes(collection_documents)
+    if note_chashes:
+        click.echo(
+            f"  protecting {len(note_chashes)} manifest-less note "
+            f"chunk(s) from orphan classification (RDR-145)"
+        )
+    referenced = referenced | note_chashes
+
+    incomplete_docs = non_complete_documents(collection_documents)
+    if incomplete_docs:
+        _states = ", ".join(sorted({
+            f"{d.title!r}={d.index_state!r}" for d in incomplete_docs
+        }))
+        click.echo(
+            f"  {len(incomplete_docs)} document(s) in {collection!r} are "
+            f"not index_state='complete' ({_states}) — a --no-dry-run "
+            f"--yes run will REFUSE until they resolve, or pass "
+            f"--allow-incomplete-index-state (nexus-g6k6b)"
+        )
 
     candidates: list[tuple[str, str]] = []  # (chunk_id, chash)
     skipped_no_chash = 0
@@ -428,13 +504,43 @@ def gc_cmd(
         )
         raise click.exceptions.Exit(1)
 
+    # nexus-g6k6b (RUNFENCE precondition, nexus-39upx round 2 CRITICAL):
+    # Hal's 2026-08-02 comment, binding, verbatim: "The corpus-wide sweep
+    # (b) MUST filter on index_state = 'complete'. Sweeping a document
+    # that is mid-index would delete chunks an in-flight run has already
+    # written but has not yet manifested." A T3 chunk carries no doc_id
+    # (post-RDR-108), so a candidate cannot be attributed to the specific
+    # document that most recently owned it — the conservative,
+    # structurally-honest response when candidates cannot be attributed
+    # to individual documents is a collection-level circuit breaker: ANY
+    # non-complete document in this collection means no candidate can be
+    # PROVEN safe, so refuse rather than delete anything.
+    if incomplete_docs and not allow_incomplete_index_state:
+        _names = ", ".join(sorted({
+            f"{d.title!r} ({d.index_state!r})" for d in incomplete_docs
+        }))
+        click.echo(
+            f"\nREFUSING to delete: {len(incomplete_docs)} document(s) in "
+            f"'{collection}' are not index_state='complete': {_names}. "
+            f"An in-flight or fence-failed document's chunks are not "
+            f"garbage — they are a run in progress or a documented-damaged "
+            f"state with its own remedy (finish the reindex, or re-index "
+            f"with --force). If you have confirmed no reindex is "
+            f"concurrently running against this collection, re-run with "
+            f"--allow-incomplete-index-state."
+        )
+        raise click.exceptions.Exit(1)
+
     # NOTE on the manifest snapshot: ``referenced`` was sampled at the
     # top of this command. A doc registered concurrently between
     # snapshot and execution would not appear in the referenced set,
-    # so its chunks could be GC'd despite the doc being live again.
-    # Operators SHOULD NOT run gc concurrently with active indexing.
-    # The window is single-operator-driven and acceptably small in
-    # practice.
+    # so its chunks could be GC'd despite the doc being live again. The
+    # index_state check above closes the common case (a NEW re-index
+    # begun after this command started would stamp 'indexing' before its
+    # first chunk upsert — nexus-5xn3k.4 fence-begin ordering — and would
+    # be caught by the NEXT invocation, though not retroactively by this
+    # already-in-flight one); the residual snapshot-to-execution race is
+    # single-operator-driven and acceptably small in practice.
     #
     # AUDIT-TRAIL WINDOW (nexus-i711w item 20, Hal ruling 2026-07-30):
     # the local ChunkOrphaned EventLog emission died with the local

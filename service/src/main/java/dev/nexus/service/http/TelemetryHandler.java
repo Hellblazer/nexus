@@ -39,6 +39,7 @@ import java.util.Map;
  *   GET  /v1/telemetry/consents/list           list the tenant's consent trail (RDR-182)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
+ *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries
@@ -101,6 +102,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/consents/list"          -> handleConsentList(exchange, tenant, method);
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
+                case "/nx_answer_runs/query"   -> handleNxAnswerRunsQuery(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/list"     -> handleHookFailureList(exchange, tenant, method);
                 case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
@@ -293,6 +295,23 @@ public final class TelemetryHandler implements HttpHandler {
         String createdAt = optStr(body, "created_at");
         repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd, durationMsV, createdAt);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * GET /v1/telemetry/nx_answer_runs/query — the read half of nx_answer_runs
+     * (nexus-eho3u: it was write-only — every nx_answer call recorded a row
+     * and no route ever read one back). {@code ?since=<iso>} bounds the
+     * window (absent/blank = no bound), {@code ?limit=N} caps the returned
+     * page (default 20). Aggregates (total, hit/fallback split, latency
+     * buckets, averages) are computed over the WHOLE filtered set, not the
+     * page — see {@link TelemetryRepository#queryNxAnswerRuns}.
+     */
+    private void handleNxAnswerRunsQuery(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String since = params.getOrDefault("since", "");
+        int limit = parseIntParam(params, "limit", 20);
+        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit)));
     }
 
     // ── hook_failures ──────────────────────────────────────────────────────────

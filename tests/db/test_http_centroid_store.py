@@ -248,3 +248,388 @@ def test_o2_server_error_propagates_not_swallowed(store: HttpCentroidStore) -> N
     # 5xx is RAISED, not silently None (fail-loud divergence from the oracle swallow).
     with pytest.raises(httpx.HTTPStatusError):
         store.nearest([1.0, 0.0], "boom")
+
+
+# ── nexus-2mb6n: per-store-instance centroid cache ─────────────────────────────
+
+
+def _counting_store() -> tuple[HttpCentroidStore, _FakeCentroidService, dict[str, int]]:
+    """A store wired to a fake service that also counts by_collection/foreign
+    hits — the call-count spy the fetch-once test needs."""
+    fake = _FakeCentroidService()
+    counts = {"by_collection": 0, "foreign": 0}
+    orig_handler = fake.handler
+
+    def counting_handler(request: httpx.Request) -> httpx.Response:
+        path = urlparse(str(request.url)).path.replace("/v1/taxonomy/centroids", "")
+        if request.method == "GET" and path == "/by_collection":
+            counts["by_collection"] += 1
+        elif request.method == "GET" and path == "/foreign":
+            counts["foreign"] += 1
+        return orig_handler(request)
+
+    s = HttpCentroidStore(
+        base_url="http://svc",
+        _token=TOKEN,
+        _transport=httpx.MockTransport(counting_handler),
+    )
+    return s, fake, counts
+
+
+def test_get_by_collection_fetched_once_across_repeated_calls() -> None:
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__cache", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+        ])
+        first = store.get_by_collection("k__cache")
+        second = store.get_by_collection("k__cache")
+        third = store.get_by_collection("k__cache")
+        assert first == second == third
+        assert counts["by_collection"] == 1, (
+            f"expected exactly one network fetch, got {counts['by_collection']}"
+        )
+    finally:
+        store.close()
+
+
+def test_get_foreign_fetched_once_across_repeated_calls() -> None:
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__a", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+            {"collection": "k__b", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b", "doc_count": 1},
+        ])
+        store.get_foreign("k__a")
+        store.get_foreign("k__a")
+        assert counts["foreign"] == 1
+
+    finally:
+        store.close()
+
+
+def test_same_and_foreign_are_independently_cached() -> None:
+    """(collection, 'same') and (collection, 'foreign') are distinct cache
+    keys — fetching one must not satisfy the other from cache."""
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__a", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+            {"collection": "k__b", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b", "doc_count": 1},
+        ])
+        store.get_by_collection("k__a")
+        store.get_foreign("k__a")
+        assert counts["by_collection"] == 1
+        assert counts["foreign"] == 1
+    finally:
+        store.close()
+
+
+def test_cache_invalidated_on_upsert() -> None:
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__inv", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+        ])
+        first = store.get_by_collection("k__inv")
+        assert len(first["ids"]) == 1
+
+        store.upsert([
+            {"collection": "k__inv", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b", "doc_count": 1},
+        ])
+        second = store.get_by_collection("k__inv")
+        assert len(second["ids"]) == 2, "stale cache: upsert must invalidate"
+        assert counts["by_collection"] == 2, "the post-mutation read must be a real fetch, not cached"
+    finally:
+        store.close()
+
+
+def test_cache_invalidated_on_delete_ids() -> None:
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__del", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+            {"collection": "k__del", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b", "doc_count": 1},
+        ])
+        store.get_by_collection("k__del")
+        store.delete_ids("k__del", [1])
+        after = store.get_by_collection("k__del")
+        assert len(after["ids"]) == 1
+        assert counts["by_collection"] == 2
+    finally:
+        store.close()
+
+
+def test_cache_invalidated_on_purge() -> None:
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__purge", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+        ])
+        store.get_by_collection("k__purge")
+        store.purge("k__purge")
+        after = store.get_by_collection("k__purge")
+        assert after["ids"] == []
+        assert counts["by_collection"] == 2
+    finally:
+        store.close()
+
+
+def test_mutation_in_one_collection_invalidates_others_foreign_cache() -> None:
+    """A centroid change in collection A must invalidate B's cached
+    get_foreign (which includes A's rows) — narrower per-collection
+    invalidation would leave B's cross-collection view stale."""
+    store, _fake, counts = _counting_store()
+    try:
+        store.upsert([
+            {"collection": "k__a", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+        ])
+        before = store.get_foreign("k__b")
+        assert before["ids"] == ["k__a:1"]
+
+        store.upsert([
+            {"collection": "k__a", "topic_id": 2, "embedding": [0.0, 1.0], "label": "a2", "doc_count": 1},
+        ])
+        after = store.get_foreign("k__b")
+        assert {i.split(":")[1] for i in after["ids"]} == {"1", "2"}
+        assert counts["foreign"] == 2
+    finally:
+        store.close()
+
+
+def test_cache_failure_never_masks_as_silent_empty() -> None:
+    """A fetch failure on a cold key must raise, never get cached as an
+    empty/None result that later reads would silently trust."""
+    fake = _FakeCentroidService()
+    store = HttpCentroidStore(
+        base_url="http://svc", _token=TOKEN,
+        _transport=httpx.MockTransport(fake.handler),
+    )
+    try:
+        # "boom" is the fake service's 500-sentinel collection for /query;
+        # /by_collection has no such sentinel, so drive a raise via a
+        # monkeypatched _get instead — the failure path under test is
+        # "fetch() raises", regardless of cause.
+        def _boom(*_a, **_kw):
+            raise httpx.HTTPStatusError("boom", request=None, response=httpx.Response(500))
+
+        import unittest.mock as mock
+        with mock.patch.object(store, "_get", side_effect=_boom):
+            with pytest.raises(httpx.HTTPStatusError):
+                store.get_by_collection("k__fail")
+        # Nothing cached — the NEXT call (now unpatched) does a real fetch.
+        store.upsert([
+            {"collection": "k__fail", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+        ])
+        env = store.get_by_collection("k__fail")
+        assert len(env["ids"]) == 1
+    finally:
+        store.close()
+
+
+def test_concurrent_same_key_reads_are_thread_safe_and_single_fetch() -> None:
+    """Two threads requesting the SAME (collection, kind) concurrently must
+    both see correct data, and only ONE underlying HTTP fetch should occur
+    — the flush_concurrency=3 indexer path hits this exact race on every
+    cold collection."""
+    import threading
+    import time as _time
+
+    fake = _FakeCentroidService()
+    counts = {"n": 0}
+    orig_handler = fake.handler
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_counting_handler(request: httpx.Request) -> httpx.Response:
+        path = urlparse(str(request.url)).path.replace("/v1/taxonomy/centroids", "")
+        if request.method == "GET" and path == "/by_collection":
+            counts["n"] += 1
+            started.set()
+            # Hold the response just long enough for a second thread to
+            # queue up on the store's lock behind this fetch.
+            release.wait(timeout=2.0)
+        return orig_handler(request)
+
+    store = HttpCentroidStore(
+        base_url="http://svc", _token=TOKEN,
+        _transport=httpx.MockTransport(slow_counting_handler),
+    )
+    try:
+        store.upsert([
+            {"collection": "k__thread", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+        ])
+
+        results: list[dict] = []
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                results.append(store.get_by_collection("k__thread"))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via errors list
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        started.wait(timeout=2.0)
+        t2.start()
+        _time.sleep(0.05)  # let t2 queue up behind the lock
+        release.set()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+
+        assert not errors, errors
+        assert len(results) == 2
+        assert results[0] == results[1]
+        assert counts["n"] == 1, f"expected a single fetch under concurrency, got {counts['n']}"
+    finally:
+        store.close()
+
+
+def test_cache_hit_for_one_key_never_blocks_behind_another_keys_slow_fetch() -> None:
+    """nexus-2mb6n review round 2 (reviewer Important-1): the original
+    single process-wide lock was held across the FULL fetch (including
+    the mixin's gateway-retry envelope — worst case ~90s), so a slow miss
+    on one key blocked a cache HIT on an already-warm, unrelated key. Per-
+    key locking fixes this: warm key A, block key B's fetch mid-flight in
+    another thread, and confirm A's hit still returns fast."""
+    import threading
+    import time as _time
+
+    fake = _FakeCentroidService()
+    b_started = threading.Event()
+    b_release = threading.Event()
+    orig_handler = fake.handler
+
+    def gated_handler(request: httpx.Request) -> httpx.Response:
+        path = urlparse(str(request.url)).path.replace("/v1/taxonomy/centroids", "")
+        qs = parse_qs(urlparse(str(request.url)).query)
+        if (request.method == "GET" and path == "/by_collection"
+                and qs.get("collection") == ["k__b"]):
+            b_started.set()
+            b_release.wait(timeout=2.0)
+        return orig_handler(request)
+
+    store = HttpCentroidStore(
+        base_url="http://svc", _token=TOKEN,
+        _transport=httpx.MockTransport(gated_handler),
+    )
+    try:
+        store.upsert([
+            {"collection": "k__a", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a", "doc_count": 1},
+            {"collection": "k__b", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b", "doc_count": 1},
+        ])
+        # Warm key A BEFORE key B's slow fetch starts — a genuine cache hit.
+        a_warm = store.get_by_collection("k__a")
+        assert a_warm["ids"] == ["k__a:1"]
+
+        b_result: list = []
+
+        def fetch_b() -> None:
+            b_result.append(store.get_by_collection("k__b"))
+
+        t_b = threading.Thread(target=fetch_b)
+        t_b.start()
+        assert b_started.wait(timeout=2.0), "B's fetch never started"
+
+        # A's hit must return quickly even though B's fetch is currently
+        # blocked mid-flight — the whole point of per-key locking.
+        a_t0 = _time.monotonic()
+        a_hit = store.get_by_collection("k__a")
+        a_elapsed = _time.monotonic() - a_t0
+        assert a_elapsed < 0.5, (
+            f"A's cache hit took {a_elapsed}s — blocked behind B's slow fetch "
+            "(per-key locking regression)"
+        )
+        assert a_hit == a_warm
+
+        b_release.set()
+        t_b.join(timeout=2.0)
+        assert b_result and b_result[0]["ids"] == ["k__b:2"]
+    finally:
+        store.close()
+
+
+def test_mid_fetch_invalidation_does_not_poison_cache_epoch_guard() -> None:
+    """nexus-2mb6n review round 2 RECURRENCE (critic-reproduced
+    empirically): the per-key-locking redesign (finding 2) opened a new
+    same-process race the coarser single-lock predecessor didn't have —
+    a reader's fetch computes its response reflecting PRE-mutation state,
+    a writer's upsert/invalidate fires on another thread WHILE that
+    fetch is still in flight (client-side), and the reader would then
+    cache its now-stale result AFTER the writer's clear, undoing the
+    invalidation.
+
+    The fetch-epoch guard closes this: the reader records the cache
+    epoch before starting its fetch and refuses to write the cache if
+    the epoch moved while the fetch was in flight. Post-settle, the
+    cache must NOT contain the pre-mutation snapshot, and the next read
+    must fetch fresh (real, post-mutation) data.
+    """
+    import threading
+    import time as _time
+
+    fake = _FakeCentroidService()
+    reader_response_captured = threading.Event()
+    writer_mutation_done = threading.Event()
+    orig_handler = fake.handler
+
+    def gated_handler(request: httpx.Request) -> httpx.Response:
+        path = urlparse(str(request.url)).path.replace("/v1/taxonomy/centroids", "")
+        if request.method == "GET" and path == "/by_collection":
+            # Compute the response NOW, against CURRENT (pre-mutation)
+            # server state — this is the reader's HTTP round trip having
+            # already captured its snapshot. Only the RETURN to the
+            # client-side caller is delayed until after the writer's
+            # mutation lands, simulating "stale data in flight" rather
+            # than a request that hasn't reached the server yet.
+            response = orig_handler(request)
+            reader_response_captured.set()
+            writer_mutation_done.wait(timeout=2.0)
+            return response
+        return orig_handler(request)
+
+    store = HttpCentroidStore(
+        base_url="http://svc", _token=TOKEN,
+        _transport=httpx.MockTransport(gated_handler),
+    )
+    try:
+        store.upsert([
+            {"collection": "k__race", "topic_id": 1, "embedding": [1.0, 0.0], "label": "pre", "doc_count": 1},
+        ])
+
+        reader_result: list = []
+
+        def reader() -> None:
+            reader_result.append(store.get_by_collection("k__race"))
+
+        t_reader = threading.Thread(target=reader)
+        t_reader.start()
+        assert reader_response_captured.wait(timeout=2.0), "reader's fetch never captured a response"
+
+        # Writer mutates the SAME store instance while the reader's
+        # fetch is still in flight (blocked, response captured but not
+        # yet returned) — this is exactly the critic's reproduction.
+        store.upsert([
+            {"collection": "k__race", "topic_id": 2, "embedding": [0.0, 1.0], "label": "post", "doc_count": 1},
+        ])
+        writer_mutation_done.set()
+        t_reader.join(timeout=2.0)
+
+        # The reader's OWN captured result legitimately reflects
+        # pre-mutation state (1 centroid) — that was live when its fetch
+        # captured its snapshot. That part is correct and expected.
+        assert len(reader_result[0]["ids"]) == 1
+
+        # The assertion that matters: the cache must NOT have been
+        # poisoned with that pre-mutation snapshot. A fresh read must
+        # reflect the mutation (2 centroids) — proving the epoch guard
+        # skipped the cache-store on the reader's stale-relative-to-epoch
+        # fetch.
+        after = store.get_by_collection("k__race")
+        assert len(after["ids"]) == 2, (
+            f"cache poisoned with pre-mutation data: got {after['ids']!r}"
+        )
+    finally:
+        store.close()

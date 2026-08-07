@@ -49,6 +49,9 @@ import errno
 import fcntl
 import json
 import os
+import re
+import signal
+import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -837,3 +840,347 @@ def exit_if_process_unowned(
     flush_logging()
     sup.stop()
     return True
+
+
+# ── Process-table fallback (nexus-oyo2g) ────────────────────────────────────
+#
+# ``ServiceRegistry.discover()``'s liveness contract is "lease freshness, not
+# pid" (see the module docstring and daemon/AGENTS.md's "Liveness is lease
+# freshness, not pid" hot rule) — that invariant is UNCHANGED here. What
+# follows is a second, narrower concern: a *lease MISS* is a discovery gap,
+# not proof that nothing is running. A TTL-expired lease on a
+# stalled-but-alive supervisor (heartbeat stuck, process serving) is
+# indistinguishable from a genuinely stopped service at the registry layer.
+# ``stop`` cannot honestly report "already stopped" without checking ground
+# truth, so — ONLY on a lease miss, and ONLY for the idempotent ``stop``
+# verb, never for ``discover()``/election/self-heal — it consults the OS
+# process table. This generalizes the mechanism ``upgrade_finish.py``'s
+# convergence path already built for exactly this gap
+# (``service_stack_pids`` / ``_sweep_surviving_stack``, nexus-cfgo9) into the
+# shared primitive so any tier's ``stop`` can reuse it instead of growing a
+# second copy.
+#
+# The raw process-table readers below (``ps``, falling back to a Linux
+# ``/proc`` walk with no userland dependency) are the same code that used to
+# live in ``upgrade_finish.py``; that module now imports them from here.
+
+
+#: Where Linux exposes the process table without any userland tool.
+PROCFS_ROOT = Path("/proc")
+
+
+def _procfs_available() -> bool:
+    """True when this box exposes a Linux-shaped ``/proc``."""
+    return (PROCFS_ROOT / "uptime").exists()
+
+
+def _parse_etime(etime: str) -> int:
+    """``[[dd-]hh:]mm:ss`` -> seconds (POSIX ps etime)."""
+    days = 0
+    if "-" in etime:
+        d, etime = etime.split("-", 1)
+        days = int(d)
+    parts = [int(p) for p in etime.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, s = parts
+    return ((days * 24 + h) * 60 + m) * 60 + s
+
+
+def _procfs_enumerate() -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for EVERY process, read from ``/proc``.
+
+    A minimal container (debian-slim without procps) has no ``ps`` binary
+    at all; Linux always mounts ``/proc``, so this fallback removes the
+    userland dependency rather than merely tolerating its absence.
+
+    Age is derived the same way ``ps etime`` derives it: system uptime minus
+    the process's ``starttime`` (field 22 of ``/proc/<pid>/stat``, in clock
+    ticks since boot). A process whose files vanish mid-scan (exited between
+    ``iterdir`` and ``read``) is skipped, never guessed at.
+    """
+    uptime_s = float((PROCFS_ROOT / "uptime").read_text().split()[0])
+    hz = os.sysconf("SC_CLK_TCK") or 100
+    out: list[tuple[int, int, str]] = []
+    for entry in PROCFS_ROOT.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            raw_cmdline = (entry / "cmdline").read_bytes()
+            stat = (entry / "stat").read_text()
+        except (OSError, ValueError):
+            continue  # exited mid-scan, or not ours to read
+        # Kernel threads have an empty cmdline — never a conexus process.
+        command = raw_cmdline.replace(b"\x00", b" ").decode(
+            "utf-8", "replace",
+        ).strip()
+        if not command:
+            continue
+        # Field 2 (comm) is parenthesised and may itself contain spaces or
+        # ')', so index from the LAST ')': the remainder starts at field 3,
+        # making starttime (field 22) index 19.
+        try:
+            after = stat[stat.rindex(")") + 1:].split()
+            start_ticks = float(after[19])
+        except (ValueError, IndexError):
+            continue
+        age = int(max(0.0, uptime_s - start_ticks / hz))
+        out.append((pid, age, command))
+    return out
+
+
+def _ps_enumerate() -> list[tuple[int, int, str]] | None:
+    """``[(pid, age_s, command)]`` from POSIX ``ps``, or ``None`` when this
+    box has no ``ps`` binary at all (the caller then tries ``/proc``).
+
+    ``ps -eo pid,etime,command`` is POSIX-portable (etime, unlike lstart,
+    parses identically on macOS and Linux).
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", "-wweo", "pid,etime,command"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        # A silent empty ps = zero processes detected = the fail-open class
+        # again. Fail loud instead.
+        raise RuntimeError(
+            f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+        )
+    return _parse_ps_table(proc.stdout)
+
+
+def _parse_ps_table(ps_output: str) -> list[tuple[int, int, str]]:
+    """Parse a ``pid etime command`` table into ``[(pid, age_s, command)]``."""
+    out: list[tuple[int, int, str]] = []
+    for line in ps_output.splitlines()[1:]:
+        m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
+        if not m:
+            continue
+        try:
+            age = _parse_etime(m.group(2))
+        except ValueError:
+            continue
+        out.append((int(m.group(1)), age, m.group(3)))
+    return out
+
+
+def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
+
+    Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (see
+    :func:`_procfs_enumerate`). A box with NEITHER raises; so does a box
+    whose PRESENT ``ps`` fails or returns an empty table (that is a signal
+    worth surfacing — e.g. a hidepid-restricted or corrupted procps — not a
+    case to silently route around). It raises rather than reporting an
+    empty table: a silent "zero processes" is the fail-open this function
+    exists to eliminate. ``ps_output`` is injectable for tests.
+    """
+    if ps_output is not None:
+        return _parse_ps_table(ps_output)
+    rows = _ps_enumerate()
+    if rows is None:
+        if not _procfs_available():
+            raise RuntimeError(
+                "this system has neither a 'ps' command nor a readable "
+                "/proc filesystem — process-skew detection cannot run "
+                "(install procps, or run on a host that provides one)"
+            )
+        rows = _procfs_enumerate()
+    return rows
+
+
+def process_command(pid: int) -> str:
+    """The full command line of *pid*, or ``""`` when it is gone.
+
+    Used by pid-recycle re-checks — a bare ``ps -p`` direct call would add
+    a userland dependency this module otherwise sheds via ``/proc``.
+    """
+    if _procfs_available():
+        try:
+            raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    try:
+        probe = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+    return probe.stdout.strip()
+
+
+def pid_alive(pid: int) -> bool:
+    """True when signalling 0 to *pid* succeeds.
+
+    THE single implementation (nexus-oyo2g review finding 3): this used to
+    be duplicated in ``storage_service_daemon._pid_is_alive`` with a
+    diverged ``OSError`` edge case — that module now imports this function
+    under its old name instead of defining its own. Kept THIS module's
+    more permissive-on-ambiguity semantics: an ``OSError`` other than
+    ``ProcessLookupError`` (ESRCH) is treated as "alive" rather than
+    "dead". A liveness probe that decides whether to skip a kill/declare
+    "nothing to signal" must not treat an ambiguous errno as proof of
+    death — a false "dead" here is exactly the class of bug this bead
+    fixes (declaring something stopped when it might still be running).
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+    return True
+
+
+def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
+    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still alive.
+
+    A SIGSTOPped process never acts on SIGTERM while stopped, which is
+    exactly why the escalation to the uncatchable, unblockable SIGKILL is
+    unconditional rather than a best-effort nicety (nexus-oyo2g repro c:
+    double-spawn from a frozen supervisor).
+    """
+    live = [p for p in pids if pid_alive(p)]
+    for pid in live:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        live = [p for p in live if pid_alive(p)]
+        if not live:
+            return []
+        time.sleep(0.2)
+    for pid in live:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    time.sleep(0.5)
+    return [p for p in live if pid_alive(p)]
+
+
+def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
+    """Argv predicate matching the storage-service SUPERVISOR (``nx daemon
+    service start --foreground --config-dir <config_dir>``) or ENGINE
+    (argv[0] under ``<config_dir>/service/nexus-service``) belonging to
+    *config_dir*.
+
+    Token-exact on ``--config-dir`` — never a substring test: ``--config-dir``
+    is the documented multi-profile mechanism, and a bare
+    ``str(config_dir) in command`` would match ``.config/nexus`` against
+    ``.config/nexus-staging``'s command line, folding a healthy sibling
+    profile's supervisor into a kill set. The engine match is argv[0]-exact
+    for the same reason (never a substring match on a `tail .../nexus-service.log`
+    or similar diagnostic command).
+    """
+    engine_path = str(config_dir / "service" / "nexus-service")
+    target = str(config_dir)
+
+    def _match(command: str) -> bool:
+        if command.split()[:1] == [engine_path]:
+            return True
+        if "daemon service start" not in command:
+            return False
+        tokens = command.split()
+        for i, tok in enumerate(tokens):
+            if tok == "--config-dir" and i + 1 < len(tokens):
+                return tokens[i + 1] == target
+            if tok.startswith("--config-dir="):
+                return tok[len("--config-dir="):] == target
+        return False
+
+    return _match
+
+
+@dataclass(frozen=True)
+class ProcessSweepResult:
+    """Outcome of :func:`sweep_matching_processes`.
+
+    ``available`` is False only when the process table itself could not be
+    read (no ``ps`` and no ``/proc``) — a caller degrades gracefully on
+    that leg rather than claiming a clean sweep it never performed.
+    """
+
+    available: bool
+    error: str | None
+    found: tuple[tuple[int, str], ...]
+    stubborn: tuple[int, ...]
+
+    @property
+    def pids(self) -> tuple[int, ...]:
+        return tuple(p for p, _cmd in self.found)
+
+
+def sweep_matching_processes(
+    matcher: Callable[[str], bool],
+    *,
+    exclude_pid: int | None = None,
+    grace_s: float = 10.0,
+) -> ProcessSweepResult:
+    """Find OS processes whose command line satisfies *matcher*, terminate
+    them (SIGTERM -> SIGKILL via :func:`terminate_pids`), and report what
+    was found / left stubborn.
+
+    THE shared mechanism nexus-oyo2g's ``stop_storage_service`` fix needed:
+    a lease MISS from ``ServiceRegistry.discover()`` is a discovery gap, not
+    proof nothing is running (a TTL-expired lease on a stalled-but-alive
+    supervisor looks identical to "stopped" from the registry's point of
+    view). Consulting the process table as ground truth removes that
+    ambiguity. Generalizes ``upgrade_finish._sweep_surviving_stack``
+    (nexus-cfgo9) — that function still exists for its own before/after
+    subprocess-composition use, but the core matcher + terminate mechanism
+    now has exactly one implementation, here.
+
+    Re-verifies each candidate's argv immediately before returning it as
+    "found" (guards the snapshot-to-report window against pid reuse — the
+    same discipline as ``upgrade_finish``'s recycle guard, folded into one
+    pass since there is no separate before/after subprocess gap here).
+
+    All matched pids are handed to :func:`terminate_pids` together (SIGTERM
+    to every pid, then escalate) rather than supervisor-then-engine in
+    sequence the way ``_sweep_surviving_stack`` orders it: that ordering
+    existed to ride the supervisor's PDEATHSIG cascade onto its still-live
+    engine child, a mechanism RDR-175 retired (the supervisor's in-process
+    respawn-on-child-death is gone, so there is no cascade left to
+    sequence around) — simultaneous SIGTERM is not a regression here.
+    """
+    me = exclude_pid if exclude_pid is not None else os.getpid()
+    try:
+        rows = all_process_rows()
+    except Exception as exc:  # noqa: BLE001 — no process table: surfaced to the caller, never silently "nothing found"
+        return ProcessSweepResult(available=False, error=str(exc), found=(), stubborn=())
+
+    found: list[tuple[int, str]] = []
+    for pid, _age, command in rows:
+        if pid == me or not matcher(command):
+            continue
+        current = process_command(pid)
+        # An unreadable argv (permissions, zombie mid-reap) is not evidence
+        # of a recycle; only a DIFFERENT readable argv is.
+        if current and current.split() != command.split():
+            _log.info(
+                "sweep_matching_processes_pid_recycled",
+                pid=pid, recorded=command[:120], current=current[:120],
+            )
+            continue
+        found.append((pid, command))
+
+    if not found:
+        return ProcessSweepResult(available=True, error=None, found=(), stubborn=())
+
+    stubborn = tuple(terminate_pids([pid for pid, _cmd in found], grace_s=grace_s))
+    return ProcessSweepResult(
+        available=True, error=None, found=tuple(found), stubborn=stubborn,
+    )

@@ -38,18 +38,65 @@ rules:
     matcher: Bash
     mode: redirect
     rationale: >-
-      TWO consolidated git-hygiene checks, one hook (one subprocess spawn).
-      (1) git add wildcard forms (-A, ., --all) pull in unrelated untracked
-      drafts; stage by explicit path (feedback_no_git_add_all).
+      THREE consolidated git-hygiene/safety checks, one hook (one subprocess
+      spawn for the first two; the third spawns additional `nx` subprocesses
+      only when it has gated commits to check — see its own latency note
+      below). (1) git add wildcard forms (-A, ., --all) pull in unrelated
+      untracked drafts; stage by explicit path (feedback_no_git_add_all).
       (2) git push whose EFFECTIVE target is main is denied — PRs only
       (nexus-vduer). Resolves the target from an explicit refspec, else the
       current branch's upstream, because the 2026-07-23 incident was a BARE
       `git push` from a checkout already on main. Tag pushes stay allowed.
-      Consolidated rather than split because RDR-121/125 cap routing rules at
-      FOUR cross-plugin; a fifth needs consolidation or a successor-RDR budget
+      (3) git push carrying a commit that touches a gated path (src/,
+      service/src/main/, conexus/, tests/) with no review-completed coverage
+      is denied (nexus-4av2n) — the mechanized companion to
+      pre_close_verification_hook.sh's close-time gate, closing the gap that
+      all five of the 2026-07-31 unreviewed commits were PUSHED before any
+      bead close that day. ROUND 2 (both stacked reviewers, T2 [21539]/
+      [21540]): coverage lookup is DUAL-SOURCE (T1 scratch OR T2 memory)
+      since a marker written via the MCP scratch tool is invisible to a
+      T1-only CLI check whenever the CLI's T1 lease is stale; pure tag
+      pushes (vX.Y.Z, engine-service-vX.Y.Z) and release/* branch pushes
+      are exempt (loud INFO, not silent); merge commits are diffed against
+      their first parent (bare diff-tree returns nothing for merges by
+      git's own default); the 50-commit scan cap now warns loudly instead
+      of silently passing when exceeded. ROUND 3 (substantive-critic
+      closure verification, elevated to Critical): round 2's call-COUNT
+      budget (5 extra `nx` calls) did NOT bound wall-clock time — the real
+      2026-07-31 incident shape (5-8 uncovered gated commits) measured
+      6.49s-6.91s live, exceeding the hook's own 5s PreToolUse timeout
+      (hooks.json). Replaced by a wall-clock `_Deadline` (3.5s) the hook
+      enforces on ITSELF, denying deterministically the moment the budget
+      would be exceeded rather than ever risking a harness kill; the
+      fast-path range-tip T2 lookup that round 2 ran unconditionally
+      (costing a second `nx` call even when T1 alone already covered
+      everything) is now lazy, restoring the 1-call fast path. T1/T2 being
+      genuinely UNREACHABLE (not just slow) still allows through with a
+      loud warning; running out of DEADLINE denies (folds into "missing")
+      — "ran out of time while nx was reachable and working" is
+      indistinguishable in effect from "would have found nothing".
+      LATENCY (measured honestly, per phase, in THIS environment — a real
+      `nx scratch list` (isolated T1) ran ~0.14s; a real `nx memory search`
+      (live PG-backed T2) ran ~1.45s, both single-call, no artificial
+      delay): FAST PATH (T1 alone covers) ≈ 0.15-0.4s, ONE `nx` call.
+      TYPICAL multi-bead push needing 1-2 T2 fallback lookups ≈ 1.5-3.2s,
+      within the 3.5s deadline. WORST CASE (many distinct uncovered ids,
+      the 2026-07-31 shape) now DENIES DETERMINISTICALLY at ~3.5s rather
+      than stalling to 6+ seconds — the deadline is the ceiling, not an
+      estimate. A short-TTL cache for the `nx` calls was considered and
+      explicitly DECLINED this round too (a stale POSITIVE cache entry
+      could hide a marker an agent just wrote, reproducing the exact
+      vacuity bug nexus-4av2n exists to fix; a negative-only cache was
+      separately noted as available and safe-directioned but moot against
+      the worst case, which is a COLD-cache scenario a first-pass cache of
+      either polarity would not help) — see the hook's own module
+      docstring for the full tradeoff writeup, left as a documented future
+      optimization rather than implemented. Consolidated rather than split
+      into standalone rules because RDR-121/125 cap routing rules at FOUR
+      cross-plugin; a fifth needs consolidation or a successor-RDR budget
       revision, and the cap is on rule COUNT (measured latency was ~147ms
-      against the 300ms budget, i.e. not binding — but that is not this
-      change's call to make).
+      against the 300ms budget for the first two checks, i.e. not binding
+      — but that is not this change's call to make).
     escape_token: "# routing-allow:"
     fail_closed: false
   subagent_git_write_requires_orchestrator:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,21 @@ STOP_HOOK = HOOKS_DIR / "stop_verification_hook.sh"
 CLOSE_HOOK = HOOKS_DIR / "pre_close_verification_hook.sh"
 CONFIG_READER = HOOKS_DIR / "read_verification_config.py"
 
-# Minimal PATH with python3 but without bd/nx
+# Minimal PATH with python3 but without bd/nx. A dedicated symlink-only
+# directory, NOT the parent of `which python3` -- this repo's venv bin/
+# (where python3 typically resolves in a dev shell) also ships the `nx`
+# console script alongside it, so using that whole directory silently
+# reintroduces a REAL `nx` and defeats "without bd/nx" (nexus-4av2n:
+# confirmed live -- `which python3` resolves into .venv/bin, which also
+# contains `nx`, making test_on_close_true_always_allows exercise a real
+# T1 session instead of the unreachable-T1 path it meant to test).
 _PYTHON3 = subprocess.run(
     ["which", "python3"], capture_output=True, text=True
 ).stdout.strip()
-_MINIMAL_PATH = f"{os.path.dirname(_PYTHON3)}:/usr/bin:/bin"
+_PYTHON3_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-verif-integ-python3-"))
+if _PYTHON3:
+    (_PYTHON3_ISOLATED_DIR / "python3").symlink_to(_PYTHON3)
+_MINIMAL_PATH = f"{_PYTHON3_ISOLATED_DIR}:/usr/bin:/bin"
 
 
 def _run_hook(
@@ -229,7 +240,12 @@ class TestStopHookPipeline:
 
 
 class TestCloseHookPipeline:
-    """End-to-end tests for the PreToolUse close hook (advisory only)."""
+    """End-to-end tests for the PreToolUse close hook.
+
+    nexus-4av2n: no longer advisory-only -- see
+    tests/hooks/test_pre_close_verification_hook.py for the deny/allow/
+    override matrix. These tests cover only the fast no-op and config-gate
+    paths plus the T1-unreachable capability-honest allow."""
 
     @staticmethod
     def _get_decision(output: dict) -> str:
@@ -253,7 +269,15 @@ class TestCloseHookPipeline:
         result = _run_hook(CLOSE_HOOK, payload)
         assert self._get_decision(json.loads(result.stdout)) == "allow"
 
-    def test_on_close_true_always_allows(self, mock_plugin_root) -> None:
+    def test_on_close_true_with_t1_unreachable_allows_capability_honest(
+        self, mock_plugin_root
+    ) -> None:
+        """nexus-4av2n: the hook now BLOCKS on a missing review marker when
+        T1 is reachable (see tests/hooks/test_pre_close_verification_hook.py
+        for that path in full). This PATH has no `nx` on it at all -- a
+        capability gap, not a review gap -- so it allows (never brick a
+        close over a broken T1) but stamps verification=unverified, not
+        the old unconditional verification=passed."""
         env = mock_plugin_root({"on_close": True})
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
@@ -261,7 +285,9 @@ class TestCloseHookPipeline:
             "tool_input": {"command": "bd close nexus-test"},
         })
         result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        assert self._get_decision(json.loads(result.stdout)) == "allow"
+        out = json.loads(result.stdout)
+        assert self._get_decision(out) == "allow"
+        assert "unreachable" in out["hookSpecificOutput"].get("additionalContext", "").lower()
 
     def test_on_close_false_passes_through(self, mock_plugin_root) -> None:
         env = mock_plugin_root({"on_close": False})

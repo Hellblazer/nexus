@@ -1488,7 +1488,22 @@ class TestCheckDanglingManifests:
     the catalog reader's ``manifest_verify_all()`` return/raise instead.
     """
 
-    def _cat(self, *, collections: list[dict] | None = None, raise_status: int | None = None):
+    def _cat(
+        self, *, collections: list[dict] | None = None, raise_status: int | None = None,
+        orphans_by_dim: dict[int, list[dict]] | None = None, orphans_exc: Exception | None = None,
+        orphans_responses_by_dim: dict[int, list] | None = None,
+        orphans_calls_log: list[tuple[int, int]] | None = None,
+    ):
+        """*orphans_responses_by_dim*: an optional ``{dim: [resp_or_exc, ...]}``
+        QUEUE consumed one entry per ``manifest_orphans(dim, ...)`` call for
+        that dim (nexus-heizf code-review fix round) — lets a test give the
+        FIRST call a truncated sample and the refetch a DIFFERENT outcome
+        (success or a raised exception), which a single ``orphans_by_dim``
+        dict cannot express. Falls through to the original ``orphans_by_dim``/
+        ``orphans_exc`` behavior once a dim's queue is exhausted or absent.
+        *orphans_calls_log*, when given, records ``(dim, limit)`` for every
+        call — used to assert the refetch never exceeds the ceiling.
+        """
         import httpx
 
         class _Cat:
@@ -1501,6 +1516,20 @@ class TestCheckDanglingManifests:
                     )
                 rows = collections or []
                 return {"collections": rows, "count": len(rows)}
+
+            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+                if orphans_calls_log is not None:
+                    orphans_calls_log.append((dim, limit))
+                queue = (orphans_responses_by_dim or {}).get(dim)
+                if queue:
+                    resp = queue.pop(0)
+                    if isinstance(resp, Exception):
+                        raise resp
+                    return resp
+                if orphans_exc is not None:
+                    raise orphans_exc
+                rows = (orphans_by_dim or {}).get(dim, [])
+                return {"dim": dim, "count": len(rows), "orphans": rows[:limit]}
         return _Cat()
 
     def _run(self, monkeypatch, cat):
@@ -1520,6 +1549,102 @@ class TestCheckDanglingManifests:
         assert "code__x" in r.detail
         assert "1 of 2" in r.detail, r.detail
         assert any("reconcile" in f for f in r.fix_suggestions)
+
+    def test_wording_says_rows_not_chashes(self, monkeypatch) -> None:
+        """nexus-heizf part 2: manifest_verify_all's SQL counts manifest
+        ROWS (position-duplicated chashes counted twice), not distinct
+        chashes — the detail text must say so, never "chash(es)"."""
+        cat = self._cat(collections=[
+            {"collection": "code__x", "referenced": 2, "present": 1, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "row(s)" in r.detail, r.detail
+        assert "chash(es) missing" not in r.detail, r.detail
+
+    def test_small_count_names_damaged_tumblers(self, monkeypatch) -> None:
+        """nexus-heizf part 1: <=10 damaged documents are named directly —
+        no need to run a separate --list command to learn which."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
+            ],
+            orphans_by_dim={
+                768: [{"tenant_id": "t", "doc_id": "1.2.3", "position": 0,
+                       "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"}],
+            },
+        )
+        r = self._run(monkeypatch, cat)
+        assert "1.2.3" in r.detail, r.detail
+        assert "--list" not in r.detail, r.detail
+
+    def test_large_count_points_at_list_flag_instead_of_naming(self, monkeypatch) -> None:
+        """nexus-heizf part 1: >10 damaged documents point at `nx catalog
+        manifest-verify --list` rather than dumping every tumbler inline."""
+        rows = [
+            {"tenant_id": "t", "doc_id": f"1.2.{i}", "position": 0,
+             "chash": f"{i:02x}" * 32, "collection": "code__x__bge-base-en-v15-768__v1"}
+            for i in range(11)
+        ]
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 11, "present": 0, "missing": 11},
+            ],
+            orphans_by_dim={768: rows},
+        )
+        r = self._run(monkeypatch, cat)
+        assert "nx catalog manifest-verify --list" in r.detail, r.detail
+        assert "1.2.0" not in r.detail, r.detail
+
+    def test_distinct_chash_count_shown_when_cheap(self, monkeypatch) -> None:
+        """Two manifest rows (two positions) sharing ONE chash must report
+        1 distinct chash alongside the 2-row count — the enumeration is
+        already in hand (part 1's wiring), so this is free."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 2, "present": 0, "missing": 2},
+            ],
+            orphans_by_dim={
+                768: [
+                    {"tenant_id": "t", "doc_id": "1.2.3", "position": 0,
+                     "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"},
+                    {"tenant_id": "t", "doc_id": "1.2.3", "position": 1,
+                     "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"},
+                ],
+            },
+        )
+        r = self._run(monkeypatch, cat)
+        assert "2 manifest row(s)" in r.detail, r.detail
+        assert "1 distinct chash(es)" in r.detail, r.detail
+
+    def test_enumeration_failure_degrades_to_collection_level_only(self, monkeypatch) -> None:
+        """manifest_orphans failing must never crash `nx doctor` or hide the
+        collection-level warning already established by manifest_verify_all
+        — it degrades to the old collection-only detail plus the --list
+        pointer (best-effort enrichment, not load-bearing)."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
+            ],
+            orphans_exc=RuntimeError("engine unreachable"),
+        )
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "code__x__bge-base-en-v15-768__v1" in r.detail
+        assert "nx catalog manifest-verify --list" in r.detail, r.detail
+
+    def test_unroutable_collection_reported_loud_not_silent(self, monkeypatch) -> None:
+        """nexus-h1zu0: a damaged collection whose model token has no known
+        dim routing must be surfaced explicitly, never silently dropped
+        from the enumeration with no error."""
+        cat = self._cat(
+            collections=[
+                {"collection": "code__x__some-future-model-9000__v1", "referenced": 1, "present": 0, "missing": 1},
+            ],
+            orphans_by_dim={},
+        )
+        r = self._run(monkeypatch, cat)
+        assert "could not be enumerated" in r.detail, r.detail
+        assert "code__x__some-future-model-9000__v1" in r.detail, r.detail
 
     def test_fully_resolvable_manifest_is_clean(self, monkeypatch) -> None:
         cat = self._cat(collections=[
@@ -1587,6 +1712,407 @@ class TestCheckDanglingManifests:
         assert r.ok is True
         assert "no catalog" in r.detail
 
+    def test_detail_always_carries_the_population_disjointness_note(self, monkeypatch) -> None:
+        """nexus-h1zu0 / substantive-critic Significant-1 (2026-08-05): the
+        disjointness caveat vs `purge-trash`'s 'stranded' population must be
+        in the LIVE detail text an agent actually parses, not docstring/help
+        only — the 2026-08-04 nexus-55l58 shakedown was misled by exactly
+        that gap."""
+        cat = self._cat(collections=[
+            {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "purge-trash" in r.detail, r.detail
+        assert "stranded" in r.detail, r.detail
+
+    def test_text_mode_states_unroutable_count_even_with_zero_enumerated_rows(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-heizf code-review fix round: when every damaged collection
+        is unroutable, total_rows is 0 but the warn must still be legible —
+        the unroutable count/names, not a bare '0 row(s)' that reads as
+        contradicting the non-zero exit."""
+        cat = self._cat(collections=[
+            {"collection": "code__x__unknown-token__v1", "referenced": 1, "present": 0, "missing": 1},
+        ])
+        r = self._run(monkeypatch, cat)
+        assert "could not be enumerated" in r.detail, r.detail
+        assert "code__x__unknown-token__v1" in r.detail, r.detail
+
+
+class TestCheckChashConformanceReport:
+    """RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
+    coverage via the engine route (``nexus.chash_conformance_report(dim)``).
+
+    The LOCAL ``nexus_diag`` psql probe (``nexus.db.diag_connection``) is
+    LOCAL-ONLY BY DESIGN (nexus-y3wuu Hal decision) — it shells a local
+    ``psql`` at 127.0.0.1 using a local ``pg_credentials`` file, which does
+    not exist on managed/cloud installs. This check is the fallback
+    observability surface for those installs, via
+    ``HttpCatalogClient.chash_conformance_report``.
+
+    KILL-CONTROL NOTE (CORRECTED — code-review fix round, substantive-critic
+    CRITICAL nexus-5nrzk, T2 [21458]): the prior claim here ("seeding is
+    impossible by construction") was FALSE AS WRITTEN. Seeding a genuine
+    width-non-conformant row through the real engine IS possible — but only
+    via a superuser CHECK-constraint-drop maneuver at the JAVA test layer
+    (``service/src/test/java/dev/nexus/service/ChashConformanceReportIntegrationTest.java``,
+    mirroring ``RekeyOpsIntegrationTest``'s ``withChecksDropped`` helper),
+    NOT reachable through any client-facing HTTP/Python write path (the
+    width CHECK, even NOT VALID, still enforces on every NEW client write —
+    see ``rdr180-001-bytea-chash.xml``). This Python engine-integration
+    test file (``tests/db/test_du2dw_chash_conformance_report_engine.py``)
+    therefore still cannot seed poison itself and continues to prove only
+    the clean branch + wiring against a real engine. The actual non-zero
+    branch — ``nexus.chash_conformance_report(dim)`` counting a real
+    poisoned row and returning its hex in ``sample_chashes`` — is now
+    proven end-to-end at the Java layer instead. THIS class proves the same
+    failure branch at the FAKE-CATALOG-READER layer (a stub
+    ``chash_conformance_report`` returning non-conformant counts) — the
+    same layer-test posture ``TestCheckDanglingManifests`` above already
+    uses for its analogous engine-route checks
+    (``manifest_verify_all``/``manifest_orphans``), now corroborated by a
+    real-poison proof one layer down rather than merely asserted absent.
+    """
+
+    def _cat(
+        self, *, tables_by_dim: dict[int, list[dict]] | None = None,
+        raise_status: int | None = None, raise_exc: Exception | None = None,
+    ):
+        import httpx
+
+        class _Cat:
+            def chash_conformance_report(self, dim: int) -> dict:
+                if raise_status is not None:
+                    request = httpx.Request("GET", "https://engine.example/v1/catalog/chash/conformance")
+                    response = httpx.Response(raise_status, request=request)
+                    raise httpx.HTTPStatusError(
+                        f"{raise_status} error", request=request, response=response,
+                    )
+                if raise_exc is not None:
+                    raise raise_exc
+                tables = (tables_by_dim or {}).get(dim, [
+                    {"table_name": f"nexus.chunks_{dim}", "total": 5, "non_conformant": 0, "sample_chashes": []},
+                    {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+                ])
+                return {"dim": dim, "tables": tables}
+        return _Cat()
+
+    def _t3(self, *, collection_names: list[str] | None = None, raise_exc: Exception | None = None):
+        """Fake T3 handle backing the unroutable-collections probe
+        (nexus-4ijv4). ``None`` names -> no collections (the common case for
+        the other tests in this class, which don't care about this axis)."""
+        class _T3:
+            def list_collections(self) -> list[dict]:
+                if raise_exc is not None:
+                    raise raise_exc
+                return [{"name": n} for n in (collection_names or [])]
+        return _T3()
+
+    def _run(self, monkeypatch, cat, *, t3=None):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3",
+            lambda *a, **k: (t3 if t3 is not None else self._t3()),
+            raising=False,
+        )
+        return h._check_chash_conformance_report()[0]
+
+    def test_clean_store_across_all_dims(self, monkeypatch) -> None:
+        cat = self._cat()
+        r = self._run(monkeypatch, cat)
+        assert r.ok is True
+        assert "clean" in r.detail
+        assert "3 dim(s) checked" in r.detail, r.detail
+
+    def test_non_conformant_rows_reported_loud(self, monkeypatch) -> None:
+        """The failure branch (kill control — see class docstring for why
+        this is proven at the fake-reader layer, not via a live seed)."""
+        cat = self._cat(tables_by_dim={
+            384: [
+                {"table_name": "nexus.chunks_384", "total": 5, "non_conformant": 2, "sample_chashes": ["aa", "bb"]},
+                {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+            ],
+        })
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "2 chunk row(s)" in r.detail, r.detail
+        assert "nexus.chunks_384=2" in r.detail, r.detail
+        assert "TENANT-SCOPED" in r.detail, r.detail
+        assert any("nx upgrade" in f for f in r.fix_suggestions)
+
+    def test_engine_predating_route_renders_skipped_with_warning(self, monkeypatch) -> None:
+        """vw594 F3 / manifest_verify_all precedent: a pre-route engine 404s
+        every dim identically — SKIPPED + loud warn, never a false clean."""
+        cat = self._cat(raise_status=404)
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+        assert "chash-conformance route" in r.detail, r.detail
+        assert "NOT a clean-store signal" in r.detail, r.detail
+
+    def test_other_transport_failure_renders_skipped_with_warning_not_clean(self, monkeypatch) -> None:
+        cat = self._cat(raise_status=500)
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+
+    def test_unexpected_exception_renders_warn_not_a_false_clean(self, monkeypatch) -> None:
+        """substantive-critic (T2 [21458]): this branch used to swallow ANY
+        exception — including HttpCatalogClient.chash_conformance_report's
+        OWN deliberate fail-closed RuntimeError (a malformed response) —
+        into ok=True 'skipped', contradicting this check's own never-a-
+        false-clean docstring promise. Must never crash `nx doctor` (still
+        true here) AND must never render ok=True."""
+        cat = self._cat(raise_exc=RuntimeError("engine unreachable"))
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail, r.detail
+
+    def test_client_fail_closed_runtimeerror_renders_warn_not_a_false_clean(
+        self, monkeypatch,
+    ) -> None:
+        """The exact concrete shape the prior bug swallowed: HttpCatalogClient
+        .chash_conformance_report raises RuntimeError when the response
+        carries no `tables` field (its own fail-closed contract, see that
+        method's docstring) — this must surface as a loud WARN, never a
+        silent clean pass."""
+        cat = self._cat(raise_exc=RuntimeError(
+            "chash/conformance response carried no `tables` field — cannot "
+            "verify chash conformance; refusing a false-clean empty report"
+        ))
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "carried no `tables` field" in r.detail, r.detail
+
+    def test_catalog_unavailable_degrades_to_plain_skip(self, monkeypatch) -> None:
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: None, raising=False,
+        )
+        r = h._check_chash_conformance_report()[0]
+        assert r.ok is True
+        assert "no catalog" in r.detail
+
+    def test_label_distinct_from_gate_matched_local_probe_label(self) -> None:
+        """This check must NEVER collide with ``CHASH_CONFORMANCE_LABEL`` —
+        the install-binary gate (``commands/daemon.py``) and the convergence
+        gate (``upgrade_finish.py``) exact-match on that label and need the
+        LOCAL nexus_diag probe's cross-tenant BYPASSRLS visibility
+        (nexus-vounk); this engine-route check's tenant-scoped count would
+        silently under-report a poisoned store if it fed the same gate."""
+        import nexus.health as h
+        from nexus.db.chash_tables import CHASH_CONFORMANCE_LABEL
+
+        assert h._CHASH_CONFORMANCE_REPORT_LABEL != CHASH_CONFORMANCE_LABEL
+
+    # ── unroutable-collection surfacing (nexus-4ijv4, T2 [21458]) ──────────
+
+    def test_clean_with_unroutable_collection_is_not_plain_clean(self, monkeypatch) -> None:
+        """The core complaint: a tenant with content under an unrecognized
+        embedding-model token must NOT read as a plain clean pass — those
+        collections were never counted or sampled at all."""
+        cat = self._cat()  # every dim clean
+        t3 = self._t3(collection_names=[
+            "knowledge__x__some-unrecognized-legacy-token-9000__v1",
+        ])
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is False and r.warn is True, (
+            "clean-with-unroutable must render as a WARN, not ok=True — "
+            f"got ok={r.ok} warn={r.warn} detail={r.detail!r}"
+        )
+        assert "NOT CHECKED" in r.detail, r.detail
+        assert "some-unrecognized-legacy-token-9000" in r.detail, r.detail
+
+    def test_dirty_with_unroutable_collection_carries_both_notes(self, monkeypatch) -> None:
+        """The non_conformant>0 branch must ALSO carry the unroutable note —
+        the two findings are orthogonal (one is about rows the probe
+        checked and found bad, the other is about content the probe never
+        reached at all) and neither should hide the other."""
+        cat = self._cat(tables_by_dim={
+            384: [
+                {"table_name": "nexus.chunks_384", "total": 5, "non_conformant": 1, "sample_chashes": ["aa"]},
+                {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+            ],
+        })
+        t3 = self._t3(collection_names=[
+            "knowledge__x__some-unrecognized-legacy-token-9000__v1",
+        ])
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is False and r.warn is True
+        assert "1 chunk row(s)" in r.detail, r.detail
+        assert "NOT CHECKED" in r.detail, r.detail
+        assert "some-unrecognized-legacy-token-9000" in r.detail, r.detail
+
+    def test_fully_routable_collections_still_render_plain_clean(self, monkeypatch) -> None:
+        """Regression guard: a tenant whose collections ALL route to a known
+        dim must still get the plain clean pass — the new probe must not
+        false-positive on ordinary, fully-covered content."""
+        cat = self._cat()
+        t3 = self._t3(collection_names=[
+            "knowledge__x__bge-base-en-v15-768__v1",
+            "code__y__voyage-code-3__v1",
+        ])
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is True
+        assert "clean" in r.detail
+        assert "NOT CHECKED" not in r.detail, r.detail
+
+    def test_unroutable_probe_failure_does_not_hide_primary_clean_result(
+        self, monkeypatch,
+    ) -> None:
+        """Best-effort: the unroutable-collection enrichment failing must
+        never crash this check or suppress the primary (clean) verdict —
+        it just loses the enrichment, silently to the operator's detriment
+        but never to a crash."""
+        cat = self._cat()
+        t3 = self._t3(raise_exc=RuntimeError("t3 unreachable"))
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is True
+        assert "clean" in r.detail
+
+    def test_unroutable_probe_failure_does_not_hide_primary_dirty_result(
+        self, monkeypatch,
+    ) -> None:
+        cat = self._cat(tables_by_dim={
+            384: [
+                {"table_name": "nexus.chunks_384", "total": 5, "non_conformant": 3, "sample_chashes": ["aa"]},
+                {"table_name": "nexus.catalog_document_chunks", "total": 5, "non_conformant": 0, "sample_chashes": []},
+            ],
+        })
+        t3 = self._t3(raise_exc=RuntimeError("t3 unreachable"))
+        r = self._run(monkeypatch, cat, t3=t3)
+        assert r.ok is False and r.warn is True
+        assert "3 chunk row(s)" in r.detail, r.detail
+
+
+class TestManifestOrphanReportCompleteness:
+    """nexus-heizf code-review fix round (2026-08-05): manifest_orphan_report
+    must never treat a truncated or failed refetch as a complete result —
+    cross-checked against the census's own `missing` count per collection."""
+
+    def _cat(self, *, responses: dict[int, list]):
+        class _Cat:
+            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+                queue = responses.get(dim, [])
+                if not queue:
+                    return {"dim": dim, "count": 0, "orphans": []}
+                resp = queue.pop(0)
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        return _Cat()
+
+    def _row(self, doc_id: str, position: int, chash: str, collection: str) -> dict:
+        return {
+            "tenant_id": "t", "doc_id": doc_id, "position": position,
+            "chash": chash, "collection": collection,
+        }
+
+    def test_refetch_failure_marks_collection_incomplete_not_silently_complete(self) -> None:
+        from nexus.health import manifest_orphan_report
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        cat = self._cat(responses={
+            768: [
+                # First (sample) call: count says 5 total, only 1 comes back.
+                {"dim": 768, "count": 5, "orphans": [self._row("1.2.3", 0, "a" * 64, coll)]},
+                # Refetch attempt fails outright.
+                RuntimeError("engine unreachable mid-refetch"),
+            ],
+        })
+        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 5, "referenced": 5}])
+
+        assert report["total_rows"] == 1, "the partial sample must still be reported, not discarded"
+        assert coll not in report["unroutable_collections"]
+        assert report["incomplete_collections"] == {coll: {"enumerated": 1, "expected": 5}}
+
+    def test_refetch_success_clears_incomplete(self) -> None:
+        from nexus.health import manifest_orphan_report
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        cat = self._cat(responses={
+            768: [
+                {"dim": 768, "count": 2, "orphans": [self._row("1.2.3", 0, "a" * 64, coll)]},
+                {"dim": 768, "count": 2, "orphans": [
+                    self._row("1.2.3", 0, "a" * 64, coll),
+                    self._row("1.2.3", 1, "b" * 64, coll),
+                ]},
+            ],
+        })
+        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 2, "referenced": 2}])
+
+        assert report["total_rows"] == 2
+        assert report["incomplete_collections"] == {}
+
+    def test_count_exceeding_ceiling_bounds_the_refetch_and_marks_incomplete(
+        self, monkeypatch,
+    ) -> None:
+        """The refetch must NEVER request more than
+        `_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM` — a single damaged dim with a
+        huge orphan population must not drive an unbounded response."""
+        import nexus.health as h
+        monkeypatch.setattr(h, "_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM", 3)
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        calls: list[int] = []
+
+        class _Cat:
+            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
+                calls.append(limit)
+                if len(calls) == 1:
+                    return {"dim": dim, "count": 100, "orphans": [self._row_static("1.2.3", 0, "a" * 64, coll)]}
+                # Second call: engine-wide count is still 100, but the
+                # ceiling-bounded refetch can only ask for `limit` rows.
+                return {
+                    "dim": dim, "count": 100,
+                    "orphans": [
+                        self._row_static("1.2.3", i, f"{i:064x}", coll) for i in range(limit)
+                    ],
+                }
+
+            @staticmethod
+            def _row_static(doc_id, position, chash, collection):
+                return {"tenant_id": "t", "doc_id": doc_id, "position": position,
+                        "chash": chash, "collection": collection}
+
+        from nexus.health import manifest_orphan_report
+        report = manifest_orphan_report(_Cat(), [{"collection": coll, "missing": 100, "referenced": 100}])
+
+        assert calls == [h._MANIFEST_ORPHANS_SAMPLE_LIMIT, 3], (
+            f"refetch must be bounded to the ceiling (3), got calls={calls}"
+        )
+        assert report["incomplete_collections"] == {coll: {"enumerated": 3, "expected": 100}}
+
+    def test_malformed_position_is_skipped_not_raised(self) -> None:
+        """nexus-heizf code-review fix round: a malformed `position` from
+        the wire must be logged and skipped, never an unhandled exception —
+        `manifest_orphan_report`'s own docstring promises "never raises"."""
+        from nexus.health import manifest_orphan_report
+
+        coll = "code__x__bge-base-en-v15-768__v1"
+        cat = self._cat(responses={
+            768: [{
+                "dim": 768, "count": 2,
+                "orphans": [
+                    self._row("1.2.3", "not-an-int", "a" * 64, coll),
+                    self._row("1.2.3", 1, "b" * 64, coll),
+                ],
+            }],
+        })
+        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 2, "referenced": 2}])
+
+        # Both rows counted (total_rows), but only the parseable position
+        # landed in the doc's position list.
+        assert report["total_rows"] == 2
+        assert report["collections"][coll]["1.2.3"]["positions"] == [1]
+        assert report["collections"][coll]["1.2.3"]["chashes"] == {"a" * 64, "b" * 64}
+
 
 class TestCheckStaleIndexingRuns:
     """nexus-5xn3k.6 bead-text amendment: documents stranded in
@@ -1595,12 +2121,21 @@ class TestCheckStaleIndexingRuns:
     aggregate.
     """
 
-    def _entry(self, *, index_state, index_started_at="", source_uri="", tumbler=""):
+    def _entry(
+        self, *, index_state, index_started_at="", source_uri="", tumbler="",
+        index_state_reported=True, indexed_at="",
+    ):
         return type("E", (), {
             "index_state": index_state,
             "index_started_at": index_started_at,
             "source_uri": source_uri,
             "tumbler": tumbler,
+            # nexus-vw594 F3: defaults to True (matches CatalogEntry's own
+            # default) — a fence-aware engine reporting the key. Pass
+            # False to simulate a genuinely pre-fence engine that never
+            # sends the key at all.
+            "index_state_reported": index_state_reported,
+            "indexed_at": indexed_at,
         })()
 
     def _cat(self, entries):
@@ -1653,13 +2188,21 @@ class TestCheckStaleIndexingRuns:
         assert "none" in r.detail
 
     def test_checked_zero_is_skipped_not_clean(self, monkeypatch) -> None:
-        """NON-VACUITY: an engine that predates the fence reports
-        index_state=None on every row; that must never render as a clean
-        'none (0 checked)' pass."""
-        entries = [self._entry(index_state=None)]
+        """NON-VACUITY: an engine that predates the fence never sends the
+        index_state KEY at all (index_state_reported=False); that must
+        never render as a clean 'none (0 checked)' pass.
+
+        nexus-vw594 F3 / nexus-biq4x: this is now the genuinely-unsupported
+        case, distinct from a fence-aware engine reporting the key with a
+        NULL value (see TestDoctorFenceCoverageDistinction below) — the
+        two used to be indistinguishable through dict.get() and collapsed
+        onto this exact message for both, which was nexus-biq4x's bug.
+        """
+        entries = [self._entry(index_state=None, index_state_reported=False)]
         r = self._run(monkeypatch, entries)
         assert r.ok is True
         assert "skipped" in r.detail
+        assert "predates the index-run fence" in r.detail
         assert "none (" not in r.detail
 
     def test_catalog_unavailable_degrades_to_skip(self, monkeypatch) -> None:
@@ -1671,6 +2214,144 @@ class TestCheckStaleIndexingRuns:
         r = h._check_stale_indexing_runs()[0]
         assert r.ok is True
         assert "no catalog" in r.detail
+
+
+class TestDoctorFenceCoverageDistinction:
+    """nexus-vw594 F3 (production test #4, root cause of nexus-biq4x):
+    ``_check_stale_indexing_runs`` must distinguish "index_state reported
+    but NULL on every row" (a fence-aware engine that simply has nothing
+    stamped) from "index_state key never sent" (a genuinely pre-fence
+    engine) — ``dict.get("index_state")`` alone cannot tell these apart
+    (both read as Python ``None``), which is exactly what let a fully
+    fence-aware, 100%-uncovered production install (the nexus-vw594
+    incident) render as a green pre-fence skip.
+
+    KILL CONTROL (documented per the task's TDD contract, not a separate
+    test — verified manually during implementation, 2026-08-04): reverting
+    the ``index_state_reported`` disambiguation in ``_to_entry``
+    (http_catalog_client.py) — i.e. dropping the
+    ``index_state_reported="index_state" in d`` line so the field always
+    defaults ``True`` regardless of wire shape — collapses this test back
+    onto the OLD behaviour: ``test_reported_null_after_fence_release_warns``
+    goes from WARN to a false "skipped ... predates the fence" (still
+    passes as a *string* match against the wrong branch, which is why the
+    stronger regression signal is `test_checked_zero_is_skipped_not_clean`
+    above going RED — with the revert, an ``index_state_reported=False``
+    fixture entry no longer has any way to reach ``not_reported`` at all,
+    since the flag is gone from the wire-parsing path; that fixture then
+    falls into ``reported_null`` and this file's WARN test starts
+    asserting on the SAME code path as the pre-fence test, which is the
+    coverage-gap regression this test exists to catch).
+    """
+
+    def _entry(self, *, index_state, indexed_at="", index_state_reported=True, source_uri="", tumbler=""):
+        return type("E", (), {
+            "index_state": index_state,
+            "index_started_at": "",
+            "indexed_at": indexed_at,
+            "index_state_reported": index_state_reported,
+            "source_uri": source_uri,
+            "tumbler": tumbler,
+        })()
+
+    def _cat(self, entries):
+        class _Cat:
+            def all_documents(self, limit=0):
+                return list(entries)
+        return _Cat()
+
+    def _run(self, monkeypatch, entries):
+        return self._run_all(monkeypatch, entries)[0]
+
+    def _run_all(self, monkeypatch, entries):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(entries), raising=False,
+        )
+        return h._check_stale_indexing_runs()
+
+    def test_reported_null_after_fence_release_warns(self, monkeypatch) -> None:
+        """The vw594 signature: index_state reported-but-NULL on the WHOLE
+        corpus, with at least one document indexed AFTER the fence's
+        release date — an unfenced producer wrote it. Must WARN, never
+        ok=True, and must NOT reuse the pre-fence "predates" wording (that
+        wording asserts something false: this engine DOES report the
+        fence field)."""
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T16:03:00+00:00",
+                source_uri="chroma://code__nexus/foo.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False
+        assert r.warn is True
+        assert "predates the index-run fence" not in r.detail
+        assert "coverage gap" in r.detail or "never calling" in r.detail
+
+    def test_reported_null_before_fence_release_stays_ok_with_honest_message(self, monkeypatch) -> None:
+        """Quiescent case (nexus-biq4x's own prescribed fix): the fence is
+        live but nothing has run through it yet (fresh install / stable
+        corpus). Stays ok=True — but with the "fence live" signal, never
+        the misleading pre-fence message."""
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-07-01T00:00:00+00:00",
+                source_uri="chroma://code__nexus/foo.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "predates the index-run fence" not in r.detail
+        assert "fence live" in r.detail
+
+    def test_mixed_corpus_checked_and_reported_null_both_warn(self, monkeypatch) -> None:
+        """CRITICAL regression (substantive-critic, T2
+        nexus/vw594-critique-2026-08-05 [21445], repro:
+        scratchpad/verify_mixed.py): the vw594-signature check used to be
+        nested inside ``if checked == 0``, so a mixed corpus — one
+        document with a genuine fenced run (checked > 0, e.g. the first
+        ``nx index repo`` after deploy) PLUS a second, unrelated document
+        that reports index_state but was never stamped after the fence
+        shipped — fell through to the generic ok=True "none (N checked)"
+        branch without the reported_null population ever being
+        inspected. That is nexus-biq4x's silent-green bug reborn under a
+        NEW trigger (checked > 0 instead of "engine predates the fence").
+        This fixture is deliberately NON-uniform (one checked doc, one
+        reported_null doc) — every fixture before this one in this class
+        was uniform, which is exactly why 7/7 green was false confidence.
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-03T00:00:00+00:00",
+                source_uri="chroma://code__nexus/checked.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T16:03:00+00:00",
+                source_uri="chroma://code__nexus/unfenced.py",
+            ),
+        ]
+        results = self._run_all(monkeypatch, entries)
+        warns = [r for r in results if r.warn]
+        assert warns, (
+            f"expected at least one WARN result from a mixed checked+"
+            f"reported_null corpus, got: {results}"
+        )
+        assert any(r.ok is False for r in warns)
+        assert not any("none (" in r.detail and r.ok for r in results), (
+            "the checked>0 summary must not silently supersede the "
+            f"reported_null WARN: {results}"
+        )
+        assert any(
+            "predates the index-run fence" not in r.detail
+            and ("coverage gap" in r.detail or "never calling" in r.detail)
+            for r in warns
+        )
 
 
 # ── nexus-0ehwe item 4: tumbler allocator drift ──────────────────────────────

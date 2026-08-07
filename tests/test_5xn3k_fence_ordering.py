@@ -195,17 +195,42 @@ def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> No
     assert fence.begin_calls[0]["collection"] == COLLECTION
 
 
-def test_index_document_rides_manifest_complete_with_same_hash(tmp_path) -> None:
-    """Single-flush documents ride write_manifest_many's complete map (no
-    extra round trip): fire_batch must receive manifest_complete mapping the
-    resolved doc_id to the SAME content_hash begin carried."""
+def test_index_document_explicit_complete_after_manifest_not_a_ride(tmp_path) -> None:
+    """nexus-tp8yk D2a: single-flush documents USED TO ride
+    write_manifest_many's optional `complete` map — but the production
+    writer never exposes write_manifest_many (dcv2k: the op is absent from
+    both CATALOG_WRITE_OPS and _SERVICE_ONLY_WRITE_OPS), so that ride was
+    structurally unreachable on every real run; the completion stamp fell
+    through to mcp_infra's per-doc `_stamp_index_run_complete`, whose
+    IndexRunVerifyRefused is swallowed at the call site (never propagates
+    to the CLI). Post-D2a, `_index_document` drops the ride and calls the
+    PROPAGATING `_fence_complete` explicitly at the tail — mirroring
+    `_index_pdf_incremental`'s multi-batch shape. fire_batch's
+    manifest_complete must now be None, and the explicit complete call
+    must land with the SAME content_hash begin carried, strictly AFTER
+    the manifest batch fired.
+    """
     seq: list = []
-    fence = _RecordingFenceWriter(seq)
-    _, hooks, _ = _drive_index_document(tmp_path, seq, fence)
+    fence = _RecordingFenceWriter(seq, complete_result={
+        "referenced": 1, "present": 1, "missing": 0, "flagged": 0,
+    })
+    n, hooks, _ = _drive_index_document(tmp_path, seq, fence)
 
+    assert n == 1
     assert hooks.batch_calls, "fire_batch never fired"
-    mc = hooks.batch_calls[0]["manifest_complete"]
-    assert mc == {DOC_ID: fence.begin_calls[0]["content_hash"]}
+    assert hooks.batch_calls[0]["manifest_complete"] is None, (
+        "the manifest_complete ride must be dropped — it never reached "
+        "the production writer (dcv2k); completion is now explicit"
+    )
+    assert fence.complete_calls, "_fence_complete never fired explicitly"
+    assert fence.complete_calls[0]["doc_id"] == DOC_ID
+    assert (
+        fence.complete_calls[0]["content_hash"]
+        == fence.begin_calls[0]["content_hash"]
+    )
+    assert fence.complete_calls[0]["chunk_count"] == 1
+    ops = [op for op, *_ in seq]
+    assert ops.index("complete") > ops.index("manifest_batch"), seq
 
 
 def test_index_document_no_catalog_skips_fence(tmp_path) -> None:

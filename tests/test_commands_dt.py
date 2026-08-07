@@ -25,7 +25,7 @@ Tests run on every platform via fake-helper monkeypatching plus
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -581,6 +581,641 @@ class TestStampFailedSummary:
         assert result.exit_code == 0, result.output
         assert "Indexed 1 record(s)" in result.output
         assert "stamp-failed" not in result.output
+
+
+# ── nexus-hb10j: --dt-content per-record catches must include the two ──────
+# NexusError subclasses tp8yk/w6wp0 introduced (ChunkLandingUnverifiedError, ─
+# IndexRunVerifyRefused) — collect-and-continue, mirroring the file-backed ──
+# _index_record call site (dt.py 748-805), not a whole-batch abort. ─────────
+
+
+class TestDtContentExceptionHandling:
+    """``_index_dt_content_record`` (the ``--dt-content`` non-file-backed
+    ingest path) only caught ``(RuntimeError, ImportError, OSError)`` around
+    its ``index_markdown()`` call — ``ChunkLandingUnverifiedError`` and
+    ``IndexRunVerifyRefused`` (both ``NexusError`` subclasses raised since
+    tp8yk/w6wp0) fell through uncaught and aborted the WHOLE ``--dt-content``
+    batch on the first affected record (third occurrence of the
+    nexus-2fyb/qo84l/9800y regression class — filed by the 2xu6t critic, T2
+    [21480]).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _dt_available(self, monkeypatch):
+        """``dt_content_active`` gates on ``_dt.available()`` — force it on
+        so the ``--dt-content`` branch is reached without a real DT."""
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+
+    def test_chunk_landing_unverified_collects_and_continues(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise ChunkLandingUnverifiedError(collection=collection, count=3)
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        # Collect-and-continue: U-OK must still be processed despite
+        # U-BAD's exception — a whole-batch abort would report "Indexed 0
+        # record(s)" (and, pre-fix, a raw traceback / empty output — see
+        # the RED run) and never reach U-OK at all.
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 from DT content" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert "U-BAD" in result.output, result.output
+        assert "cannot confirm 3 chunk(s)" in result.output, result.output
+        # ChunkLandingUnverifiedError fires BEFORE any manifest write
+        # (doc_indexer.py:1202-1206, D1's whole point) and — unlike
+        # IndexRunVerifyRefused's _record_complete_refusal side effect —
+        # touches none of the three run-level gate collectors
+        # (get_manifest_write_failures / get_manifest_identity_drops /
+        # get_complete_refusals). So the per-record ``failed`` bucket
+        # alone does not force a nonzero exit here; that's the run-level
+        # gate's job (see test_dt_content_refusal_still_honours_run_
+        # level_gate below), and this pin matches the file-backed
+        # sibling's identical existing contract (dt.py 782-805).
+        assert result.exit_code == 0, result.output
+
+    def test_index_run_verify_refused_collects_and_continues(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.errors import IndexRunVerifyRefused
+
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise IndexRunVerifyRefused(
+                    doc_id="1.99.1", referenced=5, present=3, missing=2,
+                    chunk_count=5,
+                )
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 from DT content" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert "U-BAD" in result.output, result.output
+        assert "completion REFUSED" in result.output, result.output
+        # Same rationale as the ChunkLandingUnverifiedError test above: a
+        # bare raise from this stub does not, by itself, populate
+        # get_complete_refusals() (only the real doc_indexer._fence_
+        # complete -> _record_complete_refusal call site does that, as a
+        # side effect of the SAME exception in production) — see the
+        # dedicated integration test below for that wiring.
+        assert result.exit_code == 0, result.output
+
+    def test_dt_content_refusal_still_honours_run_level_gate(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """Integration check (nexus-hb10j fix-shape guidance: 'verify the
+        record-level catches feed it consistently'): the run-level
+        identity-drop/refusal gate (commands._helpers, nexus-7f5qj) is the
+        ONLY thing that drives nonzero exit for a --dt-content batch —
+        mirrors TestIdentityDropSummary.test_summary_surfaces_drops_and_
+        batch_continues, which pins the same contract for the file-backed
+        branch. Simulates the collector entry doc_indexer._fence_complete's
+        real IndexRunVerifyRefused raise site (_record_complete_refusal)
+        would populate, alongside the SAME exception being converted to a
+        per-record ``failed`` entry by our new except clause — proving the
+        new catch does not shadow, reset, or otherwise interfere with the
+        collector-driven exit gate.
+        """
+        from nexus.errors import IndexRunVerifyRefused
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_complete_refusals",
+            lambda: ["1.99.1"],
+        )
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            raise IndexRunVerifyRefused(
+                doc_id="1.99.1", referenced=5, present=3, missing=2,
+                chunk_count=5,
+            )
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "1 failed" in result.output, result.output
+        assert "completion refused" in result.output.lower(), result.output
+        assert result.exit_code != 0, result.output
+
+    def test_register_ok_path_unchanged(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """Regression pin: no exception -> both records index cleanly via
+        the dt-content path, exit 0, no 'failed' mention."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-A", "x-devonthink-item://a"),
+            ("U-B", "x-devonthink-item://b"),
+        ]
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record",
+            lambda uuid, *, collection, corpus, extraction_source="dt_content": True,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Indexed 2 record(s)" in result.output, result.output
+        assert "2 from DT content" in result.output, result.output
+        assert "failed" not in result.output, result.output
+        assert result.exit_code == 0, result.output
+
+    def test_skip_path_unchanged_when_dt_content_returns_false(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """Kill control: the existing False-return (not an exception) path
+        — e.g. empty DT text — must still bucket as skipped, not failed.
+        Proves the new except clauses don't accidentally widen to catch
+        the plain bool-return contract."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-EMPTY", "x-devonthink-item://empty"),
+        ]
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record",
+            lambda uuid, *, collection, corpus, extraction_source="dt_content": False,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Indexed 0 record(s) (1 skipped)" in result.output, result.output
+        assert "failed" not in result.output, result.output
+        assert result.exit_code == 0, result.output
+
+
+# ── nexus-cy4oy: handler-BODY coverage for PER_RECORD_SURVIVABLE_EXCEPTIONS ─
+#
+# substantive-critic CRITICAL (round-2 review of nexus-rlkgu, T2 [21492]):
+# the AST tripwire (tests/test_rlkgu_per_record_catch_tripwire.py) inspects
+# except-clause TYPES, not handler BODIES. Its gates went green on a dt.py
+# dispatch shaped `if isinstance(exc, IndexRunVerifyRefused): ... else: #
+# assumes ChunkLandingUnverifiedError` — a hypothetical THIRD
+# PER_RECORD_SURVIVABLE_EXCEPTIONS member would hit the else branch, access
+# an attribute it doesn't have (.collection/.count), raise AttributeError
+# INSIDE the handler, and escape the try/except — occurrence-4 of the
+# nexus-2fyb/qo84l/9800y/hb10j class reproduced with both AST gates green.
+# dt.py's dispatch is now TOTAL (explicit isinstance branch per known type
+# + a generic final else with no attribute assumptions); the two test
+# classes below are the handler-body coverage the AST gates structurally
+# cannot give:
+#
+# * TestAllTupleMembersSurviveTheRealPerRecordPath — registry-driven
+#   (iterates the REAL nexus.errors.PER_RECORD_SURVIVABLE_EXCEPTIONS tuple,
+#   not hand-enumerated pytest functions) so a future third REAL member
+#   gets this coverage automatically as long as _MEMBER_KWARGS stays in
+#   sync (enforced by test_member_kwargs_registry_covers_every_tuple_member).
+# * TestGenericFallbackHandlesUnknownTupleMember — the actual kill control:
+#   monkeypatches in a SYNTHETIC third member with neither known shape and
+#   proves the generic else branch survives it. Manually verified during
+#   implementation: reverting dt.py's total dispatch back to the binary
+#   if/else form (`if isinstance(exc, IndexRunVerifyRefused): ... else:
+#   <ChunkLandingUnverifiedError-shaped access>`) turns both tests in that
+#   class RED with an AttributeError escaping the handler; restoring the
+#   fix turns them green again (see the developer's T1 scratch write-back
+#   for the exact revert/restore transcript).
+
+from nexus.errors import (  # noqa: E402 — grouped with this section's test-only imports
+    ChunkLandingUnverifiedError,
+    ExtractionQualityError,
+    IndexRunVerifyRefused,
+    NexusError as _NexusError,
+)
+
+_MEMBER_KWARGS: dict[type, dict] = {
+    ChunkLandingUnverifiedError: {
+        "collection": "docs__dt-test__voyage-context-3__v1", "count": 3,
+    },
+    IndexRunVerifyRefused: {
+        "doc_id": "1.99.1", "referenced": 5, "present": 3, "missing": 2,
+        "chunk_count": 5,
+    },
+    # nexus-wi1uv round-2 (code-review-expert + substantive-critic
+    # Critical, both independently, 2026-08-06): PDF post-extraction
+    # quality-gate failures must survive nx dt index's per-record loop
+    # exactly like the two members above.
+    ExtractionQualityError: {
+        "message": (
+            "PDF paper.pdf failed the post-extraction quality gate "
+            "(extraction_method=docling): whitespace_ratio=0.0114 < "
+            "floor 0.05."
+        ),
+    },
+}
+
+
+def test_member_kwargs_registry_covers_every_tuple_member() -> None:
+    """Completeness guard for the registry itself: a new
+    PER_RECORD_SURVIVABLE_EXCEPTIONS member with no _MEMBER_KWARGS entry
+    would silently skip the mechanical real-path drive-through below —
+    this fails loud instead of silently under-covering."""
+    from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS
+
+    missing = [
+        c.__name__ for c in PER_RECORD_SURVIVABLE_EXCEPTIONS
+        if c not in _MEMBER_KWARGS
+    ]
+    assert not missing, (
+        "PER_RECORD_SURVIVABLE_EXCEPTIONS member(s) with no _MEMBER_KWARGS "
+        f"registry entry in this test file — add one: {missing}"
+    )
+
+
+class TestAllTupleMembersSurviveTheRealPerRecordPath:
+    """Registry-driven: iterates the REAL production
+    ``PER_RECORD_SURVIVABLE_EXCEPTIONS`` tuple (not hand-enumerated test
+    functions) and drives EACH member through both per-record branches,
+    proving collect-and-continue. A future third REAL member is covered
+    automatically as long as ``_MEMBER_KWARGS`` is kept in sync."""
+
+    from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS as _MEMBERS
+
+    @pytest.mark.parametrize(
+        "member_cls", list(_MEMBERS), ids=lambda c: c.__name__,
+    )
+    def test_dt_content_branch_collects_and_continues(
+        self, runner, fake_selectors, monkeypatch, member_cls,
+    ) -> None:
+        from nexus.cli import main
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+        kwargs = _MEMBER_KWARGS[member_cls]
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise member_cls(**kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"{member_cls.__name__} escaped the handler as a raw "
+            f"traceback: {result.exception!r}"
+        )
+        assert "1 failed" in result.output, result.output
+        assert "U-BAD" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
+
+    @pytest.mark.parametrize(
+        "member_cls", list(_MEMBERS), ids=lambda c: c.__name__,
+    )
+    def test_file_backed_branch_collects_and_continues(
+        self, runner, monkeypatch, member_cls,
+    ) -> None:
+        from nexus.cli import main
+
+        kwargs = _MEMBER_KWARGS[member_cls]
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+
+        seq = [
+            lambda *a, **kw: (_ for _ in ()).throw(member_cls(**kwargs)),
+            lambda *a, **kw: 4,
+        ]
+
+        def _dispatch(*a, **kw):
+            return seq.pop(0)(*a, **kw)
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _dispatch)
+
+        result = runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"{member_cls.__name__} escaped the handler as a raw "
+            f"traceback: {result.exception!r}"
+        )
+        assert not seq, "U2 was never dispatched — the batch aborted after U1's exception"
+        assert "1 failed" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output
+
+
+class _SyntheticThirdMember(_NexusError):
+    """Test-only third ``PER_RECORD_SURVIVABLE_EXCEPTIONS`` member — NEVER
+    added to the real production tuple. Deliberately carries neither
+    ``ChunkLandingUnverifiedError``'s ``(.collection, .count)`` nor
+    ``IndexRunVerifyRefused``'s field set: a handler whose fallback branch
+    blindly assumes either shape raises ``AttributeError`` on this class."""
+
+    def __init__(self, *, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"synthetic third member: {detail}")
+
+
+class TestGenericFallbackHandlesUnknownTupleMember:
+    """THE kill control for nexus-cy4oy: monkeypatches
+    ``nexus.errors.PER_RECORD_SURVIVABLE_EXCEPTIONS`` to include a
+    synthetic third member with an incompatible shape, raises it from the
+    per-record helper, and proves dt.py's generic final ``else`` branch
+    (type name + ``str(exc)``, no attribute assumptions) survives it —
+    collect-and-continue, not a crash. dt.py's deferred
+    ``from nexus.errors import (..., PER_RECORD_SURVIVABLE_EXCEPTIONS)``
+    re-imports the name fresh on every ``index_cmd()`` call, so patching
+    the module attribute before ``runner.invoke`` is picked up by the
+    ``except PER_RECORD_SURVIVABLE_EXCEPTIONS`` clause at call time."""
+
+    def test_dt_content_branch(self, runner, fake_selectors, monkeypatch) -> None:
+        from nexus.cli import main
+        import nexus.errors as errors_mod
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+        monkeypatch.setattr(
+            errors_mod, "PER_RECORD_SURVIVABLE_EXCEPTIONS",
+            (*errors_mod.PER_RECORD_SURVIVABLE_EXCEPTIONS, _SyntheticThirdMember),
+        )
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+            if uuid == "U-BAD":
+                raise _SyntheticThirdMember(detail="unknown-shape")
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"the synthetic third member escaped the handler: {result.exception!r}"
+        )
+        assert "1 failed" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
+        assert "synthetic third member: unknown-shape" in result.output, result.output
+
+    def test_file_backed_branch(self, runner, monkeypatch) -> None:
+        from nexus.cli import main
+        import nexus.errors as errors_mod
+
+        monkeypatch.setattr(
+            errors_mod, "PER_RECORD_SURVIVABLE_EXCEPTIONS",
+            (*errors_mod.PER_RECORD_SURVIVABLE_EXCEPTIONS, _SyntheticThirdMember),
+        )
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+
+        seq = [
+            lambda *a, **kw: (_ for _ in ()).throw(
+                _SyntheticThirdMember(detail="unknown-shape"),
+            ),
+            lambda *a, **kw: 4,
+        ]
+
+        def _dispatch(*a, **kw):
+            return seq.pop(0)(*a, **kw)
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _dispatch)
+
+        result = runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
+
+        assert "Traceback" not in result.output, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"the synthetic third member escaped the handler: {result.exception!r}"
+        )
+        assert not seq, "U2 was never dispatched — the batch aborted after U1's exception"
+        assert "1 failed" in result.output, result.output
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "synthetic third member: unknown-shape" in result.output, result.output
+
+
+# ── nexus-2xu6t: nx dt index must NOT report success when the catalog ───────
+# register failed (pbawi acceptance item 3) ──────────────────────────────────
+
+
+class TestIdentityDropSummary:
+    """``nx dt index`` reports SUCCESS when the preflight catalog register
+    failed — chunks land in T3 (searchable) but no catalog Document exists
+    for them (no tumbler, no ``--link-semantic``, no ``--writeback``).
+
+    nexus-tp8yk D2 already wires ``get_manifest_identity_drops()`` into
+    this command's exit code (see ``index_cmd``'s tail, mirroring
+    ``index_repo_cmd``'s ``_emit_manifest_write_failure_summary``); these
+    tests are the first to actually exercise that wiring for ``nx dt
+    index`` specifically. Two layers, mirroring test_index_cmd.py's own
+    split for ``nx index repo``:
+
+    * ``test_register_throw_*`` drives the REAL ``_register_or_lookup_
+      doc_id`` swallow through a broken catalog writer (forcing
+      ``NX_STORAGE_BACKEND_VECTORS=chroma`` so the write lands on the
+      injected ``make_t3`` double rather than the real local engine's
+      ``/v1/vectors`` service path — service mode is the pytest-env
+      default per ``is_vector_service_mode``'s RDR-155 P4a.2 docstring),
+      proving the register-failure -> collector link end to end.
+    * ``test_summary_*`` mirrors ``test_identity_drop_summary_surfaces_
+      drops`` / ``test_identity_drop_summary_silent_when_none`` in
+      test_index_cmd.py: mocks the collector directly to pin the
+      collector -> exit-code wiring in isolation, with a REAL
+      multi-record dispatch (via ``fake_dispatcher``) proving the drop
+      does not abort per-record processing.
+    """
+
+    @staticmethod
+    def _empty_t3() -> MagicMock:
+        t3 = MagicMock()
+        t3.get_or_create_collection.return_value = MagicMock(
+            get=MagicMock(return_value={"ids": [], "metadatas": []}),
+        )
+        return t3
+
+    @staticmethod
+    def _broken_catalog(*, register_raises: bool):
+        """Reader/writer doubles mirroring the pbawi 409/wedge shape:
+        first-time file, curator owner already resolves (no
+        ``register_owner`` round-trip), and — when *register_raises* —
+        ``writer.register`` throws exactly like a wedged owner's real
+        engine 409 (nexus-pbawi)."""
+        reader = MagicMock()
+        reader.by_file_path.return_value = None
+        reader.curator_owner_tumbler_by_name.return_value = "1.99"
+        reader.find_by_file_path.return_value = MagicMock(tumbler="1.99.1")
+        writer = MagicMock()
+        if register_raises:
+            writer.register.side_effect = RuntimeError(
+                "integrity constraint violation",
+            )
+        else:
+            writer.register.return_value = "1.99.1"
+        return reader, writer
+
+    def _make_md(self, tmp_path, name: str):
+        p = tmp_path / f"{name}.md"
+        p.write_text(f"# {name}\n\nSome real prose body for {name}.\n")
+        return p
+
+    def test_register_throw_exits_nonzero_with_distinct_summary_and_batch_continues(
+        self, runner, fake_selectors, monkeypatch, tmp_path,
+    ):
+        from nexus.cli import main
+
+        # Force the injected make_t3() double onto the write path instead of
+        # the real local engine's /v1/vectors service route — see class
+        # docstring. index_markdown stays on the single-flush
+        # _index_document path either way (no streaming pipeline
+        # involved), so this is the only override single-file .md needs.
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        # nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+        # (Hal determination 2026-07-28) — local mode (ONNX) is the
+        # surviving non-service dispatch path this test needs to reach
+        # _register_or_lookup_doc_id via. The module-level ``cloud_mode``
+        # fixture (pytestmark above) already monkeypatched
+        # ``nexus.config.is_local_mode`` to a hardcoded ``False``; an env
+        # var flip alone would not undo that, since the function object
+        # itself was replaced. Re-patch it directly.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+
+        md_a = self._make_md(tmp_path, "recA")
+        md_b = self._make_md(tmp_path, "recB")
+        fake_selectors["selection"].return_value = [
+            ("U-A", str(md_a)),
+            ("U-B", str(md_b)),
+        ]
+
+        reader, writer = self._broken_catalog(register_raises=True)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+            result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        # Collect-and-continue (nexus-9800y convention): the register
+        # exception on record A must not abort record B — both land.
+        assert "Indexed 2 record(s)" in result.output, result.output
+        # Distinct, non-clean outcome — never the plain success summary.
+        assert (
+            "WITHOUT a catalog document identity" in result.output
+        ), result.output
+        assert "nx catalog reconcile" in result.output
+        # pbawi acceptance item 3, verbatim requirement: must NOT exit 0.
+        assert result.exit_code != 0, result.output
+
+    def test_register_ok_summary_unchanged(
+        self, runner, fake_selectors, monkeypatch, tmp_path,
+    ):
+        """Baseline regression pin: when registration succeeds, the
+        identity-drop WARNING must not appear and the run exits 0 —
+        the fix must not cry wolf on the healthy path."""
+        from nexus.cli import main
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        # nexus-sghyo (2026-08-06): see test_register_throw_* above — local
+        # mode is the surviving non-service dispatch path.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+
+        md_a = self._make_md(tmp_path, "recOK")
+        fake_selectors["selection"].return_value = [("U-OK", str(md_a))]
+
+        reader, writer = self._broken_catalog(register_raises=False)
+
+        with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
+             patch("nexus.doc_indexer._fence_begin"), \
+             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+            result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "WITHOUT a catalog document identity" not in result.output
+        assert result.exit_code == 0, result.output
+
+    def test_summary_surfaces_drops_and_batch_continues(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        """Collector -> exit-code wiring, isolated from the register
+        mechanism (mirrors test_index_cmd.py's ``test_identity_drop_
+        summary_surfaces_drops``). ``fake_dispatcher`` reports two clean
+        per-record successes; the collector nonetheless reports drops
+        (as it would after a real register failure) — the run must
+        still process BOTH records (collect-and-continue) and THEN
+        fail loud at the tail.
+        """
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_identity_drops",
+            lambda: [
+                {"collection": "docs__dt", "batch_size": 3},
+                {"collection": "docs__dt", "batch_size": 5},
+            ],
+        )
+        fake_selectors["selection"].return_value = [
+            ("U-A", "/a.pdf"), ("U-B", "/b.md"),
+        ]
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert len(fake_dispatcher) == 2, "both records must be dispatched"
+        assert "Indexed 2 record(s)" in result.output, result.output
+        assert (
+            "WARNING: 2 chunk batch(es) (8 chunks; collection(s): "
+            "docs__dt) were indexed WITHOUT a catalog document identity"
+        ) in result.output, result.output
+        assert "nx catalog reconcile" in result.output
+        assert result.exit_code != 0, result.output
+
+    def test_summary_silent_when_no_drops(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert result.exit_code == 0, result.output
+        assert "WITHOUT a catalog document identity" not in result.output
 
 
 # ── nx dt open ───────────────────────────────────────────────────────────────

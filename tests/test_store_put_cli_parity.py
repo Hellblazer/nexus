@@ -68,10 +68,18 @@ def _install_recording_registry(monkeypatch):
             super().fire_single(doc_id, collection, content)
 
         def fire_batch(self, doc_ids, collection, contents, embeddings=None,
-                       metadatas=None, *, catalog_doc_id=""):  # type: ignore[override]
+                       metadatas=None, *, catalog_doc_id="",
+                       manifest_complete=None):  # type: ignore[override]
+            # nexus-cotmr: keep in sync with HookRegistry.fire_batch's real
+            # signature (manifest_complete, nexus-5xn3k.4 RUNFENCE) — CLI
+            # `nx store put` / `nx memory promote` now fence and pass this
+            # through fire_store_chains -> fire_batch; an override missing
+            # the parameter raises TypeError on every such call, not just
+            # the RUNFENCE-specific ones.
             batch.append(list(doc_ids))
             super().fire_batch(doc_ids, collection, contents, embeddings,
-                               metadatas, catalog_doc_id=catalog_doc_id)
+                               metadatas, catalog_doc_id=catalog_doc_id,
+                               manifest_complete=manifest_complete)
 
         def fire_document(self, source_path, collection, content, *, doc_id=""):  # type: ignore[override]
             doc.append(source_path)

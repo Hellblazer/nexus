@@ -13,6 +13,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.lint
+
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "nexus"

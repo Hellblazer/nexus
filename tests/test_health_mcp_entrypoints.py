@@ -305,9 +305,12 @@ class TestDoctorCliMcpEntryPointComposition:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.registry.RepoRegistry", return_value=mock_reg),
+            # nexus-cw262: health.py's git-hooks check now calls
+            # list_repos_dual_with_catalog_roots directly; the old
+            # list_repos_dual wrapper is no longer on that path.
             patch(
-                "nexus.repos.list_repos_dual",
-                side_effect=lambda **_: list(mock_reg.all()),
+                "nexus.repos.list_repos_dual_with_catalog_roots",
+                side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
             ),
             patch("nexus.config.get_credential", return_value="sk-key"),
             # Unconditional service probe (critique finding 2, test_doctor_cmd.py) — stub it green.

@@ -60,9 +60,17 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
         # Patch at definition site (nexus.repos) because health.py
         # imports lazily inside _check_hooks — no module-level
         # symbol exists to patch on nexus.health itself.
+        #
+        # nexus-cw262: health.py's git-hooks check now calls
+        # list_repos_dual_with_catalog_roots directly (one round trip
+        # serving both the walk list and the catalog-only attribution set,
+        # instead of a second independent list_owners_by_type call) —
+        # patch that function, not the list_repos_dual wrapper it no
+        # longer goes through. catalog_repo_roots=set() mirrors this
+        # fixture's mock_reg-only (no catalog) setup.
         patch(
-            "nexus.repos.list_repos_dual",
-            side_effect=lambda **_: list(mock_reg.all()),
+            "nexus.repos.list_repos_dual_with_catalog_roots",
+            side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
         ),
     ]
     if callable(cred):
@@ -330,6 +338,13 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
 # ── Index log ───────────────────────────────────────────────────────────────
 
 def test_doctor_index_log_not_created_yet(runner, mock_reg):
+    """nexus-ay18d fix-round finding: this assertion previously passed via
+    an UNRELATED check's "not created yet" wording — the now-retired
+    ``_check_t2_integrity``'s fresh-box detail, present ANYWHERE in the
+    full doctor output because the assertion is a blanket substring check,
+    not scoped to the index-log section. The index-log check's own
+    no-activity wording never actually said "not created yet". Pinned to
+    the real message instead."""
     with tempfile.TemporaryDirectory() as tmpdir:
         fake_home = Path(tmpdir)
         (fake_home / ".config" / "nexus").mkdir(parents=True, exist_ok=True)
@@ -337,7 +352,7 @@ def test_doctor_index_log_not_created_yet(runner, mock_reg):
             patch.object(Path, "home", return_value=fake_home),
         ])
     assert "index log" in result.output
-    assert "not created yet" in result.output
+    assert "no index activity recorded yet" in result.output
 
 
 # ── Single-database check ───────────────────────────────────────────────────
@@ -397,9 +412,12 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.
         patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
+        # nexus-cw262: health.py's git-hooks check now calls
+        # list_repos_dual_with_catalog_roots directly; the old
+        # list_repos_dual wrapper is no longer on that path.
         patch(
-            "nexus.repos.list_repos_dual",
-            side_effect=lambda **_: list(mock_reg.all()),
+            "nexus.repos.list_repos_dual_with_catalog_roots",
+            side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
         ),
         # Unconditional service probe (critique finding 2) — stub it green.
         patch("nexus.db.http_vector_client._get", return_value=[]),
@@ -436,9 +454,12 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.
         patch("nexus.health._probe_mcp_server", return_value=(True, "stubbed")),
+        # nexus-cw262: health.py's git-hooks check now calls
+        # list_repos_dual_with_catalog_roots directly; the old
+        # list_repos_dual wrapper is no longer on that path.
         patch(
-            "nexus.repos.list_repos_dual",
-            side_effect=lambda **_: list(mock_reg.all()),
+            "nexus.repos.list_repos_dual_with_catalog_roots",
+            side_effect=lambda **_: (list(mock_reg.all()), set(), "unknown"),
         ),
         patch("nexus.db.make_t3", return_value=_StubServiceClient()),
         # Unconditional service probe (critique finding 2) — stub it green.

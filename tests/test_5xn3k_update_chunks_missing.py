@@ -190,14 +190,19 @@ def test_multiple_stale_ids_all_land(engine):
 # ── Engine-floor tolerance: absent "missing" key is "cannot tell" ──────────
 
 
-def test_engine_floor_no_missing_key_no_reroute_but_warns(engine, caplog):
+def test_engine_floor_no_missing_key_raises_landing_unverified(engine, caplog):
     """Pre-fence engine: response has no "missing" field at all.
 
-    Today's (pre-fix) behaviour must be preserved exactly — no reroute,
-    because the client cannot tell which ids (if any) were stale — but the
-    degraded report must be surfaced at WARNING, never silently treated as
-    "zero misses".
+    nexus-tp8yk D1: pre-fix, this degraded to "no reroute" and returned
+    normally — the caller's manifest hook would then write rows for a
+    batch never confirmed landed (design memo §1 P1's mechanism). Post-
+    fix, "cannot tell" must REFUSE, not silently proceed:
+    ``_upsert_skip_reembed`` raises ``ChunkLandingUnverifiedError``.
+    ``HttpVectorClient.update_chunks``' own WARNING (a distinct, lower-
+    layer signal) still fires first — unaffected by this bead.
     """
+    from nexus.errors import ChunkLandingUnverifiedError
+
     db = _client()
     engine.missing_key_enabled = False
     stale_id = "cc" * 32
@@ -206,13 +211,16 @@ def test_engine_floor_no_missing_key_no_reroute_but_warns(engine, caplog):
 
     _route_structlog_to_stdlib()
     with caplog.at_level(logging.WARNING, logger="nexus.db.http_vector_client"):
-        _upsert_skip_reembed(
-            db, _COLL, [stale_id], ["should NOT silently land"], [[]],
-            [{"source_path": "x.py"}],
-        )
+        with pytest.raises(ChunkLandingUnverifiedError) as excinfo:
+            _upsert_skip_reembed(
+                db, _COLL, [stale_id], ["should NOT silently land"], [[]],
+                [{"source_path": "x.py"}],
+            )
 
-    # No reroute happened — today's (degraded) behaviour preserved.
+    # No reroute happened — refusing beats guessing.
     assert stale_id not in engine.rows
+    assert excinfo.value.collection == _COLL
+    assert excinfo.value.count == 1
     assert any(
         r.msg == "update_chunks_missing_unreported" and r.levelname == "WARNING"
         for r in caplog.records
@@ -256,15 +264,19 @@ def test_missing_key_present_but_empty_is_genuinely_zero_no_warning(engine, capl
 # trusted; if even one page omits it, the whole call degrades to None.
 
 
-def test_mixed_page_missing_field_omission_is_cannot_tell_no_reroute(engine, caplog):
+def test_mixed_page_missing_field_omission_raises_landing_unverified(engine, caplog):
     """4 ids, page size forced to 2 -> exactly 2 pages. Page 1's response
     includes "missing" (and would, on its own, look like actionable data —
     every one of its ids is a stale positive); page 2's response omits the
-    key entirely (older/mixed engine). The overall call must NOT reroute
-    ANY id — not even page 1's — because "missing" is only trustworthy when
-    every page reports it. Falsifies the OR-accumulation bug directly:
-    that bug would reroute page 1's ids and log nothing about page 2.
+    key entirely (older/mixed engine). "missing" is only trustworthy when
+    every page reports it, so the overall call degrades to ``None`` —
+    which, post-nexus-tp8yk D1, must RAISE rather than reroute ANY id
+    (not even page 1's). Falsifies the OR-accumulation bug directly: that
+    bug would reroute page 1's ids and log nothing about page 2; a
+    pre-tp8yk regression would return normally with no reroute at all.
     """
+    from nexus.errors import ChunkLandingUnverifiedError
+
     db = _client()
     ids = [f"{c}" * 64 for c in "abcd"]  # 4 ids
     engine.probe_present = set(ids)  # probe reports all 4 present
@@ -280,7 +292,8 @@ def test_mixed_page_missing_field_omission_is_cannot_tell_no_reroute(engine, cap
             "nexus.db.limits.QUOTAS", ServiceLimits(MAX_RECORDS_PER_WRITE=2),
         )
         with caplog.at_level(logging.WARNING):
-            _upsert_skip_reembed(db, _COLL, ids, documents, embeddings, metadatas)
+            with pytest.raises(ChunkLandingUnverifiedError):
+                _upsert_skip_reembed(db, _COLL, ids, documents, embeddings, metadatas)
 
     # No reroute happened for ANY id, including page 1's — cannot-tell
     # dominates the whole call, not just the page that was missing it.

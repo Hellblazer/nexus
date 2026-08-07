@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +30,9 @@ from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
     StaleOwnerError,
+    ProcessSweepResult,
+    storage_service_stack_matcher,
+    sweep_matching_processes,
 )
 
 
@@ -459,3 +463,141 @@ class TestDiscoverReapToctou:
         live = registry.discover("42")
         assert live is not None, "a re-stamped-fresh record must not be reaped"
         assert live.owner_token == "A"
+
+
+# ---------------------------------------------------------------------------
+# nexus-oyo2g: the process-table lease-miss fallback (storage_service stop).
+# ---------------------------------------------------------------------------
+
+
+class TestStorageServiceStackMatcher:
+    """Argv predicate identifying a storage-service supervisor/engine pair
+    belonging to a given config_dir. See ``storage_service_daemon.
+    stop_storage_service``'s Phase 2/3 (nexus-oyo2g)."""
+
+    def test_matches_supervisor_and_engine(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "nexus"
+        matcher = storage_service_stack_matcher(cfg)
+        assert matcher(
+            f"nx daemon service start --foreground --config-dir {cfg}"
+        )
+        assert matcher(f"{cfg}/service/nexus-service -Xmx1g")
+
+    def test_rejects_unrelated_and_sibling_profile(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "nexus"
+        sibling = tmp_path / "nexus-staging"
+        matcher = storage_service_stack_matcher(cfg)
+        assert not matcher("/x/pg-bundle/bundle/bin/postgres -D /x/postgres")
+        # Token-exact on --config-dir: a prefix-colliding sibling profile
+        # must never match (review Critical 2026-08-01, carried over from
+        # upgrade_finish.service_stack_pids).
+        assert not matcher(
+            f"nx daemon service start --foreground --config-dir {sibling}"
+        )
+        assert not matcher(f"tail -f {cfg}/service/nexus-service.log")
+
+
+class TestSweepMatchingProcesses:
+    """``sweep_matching_processes`` — THE shared mechanism nexus-oyo2g's
+    ``stop_storage_service`` lease-miss fallback needed. Generalizes
+    ``upgrade_finish._sweep_surviving_stack`` into the primitive."""
+
+    def test_finds_and_terminates_matching_processes(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "nexus"
+        rows = [
+            (196, 60, f"nx daemon service start --foreground --config-dir {cfg}"),
+            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+            (153, 60, "/x/pg-bundle/bundle/bin/postgres -D /x/postgres"),
+        ]
+        terminated: list[list[int]] = []
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+            side_effect=lambda pids, **_: terminated.append(sorted(pids)) or [],
+        ):
+            result = sweep_matching_processes(
+                storage_service_stack_matcher(cfg), exclude_pid=99999,
+            )
+        assert isinstance(result, ProcessSweepResult)
+        assert result.available
+        assert sorted(result.pids) == [196, 214]
+        assert result.stubborn == ()
+        assert terminated == [[196, 214]]
+
+    def test_no_matches_is_a_true_noop(self, tmp_path: Path) -> None:
+        """No matching process => no terminate_pids call at all — a clean
+        sweep must not narrate or signal anything (mirrors
+        _sweep_surviving_stack's 'silent when actually stopped' contract)."""
+        cfg = tmp_path / "nexus"
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+        ) as term:
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+        assert result.available
+        assert result.found == ()
+        assert result.pids == ()
+        term.assert_not_called()
+
+    def test_recycled_pid_is_never_signalled(self, tmp_path: Path) -> None:
+        """Pid-recycle TOCTOU guard: a pid whose CURRENT argv no longer
+        matches what the snapshot recorded must never be signalled — the
+        same discipline as upgrade_finish._sweep_surviving_stack."""
+        cfg = tmp_path / "nexus"
+        rows = [
+            (196, 60, f"nx daemon service start --foreground --config-dir {cfg}"),
+            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+        ]
+        current = {196: "vim /etc/hosts", 214: rows[1][2]}
+        terminated: list[list[int]] = []
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            side_effect=lambda pid: current[pid],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+            side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+        ):
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+        assert result.pids == (214,), (
+            f"the recycled pid 196 must never be signalled: {result}"
+        )
+        assert terminated == [[214]]
+
+    def test_process_table_unavailable_is_reported_not_swallowed(
+        self, tmp_path: Path,
+    ) -> None:
+        cfg = tmp_path / "nexus"
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows",
+            side_effect=RuntimeError("no ps, no /proc"),
+        ):
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+        assert not result.available
+        assert result.error and "no ps" in result.error
+        assert result.found == ()
+
+    def test_stubborn_survivor_is_surfaced(self, tmp_path: Path) -> None:
+        """A pid that survives even the SIGKILL escalation inside
+        terminate_pids must be reported in ``stubborn``, never dropped."""
+        cfg = tmp_path / "nexus"
+        rows = [
+            (196, 60, f"nx daemon service start --foreground --config-dir {cfg}"),
+        ]
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            return_value=rows[0][2],
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids", return_value=[196],
+        ):
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+        assert result.pids == (196,)
+        assert result.stubborn == (196,)

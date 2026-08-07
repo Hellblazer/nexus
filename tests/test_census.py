@@ -389,7 +389,7 @@ def test_cli_missing_project_dir_exits_nonzero(tmp_path: pathlib.Path) -> None:
 def test_cli_json_mode_is_parseable(corpus: pathlib.Path) -> None:
     res = _invoke(["capability", "--project-dir", str(corpus), "--json"])
     assert res.exit_code == 0, res.output
-    payload = json.loads(res.output)
+    payload = json.loads(res.stdout)
     assert payload["verdict"] is None
     assert payload["measurable_sessions"] == 2
 

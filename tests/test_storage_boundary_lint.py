@@ -21,13 +21,43 @@ Allowlist model (RDR-186 P4, bead nexus-146xx.18):
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 import pytest
 
+pytestmark = pytest.mark.lint
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
+
+
+@functools.cache
+def _default_scan_result():
+    """The full-repo AST scan with every ``scan_repo`` override at its
+    default (``None``) value — run exactly ONCE per pytest session and
+    shared by every truly-bare wrapper call below.
+
+    test-suite-compression P0 (nexus-test-cleanup, T1 scratch 47337851,
+    2026-08-05): ~60 tests in this file each called ``scan_repo(REPO_ROOT)``
+    fresh (76s total; ~32 of the 60 pass no distinguishing kwargs at all,
+    so those calls are provably the identical scan repeated ~32 times —
+    ``scan_repo``'s own docstring confirms every override parameter
+    defaults to ``None`` and is resolved to the same module-level default
+    internally, so a bare call from ANY of the wrapper functions below
+    (``_check``, ``_catalog_check``, ``_db_access_check``, etc.) produces
+    byte-identical output). Every wrapper funnels a truly bare invocation
+    (no ``extra_files``, no allowlist override) through this cache; ANY
+    override computes fresh and is NEVER cached — those intentionally scan
+    a different input (a synthetic ``tmp_path`` file, or a widened/narrowed
+    allowlist) and must not be conflated with the default scan or with each
+    other (see this file's docstring risk note: only bare ``_check()``-style
+    calls are safe to share).
+    """
+    from nexus.storage_boundary_lint import scan_repo
+
+    return scan_repo(repo_root=REPO_ROOT)
 
 
 def _check(extra_files=None, allowlist_prefixes=None,
@@ -36,6 +66,16 @@ def _check(extra_files=None, allowlist_prefixes=None,
            voyageai_client_allowlist=None,
            t2database_construction_allowlist=None):
     """Run the lint and return its result."""
+    if (
+        extra_files is None
+        and allowlist_prefixes is None
+        and construction_allowlist_prefixes is None
+        and sqlite_connect_allowlist is None
+        and voyageai_client_allowlist is None
+        and t2database_construction_allowlist is None
+    ):
+        return _default_scan_result()
+
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
@@ -553,7 +593,11 @@ def test_dual_population_baseline_locked():
         f"{result.sqlite_allowlisted_connects} != allowlist sum "
         f"{sum(SQLITE_CONNECT_ALLOWLIST.values())}"
     )
-    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 3
+    # 3 -> 2 at nexus-ay18d: health.py's PRAGMA integrity_check / FTS5
+    # write-shaped probe was ported off SQLite entirely (asks the engine's
+    # GET /version for the Liquibase changelog fingerprint instead), not
+    # merely relabelled — one fewer sqlite3.connect site in src/.
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 2
     # ZERO violations: every direct construction / connect outside the
     # named allowlists fails CI here — the enforcement teeth.
     assert result.total_violations == 0, (
@@ -616,6 +660,9 @@ def test_named_allowlists_point_at_live_files():
 
 
 def _catalog_check(extra_files=None, catalog_construction_allowlist_prefixes=None):
+    if extra_files is None and catalog_construction_allowlist_prefixes is None:
+        return _default_scan_result()
+
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
@@ -1000,6 +1047,9 @@ def test_taxonomy_write_lint_named_budget_exempts_first_n(
 
 
 def _db_access_check(extra_files=None, catalog_db_access_allowlist_prefixes=None):
+    if extra_files is None and catalog_db_access_allowlist_prefixes is None:
+        return _default_scan_result()
+
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
@@ -1098,6 +1148,13 @@ def test_catalog_db_access_metric_dict_includes_field():
 
 def _raw_handle_check(extra_files=None, t2_raw_handle_access_allowlist_prefixes=None,
                       t2_raw_handle_allowlist=None):
+    if (
+        extra_files is None
+        and t2_raw_handle_access_allowlist_prefixes is None
+        and t2_raw_handle_allowlist is None
+    ):
+        return _default_scan_result()
+
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
@@ -1263,6 +1320,9 @@ def test_t2_raw_handle_aliased_access_is_a_documented_blind_spot(tmp_path):
 
 
 def _client_for_check(extra_files=None, client_for_allowlist_prefixes=None):
+    if extra_files is None and client_for_allowlist_prefixes is None:
+        return _default_scan_result()
+
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
@@ -1347,6 +1407,9 @@ def test_client_for_baseline_is_zero_in_repo():
 
 
 def _catalog_dir_check(extra_files=None, catalog_dir_access_allowlist_prefixes=None):
+    if extra_files is None and catalog_dir_access_allowlist_prefixes is None:
+        return _default_scan_result()
+
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(

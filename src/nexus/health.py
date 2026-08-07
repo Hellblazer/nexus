@@ -6,14 +6,13 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import structlog
 
@@ -756,10 +755,14 @@ def _check_t3_cloud() -> list[HealthResult]:
     # migration-source credential rows died with the migration machinery
     # at P4b.
 
-    # VOYAGE_API_KEY — server-side embedding on the service path; the
-    # client key is enrichment + engine-bootstrap material only (RDR-188
-    # moved reranking server-side — no client code path consumes this key
-    # for rerank), not a serving requirement.
+    # VOYAGE_API_KEY — server-side embedding on the service path. The
+    # client key is no longer a client credential of any kind (nexus-sghyo,
+    # Hal determination 2026-07-28: "we do no embedding on the client" —
+    # RDR-188 already moved reranking server-side, so no client code path
+    # consumed this key for rerank either). It remains an OPTIONAL
+    # engine-bound setting: a locally-spawned engine plumbs it through
+    # (daemon/storage_service_daemon.py) for voyage mode. Not a serving
+    # requirement from the client's perspective either way.
     voyage_key = get_credential("voyage_api_key")
     results.append(HealthResult(
         label="Voyage AI (VOYAGE_API_KEY)",
@@ -1110,7 +1113,7 @@ def _check_git_hooks() -> list[HealthResult]:
     from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END  # noqa: PLC0415 — deferred to avoid circular import
     _effective_hooks_dir = _ghm.effective_hooks_dir
     from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.repos import list_repos_dual  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.repos import list_repos_dual_with_catalog_roots  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
@@ -1146,10 +1149,31 @@ def _check_git_hooks() -> list[HealthResult]:
     # legacy ``repos.json`` fallback via the dual-read shim. Catalog
     # paths come from ``owners WHERE owner_type='repo'``; the registry
     # provides legacy installs that have not yet been re-indexed.
+    cat = None
+    repos: list[str] = []
+    # nexus-cw262 (round-2 critique, T2 21456 moderate finding): a single
+    # list_repos_dual_with_catalog_roots call now serves BOTH the walk list
+    # (``repos``, CATALOG ∪ registry union) and the attribution set
+    # (``catalog_repo_roots``, catalog-only) from ONE
+    # cat.list_owners_by_type("repo") round trip. Pre-fix this was two
+    # independent calls (list_repos_dual, then a second list_owners_by_type
+    # inline below); a transient failure of the SECOND call alone silently
+    # degraded catalog_repo_roots to empty, misattributing a genuinely
+    # catalog-owned dead owner as a legacy repos.json entry — a narrow,
+    # self-healing (next doctor run) but real recurrence of the population-
+    # mismatch class this same bead's round-1 fix closed for the common case.
+    catalog_repo_roots: set[str] = set()
+    # nexus-cw262 round-3 critique (T2 21467 Significant-2): the SAME call
+    # also yields the owner-deactivate capability signal now — "unknown"
+    # (not "available") is the safe default until proven otherwise, so a
+    # failed/empty read never accidentally claims a route that may not
+    # exist on the connected engine.
+    deactivate_capability = "unknown"
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
         cat = make_catalog_reader()
-        repos = list_repos_dual(cat=cat, registry_path=registry_path)
+        repos, catalog_repo_roots, deactivate_capability = list_repos_dual_with_catalog_roots(
+            cat=cat, registry_path=registry_path)
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         # RDR-137 followup IMP-20 (nexus-43qgm.20): exc_info=True so
         # the operator sees the traceback alongside the error message
@@ -1159,6 +1183,8 @@ def _check_git_hooks() -> list[HealthResult]:
             "doctor_registry_load_failed", error=str(exc), exc_info=True,
         )
         repos = []
+        catalog_repo_roots = set()
+        deactivate_capability = "unknown"
 
     if not repos:
         results.append(HealthResult(
@@ -1211,11 +1237,98 @@ def _check_git_hooks() -> list[HealthResult]:
                         detail=f"{repo_path} — not installed",
                         fix_suggestions=[f"nx hooks install {repo_path}"],
                     ))
-            except Exception:  # noqa: BLE001 — git-hook probe is best-effort; degrade to 'could not check'
-                results.append(HealthResult(
-                    label="git hooks", ok=True,
-                    detail=f"{repo_path} — could not check",
-                ))
+            except Exception as exc:  # noqa: BLE001 — git-hook probe is best-effort; degrade to an HONEST signal, never a silent ok=True (nexus-9t86i / nexus-7kl32: a check that could not read state must never render ✓)
+                # nexus-7kl32: the dominant cause of a probe failure here is
+                # a dead owner — a registered repo whose root no longer
+                # exists on disk (bench-index sandboxes, throwaway probe
+                # checkouts, stale worktrees; the u8n4r-era debris
+                # population). That case gets its own honest wording; any
+                # other probe failure still degrades honestly, just without
+                # the dead-owner framing. Either way this is now ok=False,
+                # warn=True (soft warning ⚠, never fatal — RDR-129 B4) so a
+                # dead owner never again renders as a signal-free green.
+                try:
+                    vanished = not repo_path.exists()
+                except OSError:
+                    # code-review IMPORTANT (nexus-7kl32): .exists() itself
+                    # can raise (e.g. a permission-denied path component) —
+                    # the sibling classifier
+                    # (catalog_cmds.owners._classify_owner_root) guards this
+                    # identical risk. Degrade to the generic could-not-check
+                    # branch instead of letting it crash `nx doctor` — the
+                    # whole point of this fix was to STOP creating new crash
+                    # surfaces out of probe failures.
+                    vanished = False
+
+                if vanished:
+                    if str(repo_path) in catalog_repo_roots:
+                        # A catalog owner — nx catalog owners --census
+                        # covers it (same list_repos_dual_with_catalog_roots
+                        # round trip built this attribution set above).
+                        #
+                        # nexus-cw262 round-3 critique (T2 21467
+                        # Significant-2): the mutation arm's ACTUAL
+                        # availability depends on which engine build this
+                        # tenant is connected to — the live cloud engine at
+                        # authorship time genuinely predates the route. Name
+                        # the census unconditionally (it always works, engine
+                        # floor or not) but qualify the mutation arm honestly
+                        # per the capability signal computed above, rather
+                        # than claiming it unconditionally.
+                        fix = ["nx catalog owners --census — inspects dead owners"]
+                        if deactivate_capability == "available":
+                            fix.append(
+                                "--execute deactivate --no-dry-run --confirm "
+                                "deregisters eligible ones (nexus-cw262)"
+                            )
+                        elif deactivate_capability == "unavailable":
+                            fix.append(
+                                "the --execute deactivate mutation arm requires "
+                                "an engine build carrying the nexus-cw262 "
+                                "owner-deactivate route (not yet deployed here); "
+                                "re-run after the connected engine is upgraded"
+                            )
+                        else:  # "unknown" — no owners response to read the signal from
+                            fix.append(
+                                "whether --execute deactivate is available on the "
+                                "connected engine could not be confirmed this run "
+                                "(nexus-cw262)"
+                            )
+                        results.append(HealthResult(
+                            label="git hooks", ok=False, warn=True,
+                            detail=(
+                                f"{repo_path} — owner root no longer exists "
+                                "on disk (dead owner)"
+                            ),
+                            fix_suggestions=fix,
+                        ))
+                    else:
+                        # code-review SIGNIFICANT (nexus-7kl32, critic
+                        # finding 2): a legacy repos.json-only entry is NOT
+                        # visible to the census (catalog owners only) —
+                        # pointing at it here would be exactly the
+                        # misleading-rendering class this bead exists to
+                        # eliminate, just relocated. Its actual remedy also
+                        # differs: repos.json is a local, directly editable
+                        # file, not a catalog row.
+                        results.append(HealthResult(
+                            label="git hooks", ok=False, warn=True,
+                            detail=(
+                                f"{repo_path} — owner root no longer exists "
+                                "on disk (dead owner; legacy repos.json "
+                                "entry — not covered by `nx catalog owners "
+                                "--census`, which classifies catalog owners "
+                                "only)"
+                            ),
+                            fix_suggestions=[
+                                f"remove the stale entry from {registry_path}"
+                            ],
+                        ))
+                else:
+                    results.append(HealthResult(
+                        label="git hooks", ok=False, warn=True,
+                        detail=f"{repo_path} — could not check ({exc})",
+                    ))
 
     return results
 
@@ -1448,97 +1561,219 @@ def _check_mineru_server() -> list[HealthResult]:
     )]
 
 
-# RDR-129 B4 (nexus-uq8a4): the FTS5 integrity probe
-# (``INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')``) is a
-# *write* — it needs ``memory.db``'s single WAL writer slot. A legitimate
-# concurrent writer (typically an active ``nx index repo``) holds that slot,
-# and the probe would block to ``busy_timeout`` and then report a hard red X
-# for a database that is perfectly healthy, just busy. We give each attempt a
-# bounded ``busy_timeout`` and retry briefly; on continued contention we emit a
-# SOFT WARN (the DB is fine) rather than a hard failure. A genuine corruption
-# (a non-lock error, or a failing ``PRAGMA integrity_check``) still hard-fails.
-_INTEGRITY_BUSY_TIMEOUT_MS: int = 2000
-_INTEGRITY_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.25, 0.5)
+#: Label for the ported T2 schema-fingerprint check (nexus-ay18d). Deliberately
+#: DISTINCT from doctor.py's opt-in "T2 schema check" (`--check-schema`,
+#: nexus-vl8lk) — same underlying probe (:func:`probe_t2_schema_fingerprint`),
+#: different consumer: this one runs UNCONDITIONALLY in every `nx doctor`
+#: sweep (cheap, single HTTP call), the flag is a deliberate, verbose,
+#: exit-code-bearing report an operator asks for explicitly. Mirrors the
+#: `_CHASH_CONFORMANCE_REPORT_LABEL` precedent (RDR-180, nexus-du2dw) for
+#: keeping two call sites of the same probe honestly distinguishable.
+_T2_SCHEMA_LABEL = "T2 schema applied"
+
+#: Label for the frozen-migration-source advisory (nexus-ay18d). Purely
+#: informational — never gates `nx doctor`'s exit code — emitted only when
+#: the file is present (mirrors ``_check_engine_convergence``'s "return []
+#: when not applicable" convention: silence, not a result, when absent).
+_LEGACY_T2_SOURCE_LABEL = "legacy T2 migration source"
 
 
-def _is_lock_error(exc: BaseException) -> bool:
-    """True when *exc* is transient writer-slot contention, not corruption.
+@dataclass(frozen=True)
+class T2SchemaFingerprint:
+    """Result of probing the engine's ``GET /version`` for the Liquibase
+    changelog fingerprint (bead nexus-ay18d / nexus-vl8lk).
 
-    Mirrors the discriminator the retired T2 bootstrap-migration retry used
-    (``database is locked`` / ``database is busy``, including the
-    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked");
-    the retry died with ``db/migrations.py`` (RDR-158 P4 Stage 4,
-    nexus-i711w) but the lock-vs-corruption distinction is still the point.
+    ``reachable=False`` means the service endpoint could not be resolved or
+    ``/version`` could not be reached/parsed — :attr:`unreachable_detail`
+    carries the cause. ``reachable=True, reported=False`` means the endpoint
+    answered but carried NONE of ``schema_latest_id`` / ``schema_changeset_count``
+    / ``schema_error`` — the documented managed/cloud omission-by-design
+    (``nexus.db.managed_endpoint`` module docstring: "schema_latest_id /
+    schema_changeset_count / schema_error remain absent on the managed
+    endpoint BY DESIGN"), or an engine predating the nexus-pebfx.4 fields.
+    Distinguishing "key absent" from "key present but null" (rather than a
+    blanket ``.get()``) is the same lesson nexus-vw594 F3 named for
+    ``index_state_reported``: an absent key is UNKNOWN, not evidence of
+    anything, and must never collapse into the same branch as a populated
+    field reading zero.
     """
-    msg = str(exc).lower()
-    return "locked" in msg or "busy" in msg
+
+    reachable: bool
+    reported: bool
+    latest_id: str | None = None
+    changeset_count: int | None = None
+    schema_error: str | None = None
+    unreachable_detail: str = ""
 
 
-def _check_t2_integrity() -> list[HealthResult]:
-    import time  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+def probe_t2_schema_fingerprint(
+    *,
+    base_url: str | None = None,
+    timeout: float = 5.0,
+    http_get: Callable[[str, float], object] | None = None,
+) -> T2SchemaFingerprint:
+    """Ask the engine's already-existing ``GET /version`` (Java
+    ``VersionHandler``) for the applied Liquibase changelog fingerprint.
+
+    PORT decision (nexus-ay18d / nexus-vl8lk): both beads' own text names
+    "Liquibase changeset state" as the honest Postgres-side answer to what
+    the retired SQLite ``PRAGMA integrity_check`` used to ask. The route
+    already ships on every engine at the current floor
+    (``REQUIRED_ENGINE_VERSION``, well past nexus-pebfx.4, which introduced
+    these fields) — no new engine route was added for this fix.
+
+    Shared by TWO consumers, one probe: :func:`_check_t2_schema_applied`
+    (this module's always-on ``nx doctor`` sweep, terse ``HealthResult``)
+    and ``nexus.commands.doctor._run_check_schema`` (the opt-in
+    ``--check-schema`` verbose report with exit codes). Keeping the HTTP
+    call + absent-vs-null interpretation in ONE place means the two
+    consumers can never independently drift on what "schema applied" means.
+
+    Args:
+        base_url: Override the resolved service base URL (test injection;
+            mirrors :func:`nexus.db.managed_endpoint.probe_managed_service`'s
+            own ``base_url`` param). ``None`` resolves via
+            :func:`nexus.db.service_endpoint.resolve_service_endpoint`.
+        timeout: HTTP timeout in seconds.
+        http_get: Injectable ``(url, timeout) -> httpx.Response`` callable
+            (test injection). ``None`` uses ``httpx.get``.
+
+    Never raises — any resolution/transport/parse failure degrades to
+    ``reachable=False`` so BOTH callers can render an honest warning instead
+    of crashing `nx doctor` (the "WARN, never ok=True, for ANY exception
+    here" lesson from nexus-du2dw's chash-conformance-report review).
+    """
+    try:
+        import httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
+
+        resolved_base_url = base_url
+        if resolved_base_url is None:
+            from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred to avoid circular import
+
+            resolved_base_url, _token = resolve_service_endpoint()
+
+        get = http_get if http_get is not None else (
+            lambda u, t: httpx.get(u, timeout=t)
+        )
+        resp = get(f"{resolved_base_url.rstrip('/')}/version", timeout)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — boundary fallback — must degrade, never crash `nx doctor`
+        return T2SchemaFingerprint(reachable=False, reported=False, unreachable_detail=str(exc))
+
+    if not isinstance(body, dict):
+        return T2SchemaFingerprint(reachable=False, reported=False, unreachable_detail=f"/version returned non-object body: {body!r}")
+
+    reported = any(k in body for k in ("schema_latest_id", "schema_changeset_count", "schema_error"))
+    if not reported:
+        return T2SchemaFingerprint(reachable=True, reported=False)
+
+    count_raw = body.get("schema_changeset_count")
+    count = int(count_raw) if isinstance(count_raw, (int, float)) and not isinstance(count_raw, bool) else None
+    return T2SchemaFingerprint(
+        reachable=True,
+        reported=True,
+        latest_id=body.get("schema_latest_id"),
+        changeset_count=count,
+        schema_error=body.get("schema_error"),
+    )
+
+
+def _check_t2_schema_applied() -> list[HealthResult]:
+    """T2 schema-applied check (nexus-ay18d), PORTED off the retired SQLite
+    ``PRAGMA integrity_check`` / FTS5-rebuild probe.
+
+    WHY THE OLD CHECK DIED (nexus-ay18d): ``_check_t2_integrity`` opened
+    ``default_db_path()`` — the frozen SQLite migration source, per RDR-158
+    P4 never the live store in ANY mode since T2 moved to Postgres — with
+    no service-mode branch. On a legacy file present it validated a fossil
+    under the "T2 integrity" label; on a fresh PG-only box (the file never
+    exists) it returned ``ok=True, detail="not created yet"`` having
+    examined nothing — a clean pass that measured nothing, permanently
+    vacuous on every supported install shape (WAVE-2 finding, bead notes).
+
+    WHY THIS IS A PORT, NOT A RETIRE-WITH-NO-REPLACEMENT: Postgres has no
+    lightweight client-observable equivalent to SQLite's ``PRAGMA
+    integrity_check`` (that would need ``pg_amcheck`` wired through a NEW
+    engine route — explicitly out of scope for this fix; adding a route is
+    option (c) DEFER-LOUD, not needed here). But the bead's own suggested
+    fix — "Postgres has its own answer - Liquibase changeset state" — is
+    already served by the engine's existing ``GET /version`` handshake
+    (:func:`probe_t2_schema_fingerprint`), so this check now asks THAT: is
+    the schema Liquibase actually applied readable and non-empty. This is a
+    narrower question than on-disk corruption, but it is a REAL,
+    non-vacuous answer sourced from the live store, which is strictly more
+    honest than the false attribution the old check produced.
+
+    Capability-honest degrade: unreachable engine -> soft WARN (never
+    silent ok=True); a managed/cloud endpoint that withholds the fingerprint
+    by design -> ok=True, explicitly labelled "not exposed", never
+    conflated with "checked and healthy".
+
+    Legacy-file advisory: DECOUPLED from the verdict above. When
+    ``default_db_path()`` still exists on disk (a migration-era install
+    that has not been cleaned up), this reports a SEPARATE, purely
+    informational entry under :data:`_LEGACY_T2_SOURCE_LABEL` — always
+    ``ok=True`` — naming it a frozen rollback artifact, never claiming
+    anything about the live store. No file present -> no entry at all
+    (mirrors ``_check_engine_convergence``'s "not applicable" convention).
+    """
+    results: list[HealthResult] = []
+    label = _T2_SCHEMA_LABEL
+
+    fp = probe_t2_schema_fingerprint()
+    if not fp.reachable:
+        results.append(HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"SKIPPED (T2 engine unreachable: {fp.unreachable_detail}) — "
+                "see 'Storage service health' above for the underlying cause."
+            ),
+        ))
+    elif not fp.reported:
+        results.append(HealthResult(
+            label=label,
+            ok=True,
+            detail=(
+                "not exposed by this endpoint (managed/cloud service "
+                "withholds the schema fingerprint by design, or the engine "
+                "predates the /version schema fields)"
+            ),
+        ))
+    elif fp.schema_error:
+        results.append(HealthResult(
+            label=label, ok=False,
+            detail=f"engine reported schema_error: {fp.schema_error}",
+        ))
+    elif not fp.changeset_count:
+        # Non-vacuity (nexus-kmo9h class): an engine that answers but
+        # reports zero applied changesets is not a healthy schema state,
+        # even though it is not a transport/read error either.
+        results.append(HealthResult(
+            label=label, ok=False,
+            detail=f"schema_changeset_count={fp.changeset_count!r} — Liquibase applied nothing",
+        ))
+    else:
+        results.append(HealthResult(
+            label=label, ok=True,
+            detail=f"{fp.changeset_count} changeset(s) applied, latest={fp.latest_id}",
+        ))
 
     db_path = default_db_path()
-    if not db_path.exists():
-        return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
+    if db_path.exists():
+        results.append(HealthResult(
+            label=_LEGACY_T2_SOURCE_LABEL,
+            ok=True,
+            detail=(
+                f"frozen pre-migration SQLite file present at {db_path} — a "
+                "downgrade/rollback artifact, not live data; T2 is Postgres "
+                "in every mode since RDR-158 P4"
+            ),
+        ))
 
-    try:
-        conn = sqlite3.connect(str(db_path))  # frozen-source-integrity-write: NOT mode=ro — the FTS5 integrity-check pseudo-command below requires a writable connection (checking command, no content change); named in SQLITE_CONNECT_ALLOWLIST with the write-shaped exception documented
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_INTEGRITY_BUSY_TIMEOUT_MS}")
-            rows = conn.execute("PRAGMA integrity_check").fetchall()
-            pragma_ok = len(rows) == 1 and rows[0][0] == "ok"
-            if not pragma_ok:
-                issues = "; ".join(r[0] for r in rows[:3])
-                return [HealthResult(label="T2 integrity", ok=False, detail=f"PRAGMA: {issues}")]
-
-            # FTS5 integrity probe — a write that takes the WAL writer slot.
-            # Retry on transient lock contention; a non-lock error is genuine
-            # FTS5 corruption and must hard-fail immediately.
-            sleeps = _INTEGRITY_RETRY_SLEEPS_BETWEEN
-            max_attempts = len(sleeps) + 1
-            fts_ok = False
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    conn.execute(
-                        "INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"
-                    )
-                    fts_ok = True
-                    break
-                except sqlite3.OperationalError as exc:
-                    if not _is_lock_error(exc):
-                        return [HealthResult(label="T2 integrity", ok=False, detail=f"FTS5: {exc}")]
-                    # Clear any partial transaction so the retry re-reads a
-                    # fresh snapshot (handles SQLITE_BUSY_SNAPSHOT too).
-                    try:
-                        conn.rollback()
-                    except sqlite3.Error:
-                        pass
-                    if attempt == max_attempts:
-                        # Transient writer-lock contention, not corruption.
-                        # Stays SOFT by design — and *stays* soft even after
-                        # RDR-129's single-daemon enforcement ships: a lock
-                        # here post-P2 indicates a single-daemon invariant
-                        # violation (a second daemon, or a direct writer
-                        # bypassing the daemon), which the A3 daemon census
-                        # reports as a hard error. The two are complementary;
-                        # keeping B4 soft means the drop metric is never lost
-                        # to a hard fail. Do NOT flip this to a hard failure
-                        # without understanding that relationship (RDR-129 §B4).
-                        return [HealthResult(
-                            label="T2 integrity",
-                            ok=False,
-                            warn=True,
-                            detail="FTS5: busy (write in progress, retry)",
-                        )]
-                    time.sleep(sleeps[attempt - 1])
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        return [HealthResult(label="T2 integrity", ok=False, detail=f"could not open: {exc}")]
-
-    if pragma_ok and fts_ok:
-        return [HealthResult(label="T2 integrity", ok=True, detail="PRAGMA ok, FTS5 ok")]
-    return [HealthResult(label="T2 integrity", ok=False, detail="check failed")]
+    return results
 
 
 def _check_t2_dropped_writes() -> list[HealthResult]:
@@ -1674,10 +1909,21 @@ def _check_credential_persistence() -> list[HealthResult]:
     GUI-spawned ``nx-mcp`` (Claude Desktop, Cowork SDK bridge) inherits
     launchd's environment, NOT the user's interactive shell. If
     ``VOYAGE_API_KEY`` is in ``.zshrc`` exports but never persisted via
-    ``nx config set``, the GUI-spawned subprocess sees it as absent,
-    ``is_local_mode()`` flips to True, and T3 dispatch goes to the
-    daemon path that fails opaquely. (RDR-155 P4b: the CHROMA_* keys
-    died with the migration machinery.)
+    ``nx config set``, the GUI-spawned subprocess sees it as absent.
+
+    nexus-sghyo (2026-08-06) CORRECTED CLAIM: this docstring previously
+    said the gap flips ``is_local_mode()`` to True and breaks T3
+    dispatch — FALSE since RDR-155 (``is_local_mode()`` never reads this
+    key; see nexus-nmw3i below, which already fixed the mode-detection
+    half of this same false premise). The key is no longer a client
+    embedding credential at all (Hal determination 2026-07-28: "we do no
+    embedding on the client") — it is an OPTIONAL engine-bound setting:
+    a locally-spawned engine plumbs it through
+    (``daemon/storage_service_daemon.py``) to run in voyage mode instead
+    of the local bge-768 default. The REAL consequence of the env-only
+    gap: a GUI-spawned engine-provisioning path sees the key as absent
+    and the locally-spawned engine silently defaults to bge-768 instead
+    of the voyage mode the operator intended — never a mode misdetection.
 
     This check runs on the CLI side (where shell env IS visible) and
     surfaces the gap before the GUI-spawn path hits it. Non-fatal: a
@@ -1735,7 +1981,8 @@ def _check_credential_persistence() -> list[HealthResult]:
     detail = (
         f"{len(env_only)} credential(s) in shell env only: {', '.join(env_only)}. "
         "GUI-spawned consumers (Claude Desktop, Cowork) cannot see "
-        "shell env vars and will misdetect cloud mode as local mode."
+        "shell env vars — a locally-spawned engine will silently default "
+        "to bge-768 instead of voyage mode."
     )
 
     return [
@@ -3183,6 +3430,227 @@ def _check_dimension_orphans() -> list[HealthResult]:
     )]
 
 
+#: nexus-heizf: above this many distinct damaged DOCUMENTS, doctor stops
+#: naming tumblers inline and points at the enumeration command instead.
+_DANGLING_MANIFEST_NAME_THRESHOLD = 10
+
+#: nexus-heizf part 1: a single ``manifest_orphans`` call's sample cap.
+#: Chosen generously so the common case (a few dozen to a couple hundred
+#: dangling rows, per the 2026-08-04 nexus-55l58 shakedown's 188) needs no
+#: second round trip; :func:`manifest_orphan_report` still re-fetches on the
+#: rare miss, bounded by ``_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM`` below.
+_MANIFEST_ORPHANS_SAMPLE_LIMIT = 2000
+
+#: nexus-heizf code-review fix round (2026-08-05): the ceiling on the
+#: refetch below. ``manifest_orphans(dim)``'s ``limit`` is an ENGINE-WIDE
+#: cap on that dim's orphan rows (not scoped to the damaged collections
+#: under investigation here) with no upper bound enforced server-side and
+#: — load-bearing for why this is a single bounded fetch, not a paged loop
+#: — NO ``offset`` parameter (CatalogRepository.manifestOrphanReport /
+#: CatalogHandler.handleManifestOrphans both take only ``limit``), so
+#: repeated calls cannot walk pages the way the ``MAX_QUERY_RESULTS=300``
+#: convention elsewhere in this codebase does. Un-bounding the refetch
+#: (the pre-fix-round shape: ``limit=count``) would let one damaged dim
+#: with tens of thousands of rows drive an unbounded response. 10k is
+#: ~50x the 2026-08-04 nexus-55l58 shakedown's 188-row observation —
+#: generous headroom for real data, still a hard stop. Exceeding it (or a
+#: refetch failure) is never silently treated as complete: see the
+#: per-collection ``incomplete_collections`` cross-check against the
+#: census's own ``missing`` counts at the end of
+#: :func:`manifest_orphan_report`.
+_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM = 10_000
+
+#: nexus-h1zu0 / nexus-heizf: the one-line runtime disjointness caveat —
+#: appears in `nx doctor`'s dangling-manifest detail AND
+#: `nx catalog manifest-verify --list`'s output (both text and --json),
+#: never docstring/help-only (substantive-critic Significant-1, 2026-08-05:
+#: the 2026-08-04 nexus-55l58 shakedown was mislead by an instrument's
+#: *docstring*, which nobody reads mid-incident — the live numeric output
+#: itself must carry the warning). See ``purge_trash.py``'s matching line.
+_DANGLING_MANIFEST_POPULATION_NOTE = (
+    "population: live-doc manifest rows missing a T3 chunk — disjoint "
+    "from `nx catalog purge-trash`'s 'stranded' chunks (tombstoned-doc "
+    "chunks with no live parent); one reading clean says nothing about "
+    "the other"
+)
+
+
+def _compact_position_ranges(positions: list[int]) -> str:
+    """Compact a list of manifest positions into ``"0-3,7,9-12"`` form.
+
+    Pure display helper — a damaged document with hundreds of contiguous
+    dangling positions (a whole-file re-chunk gone wrong) renders as one
+    short range instead of a wall of individual numbers.
+    """
+    xs = sorted(set(positions))
+    if not xs:
+        return ""
+    ranges: list[str] = []
+    start = prev = xs[0]
+    for x in xs[1:]:
+        if x == prev + 1:
+            prev = x
+            continue
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = x
+    ranges.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
+
+
+def manifest_orphan_report(cat: object, damaged_collections: list[dict]) -> dict:
+    """Enumerate the dangling manifest ROWS behind a ``manifest_verify_all``
+    census, grouped by collection then by document (nexus-heizf part 1).
+
+    Wires the previously-dead ``manifest_orphans(dim)`` client method
+    (RDR-159 P-1b, zero callers before this bead — T2 nexus/55l58-
+    instrument-map-2026-08-04) to a consumer: given the damaged rows
+    ``manifest_verify_all()`` already returned (``{"collection",
+    "referenced", "present", "missing"}`` dicts with ``missing > 0``),
+    resolves each collection's dim via :func:`nexus.db.reconcile.
+    dim_for_model_token` and enumerates the actual ``(doc_id, position,
+    chash)`` rows for every resolvable dim.
+
+    ROUTING PARITY (nexus-h1zu0): ``manifest_verify_all`` does not route by
+    model token at all — it ORs presence across all three ``chunks_<dim>``
+    tables per manifest row, so it never drops a collection for having an
+    unrecognized token. ``manifest_orphans(dim)``'s SQL, by contrast, only
+    returns rows for collections whose ``__<model>__`` segment is in that
+    dim's hardcoded IN-list (rdr180-002-hex-boundary-functions.xml). A
+    collection with a token outside ALL three IN-lists is therefore
+    invisible to ``manifest_orphans`` at every dim while still being
+    counted (and possibly flagged ``missing``) by ``manifest_verify_all`` —
+    a SILENT per-collection coverage gap with no error. This function
+    closes the "silent, no error" half of that gap (not the underlying SQL
+    routing itself — see :func:`nexus.db.reconcile.dim_for_model_token`'s
+    docstring for why a client-side fix was chosen over an engine-side SQL
+    change): any damaged collection this function cannot route, OR whose
+    ``manifest_orphans`` call itself fails, is reported by NAME in
+    ``unroutable_collections`` rather than being dropped without a trace.
+    On 2026-08-04 production data every damaged collection routed cleanly
+    (188 census rows = 188 enumerated rows) — the gap is latent, not
+    active; this function makes it loud if it ever isn't.
+
+    COMPLETENESS (code-review-expert fix round, 2026-08-05): a dim's
+    orphan population can exceed what a single bounded fetch returns (see
+    ``_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM``), and the bounded refetch
+    itself can fail. NEITHER case is silently treated as a complete
+    result — the row count actually enumerated for each collection is
+    cross-checked against the census's own ``missing`` count from
+    *damaged_collections*; a shortfall lands the collection in
+    ``incomplete_collections`` with both numbers, regardless of which of
+    the two causes produced it (uniform handling, not a special case per
+    failure mode).
+
+    Returns::
+
+        {
+            "collections": {
+                "<collection>": {
+                    "<doc_id>": {"positions": [0, 1, ...], "chashes": {"..."}},
+                    ...
+                },
+                ...
+            },
+            "unroutable_collections": [...],  # sorted, deduped names
+            "incomplete_collections": {
+                "<collection>": {"enumerated": <int>, "expected": <int>},
+                ...
+            },
+            "total_rows": <int>,              # sum of enumerated rows
+        }
+
+    Best-effort: never raises. A ``manifest_orphans`` failure for one dim
+    folds that dim's collections into ``unroutable_collections`` and moves
+    on to the next dim rather than aborting the whole report. Per-row
+    field parsing is guarded too (a malformed ``position`` from the wire
+    is logged and skipped, never an unhandled exception).
+    """
+    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid a module-load-time import cycle
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
+    from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — see above
+
+    damaged_names = {str(row.get("collection", "?")) for row in damaged_collections}
+    expected_missing: dict[str, int] = {
+        str(row.get("collection", "?")): int(row.get("missing", 0) or 0)
+        for row in damaged_collections
+    }
+    dims_needed: dict[int, list[str]] = {}
+    unroutable: list[str] = []
+    for name in sorted(damaged_names):
+        if not is_conformant_collection_name(name):
+            unroutable.append(name)
+            continue
+        token = parse_conformant_collection_name(name)["embedding_model"]
+        dim = dim_for_model_token(token)
+        if dim is None:
+            unroutable.append(name)
+            continue
+        dims_needed.setdefault(dim, []).append(name)
+
+    collections: dict[str, dict[str, dict]] = {}
+    total_rows = 0
+    for dim in sorted(dims_needed):
+        try:
+            first = cat.manifest_orphans(dim, limit=_MANIFEST_ORPHANS_SAMPLE_LIMIT)
+        except Exception as exc:  # noqa: BLE001 — isolated per dim: reported, not swallowed
+            _log.warning("doctor_manifest_orphans_failed", dim=dim, error=str(exc))
+            unroutable.extend(dims_needed[dim])
+            continue
+        count = int(first.get("count", 0) or 0)
+        orphans = first.get("orphans") or []
+        if count > len(orphans):
+            # Bounded refetch (nexus-heizf fix round): never request more
+            # than the hard ceiling, and a refetch failure is left to fall
+            # through to the completeness cross-check below rather than
+            # silently standing in for a complete result.
+            fetch_limit = min(count, _MANIFEST_ORPHANS_MAX_ROWS_PER_DIM)
+            if fetch_limit > len(orphans):
+                try:
+                    second = cat.manifest_orphans(dim, limit=fetch_limit)
+                    orphans = second.get("orphans") or orphans
+                except Exception as exc:  # noqa: BLE001 — best-effort refetch; a shortfall is still caught below
+                    _log.warning("doctor_manifest_orphans_refetch_failed", dim=dim, error=str(exc))
+        for row in orphans:
+            coll = str(row.get("collection", "?"))
+            if coll not in damaged_names:
+                continue
+            doc_id = str(row.get("doc_id", "?"))
+            bucket = collections.setdefault(coll, {})
+            doc_bucket = bucket.setdefault(doc_id, {"positions": [], "chashes": set()})
+            position = row.get("position")
+            if position is not None:
+                try:
+                    doc_bucket["positions"].append(int(position))
+                except (TypeError, ValueError) as exc:
+                    _log.warning(
+                        "doctor_manifest_orphans_row_position_unparseable",
+                        row=row, error=str(exc),
+                    )
+            chash = row.get("chash")
+            if chash:
+                doc_bucket["chashes"].add(str(chash))
+            total_rows += 1
+
+    incomplete: dict[str, dict[str, int]] = {}
+    for coll, expected in expected_missing.items():
+        if coll in unroutable or expected <= 0:
+            continue
+        enumerated = sum(
+            len(info["positions"]) for info in collections.get(coll, {}).values()
+        )
+        if enumerated < expected:
+            incomplete[coll] = {"enumerated": enumerated, "expected": expected}
+
+    return {
+        "collections": collections,
+        "unroutable_collections": sorted(set(unroutable)),
+        "incomplete_collections": incomplete,
+        "total_rows": total_rows,
+    }
+
+
 def _check_dangling_manifests() -> list[HealthResult]:
     """Name collections whose manifest references chashes that no longer
     exist in T3 (nexus-5xn3k AC5, RE-ARMED by nexus-5xn3k.6 on
@@ -3214,6 +3682,37 @@ def _check_dangling_manifests() -> list[HealthResult]:
 
     Degrades to a skip — a doctor check must never crash the command it is
     diagnosing, and never guess.
+
+    POPULATION (nexus-heizf part 3 — read this before comparing this
+    check's count against ``nx catalog purge-trash``'s "stranded chunks"
+    preview; they are DISJOINT, not two views of the same rows, and one
+    reading clean says NOTHING about the other):
+
+    * THIS check: manifest ROWS of LIVE documents
+      (``catalog_documents.deleted_at IS NULL``) whose ``(collection,
+      chash)`` has NO backing row in any ``chunks_<dim>`` table. Direction:
+      manifest -> chunk. A chash can be counted here more than once (one
+      per manifest row/position that references it) — see the wording
+      note below.
+    * ``purge-trash``'s stranded-chunk preview (``nexus.purge_trash``'s
+      dry-run count, ``commands/catalog_cmds/purge_trash.py``): EXISTING
+      ``chunks_<dim>`` rows that ARE manifest-backed but have NO LIVE
+      parent document (every referencing manifest row's document is
+      tombstoned). Direction: chunk -> parent.
+
+    A chash cannot be in both populations at once (this check requires a
+    LIVE parent by construction; purge-trash requires the opposite). Zero
+    stranded chunks says nothing about this check's count, and vice versa
+    — the 2026-08-04 nexus-55l58 shakedown mistook one instrument's zero
+    for evidence against the other's non-zero finding on the SAME data.
+
+    WORDING: ``manifest_verify_all()``'s ``missing`` count is manifest ROWS,
+    not distinct chashes — the same chash referenced from two positions in
+    one document's manifest counts twice. The detail text below says
+    "row(s)"; a cheap distinct-chash count is layered on top via
+    :func:`manifest_orphan_report` when the enumeration succeeds (nexus-
+    heizf part 2 — the 2026-08-04 shakedown's 188 rows were 186 distinct
+    chashes).
     """
     label = "dangling manifest chashes"
     try:
@@ -3295,23 +3794,310 @@ def _check_dangling_manifests() -> list[HealthResult]:
         )]
 
     names = "; ".join(
-        f"{name} ({n_missing} of {n_ref} manifest chash(es) missing from T3)"
+        f"{name} ({n_missing} of {n_ref} manifest row(s) missing a T3 chunk)"
         for name, n_missing, n_ref in dangling
     )
+    detail = (
+        f"{len(dangling)} collection(s) have manifest rows referencing chunks "
+        f"that do not exist: {names}. A document in this state reports a "
+        "chunk_count and returns nothing; re-indexing may silently no-op "
+        f"(nexus-5xn3k). [{_DANGLING_MANIFEST_POPULATION_NOTE}]"
+    )
+    fix_suggestions = [
+        "nx catalog reconcile          (rebuild manifests from T3)",
+        "nx index <path> --force       (discard the staleness decision and re-index)",
+    ]
+
+    # nexus-heizf part 1: best-effort enrichment — name the actual damaged
+    # documents (small count) or point at the enumeration command (large
+    # count). A failure here must never downgrade or hide the
+    # collection-level warning already established above.
+    try:
+        report = manifest_orphan_report(cat, [
+            {"collection": name, "missing": n_missing, "referenced": n_ref}
+            for name, n_missing, n_ref in dangling
+        ])
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment only
+        _log.debug("doctor_dangling_manifest_enumeration_failed", error=str(exc))
+        report = None
+
+    unroutable = report["unroutable_collections"] if report is not None else []
+    incomplete = report["incomplete_collections"] if report is not None else {}
+
+    if report is not None and report["total_rows"]:
+        doc_ids: set[str] = set()
+        chashes: set[str] = set()
+        for coll_docs in report["collections"].values():
+            for doc_id, info in coll_docs.items():
+                doc_ids.add(doc_id)
+                chashes.update(info["chashes"])
+        n_docs = len(doc_ids)
+        detail += (
+            f" ({report['total_rows']} manifest row(s), {len(chashes)} "
+            f"distinct chash(es), {n_docs} document(s))"
+        )
+    else:
+        n_docs = 0
+
+    if unroutable:
+        detail += (
+            f"; {len(unroutable)} collection(s) could not be enumerated "
+            f"(unrecognized model routing or an enumeration error): "
+            f"{', '.join(unroutable)}"
+        )
+    if incomplete:
+        partials = "; ".join(
+            f"{coll} ({info['enumerated']} of {info['expected']})"
+            for coll, info in sorted(incomplete.items())
+        )
+        detail += (
+            f"; {len(incomplete)} collection(s) only PARTIALLY enumerated "
+            f"(row cap or an enumeration error) — counts are a LOWER "
+            f"BOUND for them: {partials}"
+        )
+
+    if 0 < n_docs <= _DANGLING_MANIFEST_NAME_THRESHOLD and not unroutable and not incomplete:
+        detail += f". Damaged document(s): {', '.join(sorted(doc_ids))}"
+    else:
+        detail += ". Run: nx catalog manifest-verify --list"
+
     return [HealthResult(
         label=label,
         ok=False,
         warn=True,
+        detail=detail,
+        fix_suggestions=fix_suggestions,
+    )]
+
+
+#: RDR-180 (bead nexus-du2dw): the label for the ENGINE-ROUTE chash
+#: conformance check, deliberately DISTINCT from ``CHASH_CONFORMANCE_LABEL``
+#: (``nexus.db.chash_tables``, "Chunk chash conformance") — that label is
+#: substring-matched by the install-binary gate and the convergence gate
+#: (``upgrade_finish.py``, ``commands/daemon.py``), both of which need the
+#: LOCAL nexus_diag probe's cross-tenant BYPASSRLS visibility (nexus-vounk:
+#: a tenant-scoped session undercounts to zero on a poisoned store). This
+#: check's tenant-scoped count cannot honestly stand in for that decision,
+#: so it reports under its own label and is never wired into those gates —
+#: it exists purely so a managed/cloud install (no local psql access) gets
+#: SOME observability instead of none.
+_CHASH_CONFORMANCE_REPORT_LABEL = "Chunk chash conformance (tenant-scoped, engine route)"
+
+#: Dims the ``chash_conformance_report`` stored function accepts (RDR-180).
+_CHASH_CONFORMANCE_REPORT_DIMS: tuple[int, ...] = (384, 768, 1024)
+
+
+def _check_chash_conformance_report() -> list[HealthResult]:
+    """Managed/cloud-mode chash width-conformance check (RDR-180, bead
+    nexus-du2dw) — the engine-route counterpart to the LOCAL-ONLY
+    ``nexus_diag`` psql probe run by :func:`_check_migration_state`
+    (``nexus.db.diag_connection`` — shells a local psql at 127.0.0.1 using a
+    local ``pg_credentials`` file, LOCAL-ONLY BY DESIGN per the nexus-y3wuu
+    Hal decision). A managed/cloud install has no local Postgres and no
+    local credentials file, so that probe is PERMANENTLY BLIND there — the
+    same blind-spot family as the nexus-55l58 shakedown's §3.3b
+    substrate-direct anchor finding.
+
+    SCOPING (read before comparing this check's count against the local
+    'Chunk chash conformance' label): this check calls
+    ``HttpCatalogClient.chash_conformance_report``, which invokes a
+    SECURITY INVOKER stored function — tenant-scoped by FORCE RLS, NOT the
+    cross-tenant BYPASSRLS view the local probe reads (nexus-vounk: a
+    tenant-scoped session undercounts to zero on a poisoned store, which is
+    exactly why the install-binary gate needs the cross-tenant view). This
+    check gives a managed-mode tenant visibility into THEIR OWN data's
+    conformance; it is a self-service observability surface, not a
+    substitute for the local gate's whole-store decision — hence the
+    distinct label (never fed into the install-binary/convergence gates,
+    which filter on ``CHASH_CONFORMANCE_LABEL`` exactly).
+
+    Covers the GATING ("poison") tables that are dim-routable —
+    ``chunks_<dim>`` and ``catalog_document_chunks`` (filtered to that dim's
+    model-token collections, same IN-list routing caveat as
+    ``manifest_orphans``/``_check_dangling_manifests``). The LEGACY-DEBT
+    tables (topic_assignments, frecency, relevance_log) are NOT covered —
+    they are not dim-routable by construction (mixed identity space); this
+    is a stated scope reduction relative to the local probe's four-table
+    coverage, not a silent one.
+
+    Engine-floor honesty (vw594 F3 / manifest_verify_all precedent): a
+    pre-route engine 404s ``/chash/conformance`` — this degrades to a LOUD
+    WARN naming the gap explicitly, never a silent/false clean pass. Any
+    other failure (engine down, catalog unavailable) also degrades to a
+    WARN or a benign skip, matching ``_check_dangling_manifests``'s
+    fail-open-but-loud contract — this check must never crash `nx doctor`
+    and must never read "couldn't check" as "checked, clean" (nexus-kmo9h).
+    """
+    label = _CHASH_CONFORMANCE_REPORT_LABEL
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_chash_conformance_report_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
+    import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
+
+    rows: list[dict] = []
+    dims_checked = 0
+    for dim in _CHASH_CONFORMANCE_REPORT_DIMS:
+        try:
+            result = cat.chash_conformance_report(dim)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 404:
+                # Pre-route engine: every dim 404s identically, so stop at
+                # the first one — the vw594 F3 / manifest_verify_all
+                # precedent, applied here. Fail OPEN, but LOUD.
+                _log.warning(
+                    "doctor_chash_conformance_report_engine_floor",
+                    status=status, dim=dim,
+                )
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        "SKIPPED (engine predates the chash-conformance "
+                        f"route — /chash/conformance 404'd on dim={dim}; "
+                        "re-run after the next engine tag lands). This is "
+                        "NOT a clean-store signal — if a local psql is "
+                        "available, `nx doctor`'s local 'Chunk chash "
+                        "conformance' check is the authoritative "
+                        "cross-tenant probe until the engine is upgraded."
+                    ),
+                )]
+            _log.warning(
+                "doctor_chash_conformance_report_check_failed",
+                error=str(exc), dim=dim,
+            )
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"SKIPPED (chash_conformance_report failed for dim={dim}: {exc})",
+            )]
+        except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`, but must not lie either
+            # substantive-critic (T2 nexus/critique-du2dw-2026-08-05 [21458]):
+            # this branch used to return ok=True "skipped" — which silently
+            # swallows HttpCatalogClient.chash_conformance_report's OWN
+            # deliberate fail-closed RuntimeError (missing `tables` field —
+            # see that method's docstring) into a false-benign pass,
+            # contradicting this check's own "never a false clean" promise a
+            # few lines above. WARN, never ok=True, for ANY exception here.
+            _log.warning(
+                "doctor_chash_conformance_report_check_failed",
+                error=str(exc), dim=dim,
+            )
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"SKIPPED (chash_conformance_report failed for dim={dim}: {exc})",
+            )]
+        dims_checked += 1
+        rows.extend(result.get("tables") or [])
+
+    if dims_checked == 0:
+        # NON-VACUITY (nexus-kmo9h): zero dims actually checked is not a
+        # clean bill of health.
+        return [HealthResult(label=label, ok=True, detail="skipped (no dim reachable)")]
+
+    total_non_conformant = 0
+    offenders: list[str] = []
+    for row in rows:
+        try:
+            n = int(row.get("non_conformant", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            _log.debug(
+                "doctor_chash_conformance_report_row_skipped", row=row, error=str(exc),
+            )
+            continue
+        total_non_conformant += n
+        if n > 0:
+            offenders.append(f"{row.get('table_name', '?')}={n}")
+
+    # substantive-critic SIGNIFICANT (nexus-4ijv4, T2 [21458]): a collection
+    # whose model token maps to no dim is INVISIBLE to the per-dim loop
+    # above at every dim — same IN-list routing caveat as manifest_orphans
+    # / _check_dangling_manifests (nexus-h1zu0). Left unstated, a tenant
+    # with such content reads "clean" while those collections were never
+    # counted or sampled at all — the exact false-clean-by-omission shape
+    # nexus-kmo9h exists to catch. Best-effort: a probe failure here must
+    # never crash this check or hide the primary (non_)conformant result.
+    unroutable_collections: list[str] = []
+    try:
+        from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
+        from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
+
+        t3 = make_t3()
+        for c in t3.list_collections():
+            name = str(c.get("name", ""))
+            if not name or not is_conformant_collection_name(name):
+                continue
+            token = parse_conformant_collection_name(name)["embedding_model"]
+            if dim_for_model_token(token) is None:
+                unroutable_collections.append(name)
+        unroutable_collections = sorted(set(unroutable_collections))
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment only; never hides the primary result
+        _log.debug("doctor_chash_conformance_report_unroutable_probe_failed", error=str(exc))
+        unroutable_collections = []
+
+    unroutable_suffix = ""
+    if unroutable_collections:
+        names = ", ".join(unroutable_collections[:10])
+        more = (
+            f" (+{len(unroutable_collections) - 10} more)"
+            if len(unroutable_collections) > 10 else ""
+        )
+        unroutable_suffix = (
+            f" NOT CHECKED: {len(unroutable_collections)} collection(s) use "
+            "an embedding-model token this probe cannot route to any dim — "
+            f"never counted, never sampled: {names}{more} (same IN-list "
+            "routing caveat as manifest_orphans; nexus-h1zu0)."
+        )
+
+    if total_non_conformant > 0:
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"{total_non_conformant} chunk row(s) in YOUR tenant have a "
+                "width-non-conformant chash (octet_length <> 32 — legacy "
+                "pre-RDR-108 ids; the GH #1414 / nexus-pnwu0 class). Per "
+                f"table: {', '.join(offenders)}. This is a TENANT-SCOPED "
+                "count (see this check's docstring for why it differs from "
+                "the local cross-tenant psql probe). Re-indexing affected "
+                "content heals these rows in place." + unroutable_suffix
+            ),
+            fix_suggestions=[
+                "nx catalog owners list        (find affected collections' repos)",
+                "nx index repo <path>          (re-index file-backed collections, additive)",
+                "nx upgrade                    (the chash-rekey rung recomputes conformant ids)",
+                "nx doctor                     (re-run; this warning clears once healed)",
+            ],
+        )]
+
+    if unroutable_collections:
+        # nexus-4ijv4: clean-with-unroutable must NEVER render as a plain
+        # clean pass — the CHECKED tables/dims are genuinely clean, but the
+        # tenant's store as a WHOLE was not fully checked. WARN, not ok=True.
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"clean across {len(rows)} checked table(s), {dims_checked} "
+                f"dim(s) (tenant-scoped) —{unroutable_suffix}"
+            ),
+        )]
+
+    return [HealthResult(
+        label=label,
+        ok=True,
         detail=(
-            f"{len(dangling)} collection(s) reference chunks that do not exist: "
-            f"{names}. A document in this state reports a chunk_count and "
-            "returns nothing; re-indexing may silently no-op (nexus-5xn3k)."
+            f"clean — 0 width-non-conformant chash rows across {len(rows)} "
+            f"table(s), {dims_checked} dim(s) checked (tenant-scoped)"
         ),
-        fix_suggestions=[
-            "nx catalog manifest-verify <tumbler>   (name the specific document)",
-            "nx catalog reconcile          (rebuild manifests from T3)",
-            "nx index <path> --force       (discard the staleness decision and re-index)",
-        ],
     )]
 
 
@@ -3340,6 +4126,16 @@ def _check_dangling_manifests() -> list[HealthResult]:
 #: low-stakes advisory threshold, not a one-liner, so it's deferred with
 #: this comment instead.
 _STALE_INDEXING_THRESHOLD_HOURS = 6.0
+
+#: v7.1.0 tag time (UTC) — the first PUBLIC release carrying the CLIENT-side
+#: index-run fence (nexus-5xn3k.3, commit 4b0c5fb5). nexus-vw594 F3 / root
+#: cause of nexus-biq4x: used ONLY to distinguish a quiescent-but-fence-aware
+#: corpus (nothing indexed since the fence shipped — expected, still
+#: ok=True) from the nexus-vw594 coverage-gap signature (a document indexed
+#: AFTER this date carries no fence stamp, because its producer never calls
+#: begin/complete at all — see the investigation memo, T2
+#: nx memory get -p nexus -t "vw594-investigation-2026-08-04").
+_FENCE_RELEASE_DT = datetime(2026, 8, 2, 22, 26, 0, tzinfo=UTC)
 
 
 def _check_stale_indexing_runs() -> list[HealthResult]:
@@ -3383,16 +4179,43 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     now = datetime.now(UTC)
     stale: list[tuple[str, str]] = []  # (identifier, age)
     checked = 0
+    # nexus-vw594 F3 (root cause of nexus-biq4x): a THIRD population,
+    # distinct from both "checked" (real index_state, non-null) and the old
+    # binary's silent skip. A row where the wire reported the
+    # ``index_state`` key at all (``index_state_reported``) but its value
+    # is NULL is NOT the same evidence as a key genuinely absent — see
+    # CatalogEntry.index_state_reported's docstring.
+    reported_null = 0
+    not_reported = 0
+    newest_reported_null_dt: datetime | None = None
     try:
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
         # doctor currently pays for the full-corpus walk TWICE per run.
         for entry in cat.all_documents(limit=0):
+            reported = bool(getattr(entry, "index_state_reported", True))
             state = getattr(entry, "index_state", None)
+            if not reported:
+                # Genuinely pre-fence engine — the wire never carried the
+                # key. Unknown, not evidence either way.
+                not_reported += 1
+                continue
             if state is None:
-                # Legacy row or a pre-fence engine (memo §6) — unknown, not
-                # evidence either way. Excluded from `checked` too: it must
-                # not count as "one document this check actually assessed."
+                # Fence-aware engine, but this document has never been
+                # stamped (unfenced producer, or simply not re-indexed
+                # since the fence shipped — §_FENCE_RELEASE_DT below tells
+                # these two apart).
+                reported_null += 1
+                indexed_at = str(getattr(entry, "indexed_at", "") or "")
+                if indexed_at:
+                    try:
+                        ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        ia_dt = None
+                    if ia_dt is not None and (
+                        newest_reported_null_dt is None or ia_dt > newest_reported_null_dt
+                    ):
+                        newest_reported_null_dt = ia_dt
                 continue
             checked += 1
             if state != "indexing":
@@ -3416,40 +4239,96 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
         _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
 
-    if checked == 0:
-        # NON-VACUITY: an engine that predates the fence (memo §6) omits
-        # index_state entirely on every row, so nothing above ever
-        # increments `checked`. Say so rather than render an all-clear
-        # this check cannot actually support.
-        return [HealthResult(
-            label=label, ok=True,
-            detail="skipped (engine does not report index_state — predates "
-                   "the index-run fence)",
-        )]
-    if not stale:
+    # nexus-vw594 F3 fix-round CRITICAL (substantive-critic, T2
+    # nexus/vw594-critique-2026-08-05 [21445]): this check MUST run
+    # UNCONDITIONALLY — never nested inside `if checked == 0`. The prior
+    # shape nested the reported_null/vw594-signature detection inside
+    # that guard, so a mixed corpus where ONE document has a genuine
+    # fenced run (checked > 0 — e.g. the very first `nx index repo` post-
+    # deploy) fell through to the generic "none (N checked)" ok=True
+    # branch WITHOUT EVER INSPECTING reported_null, even when a SECOND
+    # document in the same corpus was reported-but-NULL and indexed
+    # after the fence shipped. That is nexus-biq4x's silent-green bug
+    # reborn under a new trigger (checked > 0 instead of "engine predates
+    # the fence"); the critic reproduced it against this function with a
+    # real 2-doc mixed fixture. `results` collects every WARN-worthy
+    # finding independently; the summary branches below only run when
+    # NONE fired.
+    results: list[HealthResult] = []
+
+    if (
+        reported_null > 0
+        and newest_reported_null_dt is not None
+        and newest_reported_null_dt > _FENCE_RELEASE_DT
+    ):
+        # The vw594 signature: a document landed AFTER the fence existed
+        # with no stamp at all — an unfenced producer wrote it. Never
+        # ok=True for this (nexus-biq4x's misdiagnosis was exactly
+        # rendering this case as a green pre-fence skip).
+        results.append(HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{reported_null} document(s) report index_state but it "
+                "is NULL on every one of them, and at least one was "
+                f"indexed {newest_reported_null_dt.isoformat()} — after "
+                f"the fence's {_FENCE_RELEASE_DT.isoformat()} release. "
+                "The fence engine is live; a producer wrote this document "
+                "without ever calling index-run begin/complete "
+                "(nexus-vw594 coverage gap), not a pre-fence engine."
+            ),
+            fix_suggestions=[
+                "nx index <path> --force   (re-index through a fenced producer)",
+            ],
+        ))
+
+    if stale:
+        names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
+        if len(stale) > 10:
+            names += f"; +{len(stale) - 10} more"
+        results.append(HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"{len(stale)} document(s) stranded in index_state='indexing' "
+                f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
+                "SAFE (re-indexing never skips an 'indexing' document, "
+                "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
+                "intervening run — check for a stuck run or a rolling deploy "
+                "that split a begin/complete pair across engine versions."
+            ),
+            fix_suggestions=[
+                "nx index <path> --force   (clears the fence on a clean run)",
+            ],
+        ))
+
+    if results:
+        return results
+
+    # Nothing WARN-worthy found — build the single honest ok=True summary.
+    if checked > 0:
         return [HealthResult(
             label=label, ok=True,
             detail=f"none ({checked} fenced document(s) checked)",
         )]
-
-    names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
-    if len(stale) > 10:
-        names += f"; +{len(stale) - 10} more"
+    if reported_null > 0:
+        # Quiescent: the fence is live but nothing has run through it yet
+        # (fresh install, or a stable corpus untouched since the fence
+        # shipped — catalog-020 does not retro-populate by design).
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"fence live, 0 stale runs ({reported_null} document(s) "
+                   "report index_state but none has run through the fence yet)",
+        )]
+    # NON-VACUITY: a genuinely pre-fence engine omits index_state entirely
+    # on every row (not_reported > 0 and nothing else), or the corpus
+    # scanned had nothing to say at all. Either way there is nothing this
+    # check can assess — say so rather than render an all-clear it cannot
+    # actually support.
     return [HealthResult(
-        label=label,
-        ok=False,
-        warn=True,
-        detail=(
-            f"{len(stale)} document(s) stranded in index_state='indexing' "
-            f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
-            "SAFE (re-indexing never skips an 'indexing' document, "
-            "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
-            "intervening run — check for a stuck run or a rolling deploy "
-            "that split a begin/complete pair across engine versions."
-        ),
-        fix_suggestions=[
-            "nx index <path> --force   (clears the fence on a clean run)",
-        ],
+        label=label, ok=True,
+        detail="skipped (engine does not report index_state — predates "
+               "the index-run fence)",
     )]
 
 
@@ -3486,7 +4365,16 @@ def _check_next_seq_drift() -> list[HealthResult]:
         cat = make_catalog_reader()
         if cat is None:
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        owners = cat.list_owners()
+        # nexus-cw262 (round-3 critique, T2 21467 Significant-3): list_owners()
+        # defaults to excluding deactivated owners now that the flag exists —
+        # include_deactivated=True preserves this check's PRIOR coverage
+        # (every owner, always) rather than silently narrowing it. Mirrors
+        # CatalogRepository.sweepNextSeqDrift's own deliberate choice to keep
+        # covering deactivated owners: "a deactivated owner can still receive
+        # late-arriving writes via an explicit tumbler_prefix (e.g. ETL
+        # replay)" — next_seq drift-floor visibility is orthogonal to owner
+        # liveness, same as the engine-side sweep this check watches.
+        owners = cat.list_owners(include_deactivated=True)
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_next_seq_check_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
@@ -3634,6 +4522,14 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # resolve in T3 — the class `nx catalog reconcile` does not cover
     # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
     results.extend(_check_dangling_manifests())
+    # RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
+    # coverage via the engine route — the local nexus_diag psql probe inside
+    # _check_migration_state (above) is LOCAL-ONLY by design (nexus-y3wuu)
+    # and permanently blind on installs with no direct substrate access.
+    # Runs ALONGSIDE the local check (distinct label, tenant-scoped, never
+    # fed into the install-binary/convergence gates — see the check's own
+    # docstring for the scoping rationale).
+    results.extend(_check_chash_conformance_report())
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
@@ -3651,7 +4547,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())
-    results.extend(_check_t2_integrity())
+    results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())
 
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import

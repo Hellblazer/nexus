@@ -35,7 +35,6 @@ from nexus.hook_registry import record_catalog_hook_failure
 from nexus.indexer_utils import (
     build_doc_id_resolver,
     build_staleness_cache,
-    check_credentials,
     check_local_path_writable,
     check_staleness,
     should_ignore as _should_ignore,  # shared implementation
@@ -1699,13 +1698,16 @@ def _build_frecency_doc_id_map(
     repo: Path, files: list[Path],
 ) -> dict[Path, str]:
     """nexus-f4z9: resolve each file's catalog ``doc_id`` so the
-    frecency-only update can key chunk lookups on ``doc_id`` instead
-    of ``source_path``. Returns a ``{abs_path: doc_id}`` mapping;
-    files without a catalog entry are absent from the map (the caller
-    falls back to the legacy ``source_path`` filter for those).
+    frecency-only update can key chunk lookups on ``doc_id``. Returns a
+    ``{abs_path: doc_id}`` mapping; files without a catalog entry are
+    absent from the map — the caller now SKIPS the frecency refresh
+    for those files (nexus-afudo, 2026-08-05: the legacy source_path
+    filter this used to fall back to was deleted as dead code; RDR-102
+    D2 removed source_path from make_chunk_metadata for every writer).
 
     Best-effort: catalog absent / owner missing / lookup failure all
-    return an empty map so the caller's legacy path keeps working.
+    return an empty map, which now means "no frecency refresh this run
+    for the affected files" rather than a doomed source_path query.
     """
     file_to_doc_id: dict[Path, str] = {}
     try:
@@ -1724,8 +1726,8 @@ def _build_frecency_doc_id_map(
         # per-file ``by_file_path`` pass (a second full serial-WAN sweep
         # in service mode, paid on every warm run). A by_owner failure
         # raises into the outer except -> empty map, which the documented
-        # contract tolerates (caller falls back to the legacy
-        # source_path filter).
+        # contract tolerates (caller now skips the frecency refresh for
+        # the affected files — nexus-afudo).
         path_to_entry = {e.file_path: e for e in cat.by_owner(owner)}
         for abs_path in files:
             try:
@@ -1755,10 +1757,10 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
       service handles its own Chroma/Voyage.  This replaces the
       nexus-67ljl early-return skip-guard that previously prevented
       split-brain writes to daemon-Chroma.
-    - Local/cloud mode: checks credentials, then obtains a
+    - Local mode: checks the local path is writable, then obtains a
       :class:`T3Database` via ``make_t3()`` and updates directly.
+      Non-service cloud mode is retired (nexus-sghyo) and raises loud.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -1793,19 +1795,23 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     else:
         from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         if not is_local_mode():
-            voyage_key = get_credential("voyage_api_key")
-            chroma_key = get_credential("chroma_api_key")
-            check_credentials(voyage_key, chroma_key)
-        else:
-            check_local_path_writable()
+            # nexus-sghyo: non-service cloud-mode ingestion was retired —
+            # the client no longer embeds via Voyage.
+            raise CredentialsMissingError(
+                "non-service cloud-mode ingestion was retired: the client "
+                "no longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                "VECTORS=service (the default) or unset it."
+            )
+        check_local_path_writable()
         db = make_t3()
 
     frecency_map = batch_frecency(repo)
 
     # nexus-f4z9: pre-resolve doc_ids once for all files so the chunk
     # lookup can key on ``doc_id`` when the catalog has the entry.
-    # Files predating the catalog backfill fall through to the legacy
-    # ``source_path``-keyed filter.
+    # Files predating the catalog backfill (no doc_id) are skipped by
+    # the per-file loop below — nexus-afudo (2026-08-05) deleted the
+    # legacy source_path-keyed filter they used to fall through to.
     file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
 
     # Update frecency in all three content-type collections (nexus-e0w01).
@@ -1863,12 +1869,25 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                         existing = present
 
             if existing is None:
-                # Legacy where-filter fallback. Returns nothing for
-                # post-Phase-3 chunks; correct for pre-Phase-3 only.
-                where = (
-                    {"doc_id": doc_id} if doc_id
-                    else {"source_path": str(file)}
-                )
+                if not doc_id:
+                    # nexus-afudo (2026-08-05): the legacy source_path
+                    # where-filter this used to fall back to is DELETED
+                    # dead code. RDR-102 D2 (2026-05-02) removed
+                    # source_path from make_chunk_metadata for every
+                    # writer; a live-store probe (field>=! existence
+                    # test) found zero source_path rows across 13
+                    # representative collections (~115k chunks,
+                    # including this run's own code__/docs__/rdr__
+                    # collections). A file with no catalog doc_id has no
+                    # frecency-refresh path left — skip it; the next run
+                    # retries once the catalog hook backfills a doc_id.
+                    continue
+                # doc_id-keyed where-filter. Returns nothing for
+                # post-Phase-3 chunks whose manifest resolution above
+                # failed or found no chashes; still worth trying — a
+                # transient manifest-read failure with an otherwise
+                # healthy doc_id should not skip the file outright.
+                where = {"doc_id": doc_id}
                 try:
                     existing = _paginated_get(
                         col, include=["metadatas"], where=where,
@@ -1909,6 +1928,40 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 #: worker (nexus-7yfe6). Idempotent ON CONFLICT upsert → the deferred file
 #: re-uploads cleanly next run.
 _TRANSIENT_UPSERT_CODES = frozenset({502, 503, 504})
+
+
+def _contain_extraction_quality_gate(
+    fn: "Callable[[], int]", file: "Path", failed: list[str],
+) -> int:
+    """Run per-file PDF index ``fn``; on ``ExtractionQualityError`` (nexus-wi1uv's
+    post-extraction quality gate), log an ERROR naming the file + remedy,
+    append *file* to *failed*, and return 0 (file NOT written this run)
+    instead of propagating.
+
+    Round-2 review finding (code-review-expert + substantive-critic
+    Critical, both independently): pre-fix, ``run_file_loop``'s
+    first-exception-cancels-all contract meant ONE PDF tripping the
+    quality gate during ``nx index repo`` aborted the ENTIRE run —
+    cancelling all not-yet-started code/prose/PDF/RDR files, not just the
+    offending PDF. Same containment shape as :func:`_contain_transient_
+    upsert` (same layer, same file), but for a PERMANENT per-document
+    condition rather than a transient upsert blip — so this does not
+    retry next run the way a deferred transient upsert does; the file
+    stays quality-gate-failed until explicitly re-indexed with
+    ``nx index pdf --allow-degraded-extraction <file>``.
+    """
+    from nexus.errors import ExtractionQualityError  # noqa: PLC0415 — circular-dep avoidance: nexus.errors
+
+    try:
+        return fn()
+    except ExtractionQualityError as exc:
+        _log.error(
+            "index_file_quality_gate_failed",
+            file=str(file), error=str(exc),
+            remedy=f"nx index pdf --allow-degraded-extraction {file}",
+        )
+        failed.append(str(file))
+        return 0
 
 
 def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
@@ -2087,7 +2140,8 @@ def _index_pdf_file(
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
-    Uses PDF extraction + chunking from doc_indexer, embeds via _embed_with_fallback.
+    Uses PDF extraction + chunking from doc_indexer, embeds via ``embed_fn``
+    (local/service mode; non-service embedding was retired, nexus-sghyo).
     Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
 
     *chunk_chars* overrides the PDF chunk size (default 1500 chars).  Pass
@@ -2103,7 +2157,7 @@ def _index_pdf_file(
     no-catalog path.
     """
     import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.doc_indexer import _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     content_hash = _hl.sha256()
     with file.open("rb") as f:
@@ -2113,7 +2167,10 @@ def _index_pdf_file(
 
     # Staleness check.
     # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver; falls back to source_path for legacy chunks.
+    # supplied a resolver. Empty doc_id is an unconditional "stale" —
+    # nexus-afudo (2026-08-05) deleted check_staleness's legacy
+    # source_path fallback as dead code (RDR-102 D2 removed
+    # source_path from make_chunk_metadata for every writer).
     catalog_doc_id_for_staleness = (
         doc_id_resolver(file) if doc_id_resolver is not None else ""
     )
@@ -2195,7 +2252,14 @@ def _index_pdf_file(
             embeddings = embed_fn(embed_texts_pdf)
             actual_model = target_model
         else:
-            embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
+            # nexus-sghyo: non-service embedding was retired — the client
+            # no longer embeds via Voyage. Unreachable in shipping config
+            # (the service/local-mode gate upstream always sets embed_fn).
+            raise CredentialsMissingError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -2222,6 +2286,15 @@ def _index_pdf_file(
     ):
         return len(ids)
 
+    # nexus-vw594 F1: producer #9 (nx index repo, PDF path, legacy
+    # per-file fallback — reached when the ChunkBatcher rejects the file
+    # or is absent). Fence begin BEFORE the upload, mirroring
+    # doc_indexer.py's single-flush producers; this path was previously
+    # entirely unfenced.
+    if catalog_doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+        _fence_begin(catalog_doc_id, content_hash_hex, collection_name)
+
     with _stage("upload"):
         db.upsert_chunks_with_embeddings(
             collection_name=collection_name,
@@ -2242,9 +2315,14 @@ def _index_pdf_file(
             from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             hooks = HookRegistry()
             install_default_hooks(hooks)
+        # nexus-vw594 F1: this file's whole chunk set lands in the ONE
+        # upsert above (file-atomic) — manifest_complete rides this
+        # existing call through manifest_write_batch_hook's
+        # write_manifest_many completion stamp, no extra round trip.
         hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
         )
         for _did, _doc in zip(ids, documents):
             hooks.fire_single(_did, collection_name, _doc)
@@ -2329,20 +2407,18 @@ def _prune_misclassified_in_collection(
     where-filter retained as fallback for catalog-absent callers.
 
     Files not present in *file_to_doc_id* (legacy / pre-RDR-102 D2
-    rows) fall back to per-path ``source_path`` lookup so collections
-    that pre-date the catalog backfill keep getting cleaned up. The
-    legacy set is typically small post-backfill.
+    rows) are silently skipped by this prune — nexus-afudo (2026-08-05)
+    deleted the per-path ``source_path`` lookup that used to cover them
+    as dead code (RDR-102 D2 made it permanently unable to match any
+    real chunk row). See ``_prune_misclassified_in_collection``'s
+    trailing comment for the evidence and the real backstop
+    (``mcp_infra._sweep_superseded_vectors`` + ``nx t3 gc``).
     """
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
 
-    doc_ids: list[str] = []
-    legacy_paths: list[str] = []
-    for path in target_paths:
-        d = file_to_doc_id.get(path, "")
-        if d:
-            doc_ids.append(d)
-        else:
-            legacy_paths.append(str(path))
+    doc_ids: list[str] = [
+        d for path in target_paths if (d := file_to_doc_id.get(path, ""))
+    ]
 
     pruned = 0
 
@@ -2471,9 +2547,11 @@ def _prune_misclassified_in_collection(
                     col, include=[], where={"doc_id": {"$in": batch}},
                 )
             except VectorServiceError as exc:
-                # nexus-ou4tb walk: a degraded service is NOT "no legacy
-                # rows" — isolate the batch but say so (matches the sibling
-                # legacy source_path arm below). Prune stays best-effort.
+                # nexus-ou4tb walk: a degraded service is NOT "no
+                # matching rows" — isolate the batch but say so. Prune
+                # stays best-effort. (The sibling legacy source_path arm
+                # this comment used to reference was deleted as dead
+                # code — nexus-afudo, 2026-08-05.)
                 _log.warning(
                     "legacy_prune_in_query_failed",
                     batch_size=len(batch),
@@ -2495,29 +2573,22 @@ def _prune_misclassified_in_collection(
                     doc_id_batch_size=len(batch),
                 )
 
-    # Legacy source_path fallback for unmapped files. Cardinality is
-    # bounded by the number of files indexed before catalog backfill,
-    # which on a repo that has been on a recent nexus is typically zero.
-    for src in legacy_paths:
-        # nexus-ou4tb: isolate per source_path — the guarded sibling loop
-        # above already does this, and one path's degrade must not abort the
-        # remaining prune work.
-        try:
-            existing = _paginated_get(col, include=[], where={"source_path": src})
-            if existing["ids"]:
-                _batched_delete(col, existing["ids"])
-                pruned += len(existing["ids"])
-                _log.debug(
-                    f"pruned misclassified chunks from {kind} collection (legacy)",
-                    count=len(existing["ids"]),
-                    source_path=src,
-                )
-        except Exception:  # noqa: BLE001 — one path's failure must not abort the prune
-            _log.warning(
-                "legacy_prune_failed_skipping_source_path",
-                source_path=src, collection=getattr(col, "name", "?"),
-                exc_info=True,
-            )
+    # nexus-afudo (2026-08-05): the legacy source_path where-filter loop
+    # (files absent from file_to_doc_id) DELETED as dead code. RDR-102 D2
+    # (83ac62c7, 2026-05-02) hard-removed source_path from
+    # make_chunk_metadata — the single factory every writer routes
+    # through — so `where={"source_path": src}` matched zero rows for
+    # any chunk written since then, regardless of how many files landed
+    # in legacy_paths. A live-store probe (field>=! existence test)
+    # found zero source_path rows across 13 representative collections
+    # (~115k chunks), extending nexus-tbkk1's original 6-collection
+    # probe to the code__/docs__ collections this exact prune targets.
+    # The real cross-document protection is mcp_infra.
+    # _sweep_superseded_vectors (manifest-diff, fires on every re-index)
+    # plus nx t3 gc (chash-vs-manifest, RDR-108 Phase 4) as the
+    # comprehensive manual backstop for manifest-absent legacy rows —
+    # same framing nexus-tbkk1 used for the sibling doc_indexer.py /
+    # pipeline_stages.py sites this bead closes the remainder of.
 
     return pruned
 
@@ -2541,8 +2612,10 @@ def _prune_misclassified(
 
     nexus-dcym: when ``file_to_doc_id`` is supplied (always populated by
     the catalog hook), the chunk-prune lookup keys on ``doc_id``. Files
-    not in the map fall back to the legacy ``source_path`` lookup so
-    chunks indexed before catalog backfill keep getting cleaned up.
+    not in the map are silently skipped — nexus-afudo (2026-08-05)
+    deleted the legacy ``source_path`` lookup they used to fall back
+    to as dead code (RDR-102 D2 made it permanently unable to match a
+    real chunk row).
 
     Pre-batching history: this function used to do one
     ``col.get(where={"doc_id": <id>})`` per file. For ART (~4,800 files)
@@ -2858,11 +2931,41 @@ def _drain_batcher_with_markers(
             parts.append(f"{pend['in_flight']} in-flight batches")
         on_phase(f"Flushing {' + '.join(parts)}…")
 
+        # nexus-lde88 G2: the printed "(Xs" used to be time.monotonic() - t0
+        # — CUMULATIVE since the drain started, not this flush's own
+        # duration — so three consecutive flushes printed the identical
+        # cumulative-so-far number and read as per-flush timing. Track the
+        # PREVIOUS flush's timestamp and print the per-flush delta instead;
+        # the rate/ETA projection below still needs the cumulative wall,
+        # so that arithmetic is unchanged.
+        #
+        # CAVEAT (review round 2, Suggestion): this delta is exact only at
+        # ``flush_concurrency=1`` — the ChunkBatcher default here is >1 (3,
+        # via ``_run_index``'s batcher construction), so ``on_progress``
+        # fires in the ORDER concurrent flushes complete
+        # (``as_completed()`` in ``ChunkBatcher.drain``), not the order
+        # they started. The delta is therefore the time between two
+        # JOINER OBSERVATIONS at this callback, not necessarily that one
+        # flush's own individual wall-clock duration — e.g. three flushes
+        # that ran mostly in parallel and land within a tight window print
+        # small deltas that don't individually represent ~1/3 of the real
+        # per-flush cost each. Still strictly more honest than the old
+        # cumulative-since-drain-start number (which was wrong in the same
+        # direction for EVERY flush, not just under concurrency), and
+        # exact at concurrency=1 (the drain-phase default when
+        # ``flush_pool`` is unset). For the ACTUAL per-flush attribution
+        # under concurrency, use the per-flush ``chunk_flush_complete``
+        # structlog event (nexus-lde88 G1) instead of this progress line.
+        _last_flush_t = [t0]
+
         def progress(done: int, total: int) -> None:
             # nexus-zedf7: rolling rate + projected remaining, so an hour of
             # legitimate server-side embedding never reads as a hang.
-            elapsed = time.monotonic() - t0
-            line = f"  flush {done}/{total} complete ({elapsed:.1f}s"
+            now = time.monotonic()
+            elapsed = now - t0  # cumulative — feeds the rate/ETA projection only
+            per_flush = now - _last_flush_t[0]
+            _last_flush_t[0] = now
+            line = f"  flush {done}/{total} complete ({per_flush:.1f}s"
             if 0 < done < total and elapsed > 0:
                 rate = done / elapsed
                 line += f", {rate * 60:.1f} flushes/min"
@@ -2905,7 +3008,7 @@ def _run_index(
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
     from nexus.classifier import ContentClass, classify_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.config import get_credential, load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.config import load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.ripgrep_cache import build_cache  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -3211,8 +3314,8 @@ def _run_index(
             # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
             # happens server-side in the JVM.  Python must NOT create a
             # voyageai.Client — the embed + Chroma-write pipeline runs in
-            # the Java nexus-service.  Voyage credentials are only needed
-            # for the Python Voyage path (flag unset / Phase-4 legacy).
+            # the Java nexus-service.  Non-service embedding was retired
+            # (nexus-sghyo); the else branch below raises loud.
             voyage_key = ""
             voyage_client = None
             code_model = index_model_for_collection(code_collection)
@@ -3223,13 +3326,13 @@ def _run_index(
             # server-side (Seam B contract).
             _embed_fn = lambda texts: [[]] * len(texts)  # noqa: E731
         else:
-            voyage_key = get_credential("voyage_api_key")
-            chroma_key = get_credential("chroma_api_key")
-            check_credentials(voyage_key, chroma_key)
-            import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
-            code_model = index_model_for_collection(code_collection)
-            docs_model = index_model_for_collection(docs_collection)
-            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
+            # nexus-sghyo: non-service embedding was retired — the client
+            # no longer embeds via Voyage (Hal determination 2026-07-28).
+            raise CredentialsMissingError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
 
     _log.debug("connecting to ChromaDB")
     # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through
@@ -3457,11 +3560,8 @@ def _run_index(
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
-        code_source_paths=len(code_staleness.by_source_path),
         docs_doc_ids=len(docs_staleness.by_doc_id),
-        docs_source_paths=len(docs_staleness.by_source_path),
         rdr_doc_ids=len(rdr_staleness.by_doc_id),
-        rdr_source_paths=len(rdr_staleness.by_source_path),
         elapsed_seconds=time.monotonic() - _staleness_t0,
     )
     if on_phase is not None:
@@ -3532,6 +3632,13 @@ def _run_index(
             "file": 0.0, "flush": 0.0,
             "file_batch": 0.0, "file_single": 0.0, "file_document": 0.0,
         }
+        # nexus-lde88 G4: "flush" above stayed as the merged total (taxonomy +
+        # manifest + aspect-enqueue, indistinguishable from one number). This
+        # dict carries the SAME total split by name — taxonomy/manifest come
+        # straight from HookRegistry.fire_batch's own hook_timings= (it knows
+        # each hook's __name__), aspect_enqueue is timed separately below
+        # since it isn't dispatched through the registry.
+        _flush_hook_by_name: dict[str, float] = {}
         _hook_seconds_lock = threading.Lock()
 
         def _fire_deferred_hooks(_path: str, context: object) -> None:
@@ -3578,6 +3685,38 @@ def _run_index(
 
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
+
+        def _fire_flush_grain_begin(
+            collection: str, _file_contexts: list,
+        ) -> None:
+            # nexus-vw594 F1: the RUNFENCE begin-many stamp for the repo-index
+            # hot path. Fired by ChunkBatcher's on_batch_begin callback
+            # BEFORE the network upsert (memo §3.5 T0 ordering) — this is
+            # the "TOP of the flush, before the upload" call site the
+            # investigation memo (T2 nexus/vw594-investigation-2026-08-04)
+            # names, expressed as ChunkBatcher's symmetric on_batch_begin/
+            # on_batch_complete split rather than literally inlined into
+            # _batch_flush's body: the flush closure only ever sees the
+            # flattened chunk arrays, never per-file catalog_doc_id, so the
+            # fence-relevant identity has to come from the SAME file_contexts
+            # extraction _fire_flush_grain_hooks below already does for the
+            # completion ride. ONE begin-many round trip per FLUSH (not per
+            # file) — the exact cost the :3631-era comment objected to.
+            pairs: list[tuple[str, str]] = []
+            for _path, _c in _file_contexts:
+                if not isinstance(_c, dict):
+                    continue
+                _cdid = _c.get("catalog_doc_id")
+                if not _cdid:
+                    continue
+                _metas_c = _c.get("metadatas")
+                _chash = _metas_c[0].get("content_hash", "") if _metas_c else ""
+                if _chash:
+                    pairs.append((_cdid, _chash))
+            if not pairs:
+                return
+            from nexus.doc_indexer import _fence_begin_many  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin_many(pairs, collection)
 
         def _fire_flush_grain_hooks(
             collection: str, _ids: list, _docs: list, _metas: list,
@@ -3628,8 +3767,12 @@ def _run_index(
             # nexus-5xn3k.4 RUNFENCE C2: ChunkBatcher is file-atomic (every
             # file's whole chunk set lands in one flush — see the write_many
             # call-site comments), so the completion claim is sound here.
-            # No per-file begin call (memo's explicit design: no extra round
-            # trips on this hot path) — only the ride-along complete map.
+            # No PER-FILE begin call here (memo's explicit design: no extra
+            # round trips on this hot path) — the begin-many stamp for this
+            # flush already fired once, in _fire_flush_grain_begin above via
+            # ChunkBatcher's on_batch_begin, before the upload even started
+            # (nexus-vw594 F1). This closure only carries the ride-along
+            # complete map.
             _manifest_complete: dict[str, str] = {}
             for _path, _c in _file_contexts:
                 if not isinstance(_c, dict):
@@ -3641,14 +3784,25 @@ def _run_index(
                 if _chash:
                     _manifest_complete[_cdid] = _chash
             _t0 = time.monotonic()
+            # nexus-lde88 G4: hook_timings= gets the registry's own per-hook
+            # (taxonomy_assign_batch_hook / manifest_write_batch_hook) split
+            # for free — the registry already resolves each hook's
+            # __name__ for its failure-logging path; this just times around
+            # the same call instead of merging both into one bucket.
+            _batch_hook_timings: dict[str, float] = {}
             reg.fire_batch(
                 agg_ids, collection, agg_docs,
                 [[] for _ in agg_ids], agg_metas,
                 grain="flush",
                 manifest_complete=_manifest_complete or None,
+                hook_timings=_batch_hook_timings,
             )
             with _hook_seconds_lock:
                 _hook_seconds["flush"] += time.monotonic() - _t0
+                for _hname, _hsecs in _batch_hook_timings.items():
+                    _flush_hook_by_name[_hname] = (
+                        _flush_hook_by_name.get(_hname, 0.0) + _hsecs
+                    )
 
             # nexus-nj4ch: batched aspect-extraction enqueue, replacing the
             # per-file fire_document(...) call this closure's file-grain
@@ -3692,8 +3846,12 @@ def _run_index(
                 ):
                     from nexus.aspect_worker import _ensure_aspect_worker  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
                     _ensure_aspect_worker()
+            _aspect_elapsed = time.monotonic() - _t_aspect
             with _hook_seconds_lock:
-                _hook_seconds["flush"] += time.monotonic() - _t_aspect
+                _hook_seconds["flush"] += _aspect_elapsed
+                _flush_hook_by_name["aspect_enqueue"] = (
+                    _flush_hook_by_name.get("aspect_enqueue", 0.0) + _aspect_elapsed
+                )
 
         # Shared with HttpVectorClient's internal upsert paging (nexus-nf3n7) so
         # the batcher flush cap and the client's oversize-fallback page size are
@@ -3707,6 +3865,7 @@ def _run_index(
             on_file_complete=_fire_deferred_hooks,
             on_file_failed=_batched_file_failed,
             on_batch_complete=_fire_flush_grain_hooks,
+            on_batch_begin=_fire_flush_grain_begin,
             max_chunks=_cap_for,
             # 3 concurrent flushes: inside the 10-concurrent-writes
             # per-collection service quota with headroom; the 3midv
@@ -3777,10 +3936,21 @@ def _run_index(
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
     _log.debug("indexing PDF files", count=len(pdf_files))
 
+    # nexus-wi1uv round-2 (code-review-expert + substantive-critic Critical,
+    # both independently): one PDF tripping the post-extraction quality
+    # gate must fail THAT file, never cancel the rest of this run's
+    # code/prose/PDF/RDR files via run_file_loop's first-exception-
+    # cancels-all contract. Collected here so the summary + stats key
+    # below can report it (and index_repo_cmd can drive a non-zero exit).
+    _quality_gate_failed: list[str] = []
+
     def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
         # nexus-7yfe6: same transient-upsert containment as prose (direct path).
-        return _contain_transient_upsert(lambda: _index_pdf_file(
+        # nexus-wi1uv: quality-gate containment nests inside — extraction
+        # (where the gate fires) happens before the vector upload (where a
+        # transient 5xx fires), so the inner wrapper sees it first.
+        return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(lambda: _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
@@ -3792,13 +3962,34 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
             batcher=_batcher,
-        ), file)
+        ), file, _quality_gate_failed), file)
 
     _pdf_written = run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
     _files_written += _pdf_written
+    if _quality_gate_failed:
+        # nexus-wi1uv: same "WARNING: N file(s) FAILED ... (see logs)" shape
+        # as the batcher.failed_files block below (duoak 2C) — informational
+        # during the run; index_repo_cmd converts a non-zero count into a
+        # non-zero exit (uqq9z-equivalent for this exception class) after
+        # post-processing completes, at the same point manifest_problems_
+        # detected does today.
+        _log.error(
+            "index_pdf_quality_gate_failures",
+            count=len(_quality_gate_failed),
+            files=sorted(_quality_gate_failed)[:20],
+        )
+        if on_phase is not None:
+            on_phase(
+                f"WARNING: {len(_quality_gate_failed)} PDF(s) FAILED the "
+                f"post-extraction quality gate (nexus-wi1uv, see logs): "
+                + ", ".join(sorted(_quality_gate_failed)[:5])
+                + ("…" if len(_quality_gate_failed) > 5 else "")
+                + " — retry with 'nx index pdf --allow-degraded-extraction "
+                "<file>' to accept the extraction deliberately."
+            )
 
     # Index RDR markdown files → rdr__ (nexus-3lswy: 4th run_file_loop
     # category, same wiring as prose — batched register_many/doc_id
@@ -3865,23 +4056,46 @@ def _run_index(
     if _batcher is not None:
         _drain_batcher_with_markers(_batcher, on_phase)
         _bstats = _batcher.stats
+        # nexus-lde88 G3: "flush_seconds" is now the FULL flush wall (upload
+        # + hooks); "upload_seconds" is the network write alone — the number
+        # the old "flush_seconds" name silently under-reported by ~4x while
+        # calling itself "upload". Both are reported explicitly, never
+        # conflated under one name.
+        _upload_s = _bstats["upload_seconds"]
+        _flush_wall_s = _bstats["flush_seconds"]
+        # nexus-lde88 G4: taxonomy/manifest/aspect used to merge into one
+        # "flush-grain" number — split by hook name (see _flush_hook_by_name
+        # above). .get(..., 0.0) covers a hook that never fired this run
+        # (e.g. no extractor configured for any collection -> no aspect
+        # enqueues) without pretending it ran for 0.0s of real work.
+        _taxonomy_s = _flush_hook_by_name.get("taxonomy_assign_batch_hook", 0.0)
+        _manifest_s = _flush_hook_by_name.get("manifest_write_batch_hook", 0.0)
+        _aspect_s = _flush_hook_by_name.get("aspect_enqueue", 0.0)
         _log.info(
             "index_chunk_batch_stats",
             flushes=int(_bstats["flushes"]),
-            flush_seconds=round(_bstats["flush_seconds"], 1),
+            upload_seconds=round(_upload_s, 1),
+            flush_wall_seconds=round(_flush_wall_s, 1),
             file_batch_seconds=round(_hook_seconds["file_batch"], 1),
             file_single_seconds=round(_hook_seconds["file_single"], 1),
             file_document_seconds=round(_hook_seconds["file_document"], 1),
+            flush_taxonomy_seconds=round(_taxonomy_s, 1),
+            flush_manifest_seconds=round(_manifest_s, 1),
+            flush_aspect_seconds=round(_aspect_s, 1),
         )
         if on_phase is not None and _bstats["flushes"]:
             on_phase(
                 f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
-                f"{_bstats['flush_seconds']:.1f}s upload; hooks "
+                f"{_upload_s:.1f}s upload ({_flush_wall_s:.1f}s full flush "
+                f"wall); hooks "
                 f"{_hook_seconds['file']:.1f}s file-grain "
                 f"(batch={_hook_seconds['file_batch']:.1f}s "
                 f"single={_hook_seconds['file_single']:.1f}s "
                 f"document={_hook_seconds['file_document']:.1f}s) + "
-                f"{_hook_seconds['flush']:.1f}s flush-grain"
+                f"{_hook_seconds['flush']:.1f}s flush-grain "
+                f"(taxonomy={_taxonomy_s:.1f}s "
+                f"manifest={_manifest_s:.1f}s "
+                f"aspect={_aspect_s:.1f}s)"
             )
         _batch_failures = _batcher.failed_files
         if _batch_failures:
@@ -4081,6 +4295,11 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # nexus-wi1uv round-2: count of PDFs that failed the post-extraction
+        # quality gate this run (contained per-file, never aborted the run).
+        # index_repo_cmd uses this to drive a non-zero exit after
+        # post-processing completes.
+        "pdf_quality_gate_failed": len(_quality_gate_failed),
         # nexus-tevzq: per-collection-kind attribution for the caller's
         # discover gate. Keys match the collection-name content_type prefix
         # (RDR-103 shape). prose+pdf both land in docs__.

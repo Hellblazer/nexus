@@ -7,8 +7,9 @@ Extracted from indexer.py (RDR-032).  Public API::
     index_prose_file(ctx: IndexContext, file_path: Path) -> int
 
 Handles both Markdown files (SemanticMarkdownChunker) and plain prose
-(line-based chunking via _line_chunk).  Delegates to
-doc_indexer._embed_with_fallback for CCE-aware embedding.
+(line-based chunking via _line_chunk).  Embeds via ``ctx.embed_fn``
+(local mode) or the server-side stub (service mode); non-service
+cloud-mode embedding was retired (nexus-sghyo).
 """
 from __future__ import annotations
 
@@ -29,7 +30,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     """Index a single prose file into the docs__ collection.
 
     Uses SemanticMarkdownChunker for .md/.markdown files, _line_chunk for all
-    others.  Embeds via _embed_with_fallback (CCE for voyage-context-3).
+    others.  Embeds via ``ctx.embed_fn`` (local mode) or server-side
+    (service mode).
 
     Uses ``ctx`` in place of the old 12-parameter signature.
 
@@ -37,7 +39,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     skipped (current) or failed.
     """
     from nexus.chunker import _line_chunk  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
-    from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
@@ -51,7 +52,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
     # Staleness check — skip if content + model unchanged.
     # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver; falls back to source_path for legacy chunks.
+    # supplied a resolver. (The source_path fallback was deleted as dead
+    # code by nexus-afudo, 2026-08-05 — RDR-102 Phase 5b.)
     catalog_doc_id_for_staleness = (
         ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
     )
@@ -218,7 +220,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         return 0
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
-    # Embed: local mode uses embed_fn; cloud uses _embed_with_fallback (CCE)
+    # Embed: local mode uses embed_fn; service mode embeds server-side.
     with _stage("embed"):
         if ctx.embed_fn is not None:
             embeddings = ctx.embed_fn(embed_texts)
@@ -235,8 +237,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 embeddings = [[] for _ in embed_texts]
                 actual_model = ctx.embedding_model
             else:
-                embeddings, actual_model = _embed_with_fallback(
-                    embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
+                # nexus-sghyo: non-service embedding was retired — the
+                # client no longer embeds via Voyage.
+                raise RuntimeError(
+                    "non-service embedding was retired: the client no "
+                    "longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                    "VECTORS=service (the default) or unset it."
                 )
     if actual_model != ctx.embedding_model:
         for m in metadatas:
@@ -264,6 +270,15 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return len(ids)
 
+    # nexus-vw594 F1: producer #6 (nx index repo, prose/rdr, legacy
+    # per-file fallback — reached when the ChunkBatcher rejects the file
+    # or is absent). Fence begin BEFORE the upload, mirroring
+    # doc_indexer.py's single-flush producers; this path was previously
+    # entirely unfenced.
+    if catalog_doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+        _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+
     with _stage("upload"):
         ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
             collection_name=ctx.corpus,
@@ -280,9 +295,13 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         # single-shape consumers on CLI ingest. Own stage bucket
         # (nexus-cfc72): under concurrent indexing these serialize on
         # LockedHookRegistry, and lock-wait must not read as upload time.
+        # nexus-vw594 F1: file-atomic upload above — manifest_complete
+        # rides this existing call through manifest_write_batch_hook's
+        # write_manifest_many completion stamp, no extra round trip.
         ctx.hooks.fire_batch(
             ids, ctx.corpus, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
         for _did, _doc in zip(ids, documents):
             ctx.hooks.fire_single(_did, ctx.corpus, _doc)

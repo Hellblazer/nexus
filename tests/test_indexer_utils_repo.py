@@ -175,7 +175,10 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     pdf.write_bytes(content)
     real_hash = hashlib.sha256(content).hexdigest()
 
-    monkeypatch.setattr("nexus.doc_indexer._has_credentials", lambda: True)
+    # nexus-sghyo (2026-08-06): _has_credentials is deleted (client no longer
+    # embeds via Voyage, Hal determination 2026-07-28). Ambient service mode
+    # (default) is what this test needs anyway — the server-stub embed
+    # branch does not call embed at all, so no embed_fn injection is needed.
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
 
     captured_paths: list[Path] = []
@@ -200,7 +203,15 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("nexus.doc_indexer._vector_with_retry", fake_chroma_retry)
     monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", fake_register)
 
-    result = index_pdf(pdf, "test")
+    # nexus-sghyo (2026-08-06): ambient mode is service mode by default, and
+    # with no ``t3=`` passed, index_pdf resolves its db handle via
+    # ``mcp_infra.get_t3()`` (a real, process-cached singleton) rather than
+    # the ``make_t3`` patched above — that path tries a real cloud-engine
+    # version probe and fails outside a live service. Pass ``t3=`` explicitly
+    # so the mock db is used directly, matching this test's actual intent
+    # (probing the path passed to ``_register_or_lookup_doc_id``, not
+    # exercising db-handle resolution).
+    result = index_pdf(pdf, "test", t3=mock_db)
 
     assert result == 0
     assert captured_paths
@@ -232,13 +243,29 @@ class TestStalenessCache:
     becomes a dict lookup.
     """
 
-    def test_build_indexes_doc_id_and_source_path(self) -> None:
-        """One sweep of the collection populates both the doc_id-keyed
-        and source_path-keyed indexes from chunk metadata."""
+    def test_build_indexes_doc_id_only_source_path_index_deleted_as_dead_code(
+        self,
+    ) -> None:
+        """One sweep of the collection populates the doc_id-keyed index
+        from chunk metadata.
+
+        nexus-afudo (2026-08-05): ``StalenessCache.by_source_path`` and
+        its population in ``build_staleness_cache`` were DELETED as
+        dead code — RDR-102 D2 (2026-05-02) removed source_path from
+        make_chunk_metadata for every writer, so no chunk written since
+        then has ever carried the key and the index was always empty in
+        production. This replaces ``test_build_indexes_doc_id_and_
+        source_path``, which asserted a populated ``by_source_path`` from
+        synthetic fixture metadata no real writer emits anymore.
+
+        Kill control: a chunk carrying a (now purely synthetic)
+        ``source_path`` key must NOT resurrect a ``by_source_path``
+        attribute on the cache.
+        """
         col = MagicMock(spec=["get", "name"])
         # Two chunks per file is realistic; both chunks share the same
         # content_hash + embedding_model so they collapse to a single
-        # cache entry per (doc_id, source_path) pair.
+        # cache entry per doc_id.
         col.get.return_value = {
             "ids": ["c1", "c2", "c3"],
             "metadatas": [
@@ -254,7 +281,9 @@ class TestStalenessCache:
                     "content_hash": "hash-a",
                     "embedding_model": "voyage-code-3",
                 },
-                # Legacy chunk: source_path only, no doc_id
+                # Legacy-shaped chunk: source_path only, no doc_id. Real
+                # writers never emit this post-RDR-102-D2, but the cache
+                # build must not choke on it if it ever appeared.
                 {
                     "doc_id": "",
                     "source_path": "legacy/old.py",
@@ -267,10 +296,7 @@ class TestStalenessCache:
         cache = build_staleness_cache(col)
 
         assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
-        assert cache.by_source_path == {
-            "src/a.py": ("hash-a", "voyage-code-3"),
-            "legacy/old.py": ("hash-l", "voyage-code-3"),
-        }
+        assert not hasattr(cache, "by_source_path")
 
     def test_build_resolves_phase3_chunks_via_catalog_manifest(self) -> None:
         """nexus-0ocy (RDR-108 Phase 4 review D-M4): Phase-3 chunks
@@ -341,7 +367,6 @@ class TestStalenessCache:
         cache = build_staleness_cache(col)
 
         assert cache.by_doc_id == {}
-        assert cache.by_source_path == {}
 
     def test_build_uses_get_all_metadata_when_available(self) -> None:
         """nexus-duoak follow-up: a collection exposing get_all_metadata()
@@ -522,7 +547,6 @@ class TestStalenessCache:
         cache = build_staleness_cache(col)
 
         assert cache.by_doc_id == {}
-        assert cache.by_source_path == {}
 
     def test_build_warns_when_fallback_silently_empty_after_fast_path_failure(
         self, caplog
@@ -557,7 +581,6 @@ class TestStalenessCache:
             cache = build_staleness_cache(col)
 
         assert cache.by_doc_id == {}
-        assert cache.by_source_path == {}
         events = [r.msg.get("event") if isinstance(r.msg, dict) else r.getMessage() for r in caplog.records]
         assert any(
             "build_staleness_cache_fallback_empty_after_fast_path_failure" in str(e)
@@ -698,23 +721,30 @@ class TestStalenessCache:
         assert result is True
         assert col.get.call_count == 1
 
-    def test_check_staleness_legacy_path_uses_source_path(self) -> None:
-        """Caller with ``doc_id=''`` (legacy / no catalog) uses the
-        source_path index."""
-        cache = StalenessCache(
-            by_source_path={"legacy/old.py": ("hash-l", "voyage-code-3")},
-        )
+    def test_check_staleness_legacy_path_source_path_index_deleted_as_dead_code(
+        self,
+    ) -> None:
+        """nexus-afudo (2026-08-05): a caller with ``doc_id=''`` (legacy
+        / no catalog) used to fall back to ``StalenessCache.
+        by_source_path`` — DELETED as dead code (RDR-102 D2 removed
+        source_path from make_chunk_metadata for every writer, so the
+        index could never hold a real chunk's data; see
+        ``StalenessCache``'s docstring). ``StalenessCache`` no longer
+        accepts a ``by_source_path`` kwarg at all — the field is gone,
+        not merely unused, so a resurrection attempt fails at
+        construction, not just at lookup.
 
-        # Hit on source_path
+        A doc_id-less cache lookup is now an unconditional cache miss
+        (``check_staleness`` returns False / "stale") regardless of
+        what the cache otherwise contains.
+        """
+        cache = StalenessCache(by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")})
+
+        with pytest.raises(TypeError):
+            StalenessCache(by_source_path={"legacy/old.py": ("hash-l", "voyage-code-3")})  # type: ignore[call-arg]
+
         assert check_staleness(
             col=MagicMock(), source_file="legacy/old.py",
             content_hash="hash-l", embedding_model="voyage-code-3",
-            doc_id="", cache=cache,
-        ) is True
-
-        # Miss on source_path
-        assert check_staleness(
-            col=MagicMock(), source_file="legacy/missing.py",
-            content_hash="hash-x", embedding_model="voyage-code-3",
             doc_id="", cache=cache,
         ) is False

@@ -38,16 +38,15 @@ def _fake_pipeline_engine(monkeypatch):
     monkeypatch.setattr("nexus.pipeline_stages.HttpPipelineDB", lambda: db)
     return engine
 
-@pytest.fixture(autouse=True)
-def _legacy_vector_backend(monkeypatch):
-    # nexus-9n1u3: these e2e tests use a raw chromadb EphemeralClient T3 +
-    # DefaultEmbeddingFunction and exercise the CLIENT-embed PDF path. Pin the
-    # vector backend off the 6.0 service default (is_vector_service_mode() is
-    # True by default since RDR-155 P4a) so the streaming pipeline client-embeds
-    # into the fixture instead of writing empty server-side-embed placeholders
-    # that raw chromadb rejects with "IndexError: list index out of range in
-    # upsert". The service-mode PDF path is covered by the live service smoke.
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
+# nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse fixture
+# that force-pinned this whole module to NX_STORAGE_BACKEND_VECTORS=local
+# is RETIRED — every test below now passes ``embed_fn=_local_embed``
+# explicitly (checked FIRST, before any mode/credential dispatch), so the
+# client-side ONNX embed path this file exercises no longer depends on
+# ambient mode at all. Client-side Voyage embedding (the OTHER thing that
+# env var used to steer around) is retired outright (Hal determination
+# 2026-07-28: "we do no embedding on the client") — unrelated to the
+# local ONNX path this file tests, which is unaffected by that retirement.
 
 
 @pytest.fixture(autouse=True)
@@ -73,13 +72,18 @@ def _stub_fence_complete(monkeypatch):
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
 
 
-def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
+def _local_embed(chunks, model, api_key="", input_type="document", timeout=120.0, on_progress=None):
     """Local embed stub: wraps ONNX MiniLM-L6-v2 — no API keys needed.
 
-    Returns (embeddings, model) to match _embed_with_fallback's
-    (list[list[float]], str) signature.  Passing model through (not "test-local")
-    keeps the stored embedding_model matching target_model, which is required for
-    the staleness guard (AC-E3) to trigger correctly on re-index.
+    Returns (embeddings, model) — the ``embed_fn(texts, target_model) ->
+    (embeddings, actual_model)`` shape ``index_pdf``/``_index_pdf_file``
+    dispatch to when ``embed_fn`` is supplied (nexus-sghyo, 2026-08-06:
+    this used to be the return contract of the now-deleted
+    ``_embed_with_fallback``; ``api_key`` defaults to "" so this doubles
+    directly as an ``embed_fn=`` value). Passing model through (not
+    "test-local") keeps the stored embedding_model matching target_model,
+    which is required for the staleness guard (AC-E3) to trigger
+    correctly on re-index.
 
     RDR-155 P4b P3: this used ``[v.tolist() for v in _local_ef(chunks)]``
     because chroma's ONNX EF returned numpy float32 rows. The nexus EF
@@ -98,9 +102,8 @@ class TestIndexPdfE2E:
 
     def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0."""
-        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
-            count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3)
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+            count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3, embed_fn=_local_embed)
 
         assert count > 0, "Expected at least one chunk indexed"
         results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"])
@@ -111,9 +114,8 @@ class TestIndexPdfE2E:
 
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
-        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
-            count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3)
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+            count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3, embed_fn=_local_embed)
 
         assert count > 1, (
             "Expected multiple chunks from multipage_pdf so page attribution is testable"
@@ -142,10 +144,9 @@ class TestIndexPdfE2E:
         test_doc_indexer's decoupled-T3 test).
         """
         with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-             patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed), \
              patch("nexus.doc_indexer._manifest_is_fully_present", return_value=True):
-            first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
-            second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
+            first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
+            second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
 
         assert first > 0
         assert second == 0, "Second index of unchanged PDF must return 0"
@@ -193,19 +194,23 @@ class TestIndexPdfFileE2E:
         git_meta = _git_metadata(pdf_git_repo_e2e)
         now_iso = datetime.now(UTC).isoformat()
 
-        with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
-            _index_pdf_file(
-                file=pdf,
-                repo=pdf_git_repo_e2e,
-                collection_name=collection_name,
-                target_model=model,
-                col=col,
-                db=local_t3,
-                voyage_key="vk_test",
-                git_meta=git_meta,
-                now_iso=now_iso,
-                score=0.5,
-            )
+        # nexus-sghyo: nexus.indexer._index_pdf_file's embed_fn shape is
+        # (texts) -> embeddings (single return) — DIFFERENT from
+        # doc_indexer.index_pdf's (texts, model) -> (embeddings, model)
+        # shape that _local_embed matches directly. Adapt.
+        _index_pdf_file(
+            file=pdf,
+            repo=pdf_git_repo_e2e,
+            collection_name=collection_name,
+            target_model=model,
+            col=col,
+            db=local_t3,
+            voyage_key="vk_test",
+            git_meta=git_meta,
+            now_iso=now_iso,
+            score=0.5,
+            embed_fn=lambda texts: _local_embed(texts, model)[0],
+        )
 
         results = local_t3.search("hello world test document", [collection_name])
         assert results, "Expected search results after indexing"

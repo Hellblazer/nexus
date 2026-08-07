@@ -382,7 +382,11 @@ class TestT3DatabaseLocalMode:
         # RDR-155 P4b P0a: the injected test substrate is the in-memory
         # client (was chromadb.ClientAPI).
         assert isinstance(local_db._client, InMemoryVectorClient)
-        assert local_db._voyage_client is None
+        # nexus-sghyo (2026-08-06): T3Database no longer constructs a
+        # Voyage client at all — client-side embedding is retired (Hal
+        # determination 2026-07-28). The always-None ``_voyage_client``
+        # attribute this used to assert on is gone, not just unset.
+        assert not hasattr(local_db, "_voyage_client")
 
     def test_local_mode_no_cloud_probe(self, tmp_path: Path, local_ef: LocalEmbeddingFunction) -> None:
         # RDR-155 P4a.2: local mode without an injected client fails loud (the
@@ -439,7 +443,12 @@ class TestT3DatabaseLocalMode:
         )
 
     def test_local_mode_search_skips_cce(self, local_db: T3Database) -> None:
-        assert local_db._voyage_client is None
+        # nexus-sghyo (2026-08-06): see test_local_mode_init — the client
+        # constructs no Voyage client at all now (client-side embedding
+        # retired), so there is no CCE branch left for local mode to skip
+        # via a null voyage client; this test's remaining job is proving
+        # local-mode search still works (the CCE branch was deleted, not
+        # merely bypassed).
         local_db.put(collection="knowledge__test", content="test content", title="t1")
         results = local_db.search("test", collection_names=["knowledge__test"])
         assert isinstance(results, list)

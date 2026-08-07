@@ -188,7 +188,7 @@ jobs:
           tests/e2e/local-service-gate.sh
 
       - name: Ungated integration files (nexus-5opzu)
-        # The five tests/db files with NO other automated gate anywhere —
+        # The tests/db files with NO other automated gate anywhere —
         # one of which (test_i711w_gap_xfails.py) holds the SOLE repo-wide
         # pins on five service-catalog contracts, whose strict xfails went
         # stale unseen for a session (6 XPASS(strict), 2026-07-31). They
@@ -198,6 +198,15 @@ jobs:
         # jar — so they run here, sequentially (one pytest at a time).
         # Hal call 2026-08-02 on nexus-5opzu: option (a), scheduled gate;
         # per-contract hermetic splits stay opportunistic.
+        #
+        # tests/integration/test_tp8yk_manifest_never_outruns_chunks.py
+        # (nexus-irszw, 2026-08-04): the SOLE production-layer, real-engine
+        # proof of nexus-tp8yk's D1 fix (manifest rows structurally
+        # unreachable for an unconfirmed chunk batch), including its
+        # mandatory kill control. Not a tests/db file, but the identical
+        # shape — @pytest.mark.integration, self-provisioning against the
+        # shared engine substrate, zero other CI wiring — so it joins the
+        # same allowlist rather than inventing a second gate.
         run: |
           set -euo pipefail
           uv run pytest \
@@ -206,6 +215,7 @@ jobs:
             tests/db/test_indexer_seam_b_integration.py \
             tests/db/test_frecency_enehl_integration.py \
             tests/db/test_5xn3k_runfence_gate.py \
+            tests/integration/test_tp8yk_manifest_never_outruns_chunks.py \
             -o addopts="" -m integration -q -rs --junit-xml=ungated-5opzu.xml
 
       - name: Non-vacuity — every ungated file actually ran (nexus-5opzu)
@@ -228,6 +238,10 @@ jobs:
               # Critical #1, 2026-08-02). Reachability caveat nexus-5a8ic
               # applies to this whole leg until a release promotes it.
               "test_5xn3k_runfence_gate",
+              # nexus-irszw (2026-08-04): nexus-tp8yk's sole production-layer
+              # real-engine D1 proof, incl. its mandatory kill control — same
+              # never-otherwise-selected shape as the RUNFENCE gate above.
+              "test_tp8yk_manifest_never_outruns_chunks",
           }
           root = ET.parse("ungated-5opzu.xml").getroot()
           ran: dict[str, int] = {f: 0 for f in FILES}

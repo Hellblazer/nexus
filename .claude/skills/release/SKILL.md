@@ -62,10 +62,22 @@ release process unseen. This gate builds the wheel under test, then on a
 scrubbed-env virgin HOME: local init (engine sha256+sig-verified, portable PG,
 bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG
 registration asserted, semantic search returns both sentinels, doctor with
-zero ✗ / zero ⚠ / an EMPTY warnings allowlist. Must end
-`FRESH-INSTALL MVV PASSED`. `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the
-416MB model download across runs. Every new fresh-box warning is a decision:
-fix it or allowlist it in the script WITH a rationale + bead reference.
+zero ✗ / zero ⚠ / warnings checked against the script's allowlist. Must end
+`FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
+`FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
+runs. Every new fresh-box warning is a decision: fix it or allowlist it in
+the script WITH a rationale + bead reference.
+
+This step's plain invocation is the LOCAL WHEEL layer only (dependencies
+resolve from this checkout's `uv.lock`/wheel metadata). It cannot reproduce a
+defect living in dependency RESOLUTION at a fresh `uv tool install` — that
+was nexus-l2ku5 (`mcp>=1.0` unbounded resolved `mcp` 2.0.0 straight off PyPI,
+killing both MCP servers for 4 days while every gate ran pinned to the dev
+venv). `tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]` (nexus-796zn)
+installs the real PyPI artifact via `uv tool install conexus[==X.Y.Z]` in the
+identical scrubbed sandbox and belongs to the POST-publish shakedown, not
+this pre-tag battery (nothing is on PyPI yet at this point in the checklist)
+— see T2 `nexus/shakedown-playbook` §2 S1.
 
 **`--package-upgrade` — the fix-delivery gate (GH #1402, nexus-cfgo9).** Proves
 what 6.10.0 shipped without: that an EXISTING install upgrading the package
@@ -181,6 +193,16 @@ Required when the release touches the **upgrade path** an installed user travers
 ```
 
 Runnable from any baseline (nexus-a3nqp): it detects stanza drift at runtime and cross-checks `nx doctor`'s drift claim against the actual stanza byte-diff, so a doctor false-positive/negative fails the run. Must end with `12/12 PASS`. `./tests/e2e/upgrade-shakeout.sh reset` cleans the sandbox.
+
+### 6c. Run sandbox shakedown (~5-10 min warm / +10-15 min cold)
+
+Required on every release (nexus-6xkdu: a diff-based trigger list was rejected — MinerU/docling version drift lands via `uv.lock` alone with no matching pyproject.toml pin to diff, so any trigger list is under-inclusive by construction; see nexus-7g40u).
+
+```bash
+./tests/e2e/release-sandbox.sh shakedown
+```
+
+Smoke (step 6) never calls `nx index pdf`; this is the only pre-tag gate that exercises MinerU end-to-end through the production indexing path (step 3b of 11, the `bft-to-smr.pdf` formula fixture) — the slow-marked `test_mineru_path_preserves_formulas` pytest test runs in no default or scheduled suite (nexus-6xkdu). Must end `SHAKEDOWN PASSED`; a `SHAKEDOWN FAILED` verdict or non-zero exit halts the release. All four indexing steps (2, 3a, 3b, 4) can now fail the run — the `|| true` that previously made them unable to redden the run was removed at nexus-6xkdu.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 

@@ -53,6 +53,25 @@ Pre-fix engine degradation: a 404 from ``POST /v1/catalog/purge-trash``
 (the route not existing on an engine older than nexus-3ck2g) raises a
 clear ``ClickException`` naming the required engine release — never a
 silent no-op, never a swallowed exception.
+
+POPULATION (nexus-heizf part 3 — read this before comparing this verb's
+stranded-chunk count against `nx doctor`'s "dangling manifest chashes"
+warn or ``nx catalog manifest-verify --list``; they are DISJOINT
+populations, not two views of the same rows):
+
+* THIS verb's stranded-chunk count (``nexus.purge_trash``'s orphan
+  predicate): EXISTING ``chunks_<dim>`` rows that ARE manifest-backed but
+  have NO LIVE parent document (every manifest row referencing the chash
+  belongs to a TOMBSTONED document). Direction: chunk -> parent.
+* Doctor's dangling-manifest census / ``manifest-verify --list``: manifest
+  rows of LIVE documents whose chash has NO backing chunk row at all.
+  Direction: manifest -> chunk.
+
+A chash cannot be in both at once (this verb requires the opposite of a
+live parent; the other requires one). Zero stranded chunks here says
+NOTHING about the other instrument's count, and vice versa — the
+2026-08-04 nexus-55l58 shakedown mistook this verb's zero for evidence
+against a nonzero dangling-manifest count on the SAME store.
 """
 from __future__ import annotations
 
@@ -63,6 +82,20 @@ import httpx
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+#: nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05): the
+#: disjointness caveat vs `nx doctor`'s dangling-manifest census / `nx
+#: catalog manifest-verify --list`, in the LIVE OUTPUT this command
+#: actually prints (text AND --json), not docstring/help only — mirrors
+#: `nexus.health._DANGLING_MANIFEST_POPULATION_NOTE`. The 2026-08-04
+#: nexus-55l58 shakedown was misled by a docstring nobody reads mid-
+#: incident; the numeric output itself must carry the warning.
+_POPULATION_NOTE = (
+    "population: tombstoned-doc chunks with no live parent — disjoint "
+    "from `nx doctor`'s dangling-manifest census / `nx catalog "
+    "manifest-verify --list` (live-doc manifest rows missing a chunk); "
+    "one reading clean says nothing about the other"
+)
 
 
 def _echo_result(result: dict, older_than_days: int) -> None:
@@ -171,6 +204,13 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     See the module docstring for why the writer is constructed up front
     here (deviates from reconcile-stale's lazy-writer pattern) and for
     the pre-nexus-3ck2g engine-floor refusal.
+
+    POPULATION NOTE (nexus-heizf): the stranded-chunk count above is a
+    DIFFERENT, disjoint population from `nx doctor`'s "dangling manifest
+    chashes" warn / `nx catalog manifest-verify --list` (chunk -> parent
+    here; manifest -> chunk there). See the module docstring's POPULATION
+    section — do not read one instrument's zero as evidence about the
+    other's count.
     """
     if json_out and not dry_run:
         raise click.ClickException(
@@ -204,13 +244,16 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
         writer.close()
 
     if json_out:
-        click.echo(json.dumps(result, indent=2))
+        payload = dict(result)
+        payload["population"] = _POPULATION_NOTE
+        click.echo(json.dumps(payload, indent=2))
         return
 
     if will_act:
         click.echo("Purge-trash executed:")
     else:
         click.echo("Purge-trash dry-run:")
+    click.echo(f"  [{_POPULATION_NOTE}]")
     _echo_result(result, older_than_days)
 
     if not will_act:

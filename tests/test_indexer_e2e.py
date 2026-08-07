@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
-import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -572,17 +571,8 @@ def test_smart_index_py_excluded_from_docs(
 
 
 def test_smart_index_rdr_routing(
-    cloud_mode,
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    # nexus-x2x6v: cloud_mode MUST be the FIRST fixture param — pytest sets
-    # up same-scope fixtures in request order, and rich_registry mints the
-    # code/docs collection NAMES at setup time. Without the pin (or with it
-    # ordered after rich_registry), the names are minted under the AMBIENT
-    # mode (local/minilm on a box without CHROMA_API_KEY) while _index's
-    # get_credential patch indexes under cloud/voyage — the mode-mismatch
-    # signature this pair flaked with. (The bisect to c7fc8803 was a red
-    # herring: that commit only touches scripts/build_pg_bundle.sh.)
     """RDR-102 D2: source_path is gone from chunks. The frontmatter
     title for ADR-001-storage-tiers.md is "Storage Tier Architecture"
     (overrides the filename-derived stem), so the chunk's ``title``
@@ -590,6 +580,23 @@ def test_smart_index_rdr_routing(
     ``section_title`` (the H1 "ADR-001: Storage Tier Architecture"
     propagates as section_title for all chunks under it) AND by
     asserting the rdr collection has chunks while docs does not.
+
+    nexus-sghyo PORT (2026-08-07): this test used to run under the
+    ``cloud_mode`` fixture solely so ``rdr_col_name`` would come out
+    voyage-shaped for a hardcoded ``"voyage-context-3" in rdr_col_name``
+    assertion (nexus-x2x6v). ``cloud_mode`` + the file's autouse
+    ``_legacy_vector_backend`` (``NX_STORAGE_BACKEND_VECTORS=local``) is
+    now exactly the retired non-service-embedding combination
+    (indexer.py's ``CredentialsMissingError`` — "non-service embedding
+    was retired... Set NX_STORAGE_BACKEND_VECTORS=service (the default)
+    or unset it"). The routing behaviour under test (RDR content lands
+    in rdr__, never docs__) is embedding-model-independent, so this now
+    runs in the suite's default LOCAL mode; the voyage-shaped-name
+    assertion is dropped rather than ported — cloud-mode collection
+    naming is a pure client-side derivation with its own dedicated,
+    network-free unit coverage:
+    ``tests/test_rdr_109_phase2_dispatch.py::
+    test_effective_in_cloud_mode_delegates_to_canonical``.
     """
     # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
     # the same resolution point the indexer itself uses. On a LIVE catalog,
@@ -613,11 +620,6 @@ def test_smart_index_rdr_routing(
         f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
     )
 
-    # nexus-x2x6v hardening: make the mode-pin's effect explicit — with
-    # cloud_mode first, every derivation point resolves the SAME
-    # voyage-shaped name (this line also brings the test under the
-    # mode-declaration lint, which the dynamic derivation used to evade).
-    assert "voyage-context-3" in rdr_col_name, rdr_col_name
     rdr_col = local_t3.get_or_create_collection(rdr_col_name)
     rdr_metas = rdr_col.get(include=["metadatas"])["metadatas"]
     assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
@@ -656,32 +658,30 @@ def test_smart_index_search(
     assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 
-def test_smart_index_embedding_model_metadata(
-    cloud_mode,
-    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
-) -> None:
-    # nexus-x2x6v: cloud_mode FIRST (was last — set up AFTER rich_registry
-    # had already minted minilm-named collections; see the sibling test's
-    # comment for the full mechanism).
-    # PORTED (nexus-i711w): derive the rdr collection name BEFORE indexing —
-    # the same resolution point the indexer itself uses. On a LIVE catalog,
-    # _index registers the repo owner mid-run, so a post-run derivation
-    # returns the owner-prefixed CONFORMANT name while this run's chunks
-    # were written under the LEGACY name (first-index drift window; the
-    # next-run convergence is _migrate_legacy_collections' subject, pinned
-    # by the migration/tombstone-probe suites). The old pinned substrate
-    # had no catalog at either point, which is why both derivations agreed.
-    from nexus.indexer import _repo_collection_or_legacy
-    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
-
-    _index(rich_repo, rich_registry, local_t3)
-    info = rich_registry.get(rich_repo)
-    code_col = local_t3.get_or_create_collection(info["code_collection"])
-    code_models = {m.get("embedding_model", "") for m in code_col.get(include=["metadatas"])["metadatas"]}
-    assert "voyage-code-3" in code_models
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-    docs_models = {m.get("embedding_model", "") for m in docs_col.get(include=["metadatas"])["metadatas"]}
-    assert docs_models <= {"voyage-context-3"} and docs_models
+# test_smart_index_embedding_model_metadata RETIRED (nexus-sghyo, 2026-08-07).
+# This test drove a full index_repository() run under the `cloud_mode`
+# fixture combined with the file's autouse `_legacy_vector_backend`
+# (NX_STORAGE_BACKEND_VECTORS=local) + `mock_voyage_client`, then asserted
+# the resulting T3 chunk metadata carried "voyage-code-3"/"voyage-context-3"
+# as `embedding_model`. That is precisely the CLIENT-embed leg nexus-sghyo
+# retired (Hal determination 2026-07-28: "we do no embedding on the
+# client") — indexer.py now raises CredentialsMissingError for exactly this
+# combination ("non-service embedding was retired... Set
+# NX_STORAGE_BACKEND_VECTORS=service (the default) or unset it"), and a
+# mocked voyageai.Client has no honest production equivalent to simulate
+# against post-retirement.
+#
+# The actual behavior worth pinning — that cloud-mode indexing computes
+# "voyage-code-3" for code / "voyage-context-3" for docs as the WRITE-side
+# embedding-model token — is a pure client-side string derivation
+# (`nexus.corpus.effective_embedding_model_for_writes`), independent of
+# whether any embedder actually runs. It is not lost: see
+# tests/test_rdr_109_phase2_dispatch.py::
+# test_effective_in_cloud_mode_delegates_to_canonical, which pins exactly
+# that derivation with zero network/service dependency. A genuine full
+# round-trip verification that a real chunk's stored metadata carries the
+# cloud model name requires a live Voyage-backed service, which this suite
+# does not (and should not) exercise.
 
 
 def test_smart_index_staleness_check(
@@ -721,7 +721,6 @@ def test_smart_index_staleness_check(
 
 def test_migration_moves_prose_from_code_to_docs(
     rich_repo: Path, tmp_path: Path, local_t3: T3Database,
-    cloud_mode,
 ) -> None:
     """RDR-102 D2 update: ``_prune_misclassified`` in ``indexer.py``
     keys on ``doc_id`` (the post-Phase-A canonical identity) when the
@@ -739,6 +738,19 @@ def test_migration_moves_prose_from_code_to_docs(
       4. Re-index — the doc_id-keyed _prune_misclassified must find
          and remove the seed chunk because README.md is in
          file_to_doc_id (catalog hook re-runs every index).
+
+    nexus-sghyo PORT (2026-08-07): dropped the ``cloud_mode`` fixture.
+    ``cloud_mode`` + this file's autouse ``_legacy_vector_backend``
+    (NX_STORAGE_BACKEND_VECTORS=local) is the retired non-service-embed
+    combination (indexer.py's CredentialsMissingError). The migration/
+    prune behaviour under test does not depend on cloud vs local
+    embedding — the ``"voyage-code-3"`` string below (kept, see the
+    inline note) is a fabricated metadata literal for the seeded fake
+    chunk, never derived from an actual embedder call, so nothing about
+    this test's assertions changes by running in the suite's default
+    local mode. Registered in ``_MODE_LINT_EXCLUDE_NODEIDS``
+    (tests/conftest.py) as a "string-literal-as-name" exemption from the
+    RDR-109 mode-declaration lint.
     """
     # nexus-i711w: no Catalog.init — ``_catalog_hook``'s local
     # is_initialized gate does not apply in service mode (indexer.py:933),
@@ -818,34 +830,65 @@ def test_index_then_search(
 
 
 def test_cli_index_repo(
-    mini_repo: Path, tmp_path: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+    mini_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """nexus-5xn3k PORT (2026-08-07): this test used to route the vector
+    write through the file's ``local_t3`` (a raw, DECOUPLED local
+    EphemeralClient) while the catalog stayed on the real engine
+    substrate (``_pin_t2_substrate``, autouse for the whole suite). The
+    RUNFENCE completion gate (nexus-5xn3k, shipped e1884d4d) makes
+    ``nx index repo`` fail loud whenever the engine's fail-closed
+    completion verify cannot find the referenced chunks in the SAME
+    substrate the catalog manifest points at
+    (``write_manifest_many_complete_refused``, referenced==missing==
+    chunk_count) — exactly this decoupled-substrate shape, by design
+    (see the module docstring of
+    tests/db/test_5xn3k_runfence_gate.py: "the fence read must come
+    from the substrate the chunks actually landed in, never a
+    decoupled double"). The fix is to stop decoupling: do not patch
+    ``nexus.db.make_t3`` here and undo the file's autouse
+    ``_legacy_vector_backend`` pin for this test only, so ``make_t3()``
+    resolves its production default (``HttpVectorClient`` against
+    ``NX_SERVICE_URL``/``NX_SERVICE_TOKEN`` — the SAME real engine
+    instance the catalog already uses), landing real chunks where the
+    fence actually looks.
+    """
     from click.testing import CliRunner
     from nexus.cli import main
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
     runner = CliRunner()
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=fake_credentials()):
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
         result = runner.invoke(main, ["index", "repo", str(mini_repo)])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "Done" in result.output
 
 
 def test_cli_index_then_search(
-    mini_repo: Path, tmp_path: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+    mini_repo: Path, tmp_path: Path, registry: RepoRegistry, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """nexus-5xn3k PORT (2026-08-07): see ``test_cli_index_repo``'s
+    docstring — the same decoupled-substrate/RUNFENCE incompatibility
+    applied here too. Ported the same way: let ``make_t3()`` resolve
+    the real engine for both the ``index`` and ``search`` CLI
+    invocations, so the collection actually indexed is the one search
+    reads from. The old hardcoded ``col_name`` assumed the LEGACY
+    2-segment naming shape a raw client-embed run used to produce;
+    against the real engine the collection is the CONFORMANT
+    RDR-103 name the ``registry`` fixture already knows (matching the
+    pattern ``test_index_then_search`` above uses).
+    """
     from click.testing import CliRunner
     from nexus.cli import main
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
     runner = CliRunner()
-    col_name = f"code__{mini_repo.name}-{hashlib.sha256(str(mini_repo).encode()).hexdigest()[:8]}"
-    with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-         patch("nexus.commands.search_cmd._t3", return_value=local_t3):
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
         idx = runner.invoke(main, ["index", "repo", str(mini_repo)])
-        assert idx.exit_code == 0
+        assert idx.exit_code == 0, idx.output
+        col_name = registry.get(mini_repo)["collection"]
         search = runner.invoke(main, ["search", "parse TTL expiry days", "--corpus", col_name, "--n", "5"])
-    assert search.exit_code == 0
+    assert search.exit_code == 0, search.output
     assert len(search.output.strip()) > 0
 
 

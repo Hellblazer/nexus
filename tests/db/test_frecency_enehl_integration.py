@@ -288,12 +288,24 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     import hashlib
     chunk_id = hashlib.sha256(chunk_text.encode()).hexdigest()
 
-    # Step 1: Seed a chunk directly into the service's Chroma
+    # Step 1: Seed a chunk directly into the service's Chroma. Keyed on
+    # doc_id (nexus-afudo, 2026-08-05): the legacy source_path
+    # where-filter this test used to route the update through when the
+    # catalog reader is unavailable is DELETED dead code (RDR-102 D2
+    # removed source_path from make_chunk_metadata for every writer —
+    # no chunk written since 2026-05-02 has ever carried it). doc_id is
+    # supplied explicitly via a ``_build_frecency_doc_id_map`` patch
+    # below rather than through the (still-unavailable) catalog, so the
+    # where-filter this seeds against is the alive doc_id-keyed path.
     upsert_result = _svc_post(base_url, token, "/v1/vectors/upsert-chunks", {
         "collection": collection,
         "ids": [chunk_id],
         "documents": [chunk_text],
-        "metadatas": [{"frecency_score": 0.0, "source_path": str(tmp_path / "test_file.py")}],
+        "metadatas": [{
+            "frecency_score": 0.0,
+            "doc_id": "1.1.1",
+            "source_path": str(tmp_path / "test_file.py"),
+        }],
     })
     assert upsert_result.get("upserted") == 1, (
         f"Failed to seed chunk: {upsert_result}"
@@ -317,8 +329,15 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # Patch:
     #   - batch_frecency → fake_frecency (controlled score)
     #   - make_t3 → sentinel (proves daemon-Chroma is NOT written)
-    #   - catalog reader → unavailable (forces legacy where-filter fallback path)
-    #     so the update path is exercised without catalog dependency
+    #   - catalog reader → unavailable (forces the doc_id-keyed
+    #     where-filter path — manifest resolution is skipped — so the
+    #     update path is exercised without a live catalog manifest)
+    #   - _build_frecency_doc_id_map → fake doc_id map (nexus-afudo,
+    #     2026-08-05: the legacy source_path where-filter this test
+    #     used to fall through to when the catalog is unavailable is
+    #     DELETED dead code; doc_id resolution now has to come from
+    #     somewhere other than the catalog for this scenario, so the
+    #     map is supplied directly)
     make_t3_called = []
 
     def sentinel_make_t3():
@@ -333,6 +352,8 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
         patch("nexus.db.make_t3", side_effect=sentinel_make_t3),
         patch("nexus.catalog.factory.make_catalog_reader",
               side_effect=Exception("no catalog in test")),
+        patch("nexus.indexer._build_frecency_doc_id_map",
+              return_value={test_file: "1.1.1"}),
     ):
         from nexus.indexer import _run_index_frecency_only
         _run_index_frecency_only(tmp_path, fake_registry)

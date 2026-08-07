@@ -19,6 +19,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.lint
+
 SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"
 
 #: The truncation idioms that produced the RDR-180 bug class. Comments and

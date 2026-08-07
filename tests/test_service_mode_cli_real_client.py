@@ -340,13 +340,23 @@ def test_collection_reembed_cross_model_rejected_service_mode(
     assert not any("upsert" in p for p in posted)
 
 
-def test_collection_reembed_same_model_uses_verbatim_passthrough(
+def test_collection_reembed_same_model_requests_server_side_re_embed(
     runner, real_client, monkeypatch,
 ):
-    """nexus-u37lw: same-model service re-embed stores the client-computed
-    vectors via the nexus-hxry2 verbatim passthrough (embeddings present in
-    the upsert body) — NOT upsert_chunks_with_embeddings, which discards
-    them and re-bills a server-side embed."""
+    """nexus-u37lw / nexus-sghyo (2026-08-06): same-model service re-embed
+    sends ``force_re_embed: True`` and NO client-computed ``embeddings`` —
+    the server recomputes the vector.
+
+    This used to assert the nexus-hxry2 "verbatim passthrough" (client
+    embeds via Voyage, vectors ride the wire in the upsert body). That
+    path is retired: the client no longer embeds via Voyage at all (Hal
+    determination 2026-07-28), so ``_reembed_collection`` never has a
+    client-computed vector to pass through — see that function's
+    docstring in ``src/nexus/commands/collection.py``. The bar this test
+    now pins is that the CLI's re-embed command asks the server to
+    recompute (``force_re_embed``), not that it silently no-ops via the
+    existence-partition skip.
+    """
     coll = _CODE  # encodes voyage-code-3
     upserts = []
 
@@ -374,19 +384,13 @@ def test_collection_reembed_same_model_uses_verbatim_passthrough(
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
     monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
 
-    fake_embed_result = MagicMock()
-    fake_embed_result.embeddings = [[0.25] * 1024]
-    fake_voyage = MagicMock()
-    fake_voyage.embed.return_value = fake_embed_result
-
-    with patch("nexus.commands.collection._t3", return_value=real_client), \
-            patch("voyageai.Client", return_value=fake_voyage), \
-            patch("nexus.config.get_credential", return_value="fake-key"):
+    with patch("nexus.commands.collection._t3", return_value=real_client):
         result = runner.invoke(
             main, ["collection", "re-embed", coll,
                    "--to", "voyage-code-3", "--no-dry-run", "--yes"],
         )
     assert result.exit_code == 0, result.output
     assert len(upserts) == 1
-    # The verbatim passthrough: our vectors ride the wire.
-    assert upserts[0].get("embeddings") == [[0.25] * 1024]
+    # Server-side re-embed requested; no client-computed vectors sent.
+    assert upserts[0].get("force_re_embed") is True
+    assert upserts[0].get("embeddings") is None

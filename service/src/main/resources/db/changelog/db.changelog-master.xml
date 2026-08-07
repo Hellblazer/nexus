@@ -346,11 +346,27 @@
          catalog-020, before the runAlways grants below. -->
     <include file="db/changelog/catalog-021-index-run-fence-check.xml"/>
 
+    <!-- nexus-cw262: catalog_owners.deactivated_at TIMESTAMPTZ NULL + a
+         partial (tenant_id, owner_type) WHERE deactivated_at IS NULL index —
+         the soft-delete column the 7kl32 dead-owner GC mutation arm needed
+         (census shipped read-only because this column + route did not
+         exist). After catalog-021, before the runAlways grants below. -->
+    <include file="db/changelog/catalog-022-owner-soft-delete.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001
          (the sequence); before the runAlways grants for file-order clarity. -->
     <include file="db/changelog/taxonomy-005-topics-seq-update-grant.xml"/>
+
+    <!-- RDR-180 (bead nexus-du2dw): nexus.chash_conformance_report(dim) —
+         the managed/cloud-mode engine-route counterpart to the local
+         nexus_diag psql chash-width probe (nexus.db.diag_connection is
+         LOCAL-ONLY by design, nexus-y3wuu). SECURITY INVOKER, tenant-scoped;
+         needs chunks_<dim> (rdr180-001/002) and catalog_document_chunks
+         (catalog-020) to exist. After those; before the runAlways grants
+         below for file-order clarity (matches taxonomy-005 above). -->
+    <include file="db/changelog/rdr180-021-chash-conformance-report.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

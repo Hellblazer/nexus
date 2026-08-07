@@ -27,7 +27,6 @@ the finish choreography triggers from the product side:
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import time
@@ -36,6 +35,32 @@ from pathlib import Path
 
 import structlog
 
+from nexus.daemon.service_registry import (
+    _parse_etime,
+    _procfs_enumerate,
+    all_process_rows,
+    process_command,
+    storage_service_stack_matcher,
+    terminate_pids,
+)
+#: SEMANTIC CHANGE (nexus-oyo2g round 3, critique T2 [21510] Significant-1):
+#: this module used to define its OWN ``_pid_alive`` which treated any
+#: non-ESRCH ``OSError`` as DEAD (``except OSError: return False``). The
+#: round-2 pid_alive consolidation replaced it with this re-export of the
+#: shared primitive, which treats an ambiguous (non-ESRCH) ``OSError`` as
+#: ALIVE instead (``except OSError as exc: return exc.errno != errno.
+#: ESRCH``). This module's one call site (``_sweep_surviving_stack``'s
+#: pre-recycle-guard liveness check, which gates whether a pre-stop stack
+#: survivor is re-verified and terminated by the nexus-cfgo9 convergence
+#: sweep) is why alive-on-ambiguity is the correct direction here too:
+#: declaring a stack member dead on an ambiguous errno would let the
+#: sweep skip a genuinely-still-running process, the same false-all-clear
+#: shape this whole bead exists to close in ``stop_storage_service``
+#: itself (the primitive's other consumer). See
+#: ``tests/test_upgrade_finish.py::TestPidAliveAmbiguousOSErrorSemantics``
+#: for the call-site-level pin (the primitive's own identity test does
+#: not exercise this behavior).
+from nexus.daemon.service_registry import pid_alive as _pid_alive
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _log = structlog.get_logger(__name__)
@@ -180,19 +205,6 @@ def _classify(command: str) -> str:
     return "other"
 
 
-def _parse_etime(etime: str) -> int:
-    """``[[dd-]hh:]mm:ss`` -> seconds (POSIX ps etime)."""
-    days = 0
-    if "-" in etime:
-        d, etime = etime.split("-", 1)
-        days = int(d)
-    parts = [int(p) for p in etime.split(":")]
-    while len(parts) < 3:
-        parts.insert(0, 0)
-    h, m, s = parts
-    return ((days * 24 + h) * 60 + m) * 60 + s
-
-
 def install_dist_info() -> tuple[float, str, Path]:
     """(mtime, version, dist-info path) of the installed conexus distribution.
 
@@ -230,128 +242,16 @@ def install_mtime_and_version() -> tuple[float, str]:
     return mtime, version
 
 
-#: Where Linux exposes the process table without any userland tool.
-PROCFS_ROOT = Path("/proc")
-
-
-def _procfs_available() -> bool:
-    """True when this box exposes a Linux-shaped ``/proc``."""
-    return (PROCFS_ROOT / "uptime").exists()
-
-
-def _procfs_enumerate() -> list[tuple[int, int, str]]:
-    """``[(pid, age_s, command)]`` for EVERY process, read from ``/proc``.
-
-    nexus-cfgo9 follow-up: the ``ps``-shaped path below is a userland
-    DEPENDENCY, and a minimal container (debian-slim without procps — the
-    package-upgrade rehearsal box, and a real deployment shape) has no such
-    binary. Skipping the leg for want of a tool is the silent-fallback class:
-    the one detection written for post-upgrade skew stops running exactly on
-    the boxes most likely to have it. Linux always mounts ``/proc``, so the
-    dependency is removable rather than merely tolerable.
-
-    Age is derived the same way ``ps etime`` derives it: system uptime minus
-    the process's ``starttime`` (field 22 of ``/proc/<pid>/stat``, in clock
-    ticks since boot). A process whose files vanish mid-scan (exited between
-    ``iterdir`` and ``read``) is skipped, never guessed at.
-    """
-    uptime_s = float((PROCFS_ROOT / "uptime").read_text().split()[0])
-    hz = os.sysconf("SC_CLK_TCK") or 100
-    out: list[tuple[int, int, str]] = []
-    for entry in PROCFS_ROOT.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        try:
-            raw_cmdline = (entry / "cmdline").read_bytes()
-            stat = (entry / "stat").read_text()
-        except (OSError, ValueError):
-            continue  # exited mid-scan, or not ours to read
-        # Kernel threads have an empty cmdline — never a conexus process.
-        command = raw_cmdline.replace(b"\x00", b" ").decode(
-            "utf-8", "replace",
-        ).strip()
-        if not command:
-            continue
-        # Field 2 (comm) is parenthesised and may itself contain spaces or
-        # ')', so index from the LAST ')': the remainder starts at field 3,
-        # making starttime (field 22) index 19.
-        try:
-            after = stat[stat.rindex(")") + 1:].split()
-            start_ticks = float(after[19])
-        except (ValueError, IndexError):
-            continue
-        age = int(max(0.0, uptime_s - start_ticks / hz))
-        out.append((pid, age, command))
-    return out
-
-
-def _ps_enumerate() -> list[tuple[int, int, str]] | None:
-    """``[(pid, age_s, command)]`` from POSIX ``ps``, or ``None`` when this
-    box has no ``ps`` binary at all (the caller then tries ``/proc``).
-
-    ``ps -eo pid,etime,command`` is POSIX-portable (etime, unlike lstart,
-    parses identically on macOS and Linux).
-    """
-    try:
-        proc = subprocess.run(
-            ["ps", "-wweo", "pid,etime,command"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except FileNotFoundError:
-        return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        # Review 38b7db3d M5: a silent empty ps = zero processes
-        # detected = the fail-open class again. Fail loud instead.
-        raise RuntimeError(
-            f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
-        )
-    return _parse_ps_table(proc.stdout)
-
-
-def _parse_ps_table(ps_output: str) -> list[tuple[int, int, str]]:
-    """Parse a ``pid etime command`` table into ``[(pid, age_s, command)]``."""
-    out: list[tuple[int, int, str]] = []
-    for line in ps_output.splitlines()[1:]:
-        m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
-        if not m:
-            continue
-        try:
-            age = _parse_etime(m.group(2))
-        except ValueError:
-            continue
-        out.append((int(m.group(1)), age, m.group(3)))
-    return out
-
-
-def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]:
-    """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
-
-    Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (nexus-cfgo9
-    follow-up — see :func:`_procfs_enumerate`). A box with NEITHER raises;
-    so does a box whose PRESENT ``ps`` fails or returns an empty table
-    (that is a signal worth surfacing — e.g. a hidepid-restricted or
-    corrupted procps — not a case to silently route around, review M1).
-    It raises rather than reporting an empty table: a silent "zero
-    processes" is the fail-open this module exists to eliminate
-    (review 38b7db3d M5). ``ps_output`` is injectable for tests.
-
-    The venv-marker-filtered view is :func:`enumerate_processes`; the
-    NATIVE engine binary does not carry the venv path in its argv, so
-    anything that needs to see the engine must read this table.
-    """
-    if ps_output is not None:
-        return _parse_ps_table(ps_output)
-    rows = _ps_enumerate()
-    if rows is None:
-        if not _procfs_available():
-            raise RuntimeError(
-                "this system has neither a 'ps' command nor a readable "
-                "/proc filesystem — process-skew detection cannot run "
-                "(install procps, or run on a host that provides one)"
-            )
-        rows = _procfs_enumerate()
-    return rows
+#: Process-table primitives (``PROCFS_ROOT``, ``_procfs_available``,
+#: ``_procfs_enumerate``, ``_ps_enumerate``, ``_parse_ps_table``,
+#: ``all_process_rows``, ``process_command``, ``pid_alive``,
+#: ``terminate_pids``) moved to ``nexus.daemon.service_registry``
+#: (nexus-oyo2g) — the RDR-149 shared primitive. The ones this module
+#: still calls directly are imported above; ``stop_storage_service`` needed
+#: the same mechanism this module already carried for the identical gap
+#: (nexus-cfgo9), and the standing gate (daemon/AGENTS.md) is that a
+#: lifecycle mechanism used by more than one tier/module lives in the
+#: primitive, not duplicated.
 
 
 def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
@@ -375,30 +275,6 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
         for pid, age, command in rows
         if pid != me and any(k in command for k in markers)
     ]
-
-
-def process_command(pid: int) -> str:
-    """The full command line of *pid*, or ``""`` when it is gone.
-
-    The pid-recycle re-check in :func:`restart_stale` needs one process's
-    command, and used ``ps -p`` directly — the same userland dependency
-    :func:`enumerate_processes` just shed, on a path whose ``FileNotFoundError``
-    escaped the narrow ``except`` around it and aborted the whole leg.
-    """
-    if _procfs_available():
-        try:
-            raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
-        except OSError:
-            return ""
-        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    try:
-        probe = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return ""
-    return probe.stdout.strip()
 
 
 def detect_stale_processes(
@@ -868,21 +744,6 @@ def _running_engine(config_dir: Path) -> RunningEngine:
     return RunningEngine(up=True, version=parsed)
 
 
-def _pid_alive(pid: int) -> bool:
-    """True when signalling 0 to *pid* succeeds."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     """``[(pid, command)]`` for the storage-service SUPERVISOR and ENGINE
     processes belonging to *config_dir*, read from the OS process table.
@@ -912,63 +773,20 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     to eliminate for the matching one. (The engine match has no such
     exposure: the ``/service/nexus-service`` suffix forces a
     path-structure match.)
+
+    The matcher itself (nexus-oyo2g) is now the shared
+    ``service_registry.storage_service_stack_matcher`` — the same predicate
+    ``stop_storage_service``'s lease-miss fallback uses — so there is one
+    definition of "this pid belongs to this config_dir's storage-service
+    stack", not two.
     """
-    engine_path = str(config_dir / "service" / "nexus-service")
-    target = str(config_dir)
+    matcher = storage_service_stack_matcher(config_dir)
     me = os.getpid()
-    found: list[tuple[int, str]] = []
-    for pid, _age, command in all_process_rows():
-        if pid == me:
-            continue
-        # argv[0] EXACT for the engine (critique 21345): a substring test
-        # matched an operator's `tail .../service/nexus-service.log` or
-        # `cat <binary>` run in the stop->sweep window — an innocent
-        # diagnostic command must never enter a kill set.
-        is_engine = command.split()[:1] == [engine_path]
-        is_supervisor = False
-        if "daemon service start" in command:
-            tokens = command.split()
-            for i, tok in enumerate(tokens):
-                if tok == "--config-dir" and i + 1 < len(tokens):
-                    is_supervisor = tokens[i + 1] == target
-                    break
-                if tok.startswith("--config-dir="):
-                    is_supervisor = tok[len("--config-dir="):] == target
-                    break
-        if is_engine or is_supervisor:
-            found.append((pid, command))
-    return found
-
-
-def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
-    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still alive.
-
-    Supervisors are signalled before engines by the caller: the supervisor
-    arms ``PR_SET_PDEATHSIG=SIGKILL`` on its engine child, so killing the
-    supervisor usually takes the engine with it on Linux, and the explicit
-    engine pass is the portable backstop.
-    """
-    import signal as _signal  # noqa: PLC0415 — stdlib, deferred
-
-    live = [p for p in pids if _pid_alive(p)]
-    for pid in live:
-        try:
-            os.kill(pid, _signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    deadline = time.time() + grace_s
-    while time.time() < deadline:
-        live = [p for p in live if _pid_alive(p)]
-        if not live:
-            return []
-        time.sleep(0.2)
-    for pid in live:
-        try:
-            os.kill(pid, _signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    time.sleep(0.5)
-    return [p for p in live if _pid_alive(p)]
+    return [
+        (pid, command)
+        for pid, _age, command in all_process_rows()
+        if pid != me and matcher(command)
+    ]
 
 
 def _sweep_surviving_stack(

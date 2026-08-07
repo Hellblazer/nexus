@@ -51,15 +51,19 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
  *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
  *   GET   /v1/catalog/manifest/verify_all per-collection referenced/present/missing, every live doc
  *   POST  /v1/catalog/index-run/begin    stamp index_state='indexing' (idempotent, NOT a lock)
+ *   POST  /v1/catalog/index-run/begin-many batch index_state='indexing' for N docs, ONE round trip (nexus-vw594 F1)
  *   POST  /v1/catalog/index-run/complete FAIL-CLOSED verify-then-stamp index_state='complete'
  *   POST  /v1/catalog/index-run/fail     stamp index_state='failed'
  *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
+ *   POST  /v1/catalog/owners/deactivate  soft-delete an owner (nexus-cw262 -- excluded from list/by_type by default)
+ *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
  *   GET   /v1/catalog/collections/list   list collections
@@ -152,6 +156,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
                 case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
+                case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /manifest/orphans and
                 // /docs/orphaned already existed; links had no equivalent,
                 // which is why the client could not build a doctor check.
@@ -161,6 +166,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/verify"       -> handleManifestVerify(exchange, tenant, method);
                 case "/manifest/verify_all"   -> handleManifestVerifyAll(exchange, tenant, method);
                 case "/index-run/begin"       -> handleIndexRunBegin(exchange, tenant, method);
+                case "/index-run/begin-many"  -> handleIndexRunBeginMany(exchange, tenant, method);
                 case "/index-run/complete"    -> handleIndexRunComplete(exchange, tenant, method);
                 case "/index-run/fail"        -> handleIndexRunFail(exchange, tenant, method);
 
@@ -173,6 +179,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
                 case "/owners/show"           -> handleOwnerShow(exchange, tenant, method);
                 case "/owners/by_type"        -> handleOwnerByType(exchange, tenant, method);
+                case "/owners/deactivate"     -> handleOwnerDeactivate(exchange, tenant, method);
+                case "/owners/reactivate"     -> handleOwnerReactivate(exchange, tenant, method);
 
                 // ── Collections ───────────────────────────────────────────────
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
@@ -1110,10 +1118,49 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
+    /**
+     * GET /v1/catalog/owners/list[?include_deactivated=true] — nexus-cw262: the
+     * audit escape hatch. Default (param absent or any value other than
+     * {@code "true"}) excludes deactivated owners.
+     */
     private void handleOwnerList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        var owners = repo.listOwners(tenant);
+        boolean includeDeactivated = "true".equals(queryParam(exchange, "include_deactivated"));
+        var owners = repo.listOwners(tenant, includeDeactivated);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    /**
+     * POST /v1/catalog/owners/deactivate {"tumbler_prefix": X} — nexus-cw262: the
+     * 7kl32 dead-owner GC mutation arm's engine half. Soft-delete, mirrors {@code
+     * /delete}'s shape (idempotent 0-return; reversible). Response: {@code
+     * {"deactivated": 0|1}}.
+     */
+    private void handleOwnerDeactivate(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String prefix = (String) body.get("tumbler_prefix");
+        if (prefix == null || prefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler_prefix' required\"}"); return;
+        }
+        int deactivated = repo.deactivateOwner(tenant, prefix);
+        HttpUtil.send(exchange, 200, "{\"deactivated\":" + deactivated + "}");
+    }
+
+    /**
+     * POST /v1/catalog/owners/reactivate {"tumbler_prefix": X} — nexus-cw262: the
+     * explicit manual-correction path (clears deactivated_at without a full
+     * re-registration). Response: {@code {"reactivated": 0|1}}.
+     */
+    private void handleOwnerReactivate(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String prefix = (String) body.get("tumbler_prefix");
+        if (prefix == null || prefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler_prefix' required\"}"); return;
+        }
+        int reactivated = repo.reactivateOwner(tenant, prefix);
+        HttpUtil.send(exchange, 200, "{\"reactivated\":" + reactivated + "}");
     }
 
     /**
@@ -1687,7 +1734,12 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(owner));
     }
 
-    /** POST /v1/catalog/owners/by_type — list owners filtered by owner_type. */
+    /**
+     * POST /v1/catalog/owners/by_type {"owner_type": X, "include_deactivated": bool}
+     * — list owners filtered by owner_type. nexus-cw262: {@code include_deactivated}
+     * defaults false (excludes deactivated owners) — this is the exact read path the
+     * 7kl32 census and doctor's git-hooks dead-owner attribution both use.
+     */
     private void handleOwnerByType(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -1695,7 +1747,9 @@ public final class CatalogHandler implements HttpHandler {
         if (ownerType == null || ownerType.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"owner_type required\"}"); return;
         }
-        var owners = repo.ownersByType(tenant, ownerType);
+        Object includeDeactivatedRaw = body.get("include_deactivated");
+        boolean includeDeactivated = includeDeactivatedRaw instanceof Boolean b && b;
+        var owners = repo.ownersByType(tenant, ownerType, includeDeactivated);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
     }
 
@@ -1894,6 +1948,38 @@ public final class CatalogHandler implements HttpHandler {
                    "orphans", report.get("orphans"))));
     }
 
+    /**
+     * GET /v1/catalog/chash/conformance?dim=384 — per-table chash width-
+     * conformance report (RDR-180, bead nexus-du2dw): the engine-route
+     * counterpart to the local-only nexus_diag psql probe, for managed/cloud
+     * installs with no direct substrate access.
+     *
+     * <p>Response: {@code {"dim": <d>, "tables": [{"table_name", "total",
+     * "non_conformant", "sample_chashes"}, ...]}}. Tenant-scoped (SECURITY
+     * INVOKER + FORCE RLS on the underlying tables) — see {@link
+     * CatalogRepository#chashConformanceReport} for why that is the correct
+     * scoping model here. An unsupported dim is a 400.
+     */
+    private void handleChashConformance(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String dimRaw = queryParam(exchange, "dim");
+        if (dimRaw == null || dimRaw.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"dim query param required (384|768|1024)\"}"); return;
+        }
+        int dim;
+        try {
+            dim = Integer.parseInt(dimRaw);
+        } catch (NumberFormatException e) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"dim must be an integer (384|768|1024)\"}"); return;
+        }
+        // requireSupportedDim inside the repo throws IllegalArgumentException for an
+        // unsupported dim — caught by the outer dispatch-level handler (→ 400), same
+        // convention as handleManifestOrphans.
+        List<Map<String, Object>> tables = repo.chashConformanceReport(tenant, dim);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("dim", dim, "tables", tables)));
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.2) — memo §3.3
     // ══════════════════════════════════════════════════════════════════════════
@@ -1939,6 +2025,29 @@ public final class CatalogHandler implements HttpHandler {
         String collection  = (String) body.get("collection");
         repo.beginIndexRun(tenant, docId, contentHash, runId, collection);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
+    }
+
+    /**
+     * POST /v1/catalog/index-run/begin-many  {docs: [{doc_id, content_hash, run_id}], collection}
+     * Batch idempotent index_state='indexing' stamp (nexus-vw594 F1) — one HTTP
+     * round trip covering an entire ChunkBatcher flush instead of one round
+     * trip per file. See {@link CatalogRepository#beginIndexRunMany}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleIndexRunBeginMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("docs");
+        List<Map<String, Object>> docs = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof Map<?, ?>).map(o -> (Map<String, Object>) o).toList()
+            : List.of();
+        if (docs.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        String collection = (String) body.get("collection");
+        var result = repo.beginIndexRunMany(tenant, docs, collection);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /**

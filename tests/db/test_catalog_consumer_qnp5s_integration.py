@@ -537,3 +537,97 @@ class TestDocIndexerCuratorLookup:
     def test_curator_not_found_returns_none(self, cat, seeded_catalog) -> None:
         result = cat.curator_owner_tumbler_by_name("no-such-curator")
         assert result is None
+
+
+class TestOwnerDeactivateReactivate:
+    """nexus-cw262: the 7kl32 dead-owner GC mutation arm's engine routes,
+    via the real HttpCatalogClient (POST /owners/deactivate, /owners/reactivate,
+    and the include_deactivated audit option on list_owners / list_owners_by_type).
+
+    Every test here registers its OWN fresh owner with a prefix outside the
+    "10"/"11"/"12" range ``seeded_catalog`` uses — that fixture is module-scoped
+    and read by every other class in this file, so mutating its owners here
+    would leak state across test classes.
+    """
+
+    def test_deactivate_excludes_from_list_owners_by_type(self, cat) -> None:
+        cat.register_owner(
+            name="cw262-deact-repo", owner_type="repo", tumbler_prefix="20",
+            repo_root="/Users/hal/git/cw262-deact-repo")
+
+        before = cat.list_owners_by_type("repo")
+        assert any(o.get("tumbler_prefix") == "20" for o in before), (
+            "sanity: freshly registered owner must be visible before deactivation"
+        )
+
+        assert cat.deactivate_owner("20") is True
+
+        after = cat.list_owners_by_type("repo")
+        assert not any(o.get("tumbler_prefix") == "20" for o in after), (
+            "the entire point: a deactivated owner must be excluded from the "
+            "default list_owners_by_type read path"
+        )
+
+        audited = cat.list_owners_by_type("repo", include_deactivated=True)
+        matched = [o for o in audited if o.get("tumbler_prefix") == "20"]
+        assert matched, "include_deactivated=True must still surface the row"
+        assert matched[0].get("deactivated_at") is not None
+
+    def test_deactivate_is_idempotent(self, cat) -> None:
+        cat.register_owner(name="cw262-idem-repo", owner_type="repo", tumbler_prefix="21")
+        assert cat.deactivate_owner("21") is True
+        assert cat.deactivate_owner("21") is False, (
+            "a second deactivate on an already-deactivated owner must report "
+            "no rows affected, not re-stamp the timestamp"
+        )
+
+    def test_deactivate_unknown_prefix_returns_false(self, cat) -> None:
+        assert cat.deactivate_owner("99.9999.no-such-owner") is False
+
+    def test_reactivate_restores_default_visibility(self, cat) -> None:
+        cat.register_owner(name="cw262-react-repo", owner_type="repo", tumbler_prefix="22")
+        assert cat.deactivate_owner("22") is True
+        after_deact = cat.list_owners_by_type("repo")
+        assert not any(o.get("tumbler_prefix") == "22" for o in after_deact)
+
+        assert cat.reactivate_owner("22") is True
+        after_react = cat.list_owners_by_type("repo")
+        assert any(o.get("tumbler_prefix") == "22" for o in after_react), (
+            "reactivate must restore default-list visibility"
+        )
+
+        assert cat.reactivate_owner("22") is False, "already-active is a no-op"
+
+    def test_reregistering_a_deactivated_owner_reactivates_it_automatically(self, cat) -> None:
+        """upsertOwner's self-heal contract: any live re-registration through
+        register_owner (converge-on-identity: same name+owner_type/repo_hash,
+        no explicit conflicting prefix) clears deactivated_at automatically —
+        the path a re-cloned/remounted repo takes through `nx index repo`,
+        with no separate reactivate call needed."""
+        t = cat.register_owner(
+            name="cw262-selfheal-repo", owner_type="repo",
+            repo_hash="cw262-selfheal-hash", tumbler_prefix="23")
+        assert cat.deactivate_owner(str(t)) is True
+        assert not any(
+            o.get("tumbler_prefix") == str(t) for o in cat.list_owners_by_type("repo")
+        )
+
+        t2 = cat.register_owner(
+            name="cw262-selfheal-repo", owner_type="repo",
+            repo_hash="cw262-selfheal-hash")
+        assert str(t2) == str(t), "converge-on-identity must resolve to the SAME row"
+        assert any(
+            o.get("tumbler_prefix") == str(t) for o in cat.list_owners_by_type("repo")
+        ), "the converged re-registration must have cleared deactivated_at"
+
+    def test_list_owners_include_deactivated(self, cat) -> None:
+        cat.register_owner(name="cw262-list-owners-repo", owner_type="repo", tumbler_prefix="24")
+        assert cat.deactivate_owner("24") is True
+
+        default = cat.list_owners()
+        assert not any(o.get("tumbler_prefix") == "24" for o in default)
+
+        audited = cat.list_owners(include_deactivated=True)
+        matched = [o for o in audited if o.get("tumbler_prefix") == "24"]
+        assert matched, "include_deactivated=True must surface the deactivated owner on list_owners too"
+        assert matched[0].get("deactivated_at") is not None

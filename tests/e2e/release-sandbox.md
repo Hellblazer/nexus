@@ -35,7 +35,7 @@ Reinstall the tool venv, create a fresh isolated `$HOME`, then run from `/tmp`:
 - `nx --version` (sanity)
 - `nx upgrade --dry-run` (preview migrations)
 - `nx upgrade` (apply)
-- `nx catalog setup` (initialize catalog + seed 12 builtin plan templates)
+- `nx plan reseed` (seed the builtin plan templates; catalog itself is engine-owned, nothing to initialize client-side)
 - `nx doctor --check-schema` (T2 schema sanity)
 - `nx doctor --check-plan-library` (builtin plan count)
 - `nx doctor --check-taxonomy` (topic_links invariant)
@@ -56,7 +56,7 @@ Reinstall + drop into a sandbox bash subshell with `HOME=$SANDBOX`. Use for hand
 
 ```bash
 ./tests/e2e/release-sandbox.sh shell
-(sandbox) nx catalog setup
+(sandbox) nx plan reseed
 (sandbox) nx index repo /path/to/test-repo
 (sandbox) nx search "..."
 (sandbox) exit       # normal exit restores your real $HOME
@@ -69,20 +69,25 @@ The subshell prompt is `(sandbox) $`. Plain `exit` tears down the env.
 Full ensemble pipeline check. Reinstall + sandbox setup + every nx surface in sequence, with a T1 lifecycle sniff bracketing the run. Catches deployment-shape bugs (`smoke`'s job) AND ensemble bugs that only surface when pipelines interact (auto-linker on real index, post-store hooks under load, T1 propagation across CLI invocations).
 
 ```bash
-./tests/e2e/release-sandbox.sh shakedown    # ~5–10 min, all 9 steps must complete
+./tests/e2e/release-sandbox.sh shakedown    # ~5-10 min warm cache, +10-15 min cold; 11 steps
 ```
 
-Sequence (each step prefixed with `── N/9 ──`):
+Sequence (each step prefixed with `── N/11 ──`):
 
-1. `nx catalog setup` — seeds plan library + catalog
+1. `nx plan reseed` — seeds plan library (catalog is engine-owned)
 2. `nx index repo $REPO_ROOT` — code chunker, embedder, T3 write, code__ collection
-3. `nx index pdf tests/fixtures/tc-sql.pdf --collection knowledge__shakedown` — PDF pipeline (Docling/MinerU/PyMuPDF), prose chunker, CCE embeddings, bib enricher, auto-linker
+3a. `nx index pdf tests/fixtures/tc-sql.pdf --collection knowledge__shakedown` — PDF pipeline, Docling path (no formulas)
+3b. `nx index pdf tests/fixtures/bft-to-smr.pdf --collection knowledge__shakedown` — PDF pipeline, MinerU path (formulas; pays the ~2-3 GB model download on a cold cache)
 4. `nx index rdr` — RDR indexer + status reconciliation hook
-5. `nx search` — cross-corpus search (code + docs + rdr + knowledge)
-6. `nx memory put / get` — T2 roundtrip
-7. `nx scratch put / list` — T1 use + readback (verifies T1 actually wired)
-8. `nx catalog links-for-file` — link graph readback
-9. `nx doctor --check-{schema,plan-library,taxonomy,hooks,tmpdirs}` — invariants under load
+5. `tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys` (nexus-e5uw) — greenfield acceptance, no deprecated chunk keys
+6. `nx search` — cross-corpus search (code + docs + rdr + knowledge)
+7. `nx memory put / get` — T2 roundtrip
+8. `nx scratch put / list` — T1 use + readback (verifies T1 actually wired)
+9. `nx catalog stats` — registry + link graph readback
+10. `nx doctor --check-{schema,plan-library,taxonomy}` — invariants under load
+11. `nx catalog backfill-collections` + `nx catalog doctor --collections-drift` — collections-drift release gate (nexus-o6aa.14)
+
+**Fail-loud (nexus-6xkdu).** Steps 2, 3a, 3b, and 4 (the indexing steps) used to run under `|| true`, so a broken indexer — including a broken MinerU path — could not turn the run red; that theatre is gone. A failure in any of those four is collected and continues to the remaining steps (so the rest of the ensemble still runs for diagnostic value), but the run ends with an explicit `SHAKEDOWN FAILED: N indexing step(s) ...` on stderr and a non-zero exit. Steps 5 and 11 were already abort-on-first hard gates. A clean run ends `SHAKEDOWN PASSED: all indexing steps green.`
 
 **T1 sniff** runs before and after, counting `~/.config/nexus/sessions/*.session` and `${TMPDIR}/nx_t1_*` tmpdirs. Net delta > 2 in either dimension prints a turd-risk warning. Steady-state delta should be 1 (this session's record).
 

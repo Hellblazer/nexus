@@ -58,6 +58,73 @@ class TestGrainDispatch:
         assert calls == [["d1"]]
 
 
+class TestHookTimings:
+    """nexus-lde88 G4: fire_batch's optional hook_timings= accumulates
+    per-hook-name wall seconds, so a caller firing multiple batch_grain
+    hooks in one call (taxonomy + manifest, both grain="flush") can split
+    the total back out by name instead of it staying one merged bucket."""
+
+    def test_hook_timings_keyed_by_hook_name(self) -> None:
+        import time as _time
+
+        reg = HookRegistry()
+
+        def slow_hook(doc_ids, collection, contents, embeddings=None, metadatas=None):
+            _time.sleep(0.02)
+
+        def quick_hook(doc_ids, collection, contents, embeddings=None, metadatas=None):
+            pass
+
+        slow_hook.__name__ = "slow_hook"
+        quick_hook.__name__ = "quick_hook"
+        reg.register_batch(slow_hook)
+        reg.register_batch(quick_hook)
+
+        timings: dict[str, float] = {}
+        reg.fire_batch(["d1"], "code__x", ["t"], hook_timings=timings)
+
+        assert set(timings) == {"slow_hook", "quick_hook"}
+        assert timings["slow_hook"] >= 0.02
+        assert timings["quick_hook"] < 0.02
+
+    def test_hook_timings_accumulates_across_calls(self) -> None:
+        """A caller reusing one dict across several fire_batch calls (the
+        indexer's run-lifetime _flush_hook_by_name) gets a running total,
+        not a per-call overwrite."""
+        reg = HookRegistry()
+        calls: list = []
+        reg.register_batch(_mk_hook(calls))
+
+        timings: dict[str, float] = {}
+        reg.fire_batch(["d1"], "code__x", ["t"], hook_timings=timings)
+        first = timings["hook"]
+        reg.fire_batch(["d2"], "code__x", ["t"], hook_timings=timings)
+        assert timings["hook"] >= first
+
+    def test_hook_timings_none_by_default_no_crash(self) -> None:
+        # Default (no hook_timings=) path must still work — the vast
+        # majority of fire_batch callers never pass it.
+        reg = HookRegistry()
+        calls: list = []
+        reg.register_batch(_mk_hook(calls))
+        reg.fire_batch(["d1"], "code__x", ["t"])
+        assert calls == [["d1"]]
+
+    def test_hook_timings_recorded_even_on_hook_failure(self) -> None:
+        """A raising hook is still timed and attributed — best-effort
+        failure handling must not blind the timing accounting."""
+        reg = HookRegistry()
+
+        def boom(doc_ids, collection, contents, embeddings=None, metadatas=None):
+            raise RuntimeError("boom")
+        boom.__name__ = "boom"
+        reg.register_batch(boom)
+
+        timings: dict[str, float] = {}
+        reg.fire_batch(["d1"], "code__x", ["t"], hook_timings=timings)
+        assert "boom" in timings
+
+
 class TestDefaultConsumersDeclareGrain:
     def test_default_consumers_grain_declarations(self) -> None:
         from nexus.mcp_infra import (
@@ -110,12 +177,12 @@ class TestFlushGrainOutcomeEquivalence:
         from http.server import HTTPServer
 
         from nexus.db.t2.http_chash_index import HttpChashIndex
+        from tests.db._fake_t2_server import free_port as _free_port
         from tests.db.test_http_chash_index import (
             _STORE,
             _STORE_LOCK,
             TOKEN,
             _FakeChashHandler,
-            _free_port,
         )
 
         port = _free_port()

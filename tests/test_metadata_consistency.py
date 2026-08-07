@@ -50,8 +50,13 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
     # nexus-1oguj: ``extraction_method`` follows the same drop-when-empty
     # contract — only PDF chunks that went through an extractor carry it,
     # and the pinned population is tests/test_metadata_extraction_method.py.
+    # nexus-wi1uv round-2: ``quality_gate_overridden`` follows the same
+    # drop-when-False contract — only a chunk indexed under
+    # --allow-degraded-extraction after a real gate failure carries it;
+    # pinned population is tests/test_metadata_quality_gate_overridden.py.
     return ALLOWED_TOP_LEVEL - bib_keys - {
         "git_meta", "extraction_source", "extraction_method",
+        "quality_gate_overridden",
     }
 
 
@@ -185,6 +190,11 @@ def _full_keyset_minus_optional() -> set[str]:
         "extraction_source",
         # nexus-1oguj: same drop-when-empty contract as extraction_source.
         "extraction_method",
+        # nexus-wi1uv round-2: defaults to False and is dropped by
+        # normalize; only a chunk indexed under --allow-degraded-
+        # extraction after a real gate failure carries it (see
+        # tests/test_metadata_quality_gate_overridden.py).
+        "quality_gate_overridden",
     }
 
 

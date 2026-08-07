@@ -21,7 +21,6 @@ import structlog
 from nexus.index_context import IndexContext
 from nexus.indexer_utils import build_context_prefix, check_staleness
 from nexus.languages import LANGUAGE_REGISTRY
-from nexus.retry import _voyage_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -335,7 +334,8 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     # Staleness check — skip if content + model unchanged.
     # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver; falls back to source_path for legacy chunks.
+    # supplied a resolver. (The source_path fallback was deleted as dead
+    # code by nexus-afudo, 2026-08-05 — RDR-102 Phase 5b.)
     catalog_doc_id_for_staleness = (
         ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
     )
@@ -470,20 +470,13 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             # per code chunk since RDR-155 P4a. Mirror doc_indexer's stub.
             embeddings = [[] for _ in documents]
         else:
-            for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
-                batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
-                _log.debug(
-                    "embedding batch",
-                    file=str(file_path),
-                    batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}",
-                )
-                result = _voyage_with_retry(
-                    ctx.voyage_client.embed,  # type: ignore[attr-defined]
-                    texts=batch,
-                    model=ctx.embedding_model,
-                    input_type="document",
-                )
-                embeddings.extend(result.embeddings)
+            # nexus-sghyo: non-service embedding was retired — the client
+            # no longer embeds via Voyage.
+            raise RuntimeError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
 
     # duoak 2C (nexus-1ugqs): stage chunks in the cross-file batcher;
     # upload happens in cap-sized batches and the post-store hook chains
@@ -509,6 +502,14 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return total_chunks
 
+    # nexus-vw594 F1: producer #5 (nx index repo, code, legacy per-file
+    # fallback — reached when the ChunkBatcher rejects the file or is
+    # absent). Fence begin BEFORE the upload, mirroring doc_indexer.py's
+    # single-flush producers; this path was previously entirely unfenced.
+    if catalog_doc_id:
+        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+        _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+
     with _stage("upload"):
         _log.debug("upserting", file=str(file_path), chunks=total_chunks)
         ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
@@ -526,9 +527,15 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         # single-shape consumers on CLI ingest. Own stage bucket
         # (nexus-cfc72): under concurrent indexing these serialize on
         # LockedHookRegistry, and lock-wait must not read as upload time.
+        # nexus-vw594 F1: this file's whole chunk set lands in the ONE
+        # upsert above (file-atomic, same guarantee ChunkBatcher's
+        # flush-grain ride relies on) — manifest_complete rides this
+        # existing call through manifest_write_batch_hook's
+        # write_manifest_many completion stamp, no extra round trip.
         ctx.hooks.fire_batch(
             ids, ctx.corpus, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
         for _did, _doc in zip(ids, documents):
             ctx.hooks.fire_single(_did, ctx.corpus, _doc)

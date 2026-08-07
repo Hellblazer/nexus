@@ -197,6 +197,24 @@ class TestT3GcTombstoneSafety:
         cannot be seeded into the engine's own vector store here. The
         engine-side vector leg has its own gate
         (tests/db/test_http_combined_query_integration.py).
+
+        ``--allow-incomplete-index-state`` (nexus-g6k6b PORT, 2026-08-07):
+        both docs here are seeded directly via ``cat.register`` +
+        ``cat.write_manifest`` — neither ever goes through the real
+        RUNFENCE completion stamp (``complete_index_run``), so
+        ``index_state`` is NULL for both, same as any doc this test
+        infra creates. ``nx t3 gc`` now fail-closed refuses to touch a
+        collection containing a non-'complete' document at all (the
+        RUNFENCE precondition landing after this test was authored) —
+        correctly so in production (an in-flight or fence-failed
+        reindex's chunks are not garbage), but this test cannot honestly
+        produce a real completion stamp for the reason in the paragraph
+        above (``complete_index_run``'s own fail-closed verify would
+        refuse it identically, since the InMemoryVectorClient substitute
+        chunks are not in the engine's real storage either). This test
+        has already confirmed there is no concurrent reindex (it is the
+        only writer), which is exactly the flag's documented escape
+        hatch.
         """
         from unittest.mock import patch as _patch  # noqa: PLC0415 — test-local import
 
@@ -269,7 +287,8 @@ class TestT3GcTombstoneSafety:
         try:
             with _patch("nexus.db.make_t3", return_value=t3_db):
                 result = CliRunner().invoke(
-                    main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+                    main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+                           "--allow-incomplete-index-state"],
                 )
         finally:
             catalog_factory.reset_shared_service_catalog_client_for_tests()

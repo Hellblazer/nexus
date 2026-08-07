@@ -446,9 +446,12 @@ class TestFailLoud:
         with patch(
             "nexus.upgrade_finish.subprocess.run",
             side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
-        ), patch("nexus.upgrade_finish._procfs_available", return_value=True), \
+        ), patch(
+            "nexus.daemon.service_registry._procfs_available", return_value=True,
+        ), \
                 patch(
-                    "nexus.upgrade_finish._procfs_enumerate", return_value=rows,
+                    "nexus.daemon.service_registry._procfs_enumerate",
+                    return_value=rows,
                 ), patch(
                     "nexus.upgrade_finish._install_root",
                     side_effect=RuntimeError("no dist"),
@@ -467,7 +470,7 @@ class TestFailLoud:
             "nexus.upgrade_finish.subprocess.run",
             side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
         ), patch(
-            "nexus.upgrade_finish._procfs_available", return_value=False,
+            "nexus.daemon.service_registry._procfs_available", return_value=False,
         ), _pytest.raises(RuntimeError, match="neither a 'ps' command nor"):
             enumerate_processes(None)
 
@@ -674,11 +677,73 @@ class TestFailLoud:
         (kt / "cmdline").write_bytes(b"")
         (kt / "stat").write_text(f"2 (kthreadd) {after}\n")
 
-        with patch("nexus.upgrade_finish.PROCFS_ROOT", tmp_path):
+        with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
             from nexus.upgrade_finish import _procfs_enumerate  # noqa: PLC0415 — file pattern: deferred imports
 
             rows = _procfs_enumerate()
         assert rows == [(1234, 300, "/venv/bin/python -m nexus.mcp")]
+
+
+class TestPidAliveAmbiguousOSErrorSemantics:
+    """nexus-oyo2g round 3 (critique T2 [21510], Significant finding 1).
+
+    The pid_alive consolidation (round 2, finding 3) deleted this module's
+    OWN ``_pid_alive`` — which treated any non-ESRCH ``OSError`` as DEAD
+    (``except OSError: return False``) — and replaced it with
+    ``from nexus.daemon.service_registry import pid_alive as _pid_alive``.
+    ``service_registry.pid_alive`` treats an ambiguous (non-ESRCH)
+    ``OSError`` as ALIVE instead
+    (``except OSError as exc: return exc.errno != errno.ESRCH``). That
+    flip silently propagated into THIS module's ``_sweep_surviving_stack``
+    -> ``terminate_pids`` path too, on the exact liveness check that
+    decides whether ``service_stack_pids``' nexus-cfgo9 convergence sweep
+    considers a stack member still running. No prior test in this file
+    exercised the ``OSError`` branch in either direction (every patch used
+    a blanket ``return_value``), so this pins the semantics explicitly at
+    THIS call site — not just the ``service_registry`` primitive's own
+    test (``tests/daemon/test_storage_service_daemon.py::
+    test_pid_is_alive_is_the_shared_primitive_not_a_local_copy``, which
+    only proves identity, not behavior).
+
+    Alive-on-ambiguity is the correct direction for BOTH consumers this
+    function serves: ``stop_storage_service``'s termination-verification
+    (declaring "dead" on an ambiguous errno risks the exact false-all-clear
+    this whole bead exists to close) and this module's ``_sweep_surviving_
+    stack``/``restart_stale`` convergence retry (erring toward "still
+    alive" makes the sweep retry/escalate rather than falsely declaring an
+    early clean exit — the two failure directions are NOT symmetric: a
+    missed live process is a data-integrity risk, a redundant kill attempt
+    on an already-dead pid is a no-op ``ProcessLookupError``/
+    ``PermissionError`` swallow).
+    """
+
+    def test_ambiguous_oserror_is_treated_as_alive(self) -> None:
+        import errno as _errno
+        from nexus.upgrade_finish import _pid_alive
+        # errno must be one PEP 3151 maps to NO OSError subclass: EPERM
+        # auto-promotes to PermissionError, which the OLD dead-on-ambiguous
+        # local copy also special-cased, making the probe vacuous (critique
+        # T2 [21510] round 3 falsified exactly that). EIO stays a plain
+        # OSError, so only the alive-on-ambiguity semantics pass this.
+        with patch("os.kill", side_effect=OSError(_errno.EIO, "ambiguous")):
+            assert _pid_alive(12345) is True, (
+                "an OSError other than ESRCH must be treated as ALIVE, not "
+                "dead — the safe direction for both this module's "
+                "convergence-retry use and the primitive's stop-side use"
+            )
+
+    def test_esrch_still_means_dead(self) -> None:
+        """Contrast case: the fix must not have gone TOO far — a genuine
+        'no such process' must still read as dead."""
+        import errno as _errno
+        from nexus.upgrade_finish import _pid_alive
+        with patch("os.kill", side_effect=OSError(_errno.ESRCH, "no such process")):
+            assert _pid_alive(12345) is False
+
+    def test_process_lookup_error_still_means_dead(self) -> None:
+        from nexus.upgrade_finish import _pid_alive
+        with patch("os.kill", side_effect=ProcessLookupError()):
+            assert _pid_alive(12345) is False
 
 
 class TestCrossVenvGuard:

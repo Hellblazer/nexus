@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-152 bead nexus-gmiaf.21 — Embedding parity gate.
 
-Formally proves: Java service embedding == Python PRODUCTION embedding across all three
-paths.  "Production" means the exact call that Python uses in operation, NOT a
-hand-crafted API call that may have different parameters.
+Formally proves: Java service embedding == a Python ORACLE embedding call across
+all three paths, so the JAVA engine's server-side embedding can be trusted.
+
+nexus-sghyo (2026-08-06): client-side embedding was retired outright (Hal
+determination 2026-07-28: "we do no embedding on the client") — paths 2 and 3
+are no longer "Python PRODUCTION embedding" (nothing in nexus embeds client-side
+any more); they are TEST ORACLES calling the Voyage SDK directly with the same
+wire-contract kwargs the deleted client-side wrappers used to mirror, purely to
+prove the Java engine's server-side embedding is correct. Path 1 (local ONNX)
+is unaffected — client-side LOCAL embedding (bge-768/fastembed) is NOT part of
+this retirement.
 
   1. LOCAL ONNX    — Python chromadb ONNXMiniLM_L6_V2 vs Java OnnxEmbedder
-  2. CLOUD STANDARD — Python chromadb.VoyageAIEmbeddingFunction (production path, float32)
+  2. CLOUD STANDARD — Python voyageai.Client.embed() oracle (float32)
                      vs Java VoyageEmbedder (same API parameters, no input_type, truncation=True)
   3. CLOUD CCE      — Python voyageai.Client.contextualized_embed(inputs=[[text]], input_type=...)
                      vs Java CceEmbedder (same API parameters, one text per call)
@@ -538,11 +546,18 @@ class TestEmbedParity:
         reason="VOYAGE_API_KEY not set — skipping cloud standard parity path",
     )
     def test_voyage_standard_parity(self, cloud_service: tuple[str, str]) -> None:
-        """CLOUD STANDARD: Python chromadb.VoyageAIEmbeddingFunction == Java VoyageEmbedder.
+        """CLOUD STANDARD: Python voyageai.Client (oracle) == Java VoyageEmbedder.
 
-        Python PRODUCTION path: VoyageAIEmbeddingFunction(model_name='voyage-code-3',
-        api_key=key) with default input_type=None (omitted from request), truncation=True,
-        returns np.float32.
+        nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+        (Hal determination 2026-07-28: "we do no embedding on the client") —
+        nexus.db.voyage_ef.VoyageEmbeddingFunction (the wrapper this test
+        used to gate through) is DELETED along with every other client-side
+        Voyage consumer. This leg is no longer "what t3.py uses" — it is a
+        pure TEST ORACLE, calling the Voyage SDK directly with the same
+        wire-contract kwargs the deleted wrapper used to mirror, purely to
+        prove the JAVA engine's server-side embedding is correct. Direct SDK
+        call: model='voyage-code-3', input_type=None (default, omitted from
+        request), truncation=True (default), returns np.float32.
 
         Java path: VoyageEmbedder with a request body BYTE-identical to the
         Python SDK's wire format (locked by VoyageEmbedderBodyTest against
@@ -555,20 +570,20 @@ class TestEmbedParity:
         variants 4.19e-05 cosine apart; the "linux gate failure" was the two
         legs coin-flipping between the same two variants).
         """
-        from nexus.db.voyage_ef import VoyageEmbeddingFunction
+        import voyageai
 
         base_url, token = cloud_service
         api_key = os.environ["VOYAGE_API_KEY"]
 
-        # Python PRODUCTION path: VoyageEmbeddingFunction (what t3.py uses).
-        # P3: was chromadb's VoyageAIEmbeddingFunction. That swap KEEPS this
-        # comment true — t3.py moved to the nexus EF, so continuing to gate
-        # against chroma's would have compared Java to something production no
-        # longer calls. The nexus EF mirrors chroma's embed() kwargs and float32
-        # output precisely so this leg stays a like-for-like comparison.
-        # input_type=None (default), truncation=True (default), returns np.float32
-        ef = VoyageEmbeddingFunction(model_name="voyage-code-3", api_key=api_key)
-        python_f32 = [np.array(v, dtype=np.float32) for v in ef(CORPUS)]
+        # Oracle: direct voyageai.Client call — input_type=None (default),
+        # truncation=True (default), returns np.float32. Mirrors the wire
+        # contract the deleted nexus.db.voyage_ef.VoyageEmbeddingFunction
+        # used to wrap; this is a TEST ORACLE only, not a production path.
+        client = voyageai.Client(api_key=api_key)
+        result = client.embed(
+            texts=CORPUS, model="voyage-code-3", input_type=None, truncation=True,
+        )
+        python_f32 = [np.array(v, dtype=np.float32) for v in result.embeddings]
 
         # Java path: VoyageEmbedder via code__ prefix routing
         java_vecs = _java_embed(base_url, token, _VOYAGE_COLLECTION, CORPUS)

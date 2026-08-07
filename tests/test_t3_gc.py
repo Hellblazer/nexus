@@ -317,6 +317,369 @@ def test_gc_orphan_window_excludes_recent(t3_db, tmp_path, runner):
     assert surviving == ["recent_orphan"]
 
 
+# ── nexus-39upx hazard 2 (RDR-145): manifest-less notes ─────────────────
+#
+# chashes_for_collection only sees chashes with a manifest row. A
+# store_put / nx store put note never gets one (RDR-145 defers
+# manifest-backed identity for notes; catalog-003-soft-delete.xml's
+# live_chunks view treats a manifest-less chunk as live BY DESIGN), so
+# without the fix a note's chash reads identically to a genuine re-index
+# orphan: both are simply "not referenced".
+
+
+def _register_note_active(
+    catalog: Any, *, collection: str, chash: str, title: str,
+) -> str:
+    """Register a REAL RDR-145-shaped note through the ACTIVE catalog:
+    store_put origin (content_type="knowledge", no file_path), the
+    single-chunk natural id stamped into meta["doc_id"] — exactly what
+    catalog/store_hook.py::single_chunk_manifest_metadata +
+    catalog_store_hook_tracked write at store_put time, and what
+    ``nx catalog doctor --store-put-integrity`` already reads back.
+    Deliberately writes NO manifest row.
+    """
+    owner = catalog.register_owner(f"t3-gc-note-{collection}", "curator")
+    tumbler = catalog.register(
+        owner, title, content_type="knowledge", file_path="",
+        physical_collection=collection, meta={"doc_id": chash},
+    )
+    return str(tumbler)
+
+
+def test_gc_protects_manifest_less_note_from_deletion(
+    t3_db, active_catalog, runner,
+):
+    """The load-bearing case: a note whose chash is not referenced by
+    ANY manifest (not even a live one elsewhere) must still survive —
+    chashes_for_collection alone cannot tell it apart from a genuine
+    orphan."""
+    coll = "knowledge__test_gc_note_protect"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    note_chash = "d" * 64
+    _register_note_active(
+        active_catalog, collection=coll, chash=note_chash, title="my note",
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="note1", content="a real note",
+        chunk_text_hash=note_chash, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    # The note alone makes `referenced` non-empty (its chash is now
+    # protected), so this must succeed WITHOUT --allow-empty-manifest-set.
+    assert result.exit_code == 0, result.output
+    assert "protecting 1 manifest-less note chunk(s)" in result.output
+    assert "note1" not in result.output
+    assert t3_db._client.get_collection(coll).get()["ids"] == ["note1"]
+
+
+def test_gc_deletes_genuine_orphan_while_protecting_a_note_in_the_same_collection(
+    t3_db, active_catalog, runner,
+):
+    """Non-vacuous in both directions: the note guard must not become a
+    blanket refusal that also hides a genuine orphan sharing the run."""
+    coll = "knowledge__test_gc_note_and_orphan"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    note_chash = "e" * 64
+    orphan_chash = "f" * 64
+    _register_note_active(
+        active_catalog, collection=coll, chash=note_chash, title="my other note",
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="note1", content="a real note",
+        chunk_text_hash=note_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="stale",
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    surviving = t3_db._client.get_collection(coll).get()["ids"]
+    assert surviving == ["note1"]
+
+
+def test_gc_dry_run_never_lists_a_protected_note_as_a_candidate(
+    t3_db, active_catalog, runner,
+):
+    coll = "knowledge__test_gc_note_dryrun"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    note_chash = "1" * 64
+    _register_note_active(
+        active_catalog, collection=coll, chash=note_chash, title="dry run note",
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="note1", content="a real note",
+        chunk_text_hash=note_chash, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(main, ["t3", "gc", "-c", coll, "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 orphan chunk(s) eligible" in result.output
+    assert "note1" not in result.output
+
+
+def test_gc_refuses_when_note_lookup_fails(t3_db, active_catalog, runner):
+    """FAIL LOUD, not fail-open: this is the operator-driven --yes path,
+    so an unverifiable note-set must refuse the run rather than risk
+    deleting live notes."""
+    coll = "knowledge__test_gc_note_lookup_fails"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="stale",
+        chunk_text_hash="2" * 64, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+            patch(
+                "nexus.indexer_utils.catalog_documents_for_collection",
+                side_effect=RuntimeError("engine down"),
+            ):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code != 0
+    assert "Failed to verify manifest-less note protection" in result.output
+    # Refused BEFORE any delete.
+    assert t3_db._client.get_collection(coll).get()["ids"] == ["orphan1"]
+
+
+# ── nexus-g6k6b (nexus-39upx round 2 CRITICAL): RUNFENCE index_state
+# precondition ──────────────────────────────────────────────────────────
+#
+# Bead nexus-39upx's own comment thread (Hal, 2026-08-02 11:23), binding:
+# "The corpus-wide sweep (b) MUST filter on index_state = 'complete'.
+# Sweeping a document that is mid-index would delete chunks an in-flight
+# run has already written but has not yet manifested." A T3 chunk carries
+# no doc_id (post-RDR-108), so an orphan candidate cannot be attributed to
+# the specific document that most recently owned it — nx t3 gc therefore
+# refuses the WHOLE collection's destructive run when it contains ANY
+# document not index_state='complete', rather than guessing per-candidate.
+
+
+def _register_indexing_doc_active(
+    catalog: Any, *, collection: str, run_id: str = "test-run",
+) -> str:
+    """Register a document and stamp index_state='indexing' via the real
+    RUNFENCE begin_index_run write op — the shape a genuinely in-flight
+    reindex leaves behind."""
+    owner = catalog.register_owner(f"t3-gc-indexing-{collection}", "curator")
+    tumbler = catalog.register(
+        owner, f"doc-{collection}", content_type="text",
+        file_path=f"/tmp/{collection}.md", physical_collection=collection,
+    )
+    catalog.begin_index_run(str(tumbler), "content-hash-1", run_id, collection)
+    return str(tumbler)
+
+
+def _register_failed_doc_active(catalog: Any, *, collection: str) -> str:
+    """Register a document and stamp index_state='failed' via the real
+    RUNFENCE fail_index_run write op."""
+    owner = catalog.register_owner(f"t3-gc-failed-{collection}", "curator")
+    tumbler = catalog.register(
+        owner, f"doc-{collection}", content_type="text",
+        file_path=f"/tmp/{collection}.md", physical_collection=collection,
+    )
+    catalog.fail_index_run(str(tumbler), "extraction error")
+    return str(tumbler)
+
+
+def test_gc_refuses_when_a_document_is_actively_indexing(
+    t3_db, active_catalog, runner,
+):
+    """The core hazard Hal named: a live in-flight run. A chunk that
+    would otherwise classify as a genuine orphan must be protected
+    (never physically deleted) while ANY document in the collection is
+    mid-index."""
+    coll = "knowledge__test_gc_g6k6b_indexing"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _register_indexing_doc_active(active_catalog, collection=coll)
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="would_be_orphan", content="stale",
+        chunk_text_hash="3" * 64, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        # --allow-empty-manifest-set: the fixture writes no manifest, so
+        # without it the PRE-EXISTING nexus-jqrtp empty-manifest refusal
+        # fires first and this test passes without the g6k6b breaker ever
+        # running (critique T2 [21515] round 2 falsified exactly that).
+        # Bypassing jqrtp leaves g6k6b's refusal as the ONLY non-zero path.
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+                   "--allow-empty-manifest-set"],
+        )
+
+    assert result.exit_code != 0
+    assert "REFUSING to delete" in result.output
+    assert "not index_state='complete'" in result.output
+    assert "--allow-incomplete-index-state" in result.output
+    # Refused BEFORE any delete — the chunk survives.
+    assert t3_db._client.get_collection(coll).get()["ids"] == ["would_be_orphan"]
+
+
+def test_gc_refuses_when_a_document_is_fence_failed(t3_db, active_catalog, runner):
+    """A fenced failure — its manifest may be a partial artifact of the
+    first-batch atomic_manifest_replace, same hazard shape as indexing."""
+    coll = "knowledge__test_gc_g6k6b_failed"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _register_failed_doc_active(active_catalog, collection=coll)
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="would_be_orphan", content="stale",
+        chunk_text_hash="4" * 64, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        # --allow-empty-manifest-set for the same reason as the
+        # actively-indexing test above: keep the jqrtp guard from masking
+        # the g6k6b refusal under test.
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+                   "--allow-empty-manifest-set"],
+        )
+
+    assert result.exit_code != 0
+    assert "REFUSING to delete" in result.output
+    assert "not index_state='complete'" in result.output
+    assert t3_db._client.get_collection(coll).get()["ids"] == ["would_be_orphan"]
+
+
+def test_gc_override_flag_allows_deletion_despite_incomplete_index_state(
+    t3_db, active_catalog, runner,
+):
+    """The escape hatch, mirroring --allow-empty-manifest-set: once the
+    operator has confirmed no reindex is concurrently running, the
+    override lets the (otherwise-genuine) orphan get deleted."""
+    coll = "knowledge__test_gc_g6k6b_override"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _register_indexing_doc_active(active_catalog, collection=coll)
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="genuine_orphan", content="stale",
+        chunk_text_hash="5" * 64, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+                   "--allow-incomplete-index-state", "--allow-empty-manifest-set"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert t3_db._client.get_collection(coll).get()["ids"] == []
+
+
+def test_gc_dry_run_reports_the_non_complete_document_count_loudly(
+    t3_db, active_catalog, runner,
+):
+    """Capability-honest, non-silent: even a report-only run must NAME
+    the blocker so an operator planning a real run sees it coming."""
+    coll = "knowledge__test_gc_g6k6b_dryrun"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _register_indexing_doc_active(active_catalog, collection=coll)
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="would_be_orphan", content="stale",
+        chunk_text_hash="6" * 64, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(main, ["t3", "gc", "-c", coll, "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 document(s)" in result.output
+    assert "not index_state='complete'" in result.output
+    assert "'indexing'" in result.output
+
+
+def test_gc_complete_document_is_never_a_blocker(t3_db, active_catalog, runner):
+    """Non-vacuous companion: a document that HAS completed its index
+    run must not spuriously block the collection.
+
+    The RUNFENCE completion verify (``complete_index_run``) checks T3
+    presence against the SAME Postgres the engine's catalog service
+    reads — a datastore this unit test's local ``t3_db`` fixture does
+    not write to, so a genuine begin/complete round-trip cannot succeed
+    here (it would 409 with ``missing=1``). Patches the collection-documents
+    fetch to return a real-shaped ``index_state='complete'`` entry instead,
+    isolating THIS test to gc_cmd's classification wiring — the fence's
+    OWN verify-then-stamp correctness is the RUNFENCE arc's own test
+    suite's job, not this bead's.
+    """
+    from types import SimpleNamespace
+
+    coll = "knowledge__test_gc_g6k6b_complete"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    live_chash = "7" * 64
+    orphan_chash = "8" * 64
+    _register_doc_active(active_catalog, collection=coll, chashes=[live_chash])
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="alive1", content="a",
+        chunk_text_hash=live_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="o",
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
+    )
+    complete_entry = SimpleNamespace(
+        title=f"doc-{coll}", file_path=f"/tmp/{coll}.md", meta={},
+        index_state="complete", index_state_reported=True,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+            patch("nexus.indexer_utils.catalog_documents_for_collection",
+                  return_value=[complete_entry]):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert t3_db._client.get_collection(coll).get()["ids"] == ["alive1"]
+
+
+def test_gc_note_shaped_document_never_blocks_despite_none_index_state(
+    t3_db, active_catalog, runner,
+):
+    """Hal, verbatim: store_put-origin documents never carry index_state
+    and 'their chunks are never swept: over-retention, not deletion...
+    is correct' — that must be their ONLY protection (via
+    live_note_chashes), not an additional collection-wide refusal that
+    would make every knowledge collection holding even one note
+    permanently block gc."""
+    coll = "knowledge__test_gc_g6k6b_note_no_block"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    note_chash = "9" * 64
+    orphan_chash = "0" * 64
+    _register_note_active(active_catalog, collection=coll, chash=note_chash, title="a note")
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="note1", content="a real note",
+        chunk_text_hash=note_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="o",
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    surviving = t3_db._client.get_collection(coll).get()["ids"]
+    assert surviving == ["note1"]
+
+
 def test_gc_default_window_is_30_days(t3_db, tmp_path, runner):
     """No ``--orphan-window`` flag → default 30 days.
 
@@ -541,7 +904,14 @@ def test_gc_chunk_id_shape_irrelevant_under_manifest_path(
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
-            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+            # nexus-g6k6b: _register_doc_active never stamps the RUNFENCE
+            # fence, so this document's index_state reads None (unknown) —
+            # this test's own subject is chunk-ID-shape irrelevance, not
+            # RUNFENCE, so the override is the correct, narrow way to keep
+            # it independent of that (separately and thoroughly tested)
+            # concern.
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+             "--allow-incomplete-index-state"],
         )
 
     assert result.exit_code == 0, result.output

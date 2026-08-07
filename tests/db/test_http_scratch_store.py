@@ -30,17 +30,15 @@ is in tests/db/test_http_scratch_store_integration.py (marked integration).
 
 from __future__ import annotations
 
-import json
 import os
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import pytest
 
 from nexus.db.http_scratch_store import DEFAULT_TENANT, HttpScratchStore
 from nexus.db.t1 import publish_t1_session_lease
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-scratch-token-abc123"
 SESSION = "test-session-unit"
@@ -74,20 +72,13 @@ def _make_entry(id: str, content: str, session_id: str, **kwargs: Any) -> dict[s
     }
 
 
-class _FakeScratchHandler(BaseHTTPRequestHandler):
+class _FakeScratchHandler(FakeT2HandlerBase):
     """Faithful in-process stub of ScratchHandler (Java)."""
 
-    def log_message(self, fmt, *args):
-        pass  # suppress test noise
+    TOKEN = TOKEN
 
     def _check_auth(self) -> bool:
-        auth = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant"})
+        if not super()._check_auth():
             return False
         # nexus-g5hzk: optional require-minted-session gate, mirroring the
         # Java AuthFilter — active only when a test sets _REQUIRED_T1_TOKEN.
@@ -96,18 +87,6 @@ class _FakeScratchHandler(BaseHTTPRequestHandler):
             self._send(401, {"error": "unauthorized"})
             return False
         return True
-
-    def _send(self, status: int, body: Any) -> None:
-        self.send_response(status)
-        payload = json.dumps(body).encode()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        return json.loads(self.rfile.read(length)) if length else {}
 
     def do_POST(self):  # noqa: N802
         if not self._check_auth():
@@ -232,21 +211,11 @@ class _FakeScratchHandler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def fake_server():
     """Start the fake T1 HTTP server for the module, tear down after."""
-    port = _free_port()
-    server = HTTPServer(("127.0.0.1", port), _FakeScratchHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{port}"
-    server.shutdown()
+    with fake_http_server(_FakeScratchHandler) as url:
+        yield url
 
 
 @pytest.fixture
@@ -264,21 +233,19 @@ def store(fake_server):
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 class TestPutGet:
-    def test_put_returns_uuid(self, store):
-        id_ = store.put("hello scratch content", tags="a,b")
-        assert isinstance(id_, str)
-        assert len(id_) == 36  # UUID format
+    # test_put_returns_uuid / test_get_absent_returns_none moved to the
+    # store-parametrized contract in test_t2_store_crud_contract.py
+    # (test-suite-compression P1d) — memory, plan_library, and scratch all
+    # share the same synthetic-identifier put/get/delete shape.
 
-    def test_get_returns_entry(self, store):
+    def test_get_returns_entry_with_session_id(self, store):
+        """Store-specific detail beyond the generic contract: the returned
+        entry carries the OWNING session_id verbatim (content/id round-trip
+        itself is covered by the shared crud-contract journey)."""
         id_ = store.put("get me content", tags="t1")
         result = store.get(id_)
         assert result is not None
-        assert result["id"] == id_
-        assert result["content"] == "get me content"
         assert result["session_id"] == SESSION
-
-    def test_get_absent_returns_none(self, store):
-        assert store.get("nonexistent-uuid-1234") is None
 
     def test_get_increments_access_count(self, store):
         id_ = store.put("access count test content")
@@ -379,15 +346,16 @@ class TestFlagUnflag:
 
 
 class TestDelete:
-    def test_delete_returns_true(self, store):
+    # test_delete_returns_true / test_delete_twice_returns_false moved to
+    # the store-parametrized contract in test_t2_store_crud_contract.py
+    # (test-suite-compression P1d).
+
+    def test_delete_removes_entry(self, store):
+        """Store-specific detail beyond the generic contract: a deleted
+        entry is truly gone from get(), not merely reported deleted."""
         id_ = store.put("delete me content")
         assert store.delete(id_) is True
         assert store.get(id_) is None
-
-    def test_delete_twice_returns_false(self, store):
-        id_ = store.put("delete twice test")
-        store.delete(id_)
-        assert store.delete(id_) is False
 
     def test_delete_wrong_session_returns_false(self, fake_server):
         store_a = HttpScratchStore(

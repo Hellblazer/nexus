@@ -850,6 +850,68 @@ class TestManifest:
         assert _ch("old_hash000000000000000000000000") not in chashes
 
 
+class TestPruneUnionGuard:
+    """nexus-tp8yk D3: nexus.indexer_utils.orphaned_chashes against the
+    REAL Java catalog service — the shared union guard now used by all
+    four T3-deleting prune sites (mcp_infra._sweep_superseded_vectors +
+    the three doc_indexer.py/pipeline_stages.py stale-chunk prunes).
+    Memo §5 TDD item 6: register two documents sharing a chash; a chash
+    still referenced by the OTHER live document must survive a prune
+    candidate list that includes it, while a chash exclusively owned by
+    the document under prune must NOT.
+    """
+
+    def test_shared_chash_kept_exclusive_chash_orphaned(self, cat) -> None:
+        from nexus.indexer_utils import orphaned_chashes
+
+        shared = _ch("tp8yk_shared_chash_0000000000000000")
+        exclusive_a = _ch("tp8yk_exclusive_a_chash_00000000000")
+
+        doc_a = cat.register(
+            "1.1", "tp8yk Union Guard Doc A", content_type="paper",
+            source_uri="file:///manifest/tp8yk-union-a.md",
+        )
+        doc_b = cat.register(
+            "1.1", "tp8yk Union Guard Doc B", content_type="paper",
+            source_uri="file:///manifest/tp8yk-union-b.md",
+        )
+        cat.write_manifest(str(doc_a), [
+            {"position": 0, "chash": shared},
+            {"position": 1, "chash": exclusive_a},
+        ])
+        cat.write_manifest(str(doc_b), [
+            {"position": 0, "chash": shared},
+        ])
+
+        # Both candidates are "dropped from doc A's manifest" in the
+        # caller's framing (a re-index that no longer references either).
+        result = orphaned_chashes(cat, str(doc_a), [shared, exclusive_a])
+
+        assert exclusive_a in result, (
+            "a chash referenced by NO OTHER live document must be "
+            f"reported orphaned (safe to delete) — got {result}"
+        )
+        assert shared not in result, (
+            "a chash doc B still references must survive — deleting it "
+            f"would remove a chunk doc B depends on — got {result}"
+        )
+
+    def test_reader_read_failure_keeps_everything(self, cat) -> None:
+        """Fail-open against the real service: a reader whose
+        docs_for_chashes raises (simulated here, since a real 5xx is hard
+        to provoke deterministically against a healthy service) must
+        return an EMPTY orphan list — never guess, never delete."""
+        from unittest.mock import MagicMock
+
+        from nexus.indexer_utils import orphaned_chashes
+
+        broken_reader = MagicMock()
+        broken_reader.docs_for_chashes.side_effect = RuntimeError("engine down")
+
+        result = orphaned_chashes(broken_reader, "1.1.1", [_ch("tp8yk_unreachable")])
+        assert result == []
+
+
 class TestFTSSearch:
     """
     d) FTS: english stemming probe + simple identifier probe (152-FTS-tokenizer-DECISION)

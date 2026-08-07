@@ -19,14 +19,16 @@ class IndexContext:
     """Shared parameters for per-file indexing functions.
 
     Replaces the 12-parameter function signatures of the old _index_code_file
-    and _index_prose_file.  Carries both ``voyage_key`` (raw API key, used by
-    prose/PDF paths that call doc_indexer._embed_with_fallback internally) and
-    ``voyage_client`` (pre-constructed voyageai.Client, used by the code path
-    that calls voyage_client.embed directly).
+    and _index_prose_file.
 
-    In local mode, ``embed_fn`` is set and ``voyage_client``/``voyage_key``
-    are empty.  Indexers check ``embed_fn`` first: when present, it replaces
-    all Voyage AI embedding calls.
+    In local mode, ``embed_fn`` is set (client-side ONNX/fastembed). In
+    service mode, ``embed_fn`` is a no-op stub and the JVM embeds
+    server-side. ``voyage_key`` / ``voyage_client`` are retained on the
+    dataclass for call-site compatibility but are always empty/``None``:
+    non-service, client-side Voyage embedding was retired (nexus-sghyo,
+    Hal determination 2026-07-28 — the client does no embedding). Indexers
+    that reach the branch guarded by these fields raise loud rather than
+    construct a Voyage client.
 
     ``tuning`` provides configurable constants (chunk sizes, scoring weights,
     timeouts).  Defaults to the TuningConfig defaults when not supplied.
@@ -36,9 +38,12 @@ class IndexContext:
     col: object             # ChromaDB Collection for the target collection
     db: object              # T3 database (for upsert_chunks_with_embeddings)
 
-    # Voyage AI — code path uses voyage_client; prose/PDF paths use voyage_key
-    voyage_key: str = field(repr=False)  # raw API key — single source of truth; excluded from repr to prevent leaking
-    voyage_client: object | None        # pre-constructed voyageai.Client (code path)
+    # RETIRED (nexus-sghyo): always "" / None in shipping config. Kept on
+    # the dataclass so existing call sites and tests do not need a
+    # signature migration; the non-service branches they used to feed now
+    # raise loud instead of consuming them.
+    voyage_key: str = field(repr=False)  # raw API key — excluded from repr to prevent leaking
+    voyage_client: object | None        # formerly a pre-constructed voyageai.Client (code path)
 
     # Indexing scope
     repo_path: Path

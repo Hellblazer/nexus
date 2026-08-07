@@ -226,14 +226,18 @@ last one should not run casually:
   Desktop, not nexus state.
 
 Re-establishing Desktop MVV means deciding what a post-daemon first run is
-supposed to DO before writing a harness that asserts it — the banner subsystem's
-own fate is RDR-126 §3, tracked separately. Writing a new gate against today's
-unspecified behaviour would recreate exactly the rot deleted here.
+supposed to DO before writing a harness that asserts it. The banner subsystem's
+own fate (RDR-126 §3) was decided at nexus-37jha: deleted outright, since it
+had been producer-less since the deletion above and nothing re-points it at a
+service-mode first-run event. Re-establishing a service-mode first-run banner
+is a new capability, not a restoration — file it separately if the
+Desktop/plugin-first onboarding story wants one. Writing a new gate against
+today's unspecified behaviour would recreate exactly the rot deleted here.
 
 ## Failure modes
 
 - **uv not on PATH (Claude Desktop chat install)**: `.mcpb` install fails with a cryptic error. Mitigation: README documents `brew install uv` / `pipx install uv` as pre-requisite.
-- **The `.mcpb` reads `config.yml`, NOT your shell env — cloud creds must be persisted, or the extension silently runs local mode** (the single most likely Desktop footgun). Claude Desktop spawns the `.mcpb` as a GUI subprocess that does **not** inherit your interactive shell's environment. `is_local_mode()` resolves creds via `get_credential()`, which checks the process env first and then `~/.config/nexus/config.yml` — it never sees `~/.zshrc`/`~/.bashrc` exports. So a machine where `CHROMA_API_KEY` / `VOYAGE_API_KEY` live only in the shell will run the extension in **local mode** (bge-768 local embedder), even though your CLI in a terminal resolves cloud mode fine. Symptoms: searches return "no results" or feel thin, and `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `collection_dimension_mismatch_skipped` / `search_all_collections_dimension_skipped` — typically `got 768` (local bge query) against collections that expect `1024` (voyage). The bge-768 local query simply cannot match cloud voyage-1024 collections.
+- **The `.mcpb` reads `config.yml`, NOT your shell env — the mode record and service URL must be persisted, or the extension silently runs local mode** (the single most likely Desktop footgun). Claude Desktop spawns the `.mcpb` as a GUI subprocess that does **not** inherit your interactive shell's environment. `is_local_mode()` resolves the persisted mode record, then `service_url`, then PG credentials — via `~/.config/nexus/config.yml`, never `~/.zshrc`/`~/.bashrc` exports. (It does NOT key on API keys: `VOYAGE_API_KEY` is no longer a client credential at all — the client does no embedding — and `CHROMA_API_KEY` no longer exists.) So a machine whose cloud configuration lives only in shell exports will run the extension in **local mode** (bge-768 local embedder), even though your CLI in a terminal resolves cloud mode fine. Symptoms: searches return "no results" or feel thin, and `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `collection_dimension_mismatch_skipped` / `search_all_collections_dimension_skipped` — typically `got 768` (local bge query) against collections that expect `1024` (voyage). The bge-768 local query simply cannot match cloud voyage-1024 collections. Fix: persist the cloud config via `nx config set` (or re-run `nx init --cloud`).
 
   **6.0 cloud creds** are the managed nexus-service endpoint + bearer token
   (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`); embedding runs server-side, so you do

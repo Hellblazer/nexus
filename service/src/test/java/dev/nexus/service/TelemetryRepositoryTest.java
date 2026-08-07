@@ -1094,4 +1094,187 @@ class TelemetryRepositoryTest {
             .as("tenant B must not see tenant A's marker (RLS)")
             .isEmpty();
     }
+
+    // ── nexus-eho3u: nx_answer_runs read surface ─────────────────────────────
+    //
+    // Own unique tenants (System.nanoTime(), not TENANT_A) — unlike the
+    // @Order-sequenced tests above, these assert EXACT aggregate counts over
+    // the whole tenant, so a shared tenant would pick up rows from other
+    // tests running under the same PER_CLASS instance.
+
+    @Test
+    void queryNxAnswerRuns_writeThenRead_rowsAndAggregatesRoundTrip() {
+        String tenant = "nar-" + System.nanoTime();
+        // One inline-planner fallback (plan_id null) + four plan-match hits,
+        // one landing in each latency bucket.
+        repo.importNxAnswerRunRow(tenant, "fallback question", null, null,
+            0, "Planner error: x", 0.0, 4_000L, "2026-08-01T00:00:00Z");
+        repo.importNxAnswerRunRow(tenant, "under 5s", 1L, 0.9,
+            1, "answer-1", 0.001, 4_000L, "2026-08-01T00:01:00Z");
+        repo.importNxAnswerRunRow(tenant, "5s to 30s", 2L, 0.9,
+            1, "answer-2", 0.002, 10_000L, "2026-08-01T00:02:00Z");
+        repo.importNxAnswerRunRow(tenant, "30s to 2min", 3L, 0.9,
+            1, "answer-3", 0.003, 60_000L, "2026-08-01T00:03:00Z");
+        repo.importNxAnswerRunRow(tenant, "2min to 5min", 4L, 0.9,
+            1, "answer-4", 0.004, 200_000L, "2026-08-01T00:04:00Z");
+        repo.importNxAnswerRunRow(tenant, "over 5min", 5L, 0.9,
+            1, "answer-5", 0.005, 400_000L, "2026-08-01T00:05:00Z");
+
+        var out = repo.queryNxAnswerRuns(tenant, "", 100);
+
+        assertThat(out.get("total")).isEqualTo(6);
+        assertThat(out.get("hit_count")).isEqualTo(5L);
+        assertThat(out.get("fallback_count")).isEqualTo(1L);
+        assertThat((Double) out.get("avg_cost_usd")).isCloseTo(0.0025, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(out.get("oldest_created_at")).isEqualTo("2026-08-01T00:00:00Z");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> buckets = (Map<String, Object>) out.get("latency_buckets");
+        // 2: the fallback row (4_000ms) AND the "under 5s" hit both land here.
+        assertThat(buckets.get("under_5s")).isEqualTo(2L);
+        assertThat(buckets.get("5s_to_30s")).isEqualTo(1L);
+        assertThat(buckets.get("30s_to_2min")).isEqualTo(1L);
+        assertThat(buckets.get("2min_to_5min")).isEqualTo(1L);
+        assertThat(buckets.get("over_5min")).isEqualTo(1L);
+        long bucketSum = buckets.values().stream().mapToLong(v -> (Long) v).sum();
+        assertThat(bucketSum).as("buckets must sum to total — no row silently unaccounted for")
+            .isEqualTo(6L);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        assertThat(rows).hasSize(6);
+        // Newest first.
+        assertThat(rows.get(0).get("question")).isEqualTo("over 5min");
+        assertThat(rows.get(0).get("plan_id")).isEqualTo(5L);
+        assertThat(rows.get(0).get("created_at")).isEqualTo("2026-08-01T00:05:00Z");
+        assertThat(rows.get(5).get("question")).isEqualTo("fallback question");
+        assertThat(rows.get(5).get("plan_id")).isNull();
+    }
+
+    @Test
+    void queryNxAnswerRuns_planIdZero_isTheAdHocSentinelNotAHit() {
+        // Review fix (nexus-eho3u): plan_id=0 is the synthetic ad-hoc Match
+        // sentinel _nx_answer_plan_miss returns on every SUCCESSFUL
+        // inline-planner run (core.py) — plans.id is BIGSERIAL, so 0 can
+        // never be a real plan. The ORIGINAL `plan_id IS NOT NULL` predicate
+        // counted this as a HIT, inverting the plan-match-rate metric. This
+        // is the KILL CONTROL: under that old predicate, hit_count would be
+        // 2 (the real hit AND the ad-hoc-sentinel row) and fallback_count
+        // would be 1 — both wrong. Temporarily reverting the predicate to
+        // `PLAN_ID.isNotNull()` / `PLAN_ID.isNull()` makes this test fail
+        // exactly that way (verified by hand during the fix; not left
+        // reverted in the tree).
+        String tenant = "nar-sentinel-" + System.nanoTime();
+        repo.importNxAnswerRunRow(tenant, "real hit", 11L, 0.9,
+            1, "answer", 0.001, 1_000L, "2026-08-01T00:00:00Z");
+        repo.importNxAnswerRunRow(tenant, "ad-hoc success (sentinel)", 0L, null,
+            2, "ad-hoc answer", 0.002, 2_000L, "2026-08-01T00:01:00Z");
+        repo.importNxAnswerRunRow(tenant, "genuine fallback (planner error)", null, null,
+            0, "Planner error: x", 0.0, 3_000L, "2026-08-01T00:02:00Z");
+
+        var out = repo.queryNxAnswerRuns(tenant, "", 100);
+
+        assertThat(out.get("total")).isEqualTo(3);
+        assertThat(out.get("hit_count"))
+            .as("only the REAL matched plan (plan_id=11) counts as a hit")
+            .isEqualTo(1L);
+        assertThat(out.get("fallback_count"))
+            .as("plan_id=0 (ad-hoc sentinel) AND plan_id=null (genuine miss) both count as fallback")
+            .isEqualTo(2L);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        var sentinelRow = rows.stream()
+            .filter(r -> "ad-hoc success (sentinel)".equals(r.get("question")))
+            .findFirst().orElseThrow();
+        assertThat(sentinelRow.get("plan_id")).isEqualTo(0L);
+    }
+
+    @Test
+    void queryNxAnswerRuns_limitCapsPageButNotAggregates() {
+        // Kill control mirroring hookFailures_read_aggregatesIgnoreThePageLimit:
+        // a caller asking for the last row must not see total=1.
+        String tenant = "nar-cap-" + System.nanoTime();
+        for (int i = 0; i < 5; i++) {
+            repo.importNxAnswerRunRow(tenant, "cap-" + i, null, null,
+                0, "a", 0.0, 1_000L, "2026-08-01T00:0" + i + ":00Z");
+        }
+
+        var capped = repo.queryNxAnswerRuns(tenant, "", 1);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) capped.get("rows");
+        assertThat(rows).hasSize(1);
+        assertThat(capped.get("total")).isEqualTo(5);
+        assertThat(capped.get("fallback_count")).isEqualTo(5L);
+    }
+
+    @Test
+    void queryNxAnswerRuns_sinceFilterExcludesOlderRows() {
+        String tenant = "nar-since-" + System.nanoTime();
+        repo.importNxAnswerRunRow(tenant, "old", null, null,
+            0, "a", 0.0, 1_000L, "2020-01-01T00:00:00Z");
+        repo.importNxAnswerRunRow(tenant, "new", null, null,
+            0, "a", 0.0, 1_000L, "2099-01-01T00:00:00Z");
+
+        var recent = repo.queryNxAnswerRuns(tenant, "2030-01-01T00:00:00Z", 100);
+        assertThat(recent.get("total")).isEqualTo(1);
+
+        var unbounded = repo.queryNxAnswerRuns(tenant, "", 100);
+        assertThat(unbounded.get("total")).isEqualTo(2);
+    }
+
+    @Test
+    void queryNxAnswerRuns_isTenantScoped() {
+        String mine = "nar-iso-mine-" + System.nanoTime();
+        String theirs = "nar-iso-theirs-" + System.nanoTime();
+        repo.importNxAnswerRunRow(mine, "mine", null, null,
+            0, "a", 0.0, 1_000L, PAST_TS);
+        repo.importNxAnswerRunRow(theirs, "theirs", null, null,
+            0, "a", 0.0, 1_000L, PAST_TS);
+
+        var out = repo.queryNxAnswerRuns(mine, "", 100);
+        assertThat(out.get("total")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        assertThat(rows.get(0).get("question")).isEqualTo("mine");
+    }
+
+    @Test
+    void queryNxAnswerRuns_emptyTenant_returnsZeroedAggregatesNotNull() {
+        // Non-vacuity: an empty result must be zeroed structure, not a null
+        // crash or an absent key the client would have to special-case.
+        String tenant = "nar-empty-" + System.nanoTime();
+        var out = repo.queryNxAnswerRuns(tenant, "", 100);
+
+        assertThat(out.get("total")).isEqualTo(0);
+        assertThat(out.get("hit_count")).isEqualTo(0L);
+        assertThat(out.get("fallback_count")).isEqualTo(0L);
+        assertThat(out.get("oldest_created_at")).isEqualTo("");
+        assertThat(out.get("avg_duration_ms")).isNull();
+        assertThat(out.get("avg_cost_usd")).isNull();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        assertThat(rows).isEmpty();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> buckets = (Map<String, Object>) out.get("latency_buckets");
+        assertThat(buckets.values()).allMatch(v -> ((Long) v) == 0L);
+    }
+
+    @Test
+    void queryNxAnswerRuns_livePath_recordThenQuery() {
+        // The genuinely live (non-import) write path, mirroring
+        // recordTierWrite_livePath_persistsAndIsRetrievableUnderTenant —
+        // exercises recordNxAnswerRun (not the ETL-strict import variant)
+        // feeding straight into the same read.
+        String tenant = "nar-live-" + System.nanoTime();
+        repo.recordNxAnswerRun(tenant, "live question", 9L, 0.8,
+            2, "live answer", 0.01, 2_500L, null);
+
+        var out = repo.queryNxAnswerRuns(tenant, "", 100);
+        assertThat(out.get("total")).isEqualTo(1);
+        assertThat(out.get("hit_count")).isEqualTo(1L);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        assertThat(rows.get(0).get("question")).isEqualTo("live question");
+    }
 }

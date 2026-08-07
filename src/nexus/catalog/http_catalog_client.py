@@ -243,6 +243,12 @@ def _to_entry(d: dict) -> CatalogEntry:
         index_content_hash=d.get("index_content_hash") or "",
         index_run_id=d.get("index_run_id") or "",
         index_started_at=d.get("index_started_at") or "",
+        # nexus-vw594 F3 (root cause of nexus-biq4x): "index_state" in d
+        # distinguishes "key absent" (pre-fence engine — d.get() would
+        # also return None here) from "key present, value null" (a
+        # fence-aware engine with nothing stamped yet). d.get() alone
+        # cannot tell these apart; this dict-membership check is the fix.
+        index_state_reported="index_state" in d,
     )
 
 
@@ -554,14 +560,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             raise
         return result if result and result.get("tumbler_prefix") else None
 
-    def list_owners_by_type(self, owner_type: str) -> list[dict]:
-        """Return all owners of the given type.
+    def list_owners_by_type(self, owner_type: str, *, include_deactivated: bool = False) -> list[dict]:
+        """Return owners of the given type.
 
-        Backs repos.py:list_repos_dual which previously queried
-        ``SELECT repo_root FROM owners WHERE owner_type='repo'`` directly.
-        Uses POST /v1/catalog/owners/by_type endpoint (nexus-qnp5s).
+        Backs repos.py:list_repos_dual_with_catalog_roots which previously
+        queried ``SELECT repo_root FROM owners WHERE owner_type='repo'``
+        directly. Uses POST /v1/catalog/owners/by_type endpoint (nexus-qnp5s).
+
+        ``include_deactivated`` (nexus-cw262): default False excludes
+        deactivated owners -- this is the exact read path the 7kl32 census
+        and doctor's git-hooks dead-owner attribution both use, so the
+        default-exclusion here is what makes deactivation actually stop the
+        re-surfacing debris. Pass True for the audit escape hatch.
         """
-        result = self._post("/owners/by_type", {"owner_type": owner_type})
+        result = self._post("/owners/by_type", {
+            "owner_type": owner_type,
+            "include_deactivated": include_deactivated,
+        })
         return result.get("owners", []) if result else []
 
     def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
@@ -631,6 +646,50 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "orphans": result.get("orphans", []),
         }
 
+    def chash_conformance_report(self, dim: int) -> dict:
+        """Per-table chash width-conformance report for *dim* (RDR-180, bead
+        nexus-du2dw): the engine-route counterpart to the LOCAL-ONLY
+        ``nexus_diag`` psql probe (``nexus.db.diag_connection`` — shells a
+        local psql at 127.0.0.1, nexus-y3wuu), for managed/cloud installs
+        with no direct substrate access.
+
+        Returns ``{"dim": d, "tables": [{"table_name", "total",
+        "non_conformant", "sample_chashes"}, ...]}``. One row per covered
+        table: ``chunks_<dim>`` and ``catalog_document_chunks`` (filtered to
+        *dim*'s model-token collections — same IN-list routing caveat as
+        :meth:`manifest_orphans`: a collection whose model token is outside
+        every dim's IN-list is invisible here). ``non_conformant`` counts
+        ``octet_length(chash) <> 32`` (the era-safe RDR-180 predicate,
+        ``nexus.db.chash_tables``); ``sample_chashes`` is hex-encoded,
+        capped at 20 by the server-side function.
+
+        Tenant-scoped (the stored function is SECURITY INVOKER, counting
+        under the request tenant's RLS GUC) — deliberately NOT the
+        cross-tenant BYPASSRLS view the local install-binary gate reads.
+        This gives a managed-mode tenant visibility into their OWN data's
+        conformance; it is not a substitute for the local gate's whole-store
+        decision. ``dim`` must be one of 384/768/1024.
+        """
+        if dim not in self._MANIFEST_DIMS:
+            raise ValueError(
+                f"dim must be one of {self._MANIFEST_DIMS}, got {dim!r}"
+            )
+        result = self._get("/chash/conformance", dim=dim)
+        result = result or {}
+        if "tables" not in result:
+            # Same fail-closed contract as manifest_orphans' `count` field —
+            # a stripped `tables` key defaulting to [] would read as a false
+            # clean-store zero rather than a broken response.
+            raise RuntimeError(
+                "chash/conformance response carried no `tables` field — "
+                "cannot verify chash conformance; refusing a false-clean "
+                f"empty report (response keys: {sorted(result)})"
+            )
+        return {
+            "dim": int(result.get("dim", dim)),
+            "tables": result.get("tables", []),
+        }
+
     # ══════════════════════════════════════════════════════════════════════
     # INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.3) — design memo §3.3/§3.4
     #
@@ -653,6 +712,33 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # unreachable verify (_manifest_is_fully_present, doc_indexer.py) owns
     # that fail-open+WARNING contract itself.
     # ══════════════════════════════════════════════════════════════════════
+
+    def begin_index_run_many(
+        self, docs: list[dict], collection: str,
+    ) -> dict:
+        """POST /v1/catalog/index-run/begin-many — batch ``index_state=
+        'indexing'`` stamp for N documents in ONE round trip (nexus-vw594
+        F1). *docs* is ``[{"doc_id": ..., "content_hash": ..., "run_id":
+        ...}, ...]`` — same idempotent, NOT-a-lock semantics as
+        :meth:`begin_index_run` (memo §3.5 T0), batched so the ChunkBatcher
+        flush-grain repo path pays ONE round trip per FLUSH instead of one
+        per FILE (the ``indexer.py`` ``:3631`` cost objection this closes).
+
+        Returns ``{}`` on a 404 (pre-fence engine, engine-floor-tolerated:
+        logged at WARNING) — same sentinel-vs-empty-success distinction as
+        :meth:`begin_index_run`'s single-doc 404 handling. Any other
+        transport failure propagates; the caller (:func:`nexus.doc_indexer.
+        _fence_begin_many`) wraps this in its own advisory fail-open catch.
+        """
+        try:
+            return self._post("/index-run/begin-many", {
+                "docs": docs, "collection": collection,
+            }) or {}
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                _log.warning("index_run_begin_many_engine_floor", doc_count=len(docs))
+                return {}
+            raise
 
     def begin_index_run(
         self, doc_id: str, content_hash: str, run_id: str, collection: str,
@@ -831,16 +917,30 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         all_colls = self.list_collections()
         return [c for c in all_colls if c.get("owner_id") == owner_id]
 
-    def list_owners(self) -> list[dict]:
-        """Return all owners for this tenant.
+    def list_owners(self, *, include_deactivated: bool = False) -> list[dict]:
+        """Return owners for this tenant.
 
         Backs commands/catalog.py owners_cmd which previously queried
         ``SELECT tumbler_prefix, name, owner_type, repo_hash, description FROM owners``
         directly.  Uses GET /v1/catalog/owners/list (nexus-xnz0o).
         Returns list of dicts with keys: tumbler_prefix, name, owner_type,
         repo_hash, description, repo_root, head_hash.
+
+        ``include_deactivated`` (nexus-cw262): default False excludes owners
+        the 7kl32 GC mutation arm has deactivated -- that exclusion is the
+        entire point of the deactivate route (dead owners stop appearing in
+        doctor's git-hooks walk and the census). Pass True for the audit
+        escape hatch; the returned dicts then also carry ``deactivated_at``
+        (ISO timestamp string, or ``None`` for still-active rows).
         """
-        result = self._get("/owners/list")
+        # nexus-cw262: `_get` drops any param whose value is falsy/empty
+        # (`params.items() if v is not None and v != ""`), and a bare Python
+        # `False` would otherwise round-trip as the query string "False" --
+        # not the lowercase "true" CatalogHandler.handleOwnerList checks for.
+        # Omitting the param entirely on the (far more common) False path
+        # keeps every existing plain `nx catalog owners` call unaffected.
+        params = {"include_deactivated": "true"} if include_deactivated else {}
+        result = self._get("/owners/list", **params)
         return result.get("owners", []) if result else []
 
     def distinct_doc_collections(self) -> list[str]:
@@ -1192,6 +1292,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def delete_document(self, tumbler: Tumbler | str) -> bool:
         result = self._post("/delete", {"tumbler": str(tumbler)})
         return bool(result.get("deleted", 0) > 0 if result else False)
+
+    def deactivate_owner(self, tumbler_prefix: str) -> bool:
+        """Soft-delete an owner (nexus-cw262: the 7kl32 dead-owner GC
+        mutation arm's engine call). Reversible -- see :meth:`reactivate_owner`
+        and CatalogRepository.upsertOwner's automatic clear-on-reregister.
+        Idempotent: a second call on an already-deactivated (or never-
+        existent) prefix returns False, mirroring :meth:`delete_document`'s
+        idempotent-zero contract.
+        """
+        result = self._post("/owners/deactivate", {"tumbler_prefix": str(tumbler_prefix)})
+        return bool(result.get("deactivated", 0) > 0 if result else False)
+
+    def reactivate_owner(self, tumbler_prefix: str) -> bool:
+        """Clear an owner's deactivated flag (nexus-cw262). The explicit
+        manual-correction path; a live re-registration through
+        :meth:`register_owner` / ``ensure_owner_for_repo`` already does this
+        automatically. Idempotent: already-active returns False.
+        """
+        result = self._post("/owners/reactivate", {"tumbler_prefix": str(tumbler_prefix)})
+        return bool(result.get("reactivated", 0) > 0 if result else False)
 
     def delete_many(self, tumblers: list[Tumbler | str]) -> set[str]:
         """Batch-tombstone N documents; returns the subset of *tumblers*

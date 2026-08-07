@@ -503,21 +503,16 @@ def index_repo_cmd(
         # summary reflects only this run's backoffs.
         from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
         reset_retry_stats()
-        # GH #1371 + GH #1397: zero the manifest-write-failure and
-        # identity-drop collectors so the end-of-run summary reflects only
-        # this run's gaps.
-        from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
-            reset_complete_refusals,
-            reset_ephemeral_registration_skips,
-            reset_manifest_identity_drops,
-            reset_manifest_write_failures,
-        )
-        reset_manifest_write_failures()
-        reset_manifest_identity_drops()
-        # nexus-5xn3k.6 (RUNFENCE C4, bead scope note): zero the completion-
-        # refusal collector so the end-of-run summary reflects only this
-        # run's refusals.
-        reset_complete_refusals()
+        # GH #1371 + GH #1397 + nexus-5xn3k.6: zero the manifest-write-
+        # failure / identity-drop / completion-refusal collectors so the
+        # end-of-run summary reflects only this run's gaps (nexus-7f5qj:
+        # extracted into the shared commands._helpers reset helper — this
+        # was the SECOND near-identical copy, dt.py's index_cmd being the
+        # first; index_pdf_cmd / index_md_cmd are now the third and
+        # fourth).
+        from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        from nexus.mcp_infra import reset_ephemeral_registration_skips  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        reset_identity_drop_collectors()
         # nexus-u8n4r: zero the worktree/tempdir registration-skip collector
         # so the end-of-run summary reflects only this run's refusals.
         reset_ephemeral_registration_skips()
@@ -608,48 +603,20 @@ def index_repo_cmd(
                 err=True,
             )
 
+        # nexus-tp8yk D2b: refusals / manifest-write failures / identity
+        # drops used to be stderr WARNING-only — an operator (or a script
+        # keying on rc==0) had no way to know a "clean" run left dangling
+        # manifest rows or an unstamped completion. Set inside
+        # _emit_manifest_write_failure_summary below; checked at the tail
+        # of this command to fail the run loudly (see CHANGELOG).
+        manifest_problems_detected = False
+
         def _emit_manifest_write_failure_summary() -> None:
-            # GH #1371: a persistent (retries-exhausted or non-retryable)
-            # catalog manifest-write failure previously surfaced only as a
-            # structlog WARNING — invisible without log capture wired up.
-            # Silent on zero failures (the common case).
-            from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-                get_complete_refusals,
-                get_manifest_identity_drops,
-                get_manifest_write_failures,
-            )
-            failed = get_manifest_write_failures()
-            if failed:
-                click.echo(
-                    f"  WARNING: catalog manifest write failed for {len(failed)} "
-                    f"document(s) — they will not appear in catalog-aware "
-                    f"queries. Run 'nx catalog reconcile' to repair.",
-                    err=True,
-                )
-            # GH #1397 / nexus-94fxl: batches DROPPED for missing document
-            # identity never reach the write, so they are invisible to the
-            # failure count above — a clean "0 failed" hid them entirely.
-            drops = get_manifest_identity_drops()
-            if drops:
-                n_chunks = sum(d["batch_size"] for d in drops)
-                cols = sorted({d["collection"] for d in drops})
-                click.echo(
-                    f"  WARNING: {len(drops)} chunk batch(es) ({n_chunks} chunks; "
-                    f"collection(s): {', '.join(cols)}) were indexed WITHOUT a "
-                    f"catalog document identity — their manifests were not "
-                    f"written and the documents will not appear in "
-                    f"catalog-aware queries. Run 'nx catalog reconcile' to "
-                    f"repair.",
-                    err=True,
-                )
-            # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34):
-            # the manifest write SUCCEEDED but the engine's fail-closed
-            # completion verify REFUSED the stamp — index_state stays
-            # 'indexing', the document is NOT fully indexed. Distinct from
-            # both collectors above (this is a refusal, not a write
-            # failure or an identity drop); folding it into a clean summary
-            # would reproduce the silent-success shape the fence exists to
-            # close.
+            # GH #1371 + GH #1397 + nexus-5xn3k.6: silent on zero problems
+            # (the common case). nexus-7f5qj: delegates to the shared
+            # commands._helpers collector-check (see that module for the
+            # per-collector rationale — write failures, identity drops,
+            # completion refusals — this docstring used to carry inline).
             #
             # substantive-critic SIGNIFICANT (2026-08-02, T2
             # nexus/5xn3k6-critique-2026-08-02 [21355]): a refused document
@@ -660,16 +627,11 @@ def index_repo_cmd(
             # restructured, the chunks are real. What was missing is
             # stating that overlap out loud instead of leaving two
             # unconnected numbers for the operator to reconcile by hand.
-            refused = get_complete_refusals()
-            if refused:
-                indexed_files = n - skipped_files
-                click.echo(
-                    f"  WARNING: {len(refused)} of the {indexed_files} "
-                    f"indexed above had completion refused by the engine's "
-                    f"fail-closed verify (fence left at 'indexing') — NOT "
-                    f"fully indexed. Re-index or --force to retry.",
-                    err=True,
-                )
+            from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+            nonlocal manifest_problems_detected
+            indexed_files = n - skipped_files
+            if emit_identity_drop_summary(indexed_count=indexed_files):
+                manifest_problems_detected = True
 
         def _emit_ephemeral_skip_summary() -> None:
             # nexus-u8n4r: files under an agent-worktree or system temp-dir
@@ -824,6 +786,39 @@ def index_repo_cmd(
         # index_repository (see `_emit_retry_summary`) so it fires on both
         # success and exception paths — Reviewer A/I-2.
         click.echo("Done.")
+
+        # nexus-tp8yk D2b: a manifest write failure / identity drop /
+        # completion refusal used to leave rc=0 — a "clean" run that a
+        # script or CI job keying on the exit code would never notice was
+        # damaged. The WARNING lines above already named the problem;
+        # this converts "clean but wrong" into a failed run. Refusal !=
+        # unconfirmed (nexus-5xn3k's pre-fence engine floor still warns at
+        # rc 0 — see _stamp_index_run_complete's None-sentinel handling,
+        # untouched by this bead): only a POSITIVE engine verdict (a
+        # refusal) or a write/identity failure triggers this.
+        # nexus-wi1uv round-2 (code-review-expert + substantive-critic
+        # Critical): a PDF failing the post-extraction quality gate is
+        # contained per-file inside index_repository (never aborts the
+        # run — see indexer._contain_extraction_quality_gate), but a
+        # "clean" rc=0 for a run that skipped N documents is exactly the
+        # tp8yk "clean but wrong" class the manifest_problems_detected
+        # check above exists to prevent. Checked AFTER taxonomy
+        # post-processing (like manifest_problems_detected) so the rest
+        # of the run's useful work still completes before the non-zero
+        # exit.
+        pdf_quality_gate_failed = (stats or {}).get("pdf_quality_gate_failed", 0)
+        if manifest_problems_detected:
+            from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+            raise_identity_drop_exception(subject="document")
+        if pdf_quality_gate_failed:
+            raise click.ClickException(
+                f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "
+                f"quality gate (nexus-wi1uv) — see the WARNING line(s) above "
+                f"for the affected file(s). Retry an individual file with "
+                f"'nx index pdf --allow-degraded-extraction <file>' to accept "
+                f"the extraction deliberately, or 'nx index pdf <file>' after "
+                f"fixing the underlying extraction (e.g. --extractor mineru)."
+            )
 
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:
@@ -1221,7 +1216,7 @@ def run_collection_postprocessing(
         _log.debug("taxonomy_discover_failed", exc_info=True)
 
 
-def _index_run_refused_message(exc) -> str:
+def _index_run_refused_message(exc, *, target_collection: str = "") -> str:
     """Render a :class:`~nexus.errors.IndexRunVerifyRefused` as the clean,
     fail-loud wording nexus-5xn3k.6's summary contract requires (code-
     review-expert IMPORTANT, 2026-08-02).
@@ -1237,12 +1232,82 @@ def _index_run_refused_message(exc) -> str:
     loop's failure entry so the wording (and the counts it carries) stays
     identical everywhere a refusal surfaces. Duck-typed (no import of
     ``nexus.errors`` at module scope) — callers pass the caught exception,
-    which carries ``.referenced``/``.present``/``.missing``.
+    which carries ``.doc_id``/``.referenced``/``.present``/``.missing``.
+
+    nexus-2t63u: the raw counts alone are DISHONEST for one real cause —
+    a stale ``catalog_documents.physical_collection`` from a PRIOR run
+    targeting a different ``--collection`` (see
+    ``doc_indexer._register_or_lookup_doc_id``'s ``by_file_path``
+    reconciliation, which now closes this off going forward; this message
+    remains the honest diagnosis for a document that was already wedged
+    before that fix landed, or reached this refusal by some other path).
+    ``manifest_verify`` joins the manifest's stamped collection, not this
+    run's — a document whose 107/107 chunks are all live under the
+    correct collection can still show ``missing=89`` because the manifest
+    rows are checked against the WRONG (stale) collection. When
+    *target_collection* is supplied, best-effort look up the document's
+    CURRENT ``physical_collection`` and name the mismatch explicitly
+    instead of leaving the reader to infer chunk loss from the counts
+    alone. The lookup never raises — any failure (catalog unreachable,
+    doc_id unresolvable) falls back to the generic hint below the counts,
+    never to a raw traceback.
+
+    Round 2 (reviewer #3, cheap pre-merge finding): when the live lookup
+    CONFIRMS the stamped collection already agrees with *target_collection*,
+    collection-mismatch is positively ruled out as the cause — the generic
+    "may be stale" hint must be SUPPRESSED in that case, not printed anyway.
+    Printing it after the lookup just disproved it is exactly the
+    misdirection this whole message exists to kill (the "89/107 present
+    but reported missing" incident cost a day of mis-framing as chunk
+    loss). The hint remains for the two cases where the lookup could not
+    positively confirm anything either way (no *target_collection* supplied,
+    the lookup failed, or the document could not be resolved).
     """
-    return (
+    base = (
         f"completion REFUSED — document is NOT fully indexed "
         f"(referenced={exc.referenced} present={exc.present} "
         f"missing={exc.missing})"
+    )
+    doc_id = getattr(exc, "doc_id", "") or ""
+    if not doc_id:
+        return base
+
+    stamped_collection = ""
+    if target_collection:
+        try:
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
+
+            reader = make_catalog_reader()
+            entry = reader.resolve(doc_id) if reader is not None else None
+            if entry is not None:
+                stamped_collection = entry.physical_collection
+        except Exception:  # noqa: BLE001 — best-effort diagnostic hint; must never break error rendering
+            _log.debug("index_run_refused_collection_lookup_failed", doc_id=doc_id, exc_info=True)
+            stamped_collection = ""
+
+    if stamped_collection and stamped_collection == target_collection:
+        # Confirmed CURRENT: the live lookup shows the document is already
+        # stamped to this run's own target collection, so collection
+        # mismatch is definitively ruled out — never hint at a cause the
+        # lookup just disproved.
+        return base
+
+    if stamped_collection and stamped_collection != target_collection:
+        return (
+            f"{base} — likely cause: the catalog's physical_collection "
+            f"for {doc_id} is {stamped_collection!r}, but this run "
+            f"targeted {target_collection!r}. The manifest was stamped "
+            f"under the OLD collection, so chunks already present under "
+            f"the new collection are misreported as missing (nexus-2t63u). "
+            f"Re-run the same command again — the collection has now been "
+            f"reconciled — or check 'nx catalog show {doc_id}'."
+        )
+    return (
+        f"{base} — if this document was previously indexed into a "
+        f"DIFFERENT --collection, its catalog physical_collection may "
+        f"still be stale, which makes manifest_verify check the wrong "
+        f"collection and misreport present chunks as missing "
+        f"(nexus-2t63u); check via 'nx catalog show {doc_id}'."
     )
 
 
@@ -1324,7 +1389,22 @@ def _index_run_refused_message(exc) -> str:
         "document in a different --collection than this run targets."
     ),
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None) -> None:
+@click.option(
+    "--allow-degraded-extraction",
+    "allow_degraded_extraction",
+    is_flag=True,
+    default=False,
+    help=(
+        "Accept extracted text that fails the post-extraction quality gate "
+        "(nexus-wi1uv) — e.g. docling completing on a formula-dense page "
+        "but running words together ('istheasetofthe'). By default that "
+        "gate FAILS the run rather than silently indexing unsearchable "
+        "garbage. Pass this flag only after reviewing the extraction (or "
+        "for a document you know legitimately trips the heuristic) — the "
+        "run is marked loudly in the summary when this override is used."
+    ),
+)
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -1336,7 +1416,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        ChunkLandingUnverifiedError,
         CredentialsMissingError,
+        ExtractionQualityError,
+        IndexingError,
         IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
@@ -1351,6 +1434,27 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         except CredentialsMissingError as e:
             raise click.ClickException(str(e)) from e
         except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as e:
+            raise click.ClickException(str(e)) from e
+        except ChunkLandingUnverifiedError as e:
+            # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04):
+            # this raise already exits non-zero via Click's default
+            # unhandled-exception path, but as a raw traceback rather
+            # than the exception's own actionable message — the
+            # nexus-2fyb convention this wrapper exists for. The
+            # exception's __init__ already builds a clean, human-
+            # readable message (collection + count + remedy), so
+            # str(e) alone is sufficient here (unlike
+            # IndexRunVerifyRefused, which needs _index_run_refused_
+            # message's dedicated reformatting of its raw field dump).
+            raise click.ClickException(str(e)) from e
+        except IndexingError as e:
+            # nexus-w6wp0 review round (code-review-expert + substantive-
+            # critic, 2026-08-05): index_pdf's streaming return_metadata
+            # path can raise IndexingError (chunks written but the
+            # metadata query found none) -- same nexus-2fyb translation
+            # convention as the other typed errors above, so this new
+            # failure mode gets a clean message instead of a raw
+            # traceback.
             raise click.ClickException(str(e)) from e
 
     if path is not None and dir_path is not None:
@@ -1440,27 +1544,67 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         batch_start = _time.monotonic()
 
+        # nexus-7f5qj: same collector-swallow gap as the single-file
+        # branches below — a register failure during THIS pdf's write
+        # never raises (it's caught inside doc_indexer's preflight
+        # registration and recorded to the identity-drop collector
+        # instead), so the existing per-pdf ``except Exception`` isolation
+        # never sees it and this file's "— N chunks" line prints as a
+        # plain success. Reset before each pdf so a drop attributes to
+        # THIS file, not a prior one in the batch; check after so a drop
+        # surfaces in the same ``failures`` list every other per-pdf
+        # problem here already uses (batch isolation: one orphaned
+        # document must not abort the rest of the run).
+        from nexus.commands._helpers import (  # noqa: PLC0415 — deliberate function-local import (--dir batch loop, per-file failure collector reset/check)
+            emit_identity_drop_summary,
+            reset_identity_drop_collectors,
+        )
+
+        # nexus-2t63u round 2: reset_identity_drop_collectors() below fires
+        # PER FILE (see the docstring above — it needs to, so a drop
+        # attributes to the right file), which zeroes the reconciliation
+        # collector on every iteration too. Accumulate our own running
+        # total across the whole batch instead of reading the collector
+        # only once at the end (which would see only the LAST file's count).
+        from nexus.mcp_infra import get_reconciled_collections_count  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when non-zero
+        reconciled_total = 0
         for i, pdf in enumerate(pdfs, 1):
             click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
             t0 = _time.monotonic()
+            reset_identity_drop_collectors()
             try:
                 n = index_pdf(
                     pdf, corpus=corpus, collection_name=collection,
                     force=force, enrich=enrich, extractor=extractor,
                     on_formula_oom=on_formula_oom, streaming=streaming,
+                    allow_degraded_extraction=allow_degraded_extraction,
                 )
                 elapsed = _time.monotonic() - t0
                 total_chunks += n
+                reconciled_total += get_reconciled_collections_count()
                 click.echo(f" — {n} chunks, {elapsed:.1f}s")
+                if emit_identity_drop_summary(indexed_count=1):
+                    failures.append((
+                        pdf,
+                        f"indexed ({n} chunk(s)) but catalog document "
+                        f"identity failed to register — orphaned (no "
+                        f"tumbler); re-run or 'nx catalog reconcile' to "
+                        f"repair",
+                    ))
             except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
                 elapsed = _time.monotonic() - t0
+                # nexus-2t63u round 2: a reconcile can succeed BEFORE a
+                # later failure in the same file's run (e.g. the fence
+                # refusal case) — count it here too, before the next
+                # iteration's reset zeroes the collector.
+                reconciled_total += get_reconciled_collections_count()
                 # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02):
                 # a completion-stamp refusal already lands here (Exception
                 # covers it) and is never folded into a success line — but
                 # give it the same dedicated wording as the single-file
                 # branches instead of the raw exception text.
                 msg = (
-                    _index_run_refused_message(exc)
+                    _index_run_refused_message(exc, target_collection=collection or "")
                     if isinstance(exc, IndexRunVerifyRefused) else str(exc)
                 )
                 failures.append((pdf, msg))
@@ -1468,14 +1612,41 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
 
         batch_elapsed = _time.monotonic() - batch_start
-        click.echo(
+        summary_line = (
             f"\nSummary: {total} PDFs, {total_chunks} chunks, "
             f"{batch_elapsed:.1f}s total"
         )
+        # nexus-2t63u round 2 (substantive-critic observation 4): surface a
+        # mass mistaken --collection retarget IN the batch summary, not
+        # only via scrollback WARNING lines — accumulated across the loop
+        # above (reset_identity_drop_collectors() fires PER FILE, so a
+        # single end-of-batch read would see only the last file's count).
+        if reconciled_total:
+            summary_line += (
+                f" — {reconciled_total} collection reconciliation(s), see "
+                f"WARNINGs above"
+            )
+        click.echo(summary_line)
         if failures:
             click.echo(f"  {len(failures)} failure(s):")
             for fp, err in failures:
                 click.echo(f"    {fp.name}: {err}")
+            # nexus-uqq9z: the batch used to exit 0 regardless of how many
+            # files landed in `failures` (real exceptions AND, since
+            # nexus-7f5qj, identity drops) — "reporting success" at the
+            # batch level while individual files were visibly broken. The
+            # per-file isolation above is unchanged (every file is still
+            # attempted and the failures list still prints exactly as
+            # before); this only adds the batch-wide fail-loud exit. NOTE:
+            # this contract is deliberately STRICTER than `nx dt index`'s
+            # run-level exit (which fires only on the collector classes via
+            # raise_identity_drop_exception, not on plain per-record
+            # exceptions) — any entry in `failures` fails the batch here.
+            # Raising dt to match is tracked separately (see the bead filed
+            # from the uqq9z critique).
+            raise click.ClickException(
+                f"{len(failures)} of {total} file(s) failed — see list above"
+            )
         return
 
     # Normalize --collection through t3_collection_name() so bare names like
@@ -1542,8 +1713,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "")
-        except (ImportError, RuntimeError) as e:
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction)
+        except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -1595,6 +1766,16 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo("\n(no cloud write)")
         return
 
+    # nexus-7f5qj: single-file identity-drop wiring. A catalog-register
+    # failure during THIS call never raises (doc_indexer's preflight
+    # registration swallows it into the identity-drop collector — the
+    # chunks still land, searchable, orphaned) so neither except clause
+    # below ever sees it; the collector check after the call is what
+    # catches it. Reset here so a leftover drop from an earlier call in
+    # this process is never misattributed to this run.
+    from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+    reset_identity_drop_collectors()
+
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
     fork_holder: list[tuple[str, int]] = []
@@ -1609,7 +1790,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
-                             source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+                             source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
+                             allow_degraded_extraction=allow_degraded_extraction)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this
             # is NOT an (ImportError, RuntimeError) — it fell through the
@@ -1617,8 +1799,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # (no data loss); the engine's fail-closed verify refused the
             # completion stamp. Clean fail-loud ClickException, never
             # folded into a success summary.
-            raise click.ClickException(_index_run_refused_message(e)) from e
-        except (ImportError, RuntimeError) as e:
+            raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "")) from e
+        except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -1639,17 +1821,28 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     else:
         try:
             n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
-                          source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+                          source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
+                          allow_degraded_extraction=allow_degraded_extraction)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
-            raise click.ClickException(_index_run_refused_message(e)) from e
-        except (ImportError, RuntimeError) as e:
+            raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "")) from e
+        except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
             # sees a raw Python traceback instead of an actionable message.
             raise click.ClickException(str(e)) from e
+    # nexus-7f5qj: check the collector right after the write, same
+    # ordering as index_repo_cmd's ``finally: _emit_manifest_write_
+    # failure_summary()`` — WARNING lines print before the rest of this
+    # run's summary; the ClickException itself fires last (below), after
+    # the summary lines a successful run would still print (n==0 skip is
+    # never a drop candidate: a fresh-skip never reaches doc_indexer's
+    # write path, so the collector stays empty).
+    from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop)
+    identity_drop_problems = emit_identity_drop_summary(indexed_count=n)
+
     result_label = "Force re-indexed" if force else "Indexed"
     # nexus-5xn3k.6 AC4: n==0 without --force is the staleness gate's skip
     # (or a genuinely empty extraction, in which case --force surfaces the
@@ -1668,6 +1861,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             f"  {len(fork_holder)} possible document fork(s) detected — "
             f"see log event 'index_possible_document_fork' for details."
         )
+    if identity_drop_problems:
+        from nexus.commands._helpers import raise_identity_drop_exception_for_file  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop)
+        raise_identity_drop_exception_for_file(path, chunks=n)
 
 
 @index.command("md")
@@ -1715,7 +1911,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        ChunkLandingUnverifiedError,
         CredentialsMissingError,
+        IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
     )
@@ -1743,6 +1941,13 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
             )
 
     path = path.resolve()
+
+    # nexus-7f5qj: single-file identity-drop wiring — see index_pdf_cmd's
+    # identical comment. Reset before the write so a leftover drop from an
+    # earlier call in this process is never misattributed to this run.
+    from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+    reset_identity_drop_collectors()
+
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
     fork_holder: list[tuple[str, int]] = []
@@ -1772,6 +1977,26 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as exc:
         # nexus-y8qtj: fail-loud identity errors surface the same way.
         raise click.ClickException(str(exc)) from exc
+    except IndexRunVerifyRefused as exc:
+        # nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04): this
+        # command never caught the RUNFENCE completion refusal at all —
+        # index_pdf_cmd has caught it since nexus-5xn3k.6; index_md_cmd
+        # was missed. Pre-fix a refusal here fell through as a raw
+        # traceback instead of the clean, actionable wording every other
+        # CLI surface renders for the identical exception.
+        raise click.ClickException(_index_run_refused_message(exc, target_collection=collection or "")) from exc
+    except ChunkLandingUnverifiedError as exc:
+        # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): see
+        # the identical rationale on index_pdf_cmd's wrapper. The
+        # exception's own message is already clean and actionable.
+        raise click.ClickException(str(exc)) from exc
+
+    # nexus-7f5qj: see the identical ordering rationale on index_pdf_cmd —
+    # checked right after the write, before the rest of this run's
+    # summary; the ClickException fires last, below.
+    from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop)
+    identity_drop_problems = emit_identity_drop_summary(indexed_count=n)
+
     result_label = "Force re-indexed" if force else "Indexed"
     # nexus-5xn3k.6 AC4: see the identical rationale on the pdf command.
     if n == 0 and not force:
@@ -1783,6 +2008,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
             f"  {len(fork_holder)} possible document fork(s) detected — "
             f"see log event 'index_possible_document_fork' for details."
         )
+    if identity_drop_problems:
+        from nexus.commands._helpers import raise_identity_drop_exception_for_file  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop)
+        raise_identity_drop_exception_for_file(path, chunks=n)
 
 
 _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}

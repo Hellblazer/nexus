@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cw262 — owner soft-delete column.
+
+    The 7kl32 census (`nx catalog owners` with the census flag) classifies registered
+    repo-owner roots as healthy / path_vanished / path_exists_empty /
+    unreadable but shipped read-only: catalog_owners carried no soft-delete
+    column and no engine route could deregister a dead owner, so doctor's
+    git-hooks walk and this census kept re-surfacing the same debris every
+    run. This changeset adds the column the mutation arm needs.
+
+    Naming/shape follows the catalog-003-soft-delete.xml idiom (deleted_at
+    TIMESTAMPTZ NULL on catalog_documents/catalog_links) with ONE deliberate
+    naming deviation: `deactivated_at`, not `deleted_at`. An owner row is
+    never physically purged by this mechanism — unlike documents (which get
+    a real purge_trash GC path), a deactivated owner is a REVERSIBLE
+    visibility flip (excluded from the default list_owners/ownersByType
+    read path, still addressable by tumbler_prefix, and any subsequent
+    upsertOwner write on it clears the flag — see CatalogRepository
+    ownerUpdateSet). "deactivated" names that semantics; "deleted" would
+    overclaim a destructive operation this table does not have.
+
+    Partial index mirrors catalog-003's idx_catalog_documents_collection_live
+    shape, scoped to the query catalog_owners actually takes a WHERE
+    owner_type= filter on (ownersByType / CatalogHandler's /owners/by_type,
+    the doctor git-hooks + 7kl32 census read path).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: deactivated_at column on catalog_owners ──────────── -->
+    <changeSet id="catalog-022-1" author="nexus-cw262">
+        <comment>
+            Add deactivated_at TIMESTAMPTZ NULL to catalog_owners. NULL = active
+            (the default for every existing + newly registered row); non-NULL =
+            deactivated. Deactivation is a reversible UPDATE, never a DELETE —
+            child rows (documents registered under the owner) are untouched.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_owners
+    ADD COLUMN deactivated_at TIMESTAMPTZ NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.catalog_owners DROP COLUMN IF EXISTS deactivated_at;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: partial index for the active-owners-by-type read path ── -->
+    <changeSet id="catalog-022-2" author="nexus-cw262">
+        <comment>
+            Partial index covering only active (non-deactivated) owners, scoped
+            (tenant_id, owner_type) — the exact predicate ownersByType/list_owners
+            filter on for the doctor git-hooks walk and the 7kl32 census. Owner
+            rows are admin/config-scale (dozens-hundreds per tenant, not
+            per-document), so this is a correctness/idiom-consistency addition
+            (matches catalog-003's live-partial-index convention) rather than a
+            load-bearing perf fix.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_catalog_owners_type_active
+    ON nexus.catalog_owners (tenant_id, owner_type)
+    WHERE deactivated_at IS NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP INDEX IF EXISTS nexus.idx_catalog_owners_type_active;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

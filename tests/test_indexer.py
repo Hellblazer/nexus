@@ -20,15 +20,24 @@ from tests.conftest import make_vector_test_client
 # CATALOG SEAM (nexus-i711w C-store; supersedes the nexus-aqbrk
 # ``local_catalog_backend`` module pin): this module drives the indexer with a
 # FULLY STUBBED config — ``_patches`` replaces ``nexus.config.load_config``
-# with ``_DEFAULT_CONFIG`` and ``get_credential`` with a fixed fake, and the
-# autouse ``_legacy_vector_backend`` fixture below pins vectors to chroma —
-# so the service catalog's endpoint resolution can never work here BY
+# with ``_DEFAULT_CONFIG`` and ``get_credential`` with a fixed fake — so the
+# service catalog's endpoint resolution can never work here BY
 # CONSTRUCTION (the aqbrk finding: ``_prune_deleted_files`` ->
 # ``chashes_for_collection`` reached HttpCatalogClient with a garbage
 # base_url and died on ``httpx.UnsupportedProtocol``). The old module pin
 # expressed "the catalog resolves to nothing" INCIDENTALLY (SQLite backend +
 # an uninitialised tmp config dir); that pin retires with the SQLite catalog
 # itself, so ``_patches`` now states the same thing EXPLICITLY:
+#   - nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse
+#     fixture that used to pin ``NX_STORAGE_BACKEND_VECTORS=chroma`` here
+#     is RETIRED — the legacy chroma/local embed pipeline it opted into is
+#     deleted outright (client-side Voyage embedding retired, Hal
+#     determination 2026-07-28). The module now runs under the ambient
+#     SERVICE-mode default, which resolves T3 through
+#     ``mcp_infra.get_t3()``'s memoised singleton rather than calling
+#     ``make_t3()`` per-invocation; ``_reset_t3_singleton_per_test`` below
+#     (and ``_patches``' own reset) evict it so no test leaks a stale
+#     ``db`` mock into a later one.
 #   - ``make_catalog_reader`` -> None — the catalog-absent no-op contract
 #     every ``_run_index`` journey here was written against (migration,
 #     prune, self-heal and head-hash writes all None-guard), and
@@ -48,6 +57,30 @@ from tests.conftest import make_vector_test_client
 # the first rather than appending (it silently no-opped a pin in
 # test_catalog_consolidation.py — commit 0eefc06a).
 pytestmark = pytest.mark.usefixtures("cloud_mode")
+
+
+@pytest.fixture(autouse=True)
+def _reset_t3_singleton_per_test():
+    """Evict ``mcp_infra``'s memoised T3 singleton on both sides of every
+    test in this file.
+
+    nexus-sghyo (2026-08-06): with the ``_legacy_vector_backend`` chroma
+    pin retired, ``_run_index`` / ``_run_index_frecency_only`` run under
+    the ambient SERVICE-mode default and resolve T3 via
+    ``mcp_infra.get_t3()``, which memoises the FIRST call's result
+    (``_t3_instance``) for the life of the process. Tests here patch
+    ``nexus.db.make_t3`` per-test (directly or via ``_patches``) expecting
+    a fresh ``db`` mock every time; without this reset, the first test in
+    file order to populate the singleton leaks its mock into every later
+    test that never re-triggers construction — same hazard class as
+    ``tests/conftest.py``'s ``_reset_service_t2_db`` one tier over.
+    """
+    from nexus.mcp_infra import reset_singletons
+
+    reset_singletons()
+    yield
+    reset_singletons()
+
 
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
@@ -130,9 +163,21 @@ def _patches(db, *, cfg=None, extra=None):
     mocks, stack = {}, []
     for t, kw in patches.items():
         p = patch(t, **kw); m = p.start(); stack.append(p); mocks[t.split(".")[-1]] = m
+    # nexus-sghyo (2026-08-06): with _legacy_vector_backend retired, _run_index
+    # runs under ambient SERVICE mode by default, which resolves T3 through
+    # mcp_infra.get_t3()'s memoised singleton (_t3_instance) rather than
+    # calling nexus.db.make_t3() directly on every invocation. Without a
+    # reset, the FIRST test in file order to populate the singleton leaks
+    # its `db` mock into every later test — the exact class of hazard
+    # tests/conftest.py's _reset_service_t2_db docstring describes one
+    # tier over. Evict on both sides so this test cannot leak forward or
+    # start dirty.
+    from nexus.mcp_infra import reset_singletons
+    reset_singletons()
     try: yield mocks
     finally:
         for p in reversed(stack): p.stop()
+        reset_singletons()
 
 
 @contextmanager
@@ -189,6 +234,11 @@ def test_run_index_raises_credentials_missing_without_credentials(tmp_path, monk
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-sghyo (2026-08-06): non-service mode must be forced explicitly now
+    # (ambient default is service mode, which no longer raises CredentialsMissingError
+    # for a missing Voyage credential — the client does not embed at all).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
     # Reader None (nexus-i711w seam): the non-conformant registry names
     # (code__repo/docs__repo) re-route through _repo_collection_or_legacy
     # BEFORE the credentials check; keep it on the no-catalog synth path.
@@ -213,6 +263,11 @@ def test_cache_path_includes_repo_hash(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-sghyo (2026-08-06): non-service mode must be forced explicitly now
+    # (ambient default is service mode, which no longer raises CredentialsMissingError
+    # for a missing Voyage credential — the client does not embed at all).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.ripgrep_cache.build_cache", side_effect=lambda r, cp, s: seen.append(cp)), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
@@ -232,6 +287,11 @@ def test_run_index_skips_hidden_files(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-sghyo (2026-08-06): non-service mode must be forced explicitly now
+    # (ambient default is service mode, which no longer raises CredentialsMissingError
+    # for a missing Voyage credential — the client does not embed at all).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
     seen: list[Path] = []
     with patch("nexus.frecency.batch_frecency", return_value={}), \
          patch("nexus.ripgrep_cache.build_cache", side_effect=lambda r, cp, s: seen.extend(f for _, f in s)), \
@@ -293,25 +353,44 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
 # ── _run_index_frecency_only ────────────────────────────────────────────────
 
 def test_frecency_only_updates_frecency_score(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path via an
+    explicit ``_build_frecency_doc_id_map`` patch. Pre-fix this relied
+    on the (now-deleted) legacy source_path where-filter firing when
+    the catalog reader is None — the exact dead-code class nexus-afudo
+    closed; a MagicMock ``col.get`` that ignores ``where=`` made that
+    false confidence indistinguishable from a real pass. See
+    ``test_frecency_only_skips_unmapped_files_source_path_fallback_
+    deleted_as_dead_code`` for the doc_id-less case, which now skips
+    instead of querying.
+    """
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"; repo.mkdir()
     src = repo / "main.py"; src.write_text("x = 1\n")
-    old = {"frecency_score": 0.1, "source_path": str(src), "title": "main.py:1-1"}
+    old = {"frecency_score": 0.1, "title": "main.py:1-1"}
     col = MagicMock(); col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock(); db.get_or_create_collection.return_value = col
     db.get_collection.return_value = col
-    # Catalog absent (nexus-i711w, module-header seam): reader None routes
-    # the doc_id map AND the manifest path to their legacy fallbacks, which
-    # is the state this test was written against.
-    with patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
+    with patch(
+        "nexus.indexer._build_frecency_doc_id_map",
+        return_value={src: "1.1.1"},
+    ), \
+         patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.db.make_t3", return_value=db):
+         patch("nexus.db.make_t3", return_value=db), \
+         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
+        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
+        # service mode through get_http_vector_client() directly
+        # (bypassing make_t3()) — patched above too so these tests keep
+        # exercising their own db mock under the ambient service
+        # default instead of a real (unreachable) HTTP client.
         _run_index_frecency_only(repo, _reg())
     kw = db.update_chunks.call_args_list[0].kwargs
     assert kw["ids"] == ["c1"]
     assert kw["metadatas"][0]["frecency_score"] == 0.75
     assert kw["metadatas"][0]["title"] == "main.py:1-1"
+    where = col.get.call_args.kwargs["where"]
+    assert where == {"doc_id": "1.1.1"}
 
 
 def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
@@ -344,7 +423,13 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
          patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.db.make_t3", return_value=db):
+         patch("nexus.db.make_t3", return_value=db), \
+         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
+        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
+        # service mode through get_http_vector_client() directly
+        # (bypassing make_t3()) — patched above too so these tests keep
+        # exercising their own db mock under the ambient service
+        # default instead of a real (unreachable) HTTP client.
         _run_index_frecency_only(repo, _reg())
     where = col.get.call_args.kwargs["where"]
     assert where == {"doc_id": "1.1.1"}, (
@@ -352,22 +437,35 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
     )
 
 
-def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path):
-    """Files missing from the catalog map use the legacy source_path
-    filter so chunks predating the catalog backfill keep getting
-    frecency updates.
+def test_frecency_only_skips_unmapped_files_source_path_fallback_deleted_as_dead_code(
+    tmp_path,
+):
+    """nexus-afudo (2026-08-05): the legacy source_path where-filter
+    this test used to exercise (files missing from the catalog doc_id
+    map) is DELETED dead code. RDR-102 D2 (2026-05-02) removed
+    source_path from make_chunk_metadata for every writer, so
+    ``where={"source_path": ...}`` always matched zero rows in
+    production; a live-store probe (field>=! existence test) found
+    zero source_path rows across 13 representative collections
+    (~115k chunks). A file with no catalog doc_id now has its
+    frecency refresh SKIPPED outright — no query, since the fallback
+    it used to fall through to could never find anything.
+
+    Kill control: with ``col.get`` NOT mocked with a specific
+    return_value that a stray call could accidentally satisfy, an
+    unintended reintroduction of the deleted where-filter would make
+    ``col.get`` get called (and ``update_chunks`` would be invoked with
+    whatever the default MagicMock().get() shape produces) — this
+    assertion fails either way if the dead branch comes back.
     """
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"
     repo.mkdir()
     src = repo / "legacy.py"
     src.write_text("z = 3\n")
-    old = {"frecency_score": 0.1, "source_path": str(src), "title": "legacy.py:1-1"}
     col = MagicMock()
-    col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock()
     db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
     db.get_collection.return_value = col
     with patch(
         "nexus.indexer._build_frecency_doc_id_map",
@@ -376,10 +474,16 @@ def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path)
          patch("nexus.frecency.batch_frecency", return_value={src: 0.42}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.db.make_t3", return_value=db):
+         patch("nexus.db.make_t3", return_value=db), \
+         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
+        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
+        # service mode through get_http_vector_client() directly
+        # (bypassing make_t3()) — patched above too so these tests keep
+        # exercising their own db mock under the ambient service
+        # default instead of a real (unreachable) HTTP client.
         _run_index_frecency_only(repo, _reg())
-    where = col.get.call_args.kwargs["where"]
-    assert where == {"source_path": str(src)}
+    col.get.assert_not_called()
+    db.update_chunks.assert_not_called()
 
 
 def test_frecency_only_skips_unindexed_files(tmp_path):
@@ -392,7 +496,13 @@ def test_frecency_only_skips_unindexed_files(tmp_path):
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.db.make_t3", return_value=db):
+         patch("nexus.db.make_t3", return_value=db), \
+         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
+        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
+        # service mode through get_http_vector_client() directly
+        # (bypassing make_t3()) — patched above too so these tests keep
+        # exercising their own db mock under the ambient service
+        # default instead of a real (unreachable) HTTP client.
         _run_index_frecency_only(repo, _reg())
     db.update_chunks.assert_not_called()
 
@@ -403,6 +513,11 @@ def test_frecency_only_raises_credentials_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-sghyo (2026-08-06): non-service mode must be forced explicitly
+    # now (ambient default is service mode, which routes to the real
+    # HttpVectorClient instead of raising for a missing Voyage credential
+    # — the client does not embed at all).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     # Reader None (nexus-i711w seam): the rdr_collection fallback at
     # _run_index_frecency_only:1716 resolves _repo_collection_or_legacy
     # BEFORE the credential check; keep it on the no-catalog synth path.
@@ -456,7 +571,7 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
     rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
     (rdr / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
     db, ups, _ = _tracking_db()
-    with _patches(db, extra={"nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")}}):
+    with _patches(db, extra={}):  # nexus-sghyo: _embed_with_fallback deleted; service-mode stub handles embedding now
         _run_index(repo, _reg())
     # nexus-5ut2a: _run_index re-routes the non-conformant fake registry
     # name (code__repo/docs__repo) through the conformant synth, so key by
@@ -531,10 +646,12 @@ def test_run_index_mixed_repo(tmp_path):
     (repo / "notes.rst").write_text("Some notes about the project.\n")
     (repo / "data.txt").write_text("Should be skipped.\n")
     db, ups, _ = _tracking_db()
+    # nexus-sghyo: _embed_with_fallback deleted; service-mode stub handles
+    # prose/docs embedding now. voyageai.Client patch stays harmless/inert
+    # (code_indexer's service-mode stub also skips it).
     with _patches(db, extra={
         "nexus.chunker.chunk_file": {"return_value": [_chunk(text="print('hello')")]},
         "voyageai.Client": {"return_value": _voyage(1)},
-        "nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")},
     }):
         _run_index(repo, _reg())
     # RDR-102 D2: source_path is gone; title carries
@@ -1414,14 +1531,27 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
 
 
 def test_run_index_prune_misclassified(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed ``$in``
+    path via ``file_to_doc_id`` — the legacy source_path where-filter
+    this test used to route through (via a default/empty
+    ``file_to_doc_id``) is deleted dead code (see
+    ``test_prune_misclassified_source_path_fallback_deleted_as_
+    dead_code``).
+    """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"; repo.mkdir()
+    main_py = repo / "main.py"
     cc = MagicMock(); cc.get.return_value = {"ids": []}
     dc = MagicMock(); dc.get.return_value = {"ids": ["stale-1"]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
-    _prune_misclassified(repo, "code__repo", "docs__repo", [repo/"main.py"], [repo/"README.md"], [], db)
+    _prune_misclassified(
+        repo, "code__repo", "docs__repo", [main_py], [repo/"README.md"], [], db,
+        file_to_doc_id={main_py: "doc-main"},
+    )
     dc.delete.assert_called_once_with(ids=["stale-1"])
+    where = dc.get.call_args.kwargs["where"]
+    assert where == {"doc_id": {"$in": ["doc-main"]}}
 
 
 def test_registry_c2_fallback(tmp_path):
@@ -1505,14 +1635,28 @@ def test_should_ignore(path, expected):
 # ── Empty-string chunk filtering ────────────────────────────────────────────
 
 def test_index_code_file_skips_empty_text_chunks(tmp_path):
+    # nexus-sghyo (2026-08-06): this test used to prove empty-string
+    # filtering at the ctx.voyage_client.embed call site — that whole
+    # branch is deleted outright (client-side Voyage embedding retired,
+    # Hal determination 2026-07-28: "we do no embedding on the client");
+    # it now raises unconditionally rather than dispatching to a client
+    # embed call. Repointed at the SUPPORTED embed_fn injection point,
+    # which still needs empty-chunk filtering to behave correctly (the
+    # substantive behavior this test protects).
     from nexus.indexer import _index_code_file
     repo = tmp_path / "repo"; repo.mkdir(); (repo / "main.py").write_text("x = 1\n")
-    db, col = _mock_db(); v = _voyage(1)
+    db, col = _mock_db()
+    embed_calls: list[list[str]] = []
+    def fake_embed_fn(texts):
+        embed_calls.append(list(texts))
+        return [[0.1] * 3 for _ in texts]
     with patch("nexus.chunker.chunk_file", return_value=[_chunk(), _chunk(text="", idx=1, count=2)]):
         r = _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
-                             col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                             col, db, None, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                             embed_fn=fake_embed_fn)
     assert r == 1
-    texts = v.embed.call_args[1].get("texts") or v.embed.call_args[0][0]
+    assert len(embed_calls) == 1
+    texts = embed_calls[0]
     assert "" not in texts and len(texts) == 1
 
 
@@ -1591,15 +1735,19 @@ def _run_code(tmp_path, chunks=None, col_meta=None):
                                 col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
 
 def _run_prose(tmp_path, content="Line one\nLine two\n", col_meta=None):
+    # nexus-sghyo (2026-08-06): no client-side embed function to mock —
+    # the deleted _embed_with_fallback used to back the non-service path;
+    # under the ambient service-mode default the indexer takes the
+    # server-embed stub branch instead (embeddings computed server-side).
     from nexus.indexer import _index_prose_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "notes.txt"; f.write_text(content)
     db, col = _mock_db()
     if col_meta: col.get.return_value = col_meta
-    with patch("nexus.doc_indexer._embed_with_fallback", return_value=([[0.1]*3], "voyage-context-3")):
-        return _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
-                                 col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+    return _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
+                             col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
 
 def _run_pdf(tmp_path, col_meta=None, n=1):
+    # nexus-sghyo: see _run_prose above — no client-side embed mock needed.
     from nexus.indexer import _index_pdf_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "paper.pdf"; f.write_bytes(b"%PDF-1.4 fake content")
     db, col = _mock_db()
@@ -1612,34 +1760,75 @@ def _run_pdf(tmp_path, col_meta=None, n=1):
     # (indexer.py:2179), and the catalog store hook resolves the factory at
     # fire time. None keeps it on its documented skip path, as the retired
     # local-catalog pin did incidentally.
+    # nexus-sghyo: _index_pdf_file's embed_fn=None branch is unreachable
+    # ONLY via the _run_index orchestrator (which always resolves and
+    # passes embed_fn before calling per-file helpers) — called directly
+    # here, it needs an explicit embed_fn (the local-mode-style injection
+    # point), same as the deleted _embed_with_fallback mock used to
+    # provide.
     with patch("nexus.doc_indexer._pdf_chunks", return_value=prep), \
-         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.doc_indexer._embed_with_fallback", return_value=([[0.1]*3]*n, "voyage-context-3")):
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
         return _index_pdf_file(f, repo, "docs__repo", "voyage-context-3",
-                               col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                               col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                               embed_fn=lambda texts: [[0.1] * 3 for _ in texts])
 
 def _assert_int(r): assert isinstance(r, int) and not isinstance(r, bool)
 
-def test_index_code_file_returns_int_not_bool(tmp_path): _assert_int(_run_code(tmp_path))
-def test_index_code_file_returns_zero_when_skipped(tmp_path):
-    h = hashlib.sha256(b"x = 1\ny = 2\n").hexdigest()
-    r = _run_code(tmp_path, col_meta={"metadatas":[{"content_hash":h,"embedding_model":"voyage-code-3"}],"ids":[]}); assert r == 0; _assert_int(r)
-def test_index_code_file_returns_positive_when_indexed(tmp_path):
-    r = _run_code(tmp_path, chunks=[_chunk(idx=0,count=2), _chunk(text="y = 2",idx=1,count=2,ls=2,le=2)]); _assert_int(r); assert r == 2
+# nexus-test-cleanup P3a: the 3 file kinds (code/prose/pdf) each pinned the
+# same 3 assertions (int-not-bool return type; zero when skipped by
+# content-hash match; positive when actually indexed) as 9 near-identical
+# defs. Substantive-critic review (P3 fix pass): the first collapse chained
+# all 3 signals per kind into one sequential-assert body, coupling
+# previously-independent failure ids. Re-split via a second parametrize axis
+# ("signal") crossed with the kind-triple, so all 9 original signals keep
+# independent node ids ([code-int_not_bool], [code-zero_when_skipped], ...)
+# while the runner/kwargs boilerplate still collapses to one body.
+@pytest.mark.parametrize(
+    "runner,content_bytes,model,positive_kwargs,expected_positive",
+    [
+        pytest.param(
+            _run_code, b"x = 1\ny = 2\n", "voyage-code-3",
+            dict(chunks=[_chunk(idx=0, count=2), _chunk(text="y = 2", idx=1, count=2, ls=2, le=2)]),
+            2, id="code",
+        ),
+        pytest.param(
+            _run_pdf, b"%PDF-1.4 fake content", "voyage-context-3",
+            dict(n=2), 2, id="pdf",
+        ),
+        pytest.param(
+            _run_prose, b"Line one\nLine two\n", "voyage-context-3",
+            dict(content="Line one\nLine two\nLine three\n"), None, id="prose",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "signal", ["int_not_bool", "zero_when_skipped", "positive_when_indexed"],
+)
+def test_index_file_returns_int_reflecting_skip_and_index_state(
+    tmp_path, signal, runner, content_bytes, model, positive_kwargs, expected_positive
+):
+    # Each runner mkdir()s <root>/"repo" itself (exist_ok=False); the subroot
+    # name doubles as the tmp_path subtree so no two signal cases collide.
+    root = tmp_path / signal
+    root.mkdir()
 
-def test_index_prose_file_returns_int_not_bool(tmp_path): _assert_int(_run_prose(tmp_path))
-def test_index_prose_file_returns_zero_when_skipped(tmp_path):
-    h = hashlib.sha256(b"Line one\nLine two\n").hexdigest()
-    r = _run_prose(tmp_path, col_meta={"metadatas":[{"content_hash":h,"embedding_model":"voyage-context-3"}],"ids":[]}); assert r == 0; _assert_int(r)
-def test_index_prose_file_returns_positive_when_indexed(tmp_path):
-    r = _run_prose(tmp_path, content="Line one\nLine two\nLine three\n"); _assert_int(r); assert r > 0
-
-def test_index_pdf_file_returns_int_not_bool(tmp_path): _assert_int(_run_pdf(tmp_path))
-def test_index_pdf_file_returns_zero_when_skipped(tmp_path):
-    h = hashlib.sha256(b"%PDF-1.4 fake content").hexdigest()
-    r = _run_pdf(tmp_path, col_meta={"metadatas":[{"content_hash":h,"embedding_model":"voyage-context-3"}],"ids":[]}); assert r == 0; _assert_int(r)
-def test_index_pdf_file_returns_positive_when_indexed(tmp_path):
-    r = _run_pdf(tmp_path, n=2); _assert_int(r); assert r == 2
+    if signal == "int_not_bool":
+        _assert_int(runner(root))
+    elif signal == "zero_when_skipped":
+        h = hashlib.sha256(content_bytes).hexdigest()
+        r = runner(
+            root,
+            col_meta={"metadatas": [{"content_hash": h, "embedding_model": model}], "ids": []},
+        )
+        assert r == 0
+        _assert_int(r)
+    else:
+        r = runner(root, **positive_kwargs)
+        _assert_int(r)
+        if expected_positive is None:
+            assert r > 0
+        else:
+            assert r == expected_positive
 
 
 # ── on_start / on_file callbacks ────────────────────────────────────────────
@@ -1913,35 +2102,67 @@ def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
 
 
 def test_frecency_update_paginates(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path (a
+    real ``_build_frecency_doc_id_map`` patch) so this pagination
+    behavior is exercised through code that can still fire in
+    production — the legacy source_path where-filter this test used
+    to route through is deleted dead code (see
+    ``test_frecency_only_skips_unmapped_files_source_path_fallback_
+    deleted_as_dead_code``).
+    """
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"; repo.mkdir(); src = repo / "big.py"; src.write_text("# g\n")
-    p1 = {"ids": [f"c-{i}" for i in range(300)], "metadatas": [{"frecency_score":0.0,"source_path":str(src)}]*300}
-    p2 = {"ids": [f"c-{i}" for i in range(300,310)], "metadatas": [{"frecency_score":0.0,"source_path":str(src)}]*10}
+    p1 = {"ids": [f"c-{i}" for i in range(300)], "metadatas": [{"frecency_score":0.0}]*300}
+    p2 = {"ids": [f"c-{i}" for i in range(300,310)], "metadatas": [{"frecency_score":0.0}]*10}
     cc = MagicMock(); cc.get.side_effect = [p1, p2]
     dc = MagicMock(); dc.get.return_value = {"ids":[],"metadatas":[]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
-    with patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
+    with patch(
+        "nexus.indexer._build_frecency_doc_id_map",
+        return_value={src: "1.1.1"},
+    ), \
+         patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.db.make_t3", return_value=db):
+         patch("nexus.db.make_t3", return_value=db), \
+         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
+        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
+        # service mode through get_http_vector_client() directly
+        # (bypassing make_t3()) — patched above too so this test keeps
+        # exercising its own db mock under the ambient service default.
         _run_index_frecency_only(repo, _reg())
     ids = set()
     for c in db.update_chunks.call_args_list: ids.update(c.kwargs.get("ids") or c.args[0])
     assert len(ids) == 310
+    where = cc.get.call_args_list[0].kwargs["where"]
+    assert where == {"doc_id": "1.1.1"}
 
 
 def test_prune_misclassified_paginates(tmp_path):
+    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed ``$in``
+    path (via ``file_to_doc_id``) so this pagination behavior is
+    exercised through code that can still fire in production — the
+    legacy source_path where-filter this test used to route through
+    (via an empty/default ``file_to_doc_id``) is deleted dead code
+    (see ``test_prune_misclassified_source_path_fallback_deleted_as_
+    dead_code``).
+    """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"; repo.mkdir(); bp = repo / "g.md"; bp.write_text("# b\n")
     cc = MagicMock(); cc.get.side_effect = [{"ids":[f"s-{i}" for i in range(300)]}, {"ids":[f"s-{i}" for i in range(300,310)]}]
     dc = MagicMock(); dc.get.return_value = {"ids":[]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
-    _prune_misclassified(repo, "code__repo", "docs__repo", [], [bp], [], db)
+    _prune_misclassified(
+        repo, "code__repo", "docs__repo", [], [bp], [], db,
+        file_to_doc_id={bp: "doc-1"},
+    )
     d = set()
     for c in cc.delete.call_args_list: d.update(c.kwargs.get("ids") or (c.args[0] if c.args else []))
     assert d == {f"s-{i}" for i in range(310)}
+    where = cc.get.call_args_list[0].kwargs["where"]
+    assert where == {"doc_id": {"$in": ["doc-1"]}}
 
 
 def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
@@ -1978,10 +2199,25 @@ def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
     cc.delete.assert_called_once_with(ids=["chunk-abc"])
 
 
-def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_path):
-    """Files missing from ``file_to_doc_id`` use the legacy source_path
-    lookup so chunks indexed before the catalog backfill keep getting
-    cleaned up.
+def test_prune_misclassified_source_path_fallback_deleted_as_dead_code(tmp_path):
+    """nexus-afudo (2026-08-05): the legacy source_path where-filter
+    this test used to exercise (files missing from ``file_to_doc_id``)
+    is DELETED dead code. RDR-102 D2 (2026-05-02) removed source_path
+    from make_chunk_metadata for every writer, so
+    ``where={"source_path": ...}`` always matched zero rows in
+    production regardless of how many files landed in this "legacy"
+    bucket; a live-store probe (field>=! existence test) found zero
+    source_path rows across 13 representative collections (~115k
+    chunks), including the code__/docs__ collections this exact prune
+    targets. An unmapped file (no catalog doc_id) is now silently
+    skipped by the prune — no query, since the fallback it used to
+    fall through to could never find anything.
+
+    Kill control: if the deleted branch were reintroduced, ``cc.get``
+    (mocked with NO return_value here, unlike the old test) would be
+    called and ``cc.delete`` would fire off whatever the default
+    MagicMock response produces — both assertions below fail either
+    way.
     """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"
@@ -1989,20 +2225,17 @@ def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_pa
     bp = repo / "legacy.md"
     bp.write_text("# l\n")
     cc = MagicMock()
-    cc.get.return_value = {"ids": ["chunk-legacy"]}
     dc = MagicMock()
-    dc.get.return_value = {"ids": []}
     db = MagicMock()
     db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
-    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     _prune_misclassified(
         repo, "code__repo", "docs__repo",
         [], [bp], [], db,
         file_to_doc_id={},
     )
-    where = cc.get.call_args.kwargs["where"]
-    assert where == {"source_path": str(bp)}
+    cc.get.assert_not_called()
+    cc.delete.assert_not_called()
 
 
 # ── Lock file cleanup ───────────────────────────────────────────────────────
@@ -2067,13 +2300,16 @@ def test_code_indexer_chunk_text_hash(tmp_path):
     assert m[0]["chunk_text_hash"] != m[1]["chunk_text_hash"]  # distinct chunks
 
 def _cap_prose(tmp_path, content, ext):
+    # nexus-sghyo (2026-08-06): no client-side embed function to mock —
+    # the deleted _embed_with_fallback used to back the non-service path;
+    # under the ambient service-mode default the indexer takes the
+    # server-embed stub branch instead (embeddings computed server-side).
     from nexus.indexer import _index_prose_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / f"notes{ext}"; f.write_text(content)
     docs: list[str] = []; metas: list[dict] = []; db, col = _mock_db()
     db.upsert_chunks_with_embeddings.side_effect = lambda *a, **kw: (docs.extend(kw.get("documents",a[2] if len(a)>2 else [])), metas.extend(kw.get("metadatas",a[4] if len(a)>4 else [])))
-    with patch("nexus.doc_indexer._embed_with_fallback", return_value=([[0.1]*3,[0.2]*3], "voyage-context-3")):
-        _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
-                          col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+    _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
+                      col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
     return metas, docs
 
 def test_prose_indexer_markdown_metadata(tmp_path):
@@ -2137,11 +2373,9 @@ def test_run_index_skips_code_collection_for_docs_only_repo(tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "README.md").write_text("# Title\n\nSome prose.\n")  # docs only
     db, col = _mock_db()
-    with _patches(db, extra={
-        "nexus.doc_indexer._embed_with_fallback": {
-            "return_value": ([[0.1]*10], "voyage-context-3"),
-        },
-    }):
+    # nexus-sghyo: _embed_with_fallback deleted; service-mode stub handles
+    # embedding now.
+    with _patches(db, extra={}):
         _run_index(repo, _reg())
 
     created = [
@@ -2166,12 +2400,11 @@ def test_run_index_creates_both_for_mixed_repo(tmp_path):
     (repo / "README.md").write_text("# Title\n\nProse.\n")
     db, col = _mock_db()
     v = _voyage(1)
+    # nexus-sghyo: _embed_with_fallback deleted; service-mode stub handles
+    # prose/docs embedding now. voyageai.Client patch stays harmless/inert.
     with _patches(db, extra={
         "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
         "voyageai.Client": {"return_value": v},
-        "nexus.doc_indexer._embed_with_fallback": {
-            "return_value": ([[0.1]*10], "voyage-context-3"),
-        },
     }):
         _run_index(repo, _reg())
 
@@ -2191,13 +2424,13 @@ def test_run_index_creates_both_for_mixed_repo(tmp_path):
     )
 
 
-@pytest.fixture(autouse=True)
-def _legacy_vector_backend(monkeypatch):
-    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
-    stubs fire unless opted out). This module tests the legacy
-    chroma/local embed pipeline, which is exactly the chroma-injected
-    configuration the opt-out exists for."""
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+# nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse
+# fixture that force-pinned this whole module to
+# NX_STORAGE_BACKEND_VECTORS=chroma (the legacy chroma/local embed
+# pipeline opt-out) is RETIRED — that pipeline is deleted outright: the
+# client no longer embeds via Voyage (Hal determination 2026-07-28:
+# "we do no embedding on the client"). The module runs under the
+# ambient service-mode default like production.
 
 
 # ── drain phase markers (nexus-uizok) ────────────────────────────────────────
@@ -2275,6 +2508,36 @@ def test_drain_markers_on_phase_none_safe():
     from nexus.indexer import _drain_batcher_with_markers
     b = _StubBatcher({"chunks": 5, "collections": 1, "in_flight": 0}, flushes=1)
     assert _drain_batcher_with_markers(b, None) == 1
+
+
+def test_drain_markers_prints_per_flush_not_cumulative_g2(monkeypatch):
+    """nexus-lde88 G2: pre-fix, the printed "(Xs" was
+    time.monotonic() - t0 — CUMULATIVE since the drain started — so three
+    consecutive flushes of different individual durations still each
+    printed the SAME growing number, never their own cost. Uneven
+    per-flush costs (10s, then 50s) must print 10.0s then 50.0s, not
+    10.0s then 60.0s."""
+    from nexus import indexer as idx
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(idx.time, "monotonic", lambda: t["now"])
+
+    class _UnevenBatcher(_StubBatcher):
+        def drain(self, on_progress=None):
+            for i, delta in enumerate((10.0, 50.0), start=1):
+                t["now"] += delta
+                if on_progress is not None:
+                    on_progress(i, self._flushes)
+            return self._flushes
+
+    phases: list[str] = []
+    b = _UnevenBatcher({"chunks": 2, "collections": 1, "in_flight": 0}, flushes=2)
+    idx._drain_batcher_with_markers(b, phases.append)
+
+    assert "flush 1/2 complete (10.0s" in phases[1], phases[1]
+    assert "flush 2/2 complete (50.0s" in phases[2], phases[2]
+    # The pre-fix bug would have printed cumulative 10.0s then 60.0s here.
+    assert "60.0s" not in phases[2]
 
 
 class TestQuarantineLifecycle:

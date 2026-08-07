@@ -488,3 +488,253 @@ class TestDrainProgress:
         assert s["chunks"] == 5 and s["collections"] == 2 and s["in_flight"] == 0
         b.drain()
         assert b.pending_summary == {"chunks": 0, "collections": 0, "in_flight": 0}
+
+
+class TestFlushInstrumentation:
+    """nexus-lde88 G1/G3: complete per-flush attribution.
+
+    G1 — one ``chunk_flush_complete`` structlog event per flush with
+    {collection, chunks, files, upload_s, flush_hook_s, settle_s,
+    file_hook_s}. G3 — ``upload_s`` is the network write ALONE;
+    ``stats()``'s ``flush_seconds`` now covers the FULL flush wall
+    (upload + both hook chains + settle), not just the upload leg it
+    used to silently stop short of. Review round 2 added ``settle_s``
+    (the file-settlement bookkeeping block) after the critic proved a
+    0.03s delay injected there vanished from every reported number.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _info_level(self) -> None:
+        # The event is logged at INFO; the suite default structlog filter
+        # is WARNING (tests/conftest.py::pytest_configure), which would
+        # drop it before capture_logs() ever sees it. The suite's own
+        # _restore_structlog_after_test autouse fixture restores the
+        # saved config after this test regardless.
+        import logging
+
+        import structlog
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+    def test_chunk_flush_complete_event_fields(self) -> None:
+        import time as _time
+
+        import structlog.testing
+
+        rec = Recorder()
+
+        def slow_flush(collection, ids, docs, metas):
+            _time.sleep(0.02)
+
+        b = ChunkBatcher(
+            flush=slow_flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_batch_complete=lambda *a: _time.sleep(0.01),
+            max_chunks=100,
+        )
+        with structlog.testing.capture_logs() as logs:
+            b.add("a.py", "code__x", *_mk(3, "a"))
+            b.drain()
+
+        events = [l for l in logs if l["event"] == "chunk_flush_complete"]
+        assert len(events) == 1
+        e = events[0]
+        assert e["collection"] == "code__x"
+        assert e["chunks"] == 3
+        assert e["files"] == 1
+        # Non-cumulative, genuinely measured: the injected sleeps must show
+        # up as distinct, correctly-ordered magnitudes, not zeros or one
+        # merged number.
+        assert e["upload_s"] >= 0.02
+        assert e["flush_hook_s"] >= 0.01
+        assert e["settle_s"] >= 0.0
+        assert e["file_hook_s"] >= 0.0
+
+    def test_upload_s_excludes_hook_time_g3(self) -> None:
+        """G3: upload_s must reflect ONLY the network write, not balloon to
+        include the flush-grain hook's sleep — the two are reported
+        separately, not conflated into one under-attributed number."""
+        import time as _time
+
+        import structlog.testing
+
+        rec = Recorder()
+
+        def quick_flush(collection, ids, docs, metas):
+            pass
+
+        b = ChunkBatcher(
+            flush=quick_flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_batch_complete=lambda *a: _time.sleep(0.05),
+            max_chunks=100,
+        )
+        with structlog.testing.capture_logs() as logs:
+            b.add("a.py", "code__x", *_mk(2, "a"))
+            b.drain()
+
+        e = next(l for l in logs if l["event"] == "chunk_flush_complete")
+        assert e["upload_s"] < 0.03, (
+            f"upload_s={e['upload_s']} leaked hook time (hook slept 0.05s)"
+        )
+        assert e["flush_hook_s"] >= 0.05
+
+    def test_stats_flush_seconds_covers_full_wall_g3(self) -> None:
+        """stats()['flush_seconds'] used to stop before the hooks
+        (chunk_batcher.py:399 pre-fix), under-reporting flush cost by
+        ~4x. It must now be >= upload_seconds + the hook sleep injected
+        below — the full flush wall, not just the upload leg."""
+        import time as _time
+
+        rec = Recorder()
+
+        def quick_flush(collection, ids, docs, metas):
+            pass
+
+        b = ChunkBatcher(
+            flush=quick_flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_batch_complete=lambda *a: _time.sleep(0.05),
+            max_chunks=100,
+        )
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.drain()
+        s = b.stats
+        assert s["upload_seconds"] < 0.03
+        assert s["flush_seconds"] >= 0.05
+        assert s["flush_seconds"] > s["upload_seconds"]
+        assert s["settle_seconds"] >= 0.0
+
+    def test_no_flush_complete_event_on_bisect_path(self) -> None:
+        """A batch that fails and bisects never completes AS ITSELF — no
+        event fires for it; each successfully-flushed half fires its own
+        event when it completes."""
+        import structlog.testing
+
+        calls = {"n": 0}
+
+        def flaky_flush(collection, ids, docs, metas):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+
+        rec = Recorder()
+        b = ChunkBatcher(
+            flush=flaky_flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            max_chunks=100,
+        )
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.add("b.py", "code__x", *_mk(2, "b"))
+        with structlog.testing.capture_logs() as logs:
+            b.drain()
+        events = [l for l in logs if l["event"] == "chunk_flush_complete"]
+        # The original 4-chunk/2-file batch bisects into two 1-file halves;
+        # each half flushes successfully and fires its own event — 2 total,
+        # never one for the batch that actually raised.
+        assert len(events) == 2
+        assert all(ev["files"] == 1 for ev in events)
+
+    def test_settle_s_captures_settle_bookkeeping_delay(self) -> None:
+        """Review round 2 (both reviewers): the critic proved a 0.03s delay
+        injected into the settle-bookkeeping block (_settle_file_locked,
+        called under self._lock between the flush-grain hooks and the
+        per-file callbacks) was invisible in upload_s/flush_hook_s/
+        file_hook_s AND in stats()['flush_seconds'] — reported sum 0.0000s
+        against a real wall of 0.0401s. settle_s must now capture it."""
+        import time as _time
+        import unittest.mock as mock
+
+        import structlog.testing
+
+        from nexus.chunk_batcher import ChunkBatcher as _CB
+
+        rec = Recorder()
+
+        def quick_flush(collection, ids, docs, metas):
+            pass
+
+        orig_settle = _CB._settle_file_locked
+
+        def slow_settle(self, path, settled):
+            _time.sleep(0.03)
+            return orig_settle(self, path, settled)
+
+        b = ChunkBatcher(
+            flush=quick_flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            max_chunks=100,
+        )
+        with mock.patch.object(_CB, "_settle_file_locked", slow_settle):
+            with structlog.testing.capture_logs() as logs:
+                b.add("a.py", "code__x", *_mk(2, "a"))
+                b.drain()
+
+        e = next(l for l in logs if l["event"] == "chunk_flush_complete")
+        assert e["settle_s"] >= 0.03, (
+            f"settle_s={e['settle_s']} — the injected delay vanished again"
+        )
+        s = b.stats
+        assert s["settle_seconds"] >= 0.03
+        assert s["flush_seconds"] >= 0.03
+
+    def test_partition_sums_to_wall_within_epsilon(self) -> None:
+        """The exact test the critic's probe sketches: inject a distinct,
+        recognizable delay into EACH of the four attributed phases
+        (upload, flush_hook, settle, file_hook) and assert
+        upload_s + flush_hook_s + settle_s + file_hook_s reconstructs the
+        real wall clock of the flush within a small epsilon — the
+        partition-completeness check that would have caught both the
+        original G3 gap and this round's settle-bookkeeping recurrence."""
+        import time as _time
+        import unittest.mock as mock
+
+        import structlog.testing
+
+        from nexus.chunk_batcher import ChunkBatcher as _CB
+
+        rec = Recorder()
+        DELAY = 0.03
+
+        def slow_flush(collection, ids, docs, metas):
+            _time.sleep(DELAY)
+
+        def slow_on_complete(path, context=None):
+            _time.sleep(DELAY)
+            rec.on_complete(path, context)
+
+        orig_settle = _CB._settle_file_locked
+
+        def slow_settle(self, path, settled):
+            _time.sleep(DELAY)
+            return orig_settle(self, path, settled)
+
+        b = ChunkBatcher(
+            flush=slow_flush,
+            on_file_complete=slow_on_complete,
+            on_file_failed=rec.on_failed,
+            on_batch_complete=lambda *a: _time.sleep(DELAY),
+            max_chunks=100,
+        )
+        b.add("a.py", "code__x", *_mk(2, "a"))  # single file, single flush
+
+        with mock.patch.object(_CB, "_settle_file_locked", slow_settle):
+            with structlog.testing.capture_logs() as logs:
+                wall_t0 = _time.monotonic()
+                b.drain()
+                wall = _time.monotonic() - wall_t0
+
+        e = next(l for l in logs if l["event"] == "chunk_flush_complete")
+        total = e["upload_s"] + e["flush_hook_s"] + e["settle_s"] + e["file_hook_s"]
+        # Each phase carries its own DELAY; a real attribution gap would
+        # show up as total < wall by roughly one DELAY (0.03s) or more —
+        # epsilon well under that so a reintroduced gap still fails loud.
+        assert total == pytest.approx(wall, abs=0.05), (
+            f"total={total} wall={wall} — a phase is unattributed again"
+        )
+        assert min(e["upload_s"], e["flush_hook_s"], e["settle_s"], e["file_hook_s"]) >= DELAY * 0.5

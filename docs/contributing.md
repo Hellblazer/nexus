@@ -254,7 +254,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    uv run pytest                                             # unit suite (no API keys)
    tests/e2e/local-service-gate.sh                           # integration incl. the local-service functional gate
    tests/e2e/migration-rehearsal/run.sh --package-upgrade    # ONE-engine convergence MVV (nexus-cfgo9)
-   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs)
+   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs), LOCAL WHEEL layer
    ```
    All must pass. Bare `uv run pytest -m integration` is not enough on its
    own: the local-service round-trip family self-provisions inside
@@ -314,11 +314,32 @@ Every step below is **required**. Missing any one of them has caused problems in
    ```
    The virgin-journey gate (nexus-nolqs): wheel under test → scrubbed-env
    virgin HOME → local init (ladder converged) → store/index with
-   engine-catalog registration asserted → search → doctor (zero ✗, empty
-   warnings allowlist). Complements the upgrade-axis gates (rehearsal,
-   era-hop, guided) which all start from a populated install — the
-   2026-07-21 fresh-box defect class was invisible to every one of them.
-   Must end `FRESH-INSTALL MVV PASSED`.
+   engine-catalog registration asserted → search → doctor (zero ✗,
+   warnings allowlist reviewed for new drift). Complements the upgrade-axis
+   gates (rehearsal, era-hop, guided) which all start from a populated
+   install — the 2026-07-21 fresh-box defect class was invisible to every
+   one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
+   release-battery layer)`.
+
+   This is the LOCAL WHEEL layer: it builds and installs the tree under
+   test, so it proves the release candidate works, but it resolves
+   dependencies from `uv.lock`/the wheel's own metadata, not PyPI. It does
+   NOT exercise a fresh `uv tool install`'s independent resolution — that
+   is a separate, POST-publish layer:
+   ```bash
+   ./tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]   # omit X.Y.Z for latest
+   ```
+   `--published` installs the ACTUAL PyPI artifact via
+   `uv tool install conexus[==X.Y.Z]`, isolated to a scrubbed sandbox HOME
+   exactly like the default layer (never touches the live `~/.local/share/uv`
+   or `~/.local/bin`). This is the layer nexus-l2ku5 broke (`mcp>=1.0`
+   resolved `mcp` 2.0.0 fresh from PyPI and killed both MCP servers for 4
+   days while every pre-existing gate ran pinned to the dev venv's
+   `uv.lock` and saw nothing) — it belongs to the POST-publish shakedown
+   (T2 `nexus/shakedown-playbook` §2 S1), not this pre-tag battery, since
+   there is nothing on PyPI yet to install at this point in the checklist.
+   Run it manually after a tag publishes to verify what PyPI is actually
+   serving; see the shakedown playbook for the standing T1 trigger.
 
 7b. **Run the sandbox smoke** (~2 min)
    ```bash
@@ -332,6 +353,23 @@ Every step below is **required**. Missing any one of them has caused problems in
    sessions/MCP servers active; if it ever refuses with a live-holder error,
    suspect a step-ordering regression before reaching for `--force`
    (AGENTS.md § Cutting a release, step 6).
+
+7c. **Run the sandbox shakedown** (~5-10 min warm cache, +10-15 min cold)
+   ```bash
+   ./tests/e2e/release-sandbox.sh shakedown
+   ```
+   Required on every release. Smoke (7b) only reinstalls and runs `nx
+   doctor` checks; it never calls `nx index pdf`, so it cannot catch an
+   indexing regression. The shakedown does — including MinerU end-to-end
+   through the production `nx index pdf` path (step 3b of 11, the
+   `bft-to-smr.pdf` formula fixture) — and it is the ONLY gate that does:
+   the slow-marked `test_mineru_path_preserves_formulas` pytest test is
+   not part of any default or scheduled run (nexus-6xkdu). Cold cache
+   pays MinerU's ~2-3 GB model download once. All four indexing steps
+   (2, 3a, 3b, 4) can fail the run — the `|| true` that previously made
+   them theatre was removed at nexus-6xkdu — and the run ends with an
+   explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on
+   any failure.
 
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated

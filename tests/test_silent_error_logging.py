@@ -220,13 +220,22 @@ def test_doctor_registry_load_failed_logs_warning():
     fires when that helper raises; the event name is preserved
     (``doctor_registry_load_failed``) so existing log-scrape pipelines
     keep matching.
+
+    nexus-cw262: health.py now calls
+    ``list_repos_dual_with_catalog_roots`` directly (one round trip
+    serving both the walk list and the catalog-only attribution set) —
+    patch that function, not the ``list_repos_dual`` wrapper it no
+    longer goes through.
     """
     from click.testing import CliRunner
     from nexus.commands.doctor import doctor_cmd
 
     # Patch at definition site (nexus.repos) because health.py
     # imports lazily inside _check_hooks_for_known_repos.
-    with patch("nexus.repos.list_repos_dual", side_effect=RuntimeError("corrupt")):
+    with patch(
+        "nexus.repos.list_repos_dual_with_catalog_roots",
+        side_effect=RuntimeError("corrupt"),
+    ):
         with capture_logs() as cap:
             runner = CliRunner()
             runner.invoke(doctor_cmd)

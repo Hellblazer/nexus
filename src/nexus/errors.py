@@ -16,6 +16,29 @@ class IndexingError(NexusError):
     """Error during document indexing pipeline."""
 
 
+class ExtractionQualityError(NexusError):
+    """Post-extraction text-quality gate failed (nexus-wi1uv).
+
+    Raised by :func:`nexus.pdf_extractor._enforce_extraction_quality` when
+    extracted PDF text trips the calibrated whitespace/token-length
+    signals that flag the space-stripped-garbage failure mode (MinerU or
+    Docling completing but producing unsearchable output, e.g.
+    "istheasetofthe"). The documented recovery is to retry with a
+    different extractor, or pass ``--allow-degraded-extraction`` to accept
+    the degraded output deliberately.
+
+    A per-record-raisable member of :data:`PER_RECORD_SURVIVABLE_
+    EXCEPTIONS` below (round-2 review). ``__init__`` accepts *message* as
+    a plain keyword so ``tests/test_commands_dt.py``'s registry-driven
+    ``_MEMBER_KWARGS``-style construction (``member_cls(**kwargs)``) works
+    without special-casing — the base ``Exception.__init__`` accepts only
+    positional args, which that construction pattern cannot supply.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class CredentialsMissingError(NexusError):
     """A required API key or credential is absent."""
 
@@ -193,6 +216,44 @@ class PutOversizedError(NexusError):
         )
 
 
+class ChunkLandingUnverifiedError(NexusError):
+    """A metadata-only chunk update returned ``missing=None`` — the engine's
+    response omitted the "missing" field, so the client cannot tell whether
+    any of the updated ids were a stale-positive probe miss (nexus-tp8yk D1,
+    design memo §1 P1: ``_upsert_skip_reembed`` used to treat this as "no
+    reroute" and proceed silently, letting the caller's manifest hook write
+    rows for chunks that were never confirmed present in T3).
+
+    ``None`` means "cannot tell", never "zero misses" — ``REQUIRED_ENGINE_
+    VERSION`` pins one engine identity per release (CLAUDE.md § Releases),
+    so this should be unreachable against a correctly-deployed fleet; when
+    it fires anyway (a pre-nexus-5xn3k engine, or a mixed-version fleet
+    mid-rolling-deploy) the caller must refuse to proceed rather than
+    silently commit manifest rows for an unconfirmed batch. The caller
+    (``doc_indexer``'s fence-bracketed call sites) converts this into a
+    failed index run — the fence stays ``'indexing'``, over-work on the
+    next pass, never silent under-work.
+
+    Attributes:
+        collection: T3 collection the update targeted.
+        count: number of ids whose landing could not be confirmed.
+    """
+
+    def __init__(self, *, collection: str, count: int) -> None:
+        self.collection = collection
+        self.count = count
+        super().__init__(
+            f"cannot confirm {count} chunk(s) landed in T3 collection "
+            f"{collection!r} — the engine's update-chunks response omitted "
+            f"the 'missing' field, so a stale-positive probe result cannot "
+            f"be distinguished from a genuine landing. Refusing to proceed: "
+            f"committing a manifest for these chunks would risk rows that "
+            f"reference content never confirmed present. Re-run once the "
+            f"engine fleet is on a consistent version (see REQUIRED_ENGINE_"
+            f"VERSION), or check 'nx doctor' for a version mismatch."
+        )
+
+
 class IndexRunVerifyRefused(NexusError):
     """``HttpCatalogClient.complete_index_run`` was refused by the engine's
     fail-closed verify-then-stamp gate (RUNFENCE, nexus-5xn3k, design memo
@@ -249,3 +310,47 @@ class IndexRunVerifyRefused(NexusError):
         if server_detail:
             message = f"{message} (engine: {server_detail})"
         super().__init__(message)
+
+
+#: NexusError subclasses that a per-record/per-file BATCH loop (``nx dt
+#: index``, ``nx index pdf --dir``) must catch, log, and continue past —
+#: never let escape and abort the whole batch (nexus-rlkgu; recurrence-
+#: prevention for the nexus-2fyb / nexus-qo84l / nexus-9800y / nexus-hb10j
+#: class of bug: a per-record ingest loop's narrow except tuple let a
+#: newly-introduced NexusError subclass propagate uncaught, killing the
+#: rest of the batch instead of just the offending record).
+#:
+#: This is the ONE place a per-record-raisable NexusError subclass is
+#: added; every per-record loop catch site references this tuple by name
+#: (or uses a broad ``except Exception``, safe by construction) instead of
+#: repeating a per-exception except clause. tests/test_rlkgu_per_record_
+#: catch_tripwire.py is the mechanical enforcement:
+#:
+#:  1. every per-record/per-file loop in src/nexus/commands/dt.py and
+#:     src/nexus/commands/index.py that calls an index_*-family function
+#:     must catch this tuple (by name), a broad Exception, or be in that
+#:     test's explicit allowlist with a reason;
+#:  2. EVERY NexusError subclass defined in this module must be
+#:     classified — either a member of this tuple, or listed in that
+#:     test's command-level allowlist with a reason explaining why it is
+#:     NOT per-record-raisable. A newly-added, unclassified NexusError
+#:     subclass fails that test at introduction time — the tripwire's
+#:     whole point is to make that classification decision mandatory
+#:     rather than something the next per-record loop author has to
+#:     remember to go check four call sites for.
+#:
+#: doc_indexer's per-record ingest paths (index_pdf / index_markdown) are
+#: the origin of the first two members: ChunkLandingUnverifiedError fires
+#: from ``_upsert_skip_reembed`` before any manifest row is committed;
+#: IndexRunVerifyRefused fires from the RUNFENCE completion-verify gate.
+#: ExtractionQualityError (nexus-wi1uv occurrence 5 of this exact class,
+#: caught by this tripwire before it shipped) fires from
+#: ``PDFExtractor.extract()``, deep inside ``index_pdf`` -> ``_pdf_chunks``
+#: -- reached by dt.py's ``nx dt index`` per-record loop for any
+#: ``.pdf``-suffixed record. One PDF tripping the post-extraction quality
+#: gate must fail THAT record, never abort the rest of the batch.
+PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
+    ChunkLandingUnverifiedError,
+    IndexRunVerifyRefused,
+    ExtractionQualityError,
+)

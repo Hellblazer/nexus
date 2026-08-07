@@ -2,7 +2,8 @@
 title: "Retire the SQLite T2 Backend: Make the PG Service the Only T2 Path"
 id: RDR-158
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-07
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

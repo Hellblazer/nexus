@@ -185,26 +185,443 @@ def pytest_sessionfinish(session, exitstatus):
     """
     after = _scan_fixture_cache_files()
     leaked = after - _fixture_cache_baseline
-    if not leaked:
+    if leaked:
+        # Surface and clean up.
+        leaked_sorted = sorted(leaked)
+        for path in leaked_sorted:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        names = ", ".join(p.name for p in leaked_sorted[:5])
+        suffix = "" if len(leaked_sorted) <= 5 else f" (+{len(leaked_sorted) - 5} more)"
+        session.exitstatus = 1
+        print(
+            f"\n\nFAIL: nexus-nifd cache-leak guard caught "
+            f"{len(leaked_sorted)} fixture-cache file(s) leaked into "
+            f"~/.config/nexus/: {names}{suffix}\n"
+            f"  Cause: a test bypassed the autouse `_isolate_config_dir` "
+            f"fixture or spawned a subprocess without inheriting "
+            f"NEXUS_CONFIG_DIR.\n"
+            f"  Cleanup: leaked files removed; failing the session.\n",
+            flush=True,
+        )
+
+    _check_scenario_non_vacuity(session)
+
+
+# ── `scenario` marker non-vacuity guard (test-suite-compression P2-reduced,
+# nexus-test-cleanup 2026-08-05; redesigned same-day after substantive-critic
+# reproduced it as VACUOUS under xdist — T2
+# nexus/test-suite-compression-P2-reduced-critique) ─────────────────────────
+#
+# ROOT CAUSE of the xdist gap the first cut shipped with: it tracked
+# selection/outcomes via its own ``pytest_collection_modifyitems`` /
+# ``pytest_runtest_logreport`` hooks and enforced by mutating
+# ``session.exitstatus`` in EVERY process's own ``pytest_sessionfinish`` —
+# including xdist WORKER processes. Under ``-n0`` (no xdist) or
+# ``--splits``/``--group`` (pytest-split; each shard is its own separate
+# process, architecturally identical to ``-n0``) that works, because the
+# process that ran the guard IS the process whose exit code becomes the
+# real ``pytest`` exit code. Under ``-n N`` (xdist) it does not: the
+# CONTROLLER process is the one whose exit status becomes the real exit
+# code, and a WORKER's local ``session.exitstatus`` mutation is discarded
+# once its results are reported back — so a scenario that unconditionally
+# skips trips the guard at ``-n0`` but yields a silent green exit 0 at
+# ``-n 2``, exactly the class of incident (silent skip read as pass) this
+# guard exists to prevent, on this project's OWN documented dev-loop fast
+# path (``uv run pytest -n auto``).
+#
+# FIX: enforce ONLY on the controller/serial side (never on an xdist
+# worker — see ``_is_xdist_worker`` below), and derive BOTH the selected
+# set and every outcome from the aggregated ``terminalreporter`` stats,
+# never from ``session.items`` / a locally-tracked hook. Empirically
+# verified (throwaway probe, ``-n 2``): the xdist CONTROLLER process does
+# not run collection itself — ``session.items`` is EMPTY there, and its
+# own ``pytest_collection_modifyitems`` never fires with a populated item
+# list; only the WORKERS collect. What the controller does reliably have
+# is every worker's ``TestReport`` replayed through the standard
+# ``pytest_runtest_logreport`` hook as results come back (the same
+# mechanism that powers xdist's live per-worker progress output), which
+# is exactly what populates ``terminalreporter.stats`` — the reconstruction
+# below is built entirely from that, in every mode (serial, ``-n N``,
+# ``--splits``/``--group`` — a pytest-split shard's own process populates
+# ``terminalreporter.stats`` from its own locally-run tests the same way a
+# serial run does). The FIRST cut filtered on ``report.keywords.get
+# ("scenario")`` — the same signal ``-m`` selection reads — reasoning it was
+# "a dict of every marker on the item". That reasoning had a bug, found and
+# fixed the same day; see below.
+#
+# ``pytest_collection_modifyitems`` below stamps every item's own
+# ``get_closest_marker("scenario")`` verdict into ``user_properties`` — a
+# live, non-comment ``get_closest_marker("scenario")`` consumer, which is
+# what makes ``tests/test_marker_selection_coverage.py`` treat ``scenario``
+# as wired (path 2: programmatic consumption) even though it runs in the
+# default loop with no explicit ``-m scenario`` invocation anywhere.
+#
+# FALSE-POSITIVE FOUND 2026-08-05 (nexus-test-cleanup CI red, test-lint
+# job): the first cut of this guard filtered
+# ``terminalreporter.stats`` reports on ``report.keywords.get("scenario")``.
+# ``TestReport.keywords`` is NOT "markers on the item" — empirically it is
+# ``dict(item.keywords)``, which ALSO contains a truthy entry for every
+# token pytest derives from the node's own name, including each
+# ``@pytest.mark.parametrize`` id. ``tests/test_marker_selection_coverage.py``
+# parametrizes ``test_marker_is_wired_to_a_real_invocation`` over every
+# declared marker NAME — one of which is the literal string ``"scenario"``
+# (since ``scenario`` is itself a declared marker) — so its
+# ``[scenario]`` id collides with the real ``@pytest.mark.scenario`` keyword
+# with NO actual scenario mark applied. In ``test-lint`` (no service jar,
+# no ``NX_T2_SUBSTRATE_EXPECTED``) every test — including that one — is
+# legitimately skipped by the autouse ``_pin_t2_substrate`` fixture, and
+# the false-positive keyword match read that one unrelated lint-test skip
+# as "a scenario journey silently degraded", tripping the budget=0 guard
+# on a job that runs zero real ``scenario`` tests (deselected by ``-m
+# lint``). Reproduced directly: a throwaway
+# ``@pytest.mark.parametrize("marker", ["scenario"])`` test shows
+# ``"scenario" in item.keywords`` True with ``item.get_closest_marker
+# ("scenario")`` False.
+#
+# FIX: stamp the real verdict onto ``item.user_properties`` at collection
+# time (a plain list of ``(name, value)`` tuples that IS part of the
+# standard ``TestReport`` — including across an xdist worker -> controller
+# relay) instead of relying on ``report.keywords``, which cannot
+# distinguish an applied mark from an accidental name/parametrize-id
+# substring. This runs during COLLECTION, which happens in every process
+# that collects tests — the controller included on a serial/pytest-split
+# run, workers only under true ``-n`` xdist — so it is populated in every
+# execution mode this guard needs to reason about.
+_SCENARIO_PROPERTY = "nx_scenario_marked"
+
+
+# ── partial-view guard for session.items-based censuses (nexus-vdti6,
+# 2026-08-06) ──────────────────────────────────────────────────────────────
+#
+# WHY: test_mode_declarations_are_explicit.py's census reads
+# request.session.items to scan every collected test for an undeclared
+# voyage-mode reference. CI's real PR-gating `test` job runs
+# `pytest tests/ --splits 4 --group N` (pytest-split); pytest_split/
+# plugin.py:168 does `items[:] = group.selected` inside its OWN
+# pytest_collection_modifyitems -- the identical session.items-mutation
+# mechanism `-m`/`-k` deselection uses (the same mechanism nexus-8x4le's
+# `-m lint` blind spot exploited). Under that real invocation the census
+# only ever sees its own shard (~20-25% of the corpus): enforcement was
+# shard-placement luck, not real coverage. This section makes that state
+# structurally impossible to mistake for enforcement -- ANY
+# session.items-based census can call partial_session_view_reason(request)
+# and, on a non-None return, refuse (skip -- "cannot determine anything
+# either way", never a silent pass and never a false FAIL) instead of
+# scanning a proven-partial view.
+_raw_collected_count = 0
+
+
+def pytest_itemcollected(item: pytest.Item) -> None:
+    """Count every item as pytest collects it, strictly BEFORE any
+    ``pytest_collection_modifyitems`` hook runs.
+
+    ``-m``/``-k`` deselection (``_pytest/mark/__init__.py``, itself
+    ``@hookimpl(tryfirst=True)``) and pytest-split's shard selection
+    (``@hookimpl(trylast=True)``) are both ``pytest_collection_
+    modifyitems`` hookimpls; a conftest-level hook of the SAME name would
+    have no guaranteed order against either. ``pytest_itemcollected`` fires
+    per-item during the collection phase itself, before
+    ``pytest_collection_modifyitems`` is invoked at all, so this count
+    sidesteps hook-ordering entirely rather than depending on it.
+
+    A path-scoped invocation (e.g. ``pytest tests/upgrade/``) is already
+    reflected here: only items under that path get collected in the first
+    place, so the baseline matches the invocation's own intended scope, not
+    the whole repo -- a narrow path-scoped run does not, by itself, look
+    like a partial view below.
+    """
+    global _raw_collected_count
+    _raw_collected_count += 1
+
+
+# Below this ratio of (session.items after all deselection) / (raw
+# collected count), a session.items-based census cannot see enough of the
+# corpus to mean anything. 50% is generous headroom over both known shrink
+# mechanisms: `-m lint` collapses to ~6% (803/13101) and a pytest-split
+# shard to ~20-25% (2796/13101) -- either trips this floor by a wide
+# margin. The normal default-loop reduction from
+# `-m 'not integration and not slow and not lint'` alone measures ~90%
+# (11733/13101, reproduced live 2026-08-06) and stays comfortably above it.
+_SESSION_VIEW_SANITY_FLOOR = 0.5
+
+
+def partial_session_view_reason(request: pytest.FixtureRequest) -> str | None:
+    """Return a reason if *request.session.items* is a proven-partial view,
+    or ``None`` if it is trustworthy enough for a session.items-based
+    census to scan.
+
+    Two signals, checked in order:
+
+    1. pytest-split shard mode. ``PytestSplitPlugin`` registers iff BOTH
+       ``--splits`` and ``--group`` are set (``pytest_split.plugin.
+       pytest_configure``), and its ``pytest_collection_modifyitems`` does
+       ``items[:] = group.selected`` -- the exact mechanism nexus-vdti6 was
+       filed for. Deterministic; no count heuristics needed.
+    2. A generic floor against the raw pre-deselection count from
+       ``pytest_itemcollected`` above, guarding any OTHER future
+       session.items-shrinking mechanism ("the same class could affect any
+       future session.items-based census", nexus-vdti6's own framing).
+       Skipped entirely when ``-k`` was passed: a developer's deliberate
+       keyword narrowing that happens to still select a session.items-based
+       census is a normal targeted run, not shard-blindness reappearing
+       under a new name, and must not false-alarm.
+
+    A test whose OWN selection was deselected (``-m lint``, an unrelated
+    ``-k``) never calls this at all -- it simply does not run, which is the
+    correct, unproblematic case; this function only ever fires for a
+    census that DID run.
+    """
+    config = request.config
+    if config.getoption("splits", default=None) and config.getoption(
+        "group", default=None
+    ):
+        return (
+            f"pytest-split active (--splits={config.getoption('splits')} "
+            f"--group={config.getoption('group')}): session.items is one "
+            "shard of the corpus, not the whole thing (nexus-vdti6) -- a "
+            "session.items-based census cannot enforce anything meaningful "
+            "here. Enforcement runs in the dedicated non-sharded CI job "
+            "instead (see .github/workflows/ci.yml, NX_CENSUS_ONLY_JOB)."
+        )
+    if config.getoption("keyword", default=""):
+        return None
+    raw = _raw_collected_count
+    final = len(request.session.items)
+    if raw <= 0:
+        return None
+    ratio = final / raw
+    if ratio < _SESSION_VIEW_SANITY_FLOOR:
+        return (
+            f"session.items shrank to {final}/{raw} items ({ratio:.0%}, "
+            f"floor {_SESSION_VIEW_SANITY_FLOOR:.0%}) by some mechanism "
+            "other than --splits/--group or -k -- refusing to scan a "
+            "proven-partial view rather than pass vacuously."
+        )
+    return None
+
+
+# Every session.items-based census test whose partial-view guard must be
+# evaluated PRE-FIXTURE (see pytest_runtest_setup below), keyed by full
+# nodeid. Extend alongside `_CENSUS_ONLY_ALLOWED_MODULES` for a future
+# sibling census -- add the SPECIFIC test nodeid(s) that call
+# `partial_session_view_reason`, not the whole module (a module's ratchet/
+# liveness siblings don't read session.items and must never be skipped by
+# this hook).
+_SESSION_ITEMS_CENSUS_TEST_NODEIDS: frozenset[str] = frozenset({
+    "tests/test_mode_declarations_are_explicit.py"
+    "::test_mode_declarations_are_explicit",
+})
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Evaluate the partial-view guard BEFORE any fixture -- including the
+    autouse engine-substrate fixture -- is resolved for a registered
+    session.items-based census test.
+
+    WHY THIS MUST RUN PRE-FIXTURE, NOT INSIDE THE TEST BODY (nexus-vdti6,
+    CI red 2026-08-06, develop run 31061260804): the first cut called
+    `partial_session_view_reason(request)` as the FIRST LINE of
+    `test_mode_declarations_are_explicit`'s own body. By the time a test's
+    body executes, `_pytest/runner.py`'s `pytest_runtest_setup` has ALREADY
+    called `item.setup()`, which resolves every fixture the item depends
+    on -- including the autouse `_pin_t2_substrate` fixture, which boots
+    the engine substrate for EVERY test unless `NX_TEST_T2_SUBSTRATE=none`.
+    Locally this was invisible (the box happily absorbed a second engine
+    boot from the subprocess probe's nested pytest invocation); under a
+    REAL `--splits`/`--group` CI shard, the nested invocation's engine boot
+    collided with the outer shard job's already-bound engine ("service did
+    not bind port 42279") and FAILED loudly during fixture setup, before
+    the in-body skip ever ran -- the test errored instead of skipping
+    cleanly. That is backwards twice over: it breaks CI, and even where it
+    doesn't, a shrunk-view census should be CHEAP (no engine boot at all),
+    not merely non-fatal -- paying a ~10s engine boot per shard just to
+    immediately skip defeats the "structural honesty AND cheap" point of
+    nexus-vdti6's guard.
+
+    This mirrors `_pytest/skipping.py`'s own approach exactly:
+    `@hookimpl(tryfirst=True)` on `pytest_runtest_setup` runs before
+    `_pytest/runner.py`'s `pytest_runtest_setup` (the one that calls
+    `item.setup()`), so a `pytest.skip()` raised here pre-empts fixture
+    resolution entirely -- the SAME mechanism `NX_CENSUS_ONLY_JOB`'s
+    skip-marking already relies on (see `_skip_mark_everything_but_census`
+    below), just applied per-invocation via a runtime hook instead of a
+    collection-time marker (this hook must run on every invocation --
+    including the sharded `test` matrix and a plain local `-n auto` run --
+    not just the one `NX_CENSUS_ONLY_JOB` job).
+
+    Scoped to `_SESSION_ITEMS_CENSUS_TEST_NODEIDS` so it can never
+    misfire on an unrelated test -- `item` and `item.session` expose the
+    same `.config` / `.session.items` shape `partial_session_view_reason`
+    already accepts, so no adapter is needed.
+    """
+    if item.nodeid not in _SESSION_ITEMS_CENSUS_TEST_NODEIDS:
         return
-    # Surface and clean up.
-    leaked_sorted = sorted(leaked)
-    for path in leaked_sorted:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    names = ", ".join(p.name for p in leaked_sorted[:5])
-    suffix = "" if len(leaked_sorted) <= 5 else f" (+{len(leaked_sorted) - 5} more)"
+    reason = partial_session_view_reason(item)
+    if reason is not None:
+        pytest.skip(reason)
+
+
+# ── dedicated non-sharded CI job support (nexus-vdti6 candidate 1) ─────────
+#
+# The new `pytest (mode-declarations census)` job needs request.session.
+# items to be the REAL full default-loop corpus (so the guard above finds
+# it trustworthy), but must not pay to EXECUTE ~11.7k tests' fixtures
+# (engine substrate, PG, service jar -- the ~25min the sharded `test`
+# matrix already pays 4x for). Narrowing via `-k`/`-m` is not an option --
+# that shrinks session.items through the exact items[:] = selected
+# mechanism this whole guard exists to catch. SKIP-marking instead of
+# deselecting keeps every item in session.items (collection is untouched)
+# while making every non-census item's setup an near-instant `Skipped`
+# with NO fixture resolution: `_pytest/skipping.py`'s skip check is
+# `@hookimpl(tryfirst=True)` on `pytest_runtest_setup` and raises before
+# `_pytest/runner.py`'s own `pytest_runtest_setup` (the one that calls
+# `item.setup()` and instantiates fixtures) ever runs -- verified against
+# the installed pytest source, not assumed.
+_NX_CENSUS_ONLY_ENV = "NX_CENSUS_ONLY_JOB"
+
+# Every module this dedicated job exists to run for real. Extend this
+# alongside any future session.items-based census (see tests/AGENTS.md's
+# session.items rule) so the same job covers every "same-pattern sibling"
+# without spinning up a second dedicated job per census.
+_CENSUS_ONLY_ALLOWED_MODULES: frozenset[str] = frozenset({
+    "test_mode_declarations_are_explicit.py",
+})
+
+
+def _skip_mark_everything_but_census(items) -> None:
+    for item in items:
+        module_name = item.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
+        if module_name in _CENSUS_ONLY_ALLOWED_MODULES:
+            continue
+        item.add_marker(
+            pytest.mark.skip(
+                reason=(
+                    f"{_NX_CENSUS_ONLY_ENV}: this job exists solely to give "
+                    "session.items-based censuses a real, unsharded view of "
+                    "the full corpus; every non-census test is skip-marked "
+                    "(not deselected -- session.items stays the full "
+                    "collected count) rather than executed."
+                )
+            )
+        )
+
+
+def pytest_collection_modifyitems(items) -> None:
+    for item in items:
+        if item.get_closest_marker("scenario") is not None:
+            item.user_properties.append((_SCENARIO_PROPERTY, True))
+
+    if os.environ.get(_NX_CENSUS_ONLY_ENV):
+        _skip_mark_everything_but_census(items)
+
+
+def _is_xdist_worker(session) -> bool:
+    """True when this process is an xdist WORKER subprocess.
+
+    xdist sets ``config.workerinput`` only on worker-side configs
+    (``xdist.workermanage.WorkerController`` / ``xdist.remote``); it is
+    absent on the controller and on a plain serial (no ``-n``) run. Both
+    of those non-worker cases are exactly where enforcement belongs — see
+    the module comment above.
+    """
+    return hasattr(session.config, "workerinput")
+
+
+def _scenario_outcomes_from_terminalreporter(terminalreporter) -> dict[str, str]:
+    """Derive final per-test outcomes for every `scenario`-marked test
+    reported to this process, keyed by nodeid.
+
+    Built entirely from ``terminalreporter.stats`` (see the module
+    comment above for why: it is the only selection/outcome signal
+    reliably present on an xdist controller). Mirrors the phase
+    precedence a hook-based tracker would use: a test that skips does so
+    at ``setup`` and never gets a ``call`` report, so ``skipped`` is taken
+    from whichever phase carries it; a ``teardown`` failure after a
+    passing ``call`` must not read as a clean pass.
+
+    Filters on ``report.user_properties`` (stamped by
+    ``pytest_collection_modifyitems`` above), NOT ``report.keywords`` —
+    the latter also carries a truthy entry for every token pytest derives
+    from the item's own name/parametrize id, which false-positived on
+    ``test_marker_is_wired_to_a_real_invocation[scenario]`` (see the
+    module comment above for the reproduction).
+    """
+    outcomes: dict[str, str] = {}
+    for reports in terminalreporter.stats.values():
+        for report in reports:
+            if not dict(getattr(report, "user_properties", ())).get(_SCENARIO_PROPERTY):
+                continue
+            nodeid = getattr(report, "nodeid", None)
+            if nodeid is None:
+                continue
+            if getattr(report, "skipped", False):
+                outcomes.setdefault(nodeid, "skipped")
+            elif getattr(report, "when", None) == "call":
+                if report.failed:
+                    outcomes[nodeid] = "failed"
+                elif outcomes.get(nodeid) != "failed":
+                    # stats-category iteration order is not phase order: a
+                    # passing call report must never downgrade a teardown
+                    # failure already recorded for this nodeid.
+                    outcomes[nodeid] = "passed"
+            elif getattr(report, "when", None) == "teardown" and report.failed:
+                outcomes[nodeid] = "failed"
+    return outcomes
+
+
+def _check_scenario_non_vacuity(session) -> None:
+    """Fail the session loudly if too many `scenario` tests skipped —
+    never silently skip-pass (repo convention: a gate that skip-passes
+    when its dependency is absent must carry a max-skip / non-vacuity
+    assert).
+
+    No-ops on an xdist WORKER (enforcement happens once, on the
+    controller/serial process whose exit status is the real process exit
+    code — see the module comment above). Inert when zero `scenario`
+    tests reported an outcome in THIS process — a shard or filtered run
+    that got none is fine. Otherwise at most ``NX_SCENARIO_SKIP_BUDGET``
+    (default 0) of them may skip; more than that fails the session even
+    if every individual test reported a clean ``pytest.skip()`` (the
+    substrate silently degrading is exactly the failure mode this exists
+    to catch).
+    """
+    if _is_xdist_worker(session):
+        return
+    terminalreporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if terminalreporter is None:
+        # No terminal reporter registered (e.g. -p no:terminalreporter) —
+        # nothing to aggregate outcomes from; nothing this guard can check.
+        return
+    outcomes = _scenario_outcomes_from_terminalreporter(terminalreporter)
+    if not outcomes:
+        return
+    # Honest denominator (code-review-expert, 2026-08-05): "ran" is every
+    # `scenario` nodeid with a logged outcome in this aggregate — never a
+    # separately-tracked "selected" count that could silently overstate M
+    # under a shard or partial selection.
+    ran = sorted(outcomes)
+    skipped = sorted(nid for nid in ran if outcomes[nid] == "skipped")
+    budget = int(os.environ.get("NX_SCENARIO_SKIP_BUDGET", "0"))
+    if len(skipped) <= budget:
+        return
     session.exitstatus = 1
+    names = ", ".join(Path(n).name for n in skipped[:5])
+    suffix = "" if len(skipped) <= 5 else f" (+{len(skipped) - 5} more)"
     print(
-        f"\n\nFAIL: nexus-nifd cache-leak guard caught "
-        f"{len(leaked_sorted)} fixture-cache file(s) leaked into "
-        f"~/.config/nexus/: {names}{suffix}\n"
-        f"  Cause: a test bypassed the autouse `_isolate_config_dir` "
-        f"fixture or spawned a subprocess without inheriting "
-        f"NEXUS_CONFIG_DIR.\n"
-        f"  Cleanup: leaked files removed; failing the session.\n",
+        f"\n\nFAIL: scenario non-vacuity guard — {len(skipped)}/{len(ran)} "
+        f"`scenario`-marked test(s) with a logged outcome SKIPPED "
+        f"(budget={budget}): {names}{suffix}\n"
+        f"  A `scenario` test proves a real cross-verb journey against the "
+        f"session's engine substrate (tests/conftest.py::t2_service_env). A "
+        f"skip here usually means that substrate silently degraded (a "
+        f"stale/absent service jar) rather than a scenario genuinely being "
+        f"inapplicable — see tests/test_scenario_journeys.py.\n"
+        f"  Override (rare — e.g. a deliberately substrate-less shard): "
+        f"NX_SCENARIO_SKIP_BUDGET=<n>.\n",
         flush=True,
     )
 
@@ -660,12 +1077,17 @@ def _reset_aspect_worker_singleton() -> None:
 
 
 def set_credentials(monkeypatch) -> None:
-    """Set the cloud-ingest credential env for tests that call _has_credentials().
+    """Set NX_LOCAL=0 (cloud/non-local posture) for tests that need it.
 
     Shared helper used by test_doc_indexer.py and test_pdf_subsystem.py.
     RDR-155 P4b: the CHROMA_* keys died with the chroma credential map and
-    key presence no longer implies cloud mode — pin NX_LOCAL=0 explicitly
-    so the voyage embed path under test fires.
+    key presence no longer implies cloud mode — pin NX_LOCAL=0 explicitly.
+    nexus-sghyo (2026-08-06): the VOYAGE_API_KEY env var this used to set
+    alongside NX_LOCAL is no longer a client credential (client-side
+    Voyage embedding retired, Hal determination 2026-07-28) and no
+    surviving client code path (``_has_credentials()`` is deleted)
+    reads it — kept here only in case a caller's mocked
+    ``get_credential`` still keys off it incidentally.
     """
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
@@ -725,13 +1147,12 @@ def cloud_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # at module scope instead. See ``docs/contributing.md`` and
 # ``tests/AGENTS.md``.
 _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
-    # RDR-155 P4b P3: the nexus-owned Voyage EF's own unit tests. Reason class
-    # "string-literal-as-name" — the voyage tokens are ``model_name=`` values
-    # asserted against the mocked ``voyageai.Client.embed`` kwargs, which is
-    # the wire contract under test. Every test patches the client, so no
-    # embedding, no credential and no cloud mode is involved; requesting
-    # cloud_mode would add a live-credential dependency to a fully mocked test.
-    "test_voyage_ef.py",
+    # "test_voyage_ef.py" REMOVED (nexus-sghyo, 2026-08-06): the file it
+    # excluded, tests/db/test_voyage_ef.py, was deleted along with the
+    # module it tested (nexus.db.voyage_ef) — client-side Voyage
+    # embedding is retired (Hal determination 2026-07-28: "we do no
+    # embedding on the client"). See _MODE_LINT_EXCLUDE_FILES_CEILING's
+    # matching decrement in test_mode_declarations_are_explicit.py.
     # Cloud-behavior files — Phase 1 ships the lint mechanism with these
     # excluded; subsequent PRs promote each to module-level
     # ``pytestmark = pytest.mark.usefixtures("cloud_mode")``. Promotion is
@@ -1015,6 +1436,14 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # set-difference logic in bench_tumblers/plan_teardown; no Voyage call is
     # ever made and no embedder mode is asserted.
     "test_teardown_scope.py",
+    # nexus-h1zu0: dim_for_model_token(token) -> int|None is a pure dict
+    # lookup (nexus.db.reconcile._MODEL_DIMS, mirroring the Java
+    # PgVectorRepository.MODEL_DIMS authority). "voyage-code-3"/
+    # "voyage-context-3" are passed as literal ARGUMENTS asserting the
+    # routing TABLE's contents, not a behavior assertion about which
+    # embedder ran — no Voyage call, no credential, no embedder mode
+    # involved anywhere in the file. Reason class "string-literal-as-name".
+    "test_h1zu0_dim_routing.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
@@ -1113,7 +1542,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/catalog/test_http_catalog_client.py::TestResolveChunk::test_resolve_chunk_returns_full_dict",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
-    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_uses_verbatim_passthrough",
+    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_requests_server_side_re_embed",
     #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /
@@ -1136,7 +1565,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # voyage token is a realistic collection-NAME fixture for the update-chunks
     # HTTP request body; the test asserts the request is POSTed to the
     # /update-metadata endpoint, not any cloud-mode embedder behavior.
-    "tests/db/test_http_vector_client.py::TestUpdateChunks::test_posts_to_update_metadata_endpoint",
+    "tests/db/test_http_vector_client.py::TestUpdateChunks::test_posts_to_update_metadata_endpoint_empty_and_tenant",
     #
     # nexus-f0r8p.3 (RDR-181): force_re_embed forwarding tests in the batch-flush
     # closure. The voyage tokens are collection-NAME fixtures (code__repo__voyage-code-3__v1
@@ -1200,6 +1629,30 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # class, same as test_catalog_path.py above).
     "tests/test_doc_indexer.py::TestSectionTypeInPipeline::test_markdown_chunks_has_section_type",
     "tests/test_doc_indexer.py::TestSectionTypeInPipeline::test_markdown_chunks_section_classified",
+    # nexus-8x4le (2026-08-05): landed with the RDR-180 chash-conformance
+    # doctor check (dbd2cb46, nexus-du2dw) — reason "string-literal-as-name".
+    # ``test_fully_routable_collections_still_render_plain_clean`` builds a
+    # FAKE T3 client whose ``collection_names`` fixture is
+    # ``["knowledge__x__bge-base-en-v15-768__v1", "code__y__voyage-code-3__v1"]``
+    # purely to exercise the routability-enrichment probe's "all collections
+    # route to a known dim" branch; the voyage token is a segment of a
+    # conformant RDR-103 collection NAME fed to a fake, never to a real
+    # embedder. No Voyage credential or client is constructed anywhere in
+    # ``TestCheckChashConformanceReport``. Found via the whole-session
+    # census once it was restored to the default loop (see the module
+    # docstring above ``_MODE_LINT_EXCLUDE_FILES``/here for why this census
+    # cannot live in the lint bucket) — the test itself is not new-broken,
+    # it was simply never checked while the census sat mis-scoped.
+    "tests/test_health_service_checks.py::TestCheckChashConformanceReport::test_fully_routable_collections_still_render_plain_clean",
+    # nexus-sghyo PORT (2026-08-07): "string-literal-as-name". The test
+    # manually seeds a fake misclassified chunk with a hardcoded
+    # ``"embedding_model": "voyage-code-3"`` metadata literal to simulate
+    # a pre-existing stale record — no embedder is constructed, and the
+    # `cloud_mode` fixture it used to carry was dropped because it made
+    # this test collide with the now-retired non-service-embedding leg
+    # (indexer.py's CredentialsMissingError). The prune/migration
+    # behaviour under test is embedding-model-independent.
+    "tests/test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs",
 })
 
 

@@ -957,11 +957,110 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     )
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    pid = stop_storage_service(config_dir=config_dir)
-    if pid is None:
-        click.echo("No storage service lease found — already stopped.")
+    outcome = stop_storage_service(config_dir=config_dir)
+    pid = outcome.pids[0] if outcome.pids else None
+    pids_str = ", ".join(str(p) for p in outcome.pids)
+
+    # Honest-output contract (nexus-oyo2g): a lease MISS is never proof
+    # nothing is running, so "already stopped" is said ONLY when the
+    # process table also confirms no matching process — never inferred
+    # from lease absence alone. ``lease_seen`` further distinguishes "no
+    # lease found at all" from "a lease WAS found but had no usable pid"
+    # (review finding 2) — the two are different facts and the message
+    # must not conflate them. Every pid this call actually signalled is
+    # printed, never just the first (review finding 1) — a partial pid
+    # list is a partial truth for a command whose entire point here is
+    # honest reporting.
+    if outcome.source == "none":
+        if outcome.lease_seen:
+            click.echo(
+                "A storage service lease was found but had no usable "
+                "process info, and no matching processes were found — "
+                "already stopped."
+            )
+        else:
+            click.echo(
+                "No storage service lease found and no matching processes "
+                "— already stopped."
+            )
+    elif outcome.source == "process_table_unavailable":
+        lease_clause = (
+            "a storage service lease was found but had no usable process "
+            "info"
+            if outcome.lease_seen
+            else "no storage service lease was found"
+        )
+        click.echo(
+            f"{lease_clause.capitalize()}, and the process table could "
+            "not be checked (no 'ps' and no /proc) — assuming already "
+            "stopped, but this could not be verified."
+        )
+    elif outcome.source == "process_table":
+        lease_clause = (
+            "A storage service lease was found but had no usable process "
+            "info"
+            if outcome.lease_seen
+            else "No storage service lease was found"
+        )
+        click.echo(
+            f"{lease_clause}, but {len(outcome.pids)} live process(es) "
+            f"were found on the system — signalled pid(s) {pids_str}."
+        )
     else:
-        click.echo(f"Storage service stopped (pid={pid}).")
+        click.echo(f"Storage service stopped (pid(s)={pids_str}).")
+    # Review round 2 Significant finding 2: the tree-completion sweep is
+    # documented as "not optional even on the lease-found path" — when it
+    # could not run at all (no 'ps' and no /proc) but the lease branch
+    # already signalled something, `source` stays "lease" and the message
+    # above reads as a clean stop. Say so explicitly rather than silently
+    # dropping that caveat. Skipped when source is already
+    # "process_table_unavailable" — that branch's own message already
+    # covers this.
+    if not outcome.sweep_verified and outcome.source != "process_table_unavailable":
+        click.echo(
+            "Note: the process table could not be checked (no 'ps' and no "
+            "/proc), so a lingering engine child surviving the supervisor "
+            "signal above could not be ruled out.",
+            err=True,
+        )
+    if outcome.stubborn:
+        click.echo(
+            f"Warning: pid(s) {', '.join(str(p) for p in outcome.stubborn)} "
+            "survived SIGKILL and may still be running.",
+            err=True,
+        )
+
+    # CRITICAL (nexus-oyo2g review round 3): exit code is the ONLY
+    # machine-parseable signal this command has (no --json output). The
+    # bead's own documented remedy is `nx daemon service stop && nx
+    # daemon service start` — a stubborn survivor (repro c: a frozen/
+    # SIGSTOPped supervisor that outlives even the SIGKILL escalation)
+    # means the stop was NOT verified clean, and `start`'s lease-only
+    # short-circuit (_start_locked, unchanged by this fix) would happily
+    # proceed onto the old process if the shell `&&` sees exit 0 here.
+    # A failed/unverified stop must break that chain. Exiting here (before
+    # any --with-pg Postgres teardown) is deliberate: touching Postgres
+    # while the storage-service state is unverified is itself unsafe, not
+    # just unhelpful.
+    if outcome.stubborn:
+        click.echo(
+            f"nx daemon service stop: FAILED — pid(s) "
+            f"{', '.join(str(p) for p in outcome.stubborn)} survived the "
+            "stop escalation and may still be running. Do not run "
+            "'nx daemon service start' until this is resolved manually.",
+            err=True,
+        )
+        sys.exit(1)
+    if outcome.source == "process_table_unavailable" and not outcome.pids:
+        click.echo(
+            "nx daemon service stop: could not verify — no lease was "
+            "found, but the process table could not be checked either "
+            "(no 'ps' and no /proc), so 'already stopped' could not be "
+            "confirmed. Do not chain 'nx daemon service start' on this "
+            "result without checking manually.",
+            err=True,
+        )
+        sys.exit(1)
 
     creds_path = config_dir / "pg_credentials"
     if not creds_path.exists():

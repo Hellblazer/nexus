@@ -98,9 +98,15 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 - **`[post]` phase markers** — after the per-file loop, the pipeline keeps running for RDR discovery, pruning, pipeline-version stamping, and catalog registration. Each phase emits `[post] <phase>…` / `[post] <phase> done (Xs)`, bookended by `[post] Post-processing complete (Xs)` (introduced 4.8.0, nexus-vatx Gap 2).
 - **Transient-error backoff summary** — on exit, if any Voyage / ChromaDB retry fired: `Transient-error backoff: Xs total (voyage ..., chroma ...)`. Silent on clean runs. Visible on exception paths (introduced 4.8.0, nexus-vatx Gap 4a).
 
-**Concurrent / interrupted runs (nexus-lcmbp):** a pipeline row stranded in `running` state is checked by heartbeat freshness before a retry proceeds. A `running` row younger than the stale threshold (5 minutes) now fails LOUD — HTTP 409 `conflict_running`, surfaced client-side as a non-zero exit with a remedy string — instead of the old silent `rc=0` skip that wrote zero chunks and reported success. A `running` row older than the threshold, or one marked `failed`, resumes normally; a `completed` row is skipped as up to date. Batch `--dir` mode places a fresh-heartbeat conflict in the run's failures bucket rather than aborting the whole batch.
+**Concurrent / interrupted runs (nexus-lcmbp):** a pipeline row stranded in `running` state is checked by heartbeat freshness before a retry proceeds. A `running` row younger than the stale threshold (5 minutes) now fails LOUD — HTTP 409 `conflict_running`, surfaced client-side as a non-zero exit with a remedy string — instead of the old silent `rc=0` skip that wrote zero chunks and reported success. A `running` row older than the threshold, or one marked `failed`, resumes normally; a `completed` row is skipped as up to date. Batch `--dir` mode places a fresh-heartbeat conflict in the run's failures bucket rather than aborting the whole batch — every file is still attempted (nexus-uqq9z: the batch as a whole now exits non-zero once any file lands in that bucket; see the Exit code note below).
 
 Two related output lines are new since the RUNFENCE arc (nexus-5xn3k): `skipped: index fresh (use --force)` on `repo`/`pdf`/`md`/`rdr`/`nx dt index` paths where a staleness no-op previously printed nothing or `Indexed 0 chunk(s)`; and an end-of-run `WARNING: N of the M indexed above had completion refused by the engine's fail-closed verify (fence left at 'indexing') — NOT fully indexed. Re-index or --force to retry.` The refusal warning means the manifest write succeeded but the engine's completion-verify step declined to stamp the document complete — `index_state` stays `'indexing'`, the chunks are real (already counted among the files indexed this run) but the document is not fully indexed until a subsequent run — usually `--force` — completes the fence. `nx catalog manifest-verify TUMBLER_OR_TITLE` and `nx doctor`'s `stale index-run fences` check (see [nx doctor](#nx-doctor)) both name documents left in this state.
+
+**Superseded-chunk sweep summary (nexus-39upx):** when a re-index changes a document's extracted text, the new chunks land under new content hashes and the old ones fall out of the manifest — searchable T3 rows referenced by nothing until swept. `nx index repo` / `nx dt index` / `nx index pdf` / `nx index md` now report this at end-of-run: `swept N superseded T3 chunk(s) left behind by a changed re-index (nexus-39upx)` is informational (a successful cleanup, not a problem — it does not affect the exit code). `WARNING: superseded-chunk sweep skipped for N document(s) (REASON, ...) — old/superseded T3 rows may still be searchable. Re-index, or run 'nx t3 gc -c COLLECTION' once the underlying issue clears.` means the sweep could not verify orphanhood or note-safety for one or more documents this run (reasons: `before_read_failed`, `note_lookup_failed`, `delete_failed`) — capability-honest, never silent, and counted toward the non-zero exit described next.
+
+**Exit code (nexus-tp8yk):** `nx index repo` and `nx dt index` now EXIT NON-ZERO when the run ends with any completion refusal, catalog manifest-write failure, manifest-identity drop, or superseded-chunk sweep skip — the WARNING classes described above. Previously these were WARNING-only (`rc=0`); a script or CI job that gated on the exit code alone could not tell a damaged run from a clean one. The failure message names the remedy (`nx catalog manifest-verify <tumbler>`, or re-index with `--force`). This is a NEW exit-code condition on an existing command — a "clean" run that used to exit 0 with WARNING lines now exits non-zero; any automation keying on `nx index repo` / `nx dt index`'s rc should account for this. An UNCONFIRMED completion stamp (a pre-fence engine's `None` sentinel — no verify was possible at all) is a separate case and stays WARNING-only at `rc=0`; only a POSITIVE engine verdict (a refusal) or a write/identity failure triggers the non-zero exit.
+
+**`pdf --dir` batch exit code (nexus-uqq9z):** `nx index pdf --dir` now EXITS NON-ZERO when one or more files land in the run's failures list — real per-file exceptions (extraction errors, pipeline conflicts, completion refusals) AND manifest-identity drops alike, i.e. any entry the printed `N failure(s):` list carries. Previously the batch always exited 0 regardless of how many files failed, the same "clean rc, damaged run" gap `nx index repo` / `nx dt index` closed above, just left open one layer down for the `--dir` batch path. Per-file isolation is UNCHANGED — every PDF in the directory is still attempted and the failures list still prints exactly as before; only the batch's own exit code is new. The failure message is `N of M file(s) failed — see list above`. Single-file `nx index pdf PATH` (no `--dir`) already exited non-zero on its own failures (nexus-7f5qj) and is unaffected.
 
 **`pdf` and `md` flags:**
 
@@ -128,6 +134,7 @@ catalog identity.
 | `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
 | `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
+| `--allow-degraded-extraction` | Accept extracted text that fails the post-extraction quality gate (nexus-wi1uv, see [Post-Extraction Quality Gate](#post-extraction-quality-gate) below) instead of failing the run |
 
 ### PDF Extraction Backends
 
@@ -187,6 +194,68 @@ aggressively, so set it generously (several GB).
 ```bash
 nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)
 nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not installed)
+```
+
+#### Post-extraction quality gate
+
+`--extractor docling` is the documented recovery when MinerU OOM-fails on a
+formula-dense page — but on some pages Docling (and, less often, MinerU)
+can complete "successfully" while producing **space-stripped, unsearchable
+text**: words run together (`istheasetofthe`), with heavy raw-LaTeX noise.
+Nothing about the run looked wrong — it reported success, the chunks were
+indexed and embedded — the document just could not be found by search
+(nexus-wi1uv).
+
+Every extraction (MinerU, Docling, and the PyMuPDF fallback alike) now
+passes through one post-extraction sanity gate before chunking: three cheap
+signals — whitespace ratio, mean token length, and the fraction of
+abnormally long tokens — computed on the raw extracted text and compared
+against thresholds calibrated against real extracted text (clean prose,
+legitimately dense math/formula notation, and code-identifier-dense prose,
+so the gate does not reject real papers for being equation- or
+algorithm-heavy). A document whose signals cross the thresholds **fails the
+run** naming the failing signal(s), the measured value, and the remedy:
+
+```
+PDF paper.pdf failed the post-extraction quality gate (extraction_method=docling):
+whitespace_ratio=0.0114 < floor 0.05. This is the space-stripped-garbage failure
+mode (nexus-wi1uv) — the extracted text is likely unsearchable if indexed.
+Remedy: retry with `--extractor mineru` (formula-aware, often avoids the
+corruption), or if this document is legitimately dense/unusual and you have
+reviewed the extracted text, rerun with `--allow-degraded-extraction` to
+index it anyway.
+```
+
+**Blast radius of a failure differs by command.** `nx index pdf` (single
+file or `--dir`) fails just that invocation/file — `--dir` continues the
+rest of the batch and exits non-zero listing every failure. `nx dt index`
+contains a gate failure to the offending record (per-record batch
+isolation, same as any other recoverable indexing error) and continues the
+rest of the run. `nx index repo` contains it to the offending PDF too —
+the rest of the repo (code, prose, other PDFs, RDR docs) still indexes —
+but a non-zero count of gated PDFs still fails the overall `nx index repo`
+run's exit code (after post-processing completes), naming the count and
+the per-file remedy below.
+
+**Non-spaced scripts (CJK).** `str.split()` cannot segment Han, Hiragana,
+Katakana, or Hangul text — a real Chinese/Japanese/Korean document has no
+inter-word ASCII spaces and would otherwise look identical to the
+space-stripped-garbage signature on every signal. The gate detects
+non-spaced-script-dominant text and **skips** evaluation for it (logged at
+INFO as `extraction_quality_gate_skipped`) rather than force-fitting a
+threshold that cannot discriminate for that input — a mixed document
+(e.g. English section headers in an otherwise-CJK paper) is unaffected as
+long as CJK characters are not the dominant script.
+
+Pass `--allow-degraded-extraction` only after reviewing the extraction (or
+for a document you've confirmed genuinely trips the heuristic) — the run
+logs a WARNING so the override is visible immediately, AND every chunk of
+the document is stamped `quality_gate_overridden: true` in its persisted
+T3 metadata, so a later shakedown/audit has a durable handle on which
+documents were accepted with known-degraded text:
+
+```bash
+nx search "" --corpus docs --where quality_gate_overridden=true --files
 ```
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
@@ -689,9 +758,14 @@ Full document metadata, physical collection, and all links in and out. Accepts t
 
 ```
 nx catalog manifest-verify TUMBLER_OR_TITLE [--json]
+nx catalog manifest-verify --list [--json]
 ```
 
 Verify one document's RUNFENCE manifest against T3 (nexus-5xn3k.6, design memo §4) — a single-document `manifest_verify` call reporting referenced/present/missing chash counts plus the document's index-run fence state (`index_state`). Unlike `nx doctor`'s corpus-wide `manifest_verify_all` sweep, this checks ONE document without a full scan — use it after `nx doctor` names a document as damaged, or any time you want to confirm a specific document's manifest is intact.
+
+**`--list`** (nexus-heizf) switches to corpus-wide ENUMERATION instead of a single-document check — takes no `TUMBLER_OR_TITLE` argument. Wires the previously dead `manifest_orphans` engine endpoint (RDR-159 P-1b, zero callers before this bead) to a CLI surface: every dangling manifest ROW across the whole catalog, grouped by collection then by document, with compact position ranges (`positions=[0-3,7]`) and a distinct-chash count per document. This is `nx doctor`'s "dangling manifest chashes" census (`manifest_verify_all`, collection-level counts only) taken one step further — the row-listing counterpart that names the actual damaged documents. A damaged collection whose model token cannot be routed to a `chunks_<dim>` table (nexus-h1zu0) is reported by name under `unroutable_collections` rather than silently dropped. `--json` emits `{"collections": [{"collection", "documents": [{"doc_id", "positions", "distinct_chashes"}], "row_count"}], "total_rows", "unroutable_collections", "clean"}`. Exit 0 when clean, 1 when any dangling rows exist (or any damaged collection could not be fully enumerated).
+
+**Population**: dangling manifest rows are LIVE documents' manifest rows with no backing T3 chunk (direction manifest → chunk) — a DIFFERENT, disjoint population from [`nx catalog purge-trash`](#nx-catalog-purge-trash)'s stranded-chunk preview (existing chunk rows of TOMBSTONED documents with no live parent, direction chunk → parent). A chash cannot be in both; one instrument reading clean says nothing about the other (nexus-55l58, the 2026-08-04 shakedown's mixed-instrument mistake).
 
 Not to be confused with [`nx catalog verify`](#nx-catalog-verify) below (nexus-whh61.4, a pre-existing and unrelated command) — that one reconciles the whole catalog against T3 on the chash identity (vanished/damaged/lost finding classes); this one checks a single document's RUNFENCE fence state.
 
@@ -941,6 +1015,31 @@ The `Next page: --offset N` hint printed when more rows exist means "more entrie
 
 `stats`, `owners`, and `delete` remain standard catalog management. Run `nx catalog COMMAND --help` for details.
 
+### nx catalog owners --census
+
+```
+nx catalog owners [--include-deactivated] [--json]
+nx catalog owners --census [--include-deactivated] [--json]
+nx catalog owners --census --execute deactivate [--no-dry-run] [--confirm]
+nx catalog owners --execute reactivate --owner <tumbler_prefix> [--no-dry-run] [--confirm]
+```
+
+Read-only classification of every registered repo owner's on-disk `repo_root` (nexus-7kl32): `healthy` (root exists, has content), `path_vanished` (root does not exist at all — the bench-index-sandbox / throwaway-probe-checkout / stale-worktree debris population), `path_exists_empty` (root is still there but has been emptied out), or `unreadable` (existence/contents could not be confirmed, e.g. a permission error — deliberately never folded into `healthy`, same honesty principle as `nx doctor`'s git-hooks fix below). Owners with no `repo_root` set are reported separately and excluded from all four buckets. Since round 3 (T2 21467), classification only ever runs against the CURRENTLY ACTIVE owner set — deactivated owners are excluded from these buckets on every pass (they were already handled) and, if `--include-deactivated` is not passed, only a hidden-count hint is printed. The classification call itself now always fetches the full (active + deactivated) set in one round trip, both to support `--include-deactivated` and to compute the engine-capability signal below without a second call.
+
+`--execute deactivate` (nexus-cw262) is the mutation arm: it soft-deletes (`catalog_owners.deactivated_at`) the `path_vanished` owners that also have **zero live documents attached** (corroborated via a `by_owner` lookup per candidate — a transiently-unmounted path with real, still-queryable documents is excluded with a named reason, never silently deactivated; this corroboration adds one `by_owner` call per `path_vanished` candidate to the census, so a run with a large dead-owner population is proportionally slower than the pre-cw262 census-only pass — a deliberate cost for the correctness it buys). `path_exists_empty` and `unreadable` owners are NEVER mutation-eligible, regardless of flags. Requires `--census`; double-gated exactly like `nx catalog reconcile-stale` — a bare `--execute deactivate` (or `--no-dry-run` alone) reports only, and only `--no-dry-run --confirm` together actually deactivate. `--json` cannot be combined with `--execute`.
+
+Immediately before EACH write, the execute loop RE-VERIFIES that specific owner's eligibility (path re-classified as `path_vanished`, `by_owner` re-counted as zero) — the same "classification invariant re-check" discipline `nx catalog reconcile-stale`'s tombstone arm uses. An owner whose state changed between the census pass and its turn in the write loop (a long candidate list, a path that remounted, a document that got registered in the interim) is skipped with a named reason, never deactivated on stale evidence.
+
+**THE RESIDUAL.** `catalog_owners` carries no `created_at`/`updated_at` column, so a genuinely healthy but transiently-unmounted owner (a network volume, an external drive, a container mount that is simply not attached right now) with zero currently-registered documents is **wire-indistinguishable** from actual debris — both read `path_vanished` + `doc_count=0`. This cannot be closed by more corroboration signal (there is no timestamp to age-gate against); it is bounded and made honest instead: every eligible candidate row states the residual explicitly in both the human report and `--json`'s `mutation_eligible[].residual_note`; deactivation is reversible (see `--execute reactivate` below, plus the automatic reactivate-on-reregister); and `--include-deactivated` keeps deactivated owners auditable rather than silently gone.
+
+`--execute reactivate --owner <tumbler_prefix>` (nexus-cw262 round 3) is the undo affordance: it clears `deactivated_at` for ONE named owner. No `--census` needed — pass the exact target and the same `--no-dry-run --confirm` double-gate. This is the manual-recovery path alongside the automatic one: any live re-registration of the same owner (e.g. `nx index repo` on a remounted/re-cloned path) clears the flag automatically too, with no separate command needed — `--execute reactivate` exists for the case where re-registration isn't the fastest fix (the path is still down, or Hal just wants to undo a batch deactivate immediately).
+
+`--include-deactivated` (nexus-cw262 round 3) surfaces owners that were deactivated — a past `--execute deactivate` is not a silent permanent exclusion; it is auditable state. Works on both `nx catalog owners` (plain listing) and `--census`.
+
+The mutation arm's availability depends on which engine build the tenant is connected to. `nx catalog owners --census`'s `--json` output reports `mutation_status` as `"available"`, `"unavailable"` (the connected engine confirmed NOT to carry the nexus-cw262 owner-deactivate route — e.g. the live cloud engine before its next tag deploys), or `"unknown"` (no owners to read the signal from either way). The human report and `nx doctor`'s git-hooks fix_suggestion word themselves accordingly — neither ever claims `--execute deactivate` works against an engine confirmed not to support it.
+
+`nx doctor`'s git-hooks check (a `path_vanished`/`path_exists_empty` owner used to render there as a signal-free `ok=True` "could not check") points a dead CATALOG owner at this verb's `--execute deactivate` arm, capability-qualified as above — but a dead owner registered only in the legacy `repos.json` file is invisible to this census (catalog owners only); doctor's suggestion for that case is to edit `repos.json` directly instead.
+
 ### nx catalog backfill-owner-id (removed)
 
 Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
@@ -1108,6 +1207,8 @@ Unlike `reconcile-stale`, the catalog writer is constructed even for the default
 
 Note: this verb reclaims storage; it is not the search-visibility fix for a deleted document. On engines carrying the nexus-3ck2g read-side tombstone filter, content stops appearing in search results as soon as `nx catalog delete` tombstones it — independent of when `purge-trash` later reclaims the underlying rows.
 
+**Population (nexus-heizf) — do not cross-read this instrument against `nx doctor`'s "dangling manifest chashes" warn or [`nx catalog manifest-verify --list`](#nx-catalog-manifest-verify):** the stranded-chunk count here is EXISTING chunk rows of TOMBSTONED documents with no live parent (direction chunk → parent) — the opposite direction from doctor's dangling-manifest census (LIVE documents' manifest rows with no backing chunk, direction manifest → chunk). A chash cannot be in both populations at once; zero here says nothing about the other instrument's count, and vice versa.
+
 ### nx catalog orphan-backfill
 
 ```
@@ -1160,16 +1261,23 @@ nx collection list | awk '{print $1}' | xargs -I{} nx t3 gc -c {} --no-dry-run -
 ### nx t3 gc
 
 ```
-nx t3 gc -c COLLECTION [--orphan-window 30d] [--no-dry-run --yes] [--allow-empty-manifest-set]
+nx t3 gc -c COLLECTION [--orphan-window 30d] [--no-dry-run --yes]
+         [--allow-empty-manifest-set] [--allow-incomplete-index-state]
 ```
 
 Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4). A chunk is an orphan when its full `meta.chunk_text_hash` is NOT referenced by any manifest row in the catalog `document_chunks` table for `--collection`, AND its `indexed_at` predates the orphan window (default 30 days). This is the same manifest-vs-T3 comparison the indexer's own `_prune_deleted_files` performs at the end of `nx index`; this CLI is the operator-driven form with explicit dry-run + `--yes` confirmation and `ChunkOrphaned` event emission for the audit trail. `nx t3 gc` is the SOLE emitter of `ChunkOrphaned` events and the SOLE path that physically deletes T3 chunks: the strict per-candidate order is append `ChunkOrphaned(chunk_id, reason)` to the event log, THEN call `T3Database.delete_by_chunk_ids`. A crash between the two leaves the log consistent with T3 (event present, delete pending), and the next run idempotently retries the delete.
 
 Default is report-only; both `--no-dry-run` AND `--yes` are required to actually delete. Chunks missing `chunk_text_hash` (pre-RDR-053 relics — post-Phase-3 chunks have no `doc_id` at all, so that is no longer the skip criterion) are undecidable here and skipped with a warning; re-index the source or run `nx t3 reidentify` to populate the field.
 
+**Manifest-less notes are protected (nexus-39upx, RDR-145).** A `store_put` / `nx store put` note's chunk never gets a `document_chunks` manifest row — RDR-145 defers manifest-backed identity for notes, and `catalog-003-soft-delete.xml`'s `live_chunks` view treats a manifest-less chunk as live by design. Without a second check that would be indistinguishable from a chash that fell out of a live document's manifest via re-index (both simply read "not referenced"). Before computing orphan candidates, `nx t3 gc` fetches every catalog document registered under `--collection` (one server-scoped `list_by_collection` call) and excludes the chashes of any that are note-shaped (no `file_path`, `meta["doc_id"]` set — the same identity `nx catalog doctor --store-put-integrity` reads). A collection holding protected notes prints `protecting N manifest-less note chunk(s) from orphan classification (RDR-145)`. This lookup is fail-loud, not fail-open — unlike the orphan scan itself, an unverifiable note-set REFUSES the run (exit 1) rather than risk deleting live notes, since this is the operator-driven `--yes` path.
+
+**RUNFENCE index-state precondition (nexus-g6k6b).** A T3 chunk carries no `doc_id` (post-RDR-108), so an orphan candidate cannot be attributed to the specific document that most recently owned it. Since a document mid-reindex (`index_state='indexing'`) or one whose reindex fenced a failure (`'failed'`) may leave a manifest that is a partial, in-progress artifact — and since which candidate belongs to which document cannot be determined — `nx t3 gc` refuses the WHOLE collection's `--no-dry-run --yes` run when it contains ANY document that is not `index_state='complete'` (`'indexing'`, `'failed'`, or explicitly-reported `NULL`; manifest-less notes are excluded from this check — they never carry `index_state` by design and are already, separately, always protected). A pre-RUNFENCE engine that does not report `index_state` at all is floor-tolerated: the check is skipped entirely, matching the RUNFENCE arc's behavior everywhere else. A report line names the count and states when it applies, in both dry-run and a real run.
+
 `--orphan-window` accepts `s`, `m`, `h`, `d`, `w` suffixes (e.g. `30d`, `12h`, `2w`); a bare integer is rejected so a typo cannot silently mean 30 seconds.
 
 `--allow-empty-manifest-set` (nexus-jqrtp) overrides a refusal: when the catalog manifest for `--collection` references ZERO chashes but the collection still holds live chunks, every one of them would read as an orphan candidate — indistinguishable from a fresh/mis-scoped tenant or an unbackfilled manifest. `nx t3 gc` REFUSES (exit 1) in that state unless this flag is passed, pointing at `nx t3 backfill-manifest -c COLLECTION` or `nx catalog reconcile` to investigate first. Only pass it once you've confirmed the collection really is fully orphaned (e.g. a deliberately catalog-less collection).
+
+`--allow-incomplete-index-state` (nexus-g6k6b) overrides the RUNFENCE refusal above. DANGEROUS: only pass it once you've confirmed no reindex is concurrently running against the collection (finish or abandon any in-flight/failed runs first, or accept the risk).
 
 ### nx t3 reidentify
 
@@ -1918,7 +2026,7 @@ nx doctor
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
-Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip rather than crash `nx doctor`): dimension-orphaned collections (nexus-9tsdf, remedy `nx collection prune`); the dangling-manifest chash sweep — a populated `document_chunks` manifest whose chashes no longer resolve in T3, the class `nx catalog reconcile` does not cover, via the engine's `manifest_verify_all`; fails open but LOUD (SKIPPED + warning, never a silent clean pass) on a pre-fence engine 404 (nexus-5xn3k AC5, re-armed by nexus-5xn3k.6, closes nexus-ac4id; see also [`nx catalog manifest-verify`](#nx-catalog-manifest-verify) for the single-document form of the same check); stale index-run fences — documents stranded in `index_state='indexing'` beyond 6 hours (safe but wasteful: every intervening `nx index` re-chunks and re-embeds at full cost; remedy `nx index <path> --force`; nexus-5xn3k.6); and tumbler-allocator ("next_seq") drift — owners whose sequence counter has fallen at or below their own highest child. Self-heals per-owner on that owner's next registration (`nx index <path>`, the only remedy this check names); the engine also exposes an all-owners `sweepNextSeqDrift` converge route for the same drift class, not yet wired to a `nx` client verb (nexus-0ehwe).
+Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip rather than crash `nx doctor`): dimension-orphaned collections (nexus-9tsdf, remedy `nx collection prune`); the dangling-manifest ROW census — a populated `document_chunks` manifest whose ROWS no longer resolve to a T3 chunk (a chash referenced from two positions counts as two rows, not one — the report also shows the distinct-chash count when the enumeration below succeeds), the class `nx catalog reconcile` does not cover, via the engine's `manifest_verify_all`; fails open but LOUD (SKIPPED + warning, never a silent clean pass) on a pre-fence engine 404 (nexus-5xn3k AC5, re-armed by nexus-5xn3k.6, closes nexus-ac4id; see also [`nx catalog manifest-verify`](#nx-catalog-manifest-verify) for the single-document form of the same check). When this warn fires, doctor names the damaged documents directly if there are 10 or fewer; otherwise it points at `nx catalog manifest-verify --list` (nexus-heizf) to enumerate all of them. This population is disjoint from `nx catalog purge-trash`'s stranded-chunk count — see that command's docs before comparing the two; stale index-run fences — documents stranded in `index_state='indexing'` beyond 6 hours (safe but wasteful: every intervening `nx index` re-chunks and re-embeds at full cost; remedy `nx index <path> --force`; nexus-5xn3k.6); chash width-conformance — width-non-conformant chash rows (the GH #1414 class, `octet_length(chash) <> 32`) via the engine's tenant-scoped `GET /v1/catalog/chash/conformance` route (nexus-du2dw, RDR-180): reports per-table total/non-conformant/sample counts, names collections it cannot route to a dim table instead of silently skipping them, and degrades honestly (loud skip, never a false clean) on a pre-route engine; and tumbler-allocator ("next_seq") drift — owners whose sequence counter has fallen at or below their own highest child. Self-heals per-owner on that owner's next registration (`nx index <path>`, the only remedy this check names); the engine also exposes an all-owners `sweepNextSeqDrift` converge route for the same drift class, not yet wired to a `nx` client verb (nexus-0ehwe).
 
 Then: Voyage AI key, ripgrep binary (as of 6.16.0 an optional-accelerator advisory — missing rg renders install hints, never a failed doctor; hybrid search is simply disabled), git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
 
@@ -1961,24 +2069,32 @@ The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing l
 nx doctor --check-schema          # Report where the T2 schema lives
 ```
 
-The `--check-schema` flag (RDR-076; service-backed since RDR-152) reports
-that the T2 schema lives in Postgres and is Liquibase-managed by the
-nexus-service, applied at startup. The local-SQLite table/index/FTS5 census
-this check used to run died with the `=sqlite` opt-out (RDR-158 P3,
-nexus-7bomn); it now always prints the service-backed N/A message and
-validates nothing (nexus-p0clh).
+The `--check-schema` flag (RDR-076; service-backed since RDR-152) validates
+that the T2 schema is actually applied. The local-SQLite table/index/FTS5
+census this check used to run died with the `=sqlite` opt-out (RDR-158 P3,
+nexus-7bomn); nexus-p0clh replaced it with an unconditional N/A stub that
+validated nothing. nexus-vl8lk PORTED it: the check now asks the engine's
+`GET /version` for the applied Liquibase changelog fingerprint
+(`schema_latest_id` / `schema_changeset_count` / `schema_error`) and renders
+an honest verdict — OK with the changeset count, FAIL on `schema_error` or
+zero applied changesets, exit 2 (state UNKNOWN) when the engine is
+unreachable, or an explicit N/A when the endpoint withholds the fingerprint
+by design (managed/cloud service).
 
 ```
-nx doctor --check-plan-library    # Report where the plan library lives
+nx doctor --check-plan-library    # Report plan-library dimensional health
 ```
 
-The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) originally
-bucketed every row in the local `plans` table into authored / backfilled /
-non-dimensional and enforced the RDR-078 builtin floor. That local-SQLite
-dimensional census died with the `=sqlite` opt-out (RDR-158 P3, nexus-7bomn);
-the flag now always prints "Plan library is service-backed (Postgres) —
-local SQLite dimensional census N/A in service mode" and reports nothing
-else — no builtin-floor exit code, no `nx plan repair` hint (that command
+The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) buckets
+every row in the plan library into authored / backfilled / non-dimensional
+and enforces the RDR-078 builtin floor. The local-SQLite census this check
+used to run died with the `=sqlite` opt-out (RDR-158 P3, nexus-7bomn);
+nexus-p0clh replaced it with an unconditional N/A stub that validated
+nothing. nexus-vl8lk PORTED it: the check now reads the live plan library
+via `HttpPlanLibrary.list_plans` (no new engine route) and renders the same
+census against real service data — exit 1 when the global-tier builtin
+count is below the floor (fix: `nx plan reseed`), exit 2 (counts UNKNOWN)
+when the service is unreachable. No `nx plan repair` hint (that command
 group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
 
 ```
@@ -2376,14 +2492,16 @@ accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
 
-> **Known limitation (nexus-oyo2g):** `nx daemon service stop` decides what to
-> signal from the discovery lease (15s TTL). A supervisor whose heartbeat has
-> stalled is alive and serving while invisible to that check, so `stop` can
-> report "already stopped" having signalled nothing — and a following `start`
-> short-circuits once the heartbeat revives. `nx upgrade`'s engine convergence
-> is immune (it sweeps the stack from the process table, 7.0.0); if a manual
-> `stop && start` doesn't take, check `nx doctor` for a stale-supervisor
-> process-skew warning.
+> **Fixed (nexus-oyo2g):** `nx daemon service stop` used to decide what to
+> signal purely from the discovery lease (15s TTL) — a supervisor whose
+> heartbeat had stalled was alive and serving while invisible to that check,
+> so `stop` could report "already stopped" having signalled nothing, and a
+> following `start` would short-circuit once the heartbeat revived. `stop`
+> now falls back to the OS process table (the same mechanism `nx upgrade`'s
+> engine convergence already used) whenever the lease is absent, and always
+> sweeps for a surviving engine child even after a lease-named supervisor is
+> signalled — it never reports "already stopped" while a matching process is
+> still running.
 
 | Flag | Description |
 |------|-------------|
@@ -2716,6 +2834,57 @@ nx tier-status [--session SESSION_ID] [--last N] [--since ISO8601] [--json]
 Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp, `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
 
 In service mode the counts are read from the engine via `GET /v1/telemetry/tier_writes/query` (nexus-59wjj) — same filters, same row shape as the local SQLite path. Requires an engine that carries the route; against an older engine (or an unreachable service) the command degrades to an honest "service-backed; read unavailable" message rather than reporting a false zero. The doctor tier-discipline check reads through the same route.
+
+---
+
+## nx answer-runs
+
+```
+nx answer-runs [--since ISO8601] [--limit N] [--json]
+```
+
+Reads the `nx_answer_runs` telemetry table: every `nx_answer` MCP call
+writes a row here via `POST /v1/telemetry/nx_answer_runs/record`, and until
+`GET /v1/telemetry/nx_answer_runs/query` (nexus-eho3u) landed nothing ever
+read one back — the ETL `import_nx_answer_run` path doesn't count, it only
+writes in the other direction. Service-mode only; the table has no
+session_id column, so unlike `nx tier-status` there is no per-session
+default — `--since` bounds the window, `--limit` caps the listed page
+(default 20, does not affect the aggregates), `--json` emits structured
+output.
+
+Reports, computed over the whole `--since`-filtered set independent of
+`--limit`: total run count, oldest run timestamp, plan-match hit count vs.
+inline-planner fallback count, average `duration_ms`/`cost_usd`, and a
+fixed-edge latency histogram (`<5s`, `5s-30s`, `30s-2min`, `2min-5min`,
+`>5min` — the same buckets as the production distribution `nx_answer`'s own
+docstring cites, and the shape the shakedown playbook's §4.5 telemetry
+baseline snapshot captures every run). Against an engine that predates the
+route (or an unreachable service) the command degrades to an honest
+"service-backed; read unavailable" message — a 404 is diagnosed as version
+skew, any other HTTP status points at a live engine error, never a silent
+"total: 0".
+
+A "hit" is a row with a REAL matched plan (`plan_id` set and non-zero).
+`plan_id = 0` is the synthetic ad-hoc `Match` sentinel every SUCCESSFUL
+inline-planner run carries internally — not a matched plan — so it counts
+toward `fallback`, and the per-row listing renders it `fallback` rather
+than the misleading `plan=0`.
+
+`created_at` is stamped by the ENGINE's clock, not this machine's. A run
+recorded moments ago may not appear for a sub-second-precision `--since`
+value if this machine's clock and the engine's have drifted by even a few
+hundred milliseconds (observed non-hypothetically during development);
+prefer cutoffs with real separation — minutes or more — from any write you
+expect the read to see.
+
+`--json` wraps the store's result in a query envelope —
+`{since, limit, captured_at, ...}` — mirroring `nx tier-status --json`'s
+`{scope, session_id, last_n, since, ...}` shape, so a caller diffing
+successive §4.5 baseline snapshots can see the window and page size that
+produced each one. `captured_at` is this process's own wall clock at
+render time (display metadata only, never compared against a server
+timestamp).
 
 ---
 

@@ -39,7 +39,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── default: all stores resolve to 'service' ─────────────────────────────────
 
 
-@pytest.mark.parametrize("store", VALID_STORE_NAMES)
+@pytest.mark.parametrize("store", sorted(VALID_STORE_NAMES))
 def test_default_is_service_for_every_store(
     store: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

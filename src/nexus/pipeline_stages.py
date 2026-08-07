@@ -72,11 +72,19 @@ def extractor_loop(
     extractor: str = "auto",
     on_formula_oom: str = "fail",
     extraction_done: threading.Event | None = None,
+    allow_degraded_extraction: bool = False,
 ) -> ExtractionResult:
     """Extract pages to the pipeline buffer via the on_page streaming callback.
 
     On resume, if all pages are already in the buffer, skips re-extraction
     entirely and returns the stored ExtractionResult metadata.
+
+    *allow_degraded_extraction* (nexus-wi1uv) forwarded to
+    :meth:`PDFExtractor.extract`. When the post-extraction quality gate
+    raises, pages already streamed to the pipeline buffer stay written but
+    the run is marked failed by :func:`pipeline_index_pdf`'s
+    ``first_exc``/``clear_orphan_wal`` handling below — no garbage chunks
+    ever reach the chunker/uploader stages.
     """
     state = db.get_pipeline_state(content_hash)
     pages_extracted_at_start = state["pages_extracted"] if state else 0
@@ -133,7 +141,10 @@ def extractor_loop(
     ext = PDFExtractor()
     try:
         try:
-            result = ext.extract(pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page)
+            result = ext.extract(
+                pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
+                allow_degraded=allow_degraded_extraction,
+            )
         except PipelineCancelled:
             return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
 
@@ -705,6 +716,7 @@ def pipeline_index_pdf(
     doc_id: str = "",
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
+    allow_degraded_extraction: bool = False,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -713,6 +725,13 @@ def pipeline_index_pdf(
     - Tag table-page chunks
     - Correct chunk_count to the final total
     - Prune stale chunks from a previous version
+
+    *allow_degraded_extraction* (nexus-wi1uv): forwarded to
+    ``extractor_loop``/``PDFExtractor.extract``. Default ``False`` — a
+    document whose extraction fails the post-extraction quality gate
+    raises inside the extractor stage, which this function's
+    ``first_exc`` handling turns into a failed pipeline run (fence marked
+    failed, orphan WAL cleared) rather than a completed one.
 
     Args:
         force: Break the partial-ingest deadlock (nexus-9ji). When True,
@@ -794,26 +813,22 @@ def pipeline_index_pdf(
             # Mirrors the batch path (doc_indexer._index_pdf_document).
             pass
         else:
-            from nexus.config import get_credential, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
-            voyage_key = get_credential("voyage_api_key")
-            if voyage_key:
-                from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 - deferred to avoid circular import at module load
-                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
-            else:
-                try:
-                    db.mark_failed(content_hash, error="voyage_api_key not configured")
-                except Exception:  # noqa: BLE001 — boundary catch: the RuntimeError below must propagate, not a /fail transport error
-                    _log.warning(
-                        "pipeline_terminal_mark_failed",
-                        content_hash=content_hash,
-                        exc_info=True,
-                    )
-                raise RuntimeError(
-                    "voyage_api_key not configured — cannot embed for streaming "
-                    "pipeline (set a Voyage key, or use service mode for "
-                    "server-side embedding)"
+            # nexus-sghyo: non-service streaming embedding was retired —
+            # the client no longer embeds via Voyage (Hal determination
+            # 2026-07-28).
+            try:
+                db.mark_failed(content_hash, error="non-service embedding retired (nexus-sghyo)")
+            except Exception:  # noqa: BLE001 — boundary catch: the RuntimeError below must propagate, not a /fail transport error
+                _log.warning(
+                    "pipeline_terminal_mark_failed",
+                    content_hash=content_hash,
+                    exc_info=True,
                 )
+            raise RuntimeError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
 
     # nexus-5xn3k.4 RUNFENCE C2: commit the fence BEFORE the first chunk
     # upsert (memo §3.5 T0) — right before the executor starts the
@@ -832,6 +847,7 @@ def pipeline_index_pdf(
             extractor_loop, pdf_path, content_hash, db, cancel,
             extractor=extractor, on_formula_oom=on_formula_oom,
             extraction_done=extraction_done,
+            allow_degraded_extraction=allow_degraded_extraction,
         )
         chunk_future = pool.submit(
             chunker_loop, content_hash, db, cancel, embed_fn,
@@ -935,9 +951,24 @@ def pipeline_index_pdf(
         if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
             post_pass_ok = False
 
-    # 3. Stale chunk pruning.
-    if not _prune_stale_chunks(col, str(pdf_path), content_hash, corpus=corpus):
-        post_pass_ok = False
+    # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
+    # to query T3 via nexus.doc_indexer._identity_where's source_path
+    # fallback, which RDR-102 D2 (2026-05-02) made permanently unable to
+    # match any real chunk row (make_chunk_metadata dropped source_path
+    # entirely). The real cross-document dedup/prune protection is
+    # mcp_infra._sweep_superseded_vectors (manifest-diff based), proven
+    # end-to-end at tests/integration/test_tp8yk_manifest_never_outruns_
+    # chunks.py::test_union_guard_keeps_shared_chunk_at_the_production_
+    # wiring.
+    #
+    # SIGNAL NARROWING (both reviewers, nexus-tbkk1 fix round): the
+    # deleted step's own try/except used to set post_pass_ok=False (and
+    # so preserve this run's checkpoint for retry, see below) on a T3
+    # QUERY failure during the prune window — that specific signal is
+    # gone. Narrow: passes 1/2 above already probe the same T3
+    # collection, so a genuinely degraded service is still very likely
+    # caught there; only a failure window unique to the (now-removed)
+    # prune's own query timing is silently lost.
 
     state = db.get_pipeline_state(content_hash)
     total_chunks = state["chunks_uploaded"] if state else 0
@@ -1049,21 +1080,37 @@ def _enrich_metadata_from_extraction(
         or pdf_path.stem.replace("_", " ").replace("-", " ")
     )
 
-    # `title`, `source_author`, and (nexus-1oguj) `extraction_method` are
-    # the only extraction-dependent fields in ALLOWED_TOP_LEVEL — the
-    # other fields below (source_date, format, page_count, pdf_subject,
-    # pdf_keywords, is_image_pdf, has_formulas) are dropped by
-    # metadata_schema.normalize() so writing them costs cycles for no
-    # payload. Keep this dict minimal.
+    # `title`, `source_author`, (nexus-1oguj) `extraction_method`, and
+    # (nexus-wi1uv round-2) `quality_gate_overridden` are the only
+    # extraction-dependent fields in ALLOWED_TOP_LEVEL — the other fields
+    # below (source_date, format, page_count, pdf_subject, pdf_keywords,
+    # is_image_pdf, has_formulas) are dropped by metadata_schema.normalize()
+    # so writing them costs cycles for no payload. Keep this dict minimal.
+    #
+    # nexus-wi1uv round-2 CORRECTION: the historical comment here claimed
+    # "t3.update_chunks re-runs metadata_schema.normalize() before
+    # writing" for the empty-extraction_method case. VERIFIED FALSE for
+    # the production path: HttpVectorClient.update_chunks (src/nexus/db/
+    # http_vector_client.py) posts the raw metadata dict straight to
+    # /v1/vectors/update-metadata with no client-side normalize() call —
+    # only the LOCAL/in-memory T3Database.update_chunks normalizes, which
+    # is not the serving path in either mode post-RDR-155-P4a. Harmless
+    # for extraction_method (a PDF's value is never empty by the time
+    # this post-pass runs, so the drop-when-empty branch was dead code
+    # via THIS call site regardless), but NOT harmless for quality_gate_
+    # overridden, whose False default is the COMMON case for every
+    # streamed PDF — merging it in unconditionally would silently stamp
+    # every healthy document with an explicit False, defeating the
+    # sparse-key design in metadata_schema.normalize(). So: build this
+    # dict conditionally instead of trusting a downstream normalize that
+    # does not run on this path.
     enrichment = {
         "title": source_title,
         "source_author": meta.get("pdf_author", ""),
         "extraction_method": meta.get("extraction_method", ""),
     }
-    # An empty extraction_method here is safe to merge as-is: t3.update_chunks
-    # re-runs metadata_schema.normalize() before writing, which is what
-    # actually drops the empty-string default — no local emptiness check
-    # needed in this dict.
+    if meta.get("quality_gate_overridden", False):
+        enrichment["quality_gate_overridden"] = True
 
     try:
         all_ids: list[str] = []
@@ -1144,63 +1191,35 @@ def _update_chunk_metadata(
     return True
 
 
-def _prune_stale_chunks(
-    col: Any, pdf_path: str, content_hash: str, *, corpus: str = "",
-) -> bool:
-    """Delete chunks from T3 that belong to a previous version of the same PDF.
-
-    Returns True on success, False on failure.  Query and delete errors are
-    handled separately so a delete failure reports how many stale chunks
-    remain (nexus-tcwm).
-
-    nexus-dcym: when *corpus* is supplied and the catalog already
-    registered the file, the chunk lookup keys on ``doc_id``. Empty or
-    missing entries fall back to the legacy ``source_path`` lookup.
-    """
-    from nexus.doc_indexer import _identity_where  # noqa: PLC0415  — circular-dep avoidance (nexus.doc_indexer)
-    stale_ids: list[str] = []
-    offset = 0
-    where_filter = _identity_where(pdf_path, corpus)
-
-    # Phase 1: query for stale chunks
-    try:
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where=where_filter,
-                include=["metadatas"],
-                limit=300,
-                offset=offset,
-            )
-            batch_ids = batch.get("ids", [])
-            batch_metas = batch.get("metadatas", [])
-            for eid, meta in zip(batch_ids, batch_metas):
-                if meta.get("content_hash") != content_hash:
-                    stale_ids.append(eid)
-            if len(batch_ids) < 300:
-                break
-            offset += 300
-    except Exception as exc:  # noqa: BLE001 - best-effort stale-prune query; logged via log.warning, returns False
-        _log.warning("stale_prune_query_failed", pdf_path=pdf_path, error=str(exc))
-        return False
-
-    if not stale_ids:
-        return True
-
-    # Phase 2: delete stale chunks in batches of MAX_RECORDS_PER_WRITE=300.
-    # A single unbounded col.delete(ids=stale_ids) violates the ChromaDB
-    # Cloud quota on re-indexes that drop >300 chunks (indexing review I4).
-    try:
-        for i in range(0, len(stale_ids), 300):
-            batch = stale_ids[i:i + 300]
-            _vector_with_retry(col.delete, ids=batch)
-        _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
-        return True
-    except Exception as exc:  # noqa: BLE001 - best-effort stale-prune delete; logged via log.warning, returns False
-        _log.warning(
-            "stale_prune_delete_failed",
-            pdf_path=pdf_path,
-            stale_count=len(stale_ids),
-            error=str(exc),
-        )
-        return False
+# nexus-tbkk1: _prune_stale_chunks DELETED as dead code. It queried T3
+# via nexus.doc_indexer._identity_where's source_path fallback, which
+# RDR-102 D2 (2026-05-02, commit 83ac62c7) made permanently unable to
+# match any real chunk row — make_chunk_metadata dropped source_path
+# from chunk metadata entirely, so every chunk this pipeline writes
+# carries no source_path key (empirically confirmed zero-source_path
+# across a representative T3 sample — code__1-1, docs__1-1,
+# knowledge__knowledge/dt-papers/augur-oracle-papers/interpretability —
+# see nexus.doc_indexer._identity_where's docstring). The where-clause
+# always matched zero rows in production; the union-guard LOGIC it
+# exercised (nexus.indexer_utils.orphaned_chashes) remains live — called
+# directly by mcp_infra._sweep_superseded_vectors — and is covered by
+# tests/db/test_http_catalog_integration.py::TestPruneUnionGuard. Its
+# thin wrapper prune_orphan_candidates (built specifically for this
+# call site and its three siblings, all now deleted) was ALSO deleted
+# in this same fix round (zero production callers survived) — see
+# indexer_utils.py's deletion comment. This closes only the
+# doc_indexer.py/pipeline_stages.py HALF of RDR-102 D2's "Phase 5b"
+# 4-site dead-code class — the indexer.py/indexer_utils.py sibling sites
+# (nx index repo's code/prose paths) were audited and deleted by
+# nexus-afudo (2026-08-05); Phase 5b is now fully closed. Automatic (fires-on-every-reindex)
+# replacement protection for THIS pipeline is mcp_infra._sweep_
+# superseded_vectors (manifest-diff based, fires from the same
+# fire_batch/fire_document hook chain this pipeline already calls),
+# proven end-to-end at tests/integration/test_tp8yk_manifest_never_
+# outruns_chunks.py::test_union_guard_keeps_shared_chunk_at_the_
+# production_wiring — but it cannot see a legacy row whose owning
+# document's manifest never referenced it. nx t3 gc (RDR-108 Phase 4
+# chash-vs-manifest sweep, src/nexus/commands/t3.py:219) is the
+# comprehensive but manual/operator-triggered backstop for that
+# population; no one-time sweep was run as part of closing this bead
+# (production mutation, Hal-gated).

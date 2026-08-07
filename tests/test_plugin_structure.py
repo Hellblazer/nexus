@@ -10,6 +10,8 @@ from pathlib import Path
 import yaml
 import pytest
 
+pytestmark = pytest.mark.lint
+
 REPO_ROOT = Path(__file__).parent.parent
 PLUGIN_DIR = REPO_ROOT / "conexus"
 AGENTS_DIR = PLUGIN_DIR / "agents"
@@ -48,6 +50,9 @@ _STANDALONE_SKILLS = {
     # the nexus.migration engine (nx migrate-to-service); no agent dispatch,
     # no relay structure.
     "upgrade",
+    # 2026-08-05 compression arc — reference card for nexus test-suite layer
+    # routing + authoring directives. No agent dispatch, no relay structure.
+    "test-authoring",
 }
 
 

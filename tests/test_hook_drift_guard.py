@@ -23,6 +23,10 @@ from __future__ import annotations
 import ast
 import pathlib
 
+import pytest
+
+pytestmark = pytest.mark.lint
+
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = PROJECT_ROOT / "src" / "nexus"
 

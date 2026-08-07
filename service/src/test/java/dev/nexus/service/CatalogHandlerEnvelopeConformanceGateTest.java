@@ -135,6 +135,16 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "costs client-side String comparisons, never a SQL bind-parameter risk -- the concern "
         + "MAX_BATCH_DOC_IDS exists for";
 
+    private static final String NESTED_EXACT_COUNT_CAPPED_SAMPLE =
+        "the top-level `tables` array has FIXED cardinality (one row per covered table for "
+        + "the given dim -- chunks_<dim> + catalog_document_chunks -- never paged or "
+        + "truncated by data volume). The actual bounded sample (`sample_chashes`, capped "
+        + "at 20 by the nexus.chash_conformance_report stored function) is nested inside "
+        + "each row alongside `non_conformant`, which is the EXACT total count (not the "
+        + "sample length) -- the same exact-count-plus-capped-sample idiom this gate "
+        + "enforces at the top level (see manifest_orphans' count+orphans), applied one "
+        + "level down. There is no truncatable top-level list to reconcile a count against";
+
     private static final String GRAPH_TRUNCATION_GENUINE_GAP =
         "GENUINE GAP, deliberately left exempt rather than silently masked: graphBFS "
         + "(CatalogRepository) already computes atOrOverCap (the 500-node MAX_GRAPH_NODES cap) "
@@ -173,8 +183,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 66 routes on the final tree (65 + {@code
-     * /purge-trash}, nexus-3ck2g E3). */
+     * post {@code by_doc_id}-removal. 67 routes on the final tree (65 + {@code
+     * /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance}, nexus-du2dw). */
     private static final List<RouteSpec> ROUTES = List.of(
         // ── Documents ─────────────────────────────────────────────────────
         neither("/register", "handleRegister"),
@@ -215,10 +225,22 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionOk("/manifest/orphans", "handleManifestOrphans"),
         collectionOk("/links/orphaned", "handleLinksOrphaned"),
 
+        // ── Chash conformance (RDR-180, nexus-du2dw) ────────────────────────
+        collectionExempt("/chash/conformance", "handleChashConformance", NESTED_EXACT_COUNT_CAPPED_SAMPLE),
+
         // ── Index run fence (RUNFENCE, nexus-5xn3k.2) ──────────────────────
         neither("/manifest/verify", "handleManifestVerify"),
         collectionOk("/manifest/verify_all", "handleManifestVerifyAll"),
         neither("/index-run/begin", "handleIndexRunBegin"),
+        // idListOk (nexus-vw594 F1): same shape as /manifest/write_many
+        // above — a list of FULL {doc_id, content_hash, run_id} objects,
+        // not bare identifiers, but MAX_BATCH_DOC_IDS is enforced and
+        // write_many's identical shape is classified idListOk, so this
+        // follows the same precedent. Response {docs, failed_doc_ids} is
+        // NOT collectionReturning for the same reason write_many's
+        // identical failed_doc_ids field isn't: its length is bounded by
+        // the already-capped docs input, not a server-side page.
+        idListOk("/index-run/begin-many", "handleIndexRunBeginMany"),
         neither("/index-run/complete", "handleIndexRunComplete"),
         neither("/index-run/fail", "handleIndexRunFail"),
 
@@ -231,6 +253,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/owners/head_hash", "handleOwnerHeadHash"),
         neither("/owners/show", "handleOwnerShow"),
         collectionExempt("/owners/by_type", "handleOwnerByType", ADMIN_SCALE),
+        // nexus-cw262: response is a flat scalar map ({"deactivated": N} /
+        // {"reactivated": N}) -- no JSON array of items (not collectionReturning)
+        // and the request body carries only a single tumbler_prefix scalar, no id
+        // list (not idListAccepting). Same shape as /delete above.
+        neither("/owners/deactivate", "handleOwnerDeactivate"),
+        neither("/owners/reactivate", "handleOwnerReactivate"),
 
         // ── Collections ───────────────────────────────────────────────────
         neither("/collections/upsert", "handleCollectionUpsert"),

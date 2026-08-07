@@ -152,6 +152,42 @@ class TestMcpGhostRegisterCompensation:
             "pre-existing deduped row must survive the compensation"
         )
 
+    def test_dedup_hit_then_put_failure_stamps_fence_failed(
+        self, catalog_env: Path,
+    ) -> None:
+        """nexus-vw594 F2 fix-round IMPORTANT (code-review-expert, T1
+        scratch d9173ec9): the exact wedge the reviewer named — a
+        dedup-hit store_put (``catalog_row_minted=False``, so the C2
+        rollback above never fires; the row is pre-existing, not a
+        ghost) whose ``t3.put`` then fails. ``_fence_begin`` already
+        fired before ``t3.put`` (F2); without a matching ``_fence_fail``
+        in this except path the surviving row was stranded at
+        ``index_state='indexing'`` forever, with only the 6h doctor
+        sweep as signal. Asserts the row survives (same as the sibling
+        test above) AND its fence is stamped ``'failed'``, not left
+        dangling.
+        """
+        content = "dedup content then put fails"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(
+            owner, "b6enc-dedup-fence-mcp", content_type="knowledge",
+            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
+            meta={"doc_id": chash},
+        )
+
+        result = _mcp_store_put_with(_FailingT3(), content, "b6enc-dedup-fence-mcp")
+        assert result.startswith("Error"), result
+        rows = documents_by_title("b6enc-dedup-fence-mcp")
+        assert len(rows) == 1, "pre-existing deduped row must survive the compensation"
+        assert rows[0].index_state == "failed", (
+            f"expected the fence to be stamped 'failed' after a dedup-hit "
+            f"t3.put failure, got {rows[0].index_state!r} — a surviving "
+            f"row stuck at 'indexing' forever is exactly the wedge this "
+            f"test guards against"
+        )
+
     def test_compensation_failure_does_not_mask_original_error(
         self, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

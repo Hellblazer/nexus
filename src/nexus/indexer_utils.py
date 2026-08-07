@@ -12,7 +12,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +38,345 @@ _DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
     "*.lock", "go.sum",
 ]
+
+
+def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> list[str]:
+    """Of *candidates* (chashes no longer in *doc_id*'s manifest), return the
+    subset with NO OTHER live document referencing them — safe to delete
+    from T3.
+
+    Shared union guard (nexus-tp8yk D3), extracted from
+    ``mcp_infra._sweep_superseded_vectors`` (the ORIGINAL guard — this
+    function preserves its exact log event and fail-open contract) so
+    every T3-deleting prune site gets the identical protection: identical
+    chunk TEXT collapses to ONE T3 row shared by every document that
+    contains it (CLAUDE.md § catalog/T3 split). "Not in THIS document's
+    manifest" is therefore NOT "unreferenced" — deleting on that basis
+    would silently remove chunks another live document still depends on.
+
+    FAIL-OPEN, deliberately, on every failure mode: no reader, or a reader
+    whose ``docs_for_chashes`` raises. Over-retention is recoverable (the
+    next successful sweep catches it); over-deletion is not.
+
+    Args:
+        reader: a catalog READER exposing ``docs_for_chashes(chashes) ->
+            dict[str, list[str]]`` (never the write-only proxy — see
+            nexus-kgos1: a write-only proxy raises AttributeError for
+            every read op, which used to be swallowed into a silent
+            always-empty sweep). May be ``None`` (uninitialized catalog);
+            treated the same as a lookup failure.
+        doc_id: the document whose prune candidates are being checked.
+            Excluded from the "still referenced" test — finding *doc_id*
+            itself in the reverse lookup is not evidence of sharing.
+        candidates: chashes to test (typically ``stale_ids`` /
+            ``dropped`` — chashes this run no longer references).
+
+    Returns:
+        The subset of *candidates* referenced by no live document other
+        than *doc_id*. Empty on empty input or any read failure.
+    """
+    cands = sorted({c for c in candidates if c})
+    if not cands:
+        return []
+    # structlog.get_logger() called AT CALL TIME, deliberately, not the
+    # module-level ``_log`` — matches the original _sweep_superseded_
+    # vectors's exact pattern, which existing tests patch via
+    # ``patch("structlog.get_logger")`` (tests/test_superseded_vector_
+    # sweep.py). A pre-bound module logger would not observe that patch.
+    import structlog  # noqa: PLC0415 — see rationale above
+
+    if reader is None:
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_no_reverse_lookup",
+            doc_id=doc_id, candidates=len(cands),
+        )
+        return []
+    try:
+        refs = reader.docs_for_chashes(cands) or {}
+    except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_no_reverse_lookup",
+            doc_id=doc_id, candidates=len(cands),
+        )
+        return []
+    return [h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))]
+
+
+def catalog_documents_for_collection(reader: object, collection: str) -> list:
+    """Server-scoped catalog document fetch for *collection*.
+
+    nexus-39upx round 2 SIGNIFICANT 1: the ORIGINAL ``live_note_chashes``
+    called ``reader.all_documents(content_type="knowledge")`` — an
+    UNSCOPED fetch of every ``content_type="knowledge"`` document across
+    the whole tenant (every ``knowledge__*`` collection, not just this
+    one), filtered down to *collection* client-side. ``list_by_collection``
+    is the server-side-filtered equivalent already used elsewhere
+    (``catalog/manifest_backfill.py``, ``catalog/orphan_backfill.py``):
+    same unbounded-when-limit-omitted contract as ``all_documents``'s
+    ``content_type`` branch (``CatalogHandler.handleList``'s ``collection``
+    query param, ``filterLimit=0`` when the caller sends no explicit
+    limit) — one HTTP round trip, no truncation — just scoped to ONE
+    physical collection instead of the entire tenant, and returning
+    every content_type registered under it (in practice a single
+    physical_collection carries one content_type by the RDR-103 naming
+    convention, so this is a strict narrowing, not a behavior change for
+    any conformant collection).
+
+    This is the single collection-wide catalog read shared by
+    :func:`live_note_chashes` (RDR-145 notes) and
+    :func:`non_complete_documents` (nexus-g6k6b RUNFENCE precondition) —
+    fetch once, derive both from the same list, and (via
+    :class:`CollectionDocumentsCache`) fetch it at most once per batch
+    reindex sharing a collection rather than once per orphan-triggering
+    document.
+
+    RAISES on failure — deliberately, never a silent empty list. See
+    ``live_note_chashes``'s docstring for why a swallowed read here is
+    the nexus-kgos1 failure shape one hazard over.
+
+    Args:
+        reader: a catalog READER exposing ``list_by_collection(collection)
+            -> list[CatalogEntry]``. Read op — routed through the
+            write-only proxy it raises AttributeError, same class of
+            hazard as nexus-kgos1, so this must be the reader, never
+            the writer/write-proxy. ``None`` raises immediately.
+        collection: physical collection to fetch.
+    """
+    if reader is None:
+        raise RuntimeError(
+            "catalog_documents_for_collection: no catalog reader "
+            "available — cannot read catalog documents for a T3 sweep "
+            "safety check"
+        )
+    return list(reader.list_by_collection(collection) or [])
+
+
+def is_note_shaped(entry: object) -> bool:
+    """True when *entry* is a manifest-less MCP ``store_put`` / ``nx store
+    put`` note rather than an indexed (file-backed) document.
+
+    A note's catalog row carries no ``file_path`` (store_put origin, not
+    an indexed file) and stamps its single T3 chunk's natural id — the
+    full content hash — into ``meta["doc_id"]`` at write time
+    (``catalog/store_hook.py::single_chunk_manifest_metadata`` +
+    ``catalog_store_hook_tracked``).
+
+    THE single identity predicate for "is this a note" across the
+    codebase — :func:`live_note_chashes`, :func:`non_complete_documents`,
+    and ``nx catalog doctor --store-put-integrity``'s ghost lookup all
+    read the SAME shape. Extracted here (nexus-cotmr) so another call
+    site does not re-derive it independently — a divergent re-derivation
+    is exactly the failure class this predicate exists to prevent (two
+    definitions of "note" silently drifting apart). Deliberately NOT
+    used by ``health.py``'s RUNFENCE stale-fence check: notes are fenced
+    producers since nexus-cotmr fenced the CLI store path (MCP was
+    fenced by vw594/F2), so a note-shaped exemption there would mask
+    real fence regressions (critique T2 [21535]).
+
+    Args:
+        entry: a catalog entry (``CatalogEntry`` or any duck-typed
+            fixture exposing ``file_path`` and ``meta``). Attributes are
+            read via ``getattr`` with safe defaults so hand-built test
+            fixtures that omit one or both fields do not raise.
+
+    Returns:
+        True when *entry* has no ``file_path`` AND a truthy
+        ``meta["doc_id"]``.
+    """
+    if getattr(entry, "file_path", ""):
+        return False  # has a source file: indexed content, not a note
+    return bool((getattr(entry, "meta", None) or {}).get("doc_id", ""))
+
+
+def live_note_chashes(documents) -> set[str]:
+    """Chashes of manifest-less notes among *documents* that a
+    T3-deleting sweep must NEVER treat as orphans (nexus-39upx hazard 2
+    / RDR-145).
+
+    ``catalog-003-soft-delete.xml``'s ``nexus.live_chunks`` view (and its
+    ``purge_trash`` sibling) encode the standing contract: "a chunk is
+    live if it has NO manifest rows at all (a note chunk written by MCP
+    ``store_put`` / ``nx store put``) OR has at least one live-doc
+    manifest row." A manifest-diff sweep (``orphaned_chashes`` above, or
+    ``nx t3 gc``'s ``chashes_for_collection`` diff) only ever sees the
+    SECOND half of that OR: both ``docs_for_chashes`` and
+    ``chashes_for_collection`` query ``catalog_document_chunks``, so a
+    chash with ZERO manifest rows — a legitimate note — is
+    indistinguishable from a chash that fell out of a live document's
+    manifest via re-index. Both simply read as "not referenced".
+
+    A note's catalog row carries no ``file_path`` (store_put origin, not
+    an indexed file) and stamps its single T3 chunk's natural id — the
+    full content hash — into ``meta["doc_id"]`` at write time
+    (``catalog/store_hook.py::single_chunk_manifest_metadata`` +
+    ``catalog_store_hook_tracked``; the SAME field the ``nx catalog
+    doctor --store-put-integrity`` check reads for its own ghost
+    lookup).
+
+    Pure function (nexus-39upx round 2 SIGNIFICANT 1: no I/O) — callers
+    fetch *documents* once via :func:`catalog_documents_for_collection`
+    (typically through :class:`CollectionDocumentsCache` when the same
+    collection is swept for multiple documents in one batch) and pass
+    the SAME list here and to :func:`non_complete_documents`.
+
+    Args:
+        documents: catalog entries already scoped to one physical
+            collection (e.g. the return of
+            ``catalog_documents_for_collection(reader, collection)``).
+
+    Returns:
+        The set of chashes belonging to manifest-less notes among
+        *documents*. Empty when none are note-shaped (the common case
+        for code__/docs__/rdr__ collections, which are index-origin
+        only).
+    """
+    notes: set[str] = set()
+    for e in documents or []:
+        if not is_note_shaped(e):
+            continue
+        chash = (getattr(e, "meta", None) or {}).get("doc_id", "")
+        if chash:
+            notes.add(chash)
+    return notes
+
+
+def non_complete_documents(documents) -> list:
+    """Documents among *documents* whose RUNFENCE ``index_state`` is not
+    ``'complete'`` (nexus-g6k6b — nexus-39upx round 2 CRITICAL).
+
+    Bead nexus-39upx's own comment thread (Hal, 2026-08-02 11:23),
+    verbatim, is the binding requirement this implements: "PRECONDITION
+    ON OPTION (b) from the 5xn3k RUNFENCE design... The corpus-wide
+    sweep (b) MUST filter on ``index_state = 'complete'``. Sweeping a
+    document that is mid-index would delete chunks an in-flight run has
+    already written but has not yet manifested... Treat this as a
+    stated requirement on (b), not a nice-to-have."
+
+    ``nx t3 gc``'s alive-set (``chashes_for_collection``) is a
+    COLLECTION-level union of every live document's manifest — post-RDR-108
+    a T3 chunk carries no ``doc_id`` at all, so an orphan CANDIDATE
+    (a chash referenced by no current manifest row) cannot be attributed
+    back to the specific document that most recently owned it. The
+    conservative, structurally-honest way to implement "exclude chunks
+    belonging to a non-complete document" when candidates cannot be
+    attributed to individual documents is a collection-level circuit
+    breaker: if this collection contains ANY document that is not
+    ``'complete'``, no candidate in the collection can be PROVEN safe,
+    so the caller must refuse (or require an explicit operator
+    override) rather than delete anything.
+
+    Classification, per Hal's follow-up comment (2026-08-02 17:02) —
+    honored verbatim, not paraphrased down:
+      - Note-shaped documents (the same ``file_path==""`` +
+        ``meta["doc_id"]`` shape :func:`live_note_chashes` protects) are
+        EXCLUDED from this list. Hal: "store_put-origin documents NEVER
+        carry index_state (registered exclusion on nexus-5xn3k, accepted
+        design)... That is the conservative direction (their chunks are
+        never swept: over-retention, not deletion) and is correct" —
+        i.e. notes are ALREADY, separately, unconditionally protected;
+        re-flagging them here would make every knowledge collection
+        holding even one note permanently refuse gc, which is not the
+        behavior "over-retention... is correct" describes.
+      - Every OTHER document with ``index_state`` != ``'complete'``
+        counts, INCLUDING ``None`` (reported explicitly as null).
+        Hal: "do not 'fix' it by widening the filter to NULL — NULL
+        means unknown, and sweeping unknown-state docs is exactly the
+        mid-index-deletion hazard the precondition exists to prevent."
+        This covers ``'indexing'`` (live), ``'failed'`` (a run that
+        fenced a failure — its manifest may be a partial, mid-truncation
+        artifact of ``atomic_manifest_replace``'s first-batch replace,
+        same hazard shape as ``'indexing'``), and ``None`` (unknown —
+        never assumed safe).
+      - A document whose ``index_state`` was never REPORTED at all
+        (``index_state_reported=False`` — a pre-RUNFENCE engine that
+        does not have the column) is EXCLUDED from this list: the same
+        floor-tolerance stance the RUNFENCE arc used everywhere else
+        (``doc_indexer._index_run_fresh`` et al) — an engine that
+        cannot answer the question behaves exactly as it did before
+        this check existed, never a refusal the operator cannot act on.
+
+    Pure function (no I/O) — see :func:`live_note_chashes` for the
+    fetch-once-reuse-twice rationale.
+    """
+    out = []
+    for e in documents or []:
+        if is_note_shaped(e):
+            continue  # note-shaped: live_note_chashes's exemption already covers it
+        if not getattr(e, "index_state_reported", True):
+            continue  # pre-RUNFENCE engine: floor-tolerant, no signal to act on
+        if getattr(e, "index_state", None) != "complete":
+            out.append(e)
+    return out
+
+
+class CollectionDocumentsCache:
+    """Memoizes :func:`catalog_documents_for_collection` for the
+    lifetime of one instance (nexus-39upx round 2 SIGNIFICANT 1).
+
+    ``_sweep_superseded_vectors`` (``mcp_infra.py``) is called once per
+    orphan-triggering document inside ``_manifest_write_loop``'s
+    per-batch loop — a batch reindex over many documents sharing one
+    collection would otherwise re-fetch the WHOLE collection's catalog
+    documents once per document that happens to have dropped a chash.
+    The bead's own corpus data (SHAKEOUT-7.1.1) measured ~20% orphan
+    rates in heavily-reindexed collections: a 1000-document batch
+    reindex in such a collection would trip the fetch roughly 200 times
+    with zero reuse. Construct ONE instance per ``(reader, collection)``
+    pair — once per ``_manifest_write_loop`` call — and share it across
+    every document processed in that call.
+
+    Caches a raised exception too (re-raised verbatim on every
+    subsequent :meth:`get` within the SAME batch) rather than
+    re-attempting a call that already failed once this batch — a
+    transient catalog outage should not be retried once per document
+    either; each caller's own fail-open/fail-loud handling still fires
+    per document, just against the same cached failure.
+    """
+
+    __slots__ = ("_reader", "_collection", "_value", "_error", "_done")
+
+    def __init__(self, reader: object, collection: str) -> None:
+        self._reader = reader
+        self._collection = collection
+        self._value: list | None = None
+        self._error: Exception | None = None
+        self._done = False
+
+    def get(self) -> list:
+        if not self._done:
+            self._done = True
+            try:
+                self._value = catalog_documents_for_collection(self._reader, self._collection)
+            except Exception as exc:  # noqa: BLE001 — cached and re-raised verbatim below, never swallowed
+                self._error = exc
+        if self._error is not None:
+            raise self._error
+        assert self._value is not None
+        return self._value
+
+
+# nexus-tbkk1 (2026-08-05, substantive-critic Significant #2):
+# prune_orphan_candidates DELETED. It was a THIN wrapper around
+# orphaned_chashes (above) built specifically for the tp8yk D3 fix at
+# the three doc_indexer.py prune sites and pipeline_stages._prune_
+# stale_chunks — its own docstring named exactly those four call sites
+# as its reason to exist ("the three doc_indexer.py prune sites and
+# pipeline_stages._prune_stale_chunks used to gate..."). nexus-tbkk1
+# deleted all four of those call sites (RDR-102 D2 made their
+# source_path-keyed candidate queries permanently unable to match any
+# real chunk row), leaving this wrapper with ZERO production callers —
+# only orphaned_chashes remains live, called directly by mcp_infra.
+# _sweep_superseded_vectors. Falsified by deletion (nexus-tbkk1 fix
+# round): the dedicated unit test file tests/test_indexer_utils_
+# prune_orphan_candidates.py is deleted alongside it; the union-guard
+# LOGIC it wrapped (orphaned_chashes) remains fully covered by
+# tests/db/test_http_catalog_integration.py::TestPruneUnionGuard and
+# tests/integration/test_tp8yk_manifest_never_outruns_chunks.py. If a
+# future caller (e.g. nexus-afudo's indexer.py/indexer_utils.py sites)
+# needs this exact "no-reader-at-all falls back to unconditional
+# delete" shape, recover it from git history rather than resurrecting
+# dead code speculatively — it may not even be the right shape for a
+# different candidate population.
 
 
 def find_repo_root(path: Path) -> Path | None:
@@ -257,7 +596,7 @@ class StalenessCache:
     :func:`check_staleness` so per-file checks become O(1) dict lookups
     instead of O(N) ChromaDB roundtrips.
 
-    Two indexes:
+    One index:
 
     - ``by_doc_id`` keys on the catalog tumbler stored in chunk
       metadata. Populated only for chunks whose stored ``doc_id`` field
@@ -266,12 +605,24 @@ class StalenessCache:
       backfill are absent from this index, which the cached
       ``check_staleness`` correctly treats as a cache miss → "stale" →
       re-index → ghost-chunk healed.
-    - ``by_source_path`` keys on the chunk's ``source_path`` metadata.
-      Populated for every chunk that carries a non-empty source_path
-      (most of them; RDR-102 D2 dropped source_path from the canonical
-      schema, so post-D2 chunks won't appear here — they live only in
-      ``by_doc_id``). Used only when the caller has no doc_id (legacy /
-      catalog absent code path).
+
+    nexus-afudo (2026-08-05): ``by_source_path`` DELETED as dead code —
+    RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed ``source_path`` from
+    ``make_chunk_metadata``, the single factory every writer
+    (code_indexer.py, prose_indexer.py, pipeline_stages.py, and
+    doc_indexer.py alike) routes through, so no chunk written since
+    then has ever carried the key. A live-store existence probe
+    (field>=! boundary-value test, method validated against present/
+    absent-field controls) found zero rows carrying ``source_path``
+    across 13 representative collections (~115k chunks) spanning both
+    continuously-reindexed (code__1-1, code__1-20, code__1-33) and
+    long-untouched corpora — see ``nexus.doc_indexer._identity_where``'s
+    docstring for the original 6-collection probe and T2
+    ``nexus/nexus-afudo-audit-2026-08-05`` for the extension. The index
+    was therefore always empty in production; caller-side lookups
+    against it always missed, and ``check_staleness`` correctly treated
+    every doc_id-less file as unconditionally stale (no behavior
+    change from deleting an index that could never hold a row).
 
     Why the cache exists: ``nx index repo`` on a healthy repo where
     nothing has changed is dominated by per-file
@@ -284,7 +635,6 @@ class StalenessCache:
     """
 
     by_doc_id: dict[str, tuple[str, str]] = field(default_factory=dict)
-    by_source_path: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def build_staleness_cache(col: object) -> StalenessCache:
@@ -457,9 +807,9 @@ def build_staleness_cache(col: object) -> StalenessCache:
                 doc_id = chash_to_doc.get(chash, "")
         if doc_id:
             cache.by_doc_id[doc_id] = value
-        source_path = meta.get("source_path", "")
-        if source_path:
-            cache.by_source_path[source_path] = value
+        # nexus-afudo: by_source_path population DELETED as dead code —
+        # see StalenessCache's docstring. No chunk written since RDR-102
+        # D2 (2026-05-02) carries a source_path key.
     return cache
 
 
@@ -477,13 +827,14 @@ def check_staleness(
     Two execution modes:
 
     - **Cached (preferred when the orchestrator passes a cache).**
-      Looks up ``doc_id`` in :attr:`StalenessCache.by_doc_id` (or
-      ``source_file`` in :attr:`StalenessCache.by_source_path` for
-      legacy / no-catalog callers). Pure dict lookup, no ChromaDB
-      roundtrip. The orchestrator builds the cache once per collection
-      via :func:`build_staleness_cache` before the per-file loop, so
-      ``nx index repo`` on a healthy repo (most files current) pays
-      one paginated sweep instead of one Chroma query per file.
+      Looks up ``doc_id`` in :attr:`StalenessCache.by_doc_id`. Pure
+      dict lookup, no ChromaDB roundtrip. The orchestrator builds the
+      cache once per collection via :func:`build_staleness_cache`
+      before the per-file loop, so ``nx index repo`` on a healthy repo
+      (most files current) pays one paginated sweep instead of one
+      Chroma query per file. A file with no ``doc_id`` (legacy /
+      catalog-absent caller) is an unconditional cache miss — see
+      nexus-afudo below.
     - **Per-file (back-compat).** When *cache* is ``None``, performs a
       ChromaDB ``get()`` wrapped in ``_vector_with_retry``. The retry
       logic is part of the staleness check's contract — callers must
@@ -498,9 +849,12 @@ def check_staleness(
         doc_id: Catalog ``doc_id`` for the file. When non-empty (RDR-101
             Phase 4, nexus-dcym), the chunk lookup keys on ``doc_id`` so
             that the staleness check stays consistent across renames and
-            owner-scope changes. Empty falls back to the legacy
-            ``source_path``-keyed lookup for chunks predating the
-            doc_id backfill.
+            owner-scope changes. Empty means unconditional "stale" (see
+            nexus-afudo below) — every production caller
+            (code_indexer.py, prose_indexer.py, indexer.py's PDF path)
+            supplies a real catalog-resolved doc_id or falls through
+            this fast-fail; there is no source_path-keyed lookup left
+            to fall back to.
         cache: Optional :class:`StalenessCache`. When supplied the
             check is a dict lookup; when ``None`` the check is a Chroma
             roundtrip.
@@ -508,20 +862,36 @@ def check_staleness(
     Returns:
         True when the stored chunk has the same content_hash AND embedding_model,
         meaning the file is current and can be skipped.  False otherwise.
+
+    nexus-afudo (2026-08-05): the ``source_path``-keyed fallback (both
+    the cached ``StalenessCache.by_source_path`` lookup and the
+    uncached ``where={"source_path": ...}`` Chroma query) was DELETED
+    as dead code. RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed
+    ``source_path`` from ``make_chunk_metadata`` — the single factory
+    every writer routes through — so no chunk written since then has
+    ever carried the key, and the fallback could only ever match a
+    genuinely pre-2026-05-02 legacy row. A live-store probe (field>=!
+    boundary-value existence test) found zero such rows across 13
+    representative collections (~115k chunks), extending nexus-tbkk1's
+    original 6-collection / ~47k-chunk probe to the code__/docs__/rdr__
+    collections this module's callers (``nx index repo``) actually
+    write. Empty ``doc_id`` now returns False immediately (no query,
+    no dict lookup) — behaviorally identical to the deleted fallback,
+    which always missed in production, just without the doomed I/O.
     """
     if cache is not None:
-        if doc_id:
-            stored = cache.by_doc_id.get(doc_id)
-            # Cache miss when the caller has a doc_id heals a ghost
-            # chunk by treating the file as stale: re-index will write
-            # a chunk carrying doc_id metadata and the next sweep
-            # populates by_doc_id for it. Mirrors the Chroma-path
-            # behaviour at indexer_utils.check_staleness:291.
-            if stored is None:
-                return False
-            return stored == (content_hash, embedding_model)
-        # Legacy / no-doc_id caller: fall back to source_path lookup.
-        stored = cache.by_source_path.get(str(source_file))
+        if not doc_id:
+            # No catalog doc_id for this file (legacy / catalog-absent
+            # caller). See the nexus-afudo docstring note above — no
+            # source_path-keyed cache entry can ever exist to check
+            # against, so this is an unconditional "treat as stale."
+            return False
+        stored = cache.by_doc_id.get(doc_id)
+        # Cache miss when the caller has a doc_id heals a ghost
+        # chunk by treating the file as stale: re-index will write
+        # a chunk carrying doc_id metadata and the next sweep
+        # populates by_doc_id for it. Mirrors the Chroma-path
+        # behaviour at indexer_utils.check_staleness:291.
         if stored is None:
             return False
         return stored == (content_hash, embedding_model)
@@ -529,16 +899,14 @@ def check_staleness(
     # RDR-108 Phase 3 (nexus-bdag): chunks no longer carry ``doc_id`` —
     # the catalog ``document_chunks`` manifest is authoritative. Query
     # by ``content_hash`` (a file-level fingerprint that all chunks of
-    # the same file share); falling back to ``source_path`` for legacy
-    # chunks predating RDR-102 D2.
-    where: dict
-    if content_hash:
-        where = {"content_hash": content_hash}
-    else:
-        where = {"source_path": str(source_file)}
+    # the same file share). An empty content_hash has no identity to
+    # query by — see the nexus-afudo docstring note above; unconditional
+    # "treat as stale" rather than a doomed source_path query.
+    if not content_hash:
+        return False
     existing = _vector_with_retry(
         col.get,  # type: ignore[attr-defined]
-        where=where,
+        where={"content_hash": content_hash},
         include=["metadatas"],
         limit=1,
     )
@@ -551,27 +919,6 @@ def check_staleness(
     ):
         return False
     return True
-
-
-def check_credentials(voyage_key: str, chroma_key: str) -> None:
-    """Raise CredentialsMissingError if either API key is absent.
-
-    Args:
-        voyage_key: Voyage AI API key string (empty string = missing).
-        chroma_key: ChromaDB API key string (empty string = missing).
-
-    Raises:
-        CredentialsMissingError: When one or both keys are absent.
-    """
-    missing: list[str] = []
-    if not voyage_key:
-        missing.append("voyage_api_key")
-    if not chroma_key:
-        missing.append("chroma_api_key")
-    if missing:
-        raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config set <key> <value>"
-        )
 
 
 def check_local_path_writable() -> None:

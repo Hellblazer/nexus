@@ -387,6 +387,15 @@ def _index_dt_content_record(
     record), never an exception. Returns ``True`` only when chunks were written
     AND the DT identity was stamped.
 
+    ``ChunkLandingUnverifiedError`` and ``IndexRunVerifyRefused`` (both
+    ``NexusError`` subclasses ``index_markdown``'s fence can raise —
+    errors.py:196, 234) are deliberately NOT part of the except tuple below
+    and are left to propagate to the caller (nexus-hb10j) — mirroring
+    ``_index_record``'s "indexer exception is a precondition" contract.
+    ``index_cmd``'s ``dt_content_active`` branch catches both at the call
+    site and converts them into a failed-record entry, exactly like the
+    file-backed branch does.
+
     The extracted text is cached at a STABLE per-UUID path
     (``<catalog>/.dt-content/<uuid>.md``) rather than a throwaway temp file
     (code-review HIGH-1). A throwaway path breaks re-index idempotency — the
@@ -681,15 +690,28 @@ def index_cmd(
     touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
 
-    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note): zero the completion-
-    # refusal collector so the end-of-run summary reflects only this run's
-    # refusals — mirrors nx index repo's reset_manifest_write_failures().
-    from nexus.mcp_infra import reset_complete_refusals  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
-    reset_complete_refusals()
+    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note) + nexus-tp8yk D2b: zero
+    # the completion-refusal / manifest-write-failure / identity-drop
+    # collectors (index_repo_cmd's parity — full nx index reset() triple),
+    # so this run's exit-code check below reflects only THIS run's
+    # problems, not leftover state from an earlier call in the same
+    # process. nexus-7f5qj: delegates to the shared commands._helpers
+    # reset helper (this was the first of what became four near-identical
+    # copies; see that module for the extraction rationale).
+    from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+    reset_identity_drop_collectors()
     # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l): must be bound
     # before the per-record try/except below reaches its `except
     # IndexRunVerifyRefused` clause.
-    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
+    #
+    # nexus-tp8yk substantive-critic CRITICAL (nexus-9800y, 2026-08-04): same
+    # bind-before-use requirement for the new `except ChunkLandingUnverifiedError`
+    # clause below.
+    from nexus.errors import (  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
+        ChunkLandingUnverifiedError,
+        IndexRunVerifyRefused,
+        PER_RECORD_SURVIVABLE_EXCEPTIONS,
+    )
 
     # RDR-139 Layer D: only probe DT availability once, and only when the
     # opt-in flag is set. Flag off -> the unsupported-extension skip path is
@@ -708,9 +730,88 @@ def index_cmd(
             # exactly as before.
             if dt_content_active:
                 dt_collection = _resolve_dt_collection(collection, corpus, ext)
-                if _index_dt_content_record(
-                    uuid, collection=dt_collection, corpus=corpus,
-                ):
+                try:
+                    content_indexed = _index_dt_content_record(
+                        uuid, collection=dt_collection, corpus=corpus,
+                    )
+                except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
+                    # nexus-hb10j (substantive-critic, 2xu6t adjudication,
+                    # T2 [21480], 2026-08-05): mirrors the file-backed
+                    # _index_record catch below. Both members of
+                    # PER_RECORD_SURVIVABLE_EXCEPTIONS are NexusError, not
+                    # (ImportError, RuntimeError, OSError) —
+                    # _index_dt_content_record's own except tuple around
+                    # index_markdown() never matches them, so they
+                    # propagate here unchanged. Pre-fix this escaped the
+                    # loop entirely and aborted the WHOLE --dt-content
+                    # batch on the first affected record — third
+                    # occurrence of the nexus-2fyb/qo84l/9800y regression
+                    # class, this time for the non-file-backed ingest
+                    # path. Convert to a failed-record entry with the SAME
+                    # wording the file-backed branch renders.
+                    #
+                    # nexus-rlkgu: catches the shared tuple (one except
+                    # clause) instead of one except clause per exception
+                    # type, so a NEW per-record-raisable NexusError
+                    # subclass needs no edit here — only an addition to
+                    # PER_RECORD_SURVIVABLE_EXCEPTIONS in errors.py.
+                    # isinstance dispatch below preserves the two KNOWN
+                    # exceptions' differing structured-log fields; pure
+                    # refactor, behavior unchanged for them.
+                    #
+                    # nexus-cy4oy (substantive-critic CRITICAL, round-2
+                    # review of nexus-rlkgu): the dispatch is now TOTAL —
+                    # an explicit isinstance branch per known type, plus a
+                    # generic final `else` for any OTHER
+                    # PER_RECORD_SURVIVABLE_EXCEPTIONS member. The
+                    # original binary if/else assumed its else branch was
+                    # always ChunkLandingUnverifiedError-shaped (accessed
+                    # .collection/.count unconditionally); a hypothetical
+                    # THIRD tuple member without that shape would have hit
+                    # AttributeError INSIDE this handler and escaped the
+                    # try/except, re-aborting the batch — occurrence-4 of
+                    # the nexus-2fyb/qo84l/9800y/hb10j class, reproduced
+                    # with both AST gates green (they inspect except-
+                    # clause TYPES, not handler bodies). The generic
+                    # branch below makes ANY tuple member safe: type name
+                    # + str(exc), no attribute assumptions. Handler-body
+                    # coverage (which the AST gates structurally cannot
+                    # give) is proven by TestAllTupleMembersSurviveThe
+                    # RealPerRecordPath and TestGenericFallbackHandles
+                    # UnknownTupleMember in tests/test_commands_dt.py.
+                    if isinstance(exc, IndexRunVerifyRefused):
+                        from nexus.commands.index import _index_run_refused_message  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import between commands/dt.py and commands/index.py
+                        _log.error(
+                            "dt_content_index_completion_refused",
+                            uuid=uuid,
+                            doc_id=exc.doc_id,
+                            referenced=exc.referenced,
+                            present=exc.present,
+                            missing=exc.missing,
+                        )
+                        failed.append((uuid, path, _index_run_refused_message(exc, target_collection=dt_collection)))
+                    elif isinstance(exc, ChunkLandingUnverifiedError):
+                        _log.error(
+                            "dt_content_chunk_landing_unverified",
+                            uuid=uuid,
+                            collection=exc.collection,
+                            count=exc.count,
+                        )
+                        failed.append((uuid, path, str(exc)))
+                    else:
+                        # Generic fallback: a PER_RECORD_SURVIVABLE_
+                        # EXCEPTIONS member this dispatch does not know
+                        # about yet. No attribute assumptions — type name
+                        # + str(exc) only.
+                        _log.error(
+                            "dt_content_index_unhandled_survivable_exception",
+                            uuid=uuid,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+                    continue
+                if content_indexed:
                     content_extracted += 1
                     indexed += 1
                     touched_collections.add(dt_collection)
@@ -741,31 +842,82 @@ def index_cmd(
                 dry_run=False,
                 extractor=extractor,
             )
-        except IndexRunVerifyRefused as exc:
+        except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
             # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l,
-            # 2026-08-02): NOT an (ImportError, RuntimeError) — IndexRunVerifyRefused
-            # is a NexusError. Any DT record large enough to hit the
+            # 2026-08-02) + nexus-tp8yk D1 / substantive-critic CRITICAL
+            # (nexus-9800y, 2026-08-04): neither member of
+            # PER_RECORD_SURVIVABLE_EXCEPTIONS is (ImportError, RuntimeError)
+            # — both are NexusError. Any DT record large enough to hit the
             # streaming or incremental path (index_pdf -> pipeline_index_pdf
-            # / _index_pdf_incremental -> _fence_complete) propagates this
-            # exception by contract (the fail-loud completion verify), and
-            # pre-fix it fell through this except tuple entirely, escaping
-            # the loop and aborting the WHOLE `nx dt index` batch — exactly
-            # the nexus-2fyb regression this catch exists to prevent, just
-            # for a failure mode this bead introduced. Convert to a failed-
-            # record entry with the SAME wording commands/index.py renders
-            # for the CLI pdf/md commands (imported, not duplicated) so a
-            # refusal here reads identically wherever it surfaces.
-            from nexus.commands.index import _index_run_refused_message  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import between commands/dt.py and commands/index.py
-            _log.error(
-                "dt_index_completion_refused",
-                uuid=uuid,
-                path=path,
-                doc_id=exc.doc_id,
-                referenced=exc.referenced,
-                present=exc.present,
-                missing=exc.missing,
-            )
-            failed.append((uuid, path, _index_run_refused_message(exc)))
+            # / _index_pdf_incremental -> _fence_complete) can propagate
+            # IndexRunVerifyRefused by contract (the fail-loud completion
+            # verify); index_pdf/index_markdown raise ChunkLandingUnverifiedError
+            # from _upsert_skip_reembed when a stale-positive existing_ids
+            # probe meets an engine response that omits "missing" (cannot
+            # tell whether the batch landed) — BEFORE any manifest row is
+            # committed. Pre-fix either fell through the narrow except tuple
+            # entirely, escaping the loop and aborting the WHOLE `nx dt
+            # index` batch on the first affected record — the nexus-2fyb/
+            # nexus-qo84l/nexus-9800y regression class. Convert to a
+            # failed-record entry so record N+1 still indexes.
+            #
+            # nexus-rlkgu: catches the shared tuple (one except clause)
+            # instead of one except clause per exception type, so a NEW
+            # per-record-raisable NexusError subclass needs no edit here —
+            # only an addition to PER_RECORD_SURVIVABLE_EXCEPTIONS in
+            # errors.py. isinstance dispatch below preserves the two KNOWN
+            # exceptions' differing structured-log fields and message
+            # wording (commands/index.py's _index_run_refused_message for
+            # the refusal, str(exc) for the landing-unverified case) —
+            # pure refactor, behavior unchanged for them.
+            #
+            # nexus-cy4oy (substantive-critic CRITICAL, round-2 review of
+            # nexus-rlkgu): TOTAL dispatch — an explicit isinstance branch
+            # per known type, plus a generic final `else` for any OTHER
+            # PER_RECORD_SURVIVABLE_EXCEPTIONS member. Identical rationale
+            # to the --dt-content branch's twin fix above: the old binary
+            # if/else assumed its else branch was always
+            # ChunkLandingUnverifiedError-shaped, so a hypothetical THIRD
+            # tuple member without that shape would raise AttributeError
+            # here and escape the try/except, re-aborting the batch —
+            # exactly occurrence-4 of this bug class, invisible to both
+            # AST gates (they inspect except-clause TYPES, not handler
+            # bodies). See TestAllTupleMembersSurviveTheRealPerRecordPath
+            # and TestGenericFallbackHandlesUnknownTupleMember in
+            # tests/test_commands_dt.py for the handler-body coverage.
+            if isinstance(exc, IndexRunVerifyRefused):
+                from nexus.commands.index import _index_run_refused_message  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import between commands/dt.py and commands/index.py
+                _log.error(
+                    "dt_index_completion_refused",
+                    uuid=uuid,
+                    path=path,
+                    doc_id=exc.doc_id,
+                    referenced=exc.referenced,
+                    present=exc.present,
+                    missing=exc.missing,
+                )
+                failed.append((uuid, path, _index_run_refused_message(exc, target_collection=resolved_collection)))
+            elif isinstance(exc, ChunkLandingUnverifiedError):
+                _log.error(
+                    "dt_index_chunk_landing_unverified",
+                    uuid=uuid,
+                    path=path,
+                    collection=exc.collection,
+                    count=exc.count,
+                )
+                failed.append((uuid, path, str(exc)))
+            else:
+                # Generic fallback: a PER_RECORD_SURVIVABLE_EXCEPTIONS
+                # member this dispatch does not know about yet. No
+                # attribute assumptions — type name + str(exc) only.
+                _log.error(
+                    "dt_index_unhandled_survivable_exception",
+                    uuid=uuid,
+                    path=path,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
             continue
         except (RuntimeError, ImportError) as exc:
             # nexus-2fyb code-review R4-I2: a single indexing failure must
@@ -849,13 +1001,16 @@ def index_cmd(
             "'nx catalog update <tumbler> --source-uri x-devonthink-item://<UUID>'.",
         )
 
-    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34): a
-    # completion stamp REFUSED by the engine's fail-closed verify means the
-    # manifest was written but the document is NOT actually whole in T3 —
-    # index_state stays 'indexing'. Silently folding this into a clean
-    # "Indexed N record(s)." summary reproduces, one layer up, the exact
-    # silent-success shape the fence exists to close. Mirrors
-    # _emit_manifest_write_failure_summary in commands/index.py.
+    # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34) +
+    # nexus-tp8yk D2b: a completion stamp REFUSED by the engine's
+    # fail-closed verify, a manifest write failure, or an identity drop
+    # used to leave rc=0 (WARNING-only, or silently folded into a clean
+    # "Indexed N record(s)." summary) — reproducing, one layer up, the
+    # exact silent-success shape the fence exists to close. nexus-7f5qj:
+    # delegates to the shared commands._helpers collector-check (see that
+    # module for the per-collector rationale this docstring used to carry
+    # inline, including WHY the write-failure line says "document(s)" and
+    # not "record(s)" despite this command's own convention elsewhere).
     #
     # substantive-critic SIGNIFICANT (2026-08-02, T2
     # nexus/5xn3k6-critique-2026-08-02 [21355]): a refused record still has
@@ -867,20 +1022,33 @@ def index_cmd(
     # keyed on doc_id, not per-record uuid), so this states the overlap as
     # a count relationship rather than naming which of the indexed records
     # it is.
-    from nexus.mcp_infra import get_complete_refusals  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal)
-    refused = get_complete_refusals()
-    if refused:
-        click.echo(
-            f"  WARNING: {len(refused)} of the {indexed} indexed above had "
-            f"completion refused by the engine's fail-closed verify (fence "
-            f"left at 'indexing') — NOT fully indexed. Re-index or --force "
-            f"to retry.",
-            # nexus-5xn3k.6 code-review-expert NIT (2026-08-02): matches
-            # commands/index.py's _emit_manifest_write_failure_summary
-            # stream placement — all WARNING-level summary lines go to
-            # stderr, not stdout.
-            err=True,
-        )
+    from nexus.commands._helpers import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on refusal/failure/drop)
+        emit_identity_drop_summary,
+        raise_identity_drop_exception,
+    )
+    if emit_identity_drop_summary(
+        indexed_count=indexed,
+        # nexus-7f5qj code-review follow-up (T2 [21484]): preserve this
+        # command's ORIGINAL print order exactly (refused, then
+        # write-failed, then identity-drops) — the extraction's default
+        # order matches index_repo_cmd's instead. No test pinned the
+        # order for either caller, but matching it keeps the "behavior-
+        # preserving refactor" claim exact. nexus-39upx hazard 4:
+        # appended at the end so this surface also gets sweep
+        # visibility — an explicit order that predates a check must not
+        # silently opt that surface out of it.
+        order=(
+            "refused", "write_failed", "identity_drops",
+            "superseded_swept", "superseded_sweep_skipped",
+        ),
+    ):
+        # nexus-tp8yk D2b: mirrors commands/index.py's index_repo_cmd — a
+        # completion refusal, a manifest write failure, or an identity
+        # drop used to leave rc=0. Refusal != unconfirmed: a pre-fence
+        # engine's None sentinel still warns at rc 0, untouched by this
+        # bead — only a POSITIVE engine verdict or a write/identity
+        # failure fails the run.
+        raise_identity_drop_exception(subject="record")
 
 
 def _gather_records(

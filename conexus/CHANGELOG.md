@@ -4,7 +4,30 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [7.2.0] - 2026-08-04
+## [7.3.0] - 2026-08-07
+
+### Activated by this pin advance (nexus-4av2n — the stacked-reviewer gate goes mechanical)
+- **`bd close`/`bd done` BLOCKS on a missing review-completed marker**
+  (`pre_close_verification_hook.sh`): advisory-only becomes denying;
+  `verification=passed` is stamped only when a marker is actually found
+  (previously stamped unconditionally — a false audit record). Marker lookup
+  is dual-source (T1 scratch OR T2 memory) so MCP-written markers count when
+  the CLI's T1 lease is stale, the close-verb matcher is tokenized, and the
+  lookup is bounded by a self-enforced 3.5s wall-clock deadline so the
+  harness's 5s PreToolUse timeout can never kill the check mid-flight.
+- **`git push` is gated on review coverage**
+  (`git_add_all_redirects_to_explicit_paths.py` third check): an outgoing
+  range carrying gated-path commits (`src/`, `service/src/main/`, `conexus/`,
+  `tests/`) with no review-completed coverage is denied. Tag pushes and
+  `release/*` branch pushes are exempt (loudly); merge commits are visible to
+  the scan; the 50-commit cap warns instead of silently passing. This is the
+  check the 2026-07-31 postmortem says would have caught that day's five
+  unreviewed pushed commits.
+
+### Added
+- `test-authoring` reference skill: nexus test-suite layer routing
+  (-n auto / -m lint / integration / scenario journeys) and the authoring
+  directives from the 2026-08-05 compression arc (+ registry entry).
 
 Pin advance activates the subagent-reliability wave merged inert under the
 v7.1.2 pin (the full PENDING_RELEASE ledger empties into this release):

@@ -104,6 +104,10 @@ class TestDtIndexSummaryTruthful:
         commands/index.py's existing manifest-write-failure summary — the
         run's headline count stays honest about what THIS record's client
         side did, and the refusal is never hidden inside it.
+
+        nexus-tp8yk D2b: a refusal now ALSO fails the run's exit code —
+        a "clean" rc=0 was exactly the gap a script/CI job keying on the
+        exit code would never notice.
         """
         monkeypatch.setattr(
             "nexus.mcp_infra.get_complete_refusals",
@@ -119,7 +123,7 @@ class TestDtIndexSummaryTruthful:
             index_record=lambda uuid, path, **kw: (True, 5),
             records=[("U1", "/a.pdf")],
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0, result.output
         assert reset_calls == [1]  # zeroed at run start (index.py parity)
         # substantive-critic SIGNIFICANT (2026-08-02): must STATE the
         # subset relationship — a refused record is already counted in
@@ -127,6 +131,7 @@ class TestDtIndexSummaryTruthful:
         # silently double-counted with no stated overlap.
         assert "1 of the 1 indexed above had completion refused" in result.output
         assert "NOT fully indexed" in result.output
+        assert "manifest-verify" in result.output
 
     def test_refused_subset_wording_is_not_hardcoded_to_one_of_one(self, runner, monkeypatch):
         """Pins the N/M relationship for a non-trivial ratio — a test that
@@ -143,7 +148,7 @@ class TestDtIndexSummaryTruthful:
             index_record=lambda uuid, path, **kw: (True, 3),
             records=[("U1", "/a.pdf"), ("U2", "/b.pdf")],
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0, result.output
         assert "Indexed 2 record(s)" in result.output
         assert "1 of the 2 indexed above had completion refused" in result.output
 
@@ -156,6 +161,46 @@ class TestDtIndexSummaryTruthful:
         )
         assert result.exit_code == 0, result.output
         assert "REFUSED" not in result.output
+
+    def test_manifest_write_failure_alone_exits_nonzero(self, runner, monkeypatch):
+        """nexus-tp8yk D2b: a manifest WRITE failure (distinct from a
+        refusal) must ALSO fail the run — this collector was checked by
+        neither dt.py's exit code nor (pre-tp8yk) its summary at all.
+        KILL CONTROL for this specific collector: reverting the OR-branch
+        to check only `refused` (dropping `write_failed`) makes this test
+        RED while the refusal-only tests above stay green — proving this
+        assertion is driven by write_failed, not incidentally by refused.
+        """
+        monkeypatch.setattr("nexus.mcp_infra.get_complete_refusals", lambda: [])
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_write_failures", lambda: ["1.2.3"],
+        )
+        monkeypatch.setattr("nexus.mcp_infra.get_manifest_identity_drops", lambda: [])
+        result = self._run(
+            runner, monkeypatch,
+            index_record=lambda uuid, path, **kw: (True, 1),
+            records=[("U1", "/a.pdf")],
+        )
+        assert result.exit_code != 0, result.output
+        assert "manifest write failed" in result.output
+        assert "manifest-verify" in result.output
+
+    def test_manifest_identity_drop_alone_exits_nonzero(self, runner, monkeypatch):
+        """nexus-tp8yk D2b: an identity DROP (GH #1397 class — a batch
+        indexed without a catalog identity at all) must also fail rc."""
+        monkeypatch.setattr("nexus.mcp_infra.get_complete_refusals", lambda: [])
+        monkeypatch.setattr("nexus.mcp_infra.get_manifest_write_failures", lambda: [])
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_identity_drops",
+            lambda: [{"collection": "docs__x", "batch_size": 3}],
+        )
+        result = self._run(
+            runner, monkeypatch,
+            index_record=lambda uuid, path, **kw: (True, 1),
+            records=[("U1", "/a.pdf")],
+        )
+        assert result.exit_code != 0, result.output
+        assert "WITHOUT a catalog document identity" in result.output
 
 
 class TestDtIndexRefusalPropagation:
@@ -235,6 +280,72 @@ class TestDtIndexRefusalPropagation:
         assert "missing=2" in result.output
 
 
+class TestDtIndexChunkLandingUnverifiedPropagation:
+    """substantive-critic CRITICAL (nexus-9800y, 2026-08-04): nexus-tp8yk's
+    D1 fix (``_upsert_skip_reembed`` raises ``ChunkLandingUnverifiedError``
+    on a "cannot tell" landing) reopened the exact nexus-2fyb/nexus-qo84l
+    regression class ``TestDtIndexRefusalPropagation`` above already fixed
+    once for the sibling ``IndexRunVerifyRefused`` — dt.py's per-record
+    catch did not include the new exception type, so an affected record
+    escaped the try/except entirely and aborted the WHOLE ``nx dt index``
+    batch. Mirrors that class's test shape exactly: mocks
+    ``nexus.doc_indexer.index_pdf`` (the boundary the REAL ``_index_record``
+    calls) and lets the real ``_index_record``/``index_cmd`` bodies run.
+    """
+
+    def _run(self, runner, monkeypatch, *, records, index_pdf_fn):
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", index_pdf_fn)
+        return runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
+
+    def test_chunk_landing_unverified_does_not_abort_the_whole_batch(self, runner, monkeypatch):
+        """THE regression: pre-fix, U1's ChunkLandingUnverifiedError raised
+        uncaught and U2 was NEVER PROCESSED — no summary line printed at
+        all. Post-fix, U1 lands in `failed` and U2 still indexes."""
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        seq = [
+            lambda *a, **kw: (_ for _ in ()).throw(ChunkLandingUnverifiedError(
+                collection="docs__dt-test__voyage-context-3__v1", count=3,
+            )),
+            lambda *a, **kw: 4,
+        ]
+
+        def _dispatch(*a, **kw):
+            return seq.pop(0)(*a, **kw)
+
+        result = self._run(
+            runner, monkeypatch,
+            records=[("U1", "/a.pdf"), ("U2", "/b.pdf")],
+            index_pdf_fn=_dispatch,
+        )
+        assert result.exit_code == 0, result.output
+        assert not seq, "U2 was never dispatched — the batch aborted after U1's error"
+        assert "1 failed" in result.output
+        assert "Indexed 1 record(s)" in result.output  # U2 still landed
+        assert "cannot confirm 3 chunk(s) landed" in result.output
+
+    def test_chunk_landing_unverified_alone_is_reported_not_raised(self, runner, monkeypatch):
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        def _raise(*a, **kw):
+            raise ChunkLandingUnverifiedError(
+                collection="docs__dt-test__voyage-context-3__v1", count=1,
+            )
+        result = self._run(
+            runner, monkeypatch,
+            records=[("U1", "/a.pdf")],
+            index_pdf_fn=_raise,
+        )
+        assert result.exit_code == 0, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"the error escaped as a raw traceback: {result.exception!r}"
+        )
+        assert "Traceback" not in result.output
+        assert "cannot confirm 1 chunk(s) landed" in result.output
+
+
 # ── nx index repo ────────────────────────────────────────────────────────────
 
 
@@ -311,12 +422,15 @@ class TestIndexRepoSummaryTruthful:
         result = self._invoke(
             runner, [str(repo_dir)], mock_reg, files=[("a.py", 5, 0.1)],
         )
-        assert result.exit_code == 0, result.output
+        # nexus-tp8yk D2b: a refusal now fails the run's exit code — was
+        # WARNING-only (rc=0) before this bead.
+        assert result.exit_code != 0, result.output
         assert reset_calls == [1]
         # substantive-critic SIGNIFICANT (2026-08-02): the refused file is
         # already counted among the "1 indexed" (chunks genuinely landed;
         # not restructured) — must state the overlap explicitly.
         assert "1 of the 1 indexed above had completion refused" in result.output
+        assert "manifest-verify" in result.output
 
     def test_complete_refusals_subset_wording_is_not_hardcoded_to_one_of_one(
         self, runner, repo_dir, mock_reg, monkeypatch,
@@ -334,7 +448,7 @@ class TestIndexRepoSummaryTruthful:
             runner, [str(repo_dir)], mock_reg,
             files=[("a.py", 5, 0.1), ("b.py", 3, 0.1)],
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0, result.output
         assert "1 of the 2 indexed above had completion refused" in result.output
 
     def test_complete_refusals_silent_on_zero(self, runner, repo_dir, mock_reg):
@@ -343,6 +457,42 @@ class TestIndexRepoSummaryTruthful:
         )
         assert result.exit_code == 0, result.output
         assert "REFUSED" not in result.output
+
+    def test_manifest_write_failure_alone_exits_nonzero(
+        self, runner, repo_dir, mock_reg, monkeypatch,
+    ):
+        """nexus-tp8yk D2b: a manifest WRITE failure (GH #1371 class) must
+        fail rc on its own, independent of a completion refusal. KILL
+        CONTROL: reverting the OR-branch to check only `refused` makes
+        this RED while the refusal-only tests stay green."""
+        monkeypatch.setattr("nexus.mcp_infra.get_complete_refusals", lambda: [])
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_write_failures", lambda: ["1.2.3"],
+        )
+        monkeypatch.setattr("nexus.mcp_infra.get_manifest_identity_drops", lambda: [])
+        result = self._invoke(
+            runner, [str(repo_dir)], mock_reg, files=[("a.py", 5, 0.1)],
+        )
+        assert result.exit_code != 0, result.output
+        assert "manifest write failed" in result.output
+        assert "manifest-verify" in result.output
+
+    def test_manifest_identity_drop_alone_exits_nonzero(
+        self, runner, repo_dir, mock_reg, monkeypatch,
+    ):
+        """nexus-tp8yk D2b: an identity DROP (GH #1397 class) must fail rc
+        on its own."""
+        monkeypatch.setattr("nexus.mcp_infra.get_complete_refusals", lambda: [])
+        monkeypatch.setattr("nexus.mcp_infra.get_manifest_write_failures", lambda: [])
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_manifest_identity_drops",
+            lambda: [{"collection": "docs__x", "batch_size": 3}],
+        )
+        result = self._invoke(
+            runner, [str(repo_dir)], mock_reg, files=[("a.py", 5, 0.1)],
+        )
+        assert result.exit_code != 0, result.output
+        assert "WITHOUT a catalog document identity" in result.output
 
 
 # ── nx index pdf / nx index md (single-file record-level summary) ──────────
@@ -508,11 +658,78 @@ class TestSingleFileRefusalRendering:
             )
         with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
             result = runner.invoke(main, ["index", "pdf", "--dir", str(home)])
-        # --dir isolates per-file failures — the batch itself still exits 0.
-        assert result.exit_code == 0, result.output
+        # --dir isolates per-file failures (the file itself is still fully
+        # attempted and the refusal wording still renders) but nexus-uqq9z
+        # makes the batch as a whole exit non-zero once any file lands in
+        # the failures bucket — mirrors ``nx dt index``'s run-level
+        # fail-loud contract.
+        assert result.exit_code != 0, result.output
         assert "completion REFUSED" in result.output
         assert "NOT fully indexed" in result.output
         assert "referenced=5" in result.output
+
+    def test_pdf_chunk_landing_unverified_renders_clean_message_and_exits_nonzero(
+        self, runner, fake_pdf,
+    ):
+        """nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): a
+        ChunkLandingUnverifiedError from index_pdf used to exit non-zero
+        via Click's default unhandled-exception path (a raw traceback),
+        not the nexus-2fyb clean-ClickException convention every other
+        typed error on this command already gets."""
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        def _raise(*a, **kw):
+            raise ChunkLandingUnverifiedError(
+                collection="docs__test__voyage-context-3__v1", count=4,
+            )
+        with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
+            result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"a raw traceback escaped instead of a ClickException: {result.exception!r}"
+        )
+        assert "cannot confirm 4 chunk(s) landed" in result.output
+        assert "Traceback" not in result.output
+
+    def test_md_refusal_renders_clean_message_and_exits_nonzero(self, runner, fake_md):
+        """nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04):
+        index_md_cmd never caught IndexRunVerifyRefused at all (unlike
+        index_pdf_cmd, which has since nexus-5xn3k.6) — pre-fix this fell
+        through as a raw traceback."""
+        def _raise(*a, **kw):
+            raise IndexRunVerifyRefused(
+                doc_id="1.2.3", referenced=5, present=3, missing=2, chunk_count=5,
+            )
+        with patch("nexus.doc_indexer.index_markdown", side_effect=_raise):
+            result = runner.invoke(main, ["index", "md", str(fake_md)])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"a raw traceback escaped instead of a ClickException: {result.exception!r}"
+        )
+        assert "completion REFUSED" in result.output
+        assert "NOT fully indexed" in result.output
+        assert "referenced=5" in result.output
+        assert "Traceback" not in result.output
+
+    def test_md_chunk_landing_unverified_renders_clean_message_and_exits_nonzero(
+        self, runner, fake_md,
+    ):
+        """nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): same
+        gap as the pdf command's identical test above."""
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        def _raise(*a, **kw):
+            raise ChunkLandingUnverifiedError(
+                collection="docs__test__voyage-context-3__v1", count=2,
+            )
+        with patch("nexus.doc_indexer.index_markdown", side_effect=_raise):
+            result = runner.invoke(main, ["index", "md", str(fake_md)])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), (
+            f"a raw traceback escaped instead of a ClickException: {result.exception!r}"
+        )
+        assert "cannot confirm 2 chunk(s) landed" in result.output
+        assert "Traceback" not in result.output
 
 
 # ── nx index rdr ─────────────────────────────────────────────────────────────

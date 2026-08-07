@@ -961,21 +961,28 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) 
     assert "2" in result.output
 
 
-def test_reembed_no_dry_run_writes_via_voyage(
+def test_reembed_no_dry_run_writes_via_server(
     runner, env_creds, tmp_path, monkeypatch,
     cloud_mode,
 ) -> None:
-    """nexus-bw65: --no-dry-run --yes embeds via Voyage and upserts the
-    new vectors. Chunk ids + document text + metadata preserved;
-    metadata.embedding_model stamped to the target model.
+    """nexus-bw65: --no-dry-run --yes upserts with ``force_re_embed=True``
+    so the SERVER re-embeds. Chunk ids + document text + metadata
+    preserved; metadata.embedding_model stamped to the target model.
+
+    nexus-sghyo (Hal determination 2026-07-28): the client no longer
+    embeds via Voyage — this test used to construct a mocked
+    ``voyageai.Client``, embed client-side, and assert the resulting
+    vectors landed in the ``upsert_chunks`` call's ``embeddings=`` kwarg
+    (the old "verbatim passthrough" optimisation). That path is retired;
+    ``_reembed_collection`` now sends no client-computed embeddings at
+    all and instead asks the server to recompute via
+    ``force_re_embed=True`` (see ``_reembed_collection``'s docstring in
+    ``src/nexus/commands/collection.py``).
     """
     import uuid
 
     # nexus-u37lw: name ENCODES the target model — service mode only
-    # permits same-model re-embed (cross-model fails loud pre-write),
-    # and same-model routes through the upsert_chunks verbatim
-    # passthrough, never upsert_chunks_with_embeddings (which the
-    # service handle discards vectors on).
+    # permits same-model re-embed (cross-model fails loud pre-write).
     coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-code-3__v1"
     client = make_vector_test_client()
     col = client.get_or_create_collection(coll_name)
@@ -994,26 +1001,21 @@ def test_reembed_no_dry_run_writes_via_voyage(
     upsert_calls: list[dict] = []
 
     def _capture_upsert(collection, ids, documents, metadatas=None, *,
-                        embeddings=None, skip_existing=None):
+                        force_re_embed=None, embeddings=None, skip_existing=None):
         upsert_calls.append({
             "collection_name": collection, "ids": ids,
             "documents": documents, "metadatas": metadatas,
+            "force_re_embed": force_re_embed,
             "embeddings": embeddings,
         })
 
     fake_db.upsert_chunks.side_effect = _capture_upsert
 
-    fake_embed_result = MagicMock()
-    fake_embed_result.embeddings = [[0.5] * 1024, [0.7] * 1024]
-    fake_voyage_client = MagicMock()
-    fake_voyage_client.embed.return_value = fake_embed_result
-
-    with patch("voyageai.Client", return_value=fake_voyage_client):
-        result = _invoke(
-            runner, fake_db,
-            ["re-embed", coll_name, "--to", "voyage-code-3",
-             "--no-dry-run", "--yes"],
-        )
+    result = _invoke(
+        runner, fake_db,
+        ["re-embed", coll_name, "--to", "voyage-code-3",
+         "--no-dry-run", "--yes"],
+    )
     assert result.exit_code == 0, result.output
     assert "re-embedded 2" in result.output
     assert len(upsert_calls) == 1
@@ -1025,9 +1027,9 @@ def test_reembed_no_dry_run_writes_via_voyage(
     assert all(
         m["embedding_model"] == "voyage-code-3" for m in call["metadatas"]
     )
-    # Voyage embed called with target model.
-    fake_voyage_client.embed.assert_called_once()
-    assert fake_voyage_client.embed.call_args.kwargs["model"] == "voyage-code-3"
+    # Server-side re-embed requested; no client-computed vectors sent.
+    assert call["force_re_embed"] is True
+    assert call["embeddings"] is None
 
 
 def test_reembed_rejects_cce_model(runner, env_creds, cloud_mode) -> None:

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from typing import Any, Callable
 
 import structlog
@@ -164,6 +165,7 @@ class HookRegistry:
         catalog_doc_id: str = "",
         grain: str = "all",
         manifest_complete: dict[str, str] | None = None,
+        hook_timings: dict[str, float] | None = None,
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -200,12 +202,24 @@ class HookRegistry:
         silent-truncation bug the fence exists to close; multi-batch
         documents use the explicit ``/index-run/complete`` call instead.
         Threaded only to hooks that declare the parameter.
+
+        *hook_timings* (nexus-lde88 G4) — when supplied, per-hook wall
+        seconds are ACCUMULATED into ``hook_timings[hook.__name__]``
+        (``+=``, not overwrite — a caller reusing one dict across several
+        ``fire_batch`` calls gets a running total). Optional: ``None``
+        (default) skips timing entirely, no ``time.monotonic()`` calls
+        paid on the hot path unless a caller asks. This is how the
+        flush-grain bucket (taxonomy + manifest, both ``batch_grain =
+        "flush"``) can be split back out by hook name instead of staying
+        one merged total.
         """
         if not doc_ids:
             return
         for hook in self._batch:
             if grain != "all" and getattr(hook, "batch_grain", "file") != grain:
                 continue
+            hook_name = getattr(hook, "__name__", "?")
+            _t0 = time.monotonic() if hook_timings is not None else 0.0
             try:
                 kwargs: dict = {}
                 if id(hook) in self._batch_with_catalog_doc_id:
@@ -219,7 +233,6 @@ class HookRegistry:
                 else:
                     hook(doc_ids, collection, contents, embeddings, metadatas)
             except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
-                hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
                     "post_store_batch_hook_failed",
                     hook=hook_name,
@@ -231,6 +244,11 @@ class HookRegistry:
                     hook_name=hook_name,
                     error=str(exc),
                 )
+            finally:
+                if hook_timings is not None:
+                    hook_timings[hook_name] = (
+                        hook_timings.get(hook_name, 0.0) + (time.monotonic() - _t0)
+                    )
 
     # ── Document-grain chain ─────────────────────────────────────────────────
 
@@ -313,6 +331,7 @@ class HookRegistry:
         embeddings: list[list[float]] | None = None,
         metadatas: list[dict] | None = None,
         catalog_doc_id: str = "",
+        manifest_complete: dict[str, str] | None = None,
     ) -> None:
         """Fire all three post-store hook chains for a batch of just-stored
         docs. Single, batch, and document-grain chains run in that order.
@@ -330,6 +349,19 @@ class HookRegistry:
         by document first (see ``exporter._fire_store_chains_grouped_by_doc``);
         passing a nonempty ``catalog_doc_id`` across mixed documents
         would mis-attribute every document's aspect-queue row.
+
+        *manifest_complete* (nexus-cotmr / nexus-tafjk): threaded straight
+        through to the internal :meth:`fire_batch` call — see that
+        method's own docstring for the ``{doc_id: content_hash}`` contract
+        and the file-atomicity precondition. Callers that fence their own
+        ``_fence_begin`` before the vector put (single-chunk, file-atomic
+        producers — CLI ``nx store put`` / ``nx memory promote``, mirroring
+        MCP ``store_put``'s F2 pattern) pass this so the completion stamp
+        rides the SAME round trip the manifest hook already pays for, no
+        extra call. Callers that do not fence (``nx store import``'s
+        multi-chunk-per-doc grouped batches; the ``collection.py`` re-embed
+        path, which passes no ``catalog_doc_id`` at all) simply omit it —
+        default ``None`` preserves their exact prior behavior.
         """
         n = len(doc_ids)
         if len(contents) != n:
@@ -347,10 +379,24 @@ class HookRegistry:
         for doc_id, content in zip(doc_ids, contents):
             self.fire_single(doc_id, collection, content)
 
+        # Conditional kwarg (never passed as an explicit ``None``):
+        # ``self.fire_batch`` is a virtual dispatch — a caller-installed
+        # ``HookRegistry`` subclass with a narrower, pre-existing
+        # ``fire_batch`` override (test doubles; nothing in production
+        # subclasses this) may not declare ``manifest_complete`` in its
+        # signature at all. Passing the kwarg unconditionally (even as
+        # ``None``) would raise ``TypeError`` on every such override,
+        # not just the ones this feature actually targets. Mirrors
+        # ``fire_batch``'s own internal per-hook conditional-kwarg
+        # dispatch one level down.
+        batch_kwargs: dict = {}
+        if manifest_complete is not None:
+            batch_kwargs["manifest_complete"] = manifest_complete
         self.fire_batch(
             doc_ids, collection, contents,
             embeddings=embeddings, metadatas=metadatas,
             catalog_doc_id=catalog_doc_id,
+            **batch_kwargs,
         )
 
         # nexus-w8lg1 (6.3.0 live shakeout finding #1): the document chain

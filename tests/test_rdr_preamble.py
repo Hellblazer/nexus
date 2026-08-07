@@ -20,6 +20,7 @@ Invocation convention mirrors test_rdr_lint.py:
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -39,8 +40,29 @@ def _runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(scope="session")
+def _rdr_git_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A single real ``git init`` reused by every ``rdr_env`` instance.
+
+    test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the fixture's
+    behavioral requirement is a directory where ``git rev-parse
+    --show-toplevel`` resolves cleanly — a truly empty ``.git/`` marker
+    directory does NOT satisfy that (git requires a real repo structure), so
+    the fix keeps ONE real ``git init`` and fans it out via
+    ``shutil.copytree`` per test instead of re-spawning the subprocess ~74
+    times (T1 scratch 47337851: this was the second-largest slow-test
+    contributor after the storage-boundary-lint AST-scan cache).
+    """
+    template = tmp_path_factory.mktemp("rdr_git_template")
+    subprocess.run(
+        ["git", "init", str(template)],
+        check=True, capture_output=True,
+    )
+    return template
+
+
 @pytest.fixture()
-def rdr_env(tmp_path: Path, monkeypatch):
+def rdr_env(tmp_path: Path, monkeypatch, _rdr_git_template: Path):
     """Hermetic environment: tmp git repo, default T2 path, cwd set to repo root.
 
     Returns a namespace-like dict:
@@ -49,11 +71,12 @@ def rdr_env(tmp_path: Path, monkeypatch):
       db          -- live T2Database (open for seeding, auto-closed via yield)
       repo_root   -- tmp_path (the fake git root)
     """
-    # Fake git repo so git rev-parse --show-toplevel falls back cleanly.
-    subprocess.run(
-        ["git", "init", str(tmp_path)],
-        check=True, capture_output=True,
-    )
+    # Copy the session-template .git/ into this test's tmp_path instead of
+    # spawning a fresh `git init` subprocess per test — cheap (shutil,
+    # in-process) and behaviorally identical: `git rev-parse
+    # --show-toplevel` resolves against the copied .git/ exactly as it would
+    # against a freshly-initialized one.
+    shutil.copytree(_rdr_git_template / ".git", tmp_path / ".git")
     monkeypatch.chdir(tmp_path)
 
     # Ensure docs/rdr exists (subcommands default to this path).
@@ -143,10 +166,10 @@ class TestRdrList:
         assert "| ID | Title | Status | Type | Priority |" in result.output
         assert "Hello World" in result.output
 
-    def test_rdr_list_no_rdr_dir(self, tmp_path, monkeypatch):
+    def test_rdr_list_no_rdr_dir(self, tmp_path, monkeypatch, _rdr_git_template):
         """No docs/rdr directory: exits without error, reports directory missing."""
+        shutil.copytree(_rdr_git_template / ".git", tmp_path / ".git")
         monkeypatch.chdir(tmp_path)
-        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         result = _runner().invoke(rdr, ["preamble", "rdr-list"])
@@ -178,10 +201,10 @@ class TestRdrCreate:
         assert "Existing RDRs" in result.output
         assert "Hello World" in result.output
 
-    def test_rdr_create_no_rdr_dir(self, tmp_path, monkeypatch):
+    def test_rdr_create_no_rdr_dir(self, tmp_path, monkeypatch, _rdr_git_template):
         """No docs/rdr directory: bootstrap message and first ID."""
+        shutil.copytree(_rdr_git_template / ".git", tmp_path / ".git")
         monkeypatch.chdir(tmp_path)
-        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         result = _runner().invoke(rdr, ["preamble", "rdr-create"])

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.2.0"
+version = "7.3.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -208,7 +208,7 @@ log_level = "WARNING"
 # nothing left to wire up. See tests/test_marker_selection_coverage.py,
 # the mechanized check this bead added so a marker going dark again fails
 # CI instead of going unnoticed for months.
-addopts = "-m 'not integration and not slow'"
+addopts = "-m 'not integration and not slow and not lint'"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
     "slow: expensive benchmarks/pagination/cold-import tests (deselect with '-m not slow'); excluded from default addopts, runs in the nightly local-service gate leg — see .github/workflows/local-service-gate-nightly.yml",
@@ -216,6 +216,8 @@ markers = [
     "needs_stamped_jar: integration test that constructs a vector client, so its service jar must carry a release_version (build with scripts/build-gate-jar.sh) — nexus-ao29z",
     "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
     "cloud_mode: integration test that needs the SERVICE embedding voyage-* collections, i.e. cloud mode. Incompatible with a local-service install, which RDR-160 pins to bge-768 and which serves one embedding mode at a time (deselect with '-m \"integration and not cloud_mode\"')",
+    "lint: repo-structure/meta lint tests (AST-scan the whole src tree, walk conexus/ agent-skill-command markdown, RDR frontmatter, marker-selection coverage) rather than exercising src behavior. Excluded from default addopts; runs in the dedicated CI lint leg — see .github/workflows/ci.yml's 'pytest (lint markers)' job (test-suite-compression P0, nexus-test-cleanup 2026-08-05).",
+    "scenario: cross-verb CLI journey against the real per-process engine substrate (tests/conftest.py::t2_service_env) — observes a write through a DIFFERENT verb/store handle than the one that made it. Runs in the DEFAULT loop (deliberately NOT added to addopts' deselection) — see tests/test_scenario_journeys.py and the pytest_sessionfinish non-vacuity guard in tests/conftest.py (test-suite-compression P2-reduced, nexus-test-cleanup 2026-08-05).",
 ]
 
 [dependency-groups]
@@ -233,6 +235,13 @@ dev = [
     # never correctness — pytest-split falls back to the suite average for
     # any test missing from the file (e.g. one added since the last refresh).
     "pytest-split>=0.10",
+    # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): opt-in local
+    # dev-loop parallelism via `uv run pytest -n auto`. Deliberately NOT added
+    # to addopts — CI's pytest-split sharding (above) is matrix parallelism
+    # across runners and must stay exactly as it is; xdist is an additional,
+    # independent lever for the local iteration loop only. See tests/AGENTS.md
+    # for the invocation.
+    "pytest-xdist>=3.5",
     "ruff>=0.15.18",
     "syrupy>=4.0",
     "twine>=6.2.0",

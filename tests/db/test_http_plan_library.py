@@ -16,16 +16,14 @@ Full cross-language end-to-end is in tests/db/test_http_plan_library_integration
 """
 from __future__ import annotations
 
-import json
-import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 
 from nexus.db.t2.http_plan_library import DEFAULT_TENANT, HttpPlanLibrary
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-plan-service-token-xyz"
 
@@ -78,42 +76,13 @@ def _make_plan(
     }
 
 
-class _FakePlanHandler(BaseHTTPRequestHandler):
+class _FakePlanHandler(FakeT2HandlerBase):
     """In-process stub of PlanHandler (Java)."""
 
-    def log_message(self, fmt, *args):  # suppress server log noise
-        pass
-
-    def _check_auth(self) -> bool:
-        auth   = self.headers.get("Authorization", "")
-        tenant = self.headers.get("X-Nexus-Tenant", "")
-        if auth != f"Bearer {TOKEN}":
-            self._send(401, {"error": "unauthorized"})
-            return False
-        if not tenant:
-            self._send(400, {"error": "missing X-Nexus-Tenant header"})
-            return False
-        return True
-
-    def _body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length)
-        return json.loads(raw) if raw else {}
-
-    def _send(self, status: int, data: Any) -> None:
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    TOKEN = TOKEN
 
     def _parsed_path(self):
         return urlparse(self.path)
-
-    def _qs(self) -> dict[str, str]:
-        parsed = parse_qs(urlparse(self.path).query)
-        return {k: v[0] for k, v in parsed.items()}
 
     def do_POST(self):
         if not self._check_auth():
@@ -415,14 +384,8 @@ class _FakePlanHandler(BaseHTTPRequestHandler):
 @pytest.fixture(scope="module")
 def fake_server():
     """Start the fake PlanHandler server on a random free port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    srv = HTTPServer(("127.0.0.1", port), _FakePlanHandler)
-    t   = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{port}"
-    srv.shutdown()
+    with fake_http_server(_FakePlanHandler) as url:
+        yield url
 
 
 @pytest.fixture(autouse=True)
@@ -448,17 +411,10 @@ def client(fake_server):
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 class TestSavePlan:
-    def test_save_returns_id(self, client):
-        pid = client.save_plan(
-            query="How to research RDR patterns",
-            plan_json='{"steps":[]}',
-            outcome="success",
-            tags="research,rdr",
-            project="nexus",
-            verb="research",
-        )
-        assert isinstance(pid, int)
-        assert pid > 0
+    # test_save_returns_id / test_save_conflict_upserts moved to the
+    # store-parametrized contract in test_t2_store_crud_contract.py
+    # (test-suite-compression P1d) — memory, plan_library, and scratch all
+    # share the same synthetic-identifier put/get/upsert/delete shape.
 
     def test_save_roundtrip_get(self, client):
         pid = client.save_plan(
@@ -475,19 +431,6 @@ class TestSavePlan:
         assert row["tags"] == "test"
         assert row["project"] == "proj"
 
-    def test_save_conflict_upserts(self, client):
-        pid1 = client.save_plan(
-            query="Conflict query", plan_json='{"v":1}',
-            outcome="success", project="proj",
-        )
-        pid2 = client.save_plan(
-            query="Conflict query", plan_json='{"v":2}',
-            outcome="success", project="proj",
-        )
-        assert pid2 == pid1, "same (project, query) must return same id"
-        row = client.get_plan(pid1)
-        assert row["plan_json"] == '{"v":2}', "plan_json must be updated on conflict"
-
     def test_save_missing_outcome_defaults_success(self, client):
         pid = client.save_plan(query="Default outcome", plan_json="{}")
         row = client.get_plan(pid)
@@ -495,8 +438,8 @@ class TestSavePlan:
 
 
 class TestGetPlan:
-    def test_get_absent_returns_none(self, client):
-        assert client.get_plan(99999) is None
+    # test_get_absent_returns_none moved to the store-parametrized contract
+    # in test_t2_store_crud_contract.py (test-suite-compression P1d).
 
     def test_get_by_dimensions(self, client):
         pid = client.save_plan(
@@ -514,13 +457,16 @@ class TestGetPlan:
 
 
 class TestDeletePlan:
-    def test_delete_existing(self, client):
+    # test_delete_existing / test_delete_absent_returns_zero moved to the
+    # store-parametrized contract in test_t2_store_crud_contract.py
+    # (test-suite-compression P1d).
+
+    def test_delete_removes_row(self, client):
+        """Store-specific detail beyond the generic contract: a deleted
+        plan is truly gone from get_plan(), not merely reported deleted."""
         pid = client.save_plan(query="To delete", plan_json="{}")
         assert client.delete_plan(pid) == 1
         assert client.get_plan(pid) is None
-
-    def test_delete_absent_returns_zero(self, client):
-        assert client.delete_plan(99999) == 0
 
 
 class TestDisableEnable:
@@ -787,32 +733,20 @@ class TestImportPlan:
 
 
 class TestNormalize:
-    """Verify normalization of numeric types from JSON responses."""
+    """Normalization invariants of a single save+get round-trip,
+    consolidated into one journey (test-suite-compression P1d, P1c's
+    scenario-collapse methodology — every original assertion survives) —
+    was 5 single-assertion tests each doing its own isolated save+get."""
 
-    def test_id_is_int(self, client):
-        pid = client.save_plan(query="Normalize id", plan_json="{}")
+    def test_fresh_plan_normalization_invariants(self, client):
+        pid = client.save_plan(query="Normalize invariants", plan_json="{}")
         row = client.get_plan(pid)
+
         assert isinstance(row["id"], int)
-
-    def test_counters_are_int(self, client):
-        pid = client.save_plan(query="Normalize counters", plan_json="{}")
-        row = client.get_plan(pid)
         for field in ("use_count", "match_count", "success_count", "failure_count"):
             assert isinstance(row[field], int), f"{field} must be int"
-
-    def test_match_conf_sum_is_float(self, client):
-        pid = client.save_plan(query="Normalize conf", plan_json="{}")
-        row = client.get_plan(pid)
         assert isinstance(row["match_conf_sum"], float)
-
-    def test_tags_default_empty_string(self, client):
-        pid = client.save_plan(query="Tag default", plan_json="{}")
-        row = client.get_plan(pid)
         assert row["tags"] == ""
-
-    def test_scope_tags_default_empty_string(self, client):
-        pid = client.save_plan(query="ScopeTags default", plan_json="{}")
-        row = client.get_plan(pid)
         assert row["scope_tags"] == ""
 
 
@@ -847,19 +781,8 @@ class TestListPlans:
         assert pid_d in row_ids
 
 
-class TestAuthErrors:
-    def test_wrong_token_raises(self, fake_server):
-        """Wrong token must raise, not silently succeed.
-
-        Post-mixin-adoption (nexus-f2qvx.1): both ``base_url`` and
-        ``_token`` are explicitly pinned here (a test double), so a 401
-        does NOT self-heal-and-retry to a bare ``httpx.HTTPStatusError``
-        — ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses
-        to re-resolve when both halves are pinned (nothing it could
-        change would fix a fully-pinned endpoint) and raises
-        ``RuntimeError`` instead. Either way, the call must not succeed.
-        """
-        bad = HttpPlanLibrary(base_url=fake_server, _token="wrong-token")
-        with pytest.raises(RuntimeError, match="cannot self-heal"):
-            bad.save_plan(query="Should fail", plan_json="{}")
-        bad.close()
+# TestAuthErrors (test_wrong_token_raises) moved to the store-parametrized
+# auth contract in test_t2_store_crud_contract.py (test-suite-compression
+# P1d) — plan_library, chash_index, and telemetry all adopt
+# RefreshableHttpStoreMixin and raise the identical "cannot self-heal"
+# RuntimeError for a fully-pinned wrong-token store.

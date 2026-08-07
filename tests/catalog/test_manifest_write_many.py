@@ -322,3 +322,82 @@ class TestManifestWriteFailureSurfacing:
         assert get_manifest_write_failures() == ["1.9.0"]
         reset_manifest_write_failures()
         assert get_manifest_write_failures() == []
+
+
+class TestManifestNeverOutrunsConfirmedChunks:
+    """nexus-tp8yk D1 consequence, pinned at this file's own layer (memo
+    §5 TDD plan): ``_manifest_write_loop`` — and therefore the whole
+    ``manifest_write_batch_hook`` chain this file otherwise drives
+    directly — must be STRUCTURALLY UNREACHABLE for a batch
+    ``doc_indexer._upsert_skip_reembed`` could not confirm landed. The
+    gate itself lives one layer up (``_upsert_skip_reembed`` raises
+    ``ChunkLandingUnverifiedError`` BEFORE ``hooks.fire_batch`` runs);
+    this test proves the consequence at THIS file's call site by driving
+    the real production entry point (``nexus.doc_indexer._index_document``)
+    with a fake T3 that reproduces the "stale-positive probe, cannot-tell
+    update response" fault, and asserting `_manifest_write_loop` sees
+    zero calls.
+    """
+
+    def test_unconfirmed_batch_never_reaches_manifest_write_loop(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.doc_indexer import _index_document
+        from nexus.errors import ChunkLandingUnverifiedError
+
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.mcp_infra._manifest_write_loop",
+            lambda *a, **kw: calls.append((a, kw)),
+        )
+
+        class _FakeCol:
+            def get(self, where=None, include=None, limit=None, offset=None, **kw):
+                return {"ids": [], "metadatas": []}
+
+        class _FakeT3:
+            def get_or_create_collection(self, name):
+                return _FakeCol()
+
+            def existing_ids(self, collection, ids):
+                # Stale-positive probe: reports EVERY id present.
+                return list(ids)
+
+            def update_chunks(self, collection, ids, metadatas):
+                # "Cannot tell" — the exact D1 trigger.
+                return None
+
+            def upsert_chunks_with_embeddings(self, *a, **k):
+                raise AssertionError(
+                    "must not be called — every id took the stale-positive "
+                    "(existing_ids) branch, never the fresh-upsert branch"
+                )
+
+        def _chunks(file_path, content_hash, target_model, now_iso, corpus):
+            return [(
+                "chunk-0", "chunk text",
+                {"content_hash": content_hash, "embedding_model": target_model,
+                 "chunk_text_hash": "a" * 64, "content_type": "prose"},
+            )]
+
+        def _embed(texts, model):
+            return [[0.1, 0.2]] * len(texts), model
+
+        f = tmp_path / "doc.md"
+        f.write_text("hello tp8yk")
+
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.9.99"), \
+                patch("nexus.doc_indexer._fence_begin"), \
+                patch("nexus.doc_indexer._fence_fail"):
+            with pytest.raises(ChunkLandingUnverifiedError):
+                _index_document(
+                    f, "testowner", _chunks, _FakeT3(),
+                    collection_name="docs__testowner__bge-base-en-v15-768__v1",
+                    embed_fn=_embed,
+                )
+
+        assert calls == [], (
+            "_manifest_write_loop must be UNREACHABLE for a batch "
+            f"_upsert_skip_reembed could not confirm landed — got "
+            f"{len(calls)} call(s)"
+        )

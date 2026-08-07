@@ -60,17 +60,72 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
 
 
 def _run_check_schema() -> None:
-    """Report where the T2 schema lives (RDR-076; service-backed since RDR-152).
+    """Validate the T2 schema is actually applied (RDR-076; PORTED at
+    nexus-vl8lk from an N/A stub).
 
-    nexus-p0clh: the T2 schema lives in Postgres and is Liquibase-managed by
-    the nexus-service (applied at startup). The local-SQLite table/index/FTS5
-    census this check used to run died with the =sqlite opt-out (RDR-158 P3,
-    nexus-7bomn) — reporting N/A honestly beats a misleading "T2 database not
-    found" against a frozen migration source.
+    HISTORY: nexus-p0clh (2026-06-24) replaced this check's local-SQLite
+    table/index/FTS5 census — which died with the =sqlite opt-out (RDR-158
+    P3, nexus-7bomn) — with an unconditional "N/A in service mode" stub, to
+    stop a fresh service-mode install from exiting non-zero on the
+    misleading "T2 database not found". That traded one honesty problem for
+    another: N/A ALWAYS printed and ALWAYS exited 0, even when the engine's
+    schema genuinely failed to apply — a vacuous pass no different from the
+    thing it replaced (nexus-vl8lk).
+
+    PORT, not delete: the engine's ``GET /version`` (Java ``VersionHandler``,
+    live since nexus-pebfx.4, well below the current
+    ``REQUIRED_ENGINE_VERSION`` floor — no new engine route needed for this
+    fix) already answers "is the schema applied" with the Liquibase
+    changelog fingerprint (``schema_latest_id`` / ``schema_changeset_count``
+    / ``schema_error``). :func:`nexus.health.probe_t2_schema_fingerprint`
+    is the SHARED probe — the always-on ``nx doctor`` sweep
+    (``nexus.health._check_t2_schema_applied``) asks the identical question
+    through a terser ``HealthResult``; this flag exists for the deliberate,
+    verbose, exit-code-bearing report an operator asks for explicitly.
+
+    Exit codes: 2 when the engine is unreachable (state UNKNOWN — never
+    conflated with "checked, clean"); 1 when the engine reports a
+    schema_error or zero applied changesets; 0 (with an explicit N/A note)
+    when the endpoint withholds the fingerprint by design (managed/cloud);
+    0 with a changeset count otherwise.
     """
+    from nexus.health import probe_t2_schema_fingerprint  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    fp = probe_t2_schema_fingerprint()
+    if not fp.reachable:
+        click.echo(
+            f"T2 schema check: service unavailable ({fp.unreachable_detail}). "
+            "Schema state UNKNOWN — not reporting pass or fail.",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
+
+    if not fp.reported:
+        click.echo(
+            "T2 schema check: schema fingerprint not exposed by this "
+            "endpoint (managed/cloud service withholds it by design, or "
+            "the engine predates the /version schema fields) — N/A."
+        )
+        return
+
+    if fp.schema_error:
+        click.echo(
+            f"T2 schema check: FAIL — engine reported schema_error: {fp.schema_error}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    if not fp.changeset_count:
+        click.echo(
+            f"T2 schema check: FAIL — schema_changeset_count={fp.changeset_count!r} "
+            "(Liquibase applied nothing).",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
     click.echo(
-        "T2 schema is service-backed (Postgres, Liquibase-managed) — "
-        "local SQLite schema check N/A in service mode."
+        f"T2 schema check: OK — {fp.changeset_count} changeset(s) applied, "
+        f"latest={fp.latest_id} (Postgres, Liquibase-managed, via GET /version)."
     )
 
 
@@ -293,20 +348,130 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
             )
 
 
-def _run_check_plan_library() -> None:
-    """Report where the plan library lives. RDR-092 Phase 0c.2.
+#: Minimum global-tier (``project=''``) builtin plan rows expected after
+#: seeding (``nx plan reseed``, formerly ``nx catalog setup``). RDR-078
+#: shipped 9; RDR-092 Phase 0a brought that to 12; the live count at
+#: nexus-vl8lk is 15 (``conexus/plans/builtin/*.yml``). The check only
+#: fails below 9 so a partial install on an older plugin is still
+#: tolerated — same conservative floor the pre-N/A-stub check used.
+_MIN_GLOBAL_BUILTIN_COUNT: int = 9
 
-    The plan library is service-backed (Postgres) — reported honestly as
-    N/A rather than a failure, matching --check-schema (nexus-p0clh);
-    without that a fresh install exits non-zero from the release-sandbox
-    smoke. The local-SQLite dimensional census (authored / backfilled /
-    non-dimensional counts + the global-builtin floor) died with the
-    =sqlite opt-out (RDR-158 P3, nexus-7bomn).
+
+def _run_check_plan_library() -> None:
+    """Plan-library dimensional health (RDR-092 Phase 0c.2), PORTED at
+    nexus-vl8lk from an N/A stub.
+
+    HISTORY: this check originally queried the local SQLite ``plans``
+    table directly. RDR-158 P3 (nexus-7bomn) killed the =sqlite opt-out,
+    and the check was stubbed to an unconditional "N/A in service mode"
+    (mirroring nexus-p0clh's --check-schema treatment) so a fresh
+    service-mode install stopped exiting non-zero on "T2 database not
+    found". That stub ALWAYS printed N/A and ALWAYS exited 0 — a vacuous
+    pass no different from the thing it replaced (nexus-vl8lk); the
+    dedicated release-sandbox smoke arm even ran the (now-retired)
+    ``nx catalog setup`` purely to satisfy this check, its failure
+    swallowed by ``|| true``, so neither half was ever exercised.
+
+    PORT decision (bead's own text): "the builtin-template floor is the
+    valuable half and is answerable: the plan library lives in Postgres
+    and the templates are countable." ``HttpPlanLibrary.list_plans``
+    already exists (no new engine route) — calling it with ``project=""``
+    omits the project filter server-side (``PlanRepository.listPlans``:
+    ``project == null`` -> no ``WHERE project = ...`` clause). NOT quite
+    the original SQLite whole-table census (``SELECT COUNT(*) WHERE 1=1``):
+    the engine's ``listPlans`` unconditionally filters TTL-expired rows
+    (``include_disabled`` lifts only the soft-disabled filter), so the
+    counts here are non-expired rows, optionally including soft-disabled.
+    Builtin templates ship ``ttl=None`` (permanent), so the gating floor
+    check below is unaffected; only the informational totals differ.
+    ``dimensions`` / ``tags`` / ``project`` cross the wire unchanged
+    (``PlanRepository.recordToMap``), so the authored / backfilled /
+    non-dimensional bucketing heuristic from the SQLite era still applies
+    verbatim — only the storage engine changed, so it is PRESERVED rather
+    than dropped (the bead's licensed alternative for a census that "no
+    longer means anything" does not apply here: the tags/dimensions
+    columns mean exactly what they meant before).
+
+    Paging: bounded at ``MAX_QUERY_RESULTS`` (the project's paging
+    ceiling) per call — the plan library is small (15 builtins + grown
+    plans) but a future large deployment could exceed the cap; that case
+    is reported as a NOTE, never silently undercounted.
     """
-    click.echo(
-        "Plan library is service-backed (Postgres) — local SQLite "
-        "dimensional census N/A in service mode."
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        lib = HttpPlanLibrary()
+        rows = lib.list_plans(limit=MAX_QUERY_RESULTS, include_disabled=True)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # RuntimeError is not redundant with httpx.HTTPError: constructing
+        # the client resolves the endpoint, and an unresolvable one raises
+        # ServiceEndpointUnresolvableError, a RuntimeError subclass that is
+        # NOT an httpx.HTTPError (same trap documented on
+        # _report_aspect_queue_service / _report_dangling_links_service).
+        click.echo(
+            f"Plan library check: service backend unreachable ({exc}). "
+            "Counts UNKNOWN — not reporting pass or fail.",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
+
+    total = len(rows)
+    truncated = total == MAX_QUERY_RESULTS
+
+    def _is_backfill(tags: str) -> bool:
+        return "backfill" in tags
+
+    non_dimensional = sum(1 for r in rows if not r.get("dimensions"))
+    backfilled = sum(
+        1 for r in rows if r.get("dimensions") and _is_backfill(r.get("tags") or "")
     )
+    authored = sum(
+        1 for r in rows if r.get("dimensions") and not _is_backfill(r.get("tags") or "")
+    )
+    global_builtin = sum(
+        1
+        for r in rows
+        if (r.get("project") or "") == "" and "builtin-template" in (r.get("tags") or "")
+    )
+
+    click.echo("Plan library check (service backend):")
+    trunc_note = " (hit the page cap — see NOTE below)" if truncated else ""
+    click.echo(f"  total rows:         {total}{trunc_note}")
+    click.echo(f"  authored:           {authored}")
+    click.echo(f"  backfilled:         {backfilled}")
+    click.echo(f"  non-dimensional:    {non_dimensional}")
+    click.echo(f"  global-tier builtin count: {global_builtin}")
+    click.echo("")
+
+    failed = False
+    if global_builtin < _MIN_GLOBAL_BUILTIN_COUNT:
+        click.echo(
+            f"  FAIL: global-tier builtin count {global_builtin} "
+            f"< expected {_MIN_GLOBAL_BUILTIN_COUNT}",
+            err=True,
+        )
+        click.echo("    Fix: run `nx plan reseed`.", err=True)
+        failed = True
+    if non_dimensional:
+        click.echo(
+            f"  WARN: {non_dimensional} non-dimensional row(s) "
+            "(legacy / pre-RDR-078 seeds).",
+            err=True,
+        )
+    if truncated:
+        click.echo(
+            f"  NOTE: plan count hit the {MAX_QUERY_RESULTS}-row page cap — "
+            "counts above may undercount the true library size.",
+            err=True,
+        )
+
+    if not failed:
+        click.echo("All checks passed.")
+    else:
+        raise click.exceptions.Exit(1)
 
 
 def _run_trim_telemetry(days: int) -> None:
@@ -1027,7 +1192,10 @@ def _run_check_mineru() -> None:
     "--check-schema",
     is_flag=True,
     default=False,
-    help="Validate T2 database schema and report pending migrations.",
+    help="Validate the T2 schema is applied (Postgres, Liquibase-managed, "
+         "via the engine's GET /version changelog fingerprint). Exits 2 "
+         "when the engine is unreachable, 1 on schema_error or zero "
+         "applied changesets. nexus-vl8lk.",
 )
 @click.option(
     "--check-search",
@@ -1943,10 +2111,13 @@ def _run_check_taxonomy() -> None:
     # which is how the release-sandbox smoke came to block on 29-day-old rows
     # that do not exist in the engine at all.
     #
-    # Its two siblings in the same doctor loop already resolved this by
-    # reporting N/A (_run_check_schema, _run_check_plan_library); the
-    # plan-library docstring names this exact failure, "without that a fresh
-    # install exits non-zero from the release-sandbox smoke".
+    # Its two siblings in the same doctor loop (_run_check_schema,
+    # _run_check_plan_library) went through the SAME N/A-stub intermediate
+    # state this comment describes, then were themselves ported off the
+    # stub at nexus-vl8lk (they now ask the engine directly rather than
+    # reporting N/A) — the plan-library docstring names the original
+    # failure this comment is about, "without that a fresh install exits
+    # non-zero from the release-sandbox smoke".
     #
     # The census is KEPT rather than deleted, because it is the only taxonomy
     # inspection of the frozen source and RDR-176 Gap 2 wants those probes

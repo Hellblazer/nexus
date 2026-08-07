@@ -871,6 +871,90 @@ def _record_complete_refusal(doc_id: str) -> None:
             _COMPLETE_REFUSALS.append(doc_id)
 
 
+# nexus-39upx hazard 4 (honest output): the in-band superseded-vector sweep
+# (_sweep_superseded_vectors below) previously reported ONLY via structlog —
+# invisible without log capture wired up, the exact "every catalog-level
+# check reports clean" shape this bead exists to close one layer up. Mirrors
+# _MANIFEST_WRITE_FAILURES / _COMPLETE_REFUSALS: a per-process collector the
+# CLI summary layer (commands/_helpers.py) reads and resets around a run.
+_superseded_sweep_stats_lock = threading.Lock()
+_SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
+_SUPERSEDED_SWEEP_SKIPS: list[dict] = []
+
+
+def get_superseded_sweep_stats() -> dict:
+    """Superseded-vector sweep outcomes this process/run.
+
+    ``{"swept": int, "skipped": [{"doc_id": str, "collection": str,
+    "reason": str}, ...]}``. ``swept`` is the total count of T3 rows
+    actually deleted; ``skipped`` names every run where the sweep could
+    not complete (and therefore may have left superseded rows searchable)
+    — never silent. Snapshot copy.
+    """
+    with _superseded_sweep_stats_lock:
+        return {
+            "swept": _SUPERSEDED_SWEEP_SWEPT_TOTAL,
+            "skipped": [dict(d) for d in _SUPERSEDED_SWEEP_SKIPS],
+        }
+
+
+def reset_superseded_sweep_stats() -> None:
+    """Clear the collector (CLI callers reset at the start of an indexing
+    run, mirroring ``reset_manifest_write_failures``)."""
+    global _SUPERSEDED_SWEEP_SWEPT_TOTAL
+    with _superseded_sweep_stats_lock:
+        _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
+        _SUPERSEDED_SWEEP_SKIPS.clear()
+
+
+def _record_superseded_swept(count: int) -> None:
+    global _SUPERSEDED_SWEEP_SWEPT_TOTAL
+    if count <= 0:
+        return
+    with _superseded_sweep_stats_lock:
+        _SUPERSEDED_SWEEP_SWEPT_TOTAL += count
+
+
+def _record_superseded_sweep_skip(doc_id: str, collection: str | None, reason: str) -> None:
+    with _superseded_sweep_stats_lock:
+        _SUPERSEDED_SWEEP_SKIPS.append(
+            {"doc_id": doc_id, "collection": collection or "", "reason": reason}
+        )
+
+
+# nexus-2t63u round 2 (substantive-critic observation 4): a per-process
+# collector for ``doc_indexer._register_or_lookup_doc_id``'s
+# ``physical_collection`` reconciliation, mirroring the
+# ``_SUPERSEDED_SWEEP_SWEPT_TOTAL`` shape exactly (single int, not a list —
+# a reconciliation is a single per-document event, no per-item detail worth
+# retaining beyond the WARNING log line already emitted at the reconcile
+# site). A ``--dir`` batch that mass-retargets --collection by accident
+# should surface that count in the run's own summary line, not require the
+# operator to scroll back through WARNING-level structlog output to notice.
+_reconciled_collections_lock = threading.Lock()
+_RECONCILED_COLLECTIONS_COUNT = 0
+
+
+def get_reconciled_collections_count() -> int:
+    """Count of ``physical_collection`` reconciliations this process/run."""
+    with _reconciled_collections_lock:
+        return _RECONCILED_COLLECTIONS_COUNT
+
+
+def reset_reconciled_collections_count() -> None:
+    """Clear the collector (CLI callers reset at the start of an indexing
+    run, mirroring ``reset_superseded_sweep_stats``)."""
+    global _RECONCILED_COLLECTIONS_COUNT
+    with _reconciled_collections_lock:
+        _RECONCILED_COLLECTIONS_COUNT = 0
+
+
+def _record_physical_collection_reconciled() -> None:
+    global _RECONCILED_COLLECTIONS_COUNT
+    with _reconciled_collections_lock:
+        _RECONCILED_COLLECTIONS_COUNT += 1
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -996,7 +1080,7 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
 
 
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
-                              collection: str | None, *, reader) -> None:
+                              collection: str | None, *, reader, notes_provider) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
 
     A re-index that changes the extracted text writes chunks under NEW chashes —
@@ -1015,8 +1099,24 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     checked against ``docs_for_chashes`` and kept if ANY other document
     references it.
 
+    NOTE GUARD (nexus-39upx hazard 2 / RDR-145): ``docs_for_chashes`` only
+    sees MANIFESTED references, so it cannot tell a chash that fell out of
+    THIS document's manifest from a chash that never had one at all — a
+    manifest-less ``store_put`` / ``nx store put`` note, live by design
+    (``catalog-003-soft-delete.xml``'s ``live_chunks`` contract). Surviving
+    union-guard candidates are additionally checked against
+    ``notes_provider()`` (typically ``nexus.indexer_utils.live_note_chashes``
+    over a ``CollectionDocumentsCache``-memoized document list — round 2
+    SIGNIFICANT 1: a batch reindex calls this function once per
+    orphan-triggering document, so the caller shares ONE cache across the
+    whole batch instead of this function re-fetching per document) before
+    anything is deleted.
+
     Fail-open throughout: a sweep that cannot prove a row is orphaned leaves it
-    alone. Over-retention is recoverable; over-deletion is not.
+    alone. Over-retention is recoverable; over-deletion is not. Every skip that
+    stems from an actual failure (as opposed to "nothing to do") is recorded
+    via ``_record_superseded_sweep_skip`` so the CLI summary layer can surface
+    it — a skip must never be silent (nexus-39upx hazard 4).
     """
     import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
 
@@ -1038,16 +1138,30 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     # double carrying no read methods, so the sweep silently no-opped there and
     # covered none of this. A missing wire-up must fail at the call, loudly,
     # not degrade into the no-op we are here to remove.
-    try:
-        refs = reader.docs_for_chashes(sorted(dropped)) or {}
-    except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
-        structlog.get_logger().warning(
-            "superseded_sweep_skipped_no_reverse_lookup",
-            doc_id=doc_id, candidates=len(dropped))
-        return
-    orphaned = [h for h in sorted(dropped)
-                if not any(d != doc_id for d in (refs.get(h) or []))]
+    #
+    # nexus-tp8yk D3: the union-guard LOGIC (docs_for_chashes lookup,
+    # fail-open, event name) now lives in the shared
+    # ``nexus.indexer_utils.orphaned_chashes`` — this call is a pure
+    # delegation, zero behaviour change; the three T3-deleting prune sites
+    # in doc_indexer.py/pipeline_stages.py route through the same helper.
+    from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    orphaned = orphaned_chashes(reader, doc_id, dropped)
     shared = len(dropped) - len(orphaned)
+    if not orphaned:
+        return
+    try:
+        notes = notes_provider()
+    except Exception as exc:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_note_lookup_failed",
+            doc_id=doc_id, collection=collection, candidates=len(orphaned),
+            error=str(exc))
+        _record_superseded_sweep_skip(doc_id, collection, "note_lookup_failed")
+        return
+    kept_notes = len(orphaned)
+    orphaned = [h for h in orphaned if h not in notes]
+    kept_notes -= len(orphaned)
     if not orphaned:
         return
     try:
@@ -1058,10 +1172,12 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
         structlog.get_logger().warning(
             "superseded_sweep_failed", doc_id=doc_id, collection=collection,
             orphans=len(orphaned), error=str(exc))
+        _record_superseded_sweep_skip(doc_id, collection, "delete_failed")
         return
     structlog.get_logger().info(
         "superseded_vectors_swept", doc_id=doc_id, collection=collection,
-        deleted=len(orphaned), kept_shared=shared)
+        deleted=len(orphaned), kept_shared=shared, kept_notes=kept_notes)
+    _record_superseded_swept(len(orphaned))
 
 
 def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
@@ -1113,7 +1229,13 @@ def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
             chunk_count=refused.chunk_count,
             path="per_doc",
             note="manifest rows written; completion stamp refused — "
-                 "doc is NOT fully indexed, index_state left as-was",
+                 "doc is NOT fully indexed, index_state left as-was. "
+                 "A candidate cause (nexus-2t63u): a stale "
+                 "catalog_documents.physical_collection from a prior run "
+                 "targeting a different collection makes manifest_verify "
+                 "check the wrong collection and misreport present "
+                 "chunks as missing — check via 'nx catalog show "
+                 f"{doc_id}'.",
         )
         _record_complete_refusal(doc_id)
         return
@@ -1240,7 +1362,13 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                         missing=_r.get("missing"),
                         chunk_count=_r.get("chunk_count"),
                         note="manifest rows written; completion stamp refused — "
-                             "doc is NOT fully indexed, index_state left as-was",
+                             "doc is NOT fully indexed, index_state left as-was. "
+                             "A candidate cause (nexus-2t63u): a stale "
+                             "catalog_documents.physical_collection from a "
+                             "prior run targeting a different collection "
+                             "makes manifest_verify check the wrong "
+                             "collection and misreport present chunks as "
+                             f"missing — check via 'nx catalog show {_rid}'.",
                     )
                     if _rid:
                         _record_complete_refusal(_rid)
@@ -1285,6 +1413,19 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
             return
     from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
 
+    # nexus-39upx round 2 SIGNIFICANT 1: ONE cache per call (per collection),
+    # shared across every doc_id below — not one catalog-documents fetch per
+    # orphan-triggering document. Cheap to construct even when this batch
+    # never triggers a sweep at all: the underlying fetch is fully lazy
+    # (CollectionDocumentsCache.get() is never called unless a document in
+    # this batch actually has surviving union-guard candidates to check).
+    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _notes_cache = CollectionDocumentsCache(reader, collection or "")
+
+    def _notes_provider() -> set[str]:
+        return live_note_chashes(_notes_cache.get())
+
     for doc_id, indexed_metas in by_doc.items():
         chunks = _manifest_chunk_rows(indexed_metas)
         if all(not c["chash"] for c in chunks):
@@ -1327,9 +1468,10 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                         "superseded_sweep_before_read_failed",
                         doc_id=doc_id, collection=collection, error=str(_exc))
                     _before = set()
+                    _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
                 _manifest_write_with_retry(cat.atomic_manifest_replace, doc_id, chunks)
                 _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
-                                          reader=reader)
+                                          reader=reader, notes_provider=_notes_provider)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does

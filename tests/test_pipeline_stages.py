@@ -20,7 +20,6 @@ from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunnin
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     _enrich_metadata_from_extraction,
-    _prune_stale_chunks,
     _update_chunk_metadata,
     chunker_loop,
     extractor_loop,
@@ -66,7 +65,7 @@ def _er(page_count: int = 3) -> ExtractionResult:
 
 def _fx(n: int = 3, result: ExtractionResult | None = None, text_fn=None):
     r = result or _er(n)
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
         for i in range(n):
             txt = text_fn(i) if text_fn else f"Page {i} content."
             if on_page:
@@ -195,8 +194,12 @@ class TestServiceModeStreaming:
         assert embs and all(e == [] for e in embs)
 
     def test_non_service_no_voyage_still_raises(self, db) -> None:
-        # The legacy (non-service) no-Voyage path must keep failing loud.
-        with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
+        # nexus-sghyo (2026-08-06): the legacy (non-service) embed path is
+        # now retired outright rather than credential-gated — the client
+        # no longer embeds via Voyage at all (Hal determination
+        # 2026-07-28), so the message names the retirement, not a missing
+        # key.
+        with pytest.raises(RuntimeError, match="non-service embedding was retired"):
             _run_service_mode(
                 db, _er(1), _tc(("chunk x", 0, {})),
                 service=False, voyage=None, content_hash="raw123")
@@ -208,7 +211,7 @@ class TestExtractorLoop:
         result = _er(3)
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
+            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
                 for i in range(3):
                     if on_page:
                         on_page(i, f"Page {i} text content.",
@@ -223,7 +226,7 @@ class TestExtractorLoop:
     def test_cancel_raises_pipeline_cancelled(self, db: HttpPipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
-        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
+        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
             for i in range(10):
                 if on_page:
                     on_page(i, f"Page {i}", {"page_number": i + 1, "text_length": 6})
@@ -525,6 +528,36 @@ class TestUploaderLoop:
                     f"upsert_chunks_with_embeddings returns."
                 )
 
+    def test_upsert_precedes_fire_batch_ordering(self, db) -> None:
+        """nexus-tp8yk design memo §0 ("already correct — do not touch"):
+        the streaming uploader's manifest-hook chain must only ever see
+        chunks the T3 upsert already confirmed. Regression fence — pins
+        the ordering so a future refactor cannot silently reorder
+        ``fire_batch`` ahead of ``upsert_chunks_with_embeddings`` and
+        reintroduce the P1 mechanism (manifest rows for chunks that never
+        landed) one call site over from the ones nexus-tp8yk fixed
+        directly (doc_indexer's single-flush paths).
+        """
+        _pop_chunks(db, "h1", 3)
+        t3 = MagicMock()
+        seq: list[str] = []
+        t3.upsert_chunks_with_embeddings.side_effect = (
+            lambda *a, **k: seq.append("upsert")
+        )
+
+        def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **_kwargs):
+            seq.append("fire_batch")
+
+        from nexus.hook_registry import HookRegistry
+        hooks = HookRegistry()
+        hooks.register_batch(_capture_batch)
+
+        uploader_loop("h1", db, t3, "docs__test", threading.Event(), hooks=hooks)
+
+        assert seq == ["upsert", "fire_batch"], (
+            f"upsert must strictly precede fire_batch — got {seq}"
+        )
+
 
 
 class TestPipelineIndexPdf:
@@ -540,6 +573,85 @@ class TestPipelineIndexPdf:
         assert total == 2
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
+
+    def test_streaming_register_failure_feeds_identity_drop_collector(self, db, mock_t3) -> None:
+        """nexus-2xu6t follow-up (critic round, 2026-08-05): a preflight
+        catalog-register exception must feed the nexus-94fxl identity-drop
+        collector on the STREAMING path too, not just the non-streaming
+        fallback ``tests/test_doc_indexer.py::test_preflight_register_
+        failure_feeds_identity_drop_collector`` pins.
+
+        ``_STREAMING_THRESHOLD = 0`` (doc_indexer.py) means every REAL PDF
+        that ``index_pdf`` can open with pymupdf routes through THIS
+        function (``pipeline_index_pdf``) unconditionally — the batch/
+        single-flush path the sibling test exercises is reached only when
+        pymupdf's page-count probe fails (an unopenable file), which is
+        the FALLBACK, not the forced production route. The critic caught
+        that the sibling test's ``sample_pdf`` fixture (fake, unopenable
+        bytes) accidentally exercises exactly that fallback, leaving the
+        actually-forced streaming path unpinned.
+
+        This drives ``pipeline_index_pdf`` directly (the routing decision
+        itself — pymupdf openability -> streaming vs batch — is already
+        pinned by ``TestStreamingRouting`` in test_doc_indexer.py, not
+        this test's job) with a broken catalog writer, proving the same
+        ``_register_or_lookup_doc_id`` swallow (doc_indexer.py, ``except
+        Exception`` -> returns ``""``) reaches ``uploader_loop``'s
+        ``hooks.fire_batch(catalog_doc_id="")`` -> ``manifest_write_
+        batch_hook`` -> ``_record_manifest_identity_drop`` chain here too.
+
+        Kill-control (manual, run during review): commenting out
+        ``_record_manifest_identity_drop(...)`` in
+        ``manifest_write_batch_hook`` (src/nexus/mcp_infra.py) turns this
+        RED — same probe already applied to the non-streaming sibling
+        test and to the ``nx dt index`` CLI-layer tests in
+        ``tests/test_commands_dt.py::TestIdentityDropSummary``.
+        """
+        from nexus.mcp_infra import (
+            get_manifest_identity_drops,
+            reset_manifest_identity_drops,
+        )
+
+        reset_manifest_identity_drops()
+
+        reader = MagicMock()
+        reader.by_file_path.return_value = None
+        reader.by_source_uri.return_value = None
+        reader.curator_owner_tumbler_by_name.return_value = "1.99"
+        writer = MagicMock()
+        writer.register.side_effect = RuntimeError("integrity constraint violation")
+
+        fake_result = _er(2)
+        fake_chunks = _tc(
+            ("chunk one", 0, {"page_number": 1, "chunk_type": "text"}),
+        )
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+             patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+            ME.return_value.extract.side_effect = _fx(fake_result.metadata["page_count"], fake_result)
+            MC.return_value.chunk.return_value = fake_chunks
+            total = pipeline_index_pdf(
+                Path("/streamreg.pdf"), "streamregfail1", "docs__test",
+                mock_t3, db=db, embed_fn=_embed, corpus="test",
+            )
+
+        # Collect-and-continue: the register exception must not abort the
+        # streaming upload — the chunk still lands.
+        assert total == 1, "register failure must not abort the streaming upload"
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        # writer.register was reached at least once (the pre-flight call in
+        # pipeline_index_pdf) — confirms the broken double was actually on
+        # the path, not bypassed.
+        writer.register.assert_called()
+
+        drops = get_manifest_identity_drops()
+        assert drops, (
+            "a preflight catalog-register exception on the STREAMING path "
+            "did not feed the identity-drop collector — nx dt index / nx "
+            "index pdf would report plain success on this failure when "
+            "routed through pipeline_index_pdf"
+        )
 
     def test_first_exc_propagates_even_when_mark_failed_raises(self, db, mock_t3) -> None:
         """nexus-rewgw: the /fail POST's own failure must never mask the
@@ -628,19 +740,62 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
-    def test_stale_chunk_pruning(self, db) -> None:
-        _, col = _run_with_col(
-            db,
-            col_get_return={"ids": ["abc123_0", "abc123_1", "old_hash_0"], "metadatas": [
-                {"content_hash": "abc123_full", "source_path": "/a.pdf"},
-                {"content_hash": "abc123_full", "source_path": "/a.pdf"},
-                {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
-            fake_result=_er(1),
-            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
-            content_hash="abc123_full")
-        col.delete.assert_called_once()
-        ids = col.delete.call_args.kwargs.get("ids", col.delete.call_args[1].get("ids", []))
-        assert "old_hash_0" in ids and "abc123_0" not in ids
+    def test_stale_chunk_pruning_post_pass_removed_as_dead_code(self, db) -> None:
+        """nexus-tbkk1: the stale-chunk-pruning post-pass (formerly
+        ``_prune_stale_chunks``, called from ``pipeline_index_pdf`` after
+        the metadata-enrichment and table_regions post-passes) is DELETED
+        dead code, not merely runtime-unreachable.
+
+        This test replaces ``test_stale_chunk_pruning`` and
+        ``test_stale_chunk_pruning_kept_when_shared_with_another_
+        document`` (nexus-tp8yk D3), which asserted the prune's union
+        guard correctly distinguished a genuinely-orphaned stale chash
+        from one still referenced by another live document. Both tests
+        only ever passed because their ``MagicMock col.get`` ignored the
+        ``where=`` argument entirely and served the seeded stale row
+        regardless — a green suite that was never evidence the where
+        clause the production code actually issues
+        (``{"source_path": pdf_path}``, via ``nexus.doc_indexer.
+        _identity_where``) matches anything real. RDR-102 D2
+        (2026-05-02) removed ``source_path`` from ``make_chunk_metadata``
+        entirely, so it never does; the prune's real chunk-fetch query
+        was permanently a zero-row no-op in production, which is why
+        nexus-tbkk1 deletes it outright rather than "fixing" the where
+        clause.
+
+        The union-guard LOGIC these superseded tests exercised
+        (``indexer_utils.orphaned_chashes``) is untouched by this
+        deletion and remains covered by tests/db/test_http_catalog_
+        integration.py::TestPruneUnionGuard. Its thin wrapper
+        ``prune_orphan_candidates`` — built specifically for this call
+        site and its three siblings, all now deleted — was ALSO deleted
+        in this same fix round (zero production callers survived; see
+        ``nexus.indexer_utils``'s deletion comment), along with its
+        now-pointless dedicated test file. The real cross-document prune
+        protection (``mcp_infra._sweep_superseded_vectors``, which calls
+        ``orphaned_chashes`` directly) is proven at tests/integration/
+        test_tp8yk_manifest_never_outruns_chunks.py::test_union_guard_
+        keeps_shared_chunk_at_the_production_wiring.
+
+        Kill control: seed a legacy-shaped stale row (mismatched
+        content_hash, source_path metadata) that the OLD post-pass would
+        have deleted. If the post-pass call were reintroduced, ``col.
+        delete`` would fire and this assertion would fail.
+        """
+        with patch(
+            "nexus.catalog.factory.make_catalog_reader",
+            return_value=MagicMock(docs_for_chashes=MagicMock(return_value={})),
+        ):
+            _, col = _run_with_col(
+                db,
+                col_get_return={"ids": ["abc123_0", "abc123_1", "old_hash_0"], "metadatas": [
+                    {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                    {"content_hash": "abc123_full", "source_path": "/a.pdf"},
+                    {"content_hash": "previous_hash", "source_path": "/a.pdf"}]},
+                fake_result=_er(1),
+                fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+                content_hash="abc123_full")
+        col.delete.assert_not_called()
 
     def test_conflict_already_running(self, db, mock_t3) -> None:
         """nexus-lcmbp: a retry against a fresh-heartbeat 'running' row is
@@ -650,27 +805,23 @@ class TestPipelineIndexPdf:
             pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
-    def test_embed_fn_none_resolves_credentials(self, db, mock_t3) -> None:
-        fr, fc = _er(1), _tc(("c0", 0, {"page_number": 1, "chunk_type": "text"}))
-        with (patch(_P_EXT) as ME, patch(_P_CHK) as MC,
-              patch("nexus.db.http_vector_client.is_vector_service_mode",
-                    return_value=False),
-              patch("nexus.config.get_credential", side_effect=fake_credentials("fake-key")),
-              patch("nexus.config.load_config", return_value={}),
-              patch("nexus.doc_indexer._embed_with_fallback") as me):
-            me.return_value = ([[0.1] * 4], "voyage-context-3")
-            ME.return_value.extract.side_effect = _fx(1, fr)
-            MC.return_value.chunk.return_value = fc
-            total = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
-        assert total == 1
-        me.assert_called()
+    # nexus-sghyo (2026-08-06): test_embed_fn_none_resolves_credentials
+    # DELETED — it proved that, given a valid voyage credential, the
+    # legacy non-service embed path succeeded via
+    # doc_indexer._embed_with_fallback. That whole path is retired
+    # outright regardless of credential (Hal determination 2026-07-28:
+    # "we do no embedding on the client") — no surviving subject. See
+    # test_embed_fn_none_no_credentials_fails_fast below, which now
+    # covers the (only reachable) unconditional-raise behavior.
 
     def test_embed_fn_none_no_credentials_fails_fast(self, db, mock_t3) -> None:
-        # Legacy (non-service) path: no Voyage key must still fail loud.
+        # nexus-sghyo: non-service embedding is retired unconditionally
+        # now, not merely credential-gated — the client no longer embeds
+        # via Voyage at all.
         with (patch("nexus.db.http_vector_client.is_vector_service_mode",
                     return_value=False),
               patch("nexus.config.get_credential", side_effect=fake_credentials(None))):
-            with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
+            with pytest.raises(RuntimeError, match="non-service embedding was retired"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
     def test_streaming_pdf_does_not_emit_source_path(
@@ -861,22 +1012,14 @@ def test_update_chunk_metadata(get_exc, upd_exc, expected) -> None:
     assert _update_chunk_metadata(t3, col, "docs__test", "abc123", lambda m: True) is expected
 
 
-@pytest.mark.parametrize("get_exc,get_ret,del_exc,expected,del_called", [
-    pytest.param(Exception("connection reset"), None, None, False, False, id="query_failure"),
-    pytest.param(None, {"ids": ["old1", "old2"], "metadatas": [
-        {"content_hash": "stale", "source_path": "/doc.pdf"},
-        {"content_hash": "stale", "source_path": "/doc.pdf"}]},
-        Exception("quota exceeded"), False, True, id="delete_failure"),
-    pytest.param(None, {"ids": ["old1"], "metadatas": [{"content_hash": "stale"}]},
-        None, True, True, id="success"),
-])
-def test_prune_stale_chunks(get_exc, get_ret, del_exc, expected, del_called) -> None:
-    col = MagicMock()
-    col.get = MagicMock(side_effect=get_exc) if get_exc else MagicMock(return_value=get_ret)
-    if del_exc:
-        col.delete = MagicMock(side_effect=del_exc)
-    assert _prune_stale_chunks(col, "/doc.pdf", "new_hash") is expected
-    (col.delete.assert_called if del_called else col.delete.assert_not_called)()
+# nexus-tbkk1: test_prune_stale_chunks (a parametrized unit test of the
+# query/delete pagination mechanics of nexus.pipeline_stages.
+# _prune_stale_chunks) DELETED along with the function it tested — see
+# test_stale_chunk_pruning_post_pass_removed_as_dead_code above for the
+# full rationale and the tests that still cover the surviving, unrelated
+# machinery (indexer_utils.orphaned_chashes union guard, its now-deleted
+# prune_orphan_candidates wrapper's fate; mcp_infra._sweep_superseded_
+# vectors real protection).
 
 
 def test_pipeline_data_kept_on_enrichment_failure(db) -> None:

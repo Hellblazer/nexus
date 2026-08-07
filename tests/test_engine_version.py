@@ -224,7 +224,21 @@ class TestRequiredEngineVersion:
         # client verbs (purge-trash, store-get) hard-require the v0.1.63+
         # routes; fix-delivery rule covers the rest. Deploy-first: cloud was
         # serving 0.1.65 before this bump landed.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 65)
+        # ->(0,1,67) 2026-08-07 (7.3.0 release): v0.1.66 (begin-many fence
+        # route [vw594 F1], chash-conformance report [du2dw], owner
+        # deactivate/reactivate [cw262], nx_answer_runs query [eho3u]) and
+        # v0.1.67 (12-way parallel CCE fan-out, bit-identical vectors +
+        # jittered retries [9okyk], shutdown-lifecycle fixes). Both
+        # published + acquire-gated + deployed + edge-gated (conexus
+        # [21504]/[21576]: step-6 exit 0, client-path 4/4). Deploy-first:
+        # cloud was serving 0.1.67 before this bump landed. The 7.3.0
+        # client halves (owners --census/--execute, answer-runs,
+        # manifest-verify --list, chash-conformance doctor check, CLI
+        # store fencing) hard-require the v0.1.66+ routes. This bump also
+        # trips Test8hpadAllowlistDoesNotOutliveItsTrigger: the
+        # fresh-install-mvv ALLOWLIST_REGEX entries retire in the SAME
+        # change (nexus-8hpad).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 67)
 
 
 class TestParseEngineVersion:
@@ -415,4 +429,58 @@ class TestMvvAllowlistDoesNotOutliveItsTrigger:
             "2026-08-02) in the SAME change that bumps the floor past "
             "v0.1.61, or the entry silently outlives its own removal "
             "trigger — the ac4id vacuity class recurring one arc later."
+        )
+
+
+class Test8hpadAllowlistDoesNotOutliveItsTrigger:
+    """nexus-8hpad (filed while validating nexus-796zn, 2026-08-05).
+
+    ``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX`` carries two
+    scoped entries — "chash.conformance" (bead nexus-du2dw, RDR-180) and
+    the vw594-anchored "stale index-run fences: ... report index_state but
+    it is NULL" (bead nexus-vw594 F1) — for two doctor warnings that fire
+    unconditionally on the CURRENTLY-PINNED v0.1.65 engine floor because
+    both features are client-shipped but ENGINE-HALF-INERT (both beads'
+    own close notes say so). Mirrors ``TestMvvAllowlistDoesNotOutliveItsTrigger``
+    directly above (same tripwire idiom), with one difference: unlike the
+    3cf64d48/v0.1.62 case, the future engine tag that carries both routes
+    does not exist yet, so there is no commit sha to key the trigger on.
+    Keyed instead on ``REQUIRED_ENGINE_VERSION`` moving past the KNOWN-inert
+    v0.1.65 floor — the moment the floor bumps at all, both routes are
+    presumed carried (per the paired-release choreography: a floor bump
+    always rides the engine tag that motivated it) and the entries must be
+    deleted in that SAME change, or they silently outlive their trigger —
+    the exact ac4id/5xn3k.6 vacuity class recurring a second time.
+
+    THIS test, not human memory or a bead comment, IS the revisit trigger
+    (nexus-i5c2u: eyeball steps get skipped).
+    """
+
+    def test_floor_at_0_1_65_or_allowlist_entries_removed(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION <= (0, 1, 65):
+            return  # floor hasn't moved past the known-engine-half-inert version yet
+
+        gate = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+        text = gate.read_text(encoding="utf-8")
+        assert "chash.conformance" not in text and "nexus-du2dw" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} has moved "
+            "past the known-inert v0.1.65 floor — presumably carrying "
+            "nexus-du2dw's /chash/conformance route now, so delete the "
+            "'chash.conformance' ALLOWLIST_REGEX entry (and its comment "
+            "block) from tests/e2e/fresh-install-mvv.sh (nexus-8hpad) in "
+            "the SAME change, or the entry silently outlives its own "
+            "removal trigger — the ac4id/5xn3k.6 vacuity class recurring."
+        )
+        assert "report index_state but it is NULL" not in text and "nexus-vw594" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} has moved "
+            "past the known-inert v0.1.65 floor — presumably carrying "
+            "vw594 F1's begin-many route now, so delete the vw594-anchored "
+            "'stale index-run fences' ALLOWLIST_REGEX entry (and its "
+            "comment block) from tests/e2e/fresh-install-mvv.sh "
+            "(nexus-8hpad) in the SAME change, or the entry silently "
+            "outlives its own removal trigger."
         )

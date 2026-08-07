@@ -29,6 +29,28 @@ def _make_voyage_client(embedding_dim: int = 8) -> MagicMock:
     return mock
 
 
+def _make_embed_fn(embedding_dim: int = 8):
+    """nexus-sghyo (2026-08-06): the SUPPORTED embed-injection point.
+
+    Client-side Voyage embedding (``ctx.voyage_client.embed``) is retired
+    outright (Hal determination 2026-07-28: "we do no embedding on the
+    client") — code_indexer.py's ``else`` branch that used to dispatch to
+    it now raises unconditionally. ``embed_fn`` (checked FIRST, before any
+    mode/credential branching) is the way these tests exercise the
+    staleness/re-embed decision without depending on client-side Voyage.
+    Returns ``(embed_fn, call_log)`` — call_log records each batch of
+    texts passed, standing in for the deleted ``voyage.embed.assert_
+    called()`` proof.
+    """
+    calls: list[list[str]] = []
+
+    def embed_fn(texts: list[str]) -> list[list[float]]:
+        calls.append(list(texts))
+        return [[0.1] * embedding_dim for _ in texts]
+
+    return embed_fn, calls
+
+
 def _make_db() -> MagicMock:
     """Return a mock T3 DB that accepts upsert_chunks_with_embeddings."""
     return MagicMock()
@@ -95,7 +117,7 @@ def test_modified_file_reembeds(tmp_path: Path) -> None:
         "metadatas": [{"content_hash": "old_stale_hash_abcdef", "embedding_model": _TARGET_MODEL}]
     }
 
-    voyage = _make_voyage_client(embedding_dim=8)
+    embed_fn, embed_calls = _make_embed_fn(embedding_dim=8)
     db = _make_db()
 
     result = _index_code_file(
@@ -105,14 +127,15 @@ def test_modified_file_reembeds(tmp_path: Path) -> None:
         target_model=_TARGET_MODEL,
         col=mock_col,
         db=db,
-        voyage_client=voyage,
+        voyage_client=None,
         git_meta={},
         now_iso="2026-01-01T00:00:00Z",
         score=1.0,
+        embed_fn=embed_fn,
     )
 
     assert result > 0, "Should return positive chunk count (indexed) when hash changed"
-    voyage.embed.assert_called(), "Voyage embed must be called for modified file"
+    assert embed_calls, "embed_fn must be called for modified file"
 
 
 # ── test: new file (no prior record) triggers embed ───────────────────────────
@@ -127,7 +150,7 @@ def test_new_file_embeds(tmp_path: Path) -> None:
     mock_col = MagicMock()
     mock_col.get.return_value = {"metadatas": []}
 
-    voyage = _make_voyage_client(embedding_dim=8)
+    embed_fn, embed_calls = _make_embed_fn(embedding_dim=8)
     db = _make_db()
 
     result = _index_code_file(
@@ -137,14 +160,15 @@ def test_new_file_embeds(tmp_path: Path) -> None:
         target_model=_TARGET_MODEL,
         col=mock_col,
         db=db,
-        voyage_client=voyage,
+        voyage_client=None,
         git_meta={},
         now_iso="2026-01-01T00:00:00Z",
         score=1.0,
+        embed_fn=embed_fn,
     )
 
     assert result > 0, "New file should be indexed (positive chunk count)"
-    voyage.embed.assert_called()
+    assert embed_calls
 
 
 # ── test: force=True bypasses staleness for code files ────────────────────────
@@ -167,7 +191,7 @@ def test_force_bypasses_staleness_code_file(tmp_path: Path) -> None:
         "metadatas": [{"content_hash": h, "embedding_model": _TARGET_MODEL}]
     }
 
-    voyage = _make_voyage_client(embedding_dim=8)
+    embed_fn, embed_calls = _make_embed_fn(embedding_dim=8)
     db = _make_db()
 
     result = _index_code_file(
@@ -177,15 +201,16 @@ def test_force_bypasses_staleness_code_file(tmp_path: Path) -> None:
         target_model=_TARGET_MODEL,
         col=mock_col,
         db=db,
-        voyage_client=voyage,
+        voyage_client=None,
         git_meta={},
         now_iso="2026-01-01T00:00:00Z",
         score=1.0,
         force=True,
+        embed_fn=embed_fn,
     )
 
     assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
-    voyage.embed.assert_called()
+    assert embed_calls
 
 
 # ── test: force=True bypasses staleness for prose files ───────────────────────
@@ -208,24 +233,28 @@ def test_force_bypasses_staleness_prose_file(tmp_path: Path) -> None:
     }
     db = _make_db()
 
-    fake_embeddings = [[0.1] * 8]
-    with patch("nexus.doc_indexer._embed_with_fallback", return_value=(fake_embeddings, "voyage-context-3")) as mock_embed:
-        result = _index_prose_file(
-            file=f,
-            repo=tmp_path,
-            collection_name="docs__test",
-            target_model="voyage-context-3",
-            col=mock_col,
-            db=db,
-            voyage_key="fake-key",
-            git_meta={},
-            now_iso="2026-01-01T00:00:00Z",
-            score=1.0,
-            force=True,
-        )
+    # nexus-sghyo (2026-08-06): embed_fn is the supported injection point
+    # now — the deleted doc_indexer._embed_with_fallback used to back the
+    # non-service path (client-side Voyage embedding is retired, Hal
+    # determination 2026-07-28).
+    embed_fn, embed_calls = _make_embed_fn(embedding_dim=8)
+    result = _index_prose_file(
+        file=f,
+        repo=tmp_path,
+        collection_name="docs__test",
+        target_model="voyage-context-3",
+        col=mock_col,
+        db=db,
+        voyage_key="fake-key",
+        git_meta={},
+        now_iso="2026-01-01T00:00:00Z",
+        score=1.0,
+        force=True,
+        embed_fn=embed_fn,
+    )
 
     assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
-    mock_embed.assert_called()
+    assert embed_calls
 
 
 # ── test: force=True bypasses staleness for PDF files ─────────────────────────
@@ -262,10 +291,13 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
             "embedding_model": "voyage-context-3",
         },
     )
-    fake_embeddings = [[0.1] * 8]
+    # nexus-sghyo (2026-08-06): embed_fn is the supported injection point
+    # now — the deleted doc_indexer._embed_with_fallback used to back the
+    # non-service path (client-side Voyage embedding is retired, Hal
+    # determination 2026-07-28).
+    embed_fn, embed_calls = _make_embed_fn(embedding_dim=8)
 
-    with patch("nexus.doc_indexer._pdf_chunks", return_value=[fake_chunk]) as mock_chunks, \
-         patch("nexus.doc_indexer._embed_with_fallback", return_value=(fake_embeddings, "voyage-context-3")) as mock_embed:
+    with patch("nexus.doc_indexer._pdf_chunks", return_value=[fake_chunk]) as mock_chunks:
         result = _index_pdf_file(
             file=f,
             repo=tmp_path,
@@ -278,16 +310,18 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
             now_iso="2026-01-01T00:00:00Z",
             score=1.0,
             force=True,
+            embed_fn=embed_fn,
         )
 
     assert result > 0, "force=True should return int > 0 (indexed) even when hash matches"
-    mock_embed.assert_called()
+    assert embed_calls
 
 
-@pytest.fixture(autouse=True)
-def _legacy_vector_backend(monkeypatch):
-    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
-    stubs fire unless opted out). This module tests the legacy
-    chroma/local embed pipeline, which is exactly the chroma-injected
-    configuration the opt-out exists for."""
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+# nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse fixture
+# that force-pinned this whole module to NX_STORAGE_BACKEND_VECTORS=chroma
+# (the legacy chroma/local embed pipeline opt-out) is RETIRED — that
+# pipeline is deleted outright: the client no longer embeds via Voyage
+# (Hal determination 2026-07-28: "we do no embedding on the client"). Every
+# test above now injects ``embed_fn`` explicitly (checked FIRST, before
+# any mode dispatch), so the module runs fine under the ambient
+# service-mode default.

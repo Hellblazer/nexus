@@ -71,7 +71,13 @@ class JooqRecordReflectionFeatureTest {
     // function. The fence COLUMNS on catalog_documents change no record
     // count; the two function-return records are the whole delta. This is
     // the deliberate bump the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 63;
+    // 63 -> 64: RDR-180 (nexus-du2dw) added nexus.chash_conformance_report(int)
+    // (rdr180-021-chash-conformance-report.xml) — RETURNS TABLE, so jOOQ
+    // generates one more Record type (ChashConformanceReportRecord). The
+    // Feature enumerates via the schema model, so it is already registered
+    // for native-image reflection by construction — this is the deliberate
+    // bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 64;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

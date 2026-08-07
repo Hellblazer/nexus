@@ -47,6 +47,10 @@ from __future__ import annotations
 import ast
 import pathlib
 
+import pytest
+
+pytestmark = pytest.mark.lint
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC = REPO_ROOT / "src" / "nexus"
 

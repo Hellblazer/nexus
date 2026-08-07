@@ -300,7 +300,15 @@ class TestIndexMarkdownDocIdReuse:
         chunk = _mock_chunk(0)
         chunk.metadata["header_path"] = "Hello"
 
-        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
+        # nexus-tp8yk D2a: t3 is a MagicMock, so no chunk ever lands in the
+        # substrate the real engine's fail-closed /complete verifies
+        # against — the fence would correctly refuse (referenced=1,
+        # present=0). This test proves source_uri doc_id CONVERGENCE, not
+        # fence integration (nexus-5xn3k.7 / nexus-tp8yk's own gates own
+        # the genuine proof); stub the stamp like
+        # TestIndexPdfIncrementalDocIdReuse's identical pattern above.
+        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls, \
+             patch("nexus.doc_indexer._fence_complete", lambda *a, **k: None):
             chk_cls.return_value.chunk.return_value = [chunk]
             result = index_markdown(
                 new_path, corpus=corpus_name, t3=t3,

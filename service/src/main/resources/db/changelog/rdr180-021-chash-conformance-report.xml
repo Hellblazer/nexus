@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-180 (bead nexus-du2dw) — chash width-conformance report exposed as an
+    engine route.
+
+    THE GAP THIS CLOSES: the width-non-conformant chash probe (octet_length
+    <> 32 across the poison chunk tables — the GH #1414 / nexus-pnwu0 class,
+    RDR-180's era-safe predicate) exists ONLY as a local ``psql`` invocation
+    through the ``nexus_diag`` role (``nexus.db.diag_connection`` — LOCAL-ONLY
+    BY DESIGN per the nexus-y3wuu Hal decision, shelling a local psql at
+    127.0.0.1 using a local ``pg_credentials`` file). Managed/cloud installs
+    have no local Postgres and no local credentials file, so this probe class
+    is PERMANENTLY BLIND there — the same blind-spot family as shakedown
+    §3.3b's substrate-direct anchor.
+
+    THIS FUNCTION follows the ``manifest_orphans`` idiom
+    (rdr180-002-hex-boundary-functions.xml, changeset rdr180-18): SECURITY
+    INVOKER, callable through the normal engine connection pool, tenant-scoped
+    by FORCE RLS on the underlying tables. This is DELIBERATELY a different
+    visibility model than the local ``nexus_diag`` probe: nexus_diag is
+    BYPASSRLS and reads CROSS-TENANT counts (needed for the whole-store
+    install-binary gate — nexus-vounk: a tenant-scoped session undercounts to
+    zero on a poisoned store). This function gives a MANAGED-MODE TENANT
+    visibility into their OWN data's conformance, matching the scoping model
+    of every other engine route (manifest_orphans included) — it is a
+    self-service observability surface, not a replacement for the local
+    install-binary gate's cross-tenant decision.
+
+    SCOPE: covers the GATING ("poison") chash-bearing tables that are
+    dim-routable — chunks_&lt;dim&gt; and catalog_document_chunks (filtered
+    by dim's model-token IN-list, identical routing to manifest_orphans, with
+    the SAME known caveat: a collection whose model token is outside every
+    IN-list is invisible here while still counted by the local psql probe's
+    view-based statements). The LEGACY-DEBT tables (topic_assignments,
+    frecency, relevance_log — non-gating, no width CHECK) are NOT covered by
+    this function; they are not dim-routable by construction (mixed identity
+    space) and are left to the local probe. See nexus.db.chash_tables for the
+    full table taxonomy this function is a managed-mode subset of.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="rdr180-21-chash-conformance-report" author="nexus-du2dw">
+        <comment>chash_conformance_report(dim): per-table total/non_conformant/sample_chashes (hex-encoded, capped at 20), tenant-scoped via SECURITY INVOKER + FORCE RLS — the engine-route counterpart to the nexus_diag local-psql probe, for managed/cloud installs with no substrate access</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chash_conformance_report(dim int)
+RETURNS TABLE(
+    table_name     text,
+    total          bigint,
+    non_conformant bigint,
+    sample_chashes text[]
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'chash_conformance_report: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_384'::text,
+                   (SELECT count(*) FROM nexus.chunks_384)::bigint,
+                   (SELECT count(*) FROM nexus.chunks_384
+                     WHERE octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks_384
+                                 WHERE octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+
+    ELSIF dim = 768 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_768'::text,
+                   (SELECT count(*) FROM nexus.chunks_768)::bigint,
+                   (SELECT count(*) FROM nexus.chunks_768
+                     WHERE octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks_768
+                                 WHERE octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+
+    ELSIF dim = 1024 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_1024'::text,
+                   (SELECT count(*) FROM nexus.chunks_1024)::bigint,
+                   (SELECT count(*) FROM nexus.chunks_1024
+                     WHERE octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks_1024
+                                 WHERE octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.chash_conformance_report(int)</rollback>
+    </changeSet>
+
+</databaseChangeLog>

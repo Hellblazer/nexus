@@ -4,7 +4,306 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.3.0] - 2026-08-07
+
+### Release-gate integrity (2026-08-07)
+- **The release sandbox self-provisions its storage service** (nexus-596jm):
+  smoke and shakedown run `nx init` in the sandbox HOME and tear down on any
+  exit (with a PGDATA-scoped fallback for the pre-credentials crash window
+  and mineru-api reaping). Every historical `SHAKEDOWN PASSED` had been
+  vacuous on the substrate steps behind `|| true`; the first honest run
+  exercised MinerU 12/12 and the bare doctor against a live engine.
+- **Pipe-free gate checks** (nexus-i66g4, nexus-6zxfb): every
+  `echo | grep -q` in the e2e gates became a `[[ ]]` test after a degraded
+  512-byte kernel pipe pool turned successful matches into SIGPIPE failures
+  under `pipefail` (root cause: 292 orphaned test workers holding 1,168 pipe
+  FDs — reaped; producer tracked as nexus-bj9nx).
+- **Shakedown step 2 indexes a deterministic 36-file fixture** (nexus-m7kcv)
+  instead of the full repo (~2.5h at sandbox embed speed).
+- **i711w cleanup cohort** (nexus-5uj6t/37jha/pmag3/zmfan/2tdkx/vw7zk): dead
+  T3-daemon remnants and the producer-less first-run banner deleted, phantom
+  t3 conformance tier removed, verb-rot tripwire widened to scripts/ and the
+  plugin surface (non-vacuity proven by dead-verb injection).
+- RDR-152 and RDR-158 formally closed (post-mortem: deferred gate beads rot).
+
+### Added
+- **Post-extraction quality gate on every PDF path** (nexus-wi1uv): extracted
+  text that matches the space-stripped-garbage signature (the docling
+  degrade class: "istheasetofthe") now FAILS the index run loudly instead
+  of being silently indexed as unsearchable chunks. Signals (whitespace
+  ratio, mean token length, long-token fraction) calibrated on real corpora
+  including the original incident paper's dense-LaTeX regions; CJK-dominant
+  text is skipped with a named reason, never false-failed. One gated PDF is
+  one failed record: `nx dt index` batches collect-and-continue, `nx index
+  repo` contains the failure per-file and exits non-zero with the remedy.
+  `nx index pdf --allow-degraded-extraction` indexes anyway and stamps
+  `quality_gate_overridden` into chunk metadata — deliberately-degraded
+  documents stay findable via a metadata filter forever.
+- **Per-flush indexing telemetry** (nexus-lde88): every chunk flush emits a
+  `chunk_flush_complete` structlog event with an honest four-way wall-time
+  partition (upload / flush hooks / settle / file hooks); the progress
+  line's flush seconds are now per-flush rather than cumulative, and the
+  end-of-run hook accounting splits per hook. Measured basis: embedding was
+  only 19.6% of a flush; the hook chain was 80.4% and invisible.
+
+### Changed
+- **Engine identity: `engine-service-v0.1.67`** — this release pins and was
+  gated against v0.1.67 (12-way parallel CCE embedding with bit-identical
+  vectors and jittered retries; begin-many index-run fence, chash
+  conformance report, owner deactivate/reactivate, and answer-runs routes
+  from v0.1.66). Fresh local installs download exactly this engine; the
+  fresh-install gate's doctor allowlist is now EMPTY — a virgin box reads
+  clean with zero warnings (nexus-8hpad).
+- **The client no longer embeds — client-side Voyage credential retired**
+  (nexus-sghyo): all client-side Voyage embedding paths are deleted
+  (`voyage_ef` module, the non-service embed branches, the credential
+  plumbing). `VOYAGE_API_KEY` is no longer a client credential and is not
+  a mode signal; it remains an OPTIONAL engine-bound setting for local
+  voyage mode (the engine passthrough is deliberately retained). Doctor
+  and docs wording updated to match; re-embed flows send
+  `force_re_embed=True` and the server embeds.
+- **`nx store put` / `nx memory promote` join the RUNFENCE choreography**
+  (nexus-cotmr): the CLI store path now stamps index-run begin/complete
+  like every other producer, so store-put documents carry an honest
+  `index_state` instead of tripping the stale-fence doctor warning.
+- **Re-index into a different `--collection` reconciles catalog identity
+  early** (nexus-2t63u): a stale `physical_collection` from a prior run no
+  longer wedges completion verification into reporting present chunks as
+  missing; completion-refusal messages name a collection mismatch when one
+  exists instead of implying chunk loss, and `--dir` batch summaries count
+  reconciliations distinctly. Taxonomy centroid reads during indexing are
+  cached per run (nexus-2mb6n — restoring a cache the HTTP port had
+  silently dropped), with an epoch guard against mid-fetch invalidation.
+- **Release process: the sandbox shakedown runs on every release**
+  (nexus-6xkdu): the only gate exercising MinerU end-to-end through the
+  production indexing path is now unconditional and fail-capable (its
+  indexing steps could previously never redden the run).
+
+### Fixed
+- **`nx daemon service stop` no longer concludes "already stopped" from a
+  lease miss** (nexus-oyo2g): a TTL-expired lease on a stalled-but-alive
+  supervisor made the documented stop-and-start remedy a silent no-op (and
+  could double-spawn two stacks against one Postgres). Stop now consults
+  the process table on a lease miss, signals the discovered process TREE
+  (the engine child included), reports every pid honestly, and exits
+  non-zero when a survivor or an unverifiable state means the stop cannot
+  be trusted — a failed stop now breaks a `stop && start` chain instead of
+  silently proceeding.
+- **`nx t3 gc` can no longer delete live notes or in-flight documents**
+  (nexus-39upx, nexus-g6k6b): manifest-less `store_put` notes (live by
+  design under RDR-145) are excluded from orphan classification, and any
+  document not `index_state='complete'` refuses the destructive run
+  (override: `--allow-incomplete-index-state`). The in-band re-index sweep
+  gained the same note protection.
+- **`nx catalog manifest-verify --list [--json]`** (nexus-heizf): enumerate every
+  dangling manifest row across the catalog — grouped by collection and document,
+  with compact position ranges and distinct-chash counts — via the engine's
+  previously caller-less `manifest_orphans` endpoint. Exit 1 when any rows exist.
+  Collections the client cannot route (unrecognized embedding-model token) or
+  cannot fully enumerate (fetch failure / per-dim ceiling) are named loudly as
+  lower bounds, never silently dropped (nexus-h1zu0).
+
+### Added
+- **`nx answer-runs [--since ISO8601] [--limit N] [--json]`** (nexus-eho3u):
+  read surface for the `nx_answer_runs` telemetry table, write-only since
+  RDR-080 — every `nx_answer` call recorded a row and nothing ever read one
+  back. A new engine route and `HttpTelemetryStore.query_nx_answer_runs`
+  return the last N runs plus exact aggregates (total, plan-match hits vs
+  inline-planner fallbacks — the ad-hoc `plan_id=0` sentinel counted as a
+  fallback, not a hit — average duration/cost, and a fixed-edge latency
+  histogram matching the shakedown playbook's buckets) computed over the
+  whole `--since` set independent of `--limit`. `--json` carries a
+  `{since, limit, captured_at}` envelope for baseline scripts; timestamps
+  are server-stamped (the `--since` help notes the clock-skew caveat); a
+  pre-route engine renders an honest "read unavailable", never a false
+  zero. Requires the paired engine release.
+- **`tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]`** (nexus-796zn): the
+  fresh-install gate can now install the PUBLISHED artifact from PyPI via
+  `uv tool install` in its scrubbed sandbox — exercising dependency
+  RESOLUTION at the uv-tool layer where nexus-l2ku5 lived for four days
+  invisible to every lock-pinned gate (verified counterfactually: against
+  the pre-fix 7.0.x world the mode hard-fails at the MCP handshake leg).
+  The install step is `env -i` scrubbed so ambient `UV_TOOL_DIR`/`XDG_*`
+  overrides can never redirect it into the live install; the mcp<2
+  dist-info tripwire runs in both modes; the banner and PASSED line name
+  the layer unambiguously. The local-wheel default (pre-tag release
+  battery) is unchanged; `--published` is the post-publish shakedown layer.
+- **`nx catalog owners --execute deactivate` / `--execute reactivate`**
+  (nexus-cw262): the engine owner-deactivate surface. Soft-deletes registered
+  repo owners whose root path is confirmed vanished with zero live documents,
+  so dead owners stop resurfacing in every `nx doctor` / census run.
+  Double-gated (`--no-dry-run --confirm`), TOCTOU-safe (re-verifies each
+  candidate immediately before its write), and reversible — via
+  `--execute reactivate --owner <prefix>` or automatically (and losslessly)
+  on any live re-registration of the same owner. Every eligible row
+  discloses the residual risk (a healthy-but-unmounted 0-doc owner is
+  indistinguishable from debris) with its recovery paths;
+  `--include-deactivated` keeps deactivated owners auditable. The arm's
+  availability is reported honestly per connected engine build
+  (`mutation_status`: available / unavailable / unknown) — requires the
+  paired engine release. The census's `path_vanished` corroboration adds one
+  read per candidate (deliberate cost; excludes live-document owners from
+  ever being deactivated).
+
+### Changed
+- `nx catalog owners` (plain listing) and `--census` exclude deactivated
+  owners by default; `--include-deactivated` shows them. Doctor's dead-owner
+  remedy is capability-qualified against the connected engine.
+
+- **`nx doctor` now covers chash width-conformance on managed/cloud installs**
+  (nexus-du2dw): the width-non-conformant chash probe (`octet_length(chash) <>
+  32` — the GH #1414 / nexus-pnwu0 class) previously existed only as a local
+  `psql` invocation, which managed/cloud installs could never run — a
+  permanent blind spot. A new engine route (`GET /v1/catalog/chash/conformance`,
+  `nexus.chash_conformance_report(dim)`) exposes per-table
+  total/non-conformant/sample counts, tenant-scoped, and `nx doctor` reports
+  it under its own label alongside the existing local check (which keeps its
+  cross-tenant role in the install gates). Honest on pre-route engines
+  (skipped with a loud warning, never a false clean) and names collections it
+  cannot route to a dim table instead of silently skipping them. Requires the
+  paired engine release; the counting SQL is falsified by a real
+  poisoned-row test at the engine layer.
+- **`nx catalog owners --census [--json]`** (nexus-7kl32): read-only
+  classification of every registered repo owner's root path — healthy /
+  path-vanished / path-exists-empty / unreadable (unreadable never defaults to
+  healthy). Deregistration of dead owners is not yet possible (the engine has
+  no owner-deactivate surface — tracked as nexus-cw262); the census says so
+  in its own output.
+
+### Fixed
+- **`nx doctor`'s three SQLite-era checks no longer report vacuous greens**
+  (nexus-ay18d, nexus-vl8lk): the always-on T2 integrity sweep,
+  `--check-schema`, and `--check-plan-library` all still probed the retired
+  SQLite substrate and passed unconditionally on every PG-backed install.
+  The integrity sweep is retired and reborn as "T2 schema applied" — the
+  engine's `GET /version` Liquibase changelog fingerprint, capability-honest
+  about managed/cloud installs that withhold schema fields by design (absent
+  vs null, never a false clean). `--check-schema` reports the same
+  fingerprint verbosely (exit 2 = engine unreachable, exit 1 = schema error
+  or zero applied changesets). `--check-plan-library` runs the whole-library
+  census over `HttpPlanLibrary.list_plans` with the authored / backfilled /
+  non-dimensional bucketing and the global-builtin floor reinstated; the
+  300-row page cap is a named note, never a silent undercount. The frozen
+  on-disk SQLite file, when present, is its own informational line item
+  decoupled from the schema verdict. Fix hints name the live
+  `nx plan reseed` (the retired `nx catalog setup` reference is gone —
+  `tests/e2e/release-sandbox.sh` had been silently swallowing its failure
+  via `|| true`, so the sandbox's plan seeding half works again too).
+- **`nx index pdf --dir` now exits non-zero on any per-file failure**
+  (nexus-uqq9z) — real extraction/pipeline errors and catalog-identity drops
+  alike. Previously the batch always exited 0 regardless of how many files
+  failed. Per-file isolation unchanged (every file still attempted, the
+  failures list still prints); only the batch's exit code and a trailing
+  `N of M file(s) failed — see list above` line are new. This contract is
+  deliberately stricter than `nx dt index`'s run-level exit; raising dt to
+  match is tracked separately (nexus-56ndn).
+- **`nx dt index --dt-content` no longer aborts the whole batch on a
+  chunk-landing or completion-refusal fault** (nexus-hb10j):
+  `ChunkLandingUnverifiedError` and `IndexRunVerifyRefused` fell through the
+  non-file-backed ingest path's narrower except tuple and escaped the loop
+  uncaught, aborting the entire `--dt-content` run on the first affected
+  record. Now collect-and-continue as a per-record failed entry, with the
+  run-level identity-drop gate still driving the non-zero exit.
+- **`nx index pdf` / `nx index md` no longer report success when the catalog
+  register failed** (nexus-7f5qj): a register failure during the single-file
+  commands silently orphaned chunks — written and searchable but with no
+  catalog identity — while the command exited 0 with a success-shaped
+  summary (the same class fixed for `nx dt index` under nexus-pbawi/tp8yk).
+  Both commands (and `--dir` batch entries, folded into the per-file
+  failures list) now report a distinct "indexed WITHOUT a catalog document
+  identity" outcome naming the file and remedy, and exit non-zero — proven
+  on both the streaming and non-streaming PDF routes. The
+  reset/check/raise pattern is now one shared helper used by all four
+  ingest commands.
+- **`nx index pdf` streaming metadata was silently empty** (nexus-w6wp0):
+  streaming-pipeline summary/`--json` metadata (pages, title, author) came
+  back empty for any PDF routed through the streaming pipeline — the chunk
+  count was right, everything else was not. The metadata read keyed on the
+  `source_path` field RDR-102 removed from chunk metadata months ago. Now
+  scoped through the document's catalog manifest (falling back to
+  `content_hash` only when catalog registration failed, with a logged
+  warning), and a chunks-written-but-nothing-found state fails loudly with a
+  clear message that indexing itself succeeded, instead of returning empties.
+  Note: byte-identical duplicate registrations share deduplicated chunk rows
+  by design, so their display metadata remains last-write-wins.
+- **`nx doctor` no longer renders dead owners as green** (nexus-7kl32): the
+  git-hooks check's "could not check" state — including ~24 owner directories
+  that no longer exist on this install — rendered as `ok=True`, dominating
+  the shakedown signal-density census (24 of 25 vacuous greens). Probe
+  failures now render as honest warnings (never fatal; healthy-owner exit
+  semantics unchanged), with per-source remedies: catalog-owned dead owners
+  point at the new census verb, legacy `repos.json`-only entries point at the
+  registry file to edit. A permission-denied path component no longer crashes
+  doctor.
+- **RDR-102 "Phase 5b" fully closed — the remaining `source_path` fallbacks
+  deleted** (nexus-afudo): the three sibling sites nexus-tbkk1 left live —
+  `indexer.py`'s `_prune_misclassified_in_collection` legacy prune loop and
+  `_run_index_frecency_only` fallback, plus `indexer_utils.check_staleness`'s
+  fallback (both halves, including `StalenessCache.by_source_path`) — were
+  audited with the same live-store existence probe (extended to 13 collections
+  / ~115k chunks across `code__`/`docs__`/`rdr__`/`knowledge__`; zero resident
+  `source_path` rows) and deleted with kill-control tests. Staleness checks
+  now fail safe toward re-indexing for any chunk without a doc-id-keyed
+  identity. Probe evidence: T2 `nexus/nexus-afudo-audit-2026-08-05`.
+- **Stale-chunk prune's `source_path` filter was permanently dead code**
+  (nexus-tbkk1): four prune blocks (`doc_indexer.py`'s `_index_document`,
+  `_index_pdf_incremental`, `index_pdf`'s small-doc branch, and
+  `pipeline_stages._prune_stale_chunks` on the streaming PDF path) queried T3
+  for stale chunks via `_identity_where`'s `source_path` fallback — but
+  RDR-102 D2 (2026-05-02) removed `source_path` from `make_chunk_metadata` for
+  every writer, so the where-clause matched zero rows on any post-D2 chunk and
+  the blocks never fired (a live-store probe across ~47k chunks in six
+  collections found zero resident `source_path` rows). Deleted as dead code,
+  along with the now caller-less `prune_orphan_candidates` helper; the real
+  cross-document prune protection is `mcp_infra._sweep_superseded_vectors`
+  (manifest-diff based), with `nx t3 gc` as the comprehensive manual backstop.
+  The sibling `source_path` fallbacks in `indexer.py`/`indexer_utils.py`
+  remain live pending their own audit (nexus-afudo). No user-visible behavior
+  change — the deleted code was already a no-op.
+- **`nx doctor`'s dangling-manifest warn names the patients** (nexus-heizf): for
+  ten or fewer damaged documents it lists their tumblers directly, otherwise it
+  points at `nx catalog manifest-verify --list`; its count is now correctly
+  labeled manifest *rows* (with the distinct-chash count alongside). Doctor,
+  `--list`, and `nx catalog purge-trash` output all carry a one-line note that
+  the dangling-manifest census (live docs' manifest rows missing chunks) and
+  purge-trash's "stranded" sweep (tombstoned docs' surviving chunks) measure
+  disjoint populations — one reading clean says nothing about the other.
+- **RUNFENCE coverage gap — the index-run fence had recorded zero runs for 99%
+  of the corpus** (nexus-vw594): `_fence_begin` existed only on the PDF/md/dt
+  ingest paths; the repo code/prose indexers and MCP `store_put` (10,439 of
+  10,544 documents) never stamped a run, so `index_state` was NULL corpus-wide
+  and doctor's stale-run check could never fire. Fixed via a new engine batch
+  route (`POST /v1/catalog/index-run/begin-many`, one round trip per flush),
+  fence stamping on every producer (ChunkBatcher `on_batch_begin` hot path,
+  the three legacy per-file paths, and `store_put` begin/complete/fail), a
+  doctor check that distinguishes unstamped-but-fence-aware from genuinely
+  pre-fence engines (closes nexus-biq4x: absent-vs-null no longer conflated,
+  and the check now evaluates its findings unconditionally instead of only on
+  an all-quiet corpus), and a mechanized AST tripwire so a future producer
+  cannot ship unfenced. Pre-existing NULL rows are deliberately not backfilled.
+  The engine half requires the paired engine release; older engines degrade
+  with a recorded advisory signal, not a failure.
+- **Manifests can no longer outrun their chunks at index time** (nexus-tp8yk, the
+  producer of 184 of the 188 nexus-55l58 dangling manifest rows): the single-flush
+  PDF and md/prose index paths built the RUNFENCE manifest from the *intended*
+  chunk set and could commit it even when the chunk batch never landed in T3 —
+  leaving documents that report a `chunk_count` and return nothing. Three changes:
+  - the skip-reembed path now raises `ChunkLandingUnverifiedError` instead of
+    silently proceeding when chunk landing cannot be confirmed (D1);
+  - both single-flush paths stamp fence completion explicitly, and the completion
+    verify's refusal now propagates instead of being swallowed (D2);
+  - the three post-commit prune sites route through a shared `orphaned_chashes()`
+    union guard (the one `_sweep_superseded_vectors` already had), so a prune can
+    no longer delete T3 rows another live document's manifest references (D3).
+- **BEHAVIOR CHANGE — `nx index repo` / `nx dt index` exit codes**: both
+  commands now exit **non-zero** when a run had manifest write failures,
+  document identity drops, or fence-completion refusals. (`nx index pdf` /
+  `nx index md` gained the same contract separately — see the nexus-7f5qj
+  entry below.) Previously these were stderr warnings with
+  exit 0, which is how partially-populated documents shipped as "success". Scripts
+  that treat any non-zero exit as fatal will now surface real damage instead of
+  masking it; an *unconfirmed* completion stamp (engine cannot verify either way)
+  remains a warning with exit 0.
 
 ## [7.2.0] - 2026-08-04
 

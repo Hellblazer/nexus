@@ -1,14 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the PreToolUse close verification hook script.
 
-The hook is advisory-only — checks for review scratch marker but never
-blocks. No test execution.
+nexus-4av2n scope (a): the hook BLOCKS a `bd close`/`bd done` when the
+bead(s) being closed carry no review-completed marker, and only ever
+stamps `verification=passed` on the marker-found branch. It used to be
+advisory-only (never denied) and stamped `verification=passed`
+unconditionally regardless of whether a marker existed -- a false audit
+record, which is what this fix removes.
+
+ROUND 2 (this file): after code-review-expert (T2 [21539]) and
+substantive-critic (T2 [21540], not-justified) both returned round 1, this
+file adds coverage for the DUAL-SOURCE fix (Critical-1: T1 scratch OR T2
+memory, since a marker written via the MCP scratch tool is invisible to a
+T1-only CLI check whenever the CLI's own T1 lease is stale), the T2 lookup
+budget, per-id differentiated stamping, loud stamp-failure warnings
+(Significant-d), and the tightened bd-verb matcher (Important-4).
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil as _shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,21 +36,25 @@ SCRIPT = (
     / "pre_close_verification_hook.sh"
 )
 
-_SAFE_PATH = "/usr/bin:/bin"
-
-import shutil as _shutil
-
-_PYTHON3 = _shutil.which("python3") or ""
-if _PYTHON3:
-    _SAFE_PATH = str(Path(_PYTHON3).parent) + ":" + _SAFE_PATH
+# A dedicated directory holding ONLY a `python3` symlink -- NOT the parent
+# directory of the resolved interpreter. This repo's venv bin/ (where
+# `python3` typically resolves in a dev shell) also ships the `nx` CLI
+# alongside it, so putting that whole directory on PATH would silently
+# defeat every "nx is unreachable" test below by exposing a real `nx`.
+_PYTHON3_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-python3-"))
+_PYTHON3_REAL = _shutil.which("python3") or sys.executable
+if _PYTHON3_REAL:
+    (_PYTHON3_ISOLATED_DIR / "python3").symlink_to(_PYTHON3_REAL)
+_SAFE_PATH = f"{_PYTHON3_ISOLATED_DIR}:/usr/bin:/bin"
 
 
 def _make_payload(
     tool_name: str = "Bash",
     command: str = "bd close nexus-4yit",
+    session_id: str = "test-session",
 ) -> str:
     return json.dumps({
-        "session_id": "test-session",
+        "session_id": session_id,
         "hook_event_name": "PreToolUse",
         "tool_name": tool_name,
         "tool_input": {"command": command},
@@ -46,7 +65,7 @@ def _make_payload(
 def mock_config_env(tmp_path):
     def _make(config: dict) -> dict[str, str]:
         scripts_dir = tmp_path / "hooks" / "scripts"
-        scripts_dir.mkdir(parents=True)
+        scripts_dir.mkdir(parents=True, exist_ok=True)
         script = scripts_dir / "read_verification_config.py"
         config_json = json.dumps(config)
         script.write_text(f"print({repr(config_json)})\n")
@@ -55,16 +74,115 @@ def mock_config_env(tmp_path):
     return _make
 
 
+@pytest.fixture
+def fake_nx(tmp_path):
+    """Install a fake `nx` on PATH covering BOTH subcommands the hook now
+    calls: `nx scratch list` (T1) and `nx memory search <query>` (T2
+    fallback, nexus-4av2n round 2 Critical-1). Python, not bash -- avoids
+    shell-quoting hazards for an embedded per-query case table.
+
+    `memory_by_query` maps a QUERY SUBSTRING to the raw stdout returned for
+    that call (first match wins); anything unmatched gets `memory_default`.
+    `*_unreachable=True` makes every call to that subcommand fail (nonzero
+    exit) regardless of configured text -- the CAPABILITY-gap path, distinct
+    from a reachable call that legitimately finds nothing.
+    """
+
+    def _make(
+        scratch: str = "No scratch entries.",
+        *,
+        scratch_rc: int = 0,
+        scratch_unreachable: bool = False,
+        memory_by_query: dict[str, str] | None = None,
+        memory_default: str = "No results found.",
+        memory_rc: int = 0,
+        memory_unreachable: bool = False,
+        sleep_seconds: float = 0.0,
+        call_log: Path | None = None,
+    ) -> Path:
+        """`sleep_seconds` (nexus-4av2n round 3): every invocation sleeps
+        before responding -- deterministically reproduces a slow-but-
+        working `nx` for the deadline-trip tests, without depending on
+        real subprocess-spawn latency. `call_log`: every invocation
+        appends one line (subcommand + query) so tests can assert call
+        COUNT deterministically instead of timing."""
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        nx_script = fake_bin / "nx"
+        cases = memory_by_query or {}
+        log_line = (
+            f"with open({str(call_log)!r}, 'a') as _f:\n"
+            "    _f.write(' '.join(args) + chr(10))\n"
+            if call_log is not None else ""
+        )
+        nx_script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "args = sys.argv[1:]\n"
+            f"{log_line}"
+            f"time.sleep({sleep_seconds!r})\n"
+            "if args[:2] == ['scratch', 'list']:\n"
+            f"    if {scratch_unreachable!r}:\n"
+            "        sys.exit(1)\n"
+            f"    sys.stdout.write({scratch!r})\n"
+            f"    sys.exit({scratch_rc!r})\n"
+            "if args[:2] == ['memory', 'search']:\n"
+            f"    if {memory_unreachable!r}:\n"
+            "        sys.exit(1)\n"
+            "    query = args[2] if len(args) > 2 else ''\n"
+            f"    cases = {cases!r}\n"
+            "    for k, v in cases.items():\n"
+            "        if k in query:\n"
+            "            sys.stdout.write(v)\n"
+            f"            sys.exit({memory_rc!r})\n"
+            f"    sys.stdout.write({memory_default!r})\n"
+            f"    sys.exit({memory_rc!r})\n"
+            "sys.exit(0)\n"
+        )
+        nx_script.chmod(0o755)
+        return fake_bin
+
+    return _make
+
+
+@pytest.fixture
+def fake_bd(tmp_path):
+    """Install a fake `bd` on PATH that logs every `set-state` call to a
+    file, so tests can assert which verification state got stamped (or
+    that none did)."""
+
+    def _make() -> tuple[Path, Path]:
+        fake_bin = tmp_path / "bdbin"
+        fake_bin.mkdir(exist_ok=True)
+        log = tmp_path / "bd_calls.log"
+        bd_script = fake_bin / "bd"
+        bd_script.write_text(
+            "#!/bin/bash\n"
+            f'echo "$*" >> "{log}"\n'
+            "exit 0\n"
+        )
+        bd_script.chmod(0o755)
+        return fake_bin, log
+
+    return _make
+
+
 def _run_hook(
     stdin: str,
     *,
+    path_prefix: str = "",
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    path = f"{path_prefix}:{_SAFE_PATH}" if path_prefix else _SAFE_PATH
     env = {
         **os.environ,
-        "PATH": _SAFE_PATH,
+        "PATH": path,
         **(env_overrides or {}),
     }
+    # Never let a real NX_REVIEW_GATE_OVERRIDE leak in from the outer shell
+    # into a test that didn't ask for it.
+    if "NX_REVIEW_GATE_OVERRIDE" not in (env_overrides or {}):
+        env.pop("NX_REVIEW_GATE_OVERRIDE", None)
     return subprocess.run(
         ["bash", str(SCRIPT)],
         input=stdin,
@@ -83,9 +201,23 @@ def _get_context(parsed: dict) -> str:
     return parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
 
 
-class TestPreCloseVerificationHook:
-    """PreToolUse close hook — advisory only, never blocks."""
+def _get_reason(parsed: dict) -> str:
+    return parsed.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
 
+
+# A marker entry pair in the exact `nx scratch list` shape
+# (src/nexus/commands/scratch.py list_cmd): two lines, header + content.
+def _marker(tags: str, content: str) -> str:
+    return f"[abcd1234] {tags}  flagged=False\n  {content}\n"
+
+
+# A marker entry pair in the exact `nx memory search` shape
+# (src/nexus/commands/memory.py search_cmd): two lines, header + content.
+def _t2_marker(project_title: str, content: str) -> str:
+    return f"[1] {project_title}  (developer, 2026-08-06T00:00:00Z)\n  {content}\n"
+
+
+class TestFastNoops:
     def test_script_exists_and_is_executable(self) -> None:
         assert SCRIPT.exists()
         assert os.access(SCRIPT, os.X_OK)
@@ -96,12 +228,6 @@ class TestPreCloseVerificationHook:
     def test_outputs_valid_json(self) -> None:
         parsed = json.loads(_run_hook(_make_payload()).stdout)
         assert "hookSpecificOutput" in parsed
-
-    def test_never_denies(self, mock_config_env) -> None:
-        """Even with on_close=True, decision is always allow."""
-        env = mock_config_env({"on_close": True})
-        result = _run_hook(_make_payload(), env_overrides={"PATH": _SAFE_PATH, **env})
-        assert _get_decision(json.loads(result.stdout)) == "allow"
 
     def test_fast_noop_non_bash_tool(self) -> None:
         result = _run_hook(_make_payload(tool_name="Write"))
@@ -117,7 +243,7 @@ class TestPreCloseVerificationHook:
 
     def test_allow_when_on_close_false(self, mock_config_env) -> None:
         env = mock_config_env({"on_close": False})
-        result = _run_hook(_make_payload(), env_overrides={"PATH": _SAFE_PATH, **env})
+        result = _run_hook(_make_payload(), env_overrides=env)
         assert _get_decision(json.loads(result.stdout)) == "allow"
 
     def test_allow_when_config_reader_fails(self) -> None:
@@ -127,17 +253,582 @@ class TestPreCloseVerificationHook:
         )
         assert _get_decision(json.loads(result.stdout)) == "allow"
 
-    def test_bd_done_pattern_matches(self, mock_config_env) -> None:
-        env = mock_config_env({"on_close": True})
-        result = _run_hook(
-            _make_payload(command="bd done nexus-xyz"),
-            env_overrides={"PATH": _SAFE_PATH, **env},
-        )
-        assert _get_decision(json.loads(result.stdout)) == "allow"
-
     def test_graceful_empty_stdin(self) -> None:
         result = _run_hook("")
         assert _get_decision(json.loads(result.stdout)) == "allow"
+
+    def test_bd_done_pattern_matches(self, mock_config_env, fake_nx) -> None:
+        """`bd done` is recognized the same as `bd close`."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(_marker("review-completed,nexus-xyz", "review-completed: nexus-xyz"))
+        result = _run_hook(
+            _make_payload(command="bd done nexus-xyz"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "allow"
+
+
+class TestMatcherTightening:
+    """nexus-4av2n round 2 Important-4 (code-review-expert): the prior
+    blanket grep matched `bd close|done|create` ANYWHERE in the raw command
+    text, including inside an unrelated quoted argument. Now that a match
+    can DENY the Bash call outright, a false match has real cost."""
+
+    def test_bd_verb_mentioned_in_a_commit_message_does_not_trigger(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='git commit -m "docs: bd close workflow notes"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        # Fast no-op path: no additionalContext at all (never reached the
+        # coverage machinery).
+        assert _get_context(parsed) == ""
+
+    def test_bd_verb_mentioned_in_a_description_string_does_not_trigger(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='echo "remember to bd close this later"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert _get_context(parsed) == ""
+
+    def test_real_bd_close_in_a_compound_command_still_triggers(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="echo starting && bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+
+
+class TestDenyOnMissingMarker:
+    """nexus-4av2n item 1: the hook must BLOCK, not advise, on a missing
+    marker. Round 2: "missing" now requires BOTH T1 and T2 to be reachable
+    and neither to cover -- a real absence, not a capability gap."""
+
+    def test_denies_when_no_marker_anywhere(self, mock_config_env, fake_nx) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")  # T2 defaults to "No results found."
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        assert "nexus-abc12" in _get_reason(parsed)
+        assert "review-completed" in _get_reason(parsed).lower()
+        assert "NX_REVIEW_GATE_OVERRIDE" in _get_reason(parsed)
+
+    def test_denies_when_marker_exists_for_a_different_bead_in_either_source(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """Cross-marker vacuity guard (datum iii): a review-completed
+        marker for an UNRELATED bead in EITHER T1 or T2 must not satisfy
+        this bead's check."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker("review-completed,nexus-other", "review-completed: nexus-other")
+        fake_bin = fake_nx(
+            scratch,
+            memory_by_query={"nexus-other": _t2_marker("nexus/x", "review-completed: nexus-other")},
+        )
+        result = _run_hook(
+            _make_payload(command="bd close nexus-target"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+
+    def test_denies_when_bead_id_present_but_not_tagged_review_completed(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """An entry mentioning the bead id in an unrelated (non-review)
+        context must not count -- this is the two-independent-greps bug
+        the entry-anchored match replaces."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker("misc,nexus-target", "nexus-target mentioned but not a review marker")
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(command="bd close nexus-target"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+
+    def test_deny_does_not_stamp_any_verification_state(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """nexus-4av2n item 2 core: a blocked close must never acquire a
+        verification record, false or otherwise."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx("No scratch entries.")
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert not log.exists() or log.read_text().strip() == ""
+
+
+class TestAllowOnCoveredMarker:
+    def test_allows_and_stamps_passed_when_t1_marker_covers_bead(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        scratch = _marker("review-completed,nexus-cotmr", "review-completed: nexus-cotmr — clean")
+        fake_nx_bin = fake_nx(scratch)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-cotmr"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "nexus-cotmr" in _get_context(parsed)
+        assert log.exists()
+        assert "nexus-cotmr verification=passed" in log.read_text()
+
+    def test_combined_marker_covers_multiple_bead_ids(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """nexus-4av2n datum (ii): one marker whose tags list several bead
+        ids covers each of them (tag-contains, not exact per-bead key)."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-cotmr,nexus-tafjk",
+            "review-completed: nexus-cotmr + nexus-tafjk — 2 rounds",
+        )
+        fake_nx_bin = fake_nx(scratch)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="for b in nexus-cotmr nexus-tafjk; do bd close $b; done"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        calls = log.read_text()
+        assert "nexus-cotmr verification=passed" in calls
+        assert "nexus-tafjk verification=passed" in calls
+
+
+class TestDualSourceCoverage:
+    """nexus-4av2n round 2 Critical-1 (substantive-critic, empirically
+    reproduced live): a review-completed marker written via the MCP
+    scratch tool is INVISIBLE to a T1-only CLI check whenever the CLI's
+    own T1 lease for that session is stale (the pooled-scope fallback,
+    nexus-6a19f, resolves a DIFFERENT scope than the MCP-frozen one). The
+    fix widens coverage lookup to T1 OR T2 memory."""
+
+    def test_t2_covers_when_t1_reachable_but_empty(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """THE regression this round fixes: T1 reachable-and-empty (the
+        scope-mismatch shape) falls back to T2 rather than denying."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(
+            "No scratch entries.",
+            memory_by_query={
+                "nexus-abc12": _t2_marker("nexus/review-nexus-abc12", "review-completed: nexus-abc12 clean"),
+            },
+        )
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "nexus-abc12 verification=passed" in log.read_text()
+
+    def test_t2_covers_when_t1_totally_unreachable(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(
+            scratch_unreachable=True,
+            memory_by_query={
+                "nexus-abc12": _t2_marker("nexus/review-nexus-abc12", "review-completed: nexus-abc12 clean"),
+            },
+        )
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "nexus-abc12 verification=passed" in log.read_text()
+
+    def test_t1_covers_without_ever_needing_t2(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """If T1 already covers, T2 must never even be consulted -- verify
+        by making T2 unreachable and confirming that doesn't matter."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(
+            _marker("review-completed,nexus-abc12", "review-completed: nexus-abc12"),
+            memory_unreachable=True,
+        )
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "nexus-abc12 verification=passed" in log.read_text()
+
+    def test_both_sources_reachable_and_empty_still_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """Dual-source widens WHERE coverage can be found; it must not
+        weaken WHETHER genuine absence still denies."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")  # both reachable, both empty
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+
+    def test_mixed_bead_ids_covered_and_uncovered_denies_naming_only_uncovered(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(
+            "No scratch entries.",
+            memory_by_query={"nexus-covered": _t2_marker("nexus/x", "review-completed: nexus-covered")},
+        )
+        result = _run_hook(
+            _make_payload(command="for b in nexus-covered nexus-uncov; do bd close $b; done"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        assert "nexus-uncov" in _get_reason(parsed)
+
+
+class TestLoopVariableDatum:
+    """nexus-4av2n datum (i), Hal 08-03: `for b in ...; do bd close $b; done`
+    must resolve the REAL bead ids (from the `for ... in` list), not the
+    literal string "$b"."""
+
+    def test_loop_variable_resolves_real_ids_not_the_variable(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-cotmr,nexus-tafjk",
+            "review-completed: nexus-cotmr + nexus-tafjk",
+        )
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(command="for b in nexus-cotmr nexus-tafjk; do bd close $b; done"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        # Pre-fix this would have looked up the literal "$b" and found
+        # nothing -- a false-positive advisory (under the old model) or a
+        # false DENY (under the new blocking model). Both real ids are
+        # covered, so this must ALLOW.
+        assert _get_decision(json.loads(result.stdout)) == "allow"
+
+    def test_loop_variable_with_one_uncovered_id_still_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The loop-scan recovers real ids; if one of them genuinely lacks
+        a marker, the close must still be blocked."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker("review-completed,nexus-cotmr", "review-completed: nexus-cotmr")
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(command="for b in nexus-cotmr nexus-uncov; do bd close $b; done"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        assert "nexus-uncov" in _get_reason(parsed)
+        assert "nexus-cotmr" not in _get_reason(parsed).split("Remedy")[0].split("found in T1 scratch or T2 memory for:")[1]
+
+    def test_no_literal_bead_id_is_indeterminate_not_denied(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """A truly dynamic id (no literal nexus-* anywhere) cannot be
+        statically verified -- allow without stamping, not deny."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="bd close $(cat /tmp/id.txt)"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "INDETERMINATE" in _get_context(parsed)
+
+
+class TestOverride:
+    """nexus-4av2n item 4: an explicit, auditable override."""
+
+    def test_override_env_var_allows_and_stamps_overridden(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx("No scratch entries.")
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "OVERRIDE" in _get_context(parsed)
+        assert "nexus-abc12 verification=overridden" in log.read_text()
+
+    def test_no_override_denies(self, mock_config_env, fake_nx) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+
+    def test_override_value_other_than_1_does_not_bypass(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "true"},
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+
+
+class TestCapabilityHonestBothSourcesDown:
+    """nexus-4av2n item 3(iv), widened round 2: 'uncertain' now requires
+    BOTH T1 and T2 to be unreachable (or the T2 budget exhausted) for a
+    given id -- either source alone can resolve coverage. Never brick the
+    close, but never claim 'passed' either."""
+
+    def test_both_sources_unreachable_allows_with_loud_warning_and_unverified_stamp(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(scratch_unreachable=True, memory_unreachable=True)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "unreachable" in _get_context(parsed).lower() or "not verify" in _get_context(parsed).lower()
+        assert "nexus-abc12 verification=unverified" in log.read_text()
+
+    def test_nx_missing_entirely_allows_with_loud_warning(
+        self, mock_config_env, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bd_bin),  # nx is NOT on this PATH at all
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "nexus-abc12 verification=unverified" in log.read_text()
+
+    def test_t1_unreachable_plus_override_stamps_overridden_not_unverified(
+        self, mock_config_env, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bd_bin),
+            env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        calls = log.read_text()
+        assert "nexus-abc12 verification=overridden" in calls
+        assert "unverified" not in calls
+
+
+class TestDeadlineBudget:
+    """nexus-4av2n round 3 (Critical, substantive-critic closure
+    verification on the sibling push-gate; same fix applied here since
+    this hook's lookup can ALSO stack up to 1 (T1) + N (T2 per uncovered
+    id) `nx` subprocess spawns against the same 5s PreToolUse timeout).
+    The round-2 call-count budget did not bound wall-clock time; replaced
+    by a wall-clock deadline (NX_CLOSE_GATE_DEADLINE_SECONDS test seam)
+    the hook enforces on itself, denying deterministically rather than
+    ever risking a harness kill mid-check."""
+
+    def test_deadline_exceeded_denies_deterministically(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """(a) deadline-trip deny path via a stubbed slow `nx`."""
+        env = mock_config_env({"on_close": True})
+        # Slow-but-working nx: every call sleeps 0.35s. With a 0.5s
+        # deadline, T1 (0.35s, elapsed ~0.35s < 0.5s so it proceeds) then
+        # the T2 lookup for the bead (another 0.35s, elapsed ~0.70s) is
+        # attempted (deadline not yet exceeded when it STARTS) but by the
+        # time it returns the deadline has passed -- deterministic trip on
+        # the very next id, or immediately if there's a second id.
+        fake_nx_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.35)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="for b in nexus-bud01 nexus-bud02; do bd close $b; done"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides={**env, "NX_CLOSE_GATE_DEADLINE_SECONDS": "0.5"},
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        reason = _get_reason(parsed)
+        assert "0.5" in reason or "wall-clock" in reason.lower()
+        assert not log.exists() or log.read_text().strip() == ""  # deny stamps nothing
+
+    def test_deadline_exceeded_names_override_remedy(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.35)
+        result = _run_hook(
+            _make_payload(command="for b in nexus-bud01 nexus-bud02; do bd close $b; done"),
+            path_prefix=str(fake_bin),
+            env_overrides={**env, "NX_CLOSE_GATE_DEADLINE_SECONDS": "0.5"},
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        assert "NX_REVIEW_GATE_OVERRIDE" in _get_reason(parsed)
+
+    def test_deadline_override_downgrades_to_loud_allow(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.35)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="for b in nexus-bud01 nexus-bud02; do bd close $b; done"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides={
+                **env,
+                "NX_CLOSE_GATE_DEADLINE_SECONDS": "0.5",
+                "NX_REVIEW_GATE_OVERRIDE": "1",
+            },
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "OVERRIDE" in _get_context(parsed)
+        assert "verification=overridden" in log.read_text()
+
+    def test_fast_path_single_call_when_t1_covers(
+        self, mock_config_env, fake_nx, tmp_path
+    ) -> None:
+        """(b) wall-clock ceiling test on the fast path, via call-COUNTING
+        with the stub, not timing (deterministic)."""
+        env = mock_config_env({"on_close": True})
+        call_log = tmp_path / "calls.log"
+        fake_bin = fake_nx(
+            _marker("review-completed,nexus-cov00", "review-completed: nexus-cov00"),
+            call_log=call_log,
+        )
+        result = _run_hook(
+            _make_payload(command="bd close nexus-cov00"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        calls = call_log.read_text().splitlines() if call_log.exists() else []
+        assert len(calls) == 1, calls
+        assert calls[0].startswith("scratch"), calls
+
+    def test_multiple_uncovered_ids_resolve_within_default_deadline_as_genuine_absence(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """(c) several uncovered bead ids (the loop-close shape) with a
+        REALISTICALLY FAST (not sleep-stubbed) nx must resolve WITHIN the
+        default deadline and deny as a genuine absence -- not trip the
+        deadline path. Asserts deterministically which of the two deny
+        flavors fires."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")  # no sleep -- fast
+        result = _run_hook(
+            _make_payload(
+                command="for b in nexus-bud01 nexus-bud02 nexus-bud03 nexus-bud04 nexus-bud05; do bd close $b; done"
+            ),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        reason = _get_reason(parsed)
+        for i in range(1, 6):
+            assert f"nexus-bud{i:02d}" in reason, reason
+        # Genuine-absence flavor, NOT the deadline flavor.
+        assert "wall-clock" not in reason.lower()
+        assert "VERIFIED within the hook's" not in reason
+
+
+class TestStampFailureIsLoud:
+    """nexus-4av2n round 2 Significant-d (both reviewers): a failed `bd
+    set-state` must be observable (stderr), never silently swallowed."""
+
+    def test_bd_set_state_failure_prints_warning_to_stderr(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        scratch = _marker("review-completed,nexus-cotmr", "review-completed: nexus-cotmr")
+        fake_nx_bin = fake_nx(scratch)
+        # A `bd` that always fails.
+        fake_bd_bin = fake_nx_bin.parent / "bdfailbin"
+        fake_bd_bin.mkdir(exist_ok=True)
+        (fake_bd_bin / "bd").write_text("#!/bin/bash\nexit 1\n")
+        (fake_bd_bin / "bd").chmod(0o755)
+        result = _run_hook(
+            _make_payload(command="bd close nexus-cotmr"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"  # never crashes/bricks the close
+        assert "FAILED" in result.stderr or "WARNING" in result.stderr
 
 
 class TestSessionIdExport:
@@ -155,14 +846,15 @@ class TestSessionIdExport:
     def _make_fake_nx(tmp_path: Path) -> Path:
         """A fake `nx` on PATH that logs the NX_SESSION_ID it observed
         for every invocation, then emits harmless scratch-list-shaped
-        output so the hook's downstream grep checks don't blow up."""
+        output so the hook's downstream marker checks don't blow up."""
         fake_bin = tmp_path / "fakebin"
         fake_bin.mkdir()
         nx_script = fake_bin / "nx"
         nx_script.write_text(
             "#!/bin/bash\n"
             'echo "NX_SESSION_ID=${NX_SESSION_ID:-<unset>}" >> "$NX_CALL_LOG"\n'
-            'echo "no scratch entries"\n'
+            'if [[ "$1" == "scratch" ]]; then echo "No scratch entries."; fi\n'
+            'if [[ "$1" == "memory" ]]; then echo "No results found."; fi\n'
             "exit 0\n"
         )
         nx_script.chmod(0o755)
@@ -177,8 +869,8 @@ class TestSessionIdExport:
 
         result = _run_hook(
             _make_payload(command="bd close nexus-4yit"),
+            path_prefix=str(fake_bin),
             env_overrides={
-                "PATH": f"{fake_bin}:{_SAFE_PATH}",
                 "NX_CALL_LOG": str(log_file),
                 **env,
             },
@@ -186,7 +878,6 @@ class TestSessionIdExport:
 
         assert result.returncode == 0
         log_contents = log_file.read_text() if log_file.exists() else ""
-        # _make_payload's default session_id is "test-session".
         assert "NX_SESSION_ID=test-session" in log_contents, log_contents
 
     def test_exports_session_id_from_stdin_payload_for_rdr_close_check(
@@ -207,10 +898,8 @@ class TestSessionIdExport:
 
         result = _run_hook(
             payload,
-            env_overrides={
-                "PATH": f"{fake_bin}:{_SAFE_PATH}",
-                "NX_CALL_LOG": str(log_file),
-            },
+            path_prefix=str(fake_bin),
+            env_overrides={"NX_CALL_LOG": str(log_file)},
         )
 
         assert result.returncode == 0
@@ -235,8 +924,8 @@ class TestSessionIdExport:
 
         result = _run_hook(
             payload,
+            path_prefix=str(fake_bin),
             env_overrides={
-                "PATH": f"{fake_bin}:{_SAFE_PATH}",
                 "NX_CALL_LOG": str(log_file),
                 "NX_SESSION_ID": "pre-existing-ambient-value",
                 **env,

@@ -168,7 +168,7 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
 
         @property
         def stats(self) -> dict:
-            return {"flushes": 0.0, "flush_seconds": 0.0}
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
     with _service_mode_patches(db), \
          patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
@@ -230,7 +230,7 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
 
         @property
         def stats(self) -> dict:
-            return {"flushes": 0.0, "flush_seconds": 0.0}
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
     with _service_mode_patches(db), \
          patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
@@ -271,9 +271,13 @@ def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
         mocks["make_t3"].assert_not_called()
 
 
-def test_run_index_non_service_mode_uses_make_t3(tmp_path, monkeypatch):
-    """With the explicit chroma opt-out, the legacy make_t3() path is used.
-    (nexus-tawx0: service mode is the DEFAULT now; unset == service.)"""
+def test_run_index_non_service_mode_raises_credentials_missing(tmp_path, monkeypatch):
+    """nexus-sghyo (2026-08-06): the explicit chroma opt-out no longer
+    falls back to a client-side Voyage embed — the client does no
+    embedding (Hal determination 2026-07-28). Non-service, non-local
+    ``_run_index`` fails loud instead of silently constructing a
+    voyageai.Client via the retired legacy path."""
+    from nexus.errors import CredentialsMissingError
     from nexus.indexer import _run_index
 
     repo = tmp_path / "repo"
@@ -283,13 +287,11 @@ def test_run_index_non_service_mode_uses_make_t3(tmp_path, monkeypatch):
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     monkeypatch.setenv("NX_LOCAL", "0")
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
-    monkeypatch.setenv("CHROMA_API_KEY", "fake")
 
     db, _ = _mock_db()
-    with _service_mode_patches(db) as mocks:
+    with _service_mode_patches(db) as mocks, pytest.raises(CredentialsMissingError):
         _run_index(repo, reg)
-        mocks["make_t3"].assert_called()
+    mocks["make_t3"].assert_not_called()
 
 
 # ── RDR-152 P3.3: doc_indexer embed skip in service mode ────────────────────────
@@ -305,8 +307,15 @@ def _make_doc_indexer_db():
 
 
 def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch):
-    """In service mode, _index_document must NOT call _embed_with_fallback —
-    the service embeds server-side. Instead it calls db.upsert_chunks directly."""
+    """In service mode, _index_document must NOT attempt any non-service
+    embed path — the service embeds server-side. Instead it calls
+    db.upsert_chunks_with_embeddings directly with a stub.
+
+    nexus-sghyo (2026-08-06): the legacy non-service embed path
+    (``_embed_with_fallback``) is deleted outright — the client does no
+    embedding (Hal determination 2026-07-28) — so there is nothing left
+    to mock/assert-not-called; a successful run through the service-mode
+    branch IS the proof."""
     from nexus.doc_indexer import _index_document
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
@@ -322,20 +331,27 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
 
     mock_hooks = MagicMock()
 
-    with patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
-         patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
+        # nexus-tp8yk D2a: _index_document now calls the PROPAGATING
+        # _fence_complete explicitly (mirrors _index_pdf_incremental's
+        # pre-existing shape, see that test's identical comment below in
+        # this file) — the mocked db never lands chunks in the substrate
+        # the real engine's fail-closed /complete verifies against, so
+        # unstubbed it correctly raises IndexRunVerifyRefused. This test
+        # proves the service-mode embed guard, not fence integration
+        # (nexus-5xn3k.7 / nexus-tp8yk's own gates own the genuine proof);
+        # stub the fence like every other decoupled-substrate test here.
         _index_document(
             test_file,
             corpus="test-corpus",
             chunk_fn=fake_chunk_fn,
             t3=db,
             embed_fn=None,
-        )
-        embed_mock.assert_not_called(), (
-            "_embed_with_fallback must not be called in service mode"
         )
 
 
@@ -356,11 +372,14 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
 
     mock_hooks = MagicMock()
 
-    with patch("nexus.doc_indexer._embed_with_fallback"), \
-         patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
+        # nexus-tp8yk D2a: see the identical rationale on
+        # test_index_document_service_mode_skips_embed_fallback above.
         _index_document(
             test_file,
             corpus="test-corpus",
@@ -405,12 +424,15 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
 
     with patch("nexus.mcp_infra.get_t3", mock_get_t3), \
          patch("nexus.doc_indexer.make_t3", mock_make_t3), \
-         patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
          patch("nexus.doc_indexer._make_local_embed_fn") as local_embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._fence_begin"), \
+         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
+        # nexus-tp8yk D2a: see the identical rationale on
+        # test_index_document_service_mode_skips_embed_fallback above.
         # Must NOT raise CredentialsMissingError or any credential-related error
         count = _index_document(
             test_file,
@@ -425,13 +447,23 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
     mock_get_t3.assert_called()
     # make_t3() must NOT have been called (split-brain prevention)
     mock_make_t3.assert_not_called()
-    # No Python embed must have fired
-    embed_mock.assert_not_called()
+    # No local (client-side) embed must have fired. nexus-sghyo
+    # (2026-08-06): the legacy non-service Voyage embed path
+    # (``_embed_with_fallback``) is deleted outright, so there is no
+    # longer a separate assertion for it — service mode never reaches
+    # that branch by construction (it was replaced with a fail-loud
+    # raise, unreachable here since NX_STORAGE_BACKEND_VECTORS=service).
     local_embed_mock.assert_not_called()
 
 
 def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monkeypatch):
-    """In service mode, _index_pdf_incremental must NOT call _embed_with_fallback."""
+    """In service mode, _index_pdf_incremental must NOT attempt any
+    non-service embed path.
+
+    nexus-sghyo (2026-08-06): the legacy non-service embed path
+    (``_embed_with_fallback``) is deleted outright — there is nothing
+    left to mock/assert-not-called; a successful run through the
+    service-mode branch IS the proof."""
     from nexus.doc_indexer import _index_pdf_incremental
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
@@ -447,8 +479,7 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
 
     mock_hooks = MagicMock()
 
-    with patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
-         patch("nexus.doc_indexer.read_checkpoint", return_value=None), \
+    with patch("nexus.doc_indexer.read_checkpoint", return_value=None), \
          patch("nexus.doc_indexer.write_checkpoint"), \
          patch("nexus.doc_indexer.delete_checkpoint"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
@@ -470,9 +501,6 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
             t3=db,
             embed_fn=None,
             hooks=mock_hooks,
-        )
-        embed_mock.assert_not_called(), (
-            "_embed_with_fallback must not be called in service mode incremental path"
         )
 
 
@@ -623,11 +651,12 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
 
 
 def test_voyageai_allowlisted_count_ratchet():
-    """voyageai_allowlisted_count must equal the named-allowlist sum — 3
-    after the Seam B cutover:
-    - indexer.py (cloud/non-service legacy path)
-    - doc_indexer.py (_embed_with_fallback legacy path)
-    - commands/collection.py (re-embed CLI utility)
+    """voyageai_allowlisted_count must equal the named-allowlist sum — 0
+    after nexus-sghyo (2026-08-06): the three Seam-B-era Phase-4 deletion
+    targets (indexer.py's cloud/non-service legacy path, doc_indexer.py's
+    ``_embed_with_fallback``, commands/collection.py's re-embed CLI
+    utility) were all DELETED with the client-side Voyage credential (Hal
+    determination 2026-07-28: "we do no embedding on the client").
 
     A new legacy Voyage call cannot be self-granted any more (the per-line
     escape token is retired, RDR-186 P4): it would need a reviewed
@@ -645,4 +674,4 @@ def test_voyageai_allowlisted_count_ratchet():
         f"A Phase-4 deletion target moved — update VOYAGEAI_CLIENT_ALLOWLIST "
         f"to match reality (downward when a legacy path dies)."
     )
-    assert sum(VOYAGEAI_CLIENT_ALLOWLIST.values()) == 3
+    assert sum(VOYAGEAI_CLIENT_ALLOWLIST.values()) == 0

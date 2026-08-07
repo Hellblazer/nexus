@@ -11,12 +11,14 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```bash
 uv sync                                  # install deps
 scripts/reinstall-tool.sh                # install nx CLI locally (preserves extras)
-uv run pytest                            # full unit suite (no API keys needed)
+uv run pytest -n auto                    # full unit suite, ~2min parallel (no API keys needed)
+uv run pytest                            # serial fallback (~14min; debugging only)
+uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
 uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
 
-Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/conftest.py`) or skip.
+Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/conftest.py`) or skip. **After any pull/rebase touching `service/`, run `scripts/build-gate-jar.sh`** — the substrate's freshness gate rejects a stale/unstamped jar and the whole suite errors at setup. Test-authoring directives (scenario journeys, lint bucket, contract-suite patterns, parametrize rules) live in [`tests/AGENTS.md`](tests/AGENTS.md).
 
 ## Architecture at a glance
 
@@ -148,7 +150,7 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh
 
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.
-1b. **Run the fresh-install MVV.** `./tests/e2e/fresh-install-mvv.sh` (nexus-nolqs). The VIRGIN-journey gate — every other E2E gate tests the upgrade axis from a populated install. The unit suite then pinned the SQLite opt-out backend (since retired at RDR-158), which is how the 2026-07-21 fresh-box defect class (f1itv/e9ru2/kmo9h/r5f3c/9xfx5) shipped unseen; today the suite pins the engine substrate instead, and the MVV still covers the virgin journey no unit test walks. Builds the wheel under test, then on a scrubbed-env virgin HOME: local init (engine + portable PG + bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG registration asserted (not just T3 chunks), semantic search returns both, doctor with zero ✗ and an empty warnings allowlist. Must end `FRESH-INSTALL MVV PASSED`.
+1b. **Run the fresh-install MVV.** `./tests/e2e/fresh-install-mvv.sh` (nexus-nolqs). The VIRGIN-journey gate — every other E2E gate tests the upgrade axis from a populated install. The unit suite then pinned the SQLite opt-out backend (since retired at RDR-158), which is how the 2026-07-21 fresh-box defect class (f1itv/e9ru2/kmo9h/r5f3c/9xfx5) shipped unseen; today the suite pins the engine substrate instead, and the MVV still covers the virgin journey no unit test walks. Builds the wheel under test, then on a scrubbed-env virgin HOME: local init (engine + portable PG + bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG registration asserted (not just T3 chunks), semantic search returns both, doctor with zero ✗ and warnings checked against the allowlist. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`. **This is the pre-tag LOCAL WHEEL layer only** — it resolves dependencies from this checkout's `uv.lock`/wheel metadata, not PyPI, so it cannot reproduce a defect that lives in dependency RESOLUTION (nexus-l2ku5: `mcp>=1.0` unbounded resolved `mcp` 2.0.0 fresh from PyPI on a `uv tool install`, killing both MCP servers for 4 days while every gate — this one included — ran pinned to the dev venv and saw nothing). `./tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]` (nexus-796zn) installs the PUBLISHED artifact via `uv tool install conexus[==X.Y.Z]` in the identical scrubbed sandbox (never touches the live `~/.local/share/uv`/`~/.local/bin`) and is the POST-publish SHAKEDOWN layer (T2 `nexus/shakedown-playbook` §2 S1) — there is nothing on PyPI yet to install at pre-tag time, so it does not belong in this numbered step; run it after a tag publishes.
 2. **Audit docs against changes since last tag.** `git log --oneline v<prev>..HEAD` then check `docs/cli-reference.md`, `docs/architecture.md`, `README.md` for user-visible drift.
 3. **Bump version in all seven version surfaces AND both `source.ref` fields** (CI enforces parity — see `docs/contributing.md` § Release Process step 7 for the canonical list):
    - `pyproject.toml` — `version = "X.Y.Z"`
@@ -161,6 +163,7 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh
 4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `conexus/CHANGELOG.md` with the date and the changes since last release.
 5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
 6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`. The reinstall this drives is genuinely isolated (fixed 2026-07-01, `137d2688`) — it runs cleanly with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses again with a live-holder error, suspect a step-ordering regression (the sandbox `HOME` must be activated *before* the reinstall runs, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
+6c. **Run sandbox shakedown.** `./tests/e2e/release-sandbox.sh shakedown` (~5-10 min warm cache, +10-15 min cold). Required on every release — this is the ONLY gate that exercises MinerU end-to-end through the production `nx index pdf` path (step 3b of 11), and the slow-marked `test_mineru_path_preserves_formulas` pytest test is not part of any default or scheduled run (nexus-6xkdu). All four indexing steps (2, 3a, 3b, 4) can now fail the run (the `|| true` that made them theatre was removed at nexus-6xkdu); the run ends with an explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on any failure.
 7. **Commit on a release branch + PR to main** (nexus-mkj6u: replaces direct-to-main convention).
    Base on **develop** (a release promotes develop to main — hot rule above; a main-based
    branch releases main's stale tree), then pre-merge `origin/main` to resolve the
@@ -175,6 +178,19 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh
    gh pr create --base main --title "release: conexus X.Y.Z"
    ```
    Wait for CI green. Then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA for the optional `source.sha` pin in Step 8a).
+
+   The `git push -u origin release/vX.Y.Z` step above is exempt from the
+   push-gated review-coverage check (`git_add_all_redirects_to_explicit_paths.py`,
+   nexus-4av2n round 2) — every `release/*` destination branch push allows
+   through with a loud INFO line rather than denying, since the release
+   branch's own `chore(release): ...` commit carries no bead id and this
+   push is PR-gated to main plus a human releaser by policy already, not
+   the review boundary. Tag pushes (`vX.Y.Z`, `engine-service-vX.Y.Z`) at
+   Step 8 are exempt the same way. If a push under a name that is NOT
+   `release/*` or a recognized tag shape gets denied here, that is the
+   gate doing its job — write a review-completed marker or use
+   `NX_REVIEW_GATE_OVERRIDE=1` deliberately, do not treat it as a release
+   process bug.
 8. **Tag the merge commit IMMEDIATELY after PR lands.**
    ```
    git checkout main && git pull

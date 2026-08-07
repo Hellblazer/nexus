@@ -216,6 +216,12 @@ class CatalogWriter(Protocol):
     def delete_document(self, tumbler) -> object:  # canonical
         ...
 
+    def deactivate_owner(self, tumbler_prefix) -> object:  # canonical (nexus-cw262)
+        ...
+
+    def reactivate_owner(self, tumbler_prefix) -> object:  # canonical (nexus-cw262)
+        ...
+
     def register_collection(self, name, *, content_type=..., owner_id=..., embedding_model=..., model_version=..., display_name=...) -> object:  # canonical
         ...
 
@@ -241,6 +247,9 @@ class CatalogWriter(Protocol):
         ...
 
     def begin_index_run(self, doc_id, content_hash, run_id, collection) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+        ...
+
+    def begin_index_run_many(self, docs, collection) -> object:  # canonical (RUNFENCE, nexus-vw594 F1)
         ...
 
     def complete_index_run(self, doc_id, content_hash, chunk_count) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
@@ -291,6 +300,8 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "link_if_absent",
     "unlink",
     "delete_document",
+    "deactivate_owner",
+    "reactivate_owner",
     "register_collection",
     "delete_collection_projection",
     "supersede_collection",
@@ -311,6 +322,7 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     # write silently raise AttributeError, which a bare `except Exception`
     # upstream turns into a feature that no-ops forever.
     "begin_index_run",
+    "begin_index_run_many",
     "complete_index_run",
     "fail_index_run",
 )

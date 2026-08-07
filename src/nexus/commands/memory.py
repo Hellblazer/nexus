@@ -344,6 +344,17 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             collection_name=collection,
         )
 
+        # nexus-cotmr / nexus-tafjk: second CLI producer with the same
+        # coverage gap as `nx store put` — mirrors MCP core.py::store_put's
+        # F2 pattern verbatim. content_hash is the same full-digest value
+        # single_chunk_manifest_metadata already derived; fence begin
+        # BEFORE t3.put, matching the memo's T0-before-first-chunk-upsert
+        # ordering.
+        content_hash = manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
+        if catalog_doc_id:
+            from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin(catalog_doc_id, content_hash, collection)
+
         # nexus-b6enc C2 (critic finding nexus-v4paa): promote shared the
         # ghost-register seam store_put had — a t3.put failure must not
         # strand a just-minted catalog row (row + zero chunks = the
@@ -359,6 +370,14 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                     catalog_doc_id=catalog_doc_id,
                 )
         except Exception as exc:
+            # nexus-cotmr: mirrors MCP F2's dedup-hit-then-put-failure
+            # fix — stamp 'failed' unconditionally so the fence does not
+            # wedge at 'indexing' with only the 6h doctor sweep as
+            # signal. _fence_fail never raises, so the rollback +
+            # re-raise below are unaffected.
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(exc))
             if catalog_row_minted and catalog_doc_id:
                 rollback_minted_catalog_entry(
                     catalog_doc_id, original_error=str(exc),
@@ -377,6 +396,13 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                 store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit ClickException below
                 manifest_error = str(manifest_exc)
+                # nexus-cotmr: the vector put already succeeded (t3.put
+                # above); this is the only completion path for this
+                # producer (no manifest_complete ride is possible — the
+                # direct write above already failed). Stamp 'failed' so
+                # the row does not sit silently at 'indexing'.
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, manifest_error)
                 import structlog  # noqa: PLC0415 — branch-local logging
                 structlog.get_logger(__name__).warning(
                     "store_put_manifest_direct_failed",
@@ -393,6 +419,12 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # nexus-8g79.1: thread catalog_doc_id through so the manifest
         # hook can populate document_chunks + chunk_count (idempotent
         # replace over the direct write above — coexistence is safe).
+        # nexus-cotmr F2 (mirrors MCP core.py::store_put verbatim):
+        # manifest_complete rides this existing call, unconditionally —
+        # see commands/store.py's identical comment for why an already-
+        # failed direct write is safe to re-ride here (idempotent retry;
+        # a repeat failure is swallowed by fire_batch's per-hook
+        # isolation and the fence stays at the 'failed' stamp above).
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-local import: hook-registry dep deferred, branch-local
         hooks = HookRegistry()
         install_default_hooks(hooks)
@@ -400,6 +432,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             [doc_id], collection, [entry["content"]],
             metadatas=manifest_metadatas,
             catalog_doc_id=catalog_doc_id,
+            manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
 
         if manifest_error:
