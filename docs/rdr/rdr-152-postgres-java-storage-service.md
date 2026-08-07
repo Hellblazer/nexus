@@ -2,7 +2,8 @@
 title: "Postgres + Java Storage Service + Thin HTTP Bridge: Replace the SQLite Single-Writer Daemon Class with a Multi-Tenant Postgres Substrate Owned by One Strict Java Service"
 id: RDR-152
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-07
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
