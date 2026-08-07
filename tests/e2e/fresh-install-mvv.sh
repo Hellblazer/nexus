@@ -411,51 +411,20 @@ fi
 # forever in tests/test_health_service_checks.py; only this journey's
 # allowlist entry for it was ever temporary.)
 #
-# CURRENT SCOPED ENTRIES (added nexus-796zn, 2026-08-05 — discovered while
-# validating THIS bead's --published mode; both fire unconditionally on the
-# CURRENTLY-PINNED engine floor, in either install layer, so leaving them
-# unallowlisted made the gate permanently red rather than testing anything):
-#   1. "chash-conformance route" — health.py::_check_chash_conformance_report
-#      (bead nexus-du2dw, RDR-180): a pre-route engine 404s
-#      /chash/conformance and fails OPEN but LOUD by design. "ENGINE HALF
-#      INERT until next engine-service tag" per the bead's own close note.
-#   2. "stale index-run fences" naming "coverage gap" — health.py's
-#      _check_stale_indexing_runs family (bead nexus-vw594 F1-F4): the
-#      client-side fence-stamping shipped, but the engine's begin-many
-#      route has not deployed yet, so freshly-indexed docs still show
-#      index_state=NULL. "ENGINE HALF INERT ... older engines degrade with
-#      recorded advisory, no regression on current installs" per the
-#      bead's own close note.
-# Both beads name the SAME blocker (the next engine-service tag). Tracked
-# for removal as nexus-8hpad — delete BOTH entries in the same change that
-# bumps REQUIRED_ENGINE_VERSION to a tag containing the du2dw route +
-# vw594 F1 begin-many route. tests/test_engine_version.py::
-# Test8hpadAllowlistDoesNotOutliveItsTrigger mechanizes the removal trigger
-# (mirrors TestMvvAllowlistDoesNotOutliveItsTrigger above, keyed on
-# REQUIRED_ENGINE_VERSION > (0, 1, 65) rather than a tag/commit sha, since
-# — unlike the 3cf64d48 case — the future tag does not exist yet to pin
-# one against). GREP-LEVEL PARITY with health.py's exact wording is pinned
-# separately in tests/test_fresh_install_mvv_published_mode.py.
+# CURRENT SCOPED ENTRIES: none. The nexus-796zn entries (chash-conformance
+# route [du2dw engine half] + the vw594 engine-half-inert stale-fence
+# signal) retired 2026-08-07 with the REQUIRED_ENGINE_VERSION bump to
+# (0,1,67) — both engine halves are live at the pinned floor, so a virgin
+# box's doctor now reads clean with ZERO allowlisted warnings. The
+# removal was enforced mechanically by tests/test_engine_version.py::
+# Test8hpadAllowlistDoesNotOutliveItsTrigger (the removal-trigger bead;
+# see that test's docstring for the lineage). Future entries need a
+# rationale + bead reference + a mechanized removal trigger, per the
+# HISTORY above.
 #
-# chash.conformance (dot, not a literal hyphen) matches BOTH the
-# human-facing detail's "chash-conformance route" AND the underlying
-# structlog event name's "chash_conformance_report_engine_floor" — they
-# render on separate lines and must both be covered.
-#
-# nexus-iocp8 SIGNIFICANT (substantive-critic, empirically verified): the
-# label "stale index-run fences" is shared by TWO independent WARN
-# branches in health.py's _check_stale_indexing_runs — the vw594
-# engine-half-inert signal we WANT to allowlist ("N document(s) report
-# index_state but it is NULL...coverage gap"), and a genuinely stuck
-# mid-run alarm ("N document(s) stranded in index_state='indexing'
-# beyond Nh...check for a stuck run"). Both render as
-# "stale index-run fences: N document(s) ..." — a bare
-# `stale index-run fences: [0-9]+ document` pattern swallows BOTH, which
-# would silently blind this gate to a real stuck-run alarm. Anchored to
-# the vw594 branch's own distinguishing wording ("report index_state but
-# it is NULL") so the stuck-run branch can never match; pinned by a
-# negative-case GREP-LEVEL PARITY test.
-ALLOWLIST_REGEX='chash.conformance|stale index-run fences: [0-9]+ document\(s\) report index_state but it is NULL'
+# The sentinel below matches NOTHING (an empty regex would match
+# everything through grep -v -E and silently allowlist every warning).
+ALLOWLIST_REGEX='__NO_ALLOWLISTED_WARNINGS_SENTINEL__'
 WARNING_LINES="$(grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" || true)"
 UNALLOWLISTED="$(printf '%s\n' "$WARNING_LINES" | grep -v -E "$ALLOWLIST_REGEX" | grep -v '^$' || true)"
 if [ -n "$UNALLOWLISTED" ]; then

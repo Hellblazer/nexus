@@ -205,82 +205,14 @@ def test_passed_line_names_the_layer_honestly_in_both_modes() -> None:
     assert "LOCAL WHEEL, release-battery layer" in text
 
 
-def test_doctor_allowlist_stays_in_grep_level_parity_with_health_py() -> None:
-    """nexus-8hpad (filed while validating nexus-796zn): the pinned engine
-    floor (v0.1.65) predates both the /chash/conformance route
-    (nexus-du2dw) and the begin-many index-run fence route (nexus-vw594
-    F1), so `nx doctor` unconditionally emits two WARN-shaped lines on a
-    virgin box today, in EITHER install layer. The MVV's ALLOWLIST_REGEX
-    carries a scoped entry for both. GREP-LEVEL PARITY (the same idiom
-    ``tests/test_health_service_checks.py`` already uses for the earlier
-    dangling-manifests entry): reword either side's substring without the
-    other and this fails at unit-test speed instead of reddening the MVV
-    2-4 minutes into a real run.
-    """
-    script_text = _text()
-    assert "ALLOWLIST_REGEX=" in script_text
-    assert "nexus-8hpad" in script_text  # removal-trigger bead reference
-
-    # health.py builds the chash-conformance detail across two adjacent
-    # string-literal fragments ("...the chash-conformance " + "route — ...")
-    # that only join at runtime, so pin each fragment separately rather than
-    # the concatenated phrase.
-    health_text = (REPO_ROOT / "src" / "nexus" / "health.py").read_text(encoding="utf-8")
-    for substring in ("the chash-conformance", "stale index-run fences"):
-        assert substring in health_text, f"{substring!r} missing from health.py — MVV allowlist is now stale"
-    for substring in ("chash-conformance route", "stale index-run fences"):
-        assert substring in script_text, f"{substring!r} missing from the MVV's ALLOWLIST_REGEX"
-
-
-def test_allowlist_regex_matches_vw594_signal_but_not_a_real_stuck_run_alarm() -> None:
-    """nexus-iocp8 SIGNIFICANT (substantive-critic, empirically verified):
-    health.py's ``_check_stale_indexing_runs`` has TWO independent WARN
-    branches sharing the label "stale index-run fences" — the vw594
-    engine-half-inert signal (transitional, safe to allowlist) and a
-    genuinely stuck mid-run alarm (never safe to allowlist — it means a
-    real re-index is wedged). Both render as
-    "stale index-run fences: N document(s) ..." so a bare
-    ``[0-9]+ document`` pattern swallows BOTH. Extract the ACTUAL
-    ALLOWLIST_REGEX from the script and prove it matches only the vw594
-    branch's rendered line, using literal detail text mirrored from
-    health.py (lines 4134-4141 and 4156-4162 as of this writing).
-    """
-    script_text = _text()
-    match = re.search(r"^ALLOWLIST_REGEX='(.*)'$", script_text, re.MULTILINE)
-    assert match, "ALLOWLIST_REGEX assignment not found in the script"
-    allowlist_regex = match.group(1)
-
-    # Mirrors health.py's vw594-branch detail (_check_stale_indexing_runs,
-    # the `reported_null > 0 and newest_reported_null_dt > _FENCE_RELEASE_DT`
-    # branch) as rendered by doctor's ⚠ prefix: "{label}: {detail}".
-    vw594_line = (
-        "  ⚠ stale index-run fences: 1 document(s) report index_state but it "
-        "is NULL on every one of them, and at least one was indexed "
-        "2026-08-05T19:07:24+00:00 — after the fence's "
-        "2026-08-02T22:26:00+00:00 release. The fence engine is live; a "
-        "producer wrote this document without ever calling index-run "
-        "begin/complete (nexus-vw594 coverage gap), not a pre-fence engine."
-    )
-    # Mirrors the OTHER branch (the `if stale:` block) — a real stuck-run
-    # alarm that must NEVER be silenced by this allowlist.
-    stuck_run_line = (
-        "  ⚠ stale index-run fences: 3 document(s) stranded in "
-        "index_state='indexing' beyond 24h: some/doc.md (30.0h); "
-        "other/doc.md (26.2h); third/doc.md (24.5h). This is SAFE "
-        "(re-indexing never skips an 'indexing' document, nexus-lcmbp) but "
-        "wastes a full re-chunk/re-embed on every intervening run — check "
-        "for a stuck run or a rolling deploy that split a begin/complete "
-        "pair across engine versions."
-    )
-    assert re.search(allowlist_regex, vw594_line) is not None, (
-        "ALLOWLIST_REGEX no longer matches the vw594 engine-half-inert "
-        "signal — the MVV would go red on the currently-pinned engine floor"
-    )
-    assert re.search(allowlist_regex, stuck_run_line) is None, (
-        "ALLOWLIST_REGEX over-matches: it swallows a genuine stuck-mid-run "
-        "alarm (nexus-iocp8 regression) — a real wedged re-index would pass "
-        "the MVV silently"
-    )
+# The two allowlist grep-parity tests that lived here (nexus-8hpad era:
+# test_doctor_allowlist_stays_in_grep_level_parity_with_health_py and
+# test_allowlist_regex_matches_vw594_signal_but_not_a_real_stuck_run_alarm)
+# retired 2026-08-07 with the REQUIRED_ENGINE_VERSION (0,1,67) bump: the
+# ALLOWLIST_REGEX entries they pinned are gone (see
+# tests/test_engine_version.py::Test8hpadAllowlistDoesNotOutliveItsTrigger,
+# which enforced exactly that removal). The MVV allowlist is now the
+# never-matching sentinel; a future entry must bring back a parity pin.
 
 
 def test_non_vacuity_leg_list_is_mode_aware() -> None:

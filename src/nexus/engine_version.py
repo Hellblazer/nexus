@@ -310,7 +310,23 @@ from __future__ import annotations
 #: deploy-at-tag-push): check_engine_release_floor needed no --paired-deploy
 #: flag, the pin-currency red was the only gate failure. The client halves
 #: (purge-trash + store-get verbs) ship in 7.2.0 alongside this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 65)
+#: -> (0,1,67) 2026-08-07 (7.3.0 release): engine-service-v0.1.66
+#: (tagged @1afef1dc; carries f55435eb begin-many index-run fence route
+#: [vw594 F1], dbd2cb46 chash-conformance report route [du2dw],
+#: 355372e8 owner deactivate/reactivate [cw262], a155de19 nx_answer_runs
+#: query [eho3u]) and v0.1.67 (@f96f75f0; 12-way parallel CCE embed
+#: fan-out with bit-identical vectors + Equal-Jitter retries [9okyk],
+#: EmbedderRouter/Main shutdown-lifecycle fixes) were each published +
+#: acquire-gated + DEPLOYED + edge-gated with record-deploy written
+#: (conexus relays T2 [21504]/[21576]: step-6 exit 0, client-path 4/4
+#: legs). Cloud is serving 0.1.67, so this bump is deploy-first; the
+#: client halves (owners --census/--execute, answer-runs, manifest-verify
+#: --list, chash-conformance doctor check, CLI store-path fencing) ship
+#: in 7.3.0 alongside this pin. This bump also retires the nexus-8hpad
+#: fresh-install-mvv ALLOWLIST_REGEX entries (both engine halves now live
+#: at the pinned floor) — enforced by
+#: Test8hpadAllowlistDoesNotOutliveItsTrigger.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 67)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

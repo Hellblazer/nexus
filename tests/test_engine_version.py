@@ -224,7 +224,21 @@ class TestRequiredEngineVersion:
         # client verbs (purge-trash, store-get) hard-require the v0.1.63+
         # routes; fix-delivery rule covers the rest. Deploy-first: cloud was
         # serving 0.1.65 before this bump landed.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 65)
+        # ->(0,1,67) 2026-08-07 (7.3.0 release): v0.1.66 (begin-many fence
+        # route [vw594 F1], chash-conformance report [du2dw], owner
+        # deactivate/reactivate [cw262], nx_answer_runs query [eho3u]) and
+        # v0.1.67 (12-way parallel CCE fan-out, bit-identical vectors +
+        # jittered retries [9okyk], shutdown-lifecycle fixes). Both
+        # published + acquire-gated + deployed + edge-gated (conexus
+        # [21504]/[21576]: step-6 exit 0, client-path 4/4). Deploy-first:
+        # cloud was serving 0.1.67 before this bump landed. The 7.3.0
+        # client halves (owners --census/--execute, answer-runs,
+        # manifest-verify --list, chash-conformance doctor check, CLI
+        # store fencing) hard-require the v0.1.66+ routes. This bump also
+        # trips Test8hpadAllowlistDoesNotOutliveItsTrigger: the
+        # fresh-install-mvv ALLOWLIST_REGEX entries retire in the SAME
+        # change (nexus-8hpad).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 67)
 
 
 class TestParseEngineVersion:
