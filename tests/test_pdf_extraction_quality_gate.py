@@ -221,7 +221,12 @@ class TestExtractGateWiring:
 from unittest.mock import MagicMock  # noqa: E402 — grouped with this section's imports
 
 
+@pytest.mark.usefixtures("cloud_mode")
 class TestQualityGateOverriddenPropagation:
+    """cloud_mode: _pdf_chunks is driven with a voyage-context-3 target
+    model (the chunker's cloud-token sizing path); the RDR-109 census
+    requires the mode declaration for any voyage-* literal."""
+
     def test_pdf_chunks_stamps_override_from_extraction_result(self, tmp_path: Path):
         """Batch/incremental path: PDFExtractor.extract()'s metadata carries
         quality_gate_overridden (set by _enforce_extraction_quality when
