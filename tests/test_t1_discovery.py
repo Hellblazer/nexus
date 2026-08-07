@@ -56,22 +56,26 @@ def _publish_t1_session_lease(
     session-keyed; with ``session_id=None`` it is a transient record.
     ``claude_pid`` is stamped into the payload of EITHER kind (nexus-gff3g) for
     the ancestor-pid fallback, which serves both the cold-start window and the
-    common session-id-divergence case (NX_SESSION_ID != current_session)."""
-    from nexus.daemon.service_registry import ServiceRegistry
-    from nexus.daemon.t1_lease import T1LeasePublisher
+    common session-id-divergence case (NX_SESSION_ID != current_session).
+
+    nexus-yfh5x: publishes through ``ServiceRegistry.publish`` directly --
+    the same call the now-deleted ``T1LeasePublisher.publish`` used to make
+    internally -- since that wrapper was retired as dead production code
+    (never constructed outside its own test suite)."""
+    from nexus.daemon.service_registry import ServiceRegistry, mint_owner_token
 
     registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
-    publisher = T1LeasePublisher(
-        registry=registry,
-        server_pid=server_pid,
-        host=host,
-        port=port,
+    scope_key = session_id or str(server_pid)
+    payload = {"session_id": session_id, "server_pid": server_pid}
+    if claude_pid is not None:
+        payload["claude_pid"] = claude_pid
+    return registry.publish(
+        scope_key,
+        endpoint={"host": host, "port": port, "server_pid": server_pid},
         version="1.0.0",
-        session_resolver=lambda: session_id,
-        claude_pid=claude_pid,
+        owner_token=mint_owner_token(),
+        payload=payload,
     )
-    publisher.publish()
-    return publisher
 
 
 # ─────────────────────────────────────────────────────────────────────────────

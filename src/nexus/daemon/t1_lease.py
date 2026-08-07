@@ -1,294 +1,39 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-149 P4 (bead nexus-8znyd): T1 rides the leased service registry.
+"""T1 lease discovery (RDR-149 P4 read-path residue).
 
-T1 is the per-MCP-process working-memory tier. Unlike T2/T3 it is **not**
-a supervised daemon: it is owned by the MCP server's chroma lifespan
-(``nexus.mcp.core._t1_lifespan`` Branch 3) and consumes the shared
-``ServiceRegistry`` primitive directly. This module is that consumer.
+This module used to own both the write path (``T1LeasePublisher``,
+publishing to the ``ServiceRegistry``-backed ``t1_addr.<key>`` lease format
+under the locked RF-2 transient-key -> session-id re-key protocol) and the
+read path (:func:`discover_t1_lease`, :func:`discover_t1_by_claude_ancestor`).
+The chroma-backed MCP lifespan branch that constructed ``T1LeasePublisher``
+(``nexus.mcp.core._t1_lifespan`` Branch 3) died at RDR-155 P4b / RDR-158 P3;
+an exhaustive grep confirmed zero production construction sites, so the
+publisher and its dedicated tests were retired (nexus-yfh5x).
 
-The locked RF-2 re-key protocol (the one load-bearing correctness subtlety
-of the T1 migration, tracked as CA-3):
-
-1. At lifespan publish the owner does not yet know the Claude session-id on
-   a cold top-level session: the SessionStart hook writes
-   ``~/.config/nexus/current_session`` independently of the MCP lifespan
-   (RDR-105 P4), so ``resolve_active_session_id()`` may still be ``None``.
-   The publisher therefore claims a **transient** scope key = the chroma
-   ``server_pid``: unique among live owners, never ``"unknown"``, never
-   colliding across sessions. The resolved-or-None session-id rides as a
-   payload field.
-2. The heartbeat loop calls the injected ``session_resolver`` each tick.
-   The instant it resolves non-None while the record is still
-   transient-keyed, the publisher **atomically re-keys**: it publishes the
-   session-id-keyed record (the primitive's per-scope election flock
-   serializes the generation bump against any concurrent sibling), then
-   relinquishes the transient record (which only ever unlinks the
-   publisher's own ``server_pid`` key).
-3. Readers resolve by session-id (:func:`discover_t1_lease`). The transient
-   window covers all three reader classes: the owning MCP process (via the
-   in-process ``_t1_state`` pointer), an MCP-dispatched ``claude -p``
-   subprocess (via the inherited ``NX_T1_HOST``/``NX_T1_PORT`` env, RDR-105
-   Path A), and a Claude-Code-spawned Bash sibling in the cold-start sliver
-   before ``current_session`` is written. The sibling has no env and no
-   resolvable session-id, so it matches the owner's transient record by the
-   owner's immediate Claude ancestor pid (stamped in the payload, resolved
-   identically on both sides via RF-6) -- session-targeted and TTL-bounded,
-   so no cross-session mis-bind (:func:`discover_t1_by_claude_ancestor`,
-   nexus-0x16i). No record is ever keyed ``"unknown"``.
-
-Session-scoped N-per-user semantics are preserved: the session-id IS the
-scope key (intentionally N owners per uid, one T1 server per session), so
-unlike the uid-scoped T2/T3 tiers there is no one-owner-per-user election.
+Nothing in production publishes the ``t1_addr.*`` format any more.
+:func:`discover_t1_lease` is still called by ``nx doctor --check-t1``
+(:mod:`nexus.commands.doctor`), so it stays live code, but it will find no
+lease until that checker (and ``health._check_orphan_t1`` /
+``console/watchers.py``'s ``t1_addr.*`` scan) is updated to match --
+that consumer-surface breakage is nexus-8zfwv (P1: nothing publishes
+``t1_addr.*`` any more, so ``--check-t1`` false-negatives on every
+resolved session; empirically confirmed 2026-08-07 with live MCP
+servers). Live T1 leasing today goes through the unrelated
+:mod:`nexus.db.t1` mint/lease mechanism (``publish_t1_session_lease`` /
+``read_t1_session_lease``), which this module does not touch.
 """
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Optional
 
 import structlog
 
-from nexus.daemon.service_registry import (
-    Clock,
-    LeaseRecord,
-    ServiceRegistry,
-    StaleOwnerError,
-    mint_owner_token,
-)
+from nexus.daemon.service_registry import Clock, LeaseRecord, ServiceRegistry
 
 _log = structlog.get_logger(__name__)
-
-SessionResolver = Callable[[], Optional[str]]
-
-
-def _t1_version() -> str:
-    """The running package version, stamped on the lease for observability.
-
-    T1 is not version-cycled (it is MCP-lifespan-owned; an upgrade cycles it
-    by restarting the MCP server), but the lease ``version`` field is
-    required by the primitive, so we stamp the real version for parity with
-    T2/T3 discovery payloads.
-    """
-    try:
-        from importlib.metadata import version  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-
-        return version("conexus")
-    except Exception:  # noqa: BLE001 — best-effort version read; falls back to 0.0.0
-        return "0.0.0"
-
-
-class T1LeasePublisher:
-    """Owns one T1 chroma's lease, re-keyed transient ``server_pid`` ->
-    ``session_id`` per the locked RF-2 protocol.
-
-    Constructor-injected (no singletons): the MCP lifespan builds the
-    ``ServiceRegistry`` and a ``session_resolver`` and hands them in; the
-    conformance harness and unit tests inject a ``_FakeClock``-backed
-    registry and a controllable resolver so the re-key window is exercised
-    deterministically.
-    """
-
-    def __init__(
-        self,
-        *,
-        registry: ServiceRegistry,
-        server_pid: int,
-        host: str,
-        port: int,
-        version: Optional[str] = None,
-        session_resolver: SessionResolver,
-        owner_token: Optional[str] = None,
-        claude_pid: Optional[int] = None,
-    ) -> None:
-        self._registry = registry
-        self._server_pid = server_pid
-        self._transient_key = str(server_pid)
-        self._endpoint: dict[str, Any] = {
-            "host": host,
-            "port": port,
-            "server_pid": server_pid,
-        }
-        self._version = version or _t1_version()
-        self._resolver = session_resolver
-        # The owner's immediate Claude ancestor pid (RF-6). Carried in the
-        # transient record's payload ONLY so a bare Bash sibling in the
-        # cold-start window can target this owner's transient lease by the
-        # same pid it resolves for itself (nexus-0x16i). Never a scope KEY
-        # (keys stay server_pid/session-id); never a liveness probe (liveness
-        # is lease freshness). Dropped once the lease re-keys to the session.
-        self._claude_pid = claude_pid
-        self._owner_token = owner_token or mint_owner_token()
-        self._record: Optional[LeaseRecord] = None
-        self._session_key: Optional[str] = None
-        self._fenced: bool = False
-
-    @property
-    def owner_token(self) -> str:
-        return self._owner_token
-
-    @property
-    def record(self) -> Optional[LeaseRecord]:
-        return self._record
-
-    @property
-    def session_keyed(self) -> bool:
-        """True once the lease is keyed on the session-id (re-key done)."""
-        return self._session_key is not None
-
-    @property
-    def active_scope_key(self) -> str:
-        """The scope key the live record is currently published under."""
-        return self._session_key or self._transient_key
-
-    @property
-    def fenced(self) -> bool:
-        """True if a heartbeat found a newer owner had taken the scope.
-
-        For the transient ``server_pid`` key this cannot happen (the key is
-        unique to this owner); for the session key it can if a sibling of the
-        same session published a higher generation after our last publish.
-        """
-        return self._fenced
-
-    def _payload(self, session_id: Optional[str]) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "session_id": session_id,
-            "server_pid": self._server_pid,
-        }
-        # Stamp the owner's immediate Claude ancestor pid into EVERY record,
-        # transient and session-keyed alike (nexus-gff3g). A sibling shell whose
-        # resolved session-id diverges from the owner's lease key cannot find the
-        # lease by session-id, and the claude-ancestor-pid fallback is its only
-        # path to its own T1. Divergence is the common case, not an edge case:
-        # the MCP keys on NX_SESSION_ID while the SessionStart hook writes
-        # current_session, and the two Claude-provided ids differ on resume,
-        # with multiple concurrent frontends, and under version skew. The prior
-        # behavior dropped the hint the instant a session-id resolved, so a warm
-        # publish (NX_SESSION_ID set at MCP startup, the common config) never
-        # recorded it and silently killed the fallback. Readers only ever use
-        # claude_pid as a fallback AFTER the session-id path misses, so carrying
-        # it on session-keyed records is free.
-        if self._claude_pid is not None:
-            payload["claude_pid"] = self._claude_pid
-        return payload
-
-    def publish(self) -> LeaseRecord:
-        """Claim the scope, keying on the session-id if it already resolves,
-        else on the transient ``server_pid``.
-
-        Returns the published lease. On a warm session (the resolver returns
-        non-None immediately, e.g. a ``claude -p`` subprocess that inherited
-        ``NX_SESSION_ID``) there is no transient window and no later re-key.
-        """
-        session_id = self._resolve()
-        scope_key = session_id or self._transient_key
-        self._record = self._registry.publish(
-            scope_key,
-            endpoint=self._endpoint,
-            version=self._version,
-            owner_token=self._owner_token,
-            payload=self._payload(session_id),
-        )
-        self._session_key = session_id or None
-        _log.info(
-            "t1_lease_published",
-            scope_key=scope_key,
-            session_keyed=self.session_keyed,
-            server_pid=self._server_pid,
-            generation=self._record.generation,
-        )
-        return self._record
-
-    def tick(self) -> None:
-        """One heartbeat step: re-stamp the lease, then re-key if the
-        session-id has resolved while we are still transient-keyed.
-
-        Idempotent and exception-safe. A heartbeat fenced by a newer owner
-        sets :attr:`fenced` and writes nothing (CA-4). Called by the
-        lifespan's async heartbeat loop and, in tests, directly.
-        """
-        if self._record is None or self._fenced:
-            return
-        try:
-            self._record = self._registry.heartbeat(self._record)
-        except StaleOwnerError:
-            self._fenced = True
-            _log.info(
-                "t1_lease_fenced",
-                scope_key=self.active_scope_key,
-                owner_token=self._owner_token,
-            )
-            return
-        if self._session_key is None:
-            session_id = self._resolve()
-            if session_id:
-                self._rekey(session_id)
-
-    def _rekey(self, session_id: str) -> None:
-        """Atomically move the lease from the transient key to the session
-        key. Write the session record first (under its own election flock,
-        so a concurrent sibling's generation bump serializes), then relinquish
-        the transient record (which only unlinks our own ``server_pid`` key).
-        Ordering guarantees there is never a window with no record.
-        """
-        transient_record = self._record
-        new_record = self._registry.publish(
-            session_id,
-            endpoint=self._endpoint,
-            version=self._version,
-            owner_token=self._owner_token,
-            payload=self._payload(session_id),
-        )
-        # Commit the in-process pointer to the session record BEFORE
-        # relinquishing the transient one: if the relinquish raises, the next
-        # tick must heartbeat the session record (not re-enter _rekey and
-        # inflate the generation / re-publish). The transient record then ages
-        # out via TTL. A relinquish failure is best-effort; never re-key-loop.
-        self._record = new_record
-        self._session_key = session_id
-        if transient_record is not None:
-            try:
-                self._registry.relinquish(transient_record)
-            except Exception as exc:  # noqa: BLE001 — best-effort relinquish; logged at debug, never crash tick
-                _log.debug(
-                    "t1_lease_transient_relinquish_failed",
-                    scope=self._transient_key,
-                    error=str(exc),
-                )
-        _log.info(
-            "t1_lease_rekeyed",
-            from_scope=self._transient_key,
-            to_scope=session_id,
-            server_pid=self._server_pid,
-            generation=new_record.generation,
-        )
-
-    def relinquish(self) -> None:
-        """Release the lease on shutdown, marking it shutting-down first so
-        discoverers stop resolving us immediately. Only unlinks the record if
-        we still own it (a fenced predecessor must not clobber a successor).
-        Idempotent.
-        """
-        if self._record is None:
-            return
-        record = self._record
-        try:
-            self._registry.mark_shutting_down(record)
-            self._registry.relinquish(record)
-        finally:
-            self._record = None
-
-    def _resolve(self) -> Optional[str]:
-        try:
-            sid = self._resolver()
-        except Exception as exc:  # resolver is best-effort; never crash a tick  # noqa: BLE001 — resolver is best-effort; logged at debug, never crash tick
-            _log.debug("t1_lease_session_resolve_failed", error=str(exc))
-            return None
-        if sid is None:
-            return None
-        sid = sid.strip()
-        return sid or None
 
 
 def discover_t1_lease(

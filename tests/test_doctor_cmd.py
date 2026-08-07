@@ -794,18 +794,19 @@ class TestCheckT1:
 
     @staticmethod
     def _publish_lease(config_dir, session_id, host, port):
-        from nexus.daemon.service_registry import ServiceRegistry
-        from nexus.daemon.t1_lease import T1LeasePublisher
+        # nexus-yfh5x: publishes through ServiceRegistry.publish directly --
+        # the now-deleted T1LeasePublisher was retired as dead production
+        # code (never constructed outside its own test suite).
+        from nexus.daemon.service_registry import ServiceRegistry, mint_owner_token
 
         registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
-        T1LeasePublisher(
-            registry=registry,
-            server_pid=4242,
-            host=host,
-            port=port,
+        registry.publish(
+            session_id,
+            endpoint={"host": host, "port": port, "server_pid": 4242},
             version="1.0.0",
-            session_resolver=lambda: session_id,
-        ).publish()
+            owner_token=mint_owner_token(),
+            payload={"session_id": session_id, "server_pid": 4242},
+        )
 
     def test_no_session_id_is_informational(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,

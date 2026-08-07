@@ -1445,6 +1445,109 @@ def _check_orphan_t1() -> list[HealthResult]:
     return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
 
 
+def _check_orphan_t1_handoff() -> list[HealthResult]:
+    """Reap orphaned T1 session-handoff markers (nexus-9l147).
+
+    nexus-d76vc's SessionStart hook writes a LIVE marker
+    (``t1_handoff.<mcp_pid>``, :mod:`nexus.daemon.t1_handoff`) naming the
+    transcript's new session id for a target MCP process; the MCP
+    lifespan's handoff watcher normally claims it (atomically renaming it
+    to the tick-private ``t1_handoff.claimed.<mcp_pid>``) and consumes it
+    within one 5s tick. If the target ``mcp_pid`` dies (crash/OOM/SIGKILL)
+    in the window between the marker being written and its next tick —
+    either the live or the claimed variant, depending on exactly when it
+    died — the marker is never consumed and persists on disk indefinitely.
+    Functionally safe (the handoff watcher's own staleness check rejects a
+    stale marker even after pid reuse), but it is unbounded disk litter
+    with no other sweep touching it — unlike ``t1_addr.*``, whose readers
+    self-reap stale records on discovery (:func:`_check_orphan_t1`).
+
+    A marker is orphaned when the ``mcp_pid`` embedded in its filename
+    names no live process (``nexus.session._is_pid_alive``, the same
+    ``os.kill(pid, 0)`` idiom the shared daemon substrate uses elsewhere).
+    Only orphans are reaped (unlinked); a marker whose ``mcp_pid`` IS alive
+    is left completely untouched — the owner may simply be slow to tick.
+    A filename whose suffix does not parse as a plain integer pid is never
+    guessed at or deleted (fail-safe), only surfaced.
+
+    PID-reuse tradeoff (same one ``sweep_dead_t1_holders`` /
+    ``sweep_dead_t1_elect_locks`` document): a marker whose dead
+    ``mcp_pid`` was recycled to an unrelated live process reads as
+    "alive" and is never reaped here — accepted, since the watcher's
+    staleness check makes such a marker inert and the litter is one file.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.daemon.t1_handoff import (  # noqa: PLC0415 — deferred to avoid circular import
+        _CLAIMED_MARKER_PREFIX,
+        _HANDOFF_MARKER_PREFIX,
+    )
+    from nexus.session import _is_pid_alive  # noqa: PLC0415 — deferred to avoid circular import
+
+    config_dir = nexus_config_dir()
+    if not config_dir.exists():
+        return [HealthResult(
+            label="T1 handoff markers", ok=True, detail="no nexus config dir",
+        )]
+
+    markers = list(config_dir.glob(f"{_HANDOFF_MARKER_PREFIX}*"))
+    if not markers:
+        return [HealthResult(
+            label="T1 handoff markers", ok=True, detail="no handoff markers",
+        )]
+
+    reaped: list[str] = []
+    live: list[str] = []
+    unparseable: list[str] = []
+    for path in markers:
+        name = path.name
+        # The claimed variant's prefix ("t1_handoff.claimed.") is itself
+        # prefixed by the live variant's ("t1_handoff."), so it must be
+        # checked FIRST or the pid slice below would include "claimed.".
+        if name.startswith(_CLAIMED_MARKER_PREFIX):
+            pid_str = name[len(_CLAIMED_MARKER_PREFIX):]
+        else:
+            pid_str = name[len(_HANDOFF_MARKER_PREFIX):]
+        try:
+            mcp_pid = int(pid_str)
+        except ValueError:
+            # Fail-safe: an unparseable suffix is never guessed at or
+            # deleted, only surfaced as an oddity.
+            unparseable.append(name)
+            continue
+        if _is_pid_alive(mcp_pid):
+            live.append(name)
+            continue
+        try:
+            path.unlink()
+            reaped.append(name)
+        except OSError as exc:
+            _log.debug("t1_handoff_orphan_reap_failed", path=str(path), error=str(exc))
+            unparseable.append(name)
+
+    parts: list[str] = []
+    if reaped:
+        parts.append(f"reaped {len(reaped)} orphaned marker(s): {', '.join(sorted(reaped))}")
+    if live:
+        parts.append(f"{len(live)} live marker(s) untouched")
+    if unparseable:
+        parts.append(
+            f"{len(unparseable)} unparseable/unreapable marker(s): "
+            f"{', '.join(sorted(unparseable))}"
+        )
+    if not parts:
+        parts.append("no handoff markers")
+
+    return [HealthResult(
+        label="T1 handoff markers",
+        ok=not unparseable,
+        detail="; ".join(parts),
+        fix_suggestions=(
+            ["Inspect/remove manually: ls ~/.config/nexus/t1_handoff.*"]
+            if unparseable else []
+        ),
+    )]
+
+
 def _check_orphan_checkpoints() -> list[HealthResult]:
     from nexus.checkpoint import CHECKPOINT_DIR, scan_orphaned_checkpoints  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -4544,6 +4647,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_git_hooks())
     results.extend(_check_index_log())
     results.extend(_check_orphan_t1())
+    results.extend(_check_orphan_t1_handoff())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())

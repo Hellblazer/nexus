@@ -10,6 +10,7 @@ import pytest
 
 from nexus.health import (
     _check_orphan_t1,
+    _check_orphan_t1_handoff,
     _check_t2_dropped_writes,
     _check_t2_schema_applied,
     _check_orphan_checkpoints,
@@ -302,3 +303,94 @@ class TestCheckOrphanCheckpoints:
         self._write_ckpt(ckpt_dir, str(tmp_path / "nope.pdf"), "dead_mixed")
         results = _check_orphan_checkpoints()
         assert results[0].ok is False
+
+
+# ── Orphan T1 handoff markers (nexus-9l147) ─────────────────────────────────
+
+class TestCheckOrphanT1Handoff:
+    """nexus-d76vc's SessionStart hook writes ``t1_handoff.<mcp_pid>``; the
+    MCP lifespan's handoff watcher claims it (renaming to
+    ``t1_handoff.claimed.<mcp_pid>``) then consumes it within one tick. If
+    the target mcp_pid dies between write and tick (either variant), the
+    marker is never cleaned up. This is the reaper: a marker is orphaned
+    when its filename's mcp_pid names no live process; only orphans are
+    reaped, and a live pid's marker is left completely untouched."""
+
+    def _run(self, config_dir: Path) -> tuple[bool, list[HealthResult]]:
+        with patch("nexus.config.nexus_config_dir", return_value=config_dir):
+            results = _check_orphan_t1_handoff()
+        ok = all(r.ok for r in results)
+        return ok, results
+
+    def test_no_config_dir_reports_ok(self, tmp_path):
+        ok, results = self._run(tmp_path / "nonexistent")
+        assert ok is True
+
+    def test_no_markers_reports_ok(self, tmp_path):
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert "no handoff markers" in results[0].detail.lower()
+
+    def test_orphaned_live_variant_is_reaped(self, tmp_path):
+        from nexus.daemon.t1_handoff import handoff_marker_path, write_handoff_marker
+
+        dead = _dead_pid()
+        write_handoff_marker(
+            dead, new_session_id="sess-A", claude_pid=99999, config_dir=tmp_path,
+        )
+        marker = handoff_marker_path(dead, tmp_path)
+        assert marker.exists()
+
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert not marker.exists(), "orphaned live-variant marker was not reaped"
+        assert "reaped 1" in results[0].detail.lower()
+
+    def test_orphaned_claimed_variant_is_reaped(self, tmp_path):
+        from nexus.daemon.t1_handoff import (
+            claimed_marker_path,
+            handoff_marker_path,
+            write_handoff_marker,
+        )
+
+        dead = _dead_pid()
+        write_handoff_marker(
+            dead, new_session_id="sess-A", claude_pid=99999, config_dir=tmp_path,
+        )
+        # Simulate the watcher having claimed the marker (atomic rename to
+        # the tick-private claimed path, nexus-d76vc fix-round 2) and then
+        # dying before consume_claimed_marker runs.
+        claimed = claimed_marker_path(dead, tmp_path)
+        handoff_marker_path(dead, tmp_path).rename(claimed)
+        assert claimed.exists()
+
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert not claimed.exists(), "orphaned claimed-variant marker was not reaped"
+        assert "reaped 1" in results[0].detail.lower()
+
+    def test_live_pid_marker_is_untouched(self, tmp_path):
+        from nexus.daemon.t1_handoff import handoff_marker_path, write_handoff_marker
+
+        live = os.getpid()
+        write_handoff_marker(
+            live, new_session_id="sess-A", claude_pid=99999, config_dir=tmp_path,
+        )
+        marker = handoff_marker_path(live, tmp_path)
+        assert marker.exists()
+
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert marker.exists(), "a marker for a live pid must never be reaped"
+        assert "1 live" in results[0].detail.lower()
+
+    def test_malformed_marker_name_handled_fail_safe(self, tmp_path):
+        # A marker filename whose suffix is not a plain integer must never be
+        # guessed at or deleted -- fail-safe, surfaced instead.
+        bogus = tmp_path / "t1_handoff.not-a-pid"
+        bogus.write_text("{}")
+
+        ok, results = self._run(tmp_path)
+        assert bogus.exists(), "an unparseable marker must never be deleted"
+        assert ok is False
+        assert any("not-a-pid" in r.detail for r in results)

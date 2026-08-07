@@ -482,9 +482,10 @@ def sweep_dead_t1_holders(
     flocks (this function takes its own under the shared primitive's rules).
 
     This is the startup-sweep half of the nexus-ycwec Fix #3 lifecycle GC.
-    Session-end cleanup is :meth:`T1LeasePublisher.relinquish` (already in
-    t1_lease.py). Both halves live here or in the shared primitive per the
-    RDR-149 standing gate (daemon/AGENTS.md).
+    (The session-end-cleanup half this docstring used to cross-reference,
+    ``T1LeasePublisher.relinquish``, was retired as dead production code at
+    nexus-yfh5x — nothing constructs that class any more.) Lives here per
+    the RDR-149 standing gate (daemon/AGENTS.md).
 
     TOCTOU NOTE: the liveness-check → unlink sequence is a point-in-time
     race.  OS PID reuse could in principle allow a newly started process to

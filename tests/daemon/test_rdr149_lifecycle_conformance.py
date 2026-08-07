@@ -61,7 +61,6 @@ from nexus.daemon.service_registry import (
     ServiceSupervisor,
     ttl_for_tier,
 )
-from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
 
 
@@ -210,82 +209,6 @@ class RecordHarness:
         raise NotImplementedError
 
 
-class T1RecordHarness(RecordHarness):
-    """RDR-149 P4: T1 rides the leased registry, MCP-lifespan-owned and
-    scoped on the **session-id** (intentionally N owners per uid, one T1
-    server per session). Each sibling drives a real ``T1LeasePublisher``
-    keyed on one shared session-id, so the unit battery exercises the
-    production publish / heartbeat-self-heal / re-key / fence path, not a
-    bespoke copy. The transient ``server_pid`` -> session-id re-key (CA-3)
-    is covered separately by ``TestT1SessionRekey``; here the publishers
-    resolve the session-id at publish time so they key on it directly."""
-
-    tier = "t1"
-    scope = "session"
-    has_self_heal = True  # RDR-149 P4: publisher heartbeat self-heals (#1114)
-    has_version_cycle = False  # T1 is MCP-lifespan-owned, not upgrade-cycled
-    _SESSION = "sess-A"
-
-    def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
-        super().__init__(config_dir, alive, clock)
-        self._registry = ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=3.0, heartbeat_interval=1.0
-        )
-        self._pubs: dict[int, T1LeasePublisher] = {}
-
-    def publish(self, owner: int = _OWNER_PID) -> None:
-        pub = T1LeasePublisher(
-            registry=self._registry,
-            server_pid=owner,
-            host="127.0.0.1",
-            port=0,
-            version="1.0.0",
-            session_resolver=lambda: self._SESSION,
-            owner_token=f"tok-{owner}",
-        )
-        pub.publish()
-        self._pubs[owner] = pub
-
-    def discover(self, owner: int = _OWNER_PID) -> Optional[dict[str, Any]]:
-        rec = self._registry.discover(self._SESSION)
-        if rec is None:
-            return None
-        return {
-            "pid": rec.endpoint.get("server_pid"),
-            "owner": rec.endpoint.get("server_pid"),
-            "generation": rec.generation,
-            "owner_token": rec.owner_token,
-        }
-
-    def simulate_ungraceful_death(self, owner: int = _OWNER_PID) -> None:
-        # The owner stops heartbeating; the lease ages out on its own. No pid
-        # is consulted (lease freshness is the liveness primitive).
-        self._pubs.pop(owner, None)
-
-    def advance_to_reap(self) -> None:
-        self._clock.advance(3.1)  # past TTL
-
-    def reap(self) -> None:
-        self._registry.discover(self._SESSION)  # discovery reaps an expired lease
-
-    def external_delete(self, owner: int = _OWNER_PID) -> None:
-        self._registry._record_path(self._SESSION).unlink(missing_ok=True)
-
-    def self_heal_tick(self, owner: int = _OWNER_PID) -> None:
-        pub = self._pubs.get(owner)
-        if pub is not None:
-            pub.tick()  # re-stamps; self-heals a lost record
-
-    def stale_reassert(self, owner: int) -> None:
-        pub = self._pubs.get(owner)
-        if pub is not None:
-            pub.tick()  # fenced: sets pub.fenced, writes nothing
-
-    def owners_in_scope(self, session_id: str) -> int:
-        # Session-scoped: two siblings of ONE session converge to one record.
-        return 1 if self.discover() is not None else 0
-
-
 class _LeaseHarness(RecordHarness):
     """Shared harness for tiers migrated onto the leased registry (T2 in P2,
     T3 in P3). Drives the SAME ``ServiceRegistry`` + ``ServiceSupervisor``
@@ -368,6 +291,31 @@ class _LeaseHarness(RecordHarness):
 # NO T3RecordHarness: RDR-149 P3 migrated the T3-daemon lease onto this same
 # primitive, but the T3 daemon itself retired at RDR-155 P4b (nexus-pmag3,
 # 2026-08-07) — see TIERS' comment above for the phantom-tier determination.
+
+class T1RecordHarness(_LeaseHarness):
+    """RDR-149 P4: T1 rides the leased registry, MCP-lifespan-owned and
+    scoped on the **session-id** (intentionally N owners per uid, one T1
+    server per session), unlike the uid-scoped tiers below. Drives the SAME
+    ``ServiceRegistry`` + ``ServiceSupervisor`` primitive via the shared
+    ``_LeaseHarness`` (nexus-yfh5x: the hand-rolled ``T1LeasePublisher``
+    wrapper this harness used to drive was retired as dead production code
+    -- the live MCP lifespan never constructs it; it publishes T1 leases
+    through the unrelated ``nexus.db.t1`` mint/lease mechanism instead. The
+    transient ``server_pid`` -> session-id re-key that publisher alone
+    implemented (CA-3) had no other production caller and was retired with
+    it -- this harness's siblings resolve the session-id directly, exactly
+    as they did before)."""
+
+    tier = "t1"
+    scope = "session"
+    _REGISTRY_TIER = "t1"
+    has_version_cycle = False  # T1 is MCP-lifespan-owned, not upgrade-cycled
+    _SESSION = "sess-A"
+
+    def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
+        super().__init__(config_dir, alive, clock)
+        self._scope = self._SESSION  # session-scoped, not uid-scoped
+
 
 class StorageServiceRecordHarness(_LeaseHarness):
     """RDR-149 P5.1 (nexus-gmiaf.30): storage_service rides the leased registry,
@@ -619,120 +567,16 @@ class TestLifecycleConformance:
         assert rec["owner"] == _SIBLING_PID, "stale predecessor clobbered the record"
 
 
-# ---------------------------------------------------------------------------
-# T1-only property (CA-3): the locked RF-2 transient-key -> session-id re-key.
-# The cold-start lifespan race: the SessionStart hook writes current_session
-# independently of the MCP lifespan, so session-id may be None at publish. The
-# publisher keys transiently on the chroma server_pid and re-keys the instant
-# the session-id resolves. RDR-149 P4 makes this real (was xfail through P3).
-# ---------------------------------------------------------------------------
-
-
-_SERVER_PID = 90001
-_SIBLING_SERVER_PID = 90002
-
-
-def _t1_publisher(
-    registry: ServiceRegistry,
-    *,
-    server_pid: int,
-    session_resolver,
-) -> T1LeasePublisher:
-    return T1LeasePublisher(
-        registry=registry,
-        server_pid=server_pid,
-        host="127.0.0.1",
-        port=0,
-        version="1.0.0",
-        session_resolver=session_resolver,
-        owner_token=f"tok-{server_pid}",
-    )
-
-
-class TestT1SessionRekey:
-    """CA-3: the transient-key -> session-id re-key has no ``"unknown"``
-    collapse and no window where the OWNER or an env-inheriting subprocess
-    is stranded. This asserts the registry-layer invariant: the transient
-    lease is discoverable under the ``server_pid`` key (the re-key
-    carry-forward + owner ``_t1_state`` breadcrumb). The bare Bash sibling's
-    production read path (matching the transient lease by claude_pid,
-    nexus-0x16i) is covered in ``test_t1_discovery`` /
-    ``test_t1_lease.TestTransientClaudeFallback``."""
-
-    def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
-        return ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=3.0, heartbeat_interval=1.0
-        )
-
-    def test_no_record_is_ever_keyed_unknown(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # CA-3 (i): a cold publish with an unresolved session-id keys on the
-        # server_pid, never the legacy "unknown" string.
-        reg = self._registry(config_dir, clock)
-        _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None).publish()
-        assert not (config_dir / "t1_addr.unknown").exists()
-        assert [p.name for p in config_dir.glob("t1_addr.*")] == [
-            f"t1_addr.{_SERVER_PID}"
-        ]
-
-    def test_transient_lease_is_registry_discoverable_under_server_pid(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # CA-3 carry-forward: during the transient window the record exists
-        # under the server_pid key (so the re-key can read-and-carry its
-        # generation, and the owner's _t1_state breadcrumb is backed by a
-        # real record) while NOT yet discoverable under the session-id. This
-        # asserts the registry-layer invariant only; it is NOT a claim that a
-        # bare Bash sibling reads the server_pid key (it does not -- see
-        # tests/test_t1_discovery.py for the honest production read path).
-        reg = self._registry(config_dir, clock)
-        pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None)
-        pub.publish()
-        assert reg.discover(str(_SERVER_PID)) is not None
-        assert reg.discover("sess-A") is None
-
-    def test_rekey_moves_record_to_session_id_atomically(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # The core re-key: transient server_pid record -> session-id record,
-        # transient unlinked, exactly one record at every observable step.
-        reg = self._registry(config_dir, clock)
-        sid: dict[str, str | None] = {"v": None}
-        pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: sid["v"])
-        pub.publish()
-        assert (config_dir / f"t1_addr.{_SERVER_PID}").exists()
-
-        sid["v"] = "sess-A"
-        pub.tick()
-
-        assert (config_dir / "t1_addr.sess-A").exists(), "no session-id-keyed record"
-        assert not (config_dir / f"t1_addr.{_SERVER_PID}").exists(), "transient leaked"
-        assert pub.session_keyed
-
-    def test_rekey_atomic_under_concurrent_sibling_flock(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # CA-3 (iii): two siblings of one session re-key concurrently. The
-        # session-key publish is flock-serialized (monotonic generation) and
-        # each unlinks only its own server_pid record. End state: exactly one
-        # session record at generation 2, both transient records gone.
-        reg = self._registry(config_dir, clock)
-        sid: dict[str, str | None] = {"v": None}
-        a = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: sid["v"])
-        b = _t1_publisher(
-            reg, server_pid=_SIBLING_SERVER_PID, session_resolver=lambda: sid["v"]
-        )
-        a.publish()
-        b.publish()
-
-        sid["v"] = "sess-A"
-        a.tick()
-        b.tick()
-
-        assert [p.name for p in config_dir.glob("t1_addr.*")] == ["t1_addr.sess-A"]
-        rec = reg.discover("sess-A")
-        assert rec is not None and rec.generation == 2
+# NO TestT1SessionRekey: the locked RF-2 transient-key -> session-id re-key
+# (CA-3) was ``T1LeasePublisher``-only behavior -- the shared
+# ``ServiceRegistry``/``ServiceSupervisor`` primitive T1RecordHarness now
+# drives (like every other tier) never re-keys a scope in-place, and no
+# production caller ever exercised the re-key path (``T1LeasePublisher`` had
+# zero production construction sites). Retired with the class (nexus-yfh5x).
+# The bare Bash sibling's production read path (matching a transient lease by
+# claude_pid, nexus-0x16i) remains covered by
+# ``test_t1_discovery`` / ``test_t1_lease.TestTransientClaudeFallback``,
+# which build their fixture leases via ``ServiceRegistry.publish`` directly.
 
 
 # ---------------------------------------------------------------------------
