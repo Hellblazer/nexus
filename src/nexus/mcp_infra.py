@@ -248,6 +248,32 @@ def get_t1():
     return _t1_instance, _t1_isolated
 
 
+def reset_t1_for_release() -> None:
+    """Drop the cached T1 singleton so the next :func:`get_t1` call
+    reconstructs against a freshly-swapped ``NX_T1_SESSION`` /
+    ``NX_T1_SESSION_ID`` (nexus-d76vc T1 handoff re-lease).
+
+    Deliberately narrower than :func:`reset_singletons` (which is
+    test-only and also tears down T3, the catalog client, the plan
+    cache, and search traces — the wrong blast radius for a production
+    T1-only scope swap that must leave every other tool's live state
+    untouched). This clears ONLY the T1 singleton, under the SAME lock
+    :func:`get_t1` takes for construction, so a re-lease can never race a
+    concurrent tool call's first-touch construction into observing a
+    half-swapped state: either the call sees the OLD instance (built
+    before the swap) or triggers a fresh construction against the NEW
+    env vars, never a torn state in between.
+
+    Safe to call even when no T1 singleton was ever constructed yet (a
+    no-op) — the MCP lifespan's handoff watcher calls this
+    unconditionally on every consumed marker.
+    """
+    global _t1_instance, _t1_isolated
+    with _t1_lock:
+        _t1_instance = None
+        _t1_isolated = False
+
+
 def get_t3():
     """Return the T3 handle singleton — lazy init on first call.
 

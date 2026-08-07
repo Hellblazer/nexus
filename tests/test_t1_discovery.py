@@ -172,6 +172,88 @@ class TestFindImmediateClaudePid:
             assert find_immediate_claude_pid(start_pid=500) == 600
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# find_mcp_sibling_pids (nexus-d76vc: T1 handoff marker ancestry check)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFindMcpSiblingPids:
+    """The writer-side ancestry check: only nx-mcp/nx-mcp-catalog pids
+    whose IMMEDIATE parent is the given claude_pid are ever returned.
+    """
+
+    def test_returns_mcp_and_catalog_children_of_claude_pid(self):
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "nx-mcp"),
+            (1301, 1200, "nx-mcp-catalog"),
+            (1302, 1200, "bash"),  # unrelated sibling: not an mcp command
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            result = find_mcp_sibling_pids(1200)
+        assert sorted(result) == [1300, 1301]
+
+    def test_excludes_pids_under_a_different_claude_pid(self):
+        """Two DISTINCT claude sessions: a marker for one must never be
+        computed as reachable from the other's claude_pid (MUST-HOLD
+        rn3wo.1 -- a concurrent session's hook must not be able to
+        re-point another session's MCP server)."""
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "nx-mcp"),
+            (2200, 1, "claude"),  # a DIFFERENT top-level claude process
+            (2300, 2200, "nx-mcp"),  # that session's OWN mcp server
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            result_for_1200 = find_mcp_sibling_pids(1200)
+            result_for_2200 = find_mcp_sibling_pids(2200)
+        assert result_for_1200 == [1300]
+        assert result_for_2200 == [2300]
+        # Foreign pid never leaks across:
+        assert 2300 not in result_for_1200
+        assert 1300 not in result_for_2200
+
+    def test_no_siblings_returns_empty_list(self):
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [(1200, 1, "claude"), (1300, 1200, "bash")]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == []
+
+    def test_nonpositive_claude_pid_returns_empty_without_scanning(self):
+        from nexus.session import find_mcp_sibling_pids
+
+        with patch("nexus.session._list_processes") as mock_list:
+            assert find_mcp_sibling_pids(0) == []
+            assert find_mcp_sibling_pids(-1) == []
+        mock_list.assert_not_called()
+
+    def test_process_enumeration_failure_returns_empty_list(self):
+        """``_list_processes`` already fails safe (returns []) on any OS
+        error -- this pins that find_mcp_sibling_pids propagates that
+        fail-safe rather than raising."""
+        from nexus.session import find_mcp_sibling_pids
+
+        with patch("nexus.session._list_processes", return_value=[]):
+            assert find_mcp_sibling_pids(1200) == []
+
+    def test_matches_full_path_comm_by_basename(self):
+        """``ps -o comm=`` can report a full path on some platforms; match
+        on the basename the same way ``find_immediate_claude_pid`` does."""
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "/Users/x/.local/bin/nx-mcp"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == [1300]
+
+
 class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
     """Path D (RDR-105 P2 / nexus-mj2o, narrowed further at nexus-4lkmz):
     no env, no addr file, no client injection -> raise

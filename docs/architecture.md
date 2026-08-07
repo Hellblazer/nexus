@@ -878,8 +878,12 @@ the split was understood.
 
 **Correction of a previously recorded lesson:** "prior-session T1 is never
 searchable" is **true only for the CLI path**. The MCP scope survives
-`/clear` for the life of the MCP server process, so prior-conversation T1
-*is* readable via the MCP scratch tools within the same app process.
+`/clear` for at most one handoff-watch poll tick (nexus-d76vc, ≤5s — see
+the "Update 2026-08-07" note below; this superseded the original,
+now-inaccurate "for the life of the MCP server process" wording), so
+prior-conversation T1 remains readable via the MCP scratch tools only in
+that brief window immediately after `/clear`, not indefinitely for the
+rest of the app process's life.
 
 The incident that originally produced the false lesson was **not** a scope
 mix-up — both the failed search and the eventual write landed in the *same*
@@ -907,6 +911,65 @@ write-back lost"** — an idempotent-notification-handling discipline — not
   actually terminated (not just that a search came back empty) — a search
   that races a still-running agent is expected to find nothing, and that is
   not evidence of loss.
+
+**Update 2026-08-07 (nexus-d76vc): the MCP scope now follows `/clear`/`/resume`.**
+Item 1 above ("frozen into the MCP server process's env at spawn... survives
+`/clear` and `/resume`") described the mechanism as a *permanent* limitation.
+It no longer is: freeze-at-spawn was the honest response to a missing
+signal — the MCP server samples the session id once because the MCP
+protocol carries no per-request session-id channel, so a long-lived server
+has no way to *learn* that the transcript changed. nexus-d76vc supplies that
+missing signal instead of accepting the freeze:
+
+- **Marker writer** (`nexus.hooks._write_t1_handoff_markers`, invoked from
+  `session_start()`). The conexus SessionStart hook fires on matcher
+  `startup|resume|clear|compact` and already runs `nx hook session-start`
+  (`conexus/hooks/hooks.json`). On `source=clear` or `source=resume` — the
+  two Claude Code SessionStart `source` values where the transcript's
+  session id changes out from under an already-running MCP server —
+  the hook writes `~/.config/nexus/t1_handoff.<mcp_pid>` naming the NEW
+  session id, for every live `nx-mcp`/`nx-mcp-catalog` sibling of the
+  hook's own claude ancestor (`nexus.session.find_mcp_sibling_pids`).
+  `startup` spawns brand-new MCP servers (nothing frozen yet) and
+  `compact` keeps the same session id (no divergence); neither writes a
+  marker.
+- **Watcher** (`nexus.mcp.core._t1_handoff_watch_loop` /
+  `_t1_handoff_tick`), a dedicated poll independent of the existing
+  token-refresh loop (whose interval is hours, far too coarse for a user
+  action expected to take effect promptly). Each tick checks for its own
+  marker; when one is present it re-derives its OWN claude ancestor
+  (never trusting the marker's claimed `claude_pid` alone — the marker's
+  authentication is ancestry-based on BOTH sides, per the rn3wo.1
+  never-share-identity property), validates the claimed session id and
+  the marker's freshness, then RE-LEASES: mint-or-borrow a token for the
+  new session (`nexus.db.t1._lock_guarded_mint_or_borrow`, the same
+  flock-guarded helper the original mint path uses, so a racing sibling
+  MCP converges to one mint), swap `NX_T1_SESSION`/`NX_T1_SESSION_ID`,
+  drop the cached T1 singleton (`nexus.mcp_infra.reset_t1_for_release`)
+  so the next tool call reconstructs against the new scope, and stop
+  refreshing the old lease. A rejected marker (ancestry mismatch, stale,
+  malformed) is logged loudly and **deleted** — never left in place to be
+  silently retried forever.
+- **Ownership semantics (locked design decision).** The pre-`/clear`
+  session's T1 rows are **not** migrated onto the new session id — they
+  strand under the old id and age out via the ordinary T1 TTL sweep.
+  Migrating would silently merge two conversations the user explicitly
+  separated with `/clear`.
+- **Consequence:** MCP-tool T1 and `nx` CLI T1 converge to the SAME scope
+  for a given conversation at all times (modulo the watcher's short poll
+  interval, `_T1_HANDOFF_WATCH_INTERVAL_S`, currently 5s) — item 1 above
+  is now the STEADY STATE between events, not a standing divergence.
+  Subagents need no separate handling (MUST-HOLD 4): an Agent-tool
+  dispatch shares its parent's MCP server *process*, so the re-lease's
+  process-wide state swap (env vars + the mcp_infra singleton) is visible
+  to every tool call in that process — parent conversation or dispatched
+  subagent alike — without any subagent-specific code.
+- **What did NOT change:** the CLI-vs-MCP resolution mechanics in items 2
+  and 3 above, the nexus-f7xyq fail-loud contract for an explicit session
+  id with no usable lease, and the "operator `claude -p` subprocess"
+  scopes documented in `T1 sub-agent contract (RDR-105)` (`AGENTS.md`).
+  This fix closes the ONE specific divergence window item 1 described; it
+  does not touch how a session id is resolved in the first place.
 
 ## Heritage
 

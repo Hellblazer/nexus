@@ -496,9 +496,13 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 
     RDR-149 P4 retired the T1 addr-file publish/discovery that originally
     motivated this (T1 now keys its leased registry record on the
-    session-id, not the claude_pid). This function is retained for its
-    remaining non-T1 consumer, ``nexus.phase_review_sentinel``, which keys
-    its phase-gate sentinel files by the immediate Claude pid.
+    session-id, not the claude_pid). Consumers today: ``nexus.
+    phase_review_sentinel`` (keys its phase-gate sentinel files by the
+    immediate Claude pid) and nexus-d76vc's T1 handoff marker -- both the
+    SessionStart hook's writer (:func:`find_mcp_sibling_pids`, below) and
+    the MCP lifespan's watcher use this SAME function so a marker's
+    claimed ``claude_pid`` is always checked against the identical
+    "immediate, not topmost" ancestor on both sides.
 
     Falls back to the immediate PPID when no ``claude*`` ancestor is
     found (matches the no-claude-in-chain semantics so consumers behave
@@ -515,6 +519,75 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
             return cur
         cur = _ppid_of(cur)
     return immediate_ppid
+
+
+#: nexus-d76vc: command names the T1 handoff marker writer/watcher treat as
+#: an MCP server sibling. Matches the two ``[project.scripts]`` entry
+#: points in pyproject.toml (``nx-mcp`` / ``nx-mcp-catalog``) that Claude
+#: Code's ``.mcp.json`` spawns as direct children of the claude process.
+_MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
+
+
+def _list_processes() -> list[tuple[int, int, str]]:
+    """Return ``(pid, ppid, comm)`` for every live process, best-effort.
+
+    Real process-table enumeration via ``ps -eo pid,ppid,comm=`` (portable
+    across macOS + Linux; unlike :func:`_ppid_of` this has no ``/proc``
+    fast path since a single ``ps`` call already returns the whole table
+    in one shot, cheaper than a ``/proc`` walk for this use). Empty list
+    on any failure -- callers treat that as "no siblings found", never a
+    crash (mirrors :func:`_command_name_of`'s empty-string-on-error
+    posture).
+    """
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,comm="],
+            stderr=subprocess.DEVNULL, text=True, timeout=5,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+    result: list[tuple[int, int, str]] = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        result.append((pid, ppid, parts[2].strip()))
+    return result
+
+
+def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
+    """Return live ``nx-mcp`` / ``nx-mcp-catalog`` pids whose PPID is
+    *claude_pid*.
+
+    nexus-d76vc: the ancestry check for the T1-handoff marker writer
+    (``nexus.hooks._write_t1_handoff_markers``). A marker is only ever
+    written for an MCP pid discovered THIS way -- filtered by immediate
+    parentage, never by scanning for the command name alone -- so a
+    concurrent session's hook can never target another session's MCP
+    server: two distinct top-level claude processes never share a parent
+    pid for their own spawned MCP servers (the same "immediate, not
+    topmost" ancestry reasoning :func:`find_immediate_claude_pid` already
+    relies on, applied in the other direction: parent -> children instead
+    of child -> ancestor).
+
+    Returns an empty list for a non-positive *claude_pid* or when process
+    enumeration fails (see :func:`_list_processes`) -- fail-safe: no
+    siblings found means no markers get written, never a guess.
+    """
+    if claude_pid <= 0:
+        return []
+    matches: list[int] = []
+    for pid, ppid, comm in _list_processes():
+        if ppid != claude_pid:
+            continue
+        if Path(comm).name in _MCP_SIBLING_COMMANDS:
+            matches.append(pid)
+    return matches
 
 
 
