@@ -4,7 +4,27 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.3.0] - 2026-08-07
+
+### Release-gate integrity (2026-08-07)
+- **The release sandbox self-provisions its storage service** (nexus-596jm):
+  smoke and shakedown run `nx init` in the sandbox HOME and tear down on any
+  exit (with a PGDATA-scoped fallback for the pre-credentials crash window
+  and mineru-api reaping). Every historical `SHAKEDOWN PASSED` had been
+  vacuous on the substrate steps behind `|| true`; the first honest run
+  exercised MinerU 12/12 and the bare doctor against a live engine.
+- **Pipe-free gate checks** (nexus-i66g4, nexus-6zxfb): every
+  `echo | grep -q` in the e2e gates became a `[[ ]]` test after a degraded
+  512-byte kernel pipe pool turned successful matches into SIGPIPE failures
+  under `pipefail` (root cause: 292 orphaned test workers holding 1,168 pipe
+  FDs — reaped; producer tracked as nexus-bj9nx).
+- **Shakedown step 2 indexes a deterministic 36-file fixture** (nexus-m7kcv)
+  instead of the full repo (~2.5h at sandbox embed speed).
+- **i711w cleanup cohort** (nexus-5uj6t/37jha/pmag3/zmfan/2tdkx/vw7zk): dead
+  T3-daemon remnants and the producer-less first-run banner deleted, phantom
+  t3 conformance tier removed, verb-rot tripwire widened to scripts/ and the
+  plugin surface (non-vacuity proven by dead-verb injection).
+- RDR-152 and RDR-158 formally closed (post-mortem: deferred gate beads rot).
 
 ### Added
 - **Post-extraction quality gate on every PDF path** (nexus-wi1uv): extracted
