@@ -77,7 +77,12 @@ class JooqRecordReflectionFeatureTest {
     // Feature enumerates via the schema model, so it is already registered
     // for native-image reflection by construction — this is the deliberate
     // bump the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 64;
+    // 64 -> 67: nexus-lns3o (engine half, taxonomy-006-assign-from-chashes.xml)
+    // added nexus.assign_from_chashes_384/768/1024(text, text[], boolean) —
+    // three per-dim RETURNS TABLE functions (server-side compute-and-persist
+    // taxonomy assignment from just-upserted chashes), one generated Record
+    // type each. This is the deliberate bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 67;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

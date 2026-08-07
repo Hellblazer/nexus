@@ -561,6 +561,148 @@ public final class TaxonomyRepository {
         // doc_count correctly unchanged.) The trigger is the sole writer.
     }
 
+    /** Upper bound on chashes accepted by {@link #assignFromChashes} per call
+     * (mirrors {@code assign_many}'s {@code MAX_ASSIGN_MANY} cap — one flush's
+     * worth of chashes, never an unbounded batch). */
+    public static final int MAX_ASSIGN_FROM_CHASHES = 1000;
+
+    /**
+     * POST /v1/taxonomy/assignments/assign_from_chashes (nexus-lns3o engine half,
+     * T2 [21580] flush-tail-attribution-2026-08-07 NEW-A).
+     *
+     * <p>Server-side replacement for the client's two-pass
+     * {@code HttpTaxonomyStore.compute_assignments} + {@code persist_assignments}
+     * dance. The engine already holds both the embeddings ({@code chunks_<dim>},
+     * just upserted by the SAME flush) and the centroids
+     * ({@code taxonomy_centroids_<dim>}, RDR-156), so compute-and-persist
+     * collapses into ONE server-side round trip via
+     * {@code nexus.assign_from_chashes_<dim>} (taxonomy-006) — eliminating the
+     * per-flush ~3MB embedding re-download the client compute path required.
+     *
+     * <p>PARITY (pinned by {@code TaxonomyAssignFromChashesRepositoryTest},
+     * derived from {@code HttpTaxonomyStore.compute_assignments} directly — see
+     * that test's class javadoc for the line-by-line derivation): argmax cosine
+     * similarity, NO minimum-similarity threshold; own pass persists
+     * {@code assigned_by='centroid'} with similarity/source_collection always
+     * NULL, {@code ON CONFLICT DO NOTHING}; cross pass persists
+     * {@code assigned_by='projection'} with {@code GREATEST}-wins similarity on
+     * conflict. An empty centroid set in scope silently yields zero assignments
+     * (normal empty-taxonomy state, matches the client's
+     * {@code if not c_embs: return []} short-circuit) — this is DIFFERENT from an
+     * unmatched chash (a chash never actually upserted into {@code collection}),
+     * which this method names explicitly rather than silently dropping.
+     *
+     * @param rawChashes    the just-upserted chunk chashes to assign; normalized to
+     *                      lowercase hex internally before both the existence probe
+     *                      and the SQL call so an uppercase-hex input still probes
+     *                      and assigns consistently
+     * @param crossCollection whether to also run the foreign-collection
+     *                        ("projection") pass; the own-collection
+     *                        ("centroid") pass always runs
+     * @return {@code {assigned: int, cross_assigned: int, unmatched_chashes: List<String>}}
+     * @throws IllegalArgumentException if {@code collection} is not four-segment
+     *         conformant (dim cannot be resolved) or {@code rawChashes} exceeds
+     *         {@link #MAX_ASSIGN_FROM_CHASHES}
+     */
+    public Map<String, Object> assignFromChashes(
+            String tenant, String collection, List<String> rawChashes, boolean crossCollection) {
+        if (rawChashes == null || rawChashes.isEmpty()) {
+            Map<String, Object> empty = new LinkedHashMap<>();
+            empty.put("assigned", 0);
+            empty.put("cross_assigned", 0);
+            empty.put("unmatched_chashes", List.of());
+            return empty;
+        }
+        if (rawChashes.size() > MAX_ASSIGN_FROM_CHASHES) {
+            throw new IllegalArgumentException(
+                "too many chashes (max " + MAX_ASSIGN_FROM_CHASHES + ")");
+        }
+        // Normalize to lowercase hex ONCE, at the repository boundary (nexus-lns3o
+        // review fix, code-review-expert MEDIUM): chunks_<dim>.chash is decoded
+        // case-INSENSITIVELY by the SQL function (decode(x,'hex') -> bytea, then a
+        // byte-level match), but ChashHex.hex(...) always FETCHES/formats lowercase
+        // (HexFormat.of().formatHex) and the existence-probe WHERE below compares
+        // that lowercase column rendering against these Java strings via a TEXT
+        // `.in(...)`. Without normalizing here, an uppercase-hex input chash would
+        // decode and assign successfully in the SQL pass (byte-level, case-blind)
+        // while the Java probe's text comparison missed it — reporting a chash the
+        // SQL just assigned as "unmatched", contradicting the route's "never
+        // silently dropped" contract. Normalizing once up front keeps the probe and
+        // the SQL call working from the identical casing.
+        List<String> chashes = rawChashes.stream().map(String::toLowerCase).toList();
+        // Fail loud BEFORE opening a transaction — an unresolvable dim means no
+        // per-dim table exists to query at all (dimForCollection's own contract).
+        int dim = dev.nexus.service.vectors.PgVectorRepository.dimForCollection(collection);
+        String[] chashArr = chashes.toArray(new String[0]);
+
+        return tenantScope.withTenant(tenant, ctx -> {
+            // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
+            // hex text, so the existence probe goes through ChashHex.hex(...) — the
+            // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
+            // uniformly (same idiom PgVectorRepository uses for catalog_document_chunks).
+            List<String> found = switch (dim) {
+                case 384  -> ctx.select(ChashHex.hex(CHUNKS_384.CHASH)).from(CHUNKS_384)
+                                .where(CHUNKS_384.COLLECTION.eq(collection)
+                                    .and(ChashHex.hex(CHUNKS_384.CHASH).in(chashArr)))
+                                .fetch(ChashHex.hex(CHUNKS_384.CHASH));
+                case 768  -> ctx.select(ChashHex.hex(CHUNKS_768.CHASH)).from(CHUNKS_768)
+                                .where(CHUNKS_768.COLLECTION.eq(collection)
+                                    .and(ChashHex.hex(CHUNKS_768.CHASH).in(chashArr)))
+                                .fetch(ChashHex.hex(CHUNKS_768.CHASH));
+                case 1024 -> ctx.select(ChashHex.hex(CHUNKS_1024.CHASH)).from(CHUNKS_1024)
+                                .where(CHUNKS_1024.COLLECTION.eq(collection)
+                                    .and(ChashHex.hex(CHUNKS_1024.CHASH).in(chashArr)))
+                                .fetch(ChashHex.hex(CHUNKS_1024.CHASH));
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+            java.util.Set<String> foundSet = new java.util.HashSet<>(found);
+            List<String> unmatched = chashes.stream()
+                .filter(c -> !foundSet.contains(c))
+                .distinct()
+                .toList();
+
+            int assigned = assignFromChashesOnePass(ctx, dim, collection, chashArr, false).size();
+            int crossAssigned = crossCollection
+                ? assignFromChashesOnePass(ctx, dim, collection, chashArr, true).size()
+                : 0;
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("assigned", assigned);
+            out.put("cross_assigned", crossAssigned);
+            out.put("unmatched_chashes", unmatched);
+            return out;
+        });
+    }
+
+    /**
+     * One call to {@code nexus.assign_from_chashes_<dim>()} — computes AND
+     * persists in the same statement (taxonomy-006). Called EXACTLY ONCE per
+     * (dim, crossCollection) pass: the function is VOLATILE (it writes via a
+     * data-modifying CTE), so invoking it twice for the same logical pass (e.g.
+     * a separate count-then-fetch) would fire the INSERT/upsert twice. The
+     * returned similarity reflects the FRESHLY COMPUTED argmax value, not the
+     * post-upsert DB value (see taxonomy-006's changelog comment for why).
+     */
+    private static List<Map<String, Object>> assignFromChashesOnePass(
+            DSLContext ctx, int dim, String collection, String[] chashes, boolean crossCollection) {
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> ASSIGN_FROM_CHASHES_384.call(collection, chashes, crossCollection);
+            case 768  -> ASSIGN_FROM_CHASHES_768.call(collection, chashes, crossCollection);
+            case 1024 -> ASSIGN_FROM_CHASHES_1024.call(collection, chashes, crossCollection);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        var result = ctx.selectFrom(fn).fetch();
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (var rec : result) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("chash",      rec.get("chash", String.class));
+            row.put("topic_id",   rec.get("topic_id", Long.class));
+            row.put("similarity", rec.get("similarity", Double.class));
+            rows.add(row);
+        }
+        return rows;
+    }
+
     /** Return doc_ids assigned to a topic. limit=0 means no limit. */
     public List<String> getTopicDocIds(String tenant, long topicId, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {
