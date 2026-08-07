@@ -30,4 +30,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.3.0)
 
-(none — the v7.3.0 pin advance made the ledger current; drift is zero)
+- `hooks/scripts/expectations.sh` — owes-report lock: NX_EXPECT_LOCK_TRIES env
+  knob (base-10 coerced, 600-try clamp) + stderr warning on fail-open unlocked
+  proceed (nexus-4b8sz; observable under `claude --debug` only). Installed
+  sessions keep the silent 10-try fail-open until the next plugin release.

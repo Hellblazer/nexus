@@ -255,6 +255,31 @@ expectations_start() {
 # stop because of lock contention — an unheld window just degrades this
 # one call back to the pre-lock racy read, it never denies or defers the
 # stop itself.
+#
+# BUDGET TUNABLE + DEBUG-VISIBLE DEGRADATION (nexus-bk974/nexus-4b8sz, CI
+# red 2026-08-07 run 31215840624 shard 1): the try count was a hardcoded
+# literal (10 x 0.1s ~= 1s), so a loaded CI runner that legitimately needs
+# longer than 1s to cycle the lock had no way to widen the budget short of
+# editing this file, and — worse — degrading to the fail-open unlocked
+# path was completely SILENT, indistinguishable from the lock never being
+# contended at all. Two independent fixes: (1) NX_EXPECT_LOCK_TRIES
+# overrides the try count (still x 0.1s sleep each), default 10 when
+# unset OR non-numeric (a bad env value must never break the hook — it
+# falls back to the production default, never fails loud here), coerced
+# through base-10 arithmetic (`10#$tries`) so a leading-zero value like
+# "008" is read as decimal 8 rather than crashing bash's octal literal
+# parser (008/009 have no valid octal digit), and clamped to a 600-try
+# (~60s) ceiling so a runaway env value cannot hang the hook indefinitely;
+# (2) when the loop exhausts without acquiring, one stderr line is emitted
+# before proceeding unlocked — stderr only (stdout may be parsed by
+# callers), and it is a diagnostic breadcrumb only, never a ledger row
+# (the file format's writers are exactly EXPECT/START/BLOCKED/CONSUMED,
+# per FORMAT above). CAVEAT (substantive-critic, matching the honest
+# precedent in pre_close_verification_hook.sh::_stamp_ids): subagent-
+# stop.sh exits 0 on every path (block is signaled via stdout JSON, not
+# exit 2), and the documented hook contract only feeds exit-0 stderr back
+# to the operator under `claude --debug` — this warning is observable in
+# hook debug logs, not a normal-session operator-facing signal.
 expectations_owes_report() {
     local sid="$1" agent_id="${2:-}" agent_type="${3:-}"
     [[ -n "$sid" && -n "$agent_id" && -n "$agent_type" ]] || return 1
@@ -285,14 +310,21 @@ expectations_owes_report() {
     if [[ -d "$lockdir" ]] && [[ -z "$(find "$lockdir" -maxdepth 0 -mmin -1 2>/dev/null)" ]]; then
         rmdir "$lockdir" 2>/dev/null
     fi
+    local tries="${NX_EXPECT_LOCK_TRIES:-10}"
+    [[ "$tries" =~ ^[0-9]+$ ]] || tries=10
+    tries=$((10#$tries))
+    (( tries > 600 )) && tries=600
     local _i
-    for _i in 1 2 3 4 5 6 7 8 9 10; do
+    for ((_i = 0; _i < tries; _i++)); do
         if mkdir "$lockdir" 2>/dev/null; then
             held=1
             break
         fi
         sleep 0.1
     done
+    if [[ -z "$held" ]]; then
+        echo "expectations: owes-report lock budget exhausted (${tries} tries); proceeding unlocked (fail-open, nexus-bk974/nexus-4b8sz)" >&2
+    fi
 
     local verdict
     verdict="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
