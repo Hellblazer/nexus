@@ -18,19 +18,32 @@
 # mid-run manifest-hook death in index.log; contributed to the daemon
 # silent-death cluster). So: refuse to swap under live processes.
 #
-# Usage: scripts/reinstall-tool.sh [source] [--cycle-daemons|--force]
+# Usage: scripts/reinstall-tool.sh [source] [--cycle-daemons] [--cycle-mcp] [--force]
 #   source: install source (default: "." for local dev, use "conexus" for PyPI)
 #   --cycle-daemons  stop nx-owned daemons first, reinstall, restart them
+#   --cycle-mcp      kill every Claude-session MCP server holding the venv
+#                    (nx-mcp/nx-mcp-catalog processes whose ancestor chain
+#                    includes a `claude` process). Matching is by ANCESTRY
+#                    ONLY, not session-scoped — this can kill another live
+#                    Claude session's MCP servers, not just this session's;
+#                    they all reconnect the same way. Reinstalls, then
+#                    reminds the operator that EVERY affected Claude session
+#                    must run `/mcp` to reconnect on the new venv. Composes
+#                    with --cycle-daemons. Never touches non-MCP holders
+#                    (in-flight `nx` runs, daemons) — those still refuse or
+#                    go through --cycle-daemons (nexus-hrqox).
 #   --force          swap anyway (listed processes WILL break; restart them)
 
 set -euo pipefail
 
 SOURCE="."
 CYCLE_DAEMONS=0
+CYCLE_MCP=0
 FORCE=0
 for arg in "$@"; do
     case "$arg" in
         --cycle-daemons) CYCLE_DAEMONS=1 ;;
+        --cycle-mcp)     CYCLE_MCP=1 ;;
         --force)         FORCE=1 ;;
         *)               SOURCE="$arg" ;;
     esac
@@ -44,6 +57,66 @@ live_venv_processes() {
     # transient greps. Catches the daemons, MCP servers, and in-flight
     # nx runs started from the installed tool.
     ps ax -o pid=,command= | grep -F "$VENV_DIR" | grep -v grep || true
+}
+
+# ── MCP-holder self-awareness (nexus-hrqox) ─────────────────────────────────
+# The most common live-venv-processes refusal is a Claude session's own
+# nx-mcp/nx-mcp-catalog servers: they spawn from the venv at Claude Code
+# session start and never recheck it. Those are stateless stdio children —
+# safe to kill, and Claude Code reconnects them on demand via `/mcp` —
+# unlike an in-flight `nx` run or a daemon, which must never be silently
+# killed here. Classification below is by ANCESTRY ONLY (a `claude` process
+# anywhere in the ppid chain) — it does NOT scope to the invoking session,
+# so a claude-ancestored holder belonging to ANOTHER live Claude session on
+# the box is classified and killable exactly the same as this session's own.
+# Classifying holders lets the refusal message (and the opt-in --cycle-mcp
+# arm below) tell MCP holders apart from everything else.
+
+# True if a live-holder command names nx-mcp or nx-mcp-catalog exactly
+# (basename of the first token — tolerates a full venv-bin path, and never
+# matches a lookalike like a hypothetical "nx-mcp-old").
+_is_mcp_server_cmd() {
+    local first_tok base
+    first_tok="${1%% *}"
+    base="$(basename "$first_tok" 2>/dev/null || true)"
+    [[ "$base" == "nx-mcp" || "$base" == "nx-mcp-catalog" ]]
+}
+
+# True if a `claude` process appears in PID's ancestor chain. Walks the ppid
+# chain via `ps -o ppid=,comm=` (same tool the rest of this script already
+# depends on) so it stays swappable via PATH for tests — no other external
+# dependency. Depth-capped against a broken/cyclic ppid chain.
+_pid_has_claude_ancestor() {
+    local pid="$1" depth=0 line ppid comm
+    while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" && $depth -lt 32 ]]; do
+        line="$(ps -o ppid=,comm= -p "$pid" 2>/dev/null || true)"
+        [[ -n "$line" ]] || return 1
+        read -r ppid comm <<< "$line"
+        [[ "$(basename "$comm" 2>/dev/null || true)" == "claude" ]] && return 0
+        pid="$ppid"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+# Classify $LIVE's holder lines into MCP_CLAUDE_PIDS (claude-ancestored
+# nx-mcp/nx-mcp-catalog — the class --cycle-mcp is allowed to kill) and a
+# count of everything else (OTHER_HOLDERS — in-flight nx runs, daemons,
+# standalone MCP servers with no claude ancestor). Populates both as globals;
+# call only when $LIVE is non-empty.
+_classify_live_holders() {
+    MCP_CLAUDE_PIDS=()
+    OTHER_HOLDERS=0
+    local line pid cmd
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        read -r pid cmd <<< "$line"
+        if _is_mcp_server_cmd "$cmd" && _pid_has_claude_ancestor "$pid"; then
+            MCP_CLAUDE_PIDS+=("$pid")
+        else
+            OTHER_HOLDERS=$((OTHER_HOLDERS + 1))
+        fi
+    done <<< "$1"
 }
 
 if [[ "$CYCLE_DAEMONS" == "1" ]]; then
@@ -113,16 +186,82 @@ if [[ -f "${SOURCE}/pyproject.toml" && -x "$NX_BIN" ]]; then
 fi
 
 LIVE="$(live_venv_processes)"
+
+MCP_CLAUDE_PIDS=()
+OTHER_HOLDERS=0
+if [[ -n "$LIVE" ]]; then
+    _classify_live_holders "$LIVE"
+fi
+
+# ── --cycle-mcp arm (nexus-hrqox) ────────────────────────────────────────
+# Opt-in, composes with --cycle-daemons. Kills ONLY the claude-ancestored
+# nx-mcp/nx-mcp-catalog holders classified above; refuses (never partially
+# kills) if any non-MCP holder is also present, or if a killed holder
+# survives the wait. Never swaps the venv under a surviving holder —
+# nexus-q3xrx stays untouched.
+if [[ "$CYCLE_MCP" == "1" && -n "$LIVE" && "$FORCE" != "1" ]]; then
+    if [[ ${#MCP_CLAUDE_PIDS[@]} -eq 0 || "$OTHER_HOLDERS" != "0" ]]; then
+        echo "REFUSING --cycle-mcp: it only kills Claude-session nx-mcp/"
+        echo "  nx-mcp-catalog servers (this session's or another live"
+        echo "  session's — matching is by ancestry only) — never an"
+        echo "  in-flight nx invocation or a daemon. Non-MCP (or no MCP)"
+        echo "  holder(s) remain:"
+        echo "$LIVE" | sed 's/^/  /'
+        echo "  Use --cycle-daemons for daemons, or --force to swap anyway."
+        exit 3
+    fi
+    echo "Killing Claude session MCP server(s) — this session's or another"
+    echo "live session's — before the venv swap (--cycle-mcp): ${MCP_CLAUDE_PIDS[*]}"
+    # PID-reuse TOCTOU: MCP_CLAUDE_PIDS was classified from a ps SNAPSHOT
+    # ($LIVE, captured above); if a PID were reaped and reused for something
+    # else before this kill fires, we could in principle signal the wrong
+    # process. The survivor recheck immediately below is the accepted
+    # backstop for that window — it re-snapshots live_venv_processes() AFTER
+    # the kill and refuses on whatever is ACTUALLY still holding the venv,
+    # never on what we assumed the PIDs were.
+    kill "${MCP_CLAUDE_PIDS[@]}" 2>/dev/null || true
+    sleep 0.5
+    STILL="$(live_venv_processes)"
+    if [[ -n "$STILL" ]]; then
+        echo "REFUSING: holder(s) survived --cycle-mcp's kill — refusing to swap"
+        echo "  the venv under them (nexus-q3xrx). Survivors:"
+        echo "$STILL" | sed 's/^/  /'
+        exit 3
+    fi
+    LIVE=""
+    CYCLE_MCP_KILLED=1
+fi
+
 if [[ -n "$LIVE" && "$FORCE" != "1" ]]; then
     echo "REFUSING to reinstall: live processes hold the conexus venv and a"
     echo "swap underneath them causes delayed import/cacert/version-skew"
     echo "failures (nexus-q3xrx). Holders:"
     echo "$LIVE" | sed 's/^/  /'
     echo ""
-    echo "Remedies:"
-    echo "  scripts/reinstall-tool.sh --cycle-daemons   # stop daemons, install, restart"
-    echo "  (close other Claude sessions' nx-mcp servers, or accept they break)"
-    echo "  scripts/reinstall-tool.sh --force           # swap anyway"
+    if [[ ${#MCP_CLAUDE_PIDS[@]} -gt 0 && "$OTHER_HOLDERS" == "0" ]]; then
+        # Self-aware refusal (nexus-hrqox): every holder is a Claude-session
+        # MCP server from the OLD venv — the sanctioned dance is a kill +
+        # re-run + /mcp reconnect, not the generic three-remedy list.
+        echo "All holders above are Claude-session MCP servers (nx-mcp /"
+        echo "nx-mcp-catalog) spawned from the OLD venv — matched by ancestry"
+        echo "only, so this may include another live Claude session's"
+        echo "servers, not just this one. PID(s): ${MCP_CLAUDE_PIDS[*]}"
+        echo ""
+        echo "Sanctioned sequence:"
+        echo "  kill ${MCP_CLAUDE_PIDS[*]}"
+        echo "  scripts/reinstall-tool.sh   # re-run this script"
+        echo "  then in EVERY affected Claude session: /mcp   # reconnects on the NEW venv"
+        echo ""
+        echo "Or let this script do it: scripts/reinstall-tool.sh --cycle-mcp"
+    else
+        echo "Remedies:"
+        echo "  scripts/reinstall-tool.sh --cycle-daemons   # stop daemons, install, restart"
+        if [[ ${#MCP_CLAUDE_PIDS[@]} -gt 0 ]]; then
+            echo "  scripts/reinstall-tool.sh --cycle-mcp       # kill Claude session MCP server(s) (this or another live session), install, then /mcp to reconnect"
+        fi
+        echo "  (close other Claude sessions' nx-mcp servers, or accept they break)"
+        echo "  scripts/reinstall-tool.sh --force           # swap anyway"
+    fi
     exit 3
 elif [[ -n "$LIVE" ]]; then
     echo "WARNING (--force): swapping the venv under live processes — these"
@@ -195,4 +334,16 @@ fi
 if [[ "$CYCLE_DAEMONS" == "1" ]] && command -v nx >/dev/null 2>&1; then
     nx daemon service start 2>/dev/null || \
         echo "(note: storage service not restarted; run 'nx daemon service start' manually)"
+fi
+
+# nexus-hrqox: --cycle-mcp killed every claude-ancestored MCP holder it
+# found — this session's or another live session's, since matching is by
+# ancestry only, not session-scoped. They don't come back on their own,
+# unlike the storage service above.
+if [[ "${CYCLE_MCP_KILLED:-0}" == "1" ]]; then
+    echo ""
+    echo "REMINDER: Claude-session MCP server(s) were killed for the venv"
+    echo "  swap (--cycle-mcp) — possibly in another live Claude session, not"
+    echo "  just this one. EVERY affected Claude session must run '/mcp' to"
+    echo "  reconnect on the NEW venv."
 fi
