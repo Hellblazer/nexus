@@ -447,10 +447,28 @@ expectations_already_blocked() {
 # lines) could not tell "nothing to report" from "N recognized
 # dispatches never got a report". This function now exits 2 when
 # undeclared>0, checked strictly AFTER the recognized==0 BLINDSPOT check
-# above, which still takes priority and still exits 1. RC CONTRACT:
-#   0 = clean (no undeclared, not a blindspot)
+# above, which still takes priority and still exits 1.
+#
+# NO-LEDGER EXIT CODE (nexus-ahl9v): shakedown falsification F3 proved a
+# MISTYPED session id audits as rc=0 "clean" — indistinguishable from a
+# genuinely clean session, because the absent/unreadable-file path below
+# was folded into the same fail-open `return 0` the live stop-guard
+# callers rely on (expectations_owes_report et al., none of which call
+# this function). Audits need the opposite of fail-open: absence of a
+# ledger is absence of EVIDENCE, not evidence of cleanliness. This
+# function now prints a "NOTE" line to stderr and exits 3 whenever it has
+# no readable ledger file to audit (empty/invalid session_id, or a
+# session_id with no ledger written yet) — a distinct rc a caller can
+# branch on, instead of a bare 0 a caller cannot tell apart from clean.
+# Fail-open callers are unaffected: only THIS function's contract widens;
+# expectations_owes_report/_already_blocked/_mark_blocked/_sweep (the
+# actual stop-guard hook's calls, see subagent-stop.sh) are untouched and
+# stay fail-open on a missing file. RC CONTRACT:
+#   0 = clean (no undeclared, not a blindspot, ledger was readable)
 #   1 = recognized==0 blindspot — false-clean, not a pass
 #   2 = undeclared>0 — a real declaration-completeness deficit
+#   3 = no ledger file for this session — nothing was checkable, NOT
+#       evidence of cleanliness (nexus-ahl9v)
 # See AGENTS.md's ledger usage snippet for the caller-facing summary.
 #
 # WIDENED RECOGNISER (nexus-qc4p1): recognized now means "pairable by
@@ -466,10 +484,14 @@ expectations_already_blocked() {
 # precisely what an uninstalled/inert dispatch hook looks like.
 expectations_undeclared() {
     local sid="$1"
-    [[ -n "$sid" ]] || return 0
-    local file
-    file="$(expectations_file "$sid" 2>/dev/null)" || return 0
-    [[ -r "$file" ]] || return 0
+    local file=""
+    if [[ -n "$sid" ]]; then
+        file="$(expectations_file "$sid" 2>/dev/null)" || file=""
+    fi
+    if [[ -z "$file" ]] || [[ ! -r "$file" ]]; then
+        echo "NOTE — no ledger file for session '${sid}': either this session dispatched no agents (legitimately nothing to audit) or the session id is wrong — cross-check with a known-good sid via expectations_census; absence is not evidence of cleanliness (nexus-8dr2u)" >&2
+        return 3
+    fi
     awk -F'\t' '
         # Recognition is decided in END, not on the START line: an EXPECT
         # row for the type may be anywhere in the file, so a single pass

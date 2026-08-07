@@ -30,7 +30,13 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.3.0)
 
-- `hooks/scripts/expectations.sh` — owes-report lock: NX_EXPECT_LOCK_TRIES env
-  knob (base-10 coerced, 600-try clamp) + stderr warning on fail-open unlocked
-  proceed (nexus-4b8sz; observable under `claude --debug` only). Installed
-  sessions keep the silent 10-try fail-open until the next plugin release.
+- `conexus/hooks/scripts/expectations.sh` — owes-report lock: NX_EXPECT_LOCK_TRIES
+  env knob (base-10 coerced, 600-try clamp) + stderr warning on fail-open
+  unlocked proceed (nexus-4b8sz; observable under `claude --debug` only).
+  Installed sessions keep the silent 10-try fail-open until the next plugin
+  release.
+- `conexus/hooks/scripts/expectations.sh` — `expectations_undeclared` now exits
+  3 with a stderr NOTE when the session has no ledger file, instead of the
+  indistinguishable-from-clean rc=0 (nexus-ahl9v; a mistyped session id
+  previously audited as clean). Installed sessions keep the old rc=0
+  behavior until the next plugin release.

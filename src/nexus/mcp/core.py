@@ -17,6 +17,11 @@ from typing import Any
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
+    from mcp.server.fastmcp.server import Settings as _FastMCPSettings
+except ImportError:  # pragma: no cover — future SDK restructure
+    _FastMCPSettings = None
+
 from nexus.corpus import (
     embedding_model_for_collection,
     embedding_model_for_collection_name,
@@ -1311,6 +1316,32 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
     _t1_shutdown()
     _os._exit(0)
 
+
+# nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[
+# LifespanResultT] BaseSettings) declares its `lifespan` field with a
+# forward reference to `FastMCP` that is unresolved at class-definition
+# time (`Settings` is defined earlier in the same module than `FastMCP`,
+# in mcp/server/fastmcp/server.py), and the SDK never calls
+# `model_rebuild()` itself. pydantic-settings 2.15.0 added
+# IncompleteFieldDefinitionWarning, which fires from this unresolved
+# reference every time a `Settings()` instance is constructed -- i.e.
+# every `FastMCP(...)` call, including the one directly below. Rebuilding
+# here, now that `FastMCP` is fully defined (its module finished importing
+# above), resolves the forward reference process-wide before our own
+# instantiation. No-op on pydantic-settings versions that predate the
+# warning class. Guarded (nexus-vc5yb/nexus-3hc9z): Settings is an
+# UNEXPORTED SDK internal under an unbounded mcp>=1.0,<2 pin — a future
+# SDK refactor must degrade this cosmetic fix to a logged warning, never
+# crash nx-mcp startup.
+if _FastMCPSettings is not None:
+    try:
+        _FastMCPSettings.model_rebuild()
+    except Exception as _rebuild_exc:  # noqa: BLE001 — boundary fallback: cosmetic-warning fix must never kill startup
+        structlog.get_logger(__name__).debug(
+            "fastmcp_settings_model_rebuild_failed", error=str(_rebuild_exc)
+        )
+else:  # pragma: no cover — future SDK restructure
+    structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 

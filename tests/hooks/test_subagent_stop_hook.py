@@ -813,10 +813,13 @@ def _run_undeclared(tmp_path: Path, session_id: str = SESSION) -> subprocess.Com
 
 
 class TestUndeclaredExitCodes:
-    """nexus-suuja: expectations_undeclared's rc contract is now three-way:
-    0 = clean, 1 = recognized==0 blindspot (pre-existing, false-clean not a
-    pass), 2 = undeclared>0 — a real declaration-completeness deficit that
-    was previously rc-invisible (same exit 0 as clean)."""
+    """nexus-suuja/nexus-ahl9v: expectations_undeclared's rc contract is
+    four-way: 0 = clean, 1 = recognized==0 blindspot (pre-existing,
+    false-clean not a pass), 2 = undeclared>0 — a real declaration-
+    completeness deficit that was previously rc-invisible (same exit 0 as
+    clean), 3 = no ledger file for this session — also previously
+    rc-invisible as the same exit 0 as clean (nexus-ahl9v: a mistyped
+    session id audited as rc=0)."""
 
     def test_rc_zero_when_clean(self, tmp_path: Path) -> None:
         agent_type = "worker-clean"
@@ -853,6 +856,17 @@ class TestUndeclaredExitCodes:
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "UNDECLARED" in proc.stdout
         assert "undeclared=1" in proc.stdout
+
+    def test_rc_three_when_no_ledger_file(self, tmp_path: Path) -> None:
+        """nexus-ahl9v: a session with no ledger file at all (e.g. a
+        mistyped session id) must not audit as rc=0 clean -- it must be
+        distinguishable via a dedicated rc plus a stderr NOTE. No
+        expectations file is created for this session at all (unlike the
+        other cases in this class, which write one)."""
+        proc = _run_undeclared(tmp_path, session_id="no-such-session-ever")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "NOTE" in proc.stderr
+        assert "no-such-session-ever" in proc.stderr
 
 
 class TestPluginWiring:
