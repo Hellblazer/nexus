@@ -58,24 +58,26 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  *
  * <p><strong>WHY THIS TEST BOOTS TWICE BEFORE ROLLING BACK — order fidelity.</strong>
  * Liquibase rolls back in DATABASECHANGELOG <em>execution</em> order
- * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly five
- * {@code runAlways} changesets, and they re-execute on every boot, so on any
- * cluster that has booted more than once they float to the tail of execution
- * order (master positions as of this commit, which the floor changeset shifted
- * by one):
+ * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly six
+ * {@code runAlways} changesets (nexus-0ys55 added {@code
+ * grants-003-purge-vacuum-maintain}), and they re-execute on every boot, so on
+ * any cluster that has booted more than once they float to the tail of
+ * execution order (master positions as of this commit, which the floor
+ * changeset shifted by one):
  *
  * <pre>
  *   master pos 194  staging-4-svc-grants
  *   master pos 205  grants-nexus-svc-1
  *   master pos 206  grants-002-changelog-read
- *   master pos 207  grants-nexus-diag-1
- *   master pos 208  grants-nexus-diag-2
+ *   master pos 207  grants-003-purge-vacuum-maintain
+ *   master pos 208  grants-nexus-diag-1
+ *   master pos 209  grants-nexus-diag-2
  * </pre>
  *
  * That is exactly, and in order, the five changesets the manual {@code
  * rollbackCount(10)} repro rolled back before dying on staging-4 — it was run
  * against a re-booted cluster, where staging-4 had floated from master position
- * 194 to execution depth 5.
+ * 194 to execution depth 5 (now depth 6, after nexus-0ys55's addition).
  *
  * <p>Rolling back to a TAG reaches every changeset above the floor regardless of
  * execution order, so the second boot is NOT what makes staging-4 reachable —
@@ -157,7 +159,8 @@ class SchemaRollbackRoundTripIntegrationTest {
 
 
     /**
-     * The five {@code runAlways} changesets, in master order. Their identity is
+     * The six {@code runAlways} changesets, in master order (nexus-0ys55 added
+     * {@code grants-003-purge-vacuum-maintain}, formerly five). Their identity is
      * asserted (not merely their count) so that adding or removing a
      * {@code runAlways} changeset forces a deliberate look at this test rather
      * than silently changing which changesets the rollback leg reaches first.
@@ -166,6 +169,7 @@ class SchemaRollbackRoundTripIntegrationTest {
         "staging-4-svc-grants",
         "grants-nexus-svc-1",
         "grants-002-changelog-read",
+        "grants-003-purge-vacuum-maintain",
         "grants-nexus-diag-1",
         "grants-nexus-diag-2");
 
