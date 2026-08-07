@@ -177,7 +177,7 @@ _print_help() {
         "             Verifies the wheel install + migrations + health surface." \
         "             ~4–6 min (cold cache pays the native binary + PG bundle + ~416 MB" \
         "             ONNX download; warm cache with --keep-existing is faster)." \
-        "  shakedown  Full ensemble: smoke + nx index a bounded fixture repo/pdf/rdr +" \
+        "  shakedown  Full ensemble: smoke + indexing a bounded fixture repo/pdf/rdr +" \
         "             cross-corpus search + T2 memory roundtrip + T1 scratch use +" \
         "             catalog link readback + T1 turd sniff. Exercises every pipeline" \
         "             against a fresh install." \

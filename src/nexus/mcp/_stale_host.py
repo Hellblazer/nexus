@@ -12,8 +12,9 @@ tool call pointed at staleness: ``detect_stale_processes()`` skips
 ``pid == me`` by construction, so the host must self-detect.
 
 This hook wraps the CallToolRequest handler (the same FastMCP-internals
-patch as ``_first_run.install_banner_dispatch_hook``, verified against mcp
-1.27.1) and, per Hal's g6vb4 decision (2026-07-21):
+patch pattern the now-deleted RDR-126 §3 first-run banner dispatch hook
+used, verified against mcp 1.27.1) and, per Hal's g6vb4 decision
+(2026-07-21):
 
 - **warns once** (structlog) the first time a per-call check finds the
   install newer than this process's startup baseline;
@@ -69,8 +70,7 @@ def install_stale_host_hook(server: object) -> bool:
     captured (source checkout without dist-info) or the FastMCP internals
     moved — MCP boot is never blocked.
 
-    FRAGILE COUPLING (shared with ``install_banner_dispatch_hook``): reaches
-    into ``server._mcp_server`` and patches
+    FRAGILE COUPLING: reaches into ``server._mcp_server`` and patches
     ``request_handlers[CallToolRequest]`` — private FastMCP internals,
     verified against mcp 1.27.1. ``tests/test_stale_host.py`` exercises the
     real FastMCP path and goes red if they move.

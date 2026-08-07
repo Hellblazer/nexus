@@ -6793,9 +6793,7 @@ def main():
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.mcp._first_run import (  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
         apply_embedder_notice,
-        apply_first_run_banner_instructions,
         apply_stranded_notice,
-        install_banner_dispatch_hook,
     )
     from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
@@ -6826,20 +6824,11 @@ def main():
     # with the daemon (nexus-i711w Stage 2 sub-stage B). It had already stopped
     # firing on any service-backed install (RDR-176 Phase 1), so nothing that ran
     # here still runs.
-    # RDR-126 §3 amendment (nexus-vlo2b): PRIMARY banner channel — deliver the
-    # one-shot first-run banner via the server `instructions` field at the
-    # initialize handshake. P6-B (2026-06-02) found Claude Desktop paraphrases
-    # away the content-prepend in tool results; instructions is standing
-    # context framed as a relay instruction and is not dropped. On success it
-    # marks the one-shot + clears the queue.
-    apply_first_run_banner_instructions(mcp)
-    # RDR-126 §3: FALLBACK banner channel — content-prepend on the first tool
-    # response. In production both surfaces run this same FastMCP binary, so the
-    # instructions injection above normally succeeds and clears the pending
-    # banner; this hook then no-ops. It only delivers if that injection raised
-    # (e.g. a FastMCP-internals change) — an injection-failure recovery path,
-    # not a per-surface channel. Best-effort; never blocks boot.
-    install_banner_dispatch_hook(mcp)
+    # NO first-run banner here either: the RDR-126 §3 banner (instructions
+    # injection + content-prepend fallback) was DELETED at nexus-37jha — it had
+    # been producer-less since the deletion above, so both calls that used to
+    # sit here were a no-op every boot. See nexus/mcp/_first_run.py's module
+    # docstring for the supersession record.
     # nexus-g6vb4 (GH #1414): staleness self-detection — an in-place
     # `uv tool upgrade` replaces site-packages under this live process;
     # the first deferred import then fails with an opaque ImportError.

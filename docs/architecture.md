@@ -91,9 +91,10 @@ BOTH local and managed-cloud modes. `make_t3()` returns an
 `HttpVectorClient` by default; the client reads `NX_SERVICE_URL` +
 `NX_SERVICE_TOKEN` with supervisor-lease discovery
 (`storage_service_addr.<uid>`). Start it via `nx daemon service start`. The
-older ChromaDB serving path (`nx daemon t3`) still registers but is the
-RETIRED serving route, kept only as the immutable migration source until
-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b deletes it. T2 domain stores serve through the same service
+older ChromaDB serving path (`nx daemon t3`) is GONE — deleted at
+[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b (`nx daemon` has no
+t3 subcommand; frozen Chroma directories on disk remain rollback artifacts
+only). T2 domain stores serve through the same service
 backend ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)); the SQLite + FTS5 substrate ([RDR-120](rdr/rdr-120-storage-substrate-split.md)) is
 deleted (RDR-158 P4) and its `NX_STORAGE_BACKEND=sqlite` opt-out hard-errors (P3).
 

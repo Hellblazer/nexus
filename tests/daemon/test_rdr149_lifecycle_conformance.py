@@ -67,12 +67,20 @@ from nexus import session as _sess
 
 # "t2" removed (nexus-i711w Stage 2 sub-stage B): the T2 daemon is retired, so
 # its row proved lease semantics for a tier nothing publishes. This is a
-# DELIBERATE reduction of a cross-tier battery, not bookkeeping — see
-# nexus-pmag3, which asks the same question of "t3" (retired by RDR-155 P4b
-# yet still listed here). If that resolves toward "the harnesses are
-# tier-string-generic and the extra rows are cheap coverage of the primitive",
-# this removal should be revisited.
-TIERS = ("t1", "t3", "storage_service", "aspect_worker")
+# DELIBERATE reduction of a cross-tier battery, not bookkeeping.
+#
+# "t3" removed the same way (nexus-pmag3, 2026-08-07). DETERMINATION: PHANTOM
+# TIER, not deliberate generic-harness coverage — reading (a), not (b). The
+# Chroma-serving T3 daemon that published ``ServiceRegistry(tier="t3", ...)``
+# (verified in git history: ``daemon/t3_daemon.py`` before its RDR-155 P4b
+# deletion) is gone; ``grep -rn 'tier="t3"' src/`` returns zero production
+# hits, and ``TIER_TTLS`` (``service_registry.py``) carries no "t3" override —
+# the tier falls back to ``DEFAULT_TTL`` for want of anyone real to tune it
+# for. T3RecordHarness was proving lease semantics for a tier nothing
+# publishes, identically to t2's case above, not exercising the primitive
+# under a name a future tier might reuse — the primitive's generic behavior
+# is already proven by storage_service and aspect_worker, both real.
+TIERS = ("t1", "storage_service", "aspect_worker")
 
 # Synthetic owner pids, never real live processes; liveness is injected.
 _OWNER_PID = 970001
@@ -357,21 +365,17 @@ class _LeaseHarness(RecordHarness):
         return 1 if self.discover() is not None else 0
 
 
-class T3RecordHarness(_LeaseHarness):
-    """RDR-149 P3: T3 rides the same leased registry, heartbeated by the
-    long-lived T3 supervisor. Identical lease semantics to T2 (one problem,
-    two uid-scoped tiers)."""
-
-    tier = "t3"
-    _REGISTRY_TIER = "t3"
-
+# NO T3RecordHarness: RDR-149 P3 migrated the T3-daemon lease onto this same
+# primitive, but the T3 daemon itself retired at RDR-155 P4b (nexus-pmag3,
+# 2026-08-07) — see TIERS' comment above for the phantom-tier determination.
 
 class StorageServiceRecordHarness(_LeaseHarness):
     """RDR-149 P5.1 (nexus-gmiaf.30): storage_service rides the leased registry,
-    supervised by StorageServiceSupervisor. Identical lease semantics to T3 (uid-
-    scoped, uid-scoped external-process supervisor, version-cycled by
-    _cycle_storage_service_to_current). The scope key is str(os.getuid()); the
-    registry tier prefix is "storage_service"; addr file = storage_service_addr.<uid>.
+    supervised by StorageServiceSupervisor. Identical lease semantics to the
+    retired T3-daemon tier (uid-scoped, uid-scoped external-process supervisor,
+    version-cycled by _cycle_storage_service_to_current). The scope key is
+    str(os.getuid()); the registry tier prefix is "storage_service"; addr file
+    = storage_service_addr.<uid>.
     """
 
     tier = "storage_service"
@@ -380,14 +384,16 @@ class StorageServiceRecordHarness(_LeaseHarness):
 
 class AspectWorkerRecordHarness(_LeaseHarness):
     """RDR-173 P1 (nexus-plzhp): the aspect-worker rides the SAME leased registry
-    as T2/T3/storage_service — one more leased tier, not a bespoke daemon. Real
-    scope is per-tenant (per-host would need BYPASSRLS, forbidden by RDR-152);
-    the lifecycle mechanics exercised here (reap / fence / self-heal) are
-    key-agnostic, so the harness reuses the uid scope key — the per-tenant
-    keying itself is pinned by tests/daemon/test_aspect_worker_daemon.py. Unlike
-    T2/T3 there is no in-process version-cycle: an upgrade re-spawns the daemon
-    from the (upgraded) enqueue hook and the new generation fences the old, so
-    version_cycle is a documented N/A (like T1), not a wired cycle_to_current."""
+    as storage_service (and, historically, the now-retired T2/T3 daemons) —
+    one more leased tier, not a bespoke daemon. Real scope is per-tenant
+    (per-host would need BYPASSRLS, forbidden by RDR-152); the lifecycle
+    mechanics exercised here (reap / fence / self-heal) are key-agnostic, so
+    the harness reuses the uid scope key — the per-tenant keying itself is
+    pinned by tests/daemon/test_aspect_worker_daemon.py. Unlike
+    storage_service there is no in-process version-cycle: an upgrade
+    re-spawns the daemon from the (upgraded) enqueue hook and the new
+    generation fences the old, so version_cycle is a documented N/A (like
+    T1), not a wired cycle_to_current."""
 
     tier = "aspect_worker"
     scope = "tenant"
@@ -397,7 +403,6 @@ class AspectWorkerRecordHarness(_LeaseHarness):
 
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
     "t1": T1RecordHarness,
-    "t3": T3RecordHarness,
     "storage_service": StorageServiceRecordHarness,
     "aspect_worker": AspectWorkerRecordHarness,
 }
@@ -411,18 +416,16 @@ GAP = "gap"
 SPEC = "spec"
 
 EXPECTATIONS: dict[str, dict[str, Any]] = {
-    "roundtrip": {"t1": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
-    "reap_ungraceful": {"t1": "pass", "t3": "pass", "storage_service": "pass", "aspect_worker": "pass"},
+    "roundtrip": {"t1": "pass", "storage_service": "pass", "aspect_worker": "pass"},
+    "reap_ungraceful": {"t1": "pass", "storage_service": "pass", "aspect_worker": "pass"},
     "self_heal": {
         "t1": "pass",  # RDR-149 P4: publisher heartbeat self-heals (#1114)
-        "t3": "pass",  # RDR-149 P3: supervisor heartbeat self-heals
         "storage_service": "pass",  # RDR-149 P5.1: supervisor heartbeat self-heals
         "aspect_worker": "pass",  # RDR-173 P1: rides the same supervisor heartbeat
     },
     "concurrent_one_owner": {
         "t1": "pass",  # RDR-149 P4: session-id scope converges to one owner
-        "t3": "pass",
-        "storage_service": "pass",  # uid-scoped, same lease fencing as T2/T3
+        "storage_service": "pass",  # uid-scoped, same lease fencing as the retired T2/T3 daemons
         "aspect_worker": "pass",  # per-tenant scope converges to one owner (RDR-173 P1)
     },
     "version_cycle": {
@@ -431,30 +434,28 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         # in-process cycle. This is a documented N/A, not a #1114 blocker
         # (RDR-149 P4, CA / Approach item 5).
         "t1": (GAP, "T1 is MCP-lifespan-owned, not upgrade-cycled; RDR-149 P4 N/A"),
-        "t3": "pass",  # RDR-149 P3: supervisor owns cycle_to_current (#1112)
         "storage_service": "pass",  # RDR-149 P5.1: _cycle_storage_service_to_current
         # aspect-worker is spawn-if-absent from the enqueue hook; an upgrade
         # re-spawns + generation-fences the predecessor rather than driving an
         # in-process cycle_to_current (RDR-173 P1/P2) — documented N/A, like T1.
         "aspect_worker": (GAP, "aspect-worker upgrade = re-spawn + fence, not in-process cycle; RDR-173"),
     },
-    # RDR-149 P2/P3/P4/P5.1: all four tiers ride the primitive, so their lease
-    # properties pass.
+    # RDR-149 P4/P5.1 + RDR-173 P1: all three LIVE tiers ride the primitive,
+    # so their lease properties pass. (T2/T3 rode it too, historically; both
+    # daemons are retired — nexus-i711w / nexus-pmag3 — and their columns
+    # removed with them, not left as phantom rows.)
     "pid_reuse_immunity": {
         "t1": "pass",  # RDR-149 P4: lease/generation kills pid-reuse
-        "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: lease/generation kills pid-reuse
         "aspect_worker": "pass",  # RDR-173 P1: lease/generation kills pid-reuse
     },
     "restart_higher_generation": {
         "t1": "pass",  # RDR-149 P4: generation fencing token
-        "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: generation fencing token
         "aspect_worker": "pass",  # RDR-173 P1: generation fencing token
     },
     "restart_race_fencing": {
         "t1": "pass",  # RDR-149 P4: CA-4 heartbeat-fencing arm
-        "t3": "pass",
         "storage_service": "pass",  # RDR-149 P5.1: CA-4 heartbeat-fencing arm
         "aspect_worker": "pass",  # RDR-173 P1: CA-4 heartbeat-fencing arm
     },
@@ -748,48 +749,38 @@ class TestMatrixIsNotVacuous:
         # regression silently re-opening it.
         assert EXPECTATIONS["self_heal"]["t1"] == "pass"
 
-    def test_1112_t3_version_cycle_fixed_structurally(self) -> None:
-        # #1112 (T3 stale after upgrade) was the red-first GAP cell through
-        # P0-P2; RDR-149 P3 fixed it structurally by moving the version-skew
-        # cycle onto the shared supervisor (cycle_to_current), so the cell is
-        # now green. This guards against a regression silently re-opening it.
-        assert EXPECTATIONS["version_cycle"]["t3"] == "pass"
+    # NO test_1112_t3_version_cycle_fixed_structurally: #1112 (T3 stale after
+    # upgrade) was the red-first GAP cell through P0-P2; RDR-149 P3 fixed it
+    # structurally by moving the version-skew cycle onto the shared
+    # supervisor (cycle_to_current). The T3 daemon itself retired at
+    # RDR-155 P4b (nexus-pmag3, 2026-08-07 — phantom-tier determination,
+    # see TIERS' comment above), so there is no "t3" cell left to guard.
+    # test_storage_service_version_cycle_is_behaviorally_proven exercises the
+    # SAME cycle_to_current mechanic the #1112 fix generalised, on the tier
+    # that is actually live.
 
     def test_reference_tier_passes_every_gap_another_tier_fails(self) -> None:
         # CA-1: a property that is a GAP everywhere would be mis-specified, so
-        # at least the REFERENCE tier must pass it. T2 was that reference until
-        # it retired (nexus-i711w Stage 2 sub-stage B); storage_service takes
-        # over, being the one supervised tier that is actually live.
+        # at least the REFERENCE tier must pass it. T2 (then T3) was that
+        # reference until both retired (nexus-i711w Stage 2 sub-stage B;
+        # nexus-pmag3); storage_service takes over, being the one supervised
+        # tier that is actually live.
         reference = "storage_service"
         for prop, cells in EXPECTATIONS.items():
             t1_gap = isinstance(cells["t1"], tuple) and cells["t1"][0] == GAP
-            t3_gap = isinstance(cells["t3"], tuple) and cells["t3"][0] == GAP
-            if t1_gap or t3_gap:
+            if t1_gap:
                 assert cells[reference] == "pass", (
-                    f"property {prop!r} is a GAP for T1/T3 but {reference} does "
+                    f"property {prop!r} is a GAP for T1 but {reference} does "
                     f"not pass it; the property is mis-specified (CA-1)"
                 )
 
-    # NO test_t2_migration_flipped_its_spec_cells: the RDR-149 P2 ratchet
-    # asserted every lease property stayed "pass" for T2 once it rode the
-    # primitive. The tier is retired (nexus-i711w Stage 2 sub-stage B), so
-    # there is no cell left to ratchet. The equivalent T3 ratchet below and
-    # the storage_service cells carry the same guarantee for live tiers.
-
-    def test_t3_migration_flipped_its_cells(self) -> None:
-        # RDR-149 P3 ratchet: T3 now rides the primitive + the supervisor
-        # heartbeat/cycle, so #1112 (version_cycle) and self_heal go green
-        # and the lease SPEC properties pass. A regression surfaces here.
-        for prop in (
-            "self_heal",
-            "version_cycle",
-            "pid_reuse_immunity",
-            "restart_higher_generation",
-            "restart_race_fencing",
-        ):
-            assert EXPECTATIONS[prop]["t3"] == "pass", (
-                f"T3 lease property {prop!r} regressed to non-pass after P3"
-            )
+    # NO test_t2_migration_flipped_its_spec_cells / test_t3_migration_flipped_
+    # its_cells: the RDR-149 P2/P3 ratchets each asserted every lease property
+    # stayed "pass" for T2/T3 once they rode the primitive. Both tiers are
+    # retired (nexus-i711w Stage 2 sub-stage B; nexus-pmag3), so there is no
+    # cell left to ratchet for either. The storage_service and aspect_worker
+    # ratchets below carry the same guarantee for the tiers that are actually
+    # live.
 
     def test_t1_migration_flipped_its_cells(self) -> None:
         # RDR-149 P4 ratchet: T1 now rides the primitive, so self_heal goes

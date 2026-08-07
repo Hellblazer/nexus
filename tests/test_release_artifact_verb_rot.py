@@ -22,16 +22,43 @@ REAL, LIVE Click command tree — never a hand-maintained list, which would
 just be the same rot at one remove.
 
 Surfaces swept (evidence-scoped, not speculative — see module-level
-``_SKILL_GLOB`` / ``_SH_GLOBS`` / ``_WORKFLOW_GLOB``):
+``_SKILL_GLOB`` / ``_SH_GLOBS`` / ``_WORKFLOW_GLOB`` / ``_HOOKS_JSON_FILE`` /
+``_README_FILE``):
 
   * ``.claude/skills/*/SKILL.md``       — runnable ``nx`` commands in FENCED
     code blocks only. Prose legitimately narrates retired verbs while
     explaining the retirement (see the engine-release skill's own history
-    section); only what an operator would copy-paste and run is in scope.
-  * ``tests/e2e/**/*.sh`` + ``service/native-smoke.sh`` — every non-comment
-    line. ``native-smoke.sh`` lives outside ``tests/e2e`` but is the exact
-    incident-1 script (RDR-piwya.11 / v0.1.53) and is release-workflow-only,
-    so it is swept explicitly alongside the glob.
+    section — ``nx guided-upgrade`` is named there in plain prose, not a
+    fenced block, precisely so this sweep leaves it alone); only what an
+    operator would copy-paste and run is in scope.
+  * ``tests/e2e/**/*.sh`` + ``scripts/*.sh`` + ``conexus/hooks/scripts/*.sh``
+    + ``service/native-smoke.sh`` — every non-comment line. ``native-smoke.sh``
+    lives outside ``tests/e2e`` but is the exact incident-1 script
+    (RDR-piwya.11 / v0.1.53) and is release-workflow-only, so it is swept
+    explicitly alongside the glob. ``scripts/*.sh`` is top-level only
+    (nexus-zmfan) — deliberately NOT recursive, so ``scripts/rdr152-sandbox/``
+    and ``scripts/validate/`` stay out of charter (personal/ops sandbox
+    tooling, not a release-only artifact; a real `nx storage migrate` rot
+    found there in scope-widening reconnaissance is tracked as its own bead,
+    not silently swept in here). ``conexus/hooks/scripts/*.sh`` are the
+    SHIPPED plugin hook scripts every plugin user's Claude Code session
+    actually executes.
+  * ``conexus/hooks/hooks.json`` — every ``command`` string value, however
+    deeply nested (parsed via ``json.loads``, not text-matched). This is the
+    strongest instance of the class this bead generalises: a SHIPPED
+    artifact executing a deleted verb at runtime, on every session start,
+    for every plugin user, silenced by ``|| true`` (nexus-i711w Stage 2
+    sub-stage B's own incident).
+  * ``conexus/README.md`` — fenced code blocks (as with skills) PLUS inline
+    single-backtick code spans. Unlike a skill's history section (prose
+    narration, no backticks), the README's own nexus-i711w incident was an
+    inline-backtick mention — `` `nx daemon t2 ensure-running --quiet` `` —
+    embedded in ordinary prose, invisible to a fenced-only sweep. Scoped to
+    this one file, not ``conexus/**/*.md`` generally: the wider skill/agent
+    doc corpus carries the same retrospective-narration risk fenced-only
+    protects against, and Hal's greenlight covers this bead's named surfaces,
+    not an open-ended docs sweep (docs/ itself stays deliberately uncovered
+    per the withdrawn 2026-07-28 widening, precedent below).
   * ``.github/workflows/*.yml`` — only the ``run:`` step bodies (parsed via
     PyYAML, not text-matched), so job/step ``name:`` fields — plain
     documentation, not executed shell — never enter scope.
@@ -96,9 +123,18 @@ import yaml
 REPO_ROOT = Path(__file__).parent.parent
 
 _SKILL_GLOB = ".claude/skills/*/SKILL.md"
-_SH_GLOBS = ("tests/e2e/**/*.sh",)
+#: nexus-zmfan: ``scripts/*.sh`` is deliberately top-level only (not
+#: ``scripts/**/*.sh``) — see the module docstring's surfaces-swept note.
+#: ``conexus/hooks/scripts/*.sh`` are the shipped plugin hook scripts.
+_SH_GLOBS = ("tests/e2e/**/*.sh", "scripts/*.sh", "conexus/hooks/scripts/*.sh")
 _EXTRA_SH_FILES = ("service/native-smoke.sh",)
 _WORKFLOW_GLOB = ".github/workflows/*.yml"
+#: nexus-zmfan: the shipped plugin's hooks manifest — every ``command``
+#: string, wherever nested, is in scope (see module docstring).
+_HOOKS_JSON_FILE = "conexus/hooks/hooks.json"
+#: nexus-zmfan: scoped to this one file, not a ``conexus/**/*.md`` sweep —
+#: see the module docstring's surfaces-swept note for why.
+_README_FILE = "conexus/README.md"
 
 #: ``nx <verb> [<subverb>]`` — both tokens required to start with a lowercase
 #: letter, which is what keeps this from ever matching a flag (``--help``),
@@ -110,6 +146,13 @@ _VERB_RE = re.compile(r"\bnx\s+([a-z][a-z0-9-]*)(?:\s+([a-z][a-z0-9-]*))?")
 #: skill PRESCRIBES a runnable command (mirrors
 #: test_engine_release_skill_parity.py's ``_FENCE_RE``).
 _FENCE_RE = re.compile(r"```(?:bash|sh)?\n(.*?)```", re.S)
+
+#: Inline single-backtick code spans (`` `nx foo bar` ``) — README.md only
+#: (nexus-zmfan). A skill's retrospective narration wraps a retired verb in
+#: plain prose with no backticks (see the module docstring); README mixes
+#: narration with literal copy-paste snippets inside inline code, which is
+#: exactly the shape of the nexus-i711w incident this closes.
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
 # ── Allowlists (every entry requires a reason) ──────────────────────────────
 
@@ -124,6 +167,7 @@ _GLOBAL_NOISE_ALLOWLIST: dict[str, str] = {
     "plugin": "prose, e.g. \"...OLD nx plugin still installed\" — the Claude Code plugin named nx, not a CLI call",
     "thought": "historical note: 'nx thought' was removed 2026-02-26; the citing scenario is itself skip()-ped",
     "invocation": "prose, e.g. \"every top-level nx invocation is recorded\" — names the audit mechanism, not a verb",
+    "is": "prose, e.g. \"the installed nx is ${INSTALLED_VERSION}\" (scripts/reinstall-tool.sh) — a copula, not a verb",
 }
 
 #: relative-path -> reason. EVERY nx-verb invocation in the file is exempted.
@@ -248,6 +292,44 @@ def _extract_workflow(path: Path) -> list[Invocation]:
     return _scan_lines("\n".join(run_bodies), file_label=rel)
 
 
+def _extract_hooks_json(path: Path) -> list[Invocation]:
+    """Every ``command`` string value in the shipped hooks manifest, however
+    deeply nested — mirrors the workflow extractor's discipline of scanning
+    only what actually EXECUTES (never a ``matcher:``/documentation field).
+    """
+    import json  # noqa: PLC0415 — call-site import, this module's only JSON consumer
+
+    rel = str(path.relative_to(REPO_ROOT))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    commands: list[str] = []
+
+    def _walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "command" and isinstance(value, str):
+                    commands.append(value)
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(data)
+    return _scan_lines("\n".join(commands), file_label=rel)
+
+
+def _extract_readme_md(path: Path) -> list[Invocation]:
+    """``conexus/README.md``: fenced code blocks (as with skills) PLUS
+    inline single-backtick code spans — see the module docstring and
+    ``_INLINE_CODE_RE`` for why README needs the wider net a skill does not.
+    """
+    rel = str(path.relative_to(REPO_ROOT))
+    text = path.read_text(encoding="utf-8")
+    fenced = "\n".join(_FENCE_RE.findall(text))
+    inline = "\n".join(_INLINE_CODE_RE.findall(text))
+    return _scan_lines(fenced, file_label=rel) + _scan_lines(inline, file_label=rel)
+
+
 def _sh_files() -> list[Path]:
     paths: list[Path] = []
     for pattern in _SH_GLOBS:
@@ -272,6 +354,8 @@ def _all_invocations() -> list[Invocation]:
         out.extend(_extract_skill_md(p))
     for p in _workflow_files():
         out.extend(_extract_workflow(p))
+    out.extend(_extract_hooks_json(REPO_ROOT / _HOOKS_JSON_FILE))
+    out.extend(_extract_readme_md(REPO_ROOT / _README_FILE))
     return out
 
 
@@ -298,15 +382,22 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     # is silencing an empty scan.
     "tests/e2e/migration-rehearsal/rehearse.sh": 20,
     "tests/e2e/migration-rehearsal/rehearse_guided.sh": 5,
+    # nexus-zmfan widening (hand-verified 2026-08-07):
+    "scripts/reinstall-tool.sh": 2,
+    "conexus/hooks/hooks.json": 1,
+    "conexus/hooks/scripts/subagent-start.sh": 3,
+    "conexus/README.md": 5,
 }
 
 
 def test_globs_resolve_to_files() -> None:
-    assert len(_sh_files()) >= 30, f"tests/e2e/**/*.sh glob looks broken: {len(_sh_files())} files"
+    assert len(_sh_files()) >= 35, f"the .sh globs look broken: {len(_sh_files())} files"
     assert len(_skill_files()) >= 2, f".claude/skills/*/SKILL.md glob looks broken: {_skill_files()}"
     assert len(_workflow_files()) >= 8, f".github/workflows/*.yml glob looks broken: {_workflow_files()}"
     for extra in _EXTRA_SH_FILES:
         assert (REPO_ROOT / extra).is_file(), f"explicitly-swept file moved: {extra}"
+    assert (REPO_ROOT / _HOOKS_JSON_FILE).is_file(), f"hooks manifest moved: {_HOOKS_JSON_FILE}"
+    assert (REPO_ROOT / _README_FILE).is_file(), f"plugin README moved: {_README_FILE}"
 
 
 def test_click_tree_is_not_vacuous() -> None:
@@ -318,9 +409,10 @@ def test_click_tree_is_not_vacuous() -> None:
 
 def test_extraction_is_not_vacuous_in_aggregate() -> None:
     total = len(_all_invocations())
-    assert total >= 250, (
+    assert total >= 330, (
         f"only {total} nx-invocations extracted across every swept surface — "
-        "the extraction regex likely broke (last known-good baseline: 355)"
+        "the extraction regex likely broke (last known-good baseline: 376, "
+        "post nexus-zmfan widening)"
     )
 
 
@@ -330,7 +422,11 @@ def test_anchor_file_extraction_is_not_vacuous(relpath: str, minimum: int) -> No
     invocations means the regex broke, not that the file went quiet."""
     path = REPO_ROOT / relpath
     assert path.is_file(), f"anchor file moved: {relpath}"
-    if relpath.endswith(".sh"):
+    if relpath == _README_FILE:
+        found = _extract_readme_md(path)
+    elif relpath == _HOOKS_JSON_FILE:
+        found = _extract_hooks_json(path)
+    elif relpath.endswith(".sh"):
         found = _extract_sh(path)
     elif relpath.endswith(".md"):
         found = _extract_skill_md(path)
