@@ -7,6 +7,74 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Post-extraction quality gate on every PDF path** (nexus-wi1uv): extracted
+  text that matches the space-stripped-garbage signature (the docling
+  degrade class: "istheasetofthe") now FAILS the index run loudly instead
+  of being silently indexed as unsearchable chunks. Signals (whitespace
+  ratio, mean token length, long-token fraction) calibrated on real corpora
+  including the original incident paper's dense-LaTeX regions; CJK-dominant
+  text is skipped with a named reason, never false-failed. One gated PDF is
+  one failed record: `nx dt index` batches collect-and-continue, `nx index
+  repo` contains the failure per-file and exits non-zero with the remedy.
+  `nx index pdf --allow-degraded-extraction` indexes anyway and stamps
+  `quality_gate_overridden` into chunk metadata — deliberately-degraded
+  documents stay findable via a metadata filter forever.
+- **Per-flush indexing telemetry** (nexus-lde88): every chunk flush emits a
+  `chunk_flush_complete` structlog event with an honest four-way wall-time
+  partition (upload / flush hooks / settle / file hooks); the progress
+  line's flush seconds are now per-flush rather than cumulative, and the
+  end-of-run hook accounting splits per hook. Measured basis: embedding was
+  only 19.6% of a flush; the hook chain was 80.4% and invisible.
+
+### Changed
+- **Engine identity: `engine-service-v0.1.67`** — this release pins and was
+  gated against v0.1.67 (12-way parallel CCE embedding with bit-identical
+  vectors and jittered retries; begin-many index-run fence, chash
+  conformance report, owner deactivate/reactivate, and answer-runs routes
+  from v0.1.66). Fresh local installs download exactly this engine; the
+  fresh-install gate's doctor allowlist is now EMPTY — a virgin box reads
+  clean with zero warnings (nexus-8hpad).
+- **The client no longer embeds — client-side Voyage credential retired**
+  (nexus-sghyo): all client-side Voyage embedding paths are deleted
+  (`voyage_ef` module, the non-service embed branches, the credential
+  plumbing). `VOYAGE_API_KEY` is no longer a client credential and is not
+  a mode signal; it remains an OPTIONAL engine-bound setting for local
+  voyage mode (the engine passthrough is deliberately retained). Doctor
+  and docs wording updated to match; re-embed flows send
+  `force_re_embed=True` and the server embeds.
+- **`nx store put` / `nx memory promote` join the RUNFENCE choreography**
+  (nexus-cotmr): the CLI store path now stamps index-run begin/complete
+  like every other producer, so store-put documents carry an honest
+  `index_state` instead of tripping the stale-fence doctor warning.
+- **Re-index into a different `--collection` reconciles catalog identity
+  early** (nexus-2t63u): a stale `physical_collection` from a prior run no
+  longer wedges completion verification into reporting present chunks as
+  missing; completion-refusal messages name a collection mismatch when one
+  exists instead of implying chunk loss, and `--dir` batch summaries count
+  reconciliations distinctly. Taxonomy centroid reads during indexing are
+  cached per run (nexus-2mb6n — restoring a cache the HTTP port had
+  silently dropped), with an epoch guard against mid-fetch invalidation.
+- **Release process: the sandbox shakedown runs on every release**
+  (nexus-6xkdu): the only gate exercising MinerU end-to-end through the
+  production indexing path is now unconditional and fail-capable (its
+  indexing steps could previously never redden the run).
+
+### Fixed
+- **`nx daemon service stop` no longer concludes "already stopped" from a
+  lease miss** (nexus-oyo2g): a TTL-expired lease on a stalled-but-alive
+  supervisor made the documented stop-and-start remedy a silent no-op (and
+  could double-spawn two stacks against one Postgres). Stop now consults
+  the process table on a lease miss, signals the discovered process TREE
+  (the engine child included), reports every pid honestly, and exits
+  non-zero when a survivor or an unverifiable state means the stop cannot
+  be trusted — a failed stop now breaks a `stop && start` chain instead of
+  silently proceeding.
+- **`nx t3 gc` can no longer delete live notes or in-flight documents**
+  (nexus-39upx, nexus-g6k6b): manifest-less `store_put` notes (live by
+  design under RDR-145) are excluded from orphan classification, and any
+  document not `index_state='complete'` refuses the destructive run
+  (override: `--allow-incomplete-index-state`). The in-band re-index sweep
+  gained the same note protection.
 - **`nx catalog manifest-verify --list [--json]`** (nexus-heizf): enumerate every
   dangling manifest row across the catalog — grouped by collection and document,
   with compact position ranges and distinct-chash counts — via the engine's
