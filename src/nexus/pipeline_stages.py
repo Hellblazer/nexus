@@ -813,26 +813,22 @@ def pipeline_index_pdf(
             # Mirrors the batch path (doc_indexer._index_pdf_document).
             pass
         else:
-            from nexus.config import get_credential, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
-            voyage_key = get_credential("voyage_api_key")
-            if voyage_key:
-                from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 - deferred to avoid circular import at module load
-                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                embed_fn = lambda texts, model: _embed_with_fallback(texts, model, voyage_key, timeout=timeout)
-            else:
-                try:
-                    db.mark_failed(content_hash, error="voyage_api_key not configured")
-                except Exception:  # noqa: BLE001 — boundary catch: the RuntimeError below must propagate, not a /fail transport error
-                    _log.warning(
-                        "pipeline_terminal_mark_failed",
-                        content_hash=content_hash,
-                        exc_info=True,
-                    )
-                raise RuntimeError(
-                    "voyage_api_key not configured — cannot embed for streaming "
-                    "pipeline (set a Voyage key, or use service mode for "
-                    "server-side embedding)"
+            # nexus-sghyo: non-service streaming embedding was retired —
+            # the client no longer embeds via Voyage (Hal determination
+            # 2026-07-28).
+            try:
+                db.mark_failed(content_hash, error="non-service embedding retired (nexus-sghyo)")
+            except Exception:  # noqa: BLE001 — boundary catch: the RuntimeError below must propagate, not a /fail transport error
+                _log.warning(
+                    "pipeline_terminal_mark_failed",
+                    content_hash=content_hash,
+                    exc_info=True,
                 )
+            raise RuntimeError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
 
     # nexus-5xn3k.4 RUNFENCE C2: commit the fence BEFORE the first chunk
     # upsert (memo §3.5 T0) — right before the executor starts the

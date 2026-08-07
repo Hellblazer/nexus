@@ -1085,9 +1085,18 @@ def _reembed_collection(
     nexus-bw65: in-place re-embed for non-CCE Voyage models. CCE
     (``voyage-context-3``) requires sliding-window context across chunks
     and is intentionally out of scope; the CLI rejects it up front.
+
+    nexus-sghyo (Hal determination 2026-07-28): the client no longer
+    embeds via Voyage. Every write below routes through
+    ``db.upsert_chunks(..., force_re_embed=True)`` with NO client-computed
+    ``embeddings=`` — the server (or, for the test-only T3Database facade,
+    the collection's injected embedding function) computes the vector.
+    This retires the old "verbatim passthrough" optimisation (client
+    embeds once, server skips its own billed re-embed) — there is no
+    longer a client embed to avoid duplicating, so a single server-side
+    embed per chunk is both correct and now the cheapest option.
     """
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.retry import _voyage_with_retry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     try:
         col = db.get_collection(col_name)
@@ -1105,24 +1114,9 @@ def _reembed_collection(
     if total == 0:
         return 0, 0
 
-    voyage_client = None
-    if not dry_run:
-        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        key = get_credential("voyage_api_key")
-        if not key:
-            raise click.ClickException(
-                "VOYAGE_API_KEY not set; cannot re-embed without it. "
-                "(Dry-run only requires read access.)"
-            )
-        import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
-
-        voyage_client = voyageai.Client(api_key=key)  # boundary-allow: Phase-4 deletion target — collection re-embed CLI utility
-
     processed = 0
     skipped = 0
     page = QUOTAS.MAX_QUERY_RESULTS  # 300
-    voyage_batch = 128  # Voyage embed API batch limit
     offset = 0
     while offset < total:
         page_rows = col.get(
@@ -1149,43 +1143,23 @@ def _reembed_collection(
         v_metas = [metadatas[i] for i in valid_idx]
 
         if not dry_run:
-            embeddings: list[list[float]] = []
-            for batch_start in range(0, len(v_docs), voyage_batch):
-                batch = v_docs[batch_start : batch_start + voyage_batch]
-                result = _voyage_with_retry(
-                    voyage_client.embed,
-                    texts=batch,
-                    model=target_model,
-                    input_type="document",
-                )
-                embeddings.extend(result.embeddings)
             # Stamp the new model on metadata so check_staleness reads
             # right post-re-embed; otherwise next index pass would treat
             # every chunk as stale and re-embed twice.
             for m in v_metas:
                 if isinstance(m, dict):
                     m["embedding_model"] = target_model
-            from nexus.db.http_vector_client import is_service_backed as _isb  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-            if _isb(db):
-                # nexus-u37lw: on the service handle, upsert_chunks_with_
-                # embeddings DISCARDS caller vectors (server re-embeds by
-                # collection name). The command guard has already pinned
-                # target_model == the name-encoded model here, so the
-                # nexus-hxry2 verbatim passthrough stores our vectors
-                # without a second (billed) server-side embed.
-                db.upsert_chunks(
-                    col_name, v_ids, v_docs,
-                    metadatas=v_metas,
-                    embeddings=embeddings,
-                )
-            else:
-                db.upsert_chunks_with_embeddings(
-                    collection_name=col_name,
-                    ids=v_ids,
-                    documents=v_docs,
-                    embeddings=embeddings,
-                    metadatas=v_metas,
-                )
+            # nexus-sghyo: no client-computed embeddings — the command
+            # guard (reembed_cmd) has already pinned target_model ==
+            # the name-encoded model for service-backed handles, so the
+            # server re-embeds with the correct model. force_re_embed=True
+            # bypasses the existence-partition skip so every chash is
+            # genuinely recomputed, not treated as already-current.
+            db.upsert_chunks(
+                col_name, v_ids, v_docs,
+                metadatas=v_metas,
+                force_re_embed=True,
+            )
             # nexus-bw65 / nexus-9099: fire post-store chains so the
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
@@ -1204,7 +1178,10 @@ def _reembed_collection(
                     (m.get("source_path", "") if isinstance(m, dict) else "")
                     for m in v_metas
                 ],
-                embeddings=embeddings,
+                # nexus-sghyo: no client-computed vector to pass — the
+                # server (or test EF) computed it inside upsert_chunks
+                # above.
+                embeddings=None,
                 metadatas=v_metas,
                 catalog_doc_id="",
             )

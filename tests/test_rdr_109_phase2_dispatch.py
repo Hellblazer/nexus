@@ -119,7 +119,6 @@ def t3_local():
         _client=make_vector_test_client(),
         _ef_override=None,
         local_mode=True,
-        voyage_api_key=None,
     )
 
 
@@ -129,15 +128,20 @@ def t3_cloud(monkeypatch):
 
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     monkeypatch.setenv("CHROMA_API_KEY", "ck")
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk")
     # local_mode=False but with EphemeralClient so we don't reach a real
     # CloudClient. We only exercise the _build_embedding_fn path, not
     # actually embed.
+    # nexus-sghyo (2026-08-06): voyage_api_key is deleted from
+    # T3Database's constructor — client-side Voyage embedding is
+    # retired (Hal determination 2026-07-28: "we do no embedding on the
+    # client"). A voyage-token collection name now raises
+    # IncompatibleCollectionError from this fixture's cloud-mode
+    # T3Database (see test_dispatch_cloud_mode_voyage_conformant_name /
+    # test_dispatch_cloud_mode_legacy_name).
     return T3Database(
         _client=make_vector_test_client(),
         _ef_override=None,
         local_mode=False,
-        voyage_api_key="vk_test",
     )
 
 
@@ -175,18 +179,26 @@ def test_dispatch_cloud_mode_local_name_uses_local_ef(t3_cloud) -> None:
 
 
 def test_dispatch_cloud_mode_voyage_conformant_name(t3_cloud) -> None:
-    """Cloud + voyage-token name: the standard cloud path. Verifies the
-    EF model_name matches the parsed token (not the prefix default)."""
-    ef = t3_cloud._build_embedding_fn("docs__owner-1__voyage-context-3__v1")
-    assert ef.model_name == "voyage-context-3"
+    """nexus-sghyo (2026-08-06): cloud + voyage-token name used to
+    select a client-constructed Voyage EF (model_name matching the
+    parsed token). Client-side Voyage embedding is retired outright
+    (Hal determination 2026-07-28) — the same dispatch now raises
+    IncompatibleCollectionError instead of constructing one."""
+    from nexus.db.t3 import IncompatibleCollectionError
+
+    with pytest.raises(IncompatibleCollectionError, match="voyage-context-3"):
+        t3_cloud._build_embedding_fn("docs__owner-1__voyage-context-3__v1")
 
 
 def test_dispatch_cloud_mode_legacy_name(t3_cloud) -> None:
-    """Legacy two-segment names: prefix-based fallback selects Voyage."""
-    ef = t3_cloud._build_embedding_fn("knowledge__papers")
-    # The Voyage EF stores model_name; both context and code possible per
-    # prefix. ``knowledge__`` prefix -> voyage-context-3.
-    assert ef.model_name == "voyage-context-3"
+    """nexus-sghyo: legacy two-segment names prefix-fallback to a
+    Voyage model token (``knowledge__`` -> voyage-context-3), which now
+    hits the same retired client-side-embed raise as the conformant-name
+    case above."""
+    from nexus.db.t3 import IncompatibleCollectionError
+
+    with pytest.raises(IncompatibleCollectionError, match="voyage-context-3"):
+        t3_cloud._build_embedding_fn("knowledge__papers")
 
 
 # ── nexus-a4h7b: the token PINS the local model; the active model must not win ──

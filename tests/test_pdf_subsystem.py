@@ -217,8 +217,17 @@ class TestIndexPdfPipeline:
         # tests/test_doc_indexer.py::test_pdf_metadata_schema_complete; the
         # genuine fence integration proof is nexus-5xn3k.7's job.
         monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
-        with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_fake_embed):
-            count = index_pdf(simple_pdf, corpus="test", t3=mock_t3)
+        # nexus-sghyo (2026-08-06): the deleted _embed_with_fallback used to
+        # back the non-service path this file's _legacy_vector_backend
+        # autouse fixture selects (NX_STORAGE_BACKEND_VECTORS=local); that
+        # client-side embed path is retired outright (Hal determination
+        # 2026-07-28: "we do no embedding on the client"). Pass embed_fn
+        # explicitly (the supported local-style injection point) so the
+        # dispatch short-circuits before the retired-branch raise.
+        count = index_pdf(
+            simple_pdf, corpus="test", t3=mock_t3,
+            embed_fn=lambda texts, model: ([[0.1] * 5 for _ in texts], model),
+        )
 
         assert count > 0
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
@@ -237,8 +246,13 @@ class TestIndexPdfPipeline:
         mock_t3 = MagicMock()
         mock_t3.get_or_create_collection.return_value = mock_col
 
-        with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_fake_embed):
-            count = index_pdf(simple_pdf, corpus="test", t3=mock_t3)
+        # nexus-sghyo: see test_upserts_chunks_with_real_extraction above.
+        # embed_fn is never actually invoked here (staleness skip fires
+        # first) but keeps the dispatch mode-independent regardless.
+        count = index_pdf(
+            simple_pdf, corpus="test", t3=mock_t3,
+            embed_fn=lambda texts: [[0.1] * 5 for _ in texts],
+        )
 
         assert count == 0
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
@@ -283,19 +297,25 @@ class TestIndexPdfFileGitMetadata:
 
         mock_db.upsert_chunks_with_embeddings.side_effect = capture
 
-        with patch("nexus.doc_indexer._embed_with_fallback", side_effect=_fake_embed):
-            _index_pdf_file(
-                file=pdf,
-                repo=repo,
-                collection_name=collection_name,
-                target_model=model,
-                col=mock_col,
-                db=mock_db,
-                voyage_key="vk_test",
-                git_meta=git_meta,
-                now_iso=now_iso,
-                score=0.5,
-            )
+        # nexus-sghyo (2026-08-06): _index_pdf_file's embed_fn=None branch
+        # is unreachable ONLY via the _run_index orchestrator (which always
+        # resolves and passes embed_fn before calling per-file helpers) —
+        # called directly here, it needs an explicit embed_fn (the
+        # local-mode-style injection point), same as the deleted
+        # _embed_with_fallback mock used to provide.
+        _index_pdf_file(
+            file=pdf,
+            repo=repo,
+            collection_name=collection_name,
+            target_model=model,
+            col=mock_col,
+            db=mock_db,
+            voyage_key="vk_test",
+            git_meta=git_meta,
+            now_iso=now_iso,
+            score=0.5,
+            embed_fn=lambda texts: _fake_embed(texts, model, "vk_test")[0],
+        )
 
         return captured[0] if captured else []
 

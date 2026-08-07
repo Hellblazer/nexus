@@ -1077,12 +1077,17 @@ def _reset_aspect_worker_singleton() -> None:
 
 
 def set_credentials(monkeypatch) -> None:
-    """Set the cloud-ingest credential env for tests that call _has_credentials().
+    """Set NX_LOCAL=0 (cloud/non-local posture) for tests that need it.
 
     Shared helper used by test_doc_indexer.py and test_pdf_subsystem.py.
     RDR-155 P4b: the CHROMA_* keys died with the chroma credential map and
-    key presence no longer implies cloud mode — pin NX_LOCAL=0 explicitly
-    so the voyage embed path under test fires.
+    key presence no longer implies cloud mode — pin NX_LOCAL=0 explicitly.
+    nexus-sghyo (2026-08-06): the VOYAGE_API_KEY env var this used to set
+    alongside NX_LOCAL is no longer a client credential (client-side
+    Voyage embedding retired, Hal determination 2026-07-28) and no
+    surviving client code path (``_has_credentials()`` is deleted)
+    reads it — kept here only in case a caller's mocked
+    ``get_credential`` still keys off it incidentally.
     """
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
@@ -1142,13 +1147,12 @@ def cloud_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # at module scope instead. See ``docs/contributing.md`` and
 # ``tests/AGENTS.md``.
 _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
-    # RDR-155 P4b P3: the nexus-owned Voyage EF's own unit tests. Reason class
-    # "string-literal-as-name" — the voyage tokens are ``model_name=`` values
-    # asserted against the mocked ``voyageai.Client.embed`` kwargs, which is
-    # the wire contract under test. Every test patches the client, so no
-    # embedding, no credential and no cloud mode is involved; requesting
-    # cloud_mode would add a live-credential dependency to a fully mocked test.
-    "test_voyage_ef.py",
+    # "test_voyage_ef.py" REMOVED (nexus-sghyo, 2026-08-06): the file it
+    # excluded, tests/db/test_voyage_ef.py, was deleted along with the
+    # module it tested (nexus.db.voyage_ef) — client-side Voyage
+    # embedding is retired (Hal determination 2026-07-28: "we do no
+    # embedding on the client"). See _MODE_LINT_EXCLUDE_FILES_CEILING's
+    # matching decrement in test_mode_declarations_are_explicit.py.
     # Cloud-behavior files — Phase 1 ships the lint mechanism with these
     # excluded; subsequent PRs promote each to module-level
     # ``pytestmark = pytest.mark.usefixtures("cloud_mode")``. Promotion is
@@ -1538,7 +1542,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/catalog/test_http_catalog_client.py::TestResolveChunk::test_resolve_chunk_returns_full_dict",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
-    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_uses_verbatim_passthrough",
+    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_requests_server_side_re_embed",
     #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /

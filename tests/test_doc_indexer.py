@@ -11,11 +11,10 @@ from voyageai.object.contextualized_embeddings import (
     ContextualizedEmbeddingsObject,
     ContextualizedEmbeddingsResult,
 )
-from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.doc_indexer import (
-    _batch_chunks_for_cce, _embed_with_fallback, _identity_where,
-    _lookup_existing_doc_id, _markdown_chunks, _TokenBucket,
+    _identity_where,
+    _lookup_existing_doc_id, _markdown_chunks,
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
@@ -446,6 +445,14 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     )
     monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+    # nexus-sghyo (2026-08-06): embed_fn dispatch reads ambient
+    # is_vector_service_mode() regardless of the injected t3= handle —
+    # an explicit chroma opt-out is still the only way to reach the
+    # LOCAL-MODE embed branch (_make_local_embed_fn) under test here.
+    # This is NOT the deleted non-service/non-local CLOUD credential
+    # path (client no longer embeds via Voyage) — local-mode client-side
+    # embedding (bge-768/fastembed) is unaffected by that retirement.
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     # nexus-i711w: no local catalog init — pre-flight registration goes to
     # the live catalog.
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
@@ -533,18 +540,27 @@ def test_make_local_embed_fn_returns_consistent_model_name():
 def test_index_raises_credentials_missing_when_cloud_mode_explicit(
     indexer, fixture_name, sample_pdf, sample_md, monkeypatch,
 ):
-    """The corollary: when the user has explicitly opted into cloud
-    mode (``NX_LOCAL=0``) but credentials are missing, fail fast with
-    ``CredentialsMissingError`` rather than silently degrading to
-    local. ``NX_LOCAL=0`` is the operator's commitment to using
-    Voyage; honoring it means a credential gap should be surfaced,
-    not papered over.
+    """nexus-sghyo (2026-08-06): non-service, non-local ("legacy cloud")
+    ingestion is RETIRED outright — the client no longer embeds via
+    Voyage (Hal determination 2026-07-28), regardless of whether
+    credentials are present. What used to be "cloud mode explicit but
+    credentials missing -> CredentialsMissingError naming the missing
+    key" is now "non-service mode at all -> CredentialsMissingError
+    naming the retirement", since there is no longer a credential that
+    would make this path work.
+
+    ``NX_LOCAL=0`` alone no longer selects this failure: service mode
+    (the default) is checked FIRST and silently embeds server-side
+    regardless of NX_LOCAL, so an explicit chroma opt-out
+    (``NX_STORAGE_BACKEND_VECTORS``) is required to reach the retired
+    branch at all.
     """
     from nexus.errors import CredentialsMissingError
 
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
@@ -554,10 +570,7 @@ def test_index_raises_credentials_missing_when_cloud_mode_explicit(
         with pytest.raises(CredentialsMissingError) as excinfo:
             fn(path, corpus="test")
     mock_factory.assert_not_called()
-    assert "voyage_api_key" in str(excinfo.value)
-    # RDR-155 P4b: chroma_api_key died with the chroma credential map — the
-    # voyage key is the only cloud-ingest credential named now.
-    assert "chroma_api_key" not in str(excinfo.value)
+    assert "Voyage" in str(excinfo.value)
     assert "NX_LOCAL" in str(excinfo.value)
 
 
@@ -573,7 +586,7 @@ def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
     mock_t3.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
-            result = index_pdf(sample_pdf, corpus="mybook")
+            result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 0
     ext_cls.assert_not_called()
 
@@ -582,8 +595,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voy
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with pdf_extract_patches_ctx() as pep:
-            with patch("voyageai.Client", return_value=voyage_client):
-                result = index_pdf(sample_pdf, corpus="mybook")
+            result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 1
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
@@ -668,9 +680,8 @@ def test_preflight_register_failure_feeds_identity_drop_collector(
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
          patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-         pdf_extract_patches_ctx(), \
-         patch("voyageai.Client", return_value=voyage_client):
-        result = index_pdf(sample_pdf, corpus="mybook")
+         pdf_extract_patches_ctx():
+        result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
 
     # Collect-and-continue (nexus-9800y convention): the registration
     # failure must NOT abort the write — chunks land regardless.
@@ -754,9 +765,8 @@ def test_index_pdf_small_doc_prune_deleted_as_dead_code(
          patch("nexus.doc_indexer._fence_begin"), \
          patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
-         pdf_extract_patches_ctx(), \
-         patch("voyageai.Client", return_value=voyage_client):
-        result = index_pdf(sample_pdf, corpus="mybook")
+         pdf_extract_patches_ctx():
+        result = index_pdf(sample_pdf, corpus="mybook", t3=t3)
 
     assert result == 1
     reader.docs_for_chashes.assert_not_called()
@@ -797,8 +807,7 @@ def test_index_pdf_fires_document_hook_exactly_once(
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with pdf_extract_patches_ctx():
-            with patch("voyageai.Client", return_value=voyage_client):
-                index_pdf(sample_pdf, corpus="mybook", hooks=hooks)
+            index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, hooks=hooks)
 
     assert len(fires) == 1, (
         f"Document hook fired {len(fires)} times for one PDF — "
@@ -892,9 +901,8 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_c
     mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 10, "page_number": 0, "header_path": "Hello"}
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
-            with patch("voyageai.Client", return_value=voyage_client):
-                chk_cls.return_value.chunk.return_value = [mock_chunk]
-                index_markdown(sample_md, corpus="docs")
+            chk_cls.return_value.chunk.return_value = [mock_chunk]
+            index_markdown(sample_md, corpus="docs", t3=mock_t3)
     assert captured
     missing = _BASE_REQUIRED_FIELDS - captured[0].keys()
     assert not missing, f"Missing metadata fields: {missing}"
@@ -916,10 +924,10 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     # only cares about chunk metadata shape; stub the fence tail like
     # tests/test_pipeline_stages.py's ``_stub_fence_complete`` fixture.
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
-    with patch("nexus.doc_indexer._embed_with_fallback",
-               side_effect=lambda chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None:
-               ([[0.1] * 5] * len(chunks), "test-local")):
-        index_pdf(simple_pdf, corpus="test", t3=mock_t3)
+    # nexus-sghyo (2026-08-06): no client-side embed function to mock —
+    # the service-mode stub (ambient test default) produces the
+    # placeholder embeddings; this test only asserts metadata shape.
+    index_pdf(simple_pdf, corpus="test", t3=mock_t3)
     assert captured
     missing = (_BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS) - captured[0].keys()
     assert not missing, f"Missing PDF metadata fields: {missing}"
@@ -964,18 +972,16 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
                 with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
-                    with patch("voyageai.Client", return_value=voyage_client):
-                        ext_cls.return_value.extract.return_value = MagicMock(
-                            text="txt", metadata={"page_count": 1, "format": "pdf", "extraction_method": "x"})
-                        chk_cls.return_value.chunk.return_value = [mock_chunk]
-                        index_pdf(sample_pdf, corpus="mybook")
+                    ext_cls.return_value.extract.return_value = MagicMock(
+                        text="txt", metadata={"page_count": 1, "format": "pdf", "extraction_method": "x"})
+                    chk_cls.return_value.chunk.return_value = [mock_chunk]
+                    index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     else:
         mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 0, "header_path": "H"}
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
-                with patch("voyageai.Client", return_value=voyage_client):
-                    chk_cls.return_value.chunk.return_value = [mock_chunk]
-                    index_markdown(sample_md, corpus="docs")
+                chk_cls.return_value.chunk.return_value = [mock_chunk]
+                index_markdown(sample_md, corpus="docs", t3=mock_t3)
     assert captured
     # RDR-101 Phase 5c: ``store_type`` dropped from chunk schema;
     # ``content_type`` is the canonical routing field.
@@ -1014,194 +1020,30 @@ def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_
         mock_chunk.metadata = {"chunk_start_char": 5, "chunk_end_char": 15, "page_number": 0, "header_path": ""}
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
-            with patch("voyageai.Client", return_value=voyage_client):
-                chk_cls.return_value.chunk.return_value = [mock_chunk]
-                index_markdown(md_path, corpus="docs")
+            chk_cls.return_value.chunk.return_value = [mock_chunk]
+            index_markdown(md_path, corpus="docs", t3=mock_t3)
     assert captured
     assert captured[0]["chunk_start_char"] == expected_start
     assert captured[0]["chunk_end_char"] == expected_end
 
 
-@pytest.mark.parametrize("n_chunks,expected_embs", [
-    (2, [[0.1, 0.2], [0.3, 0.4]]),
-    (1, [[0.5, 0.6]]),
-])
-def test_embed_with_fallback_calls_cce(n_chunks, expected_embs, cloud_mode):
-
-    mock_client = MagicMock()
-    cce_result = MagicMock(spec=ContextualizedEmbeddingsResult)
-    cce_result.embeddings = expected_embs
-    result_obj = MagicMock(spec=ContextualizedEmbeddingsObject)
-    result_obj.results = [cce_result]
-    mock_client.contextualized_embed.return_value = result_obj
-    with patch("voyageai.Client", return_value=mock_client):
-        embeddings, model = _embed_with_fallback(
-            chunks=[f"chunk {i}" for i in range(n_chunks)],
-            model="voyage-context-3", api_key="vk_test",
-        )
-    mock_client.contextualized_embed.assert_called_once()
-    mock_client.embed.assert_not_called()
-    assert embeddings == expected_embs
-    assert model == "voyage-context-3"
-
-
-def test_single_chunk_cce_uses_contextualized_embed(cloud_mode):
-
-    client = _make_cce_client(embeddings_per_call=[[0.1] * 10])
-    with patch("voyageai.Client", return_value=client):
-        embeddings, model = _embed_with_fallback(["single chunk content"], "voyage-context-3", "test-key")
-    client.contextualized_embed.assert_called_once()
-    client.embed.assert_not_called()
-    assert model == "voyage-context-3"
-    assert len(embeddings) == 1
-
-
-def test_embed_with_fallback_cce_failure_splits_and_stays_on_model(cloud_mode):
-
-    client = _make_cce_client(fail_on_call={1})
-    with patch("voyageai.Client", return_value=client):
-        embeddings, model = _embed_with_fallback(chunks=["a", "b"], model="voyage-context-3", api_key="vk_test")
-    assert model == "voyage-context-3"
-    assert len(embeddings) == 2
-    client.embed.assert_not_called()
-
-
-def test_embed_with_fallback_batches_large_input(cloud_mode):
-
-    chunks = [f"chunk{i}_" + "x" * 24_000 for i in range(6)]
-    client = _make_cce_client()
-    with patch("voyageai.Client", return_value=client):
-        embeddings, model = _embed_with_fallback(chunks=chunks, model="voyage-context-3", api_key="vk_test")
-    assert client._call_count[0] >= 2
-    client.embed.assert_not_called()
-    assert model == "voyage-context-3"
-    assert len(embeddings) == 6
-
-
-def test_partial_cce_failure_splits_failed_batch(cloud_mode):
-
-    client = _make_cce_client(fail_on_call={2})
-    chunks = ["chunk a", "chunk b", "chunk c", "chunk d"]
-    forced_batches = [["chunk a", "chunk b"], ["chunk c", "chunk d"]]
-    with patch("voyageai.Client", return_value=client), \
-         patch("nexus.doc_indexer._batch_chunks_for_cce", return_value=forced_batches):
-        embeddings, model = _embed_with_fallback(chunks, "voyage-context-3", "test-key")
-    assert model == "voyage-context-3"
-    assert len(embeddings) == 4
-    assert client._call_count[0] == 4
-    client.embed.assert_not_called()
-
-
-def test_cce_contract_no_top_level_embeddings_attribute():
-    obj = ContextualizedEmbeddingsObject(response=None)
-    assert not hasattr(obj, "embeddings")
-
-
-def test_cce_contract_results_list_with_embeddings():
-    obj = ContextualizedEmbeddingsObject(response=None)
-    assert hasattr(obj, "results") and isinstance(obj.results, list)
-    item = ContextualizedEmbeddingsResult(index=0, embeddings=[[0.1, 0.2], [0.3, 0.4]])
-    assert item.embeddings == [[0.1, 0.2], [0.3, 0.4]]
-
-
-def test_cce_contract_standard_embed_has_top_level_embeddings():
-    obj = EmbeddingsObject(response=None)
-    assert hasattr(obj, "embeddings") and isinstance(obj.embeddings, list)
-
-
-def test_cce_contract_spec_mock_rejects_wrong_attribute():
-    bare_mock = MagicMock()
-    _ = bare_mock.embeddings  # no error
-    spec_mock = MagicMock(spec=ContextualizedEmbeddingsObject)
-    with pytest.raises(AttributeError):
-        _ = spec_mock.embeddings
-
-
-def test_cce_contract_embed_with_fallback_uses_correct_access_path(cloud_mode):
-
-    mock_client = MagicMock()
-    item = MagicMock(spec=ContextualizedEmbeddingsResult)
-    item.embeddings = [[0.1, 0.2], [0.3, 0.4]]
-    obj = MagicMock(spec=ContextualizedEmbeddingsObject)
-    obj.results = [item]
-    mock_client.contextualized_embed.return_value = obj
-    with patch("voyageai.Client", return_value=mock_client):
-        embeddings, model = _embed_with_fallback(["a", "b"], "voyage-context-3", "vk_test")
-    assert embeddings == [[0.1, 0.2], [0.3, 0.4]]
-    assert model == "voyage-context-3"
-
-
-def test_cce_contract_token_limit_has_safety_margin():
-    from nexus.doc_indexer import _CCE_TOKEN_LIMIT
-    assert 16_000 <= _CCE_TOKEN_LIMIT <= 32_000
-
-
-def test_cce_contract_batch_chunks_splits_large_input():
-
-    chunks = ["x" * 24_000 for _ in range(6)]
-    batches = _batch_chunks_for_cce(chunks)
-    assert len(batches) >= 2
-    for batch in batches:
-        assert len(batch) >= 2
-
-
-def test_cce_contract_batch_chunks_keeps_small_input_together():
-
-    chunks = ["hello world", "foo bar"]
-    assert _batch_chunks_for_cce(chunks) == [chunks]
-
-
-def test_cce_contract_batch_chunks_merges_singleton_tail():
-
-    batches = _batch_chunks_for_cce(["x" * 40_000, "y" * 300, "z" * 300])
-    for batch in batches:
-        assert len(batch) >= 2
-
-
-@pytest.mark.parametrize("n_chunks", [1500, 2500])
-def test_batch_chunks_for_cce_splits_by_count(n_chunks):
-    from nexus.doc_indexer import _CCE_MAX_BATCH_CHUNKS
-    chunks = ["x" for _ in range(n_chunks)]
-    batches = _batch_chunks_for_cce(chunks)
-    assert len(batches) >= 2
-    for batch in batches:
-        assert len(batch) <= _CCE_MAX_BATCH_CHUNKS
-    assert sum(len(b) for b in batches) == n_chunks
-
-
-def test_batch_chunks_for_cce_singleton_not_merged_when_target_at_limit():
-    from nexus.doc_indexer import _CCE_MAX_BATCH_CHUNKS
-    chunks = ["tiny"] * (_CCE_MAX_BATCH_CHUNKS + 1)
-    batches = _batch_chunks_for_cce(chunks)
-    for batch in batches:
-        assert len(batch) <= _CCE_MAX_BATCH_CHUNKS
-    assert sum(len(b) for b in batches) == _CCE_MAX_BATCH_CHUNKS + 1
-
-
-def test_cce_contract_large_input_still_uses_cce(cloud_mode):
-
-    chunks = [f"chunk{i}_" + "x" * 18_000 for i in range(8)]
-    client = _make_cce_client()
-    with patch("voyageai.Client", return_value=client):
-        embeddings, model = _embed_with_fallback(chunks, "voyage-context-3", "vk_test")
-    assert model == "voyage-context-3"
-    assert len(embeddings) == 8
-    client.embed.assert_not_called()
-    assert client._call_count[0] >= 2
-
-
-def _make_cce_voyage():
-    """Create a mock Voyage client with spec-constrained CCE result."""
-    v = MagicMock()
-    cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-    cce_item.embeddings = [[0.1, 0.2]]
-    cce_obj = MagicMock(spec=ContextualizedEmbeddingsObject)
-    cce_obj.results = [cce_item]
-    v.contextualized_embed.return_value = cce_obj
-    return v
+# nexus-sghyo (2026-08-06): the whole client-side Voyage CCE embed
+# pipeline (``_embed_with_fallback``, ``_batch_chunks_for_cce``,
+# ``_TokenBucket``, and the voyageai-object-shape "contract" tests that
+# pinned their exact attribute-access path) was DELETED — the client no
+# longer embeds via Voyage (Hal determination 2026-07-28: "we do no
+# embedding on the client"). The falsification IS the test story here:
+# there is no surviving subject for these tests to exercise. CCE
+# embedding now happens entirely server-side; the Java-engine parity
+# oracle in tests/db/test_embed_parity.py (integration-gated) is the
+# surviving proof that server-side CCE embedding is correct.
 
 
 def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
+    # nexus-sghyo (2026-08-06): CCE embedding is entirely server-side now
+    # (no client-side Voyage mock needed) — the assertion is that docs__
+    # collections route through upsert_chunks_with_embeddings (the
+    # service-stub embed path), not a specific embedder.
     set_credentials(monkeypatch)
     mock_chunk, mock_extract = _make_pdf_mocks()
     mock_col = MagicMock()
@@ -1210,11 +1052,10 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
     mock_t3.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
          patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
-         patch("nexus.doc_indexer.PDFChunker") as chk_cls, \
-         patch("voyageai.Client", return_value=_make_cce_voyage()):
+         patch("nexus.doc_indexer.PDFChunker") as chk_cls:
         ext_cls.return_value.extract.return_value = mock_extract
         chk_cls.return_value.chunk.return_value = [mock_chunk, mock_chunk]
-        result = index_pdf(sample_pdf, corpus="mybook")
+        result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 2
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
     mock_col.upsert.assert_not_called()
@@ -1241,13 +1082,15 @@ def test_index_pdf_hash_match_model_check(stored_model, expected_result, sample_
         }
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
+    # nexus-sghyo (2026-08-06): no client-side Voyage mock needed — the
+    # client no longer embeds; service mode (the ambient test default)
+    # embeds server-side via a stub, which this test does not assert on.
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
          patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
-         patch("nexus.doc_indexer.PDFChunker") as chk_cls, \
-         patch("voyageai.Client", return_value=_make_cce_voyage()):
+         patch("nexus.doc_indexer.PDFChunker") as chk_cls:
         ext_cls.return_value.extract.return_value = mock_extract
         chk_cls.return_value.chunk.return_value = [mock_chunk, mock_chunk]
-        result = index_pdf(sample_pdf, corpus="mybook")
+        result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == expected_result
 
 
@@ -1275,150 +1118,17 @@ def test_batch_index_marks_failed_on_error(kind, tmp_path):
     assert result[str(bad)] == "failed"
 
 
-def test_embed_standard_path_batches_over_128_chunks(cloud_mode):
-    chunks = [f"chunk_{i}" for i in range(200)]
-    mock_client = MagicMock()
-    embed_call_count = [0]
-
-    def fake_embed(texts, model, input_type):
-        embed_call_count[0] += 1
-        result = MagicMock(spec=EmbeddingsObject)
-        result.embeddings = [[0.1] for _ in texts]
-        return result
-
-    mock_client.embed.side_effect = fake_embed
-    with patch("voyageai.Client", return_value=mock_client):
-        embeddings, model = _embed_with_fallback(chunks, "voyage-code-3", "vk_test")
-    assert embed_call_count[0] == 2
-    assert len(embeddings) == 200
-    assert model == "voyage-code-3"
-
-
-def test_cce_total_token_limit_exists_and_gte_per_batch():
-    from nexus.doc_indexer import _CCE_TOKEN_LIMIT, _CCE_TOTAL_TOKEN_LIMIT
-    assert _CCE_TOKEN_LIMIT <= _CCE_TOTAL_TOKEN_LIMIT
-
-
-def test_cce_max_total_chunks_constant():
-    from nexus.doc_indexer import _CCE_MAX_TOTAL_CHUNKS
-    assert _CCE_MAX_TOTAL_CHUNKS == 16_000
-
-
-@pytest.mark.parametrize("limit_override,n_chunks", [(2, 2), (1, 2)])
-def test_embed_with_fallback_warns_on_excessive_chunks(limit_override, n_chunks, cloud_mode):
-
-    mock_client = MagicMock()
-    mock_result = MagicMock()
-    mock_result.embeddings = [[0.1]]
-    mock_client.embed.return_value = mock_result
-    with patch("voyageai.Client", return_value=mock_client):
-        with patch("nexus.doc_indexer._log") as mock_log:
-            with patch("nexus.doc_indexer._CCE_MAX_TOTAL_CHUNKS", limit_override):
-                _embed_with_fallback(
-                    chunks=[f"c{i}" for i in range(n_chunks)],
-                    model="voyage-code-3", api_key="vk_test",
-                )
-            mock_log.warning.assert_called_once()
-            assert "chunk count exceeds" in mock_log.warning.call_args[0][0]
-
-
-def test_embed_with_fallback_empty_chunks(cloud_mode):
-
-    embeddings, model = _embed_with_fallback([], "voyage-context-3", "vk_test")
-    assert embeddings == []
-    assert model == "voyage-context-3"
-
-
-def test_embed_with_fallback_filters_empty_strings(cloud_mode):
-
-    mock_result = MagicMock(spec=EmbeddingsObject)
-    mock_result.embeddings = [[0.1, 0.2]]
-    mock_client = MagicMock()
-    mock_client.embed.return_value = mock_result
-    with patch("voyageai.Client", return_value=mock_client):
-        embeddings, _ = _embed_with_fallback(["", "   ", "real content", "\t\n"], "voyage-code-3", "vk_test")
-    assert mock_client.embed.called
-    call_kwargs = mock_client.embed.call_args
-    passed_texts = call_kwargs[1].get("texts") or call_kwargs[0][0]
-    assert "real content" in passed_texts
-    assert "" not in passed_texts
-    assert len(embeddings) == 1
-
-
-def test_embed_with_fallback_all_empty_strings(cloud_mode):
-
-    mock_client = MagicMock()
-    with patch("voyageai.Client", return_value=mock_client):
-        embeddings, _ = _embed_with_fallback(["", "   ", "\n"], "voyage-code-3", "vk_test")
-    assert embeddings == []
-    mock_client.embed.assert_not_called()
-
-
-def test_cce_failure_splits_recursively(cloud_mode):
-
-    client = _make_cce_client(fail_on_call={1})
-    with patch("voyageai.Client", return_value=client):
-        embeddings, model = _embed_with_fallback([f"chunk_{i}" for i in range(4)], "voyage-context-3", "vk_test")
-    assert len(embeddings) == 4
-    assert model == "voyage-context-3"
-    client.embed.assert_not_called()
-
-
-def test_embed_partial_batch_failure_stays_same_model(cloud_mode):
-
-    chunks = ["chunk a", "chunk b", "chunk c", "chunk d"]
-    forced_batches = [["chunk a", "chunk b"], ["chunk c", "chunk d"]]
-    client = _make_cce_client(fail_on_call={2})
-    # Reset fail tracking for "fail only first time on call 2"
-    real_side = client.contextualized_embed.side_effect
-    call_count = [0]
-    failed_once = [False]
-
-    def _cce(inputs, model, input_type):
-        call_count[0] += 1
-        if call_count[0] == 2 and not failed_once[0]:
-            failed_once[0] = True
-            raise RuntimeError("CCE batch 2 failed")
-        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-        cce_item.embeddings = [[1.0] for _ in inputs[0]]
-        result = MagicMock(spec=ContextualizedEmbeddingsObject)
-        result.results = [cce_item]
-        return result
-
-    client.contextualized_embed.side_effect = _cce
-    with patch("voyageai.Client", return_value=client), \
-         patch("nexus.doc_indexer._batch_chunks_for_cce", return_value=forced_batches):
-        embeddings, model = _embed_with_fallback(chunks, "voyage-context-3", "vk_test")
-    assert len(embeddings) == 4
-    assert model == "voyage-context-3"
-    client.embed.assert_not_called()
-
-
-def test_embed_single_chunk_failure_raises(cloud_mode):
-
-    mock_client = MagicMock()
-    mock_client.contextualized_embed.side_effect = RuntimeError("single chunk too large")
-    with patch("voyageai.Client", return_value=mock_client):
-        with pytest.raises(RuntimeError, match="single chunk too large"):
-            _embed_with_fallback(["one giant chunk"], "voyage-context-3", "vk_test")
-
-
-def test_embed_with_fallback_cce_empty_result_raises(cloud_mode):
-
-    mock_client = MagicMock()
-
-    def _cce_empty(inputs, model, input_type):
-        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-        cce_item.embeddings = []
-        result = MagicMock(spec=ContextualizedEmbeddingsObject)
-        result.results = [cce_item]
-        return result
-
-    mock_client.contextualized_embed.side_effect = _cce_empty
-    with patch("voyageai.Client", return_value=mock_client):
-        with pytest.raises(RuntimeError, match="CCE embedding returned no vectors"):
-            _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "vk_test")
-    mock_client.embed.assert_not_called()
+# nexus-sghyo (2026-08-06): test_embed_standard_path_batches_over_128_chunks,
+# test_cce_total_token_limit_exists_and_gte_per_batch,
+# test_cce_max_total_chunks_constant,
+# test_embed_with_fallback_warns_on_excessive_chunks,
+# test_embed_with_fallback_empty_chunks, _filters_empty_strings,
+# _all_empty_strings, test_cce_failure_splits_recursively,
+# test_embed_partial_batch_failure_stays_same_model,
+# test_embed_single_chunk_failure_raises, and
+# test_embed_with_fallback_cce_empty_result_raises all directly
+# exercised the deleted client-side ``_embed_with_fallback`` /
+# ``_CCE_*`` constants — no surviving subject.
 
 
 @pytest.mark.parametrize("indexer", ["pdf", "markdown"])
@@ -1446,7 +1156,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
                         text="text", metadata={"extraction_method": "docling", "page_count": 1,
                                                "format": "markdown", "page_boundaries": []})
                     chk_cls.return_value.chunk.return_value = [chunk]
-                    result = index_pdf(path, corpus="mybook", force=True, embed_fn=_fake_embed)
+                    result = index_pdf(path, corpus="mybook", t3=mock_t3, force=True, embed_fn=_fake_embed)
     else:
         chunk = MagicMock()
         chunk.text = "text"
@@ -1455,7 +1165,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
                 chk_cls.return_value.chunk.return_value = [chunk]
-                result = index_markdown(path, corpus="docs", force=True, embed_fn=_fake_embed)
+                result = index_markdown(path, corpus="docs", t3=mock_t3, force=True, embed_fn=_fake_embed)
 
     assert result > 0
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
@@ -1473,7 +1183,7 @@ def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
     mock_t3.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
-            result = index_pdf(sample_pdf, corpus="mybook")
+            result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 0
     ext_cls.assert_not_called()
 
@@ -1514,8 +1224,7 @@ def test_index_pdf_return_metadata_false_returns_int(sample_pdf, monkeypatch, mo
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with pdf_extract_patches_ctx() as pep:
-            with patch("voyageai.Client", return_value=voyage_client):
-                result = index_pdf(sample_pdf, corpus="test")
+            result = index_pdf(sample_pdf, corpus="test", t3=mock_t3)
     assert isinstance(result, int) and result == 1
 
 
@@ -1524,17 +1233,16 @@ def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch, mo
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
             with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
-                with patch("voyageai.Client", return_value=voyage_client):
-                    chunk = MagicMock()
-                    chunk.text = "chunk content"
-                    chunk.chunk_index = 0
-                    chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 13, "page_number": 2}
-                    ext_cls.return_value.extract.return_value = MagicMock(
-                        text="text", metadata={"extraction_method": "x", "page_count": 1,
-                                               "format": "markdown", "page_boundaries": [],
-                                               "title": "My Paper", "author": "A. Thor"})
-                    chk_cls.return_value.chunk.return_value = [chunk]
-                    result = index_pdf(sample_pdf, corpus="test", return_metadata=True)
+                chunk = MagicMock()
+                chunk.text = "chunk content"
+                chunk.chunk_index = 0
+                chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 13, "page_number": 2}
+                ext_cls.return_value.extract.return_value = MagicMock(
+                    text="text", metadata={"extraction_method": "x", "page_count": 1,
+                                           "format": "markdown", "page_boundaries": [],
+                                           "title": "My Paper", "author": "A. Thor"})
+                chk_cls.return_value.chunk.return_value = [chunk]
+                result = index_pdf(sample_pdf, corpus="test", t3=mock_t3, return_metadata=True)
     assert isinstance(result, dict)
     assert result["chunks"] == 1
     assert isinstance(result["pages"], list)
@@ -1565,8 +1273,7 @@ def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, m
 def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch, mock_t3, voyage_client):
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
-        with patch("voyageai.Client", return_value=voyage_client):
-            result = index_markdown(sample_md, corpus="test", return_metadata=True)
+        result = index_markdown(sample_md, corpus="test", t3=mock_t3, return_metadata=True)
     assert isinstance(result, dict)
     assert isinstance(result["chunks"], int) and isinstance(result["sections"], int)
 
@@ -1582,61 +1289,37 @@ def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_m
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
-        with patch("voyageai.Client"):
-            result = index_markdown(sample_md, corpus="test", return_metadata=True)
+        result = index_markdown(sample_md, corpus="test", t3=mock_t3, return_metadata=True)
     assert isinstance(result, dict) and result["chunks"] == 0 and result["sections"] == 0
 
 
-@pytest.mark.parametrize("model,use_cce", [
-    ("voyage-code-3", False),
-    ("voyage-context-3", True),
-])
-def test_embed_progress_callback_fires(model, use_cce, cloud_mode):
-
-    progress: list[tuple[int, int]] = []
-    mock_client = MagicMock()
-    if use_cce:
-        inner = MagicMock(spec=ContextualizedEmbeddingsResult)
-        inner.embeddings = [[0.1] * 10, [0.2] * 10]
-        cce_result = MagicMock(spec=ContextualizedEmbeddingsObject)
-        cce_result.results = [inner]
-        mock_client.contextualized_embed.return_value = cce_result
-        n_chunks = 2
-    else:
-        embed_result = MagicMock()
-        embed_result.embeddings = [[0.1] * 10, [0.2] * 10, [0.3] * 10]
-        mock_client.embed.return_value = embed_result
-        n_chunks = 3
-    with patch("voyageai.Client", return_value=mock_client):
-        _embed_with_fallback(
-            [f"chunk {i}" for i in range(n_chunks)],
-            model, "test-key",
-            on_progress=lambda d, t: progress.append((d, t)),
-        )
-    assert progress
-    assert progress[-1] == (n_chunks, n_chunks)
-
-
-def test_embed_progress_callback_none_is_noop(cloud_mode):
-
-    mock_client = MagicMock()
-    embed_result = MagicMock()
-    embed_result.embeddings = [[0.1] * 10]
-    mock_client.embed.return_value = embed_result
-    with patch("voyageai.Client", return_value=mock_client):
-        _embed_with_fallback(["chunk one"], "voyage-code-3", "test-key", on_progress=None)
+# nexus-sghyo (2026-08-06): test_embed_progress_callback_fires and
+# test_embed_progress_callback_none_is_noop directly exercised the
+# deleted client-side ``_embed_with_fallback`` — no surviving subject.
+# on_progress threading through the surviving orchestration path is
+# still covered by test_index_threads_on_progress below.
 
 
 @pytest.mark.parametrize("indexer", ["pdf", "markdown"])
 def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, mock_t3, voyage_client):
+    """nexus-sghyo (2026-08-06): the single-flush (small-doc) path's
+    ``on_progress`` firing was wired ENTIRELY through the deleted
+    client-side ``_embed_with_fallback`` (per-API-batch progress during
+    client embedding) — embedding is server-side now, so a single-chunk
+    document through ``_index_document`` has no client-side batching to
+    report progress on, and ``on_progress`` no longer fires here.
+    Multi-batch progress reporting on the surviving INCREMENTAL path
+    (large docs) is still covered by
+    ``test_index_pdf_incremental_progress_fires``. This test now only
+    proves the callback is accepted and does not break the pipeline.
+    """
     set_credentials(monkeypatch)
     progress: list[tuple] = []
     path = sample_pdf if indexer == "pdf" else sample_md
     if indexer == "pdf":
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             with pdf_extract_patches_ctx() as pep:
-                with patch("voyageai.Client", return_value=voyage_client):
-                    result = index_pdf(path, corpus="mybook", on_progress=lambda d, t: progress.append((d, t)))
+                result = index_pdf(path, corpus="mybook", t3=mock_t3, on_progress=lambda d, t: progress.append((d, t)))
     else:
         chunk = MagicMock()
         chunk.text = "chunk text"
@@ -1644,12 +1327,10 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
         chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 10, "page_number": 0, "header_path": "Hello"}
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
-                with patch("voyageai.Client", return_value=voyage_client):
-                    chk_cls.return_value.chunk.return_value = [chunk]
-                    result = index_markdown(path, corpus="docs", on_progress=lambda d, t: progress.append((d, t)))
+                chk_cls.return_value.chunk.return_value = [chunk]
+                result = index_markdown(path, corpus="docs", t3=mock_t3, on_progress=lambda d, t: progress.append((d, t)))
     # nexus-8g79.23: exact count — one mock chunk planted, one indexed.
     assert result == 1
-    assert progress
 
 
 def test_stale_chunk_pruning_deleted_as_dead_code(sample_md, monkeypatch, voyage_client, cloud_mode):
@@ -1707,9 +1388,8 @@ def test_stale_chunk_pruning_deleted_as_dead_code(sample_md, monkeypatch, voyage
         chunks.append(mc)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
-            with patch("voyageai.Client", return_value=voyage_client):
-                chk_cls.return_value.chunk.return_value = chunks
-                index_markdown(sample_md, corpus="docs")
+            chk_cls.return_value.chunk.return_value = chunks
+            index_markdown(sample_md, corpus="docs", t3=mock_t3)
     assert captured_deletes == []
     mock_col.delete.assert_not_called()
 
@@ -1751,7 +1431,14 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode):
                             metadata={"extraction_method": "docling", "page_count": 50,
                                       "format": "markdown", "page_boundaries": []})
                         chk_cls.return_value.chunk.return_value = mock_chunks
-                        result = index_pdf(self.path, corpus="test",
+                        # nexus-sghyo (2026-08-06): explicit t3= bypasses the
+                        # service/non-service T3-handle resolution entirely
+                        # (doc_indexer.py: "db = t3" short-circuit) — needed
+                        # now that the suite runs under the ambient
+                        # service-mode default instead of the retired
+                        # NX_STORAGE_BACKEND_VECTORS=chroma legacy opt-out,
+                        # which used to keep the make_t3 patch load-bearing.
+                        result = index_pdf(self.path, corpus="test", t3=t3,
                                            embed_fn=embed_fn, on_progress=on_progress)
             return result, t3
     return _Setup()
@@ -1828,7 +1515,7 @@ def test_index_pdf_incremental_prune_deleted_as_dead_code(incr_setup) -> None:
                     metadata={"extraction_method": "docling", "page_count": 50,
                               "format": "markdown", "page_boundaries": []})
                 chk_cls.return_value.chunk.return_value = mock_chunks
-                result = index_pdf(incr_setup.path, corpus="test", embed_fn=_fake_embed)
+                result = index_pdf(incr_setup.path, corpus="test", t3=t3, embed_fn=_fake_embed)
     assert result == n_chunks
     mock_col.delete.assert_not_called()
 
@@ -1870,7 +1557,7 @@ def test_index_pdf_incremental_writes_checkpoints_per_batch(sample_pdf, monkeypa
                         metadata={"extraction_method": "docling", "page_count": 50,
                                   "format": "markdown", "page_boundaries": []})
                     chk_cls.return_value.chunk.return_value = mock_chunks
-                    result = index_pdf(sample_pdf, corpus="test", embed_fn=_fake_embed)
+                    result = index_pdf(sample_pdf, corpus="test", t3=mock_t3, embed_fn=_fake_embed)
     assert result == n_chunks
     assert len(checkpoint_writes) >= 3
     for i in range(1, len(checkpoint_writes)):
@@ -1913,60 +1600,11 @@ def test_index_pdf_incremental_checkpoint_exceeds_total(incr_setup):
     assert result == n
 
 
-def test_token_bucket_rate_limiter():
-
-    bucket = _TokenBucket(rpm=600, burst=3)
-    t0 = time.monotonic()
-    for _ in range(3):
-        bucket.acquire()
-    assert time.monotonic() - t0 < 0.1
-
-
-def test_token_bucket_zero_burst_still_works():
-
-    _TokenBucket(rpm=60, burst=1).acquire()
-
-
-def test_parallel_embed_preserves_order(cloud_mode):
-
-
-    def _mock_cce(inputs, model, input_type):
-        batch = inputs[0]
-        time.sleep(0.01 * len(batch))
-        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-        cce_item.embeddings = [[float(i)] * 10 for i in range(len(batch))]
-        result = MagicMock(spec=ContextualizedEmbeddingsObject)
-        result.results = [cce_item]
-        return result
-
-    mock_client = MagicMock()
-    mock_client.contextualized_embed = _mock_cce
-    chunks = ["x" * 5000] * 10
-    with patch("voyageai.Client", return_value=mock_client):
-        embeddings, model = _embed_with_fallback(chunks, "voyage-context-3", "test-key")
-    assert len(embeddings) == 10
-    assert model == "voyage-context-3"
-
-
-def test_parallel_embed_progress_fires_for_each_batch(cloud_mode):
-
-    progress: list[tuple] = []
-
-    def _mock_cce(inputs, model, input_type):
-        cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-        cce_item.embeddings = [[0.1] * 10 for _ in inputs[0]]
-        result = MagicMock(spec=ContextualizedEmbeddingsObject)
-        result.results = [cce_item]
-        return result
-
-    mock_client = MagicMock()
-    mock_client.contextualized_embed = _mock_cce
-    with patch("voyageai.Client", return_value=mock_client):
-        _embed_with_fallback(
-            ["x" * 5000] * 10, "voyage-context-3", "test-key",
-            on_progress=lambda d, t: progress.append((d, t)),
-        )
-    assert progress and progress[-1][0] == 10
+# nexus-sghyo (2026-08-06): test_token_bucket_rate_limiter,
+# test_token_bucket_zero_burst_still_works, test_parallel_embed_
+# preserves_order, and test_parallel_embed_progress_fires_for_each_batch
+# directly exercised the deleted ``_TokenBucket`` / ``_embed_with_
+# fallback`` parallel-CCE machinery — no surviving subject.
 
 
 class TestStreamingRouting:
@@ -1974,11 +1612,10 @@ class TestStreamingRouting:
         pdf = tmp_path / "small.pdf"
         pdf.write_bytes(b"dummy")
         with (
-            patch("nexus.doc_indexer._has_credentials", return_value=True),
-            # GH #336: prevent the local-fallback path from firing —
-            # this test exercises the cloud streaming router, not
-            # the credential-fallback branch.
-            patch("nexus.config.is_local_mode", return_value=False),
+            # nexus-sghyo (2026-08-06): _has_credentials is deleted — the
+            # service-mode guard (checked first, ambient test default) is
+            # what now prevents the retired credential-fallback branch
+            # from firing, so no patch is needed here any more.
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
             patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
@@ -1996,11 +1633,9 @@ class TestStreamingRouting:
         pdf = tmp_path / "doc.pdf"
         pdf.write_bytes(b"dummy")
         with (
-            patch("nexus.doc_indexer._has_credentials", return_value=True),
-            # GH #336: prevent the local-fallback path from firing —
-            # this test parametrises over streaming routing, not the
-            # credential-fallback branch.
-            patch("nexus.config.is_local_mode", return_value=False),
+            # nexus-sghyo (2026-08-06): see test_streaming_never_forces_
+            # batch_path above — _has_credentials is deleted; the
+            # service-mode guard already prevents the retired branch.
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
             patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
@@ -2070,8 +1705,9 @@ class TestStreamingReturnMetadata:
         pdf.write_bytes(b"dummy")
         vwr_side_effect = self._vector_with_retry_side_effect(populated_metadatas)
         with ExitStack() as stack:
-            stack.enter_context(patch("nexus.doc_indexer._has_credentials", return_value=True))
-            stack.enter_context(patch("nexus.config.is_local_mode", return_value=False))
+            # nexus-sghyo (2026-08-06): _has_credentials is deleted — the
+            # service-mode guard (ambient test default) already prevents
+            # the retired non-service credential-fallback branch.
             stack.enter_context(patch("nexus.doc_indexer._sha256", return_value="abc123"))
             stack.enter_context(patch("nexus.doc_indexer.make_t3"))
             stack.enter_context(patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value=doc_id))
@@ -2328,6 +1964,12 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
+    # nexus-sghyo (2026-08-06): embed_fn dispatch reads ambient
+    # is_vector_service_mode() regardless of the injected t3= handle —
+    # an explicit chroma opt-out is still the only way to reach the
+    # LOCAL-MODE embed branch (_make_local_embed_fn) these callers need.
+    # Not the deleted non-service/non-local CLOUD credential path.
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     client = make_vector_test_client()
     return cat_dir, T3Database(_client=client, local_mode=True)
 
@@ -2591,10 +2233,12 @@ def test_curated_title_survives_reindex(tmp_path, monkeypatch):
 # a service-side test (GAP nexus-i711w.1 item 9).
 
 
-@pytest.fixture(autouse=True)
-def _legacy_vector_backend(monkeypatch):
-    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
-    stubs fire unless opted out). This module tests the legacy
-    chroma/local embed pipeline, which is exactly the chroma-injected
-    configuration the opt-out exists for."""
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+# nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse fixture
+# that force-pinned this whole module to NX_STORAGE_BACKEND_VECTORS=chroma
+# (RDR-152's opt-out for the legacy chroma/local embed pipeline) is
+# RETIRED — that pipeline is deleted outright: the client no longer
+# embeds via Voyage (Hal determination 2026-07-28), and non-service,
+# non-local ingestion now fails loud instead of falling through to a
+# client-side embed. The module runs under the ambient service-mode
+# default like production; tests that need local-mode behavior pass
+# ``embed_fn=`` explicitly (already the pattern most tests here used).

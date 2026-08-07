@@ -26,13 +26,16 @@ from nexus.config import get_credential
 if TYPE_CHECKING:
     from pathlib import Path
 
-    # Type-only import. T3Database transitively pulls voyageai ->
-    # transformers -> torch at module load. With this import at
-    # runtime, every `from nexus.db.<sub> import ...` triggers
-    # nexus.db.__init__ which fires the torch import (multi-second).
-    # Any CLI subcommand importing under nexus.db hits this path.
-    # Lazy-loading the T3Database import inside make_t3() removes
-    # torch from the cold-start cost of `nx <subcommand>` invocations.
+    # Type-only import. T3Database's module transitively pulls in heavy
+    # local-embedding deps (fastembed/onnxruntime, LOCAL_EMBEDDING_MODELS)
+    # at module load. With this import at runtime, every
+    # `from nexus.db.<sub> import ...` triggers nexus.db.__init__, which
+    # fires that cold-start cost. Any CLI subcommand importing under
+    # nexus.db hits this path. Lazy-loading the T3Database import inside
+    # make_t3() keeps it out of the cold-start cost of `nx <subcommand>`
+    # invocations. (nexus-sghyo: T3Database no longer imports voyageai —
+    # client-side Voyage embedding is retired — but the local-embedding
+    # import weight remains, so the lazy-load discipline stays.)
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.db.t3 import T3Database
 
@@ -60,7 +63,7 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
       short-circuits service dispatch (used by every unit test that
       exercises the T3Database facade).
     * ``_ef_override`` — override the embedding function (e.g.
-      ``DefaultEmbeddingFunction()``) to avoid Voyage AI API calls.
+      ``DefaultEmbeddingFunction()``) to avoid real embedding API calls.
       Only meaningful together with ``_client``.
     """
     if _client is None:
@@ -78,11 +81,13 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
 
     cfg = load_config()
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
+    # nexus-sghyo (Hal determination 2026-07-28): the client no longer
+    # embeds via Voyage — T3Database's voyage_api_key parameter was
+    # retired with the client-side embed path it fed.
     return T3Database(
         tenant=get_credential("chroma_tenant"),
         database=get_credential("chroma_database"),
         api_key=get_credential("chroma_api_key"),
-        voyage_api_key=get_credential("voyage_api_key"),
         read_timeout_seconds=read_timeout_seconds,
         _client=_client,
         _ef_override=_ef_override,

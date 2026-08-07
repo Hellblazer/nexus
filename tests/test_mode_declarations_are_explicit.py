@@ -211,7 +211,11 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # PgVectorRepository.MODEL_DIMS; "voyage-code-3"/"voyage-context-3" are
 # literal ARGUMENTS naming the table's keys, not a behavior assertion about
 # which embedder ran. Rationale in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 59
+# 59 -> 58 (nexus-sghyo, 2026-08-06): -1, test_voyage_ef.py DELETED along
+# with the module it tested (nexus.db.voyage_ef) — client-side Voyage
+# embedding is retired (Hal determination 2026-07-28: "we do no embedding
+# on the client"). SHRINK, downward-only.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).

@@ -7,8 +7,9 @@ Extracted from indexer.py (RDR-032).  Public API::
     index_prose_file(ctx: IndexContext, file_path: Path) -> int
 
 Handles both Markdown files (SemanticMarkdownChunker) and plain prose
-(line-based chunking via _line_chunk).  Delegates to
-doc_indexer._embed_with_fallback for CCE-aware embedding.
+(line-based chunking via _line_chunk).  Embeds via ``ctx.embed_fn``
+(local mode) or the server-side stub (service mode); non-service
+cloud-mode embedding was retired (nexus-sghyo).
 """
 from __future__ import annotations
 
@@ -29,7 +30,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     """Index a single prose file into the docs__ collection.
 
     Uses SemanticMarkdownChunker for .md/.markdown files, _line_chunk for all
-    others.  Embeds via _embed_with_fallback (CCE for voyage-context-3).
+    others.  Embeds via ``ctx.embed_fn`` (local mode) or server-side
+    (service mode).
 
     Uses ``ctx`` in place of the old 12-parameter signature.
 
@@ -37,7 +39,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     skipped (current) or failed.
     """
     from nexus.chunker import _line_chunk  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
-    from nexus.doc_indexer import _embed_with_fallback  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
@@ -219,7 +220,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         return 0
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
-    # Embed: local mode uses embed_fn; cloud uses _embed_with_fallback (CCE)
+    # Embed: local mode uses embed_fn; service mode embeds server-side.
     with _stage("embed"):
         if ctx.embed_fn is not None:
             embeddings = ctx.embed_fn(embed_texts)
@@ -236,8 +237,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 embeddings = [[] for _ in embed_texts]
                 actual_model = ctx.embedding_model
             else:
-                embeddings, actual_model = _embed_with_fallback(
-                    embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
+                # nexus-sghyo: non-service embedding was retired — the
+                # client no longer embeds via Voyage.
+                raise RuntimeError(
+                    "non-service embedding was retired: the client no "
+                    "longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                    "VECTORS=service (the default) or unset it."
                 )
     if actual_model != ctx.embedding_model:
         for m in metadatas:

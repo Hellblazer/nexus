@@ -13,6 +13,14 @@ re-index runs).
 These tests pin the stub: in service mode, NO client-side embedding call is
 made by either indexer, and the upsert receives placeholder embeddings that
 the http client ignores.
+
+nexus-sghyo (2026-08-06): the legacy client-side embedder these tests
+originally proved was SKIPPED in service mode (``_embed_with_fallback``,
+``ctx.voyage_client.embed``) is now DELETED outright — client-side Voyage
+embedding is retired (Hal determination 2026-07-28: "we do no embedding on
+the client"). The double-spend class this file guards against is
+structurally impossible now, not merely mode-gated; these tests still pin
+the substantive placeholder-embedding / force_re_embed behavior.
 """
 from __future__ import annotations
 
@@ -49,12 +57,6 @@ class _ForbiddenVoyageClient:
         )
 
 
-def _forbidden_embed_with_fallback(*a, **k):
-    raise AssertionError(
-        "_embed_with_fallback called in service mode — double spend"
-    )
-
-
 def _make_col() -> MagicMock:
     # force=False exercises the real staleness check (check_staleness ->
     # col.get roundtrip when no staleness_cache is supplied) — empty
@@ -86,10 +88,13 @@ def _service_mode(monkeypatch):
     monkeypatch.setattr(
         "nexus.db.http_vector_client.is_vector_service_mode", lambda: True
     )
-    # Both indexers import the legacy embedder lazily from doc_indexer.
-    monkeypatch.setattr(
-        "nexus.doc_indexer._embed_with_fallback", _forbidden_embed_with_fallback
-    )
+    # nexus-sghyo (2026-08-06): the legacy client-side embedder
+    # (``nexus.doc_indexer._embed_with_fallback``) is DELETED outright —
+    # client-side Voyage embedding is retired (Hal determination
+    # 2026-07-28: "we do no embedding on the client"). The double-spend
+    # this file guards against is now structurally impossible rather
+    # than merely skipped: there is no client-side embed call left to
+    # make in service mode, so there is nothing left to patch here.
 
 
 def test_prose_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):

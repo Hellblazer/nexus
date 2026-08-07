@@ -21,7 +21,6 @@ import structlog
 from nexus.index_context import IndexContext
 from nexus.indexer_utils import build_context_prefix, check_staleness
 from nexus.languages import LANGUAGE_REGISTRY
-from nexus.retry import _voyage_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -471,20 +470,13 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             # per code chunk since RDR-155 P4a. Mirror doc_indexer's stub.
             embeddings = [[] for _ in documents]
         else:
-            for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
-                batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
-                _log.debug(
-                    "embedding batch",
-                    file=str(file_path),
-                    batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}",
-                )
-                result = _voyage_with_retry(
-                    ctx.voyage_client.embed,  # type: ignore[attr-defined]
-                    texts=batch,
-                    model=ctx.embedding_model,
-                    input_type="document",
-                )
-                embeddings.extend(result.embeddings)
+            # nexus-sghyo: non-service embedding was retired — the client
+            # no longer embeds via Voyage.
+            raise RuntimeError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
 
     # duoak 2C (nexus-1ugqs): stage chunks in the cross-file batcher;
     # upload happens in cap-sized batches and the post-store hook chains

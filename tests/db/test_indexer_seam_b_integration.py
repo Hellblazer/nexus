@@ -297,9 +297,13 @@ def test_indexer_seam_b_index_search_round_trip(
 
     collection = "knowledge__seam-b-test__bge-base-en-v15-768__v1"
 
-    # NON-VACUITY PROOF: patch _make_local_embed_fn and _embed_with_fallback
-    # to raise AssertionError.  If either fires, the service-mode guard is
-    # broken and Python embedding is running instead of the service.
+    # NON-VACUITY PROOF: patch _make_local_embed_fn to raise AssertionError.
+    # If it fires, the service-mode guard is broken and local ONNX embedding
+    # is running instead of the service. nexus-sghyo (2026-08-06): the
+    # sibling client-side Voyage guard (_embed_with_fallback) this test used
+    # to pin the SAME way is deleted outright — client-side Voyage embedding
+    # is retired (Hal determination 2026-07-28: "we do no embedding on the
+    # client"), so there is no longer a function there to call accidentally.
     from unittest.mock import patch
 
     def _must_not_call_local_embed(*_a, **_kw):
@@ -308,14 +312,7 @@ def test_indexer_seam_b_index_search_round_trip(
             "guard must prevent local ONNX from firing (guard ordering bug)"
         )
 
-    def _must_not_call_embed_fallback(*_a, **_kw):
-        raise AssertionError(
-            "_embed_with_fallback was called in service mode — the service-mode "
-            "guard or upsert-site stub is broken (Python embed must not run)"
-        )
-
-    with patch("nexus.doc_indexer._make_local_embed_fn", side_effect=_must_not_call_local_embed), \
-         patch("nexus.doc_indexer._embed_with_fallback", side_effect=_must_not_call_embed_fallback):
+    with patch("nexus.doc_indexer._make_local_embed_fn", side_effect=_must_not_call_local_embed):
         # Index via doc_indexer using the service (embed_fn=None, service mode)
         from nexus.doc_indexer import _index_document, _markdown_chunks
 
@@ -334,8 +331,7 @@ def test_indexer_seam_b_index_search_round_trip(
 
     # Staleness check: second index call with same content must return 0
     # (service now has /v1/vectors/get so incremental-sync works).
-    with patch("nexus.doc_indexer._make_local_embed_fn", side_effect=_must_not_call_local_embed), \
-         patch("nexus.doc_indexer._embed_with_fallback", side_effect=_must_not_call_embed_fallback):
+    with patch("nexus.doc_indexer._make_local_embed_fn", side_effect=_must_not_call_local_embed):
         from nexus.doc_indexer import _index_document as _index_document2
         chunks_reindexed = _index_document2(
             test_doc,

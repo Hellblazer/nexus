@@ -2,13 +2,12 @@
 """Tests for the extracted indexer sub-modules (RDR-032)."""
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from nexus.errors import CredentialsMissingError
 from nexus.index_context import IndexContext
-from nexus.indexer_utils import build_context_prefix, check_credentials, check_staleness
+from nexus.indexer_utils import build_context_prefix, check_staleness
 from tests.conftest import make_vector_test_client
 
 
@@ -143,26 +142,12 @@ def test_check_staleness_passes_when_chunk_has_matching_content_hash(tmp_path):
     assert result is True
 
 
-# ── check_credentials ────────────────────────────────────────────────────────
-
-def test_check_credentials_both_present():
-    check_credentials("voyage-key", "chroma-key")  # no exception
-
-
-@pytest.mark.parametrize("voyage,chroma,match", [
-    ("", "chroma-key", "voyage_api_key"),
-    ("voyage-key", "", "chroma_api_key"),
-])
-def test_check_credentials_missing(voyage, chroma, match):
-    with pytest.raises(CredentialsMissingError, match=match):
-        check_credentials(voyage, chroma)
-
-
-def test_check_credentials_both_missing():
-    with pytest.raises(CredentialsMissingError) as exc_info:
-        check_credentials("", "")
-    msg = str(exc_info.value)
-    assert "voyage_api_key" in msg and "chroma_api_key" in msg
+# check_credentials() was deleted at nexus-sghyo (2026-08-06): the client
+# no longer embeds via Voyage (Hal determination 2026-07-28), and the
+# non-service embed path it guarded now fails loud unconditionally at
+# the call site instead of via a shared credential-presence check. See
+# tests/test_indexer_seam_b_cutover.py::test_run_index_non_service_mode_raises_credentials_missing
+# for the replacement coverage.
 
 
 # ── build_context_prefix ─────────────────────────────────────────────────────
@@ -283,16 +268,21 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     py_file = tmp_path / "example.py"
     py_file.write_text("def greet(name):\n    return f'Hello {name}'\n")
 
-    mock_voyage = MagicMock()
-    mock_embed_result = MagicMock()
-    mock_embed_result.embeddings = [[0.1] * 128]
-    mock_voyage.embed.return_value = mock_embed_result
     mock_db = MagicMock()
+
+    # nexus-sghyo (2026-08-06): the client no longer embeds via Voyage —
+    # ``embed_fn`` (the local-mode / dry-run injection point) is the
+    # supported way to exercise the embed dispatch in tests now; the
+    # legacy ``ctx.voyage_client.embed`` path is deleted outright.
+    embed_calls: list[list[str]] = []
+    def fake_embed_fn(texts):
+        embed_calls.append(list(texts))
+        return [[0.1] * 128 for _ in texts]
 
     # nexus-8g79.28: real empty collection → check_staleness returns
     # False → indexer proceeds to embed + upsert (which routes through
     # the mocked db, keeping the test focused on the indexer logic).
-    ctx = make_ctx(col=_real_col(), db=mock_db, voyage_client=mock_voyage,
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
                    git_meta={"git_project_name": "test"})
 
     result = index_code_file(ctx, py_file)
@@ -300,7 +290,7 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     # nexus-8g79.23: small fixtures produce exactly 1 chunk.
 
     assert result == 1
-    mock_voyage.embed.assert_called()
+    assert embed_calls, "embed_fn must be called"
     call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
     assert call_kwargs["collection_name"] == "code__test"
     assert len(call_kwargs["ids"]) == result
@@ -338,22 +328,29 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     txt_file = tmp_path / "notes.txt"
     txt_file.write_text("Line one of notes.\nLine two of notes.\nLine three.\n")
     mock_db = MagicMock()
+
+    # nexus-sghyo (2026-08-06): the client no longer embeds via Voyage —
+    # ``embed_fn`` (the local-mode / dry-run injection point) is the
+    # supported way to exercise the embed dispatch in tests now; the
+    # legacy ``_embed_with_fallback`` path is deleted outright.
+    embed_calls: list[list[str]] = []
+    def fake_embed_fn(texts):
+        embed_calls.append(list(texts))
+        return [[0.1] * 128 for _ in texts]
+
     # nexus-8g79.28: real empty collection → check_staleness returns
-    # False → indexer proceeds. _embed_with_fallback stays mocked
-    # (it is the embedder boundary, not the chroma boundary).
+    # False → indexer proceeds.
     ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-                   db=mock_db, voyage_client=None,
+                   db=mock_db, embed_fn=fake_embed_fn,
                    corpus="docs__test", embedding_model="voyage-context-3")
 
-    with patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
-        mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
-        result = index_prose_file(ctx, txt_file)
+    result = index_prose_file(ctx, txt_file)
 
     # nexus-8g79.23: small fixtures produce exactly 1 chunk.
 
     assert result == 1
-    mock_embed.assert_called_once()
-    embed_texts = mock_embed.call_args[0][0]
+    assert len(embed_calls) == 1
+    embed_texts = embed_calls[0]
     upsert_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
     assert embed_texts == upsert_kwargs["documents"]
     meta = upsert_kwargs["metadatas"][0]
@@ -376,14 +373,13 @@ def test_index_code_file_does_not_emit_source_path(tmp_path, make_ctx):
     py_file = tmp_path / "phase_b.py"
     py_file.write_text("def fn():\n    return 'phase B'\n")
 
-    mock_voyage = MagicMock()
-    mock_embed_result = MagicMock()
-    mock_embed_result.embeddings = [[0.1] * 128]
-    mock_voyage.embed.return_value = mock_embed_result
     mock_db = MagicMock()
+    # nexus-sghyo (2026-08-06): embed_fn is the supported injection
+    # point now — the legacy ctx.voyage_client.embed path is deleted.
     # nexus-8g79.28: real empty collection.
     ctx = make_ctx(
-        col=_real_col(), db=mock_db, voyage_client=mock_voyage,
+        col=_real_col(), db=mock_db,
+        embed_fn=lambda texts: [[0.1] * 128 for _ in texts],
         git_meta={"git_project_name": "phase-b-test"},
     )
 
@@ -415,16 +411,16 @@ def test_index_prose_file_markdown_does_not_emit_source_path(
     md_file = tmp_path / "phase_b_branch_a.md"
     md_file.write_text("# Phase B Branch A\n\nMarkdown body content.\n")
     mock_db = MagicMock()
+    # nexus-sghyo (2026-08-06): embed_fn is the supported injection
+    # point now — the legacy _embed_with_fallback path is deleted.
     # nexus-8g79.28: real empty collection.
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-        db=mock_db, voyage_client=None,
+        db=mock_db, embed_fn=lambda texts: [[0.1] * 128 for _ in texts],
         corpus="docs__phase-b-md", embedding_model="voyage-context-3",
     )
 
-    with patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
-        mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
-        result = index_prose_file(ctx, md_file)
+    result = index_prose_file(ctx, md_file)
 
     # nexus-8g79.23: small fixtures produce exactly 1 chunk.
 
@@ -450,16 +446,16 @@ def test_index_prose_file_line_chunk_does_not_emit_source_path(
     txt_file = tmp_path / "phase_b_branch_b.txt"
     txt_file.write_text("Line one of phase B branch B.\nLine two.\n")
     mock_db = MagicMock()
+    # nexus-sghyo (2026-08-06): embed_fn is the supported injection
+    # point now — the legacy _embed_with_fallback path is deleted.
     # nexus-8g79.28: real empty collection.
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-        db=mock_db, voyage_client=None,
+        db=mock_db, embed_fn=lambda texts: [[0.1] * 128 for _ in texts],
         corpus="docs__phase-b-txt", embedding_model="voyage-context-3",
     )
 
-    with patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
-        mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
-        result = index_prose_file(ctx, txt_file)
+    result = index_prose_file(ctx, txt_file)
 
     # nexus-8g79.23: small fixtures produce exactly 1 chunk.
 

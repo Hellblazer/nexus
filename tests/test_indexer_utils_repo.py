@@ -175,7 +175,10 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     pdf.write_bytes(content)
     real_hash = hashlib.sha256(content).hexdigest()
 
-    monkeypatch.setattr("nexus.doc_indexer._has_credentials", lambda: True)
+    # nexus-sghyo (2026-08-06): _has_credentials is deleted (client no longer
+    # embeds via Voyage, Hal determination 2026-07-28). Ambient service mode
+    # (default) is what this test needs anyway — the server-stub embed
+    # branch does not call embed at all, so no embed_fn injection is needed.
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
 
     captured_paths: list[Path] = []
@@ -200,7 +203,15 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("nexus.doc_indexer._vector_with_retry", fake_chroma_retry)
     monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", fake_register)
 
-    result = index_pdf(pdf, "test")
+    # nexus-sghyo (2026-08-06): ambient mode is service mode by default, and
+    # with no ``t3=`` passed, index_pdf resolves its db handle via
+    # ``mcp_infra.get_t3()`` (a real, process-cached singleton) rather than
+    # the ``make_t3`` patched above — that path tries a real cloud-engine
+    # version probe and fails outside a live service. Pass ``t3=`` explicitly
+    # so the mock db is used directly, matching this test's actual intent
+    # (probing the path passed to ``_register_or_lookup_doc_id``, not
+    # exercising db-handle resolution).
+    result = index_pdf(pdf, "test", t3=mock_db)
 
     assert result == 0
     assert captured_paths

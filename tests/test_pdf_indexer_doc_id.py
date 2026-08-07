@@ -111,19 +111,18 @@ def mock_voyage_client():
         yield mock_client
 
 
-def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
-    """Shape-#2 embed adapter (returns embeddings, model)."""
-    ef = DefaultEmbeddingFunction()
-    return ef(chunks), model
-
-
 def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -> None:
     from nexus.indexer import index_repository
 
     monkeypatch.setenv("NX_LOCAL", "1")
+    # nexus-sghyo (2026-08-06): _embed_with_fallback is deleted (client-side
+    # Voyage embedding retired) — under the ambient service-mode default
+    # (checked BEFORE is_local_mode()) the indexer takes the server-embed
+    # stub branch and writes placeholder embeddings through the injected
+    # local_t3 facade instead. These tests only assert catalog/doc_id
+    # metadata shape, not real embedding content, so the stub is sufficient.
     with patch("nexus.db.make_t3", return_value=t3), \
-         patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-         patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         index_repository(repo, registry, force=False)
 
 

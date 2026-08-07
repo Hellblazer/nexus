@@ -9,9 +9,7 @@ from __future__ import annotations
 import hashlib
 
 from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -32,7 +30,7 @@ from nexus.checkpoint import (
 )
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
-from nexus.retry import _vector_with_retry, _voyage_with_retry
+from nexus.retry import _vector_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -42,7 +40,7 @@ from nexus.pdf_extractor import PDFExtractor
 # a list of (chunk_id, document_text, metadata_dict) tuples, or an empty list.
 ChunkFn = Callable[[Path, str, str, str, str], list[tuple[str, str, dict]]]
 
-# Type alias for a local embedding function (replaces _embed_with_fallback).
+# Type alias for a local (dry-run) embedding function override.
 # Receives (texts, model) and returns (embeddings, actual_model).
 EmbedFn = Callable[[list[str], str], tuple[list[list[float]], str]]
 
@@ -53,13 +51,6 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
     return h.hexdigest()
-
-
-def _has_credentials() -> bool:
-    # RDR-155 P4b: the chroma_api_key half died with the chroma credential
-    # map; the Voyage key is the only client-side cloud-ingest credential.
-    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    return bool(get_credential("voyage_api_key"))
 
 
 def _lookup_existing_doc_id(
@@ -889,28 +880,13 @@ def _register_or_lookup_doc_id(
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
 
 
-def _missing_credentials() -> list[str]:
-    """Return the list of unset cloud-ingest credentials.
-
-    Used to construct precise error messages — callers can tell the
-    user EXACTLY which key is missing rather than the generic
-    "credentials not configured" form. Empty list means all are set.
-    (RDR-155 P4b: chroma_api_key died with the chroma credential map.)
-    """
-    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    missing: list[str] = []
-    if not get_credential("voyage_api_key"):
-        missing.append("voyage_api_key")
-    return missing
-
-
 def _make_local_embed_fn() -> tuple[EmbedFn, str]:
     """Build an ``embed_fn`` backed by :class:`LocalEmbeddingFunction`,
     returned alongside the model name it will report.
 
     Used by ``_index_document`` and ``index_pdf`` as the credential-
-    free fallback path: when the user is in local mode (``NX_LOCAL=1``
-    or no Voyage/Chroma keys configured), ingestion uses the same
+    free fallback path: when the user is in local mode
+    (:func:`nexus.config.is_local_mode`), ingestion uses the same
     ONNX MiniLM / fastembed model that ``store_put`` and local-mode
     ``nx search`` already use. The chunk metadata records the actual
     model that ran, not the requested ``target_model`` — staleness
@@ -951,229 +927,9 @@ def _make_local_embed_fn() -> tuple[EmbedFn, str]:
     return _local_embed, model_name
 
 
-_CCE_TOKEN_LIMIT = 24_000  # 75% of Voyage's 32K to account for token estimation error
-_CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
-# Note: per-batch limit of 32K means we never hit 120K in a single call
-_CCE_MAX_TOTAL_CHUNKS = 16_000  # Voyage API limit: max 16K chunks across all inputs
-_EMBED_BATCH_SIZE = 128  # Voyage AI embed() limit is 1,000; use conservative batch size
-_CCE_MAX_BATCH_CHUNKS = 1000  # Voyage API limit: max 1,000 inputs per request
 _INCREMENTAL_BATCH_SIZE = 128  # Chunks per incremental embed/upsert batch
 _INCREMENTAL_THRESHOLD = 128  # Use incremental path when chunk count exceeds this
 _STREAMING_THRESHOLD = 0      # All PDFs use the streaming pipeline (resilient path)
-_PARALLEL_WORKERS = 4  # Concurrent Voyage API calls for CCE embedding
-_RATE_LIMIT_RPM = 250  # Target RPM for Voyage API (83% of 300 RPM limit)
-
-
-class _TokenBucket:
-    """Simple token-bucket rate limiter for API call throttling.
-
-    Allows *burst* immediate calls, then throttles to *rpm* requests per minute.
-    Thread-safe.
-    """
-
-    def __init__(self, rpm: int = _RATE_LIMIT_RPM, burst: int = 4) -> None:
-        self._interval = 60.0 / rpm  # seconds between tokens
-        self._burst = burst
-        self._tokens = float(burst)
-        self._last = time.monotonic()
-        self._lock = threading.Lock()
-
-    def acquire(self) -> None:
-        """Block until a token is available."""
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                elapsed = now - self._last
-                self._tokens = min(self._burst, self._tokens + elapsed / self._interval)
-                self._last = now
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-            time.sleep(self._interval * 0.5)
-
-
-def _batch_chunks_for_cce(chunks: list[str]) -> list[list[str]]:
-    """Split chunks into batches that each fit within the CCE token limit.
-
-    Each batch must have >= 2 chunks (CCE requirement).  Single-leftover
-    chunks are merged into the previous batch rather than dropped.
-    """
-    batches: list[list[str]] = []
-    current: list[str] = []
-    current_tokens = 0
-    for chunk in chunks:
-        chunk_tokens = len(chunk) // 2  # conservative: ~2 chars/token for academic text
-        if current and (current_tokens + chunk_tokens > _CCE_TOKEN_LIMIT or len(current) >= _CCE_MAX_BATCH_CHUNKS):
-            batches.append(current)
-            current = [chunk]
-            current_tokens = chunk_tokens
-        else:
-            current.append(chunk)
-            current_tokens += chunk_tokens
-    if current:
-        # CCE requires >= 2 chunks per batch; merge singletons into previous batch
-        # but only if that won't exceed the per-batch chunk limit
-        if len(current) < 2 and batches and len(batches[-1]) < _CCE_MAX_BATCH_CHUNKS:
-            batches[-1].extend(current)
-        else:
-            batches.append(current)
-    return batches
-
-
-def _embed_with_fallback(
-    chunks: list[str],
-    model: str,
-    api_key: str,
-    input_type: str = "document",
-    timeout: float = 120.0,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> tuple[list[list[float]], str]:
-    """Embed chunks using CCE when possible, falling back to voyage-4 on failure.
-
-    Large documents are automatically batched into groups that fit within the
-    CCE token limit.  Returns ``(embeddings, actual_model_used)`` so callers
-    can record the model that produced the stored vectors in metadata.
-
-    On CCE batch failure (token limit exceeded), the batch is split in half
-    and retried with the same model. Never falls back to a different model —
-    all vectors in a collection must come from the same embedding space.
-    Single-chunk failures that cannot be split further raise immediately.
-
-    We rely on Voyage's default truncation=True. Our chunker keeps chunks well
-    under model context limits, so truncation should never activate. If it does,
-    the embedding is still usable (just based on truncated text).
-    """
-    # Filter out empty strings — Voyage AI rejects them
-    chunks = [c for c in chunks if c and c.strip()]
-    if not chunks:
-        return [], model
-    if len(chunks) >= _CCE_MAX_TOTAL_CHUNKS:
-        _log.warning(
-            "chunk count exceeds Voyage API limit",
-            chunk_count=len(chunks),
-            limit=_CCE_MAX_TOTAL_CHUNKS,
-        )
-    import voyageai  # noqa: PLC0415 — heavy/optional dep (voyageai) deferred to call time to keep module import cheap
-    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
-    if model == "voyage-context-3":
-        # CCE API accepts single-element inputs — use it for all chunk counts.
-        # The old >=2 requirement was our incorrect assumption; removing it ensures
-        # single-chunk docs are indexed in the same embedding space as CCE queries.
-        batches = _batch_chunks_for_cce(chunks) if len(chunks) >= 2 else [[chunks[0]]]
-        all_embeddings: list[list[float]] = []
-
-        def _embed_one_batch(batch: list[str]) -> list[list[float]]:
-            """Embed a single CCE batch, splitting on failure.
-
-            When a batch exceeds the 32K token limit, halves it recursively.
-            When a single chunk is too large, truncates it to ~60K chars
-            (~30K tokens) and retries once before skipping with a zero vector.
-            """
-            try:
-                r = _voyage_with_retry(
-                    client.contextualized_embed,
-                    inputs=[batch], model=model, input_type=input_type,
-                )
-                return r.results[0].embeddings
-            except Exception as exc:
-                if len(batch) <= 1:
-                    # Single oversized chunk — truncate and retry
-                    _CCE_CHAR_LIMIT = 60_000  # ~30K tokens, under 32K context window
-                    original_len = len(batch[0])
-                    if original_len > _CCE_CHAR_LIMIT:
-                        truncated = batch[0][:_CCE_CHAR_LIMIT]
-                        _log.warning("cce_chunk_truncated",
-                                     original_chars=original_len,
-                                     truncated_chars=_CCE_CHAR_LIMIT)
-                        try:
-                            r = _voyage_with_retry(
-                                client.contextualized_embed,
-                                inputs=[[truncated]], model=model, input_type=input_type,
-                            )
-                            return r.results[0].embeddings
-                        except Exception as exc2:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
-                            _log.warning("cce_chunk_skip_after_truncate",
-                                         error=str(exc2), chars=_CCE_CHAR_LIMIT)
-                            # Return zero vector — chunk is indexed but with degraded embedding
-                            dim = len(all_embeddings[0]) if all_embeddings else 1024
-                            return [[0.0] * dim]
-                    # Not a length issue — re-raise
-                    raise
-                _log.warning("cce_batch_too_large_splitting",
-                             error=str(exc), batch_size=len(batch))
-                mid = len(batch) // 2
-                result_embs: list[list[float]] = []
-                for half in (batch[:mid], batch[mid:]):
-                    result_embs.extend(_embed_one_batch(half))
-                return result_embs
-
-        if len(batches) >= 2:
-            # Parallel CCE embedding with rate limiting (nexus-cmcp)
-            bucket = _TokenBucket(rpm=_RATE_LIMIT_RPM, burst=_PARALLEL_WORKERS)
-            batch_results: list[list[list[float]] | None] = [None] * len(batches)
-
-            def _rate_limited_embed(idx: int, batch: list[str]) -> None:
-                bucket.acquire()
-                batch_results[idx] = _embed_one_batch(batch)
-
-            # Indexing review C3: drain every future before re-raising.
-            # The previous shape collected results in submission order via
-            # future.result() — the first raising future aborted the loop
-            # and the executor's __exit__ discarded the remaining results,
-            # so a later batch's 429 was silently swallowed. We now wait
-            # for *all* futures to complete, record the first exception,
-            # then re-raise it — callers that retry see the full failure
-            # surface, not just the first one.
-            with ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as pool:
-                futures = [
-                    pool.submit(_rate_limited_embed, i, b)
-                    for i, b in enumerate(batches)
-                ]
-                first_exc: BaseException | None = None
-                for future in futures:
-                    try:
-                        future.result()
-                    except BaseException as exc:  # noqa: BLE001 — gather all futures; capture first failure and re-raise after loop
-                        if first_exc is None:
-                            first_exc = exc
-                if first_exc is not None:
-                    raise first_exc
-
-                # All batches completed successfully — extend in submission
-                # order to preserve embedding alignment with the input chunks.
-                done_count = 0
-                for i, _ in enumerate(futures):
-                    embs = batch_results[i]
-                    if embs is None:
-                        raise RuntimeError(
-                            f"Batch {i} embedding result missing after future completed"
-                        )
-                    all_embeddings.extend(embs)
-                    done_count += len(embs)
-                    if on_progress:
-                        on_progress(done_count, len(chunks))
-        else:
-            # Single batch — no parallelism overhead
-            embs = _embed_one_batch(batches[0])
-            all_embeddings.extend(embs)
-            if on_progress:
-                on_progress(len(all_embeddings), len(chunks))
-
-        if all_embeddings:
-            return all_embeddings, model
-        raise RuntimeError(
-            f"CCE embedding returned no vectors for {len(chunks)} chunks — "
-            "refusing to fall through to voyage-4 (would corrupt vector space)"
-        )
-    # Standard embedding path (voyage-4 or any non-CCE model)
-    all_emb: list[list[float]] = []
-    for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
-        batch = chunks[i:i + _EMBED_BATCH_SIZE]
-        result = _voyage_with_retry(client.embed, texts=batch, model=model, input_type=input_type)
-        all_emb.extend(result.embeddings)
-        if on_progress:
-            on_progress(len(all_emb), len(chunks))
-    return all_emb, model
 
 
 def _upsert_skip_reembed(
@@ -1351,9 +1107,9 @@ def _index_document(
     directly, bypassing the default ``docs__{corpus}`` derivation.  This is
     used for RDR collections (``rdr__<repo>-<hash8>``).
 
-    When *embed_fn* is provided it replaces ``_embed_with_fallback`` and the
-    Voyage AI credential check is skipped.  This supports local dry-run mode
-    (ONNX / DefaultEmbeddingFunction) without requiring any API keys.
+    When *embed_fn* is provided it replaces the server-embed stub used in
+    service mode.  This supports local dry-run mode (ONNX /
+    DefaultEmbeddingFunction) without requiring any API keys.
 
     When *return_metadata* is True, returns the prepared chunk metadatas list
     instead of a bare int.  Callers (index_pdf, index_markdown) use it to
@@ -1404,15 +1160,18 @@ def _index_document(
 
             if is_local_mode():
                 embed_fn, local_target_model = _make_local_embed_fn()
-            elif not _has_credentials():
+            else:
+                # nexus-sghyo: non-service, non-local cloud-mode ingestion
+                # was retired — the client no longer embeds via Voyage
+                # (Hal determination 2026-07-28). Fail loud instead of
+                # falling through to a dead credential-driven embed path.
                 from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
-                missing = _missing_credentials()
                 raise CredentialsMissingError(
-                    f"cannot index in cloud mode without {', '.join(missing)}. "
-                    f"Either set the missing key(s) via 'nx config set <key> "
-                    f"<value>' (or env var), or unset NX_LOCAL to fall back "
-                    f"to local-mode ingestion (no API keys needed)."
+                    "non-service cloud-mode ingestion was retired: the client "
+                    "no longer embeds via Voyage. Unset NX_STORAGE_BACKEND_"
+                    "VECTORS (service mode is the default) or set NX_LOCAL=1 "
+                    "for local-mode ingestion (no API keys needed)."
                 )
 
     # Normalize to absolute so staleness checks are path-form-independent.
@@ -1550,12 +1309,13 @@ def _index_document(
                 embeddings = [[]] * len(documents)
                 actual_model = target_model
             else:
-                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-                voyage_key = get_credential("voyage_api_key")
-                if not voyage_key:
-                    raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+                # nexus-sghyo: non-service embedding was retired — the
+                # client no longer embeds via Voyage.
+                raise RuntimeError(
+                    "non-service embedding was retired: the client no "
+                    "longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                    "VECTORS=service (the default) or unset it."
+                )
         if actual_model != target_model:
             for m in metadatas:
                 m["embedding_model"] = actual_model
@@ -1765,13 +1525,12 @@ def _index_pdf_incremental(
                     embeddings = [[]] * len(batch_docs)
                     actual_model = target_model
                 else:
-                    from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-                    voyage_key = get_credential("voyage_api_key")
-                    if not voyage_key:
-                        raise RuntimeError("voyage_api_key required")
-                    timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                    embeddings, actual_model = _embed_with_fallback(
-                        batch_docs, target_model, voyage_key, timeout=timeout,
+                    # nexus-sghyo: non-service embedding was retired — the
+                    # client no longer embeds via Voyage.
+                    raise RuntimeError(
+                        "non-service embedding was retired: the client no "
+                        "longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                        "VECTORS=service (the default) or unset it."
                     )
 
             if actual_model != target_model:
@@ -2094,9 +1853,8 @@ def index_pdf(
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
     content unchanged since last index with the same embedding model).
 
-    Pass *embed_fn* to override the default Voyage AI embedding (e.g. a local
-    ONNX function for dry-run mode).  When *embed_fn* is provided the Voyage
-    credential check is bypassed.
+    Pass *embed_fn* to override the default server-side embedding (e.g. a
+    local ONNX function for dry-run mode).
 
     Pass *force=True* to bypass the staleness check and always re-index.
 
@@ -2164,15 +1922,18 @@ def index_pdf(
 
             if is_local_mode():
                 embed_fn, local_target_model = _make_local_embed_fn()
-            elif not _has_credentials():
+            else:
+                # nexus-sghyo: non-service, non-local cloud-mode ingestion
+                # was retired — the client no longer embeds via Voyage
+                # (Hal determination 2026-07-28). Fail loud instead of
+                # falling through to a dead credential-driven embed path.
                 from nexus.errors import CredentialsMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
-                missing = _missing_credentials()
                 raise CredentialsMissingError(
-                    f"cannot index in cloud mode without {', '.join(missing)}. "
-                    f"Either set the missing key(s) via 'nx config set <key> "
-                    f"<value>' (or env var), or unset NX_LOCAL to fall back "
-                    f"to local-mode ingestion (no API keys needed)."
+                    "non-service cloud-mode ingestion was retired: the client "
+                    "no longer embeds via Voyage. Unset NX_STORAGE_BACKEND_"
+                    "VECTORS (service mode is the default) or set NX_LOCAL=1 "
+                    "for local-mode ingestion (no API keys needed)."
                 )
 
     # Normalize to absolute so staleness checks are path-form-independent.
@@ -2568,12 +2329,13 @@ def index_pdf(
                 embeddings = [[]] * len(documents)
                 actual_model = target_model
             else:
-                from nexus.config import get_credential, load_config  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-                voyage_key = get_credential("voyage_api_key")
-                if not voyage_key:
-                    raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-                embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+                # nexus-sghyo: non-service embedding was retired — the
+                # client no longer embeds via Voyage.
+                raise RuntimeError(
+                    "non-service embedding was retired: the client no "
+                    "longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                    "VECTORS=service (the default) or unset it."
+                )
         if actual_model != target_model:
             for m in metadatas_list:
                 m["embedding_model"] = actual_model
@@ -2867,9 +2629,8 @@ def index_markdown(
     YAML frontmatter fields (title, author, date) are stored as metadata.
     Returns the number of chunks indexed, or 0 if skipped.
 
-    Pass *embed_fn* to override the default Voyage AI embedding (e.g. a local
-    ONNX function for dry-run mode).  When *embed_fn* is provided the Voyage
-    credential check is bypassed.
+    Pass *embed_fn* to override the default server-side embedding (e.g. a
+    local ONNX function for dry-run mode).
 
     Pass *force=True* to bypass the staleness check and always re-index.
 

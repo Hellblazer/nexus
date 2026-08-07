@@ -755,10 +755,14 @@ def _check_t3_cloud() -> list[HealthResult]:
     # migration-source credential rows died with the migration machinery
     # at P4b.
 
-    # VOYAGE_API_KEY — server-side embedding on the service path; the
-    # client key is enrichment + engine-bootstrap material only (RDR-188
-    # moved reranking server-side — no client code path consumes this key
-    # for rerank), not a serving requirement.
+    # VOYAGE_API_KEY — server-side embedding on the service path. The
+    # client key is no longer a client credential of any kind (nexus-sghyo,
+    # Hal determination 2026-07-28: "we do no embedding on the client" —
+    # RDR-188 already moved reranking server-side, so no client code path
+    # consumed this key for rerank either). It remains an OPTIONAL
+    # engine-bound setting: a locally-spawned engine plumbs it through
+    # (daemon/storage_service_daemon.py) for voyage mode. Not a serving
+    # requirement from the client's perspective either way.
     voyage_key = get_credential("voyage_api_key")
     results.append(HealthResult(
         label="Voyage AI (VOYAGE_API_KEY)",
@@ -1905,10 +1909,21 @@ def _check_credential_persistence() -> list[HealthResult]:
     GUI-spawned ``nx-mcp`` (Claude Desktop, Cowork SDK bridge) inherits
     launchd's environment, NOT the user's interactive shell. If
     ``VOYAGE_API_KEY`` is in ``.zshrc`` exports but never persisted via
-    ``nx config set``, the GUI-spawned subprocess sees it as absent,
-    ``is_local_mode()`` flips to True, and T3 dispatch goes to the
-    daemon path that fails opaquely. (RDR-155 P4b: the CHROMA_* keys
-    died with the migration machinery.)
+    ``nx config set``, the GUI-spawned subprocess sees it as absent.
+
+    nexus-sghyo (2026-08-06) CORRECTED CLAIM: this docstring previously
+    said the gap flips ``is_local_mode()`` to True and breaks T3
+    dispatch — FALSE since RDR-155 (``is_local_mode()`` never reads this
+    key; see nexus-nmw3i below, which already fixed the mode-detection
+    half of this same false premise). The key is no longer a client
+    embedding credential at all (Hal determination 2026-07-28: "we do no
+    embedding on the client") — it is an OPTIONAL engine-bound setting:
+    a locally-spawned engine plumbs it through
+    (``daemon/storage_service_daemon.py``) to run in voyage mode instead
+    of the local bge-768 default. The REAL consequence of the env-only
+    gap: a GUI-spawned engine-provisioning path sees the key as absent
+    and the locally-spawned engine silently defaults to bge-768 instead
+    of the voyage mode the operator intended — never a mode misdetection.
 
     This check runs on the CLI side (where shell env IS visible) and
     surfaces the gap before the GUI-spawn path hits it. Non-fatal: a
@@ -1966,7 +1981,8 @@ def _check_credential_persistence() -> list[HealthResult]:
     detail = (
         f"{len(env_only)} credential(s) in shell env only: {', '.join(env_only)}. "
         "GUI-spawned consumers (Claude Desktop, Cowork) cannot see "
-        "shell env vars and will misdetect cloud mode as local mode."
+        "shell env vars — a locally-spawned engine will silently default "
+        "to bge-768 instead of voyage mode."
     )
 
     return [

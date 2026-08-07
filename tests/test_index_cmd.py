@@ -1202,26 +1202,6 @@ class TestPdfMdIdentityDropRegisterThrow:
     """
 
     @staticmethod
-    def _voyage_double():
-        from voyageai.object.contextualized_embeddings import (
-            ContextualizedEmbeddingsObject,
-            ContextualizedEmbeddingsResult,
-        )
-
-        client = MagicMock()
-
-        def _fake_cce(inputs, model, input_type):
-            batch = inputs[0]
-            cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-            cce_item.embeddings = [[0.1, 0.2] for _ in batch]
-            result = MagicMock(spec=ContextualizedEmbeddingsObject)
-            result.results = [cce_item]
-            return result
-
-        client.contextualized_embed.side_effect = _fake_cce
-        return client
-
-    @staticmethod
     def _empty_t3():
         t3 = MagicMock()
         t3.get_or_create_collection.return_value = MagicMock(
@@ -1275,6 +1255,16 @@ class TestPdfMdIdentityDropRegisterThrow:
     ):
         from nexus.cli import main as cli_main
 
+        # nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+        # (Hal determination 2026-07-28); the non-service dispatch this test
+        # needs to reach _register_or_lookup_doc_id via is now local-mode
+        # (ONNX), not cloud-mode-with-credentials. The module-level
+        # ``cloud_mode`` fixture (pytestmark above) already monkeypatched
+        # ``nexus.config.is_local_mode`` to a hardcoded ``False`` — an env
+        # var flip alone would not undo that, since the function object
+        # itself was replaced. Re-patch it directly, run-order guaranteed
+        # to win (fixture setup happens before the test body).
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
         md = home / "orphan.md"
         md.write_text("# Orphan\n\nSome real prose body for orphan.\n")
@@ -1283,8 +1273,7 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
-             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(cli_main, ["index", "md", str(md)])
 
         assert result.exit_code != 0, result.output
@@ -1295,6 +1284,9 @@ class TestPdfMdIdentityDropRegisterThrow:
     def test_md_register_ok_summary_unchanged(self, runner, home, monkeypatch):
         from nexus.cli import main as cli_main
 
+        # nexus-sghyo (2026-08-06): see test_md_register_throw above — local
+        # mode is the surviving non-service dispatch path.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
         md = home / "healthy.md"
         md.write_text("# Healthy\n\nSome real prose body for healthy.\n")
@@ -1305,8 +1297,7 @@ class TestPdfMdIdentityDropRegisterThrow:
              patch("nexus.doc_indexer._fence_begin"), \
              patch("nexus.doc_indexer._fence_complete"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
-             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(cli_main, ["index", "md", str(md)])
 
         assert result.exit_code == 0, result.output
@@ -1324,8 +1315,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         from nexus.cli import main as cli_main
 
-        monkeypatch.setenv("NX_LOCAL", "0")
-        monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
+        # nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+        # (Hal determination 2026-07-28); local mode is the surviving
+        # non-service dispatch path this test needs.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
 
         pdf = home / "orphan.pdf"
@@ -1336,8 +1329,7 @@ class TestPdfMdIdentityDropRegisterThrow:
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             pdf_extract_patches_ctx(), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             pdf_extract_patches_ctx():
             result = runner.invoke(cli_main, ["index", "pdf", str(pdf)])
 
         assert result.exit_code != 0, result.output
@@ -1350,8 +1342,9 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         from nexus.cli import main as cli_main
 
-        monkeypatch.setenv("NX_LOCAL", "0")
-        monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
+        # nexus-sghyo (2026-08-06): see the throw variant above — local mode
+        # is the surviving non-service dispatch path.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
 
         pdf = home / "healthy.pdf"
@@ -1364,8 +1357,7 @@ class TestPdfMdIdentityDropRegisterThrow:
              patch("nexus.doc_indexer._fence_complete"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             pdf_extract_patches_ctx(), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             pdf_extract_patches_ctx():
             result = runner.invoke(cli_main, ["index", "pdf", str(pdf)])
 
         assert result.exit_code == 0, result.output
@@ -1422,8 +1414,13 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         from nexus.cli import main as cli_main
 
-        monkeypatch.setenv("NX_LOCAL", "0")
-        monkeypatch.setenv("VOYAGE_API_KEY", "vk_test")
+        # nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+        # (Hal determination 2026-07-28); local mode is the surviving
+        # non-service dispatch path — doc_indexer.index_pdf resolves
+        # embed_fn via _make_local_embed_fn() before delegating to the
+        # streaming pipeline, so pipeline_stages never hits its own
+        # (now unconditional) non-service-embedding-retired raise.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
 
         pdf = home / "orphan_streaming.pdf"
@@ -1440,8 +1437,7 @@ class TestPdfMdIdentityDropRegisterThrow:
              patch("nexus.doc_indexer.make_t3", return_value=self._t3_with_readback_chunk()), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             pdf_extract_patches_ctx(), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             pdf_extract_patches_ctx():
             ext_cls.return_value.extract.side_effect = _fx(
                 fake_result.metadata["page_count"], fake_result,
             )

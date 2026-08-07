@@ -1065,26 +1065,6 @@ class TestIdentityDropSummary:
     """
 
     @staticmethod
-    def _voyage_double() -> MagicMock:
-        from voyageai.object.contextualized_embeddings import (
-            ContextualizedEmbeddingsObject,
-            ContextualizedEmbeddingsResult,
-        )
-
-        client = MagicMock()
-
-        def _fake_cce(inputs, model, input_type):
-            batch = inputs[0]
-            cce_item = MagicMock(spec=ContextualizedEmbeddingsResult)
-            cce_item.embeddings = [[0.1, 0.2] for _ in batch]
-            result = MagicMock(spec=ContextualizedEmbeddingsObject)
-            result.results = [cce_item]
-            return result
-
-        client.contextualized_embed.side_effect = _fake_cce
-        return client
-
-    @staticmethod
     def _empty_t3() -> MagicMock:
         t3 = MagicMock()
         t3.get_or_create_collection.return_value = MagicMock(
@@ -1128,6 +1108,15 @@ class TestIdentityDropSummary:
         # _index_document path either way (no streaming pipeline
         # involved), so this is the only override single-file .md needs.
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        # nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+        # (Hal determination 2026-07-28) — local mode (ONNX) is the
+        # surviving non-service dispatch path this test needs to reach
+        # _register_or_lookup_doc_id via. The module-level ``cloud_mode``
+        # fixture (pytestmark above) already monkeypatched
+        # ``nexus.config.is_local_mode`` to a hardcoded ``False``; an env
+        # var flip alone would not undo that, since the function object
+        # itself was replaced. Re-patch it directly.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
         md_a = self._make_md(tmp_path, "recA")
         md_b = self._make_md(tmp_path, "recB")
@@ -1140,8 +1129,7 @@ class TestIdentityDropSummary:
 
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
-             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(main, ["dt", "index", "--selection"])
 
         # Collect-and-continue (nexus-9800y convention): the register
@@ -1164,6 +1152,9 @@ class TestIdentityDropSummary:
         from nexus.cli import main
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+        # nexus-sghyo (2026-08-06): see test_register_throw_* above — local
+        # mode is the surviving non-service dispatch path.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
         md_a = self._make_md(tmp_path, "recOK")
         fake_selectors["selection"].return_value = [("U-OK", str(md_a))]
@@ -1174,8 +1165,7 @@ class TestIdentityDropSummary:
              patch("nexus.doc_indexer._fence_begin"), \
              patch("nexus.doc_indexer._fence_complete"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
-             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
-             patch("voyageai.Client", return_value=self._voyage_double()):
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(main, ["dt", "index", "--selection"])
 
         assert "Indexed 1 record(s)" in result.output, result.output

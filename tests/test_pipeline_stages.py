@@ -194,8 +194,12 @@ class TestServiceModeStreaming:
         assert embs and all(e == [] for e in embs)
 
     def test_non_service_no_voyage_still_raises(self, db) -> None:
-        # The legacy (non-service) no-Voyage path must keep failing loud.
-        with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
+        # nexus-sghyo (2026-08-06): the legacy (non-service) embed path is
+        # now retired outright rather than credential-gated — the client
+        # no longer embeds via Voyage at all (Hal determination
+        # 2026-07-28), so the message names the retirement, not a missing
+        # key.
+        with pytest.raises(RuntimeError, match="non-service embedding was retired"):
             _run_service_mode(
                 db, _er(1), _tc(("chunk x", 0, {})),
                 service=False, voyage=None, content_hash="raw123")
@@ -801,27 +805,23 @@ class TestPipelineIndexPdf:
             pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
-    def test_embed_fn_none_resolves_credentials(self, db, mock_t3) -> None:
-        fr, fc = _er(1), _tc(("c0", 0, {"page_number": 1, "chunk_type": "text"}))
-        with (patch(_P_EXT) as ME, patch(_P_CHK) as MC,
-              patch("nexus.db.http_vector_client.is_vector_service_mode",
-                    return_value=False),
-              patch("nexus.config.get_credential", side_effect=fake_credentials("fake-key")),
-              patch("nexus.config.load_config", return_value={}),
-              patch("nexus.doc_indexer._embed_with_fallback") as me):
-            me.return_value = ([[0.1] * 4], "voyage-context-3")
-            ME.return_value.extract.side_effect = _fx(1, fr)
-            MC.return_value.chunk.return_value = fc
-            total = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
-        assert total == 1
-        me.assert_called()
+    # nexus-sghyo (2026-08-06): test_embed_fn_none_resolves_credentials
+    # DELETED — it proved that, given a valid voyage credential, the
+    # legacy non-service embed path succeeded via
+    # doc_indexer._embed_with_fallback. That whole path is retired
+    # outright regardless of credential (Hal determination 2026-07-28:
+    # "we do no embedding on the client") — no surviving subject. See
+    # test_embed_fn_none_no_credentials_fails_fast below, which now
+    # covers the (only reachable) unconditional-raise behavior.
 
     def test_embed_fn_none_no_credentials_fails_fast(self, db, mock_t3) -> None:
-        # Legacy (non-service) path: no Voyage key must still fail loud.
+        # nexus-sghyo: non-service embedding is retired unconditionally
+        # now, not merely credential-gated — the client no longer embeds
+        # via Voyage at all.
         with (patch("nexus.db.http_vector_client.is_vector_service_mode",
                     return_value=False),
               patch("nexus.config.get_credential", side_effect=fake_credentials(None))):
-            with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
+            with pytest.raises(RuntimeError, match="non-service embedding was retired"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
     def test_streaming_pdf_does_not_emit_source_path(

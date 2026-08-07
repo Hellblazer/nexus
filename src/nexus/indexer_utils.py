@@ -921,27 +921,6 @@ def check_staleness(
     return True
 
 
-def check_credentials(voyage_key: str, chroma_key: str) -> None:
-    """Raise CredentialsMissingError if either API key is absent.
-
-    Args:
-        voyage_key: Voyage AI API key string (empty string = missing).
-        chroma_key: ChromaDB API key string (empty string = missing).
-
-    Raises:
-        CredentialsMissingError: When one or both keys are absent.
-    """
-    missing: list[str] = []
-    if not voyage_key:
-        missing.append("voyage_api_key")
-    if not chroma_key:
-        missing.append("chroma_api_key")
-    if missing:
-        raise CredentialsMissingError(
-            f"{', '.join(missing)} not set — run: nx config set <key> <value>"
-        )
-
-
 def check_local_path_writable() -> None:
     """Validate that the local ChromaDB path is writable.
 

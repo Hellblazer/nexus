@@ -38,6 +38,30 @@ def _stub_managed_service_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_me, "probe_managed_service", lambda **_kw: None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_service_singleton():
+    """Each test sees a fresh HttpVectorClient singleton (nexus-sghyo,
+    2026-08-06).
+
+    ``get_http_vector_client()`` caches a cloud-mode version-probe FAILURE
+    at module scope (``_version_probe_error``) and re-raises it on every
+    subsequent call BEFORE even reaching ``probe_managed_service`` — the
+    stub above never gets a chance to run once that cache is poisoned.
+    A prior test elsewhere in the same pytest-xdist worker (any test that
+    hits a real cloud-mode probe against this session's unstamped dev
+    engine — see ``_stub_managed_service_probe`` above) can leave that
+    cache poisoned for every later test in this file, reproducing only in
+    combined runs. Same idiom as
+    ``tests/test_make_t3_service_dispatch.py``'s
+    ``_reset_service_singleton``.
+    """
+    from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+
+    reset_http_vector_client_for_tests()
+    yield
+    reset_http_vector_client_for_tests()
+
+
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -52,37 +76,31 @@ def mock_chromadb():
     this file stay untouched; the first element is ``None`` and every test
     that actually consumed the module half has been rewritten.
 
-    Patching the Voyage EF is load-bearing, not incidental: the old module
-    patch neutralised EF *construction*, so these tests never needed a real
-    credential. The nexus EF fails loud on a missing key (by design), so
-    without this patch every put/upsert test would die on VOYAGE_API_KEY
-    instead of exercising what it means to.
+    nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+    outright (Hal determination 2026-07-28) — there is no EF construction
+    left to neutralise. Consumers that need an EF for a cloud-mode
+    (Voyage-token) collection name now pass ``_ef_override`` explicitly;
+    without one, ``_build_embedding_fn`` raises ``IncompatibleCollectionError``
+    by design (fail loud, not a silent fallback).
     """
-    with patch("nexus.db.voyage_ef.VoyageEmbeddingFunction"):
-        yield None, MagicMock()
+    yield None, MagicMock()
 
 
 @pytest.fixture
 def mock_db(mock_chromadb):
-    """Pre-built T3Database with standard mock wiring."""
-    _, mock_client = mock_chromadb
-    mock_col = MagicMock()
-    mock_client.get_or_create_collection.return_value = mock_col
-    mock_client.get_collection.return_value = mock_col
-    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
-    return db, mock_col, mock_client
+    """Pre-built T3Database with standard mock wiring.
 
-
-@pytest.fixture
-def mock_db_voyage(mock_chromadb):
-    """Pre-built T3Database with voyage_api_key set."""
+    nexus-sghyo: ``_ef_override`` stands in for the deleted client-side
+    Voyage EF so cloud-mode (Voyage-token) collection names still resolve
+    an embedding function instead of raising ``IncompatibleCollectionError``.
+    """
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
     mock_client.get_collection.return_value = mock_col
     db = T3Database(
-        tenant="t", database="d", api_key="k", voyage_api_key="vkey",
-        _client=mock_client,
+        tenant="t", database="d", api_key="k", _client=mock_client,
+        _ef_override=MagicMock(name="ef_override"),
     )
     return db, mock_col, mock_client
 
@@ -146,25 +164,31 @@ def test_client_injection_sets_single_client():
     assert db._client is injected
 
 
-# ── AC2: VoyageAI embedding function selection ──────────────────────────────
+# ── AC2: cloud-mode embedding function dispatch ─────────────────────────────
 
 
-@pytest.mark.parametrize("collection,expected_model", [
-    ("code__myrepo", "voyage-code-3"),
-    ("knowledge__security", "voyage-context-3"),
+@pytest.mark.parametrize("collection", [
+    "code__myrepo",
+    "knowledge__security",
 ])
-def test_voyage_embedding_fn_selects_model(mock_chromadb, collection, expected_model):
-    """P4b P3: the EF is now nexus-owned (``nexus.db.voyage_ef``) rather than
-    ``chromadb.utils.embedding_functions``. The per-collection model-selection
-    contract this asserts is unchanged."""
+def test_cloud_mode_voyage_collection_raises_without_ef_override(mock_chromadb, collection):
+    """nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+    (Hal determination 2026-07-28: "we do no embedding on the client").
+    A cloud-mode collection whose name resolves to a Voyage token, with
+    no ``_ef_override``, now raises ``IncompatibleCollectionError``
+    instead of constructing a client-side EF — this SUPERSEDES the old
+    ``test_voyage_embedding_fn_selects_model`` (deleted), which proved
+    the deleted per-collection Voyage model-selection contract.
+    """
+    from nexus.db.t3 import IncompatibleCollectionError
+
     _, mock_client = mock_chromadb
     db = T3Database(
-        tenant="t", database="d", api_key="key", voyage_api_key="vkey",
+        tenant="t", database="d", api_key="key",
         _client=mock_client,
     )
-    with patch("nexus.db.voyage_ef.VoyageEmbeddingFunction") as ef_cls:
+    with pytest.raises(IncompatibleCollectionError, match=collection):
         db.get_or_create_collection(collection)
-    ef_cls.assert_called_with(model_name=expected_model, api_key="vkey")
 
 
 # ── AC3: store put ──────────────────────────────────────────────────────────
@@ -351,7 +375,12 @@ def test_search_empty_collection_returns_empty(mock_db):
 def test_search_skips_missing_collection_without_creating(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = CollectionNotFoundError("Collection not found")
-    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
+    # nexus-sghyo: _ef_override stands in for the deleted client-side
+    # Voyage EF (see mock_db fixture's docstring).
+    db = T3Database(
+        tenant="t", database="d", api_key="k", _client=mock_client,
+        _ef_override=MagicMock(name="ef_override"),
+    )
     assert db.search("query", ["knowledge__missing"], n_results=10) == []
     mock_client.get_or_create_collection.assert_not_called()
 
@@ -405,7 +434,12 @@ def test_search_continues_past_dimension_mismatch_to_next_collection(
         return col_bad if name == "knowledge__stale" else col_good
 
     mock_client.get_collection.side_effect = _get_collection
-    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
+    # nexus-sghyo: _ef_override stands in for the deleted client-side
+    # Voyage EF (see mock_db fixture's docstring).
+    db = T3Database(
+        tenant="t", database="d", api_key="k", _client=mock_client,
+        _ef_override=MagicMock(name="ef_override"),
+    )
     results = db.search(
         "q", ["knowledge__stale", "code__healthy"], n_results=5,
     )
@@ -428,38 +462,16 @@ def test_search_propagates_non_dimension_invalid_argument_errors(mock_db):
         db.search("q", ["code__x"], n_results=5)
 
 
-def test_search_cce_collection_uses_query_embeddings(mock_chromadb):
-    _, mock_client = mock_chromadb
-    mock_col = MagicMock()
-    mock_col.count.return_value = 3
-    mock_col.query.return_value = {
-        "ids": [["id-cce"]], "documents": [["cce content"]],
-        "metadatas": [[{"title": "rdr-004"}]], "distances": [[0.12]],
-    }
-    mock_client.get_collection.return_value = mock_col
-
-    # voyageai.Client is constructed lazily inside T3Database.__init__
-    # now (PR #293 cold-start fix); patch the canonical voyageai.Client
-    # rather than the nexus.db.t3 module attribute (which no longer
-    # exists at module scope).
-    with patch("voyageai.Client") as mock_vo_ctor:
-        mock_vo_inst = MagicMock()
-        mock_vo_ctor.return_value = mock_vo_inst
-        mock_vo_inst.contextualized_embed.return_value = MagicMock()
-        db = T3Database(
-            tenant="t", database="d", api_key="k", voyage_api_key="vkey",
-            _client=mock_client,
-        )
-        results = db.search("four store t3 architecture", ["rdr__nexus-abc123"], n_results=5)
-
-    mock_vo_ctor.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=0)
-    mock_vo_inst.contextualized_embed.assert_called_once_with(
-        inputs=[["four store t3 architecture"]], model="voyage-context-3", input_type="query",
-    )
-    call_kwargs = mock_col.query.call_args.kwargs
-    assert "query_embeddings" in call_kwargs
-    assert "query_texts" not in call_kwargs
-    assert len(results) == 1 and results[0]["id"] == "id-cce"
+# nexus-sghyo (2026-08-06): test_search_cce_collection_uses_query_embeddings
+# DELETED — it proved client-side CCE querying (a client-constructed
+# voyageai.Client calling contextualized_embed()), which is retired
+# outright (Hal determination 2026-07-28: "we do no embedding on the
+# client"). CCE embedding happens entirely server-side now; the
+# surviving proof is test_search_cce_skipped_without_voyage_api_key
+# below (query_texts is ALWAYS used, never query_embeddings, for every
+# T3Database.search() call — CCE dispatch has no client-side leg left
+# to take) and the Java-engine parity oracle in
+# tests/db/test_embed_parity.py (integration-gated).
 
 
 def test_search_cce_skipped_without_voyage_api_key(mock_db):
@@ -488,26 +500,13 @@ def test_search_passes_where_filter(mock_db):
 # ── CCE put ─────────────────────────────────────────────────────────────────
 
 
-def test_put_cce_collection_uses_document_input_type(mock_chromadb):
-    _, mock_client = mock_chromadb
-    mock_col = MagicMock()
-    mock_client.get_or_create_collection.return_value = mock_col
-
-    # See PR #293 cold-start note above.
-    with patch("voyageai.Client") as mock_vo_ctor:
-        mock_vo_inst = MagicMock()
-        mock_vo_ctor.return_value = mock_vo_inst
-        mock_vo_inst.contextualized_embed.return_value = MagicMock()
-        db = T3Database(
-            tenant="t", database="d", api_key="k", voyage_api_key="vkey",
-            _client=mock_client,
-        )
-        db.put(collection="knowledge__security", content="some document text about security findings", title="finding.md")
-
-    mock_vo_inst.contextualized_embed.assert_called_once_with(
-        inputs=[["some document text about security findings"]], model="voyage-context-3", input_type="document",
-    )
-    assert "embeddings" in mock_col.upsert.call_args.kwargs
+# nexus-sghyo (2026-08-06): test_put_cce_collection_uses_document_input_type
+# DELETED — it proved client-side CCE document embedding via a
+# client-constructed voyageai.Client, which is retired outright (Hal
+# determination 2026-07-28: "we do no embedding on the client").
+# put() on a cloud-mode collection now embeds through the collection's
+# dispatched embedding function (or fails loud without _ef_override —
+# see test_cloud_mode_voyage_collection_raises_without_ef_override).
 
 
 # ── AC7: collection list ────────────────────────────────────────────────────
@@ -741,14 +740,20 @@ def test_write_batch_indexer_path_still_drops_oversized(mock_db):
 # ── Embedding function cache ────────────────────────────────────────────────
 
 
-def test_embedding_fn_cached_per_collection_name(mock_chromadb):
+def test_embedding_fn_cached_per_collection_name(mock_chromadb, tmp_path):
+    # nexus-sghyo (2026-08-06): the deleted client-side Voyage EF was
+    # only ever the CONSTRUCTION VEHICLE for this caching test — the
+    # caching behavior under test (_ef_cache keyed per collection name)
+    # is generic to _build_embedding_fn, not Voyage-specific. Repointed
+    # at the LocalEmbeddingFunction branch (local_mode=True), which
+    # still constructs an EF today.
     _, mock_client = mock_chromadb
     mock_client.get_or_create_collection.return_value = MagicMock()
-    with patch("nexus.db.voyage_ef.VoyageEmbeddingFunction") as mock_ef_cls:
+    with patch("nexus.db.local_ef.LocalEmbeddingFunction") as mock_ef_cls:
         mock_ef_cls.return_value = MagicMock(name="ef_instance")
         db = T3Database(
-            tenant="t", database="d", api_key="k", voyage_api_key="vk",
-            _client=mock_client,
+            tenant="t", database="d", api_key="k", local_mode=True,
+            local_path=str(tmp_path), _client=mock_client,
         )
         ef1 = db._embedding_fn("knowledge__topic")
         ef2 = db._embedding_fn("knowledge__topic")
@@ -756,14 +761,16 @@ def test_embedding_fn_cached_per_collection_name(mock_chromadb):
     assert mock_ef_cls.call_count == 1
 
 
-def test_embedding_fn_different_names_not_confused(mock_chromadb):
+def test_embedding_fn_different_names_not_confused(mock_chromadb, tmp_path):
+    # nexus-sghyo: see test_embedding_fn_cached_per_collection_name above
+    # — repointed at LocalEmbeddingFunction for the same reason.
     _, mock_client = mock_chromadb
     mock_client.get_or_create_collection.return_value = MagicMock()
     ef_a, ef_b = MagicMock(name="ef_code"), MagicMock(name="ef_knowledge")
-    with patch("nexus.db.voyage_ef.VoyageEmbeddingFunction", side_effect=[ef_a, ef_b]) as mock_ef_cls:
+    with patch("nexus.db.local_ef.LocalEmbeddingFunction", side_effect=[ef_a, ef_b]) as mock_ef_cls:
         db = T3Database(
-            tenant="t", database="d", api_key="k", voyage_api_key="vk",
-            _client=mock_client,
+            tenant="t", database="d", api_key="k", local_mode=True,
+            local_path=str(tmp_path), _client=mock_client,
         )
         r1 = db._embedding_fn("code__repo")
         r2 = db._embedding_fn("knowledge__topic")
@@ -798,14 +805,12 @@ def test_make_t3_no_client_returns_service_handle(mock_chromadb):
     assert isinstance(db, HttpVectorClient)
 
 
-def test_make_t3_injected_client_uses_credentials(mock_chromadb):
-    """The injected-client path still resolves configured credentials so the
-    T3Database facade can build Voyage embedders (the ETL-wrapper shape)."""
-    from nexus.db import make_t3
-    creds = {"chroma_tenant": "my-tenant", "chroma_database": "my-db", "chroma_api_key": "ck-abc", "voyage_api_key": "vk-xyz"}
-    with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
-        db = make_t3(_client=MagicMock())
-    assert db._voyage_api_key == "vk-xyz"
+# nexus-sghyo (2026-08-06): test_make_t3_injected_client_uses_credentials
+# DELETED — it proved make_t3() threading the voyage_api_key credential
+# into T3Database._voyage_api_key, both of which are deleted (client-side
+# Voyage embedding retired, Hal determination 2026-07-28). The surviving
+# credential-threading contract (chroma_tenant/database/api_key) is
+# covered by test_make_t3_client_injection below.
 
 
 def test_make_t3_client_injection(mock_chromadb):
@@ -891,8 +896,8 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     assert written["frecency_score"] == 0.42
 
 
-def test_upsert_chunks_uses_correct_embedding_fn(mock_db_voyage):
-    db, mock_col, mock_client = mock_db_voyage
+def test_upsert_chunks_uses_correct_embedding_fn(mock_db):
+    db, mock_col, mock_client = mock_db
     db.upsert_chunks(collection="docs__corpus", ids=["d1"], documents=["some text"], metadatas=[{"source_path": "doc.pdf"}])
     mock_client.get_or_create_collection.assert_called_once()
     assert mock_client.get_or_create_collection.call_args.args[0] == "docs__corpus"
@@ -1264,7 +1269,12 @@ def test_t3_context_manager_works_end_to_end(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
-    with T3Database(tenant="t", database="d", api_key="k", _client=mock_client) as db:
+    # nexus-sghyo: _ef_override stands in for the deleted client-side
+    # Voyage EF (see mock_db fixture's docstring).
+    with T3Database(
+        tenant="t", database="d", api_key="k", _client=mock_client,
+        _ef_override=MagicMock(name="ef_override"),
+    ) as db:
         doc_id = db.put(collection="knowledge__cm_test", content="context manager test", title="cm.md")
         # nexus-oe2i: RDR-180 natural id is the full chunk_text_hash.
         assert isinstance(doc_id, str)

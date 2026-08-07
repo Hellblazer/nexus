@@ -283,12 +283,13 @@ SQLITE_CONNECT_ALLOWLIST: dict[str, int] = {
 }
 
 #: ``voyageai.Client`` sites outside ``db/``: the RDR-152 Seam B Phase-4
-#: deletion targets — legacy non-service embed paths that must not grow.
-VOYAGEAI_CLIENT_ALLOWLIST: dict[str, int] = {
-    "src/nexus/indexer.py": 1,        # cloud/non-service legacy embed path
-    "src/nexus/doc_indexer.py": 1,    # _embed_with_fallback legacy path
-    "src/nexus/commands/collection.py": 1,  # re-embed CLI utility
-}
+#: deletion targets. RETIRED EMPTY at nexus-sghyo (2026-08-06, Hal
+#: determination 2026-07-28: "we do no embedding on the client"): the
+#: three named legacy sites (indexer.py's non-service embed path,
+#: doc_indexer.py's ``_embed_with_fallback``, commands/collection.py's
+#: re-embed CLI utility) were all deleted with the code they allowlisted.
+#: A new entry here requires a fresh Hal decision, not a code comment.
+VOYAGEAI_CLIENT_ALLOWLIST: dict[str, int] = {}
 
 #: Direct ``T2Database(...)`` / ``T3Database(...)`` construction sites
 #: outside ``db/`` — the RDR-128 P3 documented-irreducible survivor set,

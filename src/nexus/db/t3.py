@@ -8,7 +8,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 
@@ -26,14 +26,10 @@ _NotFoundErrors = collection_not_found_errors()
 # which classifies dimension-mismatch and re-raises the rest.
 _InvalidArgumentErrors = vector_argument_errors()
 
-# voyageai is imported lazily inside ``__init__`` only when cloud mode
-# is selected. The eager import here was pulling
-# voyageai -> langchain_text_splitters -> transformers -> torch
-# (multi-second cold start) into every CLI invocation through the
-# nexus.commands.store -> nexus.db.t3 chain. Type annotations using
-# ``voyageai.Client`` are stringified by ``from __future__ import
-# annotations`` at the top of this file so the lazy import does not
-# break static type checkers.
+# nexus-sghyo: T3Database no longer imports voyageai at all — the
+# client-side Voyage embed path (constructor-time `__init__` import,
+# guarded by cloud mode) was retired with the client-side credential
+# (Hal determination 2026-07-28: "we do no embedding on the client").
 
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
@@ -192,20 +188,23 @@ def _rewrite_collection_metadata(
 from nexus.retry import (
     _vector_with_retry,
     _is_retryable_vector_error,
-    _is_retryable_voyage_error,
-    _voyage_with_retry,
 )
 
 class IncompatibleCollectionError(RuntimeError):
     """Raised by the bidirectional EF dispatch when the active mode
     can't safely embed against the collection's name.
 
-    The current trip wire is local-mode against a collection named for
-    a Voyage embedder: the local 384-dim vectors would query a stored
-    1024-dim space and produce silent noise (inverted RDR-059 hazard).
-    Failing loud here forces the operator to either re-index the
-    collection in local mode or restore cloud credentials before the
-    bad query lands.
+    Two trip wires:
+
+    - local-mode against a collection named for a Voyage embedder: the
+      local 384-dim vectors would query a stored 1024-dim space and
+      produce silent noise (inverted RDR-059 hazard). Failing loud here
+      forces the operator to either re-index the collection in local
+      mode or restore cloud credentials before the bad query lands.
+    - cloud-mode against a collection named for a Voyage embedder with
+      no ``_ef_override``: client-side Voyage embedding is retired
+      (nexus-sghyo, Hal determination 2026-07-28) — there is no
+      client-side EF left to construct.
     """
 
 
@@ -224,8 +223,11 @@ class T3Database:
       at P3 with the chromadb dependency).
 
     The two historical modes still shape embedding-function dispatch:
-    ``local_mode=True`` selects local EFs; cloud mode (default) selects
-    Voyage EFs when ``voyage_api_key`` is supplied.
+    ``local_mode=True`` selects local EFs; cloud mode (default) has no
+    client-side EF any more — client-side Voyage embedding was retired
+    (nexus-sghyo, Hal determination 2026-07-28: "we do no embedding on
+    the client"). A cloud-mode collection name that resolves to a
+    non-local model raises instead of constructing a Voyage EF.
 
     Single-database architecture (RDR-037, 2026-03-14): all collection
     prefixes (``code__``, ``docs__``, ``rdr__``, ``knowledge__``) coexist
@@ -243,7 +245,6 @@ class T3Database:
         tenant: str = "",
         database: str = "",
         api_key: str = "",
-        voyage_api_key: str = "",
         *,
         local_mode: bool = False,
         local_path: str = "",
@@ -268,7 +269,6 @@ class T3Database:
             )
 
         self._local_mode = local_mode
-        self._voyage_api_key = voyage_api_key
         self._ef_override = _ef_override
         self._ef_cache: dict[str, object] = {}
         self._ef_lock = threading.Lock()
@@ -282,22 +282,13 @@ class T3Database:
             p = Path(local_path)
             p.mkdir(parents=True, exist_ok=True)
             self._client = _client
-            self._voyage_client = None
             return
 
-        # ── Cloud mode (injected client + optional Voyage embedders) ──────
-        # Lazy voyageai import: only loaded when cloud mode is actually
-        # used (the eager top-level import was multi-second cold-start
-        # cost on every CLI invocation through the indirect import chain).
-        if voyage_api_key:
-            import voyageai  # noqa: PLC0415 — optional/heavy dependency deferred (voyageai)
-            self._voyage_client = voyageai.Client(
-                api_key=voyage_api_key,
-                timeout=read_timeout_seconds,
-                max_retries=0,
-            )
-        else:
-            self._voyage_client = None
+        # ── Cloud mode (injected client) ───────────────────────────────────
+        # nexus-sghyo: client-side Voyage embedding retired — cloud mode
+        # collections without an _ef_override raise at EF-construction
+        # time (see _build_embedding_fn) instead of embedding via a
+        # client-constructed voyageai.Client.
         self._client = _client
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
@@ -318,9 +309,16 @@ class T3Database:
         """Return the embedding function for *collection_name*.
 
         RDR-109 Phase 2 bidirectional name-aware dispatch. Four cells in
-        the (mode × embedded-model-token) matrix:
+        the (mode x embedded-model-token) matrix:
 
-        - Cloud + voyage-token name  -> Voyage EF for that model.
+        - Cloud + voyage-token name  -> raise
+          :class:`IncompatibleCollectionError`. nexus-sghyo (Hal
+          determination 2026-07-28): the client no longer embeds via
+          Voyage, so ``T3Database`` (a test-only facade — production
+          cloud-mode traffic never reaches this class, see
+          :func:`nexus.db.make_t3`) has no client-side EF to build for a
+          Voyage-token collection any more. Pass ``_ef_override`` for
+          cloud-mode collections in tests.
         - Cloud + local-token name   -> Local EF (legacy local-mode
           collection encountered after credentials were added; the
           59vl/GH-#667 path).
@@ -388,36 +386,19 @@ class T3Database:
             )
 
         model = parsed_token or embedding_model_for_collection(collection_name)
-        from nexus.db.voyage_ef import VoyageEmbeddingFunction  # noqa: PLC0415 — deferred: voyageai is a heavy optional import, matches the local-EF branches above
-
-        return VoyageEmbeddingFunction(
-            model_name=model, api_key=self._voyage_api_key
+        # nexus-sghyo (Hal determination 2026-07-28): the client no longer
+        # embeds via Voyage — cloud-mode collections resolving to a
+        # non-local model have no client-side EF to construct any more.
+        # Callers exercising this facade in cloud mode must pass
+        # _ef_override (tests only; production routes through
+        # nexus.db.make_t3()'s server-embedding HttpVectorClient).
+        raise IncompatibleCollectionError(
+            f"collection {collection_name!r} requires a Voyage embedding "
+            f"function ({model!r}), but T3Database no longer constructs "
+            "one client-side (nexus-sghyo: the client does no embedding). "
+            "Pass _ef_override for cloud-mode collections in tests, or use "
+            "local_mode for a client-embedded collection."
         )
-
-    def _cce_embed(
-        self, text: str, input_type: Literal["query", "document"] = "document"
-    ) -> list[float]:
-        """Embed *text* via the Voyage AI Contextualized Chunk Embedding API.
-
-        CCE collections (docs__, knowledge__, rdr__) use voyage-context-3 at
-        both index and query time.  voyage-4 is **not** compatible with CCE
-        vector spaces (cross-model cosine similarity ≈ 0.05, i.e. random noise).
-
-        ``inputs=[[text]]`` — one inner list — embeds the text independently,
-        with no cross-chunk context propagation.  Use ``input_type="document"``
-        (default) for documents being stored and ``input_type="query"`` for
-        search queries.  Using the wrong subtype is the same class of bug as
-        the original CCE/voyage-4 mismatch.
-        """
-        assert self._voyage_client is not None, "_cce_embed called without voyage_api_key"
-        result = _voyage_with_retry(
-            self._voyage_client.contextualized_embed,
-            inputs=[[text]],
-            model="voyage-context-3",
-            input_type=input_type,
-        )
-        assert result.results, "voyageai CCE returned empty results"
-        return result.results[0].embeddings[0]
 
     def _write_sem(self, name: str) -> threading.BoundedSemaphore:
         """Return the per-collection write semaphore, lazily initialised."""
@@ -806,15 +787,11 @@ class T3Database:
         doc_id = content_hash
         now_iso = datetime.now(UTC).isoformat()
 
-        # Determine whether this collection uses CCE.  When a voyage_api_key
-        # is available and we're not in local mode, CCE collections (docs__,
-        # knowledge__, rdr__) are embedded via _cce_embed() so that put()-stored
-        # entries are in the same vector space as the CCE-indexed chunks.
-        is_cce = (
-            not self._local_mode
-            and bool(self._voyage_api_key)
-            and index_model_for_collection(collection) == "voyage-context-3"
-        )
+        # nexus-sghyo: client-side CCE embedding (via a client-constructed
+        # voyageai.Client) is retired — the client no longer embeds via
+        # Voyage. CCE collections (docs__, knowledge__, rdr__) in cloud
+        # mode now route through the plain (non-CCE) write path below,
+        # same as every other cloud-mode collection; the server embeds.
 
         # Derive content_type from the collection prefix so the factory
         # can stamp it through normalize().
@@ -863,17 +840,10 @@ class T3Database:
         # writers (``upsert_chunks``, ``upsert_chunks_with_embeddings``,
         # ``update_chunks``) still get the strict default.
         col = self.get_or_create_collection(collection, strict=False)
-        if is_cce:
-            vec = self._cce_embed(content)
-            self._write_batch(
-                col, collection, [doc_id], [content], [metadata],
-                embeddings=[vec], fail_on_oversized=True,
-            )
-        else:
-            self._write_batch(
-                col, collection, [doc_id], [content], [metadata],
-                fail_on_oversized=True,
-            )
+        self._write_batch(
+            col, collection, [doc_id], [content], [metadata],
+            fail_on_oversized=True,
+        )
         return doc_id
 
     def upsert_chunks(
@@ -999,22 +969,16 @@ class T3Database:
         queried_count = 0
         dim_skipped_count = 0
         for name in collection_names:
-            # CCE collections must be queried with voyage-context-3 via
-            # contextualized_embed(); using query_texts would invoke the
-            # collection EF, which is not CCE-aware.
-            # Skip CCE path in local mode or when voyage_api_key is absent.
-            is_cce = (
-                not self._local_mode
-                and bool(self._voyage_api_key)
-                and index_model_for_collection(name) == "voyage-context-3"
-            )
+            # nexus-sghyo: client-side CCE querying (via a client-
+            # constructed voyageai.Client) is retired — the client no
+            # longer embeds via Voyage. Every collection now queries
+            # through its dispatched embedding function (raises for a
+            # cloud-mode Voyage-token collection with no _ef_override —
+            # see _build_embedding_fn).
             try:
-                if is_cce:
-                    col = self._client_for(name).get_collection(name)
-                else:
-                    col = self._client_for(name).get_collection(
-                        name, embedding_function=self._embedding_fn(name)
-                    )
+                col = self._client_for(name).get_collection(
+                    name, embedding_function=self._embedding_fn(name)
+                )
             except _NotFoundErrors:
                 continue  # collection doesn't exist, skip it
             count = _vector_with_retry(col.count)
@@ -1031,32 +995,25 @@ class T3Database:
                         actual=actual_n,
                         collection=name,
                     )
-            if is_cce:
+            # Fix 1: route through the invariant chokepoint.
+            # In local mode _maybe_client_embed returns [norm_vec] so the
+            # daemon receives an explicit embedding rather than delegating
+            # to its unregistered server-side DefaultEmbeddingFunction.
+            # In cloud mode it returns None and we pass query_texts so the
+            # server embeds via its registered EF.
+            embs = self._maybe_client_embed([query], name)
+            if embs is not None:
                 query_kwargs: dict = {
-                    "query_embeddings": [self._cce_embed(query, input_type="query")],
+                    "query_embeddings": embs,
                     "n_results": actual_n,
                     "include": ["documents", "metadatas", "distances"],
                 }
             else:
-                # Fix 1: route through the invariant chokepoint.
-                # In local mode _maybe_client_embed returns [norm_vec] so the
-                # daemon receives an explicit embedding rather than delegating
-                # to its unregistered server-side DefaultEmbeddingFunction.
-                # In cloud mode it returns None and we pass query_texts so the
-                # server embeds via its registered Voyage EF.
-                embs = self._maybe_client_embed([query], name)
-                if embs is not None:
-                    query_kwargs = {
-                        "query_embeddings": embs,
-                        "n_results": actual_n,
-                        "include": ["documents", "metadatas", "distances"],
-                    }
-                else:
-                    query_kwargs = {
-                        "query_texts": [query],
-                        "n_results": actual_n,
-                        "include": ["documents", "metadatas", "distances"],
-                    }
+                query_kwargs = {
+                    "query_texts": [query],
+                    "n_results": actual_n,
+                    "include": ["documents", "metadatas", "distances"],
+                }
             if where is not None:
                 query_kwargs["where"] = where
             # queried_count tracks only collections that reached col.query().

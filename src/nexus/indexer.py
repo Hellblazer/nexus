@@ -35,7 +35,6 @@ from nexus.hook_registry import record_catalog_hook_failure
 from nexus.indexer_utils import (
     build_doc_id_resolver,
     build_staleness_cache,
-    check_credentials,
     check_local_path_writable,
     check_staleness,
     should_ignore as _should_ignore,  # shared implementation
@@ -1758,10 +1757,10 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
       service handles its own Chroma/Voyage.  This replaces the
       nexus-67ljl early-return skip-guard that previously prevented
       split-brain writes to daemon-Chroma.
-    - Local/cloud mode: checks credentials, then obtains a
+    - Local mode: checks the local path is writable, then obtains a
       :class:`T3Database` via ``make_t3()`` and updates directly.
+      Non-service cloud mode is retired (nexus-sghyo) and raises loud.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -1796,11 +1795,14 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     else:
         from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         if not is_local_mode():
-            voyage_key = get_credential("voyage_api_key")
-            chroma_key = get_credential("chroma_api_key")
-            check_credentials(voyage_key, chroma_key)
-        else:
-            check_local_path_writable()
+            # nexus-sghyo: non-service cloud-mode ingestion was retired —
+            # the client no longer embeds via Voyage.
+            raise CredentialsMissingError(
+                "non-service cloud-mode ingestion was retired: the client "
+                "no longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
+                "VECTORS=service (the default) or unset it."
+            )
+        check_local_path_writable()
         db = make_t3()
 
     frecency_map = batch_frecency(repo)
@@ -2138,7 +2140,8 @@ def _index_pdf_file(
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
-    Uses PDF extraction + chunking from doc_indexer, embeds via _embed_with_fallback.
+    Uses PDF extraction + chunking from doc_indexer, embeds via ``embed_fn``
+    (local/service mode; non-service embedding was retired, nexus-sghyo).
     Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
 
     *chunk_chars* overrides the PDF chunk size (default 1500 chars).  Pass
@@ -2154,7 +2157,7 @@ def _index_pdf_file(
     no-catalog path.
     """
     import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.doc_indexer import _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     content_hash = _hl.sha256()
     with file.open("rb") as f:
@@ -2249,7 +2252,14 @@ def _index_pdf_file(
             embeddings = embed_fn(embed_texts_pdf)
             actual_model = target_model
         else:
-            embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
+            # nexus-sghyo: non-service embedding was retired — the client
+            # no longer embeds via Voyage. Unreachable in shipping config
+            # (the service/local-mode gate upstream always sets embed_fn).
+            raise CredentialsMissingError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -2968,7 +2978,7 @@ def _run_index(
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
     from nexus.classifier import ContentClass, classify_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.config import get_credential, load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.config import load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.ripgrep_cache import build_cache  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -3274,8 +3284,8 @@ def _run_index(
             # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
             # happens server-side in the JVM.  Python must NOT create a
             # voyageai.Client — the embed + Chroma-write pipeline runs in
-            # the Java nexus-service.  Voyage credentials are only needed
-            # for the Python Voyage path (flag unset / Phase-4 legacy).
+            # the Java nexus-service.  Non-service embedding was retired
+            # (nexus-sghyo); the else branch below raises loud.
             voyage_key = ""
             voyage_client = None
             code_model = index_model_for_collection(code_collection)
@@ -3286,13 +3296,13 @@ def _run_index(
             # server-side (Seam B contract).
             _embed_fn = lambda texts: [[]] * len(texts)  # noqa: E731
         else:
-            voyage_key = get_credential("voyage_api_key")
-            chroma_key = get_credential("chroma_api_key")
-            check_credentials(voyage_key, chroma_key)
-            import voyageai  # noqa: PLC0415  — optional/heavy dependency deferred (voyageai)
-            code_model = index_model_for_collection(code_collection)
-            docs_model = index_model_for_collection(docs_collection)
-            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # boundary-allow: Phase-4 deletion target — legacy non-service embed path
+            # nexus-sghyo: non-service embedding was retired — the client
+            # no longer embeds via Voyage (Hal determination 2026-07-28).
+            raise CredentialsMissingError(
+                "non-service embedding was retired: the client no longer "
+                "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
+                "(the default) or unset it."
+            )
 
     _log.debug("connecting to ChromaDB")
     # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through

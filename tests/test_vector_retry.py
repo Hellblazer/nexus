@@ -98,12 +98,18 @@ def t3_mock():
     # RDR-155 P4a.2 (nexus-1k8s1): the CloudClient construction is retired —
     # inject the mock client directly (the retry machinery under test is
     # downstream of construction and unchanged).
-    # P4b P3: nexus.db.t3 no longer imports chromadb, so there is no module to
-    # patch; the Voyage EF is patched instead so construction needs no key.
-    with patch("nexus.db.voyage_ef.VoyageEmbeddingFunction"):
-        mock_client = MagicMock()
-        from nexus.db.t3 import T3Database
-        yield T3Database(tenant="t", database="d", api_key="k", _client=mock_client), mock_client
+    # nexus-sghyo (2026-08-06): client-side Voyage embedding is retired
+    # outright (nexus.db.voyage_ef deleted) — a cloud-mode collection
+    # with no _ef_override now raises at EF-construction time
+    # (IncompatibleCollectionError). Pass _ef_override explicitly so
+    # collection-name dispatch never reaches that raise; the retry
+    # machinery under test is upstream of embedding anyway.
+    mock_client = MagicMock()
+    from nexus.db.t3 import T3Database
+    yield T3Database(
+        tenant="t", database="d", api_key="k", _client=mock_client,
+        _ef_override=MagicMock(),
+    ), mock_client
 
 
 def test_search_retries_on_503(t3_mock) -> None:
