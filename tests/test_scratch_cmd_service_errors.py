@@ -40,7 +40,7 @@ def test_call_time_401_is_clean_actionable_error() -> None:
     # RuntimeError (which click would render as a full traceback for users).
     assert not isinstance(result.exception, RuntimeError)
     assert "minted" in result.output
-    assert "NX_T1_ISOLATED=1" in result.output
+    assert "nx daemon service start" in result.output
 
 
 def test_http_401_raise_site_carries_the_marker() -> None:

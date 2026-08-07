@@ -1604,7 +1604,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 ## nx scratch
 
-T1 ephemeral session notes (ChromaDB session server, shared across agents).
+T1 ephemeral session notes (PG-backed storage-service session, shared across agents; no in-process opt-out — nexus-4lkmz).
 
 ```
 nx scratch put "hypothesis: cache invalidation is stale"

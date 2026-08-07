@@ -14,7 +14,12 @@ _SESSION_B = "test-session-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 @pytest.fixture
 def t1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> T1Database:
     monkeypatch.setenv("HOME", str(tmp_path))
-    db = T1Database(session_id=_SESSION)
+    # nexus-4lkmz: the isolated in-process leg (NX_T1_ISOLATED=1 ->
+    # process-scoped InMemoryVectorClient singleton) this fixture used to
+    # rely on implicitly is retired outright. Explicit client injection
+    # (the same pattern `two_sessions` below already uses) is the
+    # supported test-construction path now.
+    db = T1Database(session_id=_SESSION, client=make_vector_test_client())
     db.clear()
     yield db
     db.clear()
@@ -349,7 +354,10 @@ def test_t1_delete_not_found_returns_false(t1: T1Database) -> None:
 
 def test_t1_delete_session_isolation(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    sa = T1Database(session_id="session-aaaa-0000-0000-0000-000000000000")
+    sa = T1Database(
+        session_id="session-aaaa-0000-0000-0000-000000000000",
+        client=make_vector_test_client(),
+    )
     sb = T1Database(session_id="session-bbbb-0000-0000-0000-000000000000", client=sa._client)
     doc_id = sa.put(content="owned by A")
     assert sb.delete(doc_id) is False and sa.get(doc_id) is not None

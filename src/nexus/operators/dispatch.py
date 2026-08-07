@@ -16,6 +16,7 @@ import json
 import os
 from contextlib import contextmanager
 from typing import Any, Iterator
+from uuid import uuid4
 
 import structlog
 
@@ -92,6 +93,7 @@ def _build_dispatch_env(
     share_t1: bool = False,
     ephemeral: bool = False,
     parent_session_id: str | None = None,
+    grants_tool_access: bool = False,
 ) -> dict[str, str]:
     """Build the env dict for a dispatched ``claude -p`` subprocess.
 
@@ -104,16 +106,69 @@ def _build_dispatch_env(
         RETIRED. Raises ``RuntimeError`` unconditionally.
 
     Ephemeral (``ephemeral=True``)
-        Sets ``NX_T1_ISOLATED=1`` so the receiving process's T1 routing
-        takes the private in-process path (InMemoryVectorClient).
-        Strips inherited ``NX_T1_HOST`` / ``NX_T1_PORT`` legacy vars.
-        Mutually exclusive with ``share_t1``.
+        nexus-4lkmz (decision 1, LOCKED 2026-08-07; blast-radius fix
+        nexus-bjltu, 2026-08-07 review round): the isolated in-process
+        leg (``NX_T1_ISOLATED=1`` -> ``InMemoryVectorClient``) is deleted
+        outright — T1 is PG-only, no null-store branches. This mode
+        MINTS A FRESH, OWN T1 SESSION (a new uuid4, distinct from the
+        parent's) via :func:`nexus.db.t1.mint_t1_session_token` and
+        injects it directly as ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` —
+        the subprocess inherits an already-live, PG-backed
+        ``HttpScratchStore`` session (``T1RoutingAction.USE_INHERITED``)
+        with no lease lookup or mint of its own — **but ONLY when
+        ``grants_tool_access=True``**: the vast majority of dispatches
+        (~15/17 call sites) pass ``mcp_servers=None`` / ``allowed_tools=
+        None``, the stateless tool-free default per ``claude_dispatch``'s
+        own docstring, whose spawned subprocess has NO MCP tool access
+        and therefore CANNOT reach T1 at all — minting for it is dead
+        weight and, per nexus-bjltu, a real single point of failure (the
+        storage service being transiently down must never kill a
+        tool-free dispatch that never touches T1). Strips inherited
+        ``NX_T1_HOST`` / ``NX_T1_PORT`` legacy vars and any stale
+        ``NX_T1_ISOLATED`` regardless of ``grants_tool_access``. Mutually
+        exclusive with ``share_t1``.
+
+        A mint failure (only reachable when ``grants_tool_access=True``)
+        does NOT propagate: it is logged at WARNING (carrying the
+        exception) and ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` are left
+        UNSET. This is deferred fail-loud, not a null-store branch — no
+        store object is fabricated here.
+
+        WHAT HAPPENS NEXT in the subprocess's own nested MCP (if it starts
+        one) is NOT simply "raises T1UnavailableThisProcessError" —
+        nexus-ylof9 (P3, corrected here after an inaccurate first-round
+        claim): ``NX_SESSION_ID`` is forwarded below regardless of mint
+        outcome (see ``parent_session_id`` handling), so the child usually
+        DOES resolve a real (the parent's) session id, not none at all.
+        Concretely:
+
+        * If the parent is a live MCP session with a FRESH published
+          lease for that id (nexus-c8yvj) — the common case — the child's
+          Branch 0 BORROWS it (``T1RoutingAction.USE_LEASED``) and T1
+          works fine via the parent's session; this dispatch-level mint
+          failure has NO visible effect on the child at all.
+        * Otherwise the child's Branch 0 attempts its OWN mint for that
+          forwarded id; if the underlying cause is the same storage-
+          service outage, that mint also fails and defers via the
+          existing nexus-brw1s hook (a per-call ``RuntimeError``, not
+          ``T1UnavailableThisProcessError``).
+        * ``T1UnavailableThisProcessError`` (nexus-4lkmz decision 2) fires
+          ONLY when the child cannot resolve ANY session id at all (no
+          forwarded id, no lease, no fallback) — the genuinely
+          unresolvable-session case, not "any mint failure upstream".
+
+        The NX_SESSION_ID forwarding behavior itself is unchanged by this
+        correction (tracked separately: nexus-ylof9) — only this
+        docstring's prior overstatement is fixed. What remains true
+        regardless of which of the above paths fires: no store object is
+        ever fabricated here, and this dispatch-level mint failure never
+        kills the CURRENT dispatch (the point of this whole fix).
 
     Owned (default, neither flag set)
-        Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED``
-        so the subprocess resolves its own T1 (service-backed in
-        service mode, private in-process otherwise). The subprocess
-        gets a sealed-from-parent T1 session of its own.
+        Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED`` so the
+        subprocess resolves its own T1 via its own nested MCP session
+        (T1 is PG-only, no in-process opt-out — nexus-4lkmz). The
+        subprocess gets a sealed-from-parent T1 session of its own.
 
     nexus-5daww (defense in depth): both ``ephemeral`` and ``owned`` also
     strip ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` -- the SERVICE-backed T1
@@ -147,13 +202,35 @@ def _build_dispatch_env(
             "cross-process findings, or service-mode T1 session leases."
         )
     if ephemeral:
-        base["NX_T1_ISOLATED"] = "1"
+        # nexus-4lkmz decision 1 / nexus-bjltu blast-radius fix: strip any
+        # inherited T1 signals unconditionally (never the parent's token,
+        # never the retired isolated leg) -- minting only happens below,
+        # and only when the subprocess could possibly reach T1.
         base.pop("NX_T1_HOST", None)
         base.pop("NX_T1_PORT", None)
-        # nexus-5daww: never forward the parent's live SERVICE-backed T1
-        # session-token pair to a nested MCP subprocess.
+        base.pop("NX_T1_ISOLATED", None)
         base.pop("NX_T1_SESSION", None)
         base.pop("NX_T1_SESSION_ID", None)
+
+        if grants_tool_access:
+            from nexus.db.t1 import mint_t1_session_token  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+            dispatch_session_id = str(uuid4())
+            try:
+                minted = mint_t1_session_token(
+                    dispatch_session_id, context="operator dispatch mint"
+                )
+            except Exception as exc:  # noqa: BLE001 — nexus-bjltu: a mint failure must never kill the whole dispatch; the child's own Branch 0 resolves what happens next (borrow the parent's lease, its own deferred mint, or T1UnavailableThisProcessError — see this function's docstring, nexus-ylof9)
+                _log.warning(
+                    "operator_dispatch_t1_mint_failed",
+                    session_id=dispatch_session_id,
+                    error=str(exc),
+                )
+            else:
+                base["NX_T1_SESSION"] = minted["session_token"]
+                base["NX_T1_SESSION_ID"] = dispatch_session_id
+        # else: tool-free dispatch -- nothing in the subprocess can reach
+        # T1, so no mint is attempted at all (nexus-bjltu).
     else:
         # Owned: subprocess spawns its own T1. Strip any parent T1
         # signals so the lifespan's Branch 3 fires.
@@ -233,6 +310,81 @@ def _persist_timeout_log(
         return "(log write failed)"
 
 
+def _close_dispatch_session(session_id: str | None, session_token: str | None) -> None:
+    """Best-effort close of a dispatch-minted T1 session (nexus-bjltu
+    Significant #1, TWO-STEP teardown per round-2 code-review finding).
+
+    Called from ``claude_dispatch``'s ``finally`` after the subprocess has
+    exited (success, harness failure, timeout-kill, or even a subprocess-
+    creation failure) — the session is no longer needed once the one-shot
+    subprocess that owned it is gone.
+
+    TWO INDEPENDENT calls, mirroring ``mcp.core``'s Branch-0 teardown
+    EXACTLY (``_t1_session_shutdown``: scratch close first, then
+    ``HttpTokenStore().close_session()``) — round-1 of this fix closed only
+    the first half:
+
+    1. ``HttpScratchStore(...).close_session()`` — deletes the SCRATCH ROWS
+       for this session. Backstopped by the passive TTL sweep.
+    2. ``HttpTokenStore().close_session(session_id)`` — revokes the minted
+       SESSION TOKEN itself (``POST /v1/sessions/close``), the row
+       ``mint_t1_session_token``'s ``POST /v1/sessions/start`` created.
+       **NOT backstopped by any sweep** (``session_tokens`` has no
+       scheduled sweep, unlike the scratch rows — round-2 finding,
+       engine-side sweep tracked separately as nexus-t23zk, not this bead):
+       an unclosed token is a PERMANENT row, not a 24h-bounded one, which
+       is why this call is not optional the way the scratch close's TTL
+       backstop makes it merely "nice to have".
+
+    Each step is independently wrapped: a failure in step 1 must not skip
+    step 2, and vice versa. Both failures are logged, never raised — a
+    dispatch that already succeeded (or already failed for its own reason)
+    must not additionally fail on cleanup.
+
+    A no-op (skips both steps) when *session_id* is ``None`` (tool-free
+    dispatch, or a mint that never happened/failed — nothing to close
+    either way).
+    """
+    if not session_id:
+        return
+
+    # Step 1: scratch rows (HttpScratchStore), constructed EXPLICITLY from
+    # the minted id/token rather than reading ambient env (this process's
+    # own env was never mutated — only the subprocess's copy was).
+    try:
+        from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+        store = HttpScratchStore(session_id=session_id, _session_token=session_token)
+        try:
+            store.close_session()
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 — best-effort cleanup; the scratch-row TTL sweep is the backstop, never fail an already-completed dispatch on close
+        _log.warning(
+            "operator_dispatch_t1_scratch_close_failed",
+            session_id=session_id,
+            error=str(exc),
+        )
+
+    # Step 2: the session TOKEN itself (HttpTokenStore) -- a SEPARATE call
+    # against a SEPARATE endpoint, using the process's own SERVICE bearer
+    # (ambient NX_SERVICE_TOKEN, never touched by _build_dispatch_env),
+    # never the per-session T1 token from step 1. Independent try/except:
+    # this must run even if step 1 raised, and its own failure must not
+    # propagate either.
+    try:
+        from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+        with HttpTokenStore() as token_store:
+            token_store.close_session(session_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort cleanup; NO sweep backstops this row (nexus-t23zk tracks an engine-side one, not implemented here), but a dispatch that already completed must not additionally fail on cleanup
+        _log.warning(
+            "operator_dispatch_t1_token_close_failed",
+            session_id=session_id,
+            error=str(exc),
+        )
+
+
 async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
@@ -288,13 +440,16 @@ async def claude_dispatch(
     # (PR #198). Without this, ``proc.kill()`` on timeout only kills the
     # claude leader and orphans the children.
     #
-    # NX_T1_ISOLATED=1 tells the subprocess's nx SessionStart hook to NOT
-    # spin up a chroma T1 server, and tells the T1 client to go straight
-    # to EphemeralClient. Operator dispatch is stateless — each
-    # `claude -p` invocation is a one-shot call that takes its input from
-    # the prompt and produces structured JSON output. There's no cross-
-    # invocation scratch to preserve, so paying the chroma startup cost
-    # for every call would be pure waste.
+    # nexus-4lkmz decision 1 / nexus-bjltu blast-radius fix: the subprocess
+    # inherits a freshly minted, OWN T1 session (NX_T1_SESSION /
+    # NX_T1_SESSION_ID) rather than the retired NX_T1_ISOLATED=1 in-process
+    # leg -- but ONLY when this call actually grants the subprocess tool
+    # access (mcp_servers or allowed_tools set) that could reach T1. The
+    # stateless tool-free default (the common case -- extract/filter/rank/
+    # summarize/etc.) spawns a subprocess with NO MCP tool access, so it
+    # cannot reach T1 at all; minting for it would be dead weight and a
+    # storage-service hiccup must never kill a dispatch that never touches
+    # T1 (see ``_build_dispatch_env``'s ephemeral-mode docstring).
     #
     # NX_SESSION_ID=<parent-uuid> tells the subprocess's SessionStart hook
     # that it is a NESTED session — its own conversation UUID arrives via
@@ -311,13 +466,26 @@ async def claude_dispatch(
     # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
     # three-mode helper. The operator-dispatch caller is the
     # canonical stateless one-shot, so default to ``ephemeral=True``.
-    # The helper emits ``NX_T1_ISOLATED=1`` (the legacy
-    # ``NEXUS_SKIP_T1`` alias was removed at 6.5.2, a major past its
-    # promised 5.0 removal).
+    # nexus-4lkmz / nexus-bjltu: the helper mints the subprocess its own
+    # PG-backed T1 session (NX_T1_SESSION / NX_T1_SESSION_ID) rather than
+    # the retired NX_T1_ISOLATED=1 in-process leg -- gated on
+    # ``grants_tool_access`` so a tool-free dispatch never pays for (or
+    # depends on) a mint it cannot use.
     env = _build_dispatch_env(
         ephemeral=True,
         parent_session_id=parent_session_id,
+        grants_tool_access=bool(mcp_servers or allowed_tools),
     )
+    # nexus-bjltu Significant #1: track whether THIS dispatch minted its
+    # own T1 session so it can be closed after the subprocess exits,
+    # rather than relying entirely on the passive 24h TTL sweep backstop
+    # (operator dispatch is the high-volume default path -- real
+    # session-row accretion otherwise). Only ever set when
+    # ``_build_dispatch_env`` actually minted (grants_tool_access=True AND
+    # the mint succeeded); absent for tool-free dispatches and for a
+    # failed mint (nothing to close in either case).
+    _minted_session_id = env.get("NX_T1_SESSION_ID")
+    _minted_session_token = env.get("NX_T1_SESSION")
     # Base argv is the stateless, tool-free default. Opt-in tool access
     # (nexus-mawqw) appends --mcp-config / --allowedTools only when the
     # caller explicitly requests it, preserving the stateless-operator
@@ -332,153 +500,167 @@ async def claude_dispatch(
         argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
     if allowed_tools:
         argv += ["--allowedTools", ",".join(allowed_tools)]
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-        env=env,
-    )
-
+    # nexus-bjltu (round 2, code-reviewer + critic independently): the
+    # minted-session close (below) must run regardless of how the dispatch
+    # finishes -- successful subprocess completion, harness failure,
+    # timeout-kill, or even subprocess CREATION itself raising -- so the
+    # try/finally starts BEFORE ``create_subprocess_exec``, not after it.
+    # A mint immediately followed by a spawn failure (fork/exec error,
+    # resource exhaustion) previously leaked both the scratch rows and the
+    # session token with nothing to close.
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(prompt.encode()),
-            timeout=timeout,
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            env=env,
         )
-    except asyncio.TimeoutError:
-        # Search review I-6: reach the whole process group so any claude
-        # children (nested planners, tool subprocesses) get reaped too.
-        # safe_killpg guards on isinstance(proc.pid, int) so mocked-
-        # subprocess tests deterministically fall through to proc.kill()
-        # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
-        # tests/test_process_group_safety.py.
-        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 - deferred to avoid circular import at module load
-        import signal  # noqa: PLC0415 - branch-local; deferred to call time
 
-        if not safe_killpg(proc, signal.SIGKILL):
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
-                pass
-        # Reap the leader so the asyncio transport closes cleanly.
         try:
-            await proc.wait()
-        except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
-            pass
-        # nexus-1at5: drain whatever bytes already landed in the pipe
-        # buffers BEFORE raising. ``communicate()`` was cancelled mid-
-        # await so its return value is gone, but the kernel-side pipe
-        # still holds whatever the subprocess wrote. After kill+wait
-        # the writer is dead, so the read drains cleanly without
-        # blocking. Persist to a per-call log file so the operator can
-        # see what claude was producing when the timeout fired -
-        # otherwise a 5-minute timeout discards 5 minutes of analytical
-        # output and the next debugging session starts from zero.
-        partial_stdout = await _drain_pipe(proc.stdout)
-        partial_stderr = await _drain_pipe(proc.stderr)
-        log_path = _persist_timeout_log(timeout, partial_stdout, partial_stderr)
-        raise OperatorTimeoutError(
-            f"claude -p timed out after {timeout}s; "
-            f"partial output ({len(partial_stdout)}B stdout, "
-            f"{len(partial_stderr)}B stderr) logged to {log_path}"
-        )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt.encode()),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # Search review I-6: reach the whole process group so any claude
+            # children (nested planners, tool subprocesses) get reaped too.
+            # safe_killpg guards on isinstance(proc.pid, int) so mocked-
+            # subprocess tests deterministically fall through to proc.kill()
+            # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
+            # tests/test_process_group_safety.py.
+            from nexus.util.process_group import safe_killpg  # noqa: PLC0415 - deferred to avoid circular import at module load
+            import signal  # noqa: PLC0415 - branch-local; deferred to call time
 
-    if proc.returncode != 0:
-        # GH #1414: `claude -p --output-format json` reports its errors on
-        # STDOUT, so a stderr-only message rendered as the bare, useless
-        # "claude -p exited 1:" — twice, for nx_plan_audit, with nothing in
-        # mcp.log either. Report whichever stream spoke.
-        err_snippet = stderr.decode(errors="replace").strip()[:300]
-        out_snippet = stdout.decode(errors="replace").strip()[:300]
-        parts = [
-            f"{label}: {text}"
-            for label, text in (("stderr", err_snippet), ("stdout", out_snippet))
-            if text
-        ]
-        # Silence must READ as silence: a bare trailing colon is
-        # indistinguishable from "we dropped the output", which is the
-        # ambiguity that cost GH #1414 a hand investigation.
-        detail = " | ".join(parts) if parts else "no output on stdout or stderr"
-        # The DURABLE half. The exception above is visible for exactly one
-        # turn, in whatever renders the tool error; nothing writes it down.
-        # GH #1414 searched a May-July mcp.log and found nothing, because
-        # FastMCP's handler returns str(e) to the client without logging —
-        # and of the 17 call sites, 13 propagate bare on at least one real
-        # invocation path, three of them (nx_plan_audit, nx_tidy,
-        # nx_enrich_beads) with no covered path at all. This is the one
-        # choke point every caller passes through, including call site 18
-        # that nobody has written yet, so the record belongs here rather
-        # than at N call sites that must each remember to opt in.
-        #
-        # Deliberately NOT capped at the exception's 300 chars: that cap
-        # buys a readable message, and a durable record that inherits it
-        # loses the same diagnostic tail all over again (nexus-1at5's
-        # actual lesson was durability independent of the exception text,
-        # which the first cut of this fix claimed but did not deliver).
-        #
-        # SCOPE, precisely: this fires for all 17 call sites, but DURABILITY
-        # is a property of the calling process's logging mode, not of this
-        # choke point. mode="mcp" gets the rotating file handler, so the 15
-        # server-side sites get a record on disk. `nx taxonomy discover` and
-        # `review --auto` (taxonomy_cmd.py:1537,:1653) run under
-        # mode="cli", which logging_setup returns from before any file
-        # handler is attached — stderr only. Those two go from 100% silent
-        # to one stderr line per failure during the run, which is an
-        # improvement and is NOT "something to grep afterward".
-        emit = _log.info if _ROLLED_UP.get() else _log.warning
-        emit(
-            "operator_dispatch_failed",
-            returncode=proc.returncode,
-            stdout=_capped(stdout),
-            stderr=_capped(stderr),
-        )
-        # nexus-ri56e: (a) origin unambiguity — a populated message now
-        # reads like an ordinary application error, but this is the
-        # DISPATCH HARNESS failing (the claude -p CLI exited non-zero);
-        # whoever hits it must not mistake the relayed error text for a
-        # model-level answer. (b) addressability — the timeout branch has
-        # always named its artifact in the exception; name ours too, or
-        # honestly say there is none (plain CLI mode).
-        from nexus.logging_setup import active_log_file  # noqa: PLC0415 — deferred: logging_setup is heavier than this hot-free error path needs at import time
+            if not safe_killpg(proc, signal.SIGKILL):
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
+                    pass
+            # Reap the leader so the asyncio transport closes cleanly.
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
+                pass
+            # nexus-1at5: drain whatever bytes already landed in the pipe
+            # buffers BEFORE raising. ``communicate()`` was cancelled mid-
+            # await so its return value is gone, but the kernel-side pipe
+            # still holds whatever the subprocess wrote. After kill+wait
+            # the writer is dead, so the read drains cleanly without
+            # blocking. Persist to a per-call log file so the operator can
+            # see what claude was producing when the timeout fired -
+            # otherwise a 5-minute timeout discards 5 minutes of analytical
+            # output and the next debugging session starts from zero.
+            partial_stdout = await _drain_pipe(proc.stdout)
+            partial_stderr = await _drain_pipe(proc.stderr)
+            log_path = _persist_timeout_log(timeout, partial_stdout, partial_stderr)
+            raise OperatorTimeoutError(
+                f"claude -p timed out after {timeout}s; "
+                f"partial output ({len(partial_stdout)}B stdout, "
+                f"{len(partial_stderr)}B stderr) logged to {log_path}"
+            )
 
-        log_file = active_log_file()
-        where = (
-            f"durable record: operator_dispatch_failed in {log_file}"
-            if log_file is not None
-            else "no log file attached (plain CLI mode) — this message is "
-                 "the only record"
-        )
-        raise OperatorError(
-            f"claude -p exited {proc.returncode} (dispatch-harness "
-            f"failure, not a model answer): {detail} [{where}]"
-        )
+        if proc.returncode != 0:
+            # GH #1414: `claude -p --output-format json` reports its errors on
+            # STDOUT, so a stderr-only message rendered as the bare, useless
+            # "claude -p exited 1:" — twice, for nx_plan_audit, with nothing in
+            # mcp.log either. Report whichever stream spoke.
+            err_snippet = stderr.decode(errors="replace").strip()[:300]
+            out_snippet = stdout.decode(errors="replace").strip()[:300]
+            parts = [
+                f"{label}: {text}"
+                for label, text in (("stderr", err_snippet), ("stdout", out_snippet))
+                if text
+            ]
+            # Silence must READ as silence: a bare trailing colon is
+            # indistinguishable from "we dropped the output", which is the
+            # ambiguity that cost GH #1414 a hand investigation.
+            detail = " | ".join(parts) if parts else "no output on stdout or stderr"
+            # The DURABLE half. The exception above is visible for exactly one
+            # turn, in whatever renders the tool error; nothing writes it down.
+            # GH #1414 searched a May-July mcp.log and found nothing, because
+            # FastMCP's handler returns str(e) to the client without logging —
+            # and of the 17 call sites, 13 propagate bare on at least one real
+            # invocation path, three of them (nx_plan_audit, nx_tidy,
+            # nx_enrich_beads) with no covered path at all. This is the one
+            # choke point every caller passes through, including call site 18
+            # that nobody has written yet, so the record belongs here rather
+            # than at N call sites that must each remember to opt in.
+            #
+            # Deliberately NOT capped at the exception's 300 chars: that cap
+            # buys a readable message, and a durable record that inherits it
+            # loses the same diagnostic tail all over again (nexus-1at5's
+            # actual lesson was durability independent of the exception text,
+            # which the first cut of this fix claimed but did not deliver).
+            #
+            # SCOPE, precisely: this fires for all 17 call sites, but DURABILITY
+            # is a property of the calling process's logging mode, not of this
+            # choke point. mode="mcp" gets the rotating file handler, so the 15
+            # server-side sites get a record on disk. `nx taxonomy discover` and
+            # `review --auto` (taxonomy_cmd.py:1537,:1653) run under
+            # mode="cli", which logging_setup returns from before any file
+            # handler is attached — stderr only. Those two go from 100% silent
+            # to one stderr line per failure during the run, which is an
+            # improvement and is NOT "something to grep afterward".
+            emit = _log.info if _ROLLED_UP.get() else _log.warning
+            emit(
+                "operator_dispatch_failed",
+                returncode=proc.returncode,
+                stdout=_capped(stdout),
+                stderr=_capped(stderr),
+            )
+            # nexus-ri56e: (a) origin unambiguity — a populated message now
+            # reads like an ordinary application error, but this is the
+            # DISPATCH HARNESS failing (the claude -p CLI exited non-zero);
+            # whoever hits it must not mistake the relayed error text for a
+            # model-level answer. (b) addressability — the timeout branch has
+            # always named its artifact in the exception; name ours too, or
+            # honestly say there is none (plain CLI mode).
+            from nexus.logging_setup import active_log_file  # noqa: PLC0415 — deferred: logging_setup is heavier than this hot-free error path needs at import time
 
-    raw = stdout.decode(errors="replace").strip()
-    if not raw:
-        raise OperatorOutputError("claude -p produced empty stdout")
-
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise OperatorOutputError(
-            f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
-        ) from exc
-
-    # `claude -p --output-format json` returns a wrapper:
-    # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}
-    # Callers supplied a `json_schema`, so they expect the schema-conforming
-    # dict, not the wrapper.  Surface errors explicitly, unwrap otherwise.
-    if isinstance(parsed, dict) and "structured_output" in parsed:
-        if parsed.get("is_error"):
+            log_file = active_log_file()
+            where = (
+                f"durable record: operator_dispatch_failed in {log_file}"
+                if log_file is not None
+                else "no log file attached (plain CLI mode) — this message is "
+                     "the only record"
+            )
             raise OperatorError(
-                f"claude -p reported error: {parsed.get('result', '')[:300]}"
+                f"claude -p exited {proc.returncode} (dispatch-harness "
+                f"failure, not a model answer): {detail} [{where}]"
             )
-        structured = parsed.get("structured_output")
-        if structured is None:
+
+        raw = stdout.decode(errors="replace").strip()
+        if not raw:
+            raise OperatorOutputError("claude -p produced empty stdout")
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
             raise OperatorOutputError(
-                f"claude -p returned null structured_output; "
-                f"result={parsed.get('result', '')[:200]!r}"
-            )
-        return structured
-    return parsed
+                f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
+            ) from exc
+
+        # `claude -p --output-format json` returns a wrapper:
+        # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}
+        # Callers supplied a `json_schema`, so they expect the schema-conforming
+        # dict, not the wrapper.  Surface errors explicitly, unwrap otherwise.
+        if isinstance(parsed, dict) and "structured_output" in parsed:
+            if parsed.get("is_error"):
+                raise OperatorError(
+                    f"claude -p reported error: {parsed.get('result', '')[:300]}"
+                )
+            structured = parsed.get("structured_output")
+            if structured is None:
+                raise OperatorOutputError(
+                    f"claude -p returned null structured_output; "
+                    f"result={parsed.get('result', '')[:200]!r}"
+                )
+            return structured
+        return parsed
+    finally:
+        # nexus-bjltu Significant #1: close the minted session (if any)
+        # now that the subprocess that owned it is gone. No-op when this
+        # dispatch never minted (tool-free, or a failed mint).
+        _close_dispatch_session(_minted_session_id, _minted_session_token)

@@ -234,18 +234,17 @@ def get_t1():
             if _t1_instance is None:
                 if _t1_pre_init_hook is not None:
                     _t1_pre_init_hook()  # raises => propagate; cache stays empty
-                from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — deferred to avoid circular import
                 from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred to avoid circular import (db.t1)
                 _t1_instance = get_t1_database()
-                # RDR-155 P4b P0a (review finding): detect isolated mode
-                # structurally. The prior warnings-sniff for the string
-                # "EphemeralClient" matched a warning chromadb never
-                # emitted, so `is_isolated` was ALWAYS False and the
-                # "[T1 isolated] " operator prefix never fired.
-                _t1_isolated = isinstance(
-                    getattr(_t1_instance, "_client", None),
-                    InMemoryVectorClient,
-                )
+                # nexus-4lkmz: get_t1_database() with no injected client
+                # can no longer return a T1Database (the InMemoryVectorClient
+                # leg it used to construct is retired outright — T1 is
+                # PG-only). Isolated-mode detection is therefore always
+                # False on THIS path; ``inject_t1(t1, isolated=True)``
+                # remains the way tests exercise the "[T1 isolated] "
+                # operator prefix (an orthogonal, still-live test-support
+                # feature — see tests/test_mcp_server.py).
+                _t1_isolated = False
     return _t1_instance, _t1_isolated
 
 

@@ -8,7 +8,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 | Tier | Storage | Arbitrator | Transport | Durability | Use |
 |------|---------|------------|-----------|------------|-----|
-| T1 -- scratch | Service-backed (`HttpScratchStore` via `nexus-service`); `NX_T1_ISOLATED=1` opts into a private in-process `InMemoryVectorClient` | nexus-service (`nx daemon service`) | nexus-service HTTP (isolated: process-local) | Session only | Working notes, hypotheses |
+| T1 -- scratch | Service-backed (`HttpScratchStore` via `nexus-service`), PG-only — no in-process opt-out | nexus-service (`nx daemon service`) | nexus-service HTTP | Session only | Working notes, hypotheses |
 | T2 -- memory | Postgres 17 via `nexus-service` (the only backend since RDR-158; `=sqlite` hard-errors) | nexus-service (`nx daemon service`) | nexus-service HTTP | Survives restarts | Per-project notes, session context |
 | T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
 | Catalog | Engine-owned Postgres tables (Liquibase-managed schema, RLS), reached via `HttpCatalogClient` through the `nexus-service` — no local JSONL event log, no `.catalog.db` (both deleted at RDR-158 P4, nexus-i711w) | nexus-service (`nx daemon service`) | nexus-service HTTP | Permanent | Document registry, typed link graph, provenance |
@@ -99,12 +99,13 @@ Concurrent independent Claude Code windows stay isolated because each has its
 own session-id.
 
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
-lease discovery) retired with the chroma substrate. `NX_T1_ISOLATED=1` opts a
-process into a private, dependency-free in-process `InMemoryVectorClient`;
-otherwise a process outside service-mode routing raises
-`T1ServerNotFoundError` rather than silently inventing a private store.
+lease discovery) retired with the chroma substrate. The in-process
+`NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired
+(nexus-4lkmz, 2026-08: "T1 exists in PG only") — setting it now hard-fails
+with `T1IsolatedLegRetiredError`. A process outside service-mode routing
+raises `T1ServerNotFoundError` rather than inventing a private store.
 
-Everything is wiped at session end: the `SessionEnd` hook flushes flagged entries to T2 and the session's scratch rows expire against the service (isolated mode: the in-process `InMemoryVectorClient` is simply discarded with the process). Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
+Everything is wiped at session end: the `SessionEnd` hook flushes flagged entries to T2 and the session's scratch rows expire against the service (backstopped by the 24h TTL sweep). Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 
 **Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as row metadata in the service's Postgres backing store — schemaless-shaped, no client migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end regardless).
 

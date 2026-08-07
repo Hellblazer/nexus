@@ -227,9 +227,13 @@ def fake_service(monkeypatch: pytest.MonkeyPatch):
 
     Every env var relevant to CLI-dedicated-path routing is reset here so
     each test starts from "bare CLI, no inherited session" — the autouse
-    ``_isolate_t1_sessions`` fixture (conftest) sets ``NX_T1_ISOLATED=1``
-    process-wide; tests in this file always delenv it (Path C otherwise
-    wins ahead of the SERVICE routing this module tests).
+    ``_isolate_t1_sessions`` fixture (conftest) mints a real T1 session
+    against the test engine substrate (nexus-4lkmz); tests in this file
+    always delenv NX_T1_SESSION/NX_T1_SESSION_ID so they start from that
+    clean bare-CLI state instead of the conftest-minted one, and delenv
+    NX_T1_ISOLATED defensively (it is now a hard-fail trigger, never an
+    opt-in, and would otherwise outrank the SERVICE routing this module
+    tests).
     """
     _reset_fake_service_state()
     port = _free_port()
@@ -904,10 +908,9 @@ class TestSharedFallbackEscapeHatch:
     def test_escape_hatch_value_other_than_1_does_not_activate(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """Only the exact value "1" activates the hatch -- mirrors the
-        existing NX_T1_ISOLATED == "1" exact-match convention in this same
-        factory, so a typo'd or truthy-but-not-"1" value fails loud rather
-        than silently degrading."""
+        """Only the exact value "1" activates the hatch, so a typo'd or
+        truthy-but-not-"1" value fails loud rather than silently
+        degrading."""
         from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
 
         monkeypatch.setenv("NX_SESSION_ID", "escape-hatch-not-exactly-one")
@@ -2228,6 +2231,139 @@ class TestDeferredMintBoundaries:
             assert mcp_infra._t1_instance is None
         finally:
             self._disarm(mcp_core, mcp_infra)
+
+
+# ── nexus-4lkmz decision 2: no-resolvable-session-id fails loud, T1-only ──────
+#
+# LOCKED 2026-08-07: mcp/core.py's Branch 0 "no resolvable session id" case
+# used to force NX_T1_ISOLATED=1, silently redirecting the MCP process into
+# a private in-process T1Database. That leg is retired outright (T1 is
+# PG-only). The replacement: a FAIL-LOUD, per-call, named error — never a
+# shared identity (the nexus-rn3wo.1 security property), never a silent
+# private store — via the SAME pre-init-hook mechanism nexus-brw1s built for
+# the deferred-mint case, so a T1-only failure costs T1 only.
+
+
+class TestMcpCoreUnresolvableSessionFailsLoud:
+    @pytest.fixture(autouse=True)
+    def _reset_hook_state(self):
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        prev_hook = mcp_infra._t1_pre_init_hook
+        prev_instance = mcp_infra._t1_instance
+        mcp_infra.set_t1_pre_init_hook(None)
+        mcp_infra._t1_instance = None
+        try:
+            yield
+        finally:
+            mcp_infra.set_t1_pre_init_hook(prev_hook)
+            mcp_infra._t1_instance = prev_instance
+
+    def test_lifespan_does_not_raise_and_registers_the_hook(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The whole point of the fix: the MCP server must start and serve
+        every non-T1 tool normally when no session id resolves -- never
+        crash the lifespan itself."""
+        import asyncio
+
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        async def _run() -> None:
+            async with mcp_core._t1_lifespan(None):
+                assert mcp_infra._t1_pre_init_hook is (
+                    mcp_core._raise_t1_unavailable_this_process
+                ), "the hook must be registered while the lifespan is live"
+
+        asyncio.run(_run())  # must not raise
+
+        assert mcp_infra._t1_pre_init_hook is None, (
+            "the hook must be unregistered on lifespan teardown"
+        )
+
+    def test_get_t1_raises_named_error_with_actionable_message(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        import asyncio
+
+        from nexus import mcp_infra
+        from nexus.mcp.core import T1UnavailableThisProcessError
+
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        async def _run() -> None:
+            async with mcp_core._t1_lifespan(None):
+                with pytest.raises(
+                    T1UnavailableThisProcessError, match="T1 unavailable this process"
+                ) as excinfo:
+                    mcp_infra.get_t1()
+                msg = str(excinfo.value)
+                assert "resolvable session id" in msg
+                assert "search, memory, store, catalog" in msg
+                assert "NX_T1_ISOLATED" not in msg, (
+                    "must never advertise the retired escape hatch"
+                )
+                # Nothing cached -- a later call (e.g. after reconnect) retries.
+                assert mcp_infra._t1_instance is None
+
+        asyncio.run(_run())
+
+    def test_scratch_tool_returns_an_error_string_not_a_raise(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Same user-facing guarantee as the deferred-mint case above: the
+        REAL scratch tool returns an actionable error STRING, it does not
+        raise out of the MCP worker."""
+        import asyncio
+
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import scratch
+
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        async def _run() -> str:
+            async with mcp_core._t1_lifespan(None):
+                return scratch(action="put", content="unresolvable-session write")
+
+        result = asyncio.run(_run())
+        assert isinstance(result, str)
+        assert "T1 unavailable this process" in result
+
+    def test_inherited_live_token_is_unaffected(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """A sub-agent that inherited a LIVE minted token from its parent
+        must be completely unaffected by this branch -- USE_INHERITED wins
+        before the no-resolvable-session check is ever reached."""
+        import asyncio
+
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.setenv("NX_T1_SESSION", "inherited-live-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "inherited-live-session")
+
+        async def _run() -> None:
+            async with mcp_core._t1_lifespan(None):
+                assert mcp_infra._t1_pre_init_hook is None, (
+                    "USE_INHERITED must never register the unavailable-this-"
+                    "process hook"
+                )
+
+        asyncio.run(_run())
 
 
 # ── nexus-jc33g: CLI-dedicated TOKEN is cached; no per-invocation re-mint ─────

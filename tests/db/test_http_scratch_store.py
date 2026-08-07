@@ -486,7 +486,7 @@ class TestGetT1DatabaseFactory:
         # fake_server is a URL string like "http://127.0.0.1:<port>"
         port = fake_server.split(":")[-1]
         monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)  # autouse fixture sets it; isolation wins post-h8rf6
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)  # defensive: retired var hard-fails if set (nexus-4lkmz)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", port)
         monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
@@ -519,17 +519,19 @@ class TestGetT1DatabaseFactory:
         with _pytest.raises(StorageModeFlagError, match="retired SQLite storage backend"):
             get_t1_database()
 
-    def test_get_t1_database_isolated_escape_hatch_still_works(self, monkeypatch):
-        """NX_T1_ISOLATED=1 (the documented in-process ephemeral scratch)
-        survives the opt-out removal and wins before env validation."""
+    def test_get_t1_database_isolated_leg_retired_hard_fails(self, monkeypatch):
+        """nexus-4lkmz: NX_T1_ISOLATED=1 (the formerly-documented in-process
+        ephemeral scratch escape hatch) is retired outright — T1 is PG-only.
+        It still wins BEFORE env validation (same check-first position as
+        before), but now as a hard failure naming the real remedy instead of
+        a silent redirect to an in-process store."""
         monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        from nexus.db.http_scratch_store import HttpScratchStore
-        from nexus.db.t1 import get_t1_database
+        from nexus.db.t1 import T1IsolatedLegRetiredError, get_t1_database
 
-        result = get_t1_database()
-        assert not isinstance(result, HttpScratchStore)
+        with pytest.raises(T1IsolatedLegRetiredError, match="retired"):
+            get_t1_database()
 
 # ── nexus-g5hzk: 401 -> lease-reread -> retry-once (borrower self-heal) ────────
 

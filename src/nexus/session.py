@@ -518,25 +518,13 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 
 
 
-def _t1_isolated_env() -> bool:
-    """Return True when the current env opts into per-process T1 ephemeral.
-
-    ``NX_T1_ISOLATED=1`` only.
-
-    The legacy ``NEXUS_SKIP_T1=1`` alias (4.27 -> 4.28 deprecation cycle, RF-4)
-    stopped FUNCTIONING at 6.5.2 — already a full major past its promised 5.0
-    removal — and was recognized-but-ignored with a one-shot warning from then
-    until 7.0.0. That warning is removed here (RDR-155 P4b P3: the shim dies at
-    the MAJOR); the name is no longer special-cased anywhere and is now simply
-    an unrecognised environment variable.
-
-    TRADEOFF, recorded deliberately: the warning existed because a stale alias
-    with a live T1 discoverable would SILENTLY connect the caller to the shared
-    T1 instead of the isolation they asked for (critique 2026-07-13). That
-    failure mode is unchanged — it is now unsignalled. Judged acceptable at a
-    MAJOR after two releases of warning, but it is a real loss, not a no-op.
-    """
-    return os.environ.get("NX_T1_ISOLATED", "").strip().lower() in ("1", "true", "yes")
+#: ``_t1_isolated_env()`` (the NX_T1_ISOLATED=1 opt-in check) was removed at
+#: nexus-4lkmz: the isolated/ephemeral in-process T1 leg it gated is deleted
+#: outright (Hal determination 2026-07-28 — "T1 exists in PG only. The need
+#: for an isolated, ephemeral T1 has been eliminated."). The env var is now a
+#: hard-fail, checked directly in :mod:`nexus.db.t1` via
+#: ``_raise_if_t1_isolated_requested`` — there is no "is it set" query left
+#: to answer, only "fail loud if it is."
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

@@ -5,9 +5,10 @@
 # Background: PRs #602 + #603 split catalog.py into a 1683-LOC facade
 # plus six focused modules (_LinkOps / _DocumentOps / _SyncOps /
 # _WriteOps composition + catalog_git / catalog_spans static helpers).
-# Unit tests exercise the catalog through pytest fixtures with
-# EphemeralClient + NX_T1_ISOLATED=1 + mocked subprocesses.  This
-# scenario closes the gap by exercising the SAME refactored surfaces
+# Unit tests exercise the catalog through pytest fixtures with a
+# minted, PG-backed T1 test session (nexus-4lkmz — the in-process
+# NX_T1_ISOLATED=1 escape hatch retired outright) + mocked subprocesses.
+# This scenario closes the gap by exercising the SAME refactored surfaces
 # under live conditions: a real Claude Code session, a real
 # nx-mcp-catalog server, real subagent dispatch, real chroma.
 #

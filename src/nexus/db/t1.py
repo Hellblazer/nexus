@@ -6,7 +6,6 @@ import enum
 import fcntl
 import json
 import os
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,7 +25,6 @@ from nexus.db.t2 import T2Database
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 from nexus.session import (
-    _t1_isolated_env,
     resolve_active_session_id,
 )
 
@@ -117,39 +115,53 @@ def _find_promote_overlap_candidates(
     return [cand for _, cand in hits]
 
 
-#: Process-scoped client for the ``NX_T1_ISOLATED=1`` leg (RDR-155 P4b
-#: P0a). Chroma-parity note: ``EphemeralClient`` instances in one process
-#: shared backing state (the SharedSystemClient settings-hash cache), so
-#: the legacy isolated leg had per-PROCESS scratch continuity across
-#: ``T1Database`` constructions — the scratch CLI journey inside a single
-#: process depends on it. ONE client per process preserves that observable
-#: contract; a dispatch child is a fresh process, so children still start
-#: empty (the nexus-g37fr [21099] design guard).
-_isolated_client = None
-_isolated_client_lock = threading.Lock()
+class T1IsolatedLegRetiredError(RuntimeError):
+    """Raised when ``NX_T1_ISOLATED`` is set in the environment.
 
-
-def _isolated_vector_client():
-    """Return the process-scoped :class:`InMemoryVectorClient` for Path C.
-
-    The default EF is pinned to tier-0 MiniLM — byte-identical to the
-    implicit chroma default EF the legacy ``EphemeralClient`` leg used
-    (lazy model load, no construction cost here). The tier-0 disposition
-    is a P0b decision; this call site is the T1-isolated consumer to
-    update there.
+    nexus-4lkmz (Hal determination 2026-07-28): "T1 exists in PG only.
+    The need for an isolated, ephemeral T1 has been eliminated." The
+    ``NX_T1_ISOLATED=1`` leg (RDR-155 P4b P0a's process-scoped
+    ``InMemoryVectorClient`` backing, and the ``T1Database`` Path C
+    branch that constructed it) is deleted outright — there is no
+    replacement opt-out, and no code path honors this variable anymore.
+    A shell that still carries it gets this named, actionable error
+    instead of the retired escape hatch silently doing nothing (or,
+    pre-fix, quietly routing to an ephemeral in-process store).
     """
-    global _isolated_client
-    with _isolated_client_lock:
-        if _isolated_client is None:
-            from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — circular-dep avoidance
-            from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — circular-dep avoidance
 
-            _isolated_client = InMemoryVectorClient(
-                default_embedding_function=LocalEmbeddingFunction(
-                    model_name="all-MiniLM-L6-v2"
-                )
-            )
-        return _isolated_client
+
+def _raise_if_t1_isolated_requested() -> None:
+    """Hard-fail on ``NX_T1_ISOLATED`` (any truthy value) — nexus-4lkmz.
+
+    Checked at both T1 entry points that used to honor the flag —
+    :func:`get_t1_database` (the production factory, checked FIRST,
+    ahead of every backend-routing branch — mirrors the pre-retirement
+    isolation-always-wins position) and
+    :meth:`T1Database._init_new_discovery` (direct construction, e.g.
+    from tests or a caller that bypasses the factory) — so setting the
+    retired flag surfaces the SAME actionable error regardless of which
+    path constructs T1, rather than a generic "not configured" message
+    that no longer explains what changed.
+
+    Truthy values mirror the retired ``_t1_isolated_env()`` matching
+    ("1"/"true"/"yes", case-insensitive) so any spelling that used to
+    activate the leg is caught, not just the exact ``"1"`` some call
+    sites checked.
+    """
+    raw = os.environ.get("NX_T1_ISOLATED", "").strip().lower()
+    if raw in ("1", "true", "yes"):
+        raise T1IsolatedLegRetiredError(
+            "NX_T1_ISOLATED is retired: the isolated/ephemeral in-process "
+            "T1 leg (the InMemoryVectorClient backing it selected) was "
+            "deleted outright (nexus-4lkmz, Hal determination 2026-07-28 — "
+            "\"T1 exists in PG only. The need for an isolated, ephemeral T1 "
+            "has been eliminated.\"). There is no opt-out; unset "
+            "NX_T1_ISOLATED and retry.\n\n"
+            "If T1 is unavailable for this process: start the storage "
+            "service (`nx daemon service start`), then confirm a session "
+            "lease resolves (`nx doctor --check-t1`); reconnect the conexus "
+            "MCP/extension if a live session's inherited token went stale."
+        )
 
 
 class T1ServerNotFoundError(RuntimeError):
@@ -161,11 +173,14 @@ class T1ServerNotFoundError(RuntimeError):
     ``nx scratch list`` invocation spawned a fresh ``EphemeralClient``
     and saw nothing.
 
-    Opt-in paths (no exception raised):
+    Opt-in path (no exception raised):
       - ``T1Database(client=...)`` for explicit client injection in
         tests and the MCP server lifespan.
-      - ``NX_T1_ISOLATED=1`` for stateless one-shot subprocesses; constructs an
-        in-process ``InMemoryVectorClient`` (RDR-155 P4b P0a).
+
+    ``NX_T1_ISOLATED=1`` used to be a second opt-in path (an in-process
+    ``InMemoryVectorClient``, RDR-155 P4b P0a); it is retired (nexus-4lkmz)
+    and now raises :class:`T1IsolatedLegRetiredError` instead of
+    reaching this class.
     """
 
 
@@ -208,35 +223,34 @@ class T1Database:
         return resolve_active_session_id(arg) or "unknown"
 
     def _init_new_discovery(self, session_id: str | None) -> None:
-        """Two-branch fail-loud constructor (RDR-155 P4b).
+        """Single fail-loud constructor (RDR-155 P4b, retired further at
+        nexus-4lkmz).
 
         The chromadb ``HttpClient`` discovery legs (env-pair inherit,
         session-id lease, ancestor-pid fallback) died with the chroma T1
-        server. What remains:
+        server; the ``NX_T1_ISOLATED=1`` in-process opt-in (Path C) that
+        survived that retirement is itself retired now (T1 is PG-only —
+        Hal determination 2026-07-28). What remains:
 
-        Path C (operator opt-in)
-            ``NX_T1_ISOLATED=1`` -> ``InMemoryVectorClient`` (RDR-155
-            P4b P0a; dependency-free, genuinely per-process; the flag
-            survives until P3 flips it to the hard default).
-        Path D (failure)
-            Otherwise -> raise :class:`T1ServerNotFoundError`. In
-            service mode T1 never reaches this constructor
-            (``get_t1_database`` routes to ``HttpScratchStore``).
+        Isolation requested (fail loud, named)
+            ``NX_T1_ISOLATED`` set -> raise
+            :class:`T1IsolatedLegRetiredError` naming the real remedy.
+        Otherwise (fail loud, generic)
+            -> raise :class:`T1ServerNotFoundError`. In service mode T1
+            never reaches this constructor (``get_t1_database`` routes
+            to ``HttpScratchStore``); a caller reaching here with
+            neither an injected client nor a resolvable service
+            endpoint has no T1 available in this process.
         """
-        if _t1_isolated_env():
-            # RDR-155 P4b P0a: the isolated leg uses the process-scoped
-            # InMemoryVectorClient, not chromadb.EphemeralClient. See
-            # _isolated_vector_client for the per-process continuity
-            # contract this preserves.
-            self._client = _isolated_vector_client()
-            self._session_id = self._resolve_session_id(session_id)
-            return
+        _raise_if_t1_isolated_requested()
 
         raise T1ServerNotFoundError(
             "T1 not configured for this process. The chroma-backed T1 "
-            "server retired at RDR-155 P4b: T1 is service-backed in "
-            "service mode (via get_t1_database), or set NX_T1_ISOLATED=1 "
-            "to opt in to a private in-process T1."
+            "server retired at RDR-155 P4b, and the isolated in-process "
+            "leg retired at nexus-4lkmz (T1 is PG-only, no opt-out). T1 is "
+            "service-backed in service mode (via get_t1_database); direct "
+            "T1Database() construction requires client= injection or a "
+            "resolvable NX_T1_SESSION."
         )
 
     def __init__(self, session_id: str | None = None, client=None) -> None:
@@ -1558,17 +1572,22 @@ def get_t1_database(
           mints a CLI-dedicated, persisted session id (see
           :func:`_cli_dedicated_session_id`) and returns a
           :class:`_CliDedicatedScratchStore` (self-healing wrapper).
-    * ``NX_T1_ISOLATED=1`` → :class:`T1Database` (in-process ephemeral
-      scratch). The ``=sqlite`` opt-out that used to route here as well
-      hard-errors instead (RDR-158 P3, nexus-7bomn). This escape hatch is
-      checked FIRST, ahead of every branch above (including the
-      explicit-session fail-loud gate), and always wins.
+    * ``NX_T1_ISOLATED`` set (any truthy value) → raises
+      :class:`T1IsolatedLegRetiredError` (nexus-4lkmz: T1 is PG-only, the
+      isolated in-process leg is deleted, there is no opt-out). The
+      ``=sqlite`` opt-out that used to route here as well hard-errors too
+      (RDR-158 P3, nexus-7bomn). This check is FIRST, ahead of every
+      branch above (including the explicit-session fail-loud gate) —
+      mirrors the pre-retirement isolation-always-wins position, now as
+      a hard failure instead of a silent redirect.
 
-    The ``session_id`` and ``client`` arguments are forwarded to ``T1Database``
-    on the Chroma path; they are ignored on the service path (session_id is
-    sourced from ``NX_T1_SESSION``/``NX_T1_SESSION_ID`` env, a published
-    lease for a resolvable session id, or the CLI-dedicated cache file, in
-    that order).
+    The ``session_id`` and ``client`` arguments are accepted for backward
+    compatibility but are now always unused no-ops: the only production
+    path this factory ever returns from is the service branch, whose
+    session_id is sourced from ``NX_T1_SESSION``/``NX_T1_SESSION_ID`` env,
+    a published lease for a resolvable session id, or the CLI-dedicated
+    cache file, in that order. Construct ``T1Database(session_id=...,
+    client=...)`` directly for test injection instead.
 
     Returns a ``T1Database``-shaped object: callers use ``put``, ``get``,
     ``search``, ``list_entries``, ``flagged_entries``, ``flag``, ``unflag``,
@@ -1577,14 +1596,11 @@ def get_t1_database(
     """
     from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deliberate function-local import (factory-time env validation)
 
-    # nexus-h8rf6 (shakeout finding 13): explicit isolation WINS over backend
-    # routing. NX_T1_ISOLATED=1 is the documented escape hatch every T1 error
-    # message recommends ("in-process ephemeral scratch"); pre-fix it was only
-    # honored inside T1Database's Chroma-path constructor, which the SERVICE
-    # branch below never reaches — dead code in exactly the installs that
-    # need it (a bare CLI in service mode cannot safely mint a session token).
-    if os.environ.get("NX_T1_ISOLATED") == "1":
-        return T1Database(session_id=session_id, client=client)
+    # nexus-4lkmz: isolation is checked FIRST, ahead of every backend-routing
+    # branch below — mirroring the pre-retirement position where
+    # NX_T1_ISOLATED=1 always won (nexus-h8rf6). It now hard-fails instead of
+    # silently redirecting to an in-process store; there is no opt-out.
+    _raise_if_t1_isolated_requested()
 
     # RDR-158 P3 (nexus-7bomn): validation only — the =sqlite opt-out arm
     # (T1Database at the tail of this factory) died with the opt-out; a

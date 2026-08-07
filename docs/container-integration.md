@@ -281,10 +281,10 @@ session:
   visible) mints its own persisted CLI-dedicated session id — its
   scratch entries live in the shared service but under its own
   session, invisible to the host session's `nx scratch list`.
-- **`NX_T1_ISOLATED=1`** forces an in-process ephemeral scratch
-  (`InMemoryVectorClient`, not chromadb — RDR-155 P4b P0a), touching the
-  service not at all. This is the documented escape hatch when a process
-  must not (or cannot) mint a session.
+- **`NX_T1_ISOLATED`** is retired (nexus-4lkmz: T1 is PG-only). Setting it
+  now hard-fails with `T1IsolatedLegRetiredError` instead of opening the
+  in-process ephemeral scratch it used to select — there is no opt-out
+  from the service.
 
 Rule of thumb unchanged from RDR-105: **cross-process findings go to
 T2** (`nx memory put` / `memory_put`), which is shared by everything
@@ -304,7 +304,7 @@ token itself (RDR-005 bound tokens).
 | `NX_SERVICE_BIND` | **host-side, read by the Java service**: bind address override (e.g. `0.0.0.0`) for container hosting; non-loopback logs a security warning | `127.0.0.1` |
 | `NX_STORAGE_BACKEND` / `NX_STORAGE_BACKEND_<STORE>` | `service` (default) or `sqlite` (legacy opt-out; see below). Per-store overrides global. Invalid values fail loud | `service` |
 | `NX_T1_SESSION` / `NX_T1_SESSION_ID` | join an existing T1 scratch session (exported by a live MCP to its subprocesses) | CLI mints its own dedicated session |
-| `NX_T1_ISOLATED` | `1` = in-process ephemeral scratch, no service contact | unset |
+| `NX_T1_ISOLATED` | retired (nexus-4lkmz) — any truthy value hard-fails with `T1IsolatedLegRetiredError` | unset |
 | `NX_NEXUS_TENANT` | tenant stamped on T1 scratch requests | `default` |
 | `NEXUS_CONFIG_DIR` | relocate the entire config/data footprint (lease files, logs, credentials) | `~/.config/nexus` |
 

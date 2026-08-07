@@ -133,8 +133,8 @@ _install_default_hooks(_hooks)
 # non-service tail as well: Branch 0 — the SERVICE-backed T1 session path
 # (mint / borrow / inherit a session token against the storage service) —
 # is the ONLY path; a stranded =sqlite export hard-errors at the lifespan's
-# validation call. NX_T1_ISOLATED remains a per-process opt-in for
-# in-process ephemeral scratch (honored in nexus.db.t1, not here).
+# validation call. NX_T1_ISOLATED is retired outright (nexus-4lkmz, T1 is
+# PG-only) — setting it now hard-fails in nexus.db.t1, no opt-out.
 #
 # Cleanup is idempotent across three sites: the lifespan async finally
 # (HTTP/SSE clean exit + clean stdin EOF on stdio), _sigterm_handler
@@ -211,6 +211,52 @@ def _start_t1_refresh_task(session_id: str, interval: float) -> None:
     global _T1_SESSION_REFRESH_TASK
     _T1_SESSION_REFRESH_TASK = asyncio.create_task(
         _t1_session_refresh_loop(session_id, interval)
+    )
+
+
+class T1UnavailableThisProcessError(RuntimeError):
+    """Raised (via the T1 pre-init hook) when this MCP process has no
+    resolvable session id to bind a T1 session to.
+
+    nexus-4lkmz decision 2 (LOCKED 2026-08-07): replaces the pre-fix
+    behaviour of forcing ``NX_T1_ISOLATED=1`` — which, pre-retirement,
+    silently handed this process a private in-process T1Database. That
+    escape hatch is gone (T1 is PG-only); the honest replacement is a
+    FAIL-LOUD, per-call, named error — never a shared identity (the
+    nexus-rn3wo.1 security property this whole branch exists to
+    preserve: an unresolvable-session MCP process must never be pulled
+    into the SAME shared CLI-dedicated identity as every bare `nx
+    scratch` invocation) and never a silent private store.
+
+    Scoped to T1 ONLY, same "a T1-only failure must cost T1 only"
+    posture as the deferred-mint hook above: every other nexus tool
+    (search, memory, store, catalog) is unaffected, and the whole MCP
+    server does not crash — only T1-touching calls raise, and every
+    later call retries the same check (nothing is cached).
+    """
+
+
+def _raise_t1_unavailable_this_process() -> None:
+    """Pre-init hook body for the no-resolvable-session-id case.
+
+    Registered by :func:`_t1_lifespan` Branch 0 in place of the retired
+    ``NX_T1_ISOLATED=1`` force. Raises unconditionally — there is no
+    mint to retry, since without a resolvable session id there is
+    nothing to mint a token FOR (minting a shared "unknown" row would
+    let concurrent unresolvable-session MCPs collide on the (tenant,
+    session_id) UPSERT, each invalidating the other's token — the same
+    hazard the surrounding code already documents).
+    """
+    raise T1UnavailableThisProcessError(
+        "T1 unavailable this process: no resolvable session id for this "
+        "MCP server instance (neither NX_SESSION_ID nor "
+        "CLAUDE_CODE_SESSION_ID resolved one). This affects T1 scratch "
+        "only — every other nexus tool (search, memory, store, catalog) "
+        "is unaffected. A sub-agent that inherited a LIVE minted token "
+        "from its parent is unaffected too (checked before this hook "
+        "would ever be consulted). Remedy: reconnect the conexus "
+        "MCP/extension from a Claude Code session that stamps a "
+        "resolvable session id, or run `nx doctor --check-t1`."
     )
 
 
@@ -586,19 +632,25 @@ async def _t1_lifespan(_app: Any):
         # session" — which would silently pull an unresolvable-session MCP process
         # into the SAME shared CLI-dedicated identity as every bare `nx scratch`
         # invocation, a session-isolation regression across a boundary this code
-        # explicitly treats as security-relevant. Force NX_T1_ISOLATED=1 instead:
-        # get_t1_database()'s explicit-isolation escape hatch wins over backend
-        # routing (nexus-h8rf6) and returns a private, non-shared, in-process
-        # ephemeral T1Database — strictly safer than either raising (breaks the
-        # MCP session outright) or silently sharing identity with unrelated bare-CLI
-        # callers.
+        # explicitly treats as security-relevant.
+        #
+        # nexus-4lkmz decision 2 (LOCKED 2026-08-07): the pre-fix remedy forced
+        # NX_T1_ISOLATED=1, redirecting into a private in-process T1Database.
+        # That leg is deleted outright (T1 is PG-only). The honest replacement:
+        # register a pre-init hook that FAILS LOUD, per call, with a named error
+        # ("T1 unavailable this process") — never a shared identity, never a
+        # silent private store. Mirrors the deferred-mint hook's "a T1-only
+        # failure costs T1 only" posture: the MCP server starts and serves
+        # every non-T1 tool normally; only T1-touching calls raise.
         _t1_session_id = ""
-        _os.environ["NX_T1_ISOLATED"] = "1"
+        from nexus import mcp_infra as _mcp_infra_unresolved  # noqa: PLC0415 — deferred to avoid import cycle at module load
+
+        _mcp_infra_unresolved.set_t1_pre_init_hook(_raise_t1_unavailable_this_process)
         _svc_log.warning(
             "t1_session_unresolved", reason="no_resolvable_session",
-            msg="no session id to mint; T1 scratch uses an inherited token if live, "
-            "else falls back to private in-process ephemeral scratch "
-            "(NX_T1_ISOLATED=1) rather than sharing the CLI-dedicated identity")
+            msg="no session id to mint; T1 scratch uses an inherited token if "
+            "live, else T1 is unavailable this process (fail-loud on first "
+            "use) — every other nexus tool is unaffected")
     else:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.db.t1 import _lock_guarded_mint_or_borrow  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)

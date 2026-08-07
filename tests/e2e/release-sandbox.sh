@@ -642,19 +642,13 @@ case "$MODE" in
         echo
         echo "── 8/11 T1 scratch use (write + readback) ──"
         # Outside a Claude Code session, no SessionStart hook fires to
-        # publish a T1 chroma address (RDR-105 hybrid discovery: env
-        # passdown from MCP parent OR addr-file PPID walk to a claude
-        # ancestor). With neither path available, ``nx scratch *`` fails
-        # loud with ``T1ServerNotFoundError`` (the silent EphemeralClient
-        # fallback was removed in 4.27.0 because it produced data-loss
-        # bugs where put + list landed in different per-process clients).
-        #
-        # The shakedown opts into the documented escape hatch:
-        # ``NX_T1_ISOLATED=1`` makes T1Database open an in-process
-        # ``EphemeralClient`` for THIS invocation only. Cross-invocation
-        # readback is still impossible without a real session — that's
-        # tested by the cc-validation harness.
-        SCRATCH_OUT=$(NX_T1_ISOLATED=1 nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
+        # publish a live MCP session lease. T1 is PG-only (nexus-4lkmz —
+        # the in-process ``NX_T1_ISOLATED=1`` escape hatch retired
+        # outright, it now hard-fails). The bare-CLI path
+        # (``get_t1_database()``'s CLI-dedicated mint, nexus-rn3wo.1)
+        # mints its own persisted session against the live storage
+        # service instead — no opt-in flag needed.
+        SCRATCH_OUT=$(nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
         if [[ "$SCRATCH_OUT" == *"Stored:"* ]]; then
             echo "  put: ok ($SCRATCH_OUT)"
         else

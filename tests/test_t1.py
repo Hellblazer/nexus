@@ -13,15 +13,15 @@ from tests.conftest import make_vector_test_client
 @pytest.fixture(autouse=True)
 def _allow_t1_record_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     """GH #567: tests in this file exercise T1Database's record-
-    resolution + raise-loud paths directly. The conftest's autouse
-    ``_isolate_t1_sessions`` fixture sets ``NX_T1_ISOLATED=1`` to keep
-    other test files using ephemeral fallback semantics; here we
-    UNSET it so tests reach the post-fix behaviour:
-      - constructor raises ``T1ServerNotFoundError`` when no record
-      - finds a record when one is written
-      - exercises the resolver-retry loop
-    Tests that explicitly want ``NX_T1_ISOLATED=1`` opt back in
-    locally via ``monkeypatch.setenv`` inside the test body.
+    resolution + raise-loud paths directly via client injection
+    (``_ephemeral_t1`` / ``_shared_pair`` below), independent of the
+    conftest's autouse ``_isolate_t1_sessions`` fixture (which now mints
+    a real PG-backed T1 session for ``get_t1_database()``/
+    ``HttpScratchStore`` -- nexus-4lkmz -- and is orthogonal to the
+    direct ``T1Database(client=...)`` construction this file uses).
+    Defensively clears ``NX_T1_ISOLATED``, which is now a hard-fail
+    trigger rather than an opt-in (nexus-4lkmz): none of these tests
+    want it set.
     """
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 

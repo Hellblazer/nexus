@@ -1804,8 +1804,8 @@ def _run_check_t1() -> None:
       stopped), (c) the MCP server is still booting.
     * **No session-id resolves.** Neither ``NX_SESSION_ID`` nor
       ``~/.config/nexus/current_session`` is set; ``nx scratch`` from
-      this shell will fail-loud unless the operator opts in via
-      ``NX_T1_ISOLATED=1``.
+      this shell will fail-loud (T1 is PG-only, nexus-4lkmz — there is
+      no in-process opt-out).
 
     Exit code:
       * 0: healthy or "no session-id resolves" (informational).
@@ -1824,9 +1824,10 @@ def _run_check_t1() -> None:
         click.echo("[ ] T1: no session-id resolves for this process")
         click.echo(
             "    This is informational. ``nx scratch`` from this shell "
-            "will fail-loud unless you opt into per-process ephemeral "
-            "T1 via ``NX_T1_ISOLATED=1``, or the SessionStart hook has "
-            "written ~/.config/nexus/current_session."
+            "will fail-loud (T1 is PG-only; no in-process opt-out) unless "
+            "the SessionStart hook has written "
+            "~/.config/nexus/current_session, or the storage service is "
+            "reachable for a bare-CLI mint (`nx daemon service start`)."
         )
         return
 
