@@ -424,9 +424,21 @@ case "$MODE" in
         echo
         echo "── 10/11 nx doctor (all checks, post-activity) ──"
         # (--check-tmpdirs retired at RDR-155 P4b with the chroma T1 tmpdirs.)
+        # BARE `nx doctor` runs run_health_checks() — the corpus-integrity
+        # instruments (chash conformance, stale index-run fences, dangling
+        # manifests) live ONLY there, not behind any --check-* flag. The
+        # strandedness audit (T2 [21590], 2026-08-07) found this step had
+        # never invoked it, so the release gate was blind to all three and
+        # `|| true` meant even the flag-scoped checks could not redden the
+        # run. Fail-capable now, per the 6xkdu de-theatre precedent.
+        if ! nx doctor 2>&1 | sed 's/^/  /'; then
+            _fail "nx doctor reported failures in the release sandbox"
+        fi
         for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  $check:"
-            nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /' || true
+            if ! nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /'; then
+                _fail "nx doctor $check failed in the release sandbox"
+            fi
         done
 
         echo
