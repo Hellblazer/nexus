@@ -39,7 +39,7 @@ def _fire_service_path_failure(monkeypatch, captured: list) -> None:
     """Drive the SERVICE path into its exception handler with a capturing t2."""
     _force_service_path(monkeypatch)
 
-    def _capture_write(fn):
+    def _capture_write(fn, **_kwargs):
         t2 = MagicMock()
         captured.append(t2)
         # nexus-yu9w5: the service arm calls assign_from_chashes (the engine
@@ -78,7 +78,7 @@ def test_tripwire_persist_failure_never_propagates(monkeypatch):
     (T2 down, service 5xx) must never turn the best-effort hook fatal."""
     _force_service_path(monkeypatch)
 
-    def _t2_down(fn):
+    def _t2_down(fn, **_kwargs):
         raise ConnectionError("t2 unreachable")
 
     monkeypatch.setattr(mcp_infra, "t2_index_write", _t2_down)

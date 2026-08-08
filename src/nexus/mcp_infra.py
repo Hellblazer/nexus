@@ -116,11 +116,76 @@ _COLLECTIONS_CACHE_TTL = 60.0
 # the recover-on-error pattern already used by http_token_store/
 # http_scratch_store (`recover_endpoint_from_lease`).
 #
-# `_service_t2_lock` is held for the full checkout-through-use span (not just
-# the get-or-build decision) so a concurrent caller can never close() the
-# instance while another thread is still inside write_fn(db) against it.
+# `_service_t2_lock` (nexus-ldab2, CAS-narrowed): held only long enough to
+# RESOLVE the singleton, never across write_fn's own network round trip. See
+# `t2_index_write`'s docstring for the compare-and-swap eviction shape this
+# replaced the old checkout-through-use span with — identical narrowing to
+# `catalog/factory.py`'s `_service_catalog_lock` (nexus-u2u0n).
 _service_t2_db: object | None = None
 _service_t2_lock = threading.Lock()
+
+#: nexus-0dpli: in-flight caller count per instance, keyed by ``id(db)``.
+#: Same refcounted-eviction shape as ``catalog/factory.py``'s
+#: ``_service_catalog_refcounts`` — see that module's comment for the full
+#: rationale. Load-bearing here specifically because THIS bundle's own
+#: ``taxonomy_assign_batch_hook.serialize = False`` is what first makes
+#: genuinely concurrent ``t2_index_write`` calls against the shared
+#: ``T2Database`` routine in production.
+_service_t2_refcounts: dict[int, int] = {}
+
+#: nexus-0dpli: ids of ``T2Database`` instances evicted from the shared slot
+#: but still in flight for at least one caller — see
+#: ``_release_shared_t2_ref``.
+_service_t2_pending_close: set[int] = set()
+
+#: nexus-ldab2: per-op ``{op: [calls, lock_wait_s, call_s]}`` for the
+#: service-backed T2 singleton, mirroring
+#: ``catalog/factory.service_catalog_op_stats()`` (nexus-jb4pp). *op* is the
+#: caller-supplied label passed to :func:`t2_index_write` (defaults to
+#: ``"t2_write"`` when the caller does not name one — most ``write_fn``
+#: callables are anonymous lambdas, so a name has to be supplied explicitly
+#: to be meaningful; see the ``taxonomy_assign``/``aspect_enqueue`` call
+#: sites for the pattern). Counters are plain floats mutated under
+#: ``_service_t2_stats_lock``, a DIFFERENT lock from ``_service_t2_lock``
+#: itself — CAS narrowing means the singleton lock is no longer held across
+#: the round trip, so the stats mutation needs its own guard rather than
+#: piggybacking on whichever lock happened to be held.
+_service_t2_op_stats: dict[str, list[float]] = {}
+_service_t2_stats_lock = threading.Lock()
+
+
+def _record_t2_op(op: str, wait_s: float, call_s: float) -> None:
+    """Accumulate one op's timings, guarded by ``_service_t2_stats_lock``
+    (not ``_service_t2_lock`` — see that dict's module comment)."""
+    with _service_t2_stats_lock:
+        row = _service_t2_op_stats.setdefault(op, [0.0, 0.0, 0.0])
+        row[0] += 1
+        row[1] += wait_s
+        row[2] += call_s
+
+
+def service_t2_op_stats() -> dict[str, dict[str, float]]:
+    """Snapshot of per-op service-T2-singleton timings (nexus-ldab2).
+
+    ``{op: {"calls": n, "lock_wait_s": s, "call_s": s}}`` — ``lock_wait_s``
+    is time blocked on ``_service_t2_lock`` resolving the singleton (now a
+    narrow, non-round-trip critical section); ``call_s`` is ``write_fn``
+    itself (client serialization + network + server), run OUTSIDE the lock.
+    Cumulative across threads, so both may exceed wall clock. Mirrors
+    ``nexus.catalog.factory.service_catalog_op_stats()``.
+    """
+    with _service_t2_stats_lock:
+        return {
+            op: {"calls": v[0], "lock_wait_s": v[1], "call_s": v[2]}
+            for op, v in _service_t2_op_stats.items()
+        }
+
+
+def reset_service_t2_op_stats() -> None:
+    """Zero the per-op counters (test / per-run reset, mirrors
+    ``nexus.catalog.factory.reset_service_catalog_op_stats()``)."""
+    with _service_t2_stats_lock:
+        _service_t2_op_stats.clear()
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
@@ -335,36 +400,130 @@ def t2_ctx():
 
 
 
-def _service_t2_write_locked(write_fn):
-    """Run ``write_fn`` against the process-lifetime service ``T2Database``
-    singleton (nexus-53x7s), building it on first use and evicting it if
-    ``write_fn`` raises (reactive recovery against a rotated
-    ``storage_service`` lease -- see ``_service_t2_db``'s module docstring).
+def _acquire_shared_t2_ref(db: object) -> None:
+    """Record one more in-flight caller against *db*. Callers MUST hold
+    ``_service_t2_lock`` and call this immediately after resolving the
+    instance, in the SAME critical section (nexus-0dpli — identical
+    contract to ``catalog/factory._acquire_shared_catalog_ref``)."""
+    key = id(db)
+    _service_t2_refcounts[key] = _service_t2_refcounts.get(key, 0) + 1
 
-    Callers MUST hold ``_service_t2_lock`` for the full call so a concurrent
-    caller can never ``close()`` the instance out from under an in-flight
-    ``write_fn(db)``.
+
+def _release_shared_t2_ref(db: object, *, evict: bool) -> bool:
+    """Release this caller's in-flight reference to *db*. Callers MUST hold
+    ``_service_t2_lock``. Identical contract to
+    ``catalog/factory._release_shared_catalog_ref`` — see that function's
+    docstring for the full CAS-plus-refcount reasoning. Returns True
+    exactly when the CALLER must run ``db.close()`` itself after releasing
+    the lock."""
+    global _service_t2_db
+    if evict and _service_t2_db is db:
+        _service_t2_db = None
+    key = id(db)
+    remaining = _service_t2_refcounts.get(key, 1) - 1
+    if remaining > 0:
+        _service_t2_refcounts[key] = remaining
+        if evict:
+            _service_t2_pending_close.add(key)
+        return False
+    _service_t2_refcounts.pop(key, None)
+    was_pending = key in _service_t2_pending_close
+    _service_t2_pending_close.discard(key)
+    return evict or was_pending
+
+
+def _service_t2_write_locked(write_fn, *, op: str = "t2_write"):
+    """Resolve the process-lifetime service ``T2Database`` singleton
+    (nexus-53x7s) and run ``write_fn`` against it.
+
+    CAS-NARROWED (nexus-ldab2, identical shape to
+    ``catalog/factory.py``'s ``_SharedServiceCatalogHandle._call``,
+    nexus-u2u0n): ``_service_t2_lock`` is held ONLY to resolve (get-or-build)
+    the singleton — never across ``write_fn``'s own network round trip.
+
+    REFCOUNTED EVICTION (nexus-0dpli, critique finding on the first cut of
+    this narrowing): releasing the lock around the round trip means
+    MULTIPLE threads can be genuinely mid-``write_fn`` against the SAME
+    shared ``T2Database`` at once — this bundle's own
+    ``taxonomy_assign_batch_hook.serialize = False`` is what first makes
+    that routine in production. Blast radius if an eviction naively
+    ``close()``s the instance it evicts: ``T2Database.close()`` tears down
+    ALL its substores' own httpx clients (memory, plans, taxonomy,
+    telemetry, chash_index, document_aspects, aspect_queue,
+    document_highlights), so one failing call (e.g. a routine
+    aspect-enqueue conflict) could abort an unrelated, healthy, concurrent
+    ``taxonomy_assign`` call sharing the same singleton. Fixed identically
+    to the catalog handle:
+
+    1. Eviction fires ONLY on a genuine connectivity failure
+       (:func:`nexus.retry._is_connectivity_error`) — never on a routine
+       domain/business exception. Under-evict, never over-evict (see
+       ``catalog/factory.py``'s docstring for the full asymmetry argument).
+    2. Every caller acquires an in-flight reference on the instance it
+       resolved (:func:`_acquire_shared_t2_ref`) and releases it
+       (:func:`_release_shared_t2_ref`) once its own call returns or
+       raises, both under ``_service_t2_lock``. An eviction clears the
+       shared slot immediately (new callers always build fresh) but only
+       physically closes the OLD instance once its reference count drains
+       to zero — the evicting caller if no one else was using it, or
+       whichever sibling's release happens to be the last one out.
+
+    RELEASE IS UNCONDITIONAL (nexus-0dpli round 3, delta-review touch-up):
+    the reference release lives in a single ``finally``, not duplicated
+    across ``except``/``else`` branches — a ``BaseException`` that is not
+    a plain ``Exception`` (``KeyboardInterrupt``/``SystemExit`` mid-call)
+    must still release this call's reference, or it leaks forever and can
+    strand a sibling's already-evicted, pending-close instance with no one
+    left to drain it to zero. ``_evict`` defaults to ``False`` and is set
+    ``True`` only inside ``except Exception``, so a non-``Exception``
+    ``BaseException`` correctly releases WITHOUT evicting — the same safe
+    default as no exception at all.
+
+    *op* differentiates :func:`service_t2_op_stats`'s timing buckets the
+    same way ``catalog/factory.service_catalog_op_stats()`` differentiates
+    by attribute name — most ``write_fn`` callables are anonymous lambdas,
+    so a caller that wants a meaningful bucket (e.g. ``"taxonomy_assign"``)
+    must pass it explicitly; unnamed callers share the ``"t2_write"``
+    default bucket.
     """
     global _service_t2_db
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
 
-    if _service_t2_db is None:
-        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode, PG is the arbiter
+    _w0 = time.monotonic()
+    with _service_t2_lock:
+        _wait = time.monotonic() - _w0
+        if _service_t2_db is None:
+            _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode, PG is the arbiter
+        current = _service_t2_db
+        _acquire_shared_t2_ref(current)
+    _c0 = time.monotonic()
+    _evict = False
     try:
-        return write_fn(_service_t2_db)
-    except Exception:
-        # Reactive invalidation: the failure may be a rotated/expired
-        # storage_service lease baked into this instance's Http*Store
-        # clients at construction time; evict so the NEXT call resolves a
-        # fresh endpoint instead of retrying the same broken connections
-        # for the rest of the process's lifetime.
-        stale_db = _service_t2_db
-        _service_t2_db = None
-        stale_db.close()  # error-triggered eviction, not per-call teardown
+        return write_fn(current)
+    except Exception as exc:
+        # Only a genuine connectivity failure evicts — see the docstring's
+        # point 1. ``_evict`` stays False (the safe default) for any OTHER
+        # exception, including a BaseException that skips this clause
+        # entirely (KeyboardInterrupt/SystemExit — see the docstring's
+        # "RELEASE IS UNCONDITIONAL" note).
+        from nexus.retry import _is_connectivity_error  # noqa: PLC0415 — deferred to avoid import cost on the happy path
+        _evict = _is_connectivity_error(exc)
         raise
+    finally:
+        # nexus-0dpli round 3: release lives in ONE unconditional finally,
+        # not duplicated across except/else — a BaseException that
+        # _is_connectivity_error never sees (KeyboardInterrupt/SystemExit)
+        # must still release this call's reference, or it leaks and can
+        # strand a sibling's already-evicted, pending-close instance
+        # forever.
+        with _service_t2_lock:
+            _close_now = _release_shared_t2_ref(current, evict=_evict)
+        if _close_now:
+            current.close()  # error-triggered eviction, not per-call teardown
+        _record_t2_op(op, _wait, time.monotonic() - _c0)
 
 
-def t2_index_write(write_fn):
+def t2_index_write(write_fn, *, op: str = "t2_write"):
     """Run one T2 write against the service-backed :class:`T2Database`.
 
     ``write_fn(db)`` receives the writer and its return value is passed back,
@@ -379,9 +538,13 @@ def t2_index_write(write_fn):
     version-skew arm are gone (nexus-i711w Stage 2 sub-stage B), and the
     direct-SQLite arm that outlived them went with the ``=sqlite`` opt-out
     (RDR-158 P3, nexus-7bomn).
+
+    CAS-NARROWED (nexus-ldab2): see :func:`_service_t2_write_locked`'s
+    docstring — ``_service_t2_lock`` no longer spans this call's network
+    round trip, only the singleton's get-or-build decision. *op* is threaded
+    straight through for :func:`service_t2_op_stats` attribution.
     """
-    with _service_t2_lock:
-        return _service_t2_write_locked(write_fn)
+    return _service_t2_write_locked(write_fn, op=op)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
@@ -676,7 +839,8 @@ def taxonomy_assign_batch_hook(
             result = t2_index_write(
                 lambda db: db.taxonomy.assign_from_chashes(
                     collection, doc_ids, cross_collection=True,
-                )
+                ),
+                op="taxonomy_assign",
             )
         except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
             _record_taxonomy_tripwire(
@@ -718,6 +882,20 @@ def taxonomy_assign_batch_hook(
 # frequency without changing any behaviour the deletion was about. Restored,
 # and pinned by tests/test_hook_grain.py.
 taxonomy_assign_batch_hook.batch_grain = "flush"
+
+# nexus-eslkl: opts OUT of LockedHookRegistry's per-hook serialization.
+# Sole justification (corrected from the design memo's original framing,
+# which also cited _service_t2_lock — that leg is REMOVED by nexus-ldab2's
+# CAS narrowing of the very same lock, so it cannot be part of this claim
+# any more): server-side idempotency ALONE. TaxonomyRepository.assignFromChashes
+# runs in ONE tenantScope transaction; the own-collection pass is
+# `ON CONFLICT DO NOTHING` and the cross-collection pass is `GREATEST`-wins —
+# both commutative and safely re-runnable under any interleaving. Per-flush
+# chash sets are disjoint by construction (ChunkBatcher is file-atomic), so
+# concurrent fires of this hook never contend for the same row. Nothing else
+# about this hook's execution needs mutual exclusion with itself or with any
+# other registered hook.
+taxonomy_assign_batch_hook.serialize = False
 
 
 # _fetch_or_embed lived here. It fetched T3 embeddings for a batch and fell
@@ -1205,19 +1383,37 @@ def _sweep_superseded_vectors_many(
     set before any network read, removes that window by construction
     rather than by locking. The cross-FIRE race (two DIFFERENT flush-grain
     hook fires, i.e. two separate calls to this function/its caller,
-    running concurrently) is a separate, still-open hazard — accepted per
-    the design memo's recommended sequencing (this bead lands before the
-    hook-lock narrowing in nexus-eslkl, so flush-grain fires remain
-    serialized by ``LockedHookRegistry`` for now). CAVEAT (nexus-uxkq5,
-    critic finding): that serialization is CONDITIONAL —
+    running concurrently) is a separate, still-open hazard.
+
+    UPDATED post-nexus-eslkl (the hook-lock narrowing LANDED, not "before"
+    as this comment previously read): ``LockedHookRegistry`` now locks
+    PER HOOK rather than around the whole flush-grain dispatch.
+    ``manifest_write_batch_hook`` (this function's caller, via
+    ``_manifest_write_loop``) keeps its lock — it has NO ``serialize =
+    False`` declaration — so manifest(A) || manifest(B) cross-fire races
+    remain closed exactly as before, just via a narrower per-hook critical
+    section. What changed: ``taxonomy_assign_batch_hook`` now opts OUT of
+    locking entirely (server-side idempotency is sufficient for
+    taxonomy||taxonomy and taxonomy||itself), which means manifest(A)'s
+    sweep and taxonomy(B)'s ``assign_from_chashes`` probe (a DIFFERENT
+    flush's chain) can now interleave for the first time on the
+    ``LockedHookRegistry``-wrapped path — the design memo's §2c hazard.
+    Accepted deliberately: 2c's failure mode is a loud, already-instrumented
+    ``unmatched_chashes`` tripwire (RDR-172), not silent corruption like
+    2b, and shares the identical root cause and fix (the engine-side
+    per-doc-txn sweep fold, tracked at nexus-11gh6 / nexus-wxjr6 — kept
+    open by design, write-skew not yet closed at READ COMMITTED). CAVEAT
+    (nexus-uxkq5, critic finding, still applies unchanged): serialization
+    of the hooks that DO keep a lock is CONDITIONAL —
     ``LockedHookRegistry`` wraps the registry only when
     ``resolve_index_concurrency() > 1``, while ``ChunkBatcher``'s
     ``flush_concurrency=3`` is unconditional, so under
     ``NX_INDEX_CONCURRENCY=1`` flush fires run on a BARE registry and the
-    cross-fire window is live; batching also widens it there (every doc's
-    before-read now spans the whole batch's write, not just its own). The
-    real closure is the engine-side per-doc-txn sweep fold; tracked in
-    nexus-uxkq5 / nexus-eslkl.
+    cross-fire window is live there regardless of any hook's lock
+    declaration; batching also widens it there (every doc's before-read
+    now spans the whole batch's write, not just its own). The real closure
+    for both 2b and 2c is the engine-side per-doc-txn sweep fold; tracked
+    in nexus-uxkq5 / nexus-11gh6 / nexus-wxjr6.
 
     One ``docs_for_chashes`` round trip (via the shared
     :func:`nexus.indexer_utils.orphaned_chashes` union guard, reused
@@ -1855,6 +2051,10 @@ def reset_singletons():
         if _service_t2_db is not None:
             _service_t2_db.close()
         _service_t2_db = None
+        # nexus-0dpli: a test that left in-flight refcount bookkeeping
+        # behind must not leak into the next test's assertions.
+        _service_t2_refcounts.clear()
+        _service_t2_pending_close.clear()
     clear_search_traces()
     reset_plan_cache_for_tests()
     # nexus-5en9j: also reset the shared SERVICE-mode catalog client singleton

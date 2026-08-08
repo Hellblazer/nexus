@@ -3023,6 +3023,12 @@ def _run_index(
     from nexus.catalog.factory import reset_service_catalog_op_stats  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
 
     reset_service_catalog_op_stats()
+    # nexus-ldab2: mirrors the catalog reset immediately above — same
+    # process-lifetime-global-must-not-accumulate-across-runs rationale,
+    # now for the service-T2 singleton's per-op counters.
+    from nexus.mcp_infra import reset_service_t2_op_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+
+    reset_service_t2_op_stats()
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
@@ -3840,7 +3846,10 @@ def _run_index(
             _t_aspect = time.monotonic()
             try:
                 from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-                t2_index_write(lambda t2: t2.aspect_queue.enqueue_many(rows))
+                t2_index_write(
+                    lambda t2: t2.aspect_queue.enqueue_many(rows),
+                    op="aspect_enqueue",
+                )
             except Exception:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
                 _log.warning(
                     "aspect_enqueue_many_batch_failed",
@@ -4114,6 +4123,17 @@ def _run_index(
         for _op, _st in sorted(service_catalog_op_stats().items()):
             _log.info(
                 "index_catalog_op_stats",
+                op=_op,
+                calls=int(_st["calls"]),
+                lock_wait_seconds=round(_st["lock_wait_s"], 1),
+                call_seconds=round(_st["call_s"], 1),
+            )
+        # nexus-ldab2: mirrors the catalog per-op report immediately above,
+        # for the service-T2 singleton (taxonomy_assign, aspect_enqueue).
+        from nexus.mcp_infra import service_t2_op_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+        for _op, _st in sorted(service_t2_op_stats().items()):
+            _log.info(
+                "index_t2_op_stats",
                 op=_op,
                 calls=int(_st["calls"]),
                 lock_wait_seconds=round(_st["lock_wait_s"], 1),

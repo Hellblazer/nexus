@@ -432,7 +432,7 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     class _FakeDb:
         taxonomy = _FakeTaxonomy()
 
-    def _spy_index_write(write_fn):  # noqa: ANN001
+    def _spy_index_write(write_fn, **_kwargs):  # noqa: ANN001
         captured["routed"] = True
         return write_fn(_FakeDb())
 

@@ -14,12 +14,12 @@ import httpx
 import pytest
 
 from nexus.retry import (
-    _is_retryable_manifest_connection_error,
+    _is_connectivity_error,
     _manifest_write_with_retry,
 )
 
 
-# ── _is_retryable_manifest_connection_error ─────────────────────────────────
+# ── _is_connectivity_error ─────────────────────────────────
 
 @pytest.mark.parametrize("exc,expected", [
     (httpx.ConnectError("Connection refused"), True),
@@ -35,7 +35,7 @@ from nexus.retry import (
     "connection-refused", "timeout-error", "value-error", "http-400-runtime",
 ])
 def test_retryable_classification(exc: Exception, expected: bool) -> None:
-    assert _is_retryable_manifest_connection_error(exc) is expected
+    assert _is_connectivity_error(exc) is expected
 
 
 def test_retryable_via_chained_cause() -> None:
@@ -43,14 +43,14 @@ def test_retryable_via_chained_cause() -> None:
     # chains the original connection failure as __cause__/__context__.
     wrapper = RuntimeError("manifest write failed")
     wrapper.__cause__ = httpx.ConnectError("Connection refused")
-    assert _is_retryable_manifest_connection_error(wrapper) is True
+    assert _is_connectivity_error(wrapper) is True
 
 
 def test_non_retryable_status_error_not_classified_as_connection() -> None:
     request = httpx.Request("POST", "http://127.0.0.1:8765/v1/catalog/manifest/write")
     response = httpx.Response(status_code=400, request=request)
     exc = httpx.HTTPStatusError("Bad Request", request=request, response=response)
-    assert _is_retryable_manifest_connection_error(exc) is False
+    assert _is_connectivity_error(exc) is False
 
 
 # ── _manifest_write_with_retry ──────────────────────────────────────────────
