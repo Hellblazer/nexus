@@ -616,11 +616,23 @@ public final class StagingPromoteOps {
                 + "  WHERE t.collection = s.collection AND t.source_path = s.source_path)"));
 
             // (7) in-txn verify (the census extension rides nexus-jxizy.10.5).
+            // nexus-4okz4 increment 2: residualMismatchCount (the raw-string
+            // form) was deleted when RekeyOps' step 6 converted to typed DSL
+            // — this SHARED fragment's only remaining form is
+            // ChashSqlIdioms.residualMismatchCountDsl. Three explicit calls
+            // (not a loop over ChashSqlIdioms.CHUNK_TABLES) since there is no
+            // local typed per-dim registry in this class — mirrors RekeyOps'
+            // own explicit-three-constants discipline for the identical
+            // reason (no common typed interface across the three generated
+            // chunk-table classes). Same predicate, same three tables, same
+            // order — behavior-preserving swap, not a rewrite of the check.
             int residual = 0;
-            for (String t : ChashSqlIdioms.CHUNK_TABLES) {
-                residual += ctx.fetchOne(
-                    ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
-            }
+            residual += ChashSqlIdioms.residualMismatchCountDsl(
+                ctx, CHUNKS_384, CHUNKS_384.CHASH, CHUNKS_384.CHUNK_TEXT);
+            residual += ChashSqlIdioms.residualMismatchCountDsl(
+                ctx, CHUNKS_768, CHUNKS_768.CHASH, CHUNKS_768.CHUNK_TEXT);
+            residual += ChashSqlIdioms.residualMismatchCountDsl(
+                ctx, CHUNKS_1024, CHUNKS_1024.CHASH, CHUNKS_1024.CHUNK_TEXT);
             counts.put("residual_mismatched", residual);
             Integer danglingManifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
             counts.put("dangling_manifest", danglingManifest);

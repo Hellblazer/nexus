@@ -1,17 +1,28 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 /**
  * RDR-180 Item6, engine half (nexus-jxizy.6): the per-tenant full-digest
@@ -58,15 +69,39 @@ public final class RekeyOps {
 
     private static final Logger log = LoggerFactory.getLogger(RekeyOps.class);
 
-    // Shared with StagingPromoteOps via ChashSqlIdioms (nexus-jxizy.10.2):
-    // the digest formula, lemma, collapse keeper, frecency merge and verify
-    // scans are single-homed there so the two chash movers cannot drift.
-    private static final List<String> CHUNK_TABLES = ChashSqlIdioms.CHUNK_TABLES;
+    /**
+     * Typed per-dim table accessor for the three dim-partitioned content
+     * tables, in the SAME canonical order as {@link ChashSqlIdioms#CHUNK_TABLES}
+     * (nexus-4okz4 increment 2) — tied by construction/comment, not derived
+     * (same non-mechanical-link discipline {@code ChashSqlIdioms.
+     * danglingManifestCountDsl} already established for CHUNK_TABLES vs its
+     * three generated-Tables constants; see RawSqlGateTest's
+     * {@code chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove} for
+     * the full fourth-dim checklist).
+     *
+     * <p>byte[]-typed {@code chash} deliberately — NOT {@code
+     * dev.nexus.service.vectors.DimTables.ChunkTable}'s hex-string accessor.
+     * Every join in this class is against {@code chash_alias.old_bytes} /
+     * {@code new_chash}, both byte[]-typed generated fields; a hex-string
+     * comparison would silently never match (different wire representation
+     * of the same bytes, not comparable via {@code =}).
+     *
+     * <p>{@code name} mirrors {@link ChashSqlIdioms#CHUNK_TABLES}'s string
+     * entries exactly — used for the still-raw {@link
+     * ChashSqlIdioms#contentCollapseDelete(String)} call (no jOOQ DSL form,
+     * see step 4 below) and the synthetic-alias {@code source} column.
+     */
+    private record Dim(String name, Table<?> table, Field<byte[]> chash, Field<String> collection,
+                        Field<String> chunkText, Field<JSONB> metadata) {
+    }
 
-    /** Reversibility-lemma rendering of a converted key's original string. */
-    private static final String OLD_REF = ChashSqlIdioms.OLD_REF_LEMMA;
-
-    private static final String DIGEST = ChashSqlIdioms.DIGEST;
+    private static final List<Dim> DIMS = List.of(
+        new Dim("nexus.chunks_384", CHUNKS_384, CHUNKS_384.CHASH, CHUNKS_384.COLLECTION,
+            CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA),
+        new Dim("nexus.chunks_768", CHUNKS_768, CHUNKS_768.CHASH, CHUNKS_768.COLLECTION,
+            CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA),
+        new Dim("nexus.chunks_1024", CHUNKS_1024, CHUNKS_1024.CHASH, CHUNKS_1024.COLLECTION,
+            CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA));
 
     private final TenantScope tenantScope;
 
@@ -82,16 +117,42 @@ public final class RekeyOps {
     }
 
     /**
+     * Typed rendering of {@code current_setting('nexus.tenant', true)}
+     * (nexus-4okz4 increment 2) — the SQL-side tenant read every writer in
+     * this class deliberately uses INSTEAD OF the Java {@code tenant}
+     * parameter (even though it is in scope via the enclosing lambda
+     * capture), so the value always matches whatever {@link
+     * TenantScope#withTenant} actually stamped on the connection, not what
+     * the caller merely intended to pass. Preserved verbatim by this
+     * conversion — no site was rebound to a Java-side value.
+     */
+    private static Field<String> currentTenantSetting() {
+        return DSL.function("current_setting", String.class, DSL.val("nexus.tenant"), DSL.val(true));
+    }
+
+    /** {@code encode(bytes, 'hex')} — used at every alias-driven repoint. */
+    private static Field<String> hex(Field<byte[]> bytes) {
+        return DSL.function("encode", String.class, bytes, DSL.val("hex"));
+    }
+
+    /**
      * Run the full rekey for *tenant*. {@code synthesizeOrphans} selects the
      * Item8 policy for orphaned empty-text rows (default caller: drop).
      * Returns the disposition + per-table counts (the auditable envelope).
      */
-    // SANCTIONED RAW (nexus-jxizy.6, RawSqlGateTest allowlist): the rekey is
-    // deliberately server-side SQL — sha256() over chunk_text, the
-    // ctid/array_agg keeper idiom for two-phase collapse, and the
-    // reversibility-lemma CASE expressions have no jOOQ DSL form; these are
-    // one-shot freeze-window migration statements, never serving-path
-    // queries.
+    // SANCTIONED RAW (nexus-jxizy.6 origin; narrowed nexus-4okz4 increment 2):
+    // the method-level RawSqlGateTest sanction remains — the gate is
+    // method-granular, not statement-granular (that tightening is a later
+    // increment) — but the raw-SQL surface actually remaining inside this
+    // method is now narrow: the in-transaction ANALYZE + privilege probe
+    // (ChashSqlIdioms.refreshAliasStats — pg_catalog system-catalog reads,
+    // no jOOQ DSL form) and the two-phase content rekey's phase-A collapse
+    // (ChashSqlIdioms.contentCollapseDelete — the ctid/array_agg ORDER BY
+    // keeper-selection idiom; array-subscript of an ordered array_agg has
+    // no jOOQ DSL form). Every other statement (advisory lock, conflict
+    // pre-check, alias INSERT...SELECT...ON CONFLICT, the step-3 Item8
+    // UPDATE/DELETE/INSERT statements, phase-B content rekey, and every
+    // step-5 cascade UPDATE/DELETE) is typed jOOQ DSL as of this increment.
     public Map<String, Object> rekey(String tenant, boolean synthesizeOrphans) {
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             Map<String, Object> counts = new LinkedHashMap<>();
@@ -102,16 +163,37 @@ public final class RekeyOps {
             // namespace serializes a mis-sequenced concurrent rekey against
             // any in-flight promote/finalize instead of interleaving under
             // READ COMMITTED (the GH #1390 class via a cross-endpoint path).
-            ctx.execute("SELECT pg_advisory_xact_lock(hashtext('staging:' || "
-                + "current_setting('nexus.tenant', true)))");
+            // jOOQ DSL rendering (nexus-4okz4 increment 2): mirrors
+            // CatalogRepository.acquireSweepGateShared/Exclusive's
+            // DSL.function(pg_advisory_xact_lock/hashtext) shape exactly.
+            // DSL.val("staging:").concat(currentTenantSetting()) renders as
+            // Postgres's native `||` operator (verified: jOOQ's concat()
+            // renders `||` for the POSTGRES dialect family, not a
+            // NULL-coalescing CONCAT() function) — so a missing
+            // nexus.tenant GUC still yields a NULL lock key and the same
+            // silent-no-lock behavior the raw SQL had (pg_advisory_xact_lock
+            // is STRICT: NULL argument, no-op, no exception), not a
+            // behavior change.
+            ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                       DSL.function("hashtext", Integer.class,
+                           DSL.val("staging:").concat(currentTenantSetting()))))
+               .fetch();
 
             // (1) conflict pre-check across all dims: same old_ref, two digests.
-            Integer conflicts = ctx.fetchOne(
-                "SELECT count(*) FROM ("
-                + "  SELECT old_ref FROM ("
-                + unionAllContentRows()
-                + "  ) u GROUP BY old_ref HAVING count(DISTINCT new_chash) > 1"
-                + ") q").get(0, Integer.class);
+            // jOOQ DSL rendering (nexus-4okz4 increment 2): unionAllContentRowsDsl
+            // replaces the deleted unionAllContentRows() string method,
+            // identical UNION ALL shape (old_ref/old_bytes/new_chash/source
+            // per dim, filtered to mismatched content rows).
+            var conflictUnion = unionAllContentRowsDsl(ctx);
+            Field<String> conflictOldRef = conflictUnion.field("old_ref", String.class);
+            Field<byte[]> conflictNewChash = conflictUnion.field("new_chash", byte[].class);
+            Integer conflicts = ctx.selectCount()
+                .from(ctx.select(conflictOldRef)
+                    .from(conflictUnion)
+                    .groupBy(conflictOldRef)
+                    .having(DSL.countDistinct(conflictNewChash).gt(1))
+                    .asTable("q"))
+                .fetchOne(0, Integer.class);
             if (conflicts != null && conflicts > 0) {
                 throw new RekeyConflictException(
                     conflicts + " legacy id(s) map to more than one content digest "
@@ -120,11 +202,25 @@ public final class RekeyOps {
             }
 
             // (2) alias facts for every mismatched CONTENT row (all dims).
-            int aliased = ctx.execute(
-                "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
-                + "SELECT current_setting('nexus.tenant', true), old_ref, old_bytes, new_chash, source "
-                + "FROM (" + unionAllContentRows() + ") u "
-                + "ON CONFLICT (tenant_id, old_ref) DO NOTHING");
+            // jOOQ DSL rendering (nexus-4okz4 increment 2): INSERT...SELECT...
+            // ON CONFLICT DO NOTHING over a fresh unionAllContentRowsDsl
+            // instance (a second, independent derived-table build — pure
+            // expression tree, no shared state with the conflict-check one
+            // above; same SQL shape either way).
+            var aliasUnion = unionAllContentRowsDsl(ctx);
+            int aliased = ctx.insertInto(CHASH_ALIAS,
+                    CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF, CHASH_ALIAS.OLD_BYTES,
+                    CHASH_ALIAS.NEW_CHASH, CHASH_ALIAS.SOURCE)
+                .select(ctx.select(
+                        currentTenantSetting(),
+                        aliasUnion.field("old_ref", String.class),
+                        aliasUnion.field("old_bytes", byte[].class),
+                        aliasUnion.field("new_chash", byte[].class),
+                        aliasUnion.field("source", String.class))
+                    .from(aliasUnion))
+                .onConflict(CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF)
+                .doNothing()
+                .execute();
             counts.put("alias_rows", aliased);
 
             // (2a) UN-BLIND THE PLANNER before anything joins the rows we just
@@ -189,7 +285,7 @@ public final class RekeyOps {
             // of step 2's INSERT — and it is coextensive with what steps 3
             // (Item8's `reference_only_resolved`, which also joins on
             // `a.old_bytes = c.chash`) and 4 (`ChashSqlIdioms.
-            // contentCollapseDelete`/`contentRekeyUpdate`, whose predicate
+            // contentCollapseDelete`/`contentRekeyUpdateDsl`, whose predicate
             // is exactly step 2's alias-generating predicate) are about to
             // touch: neither the collapse phase nor the rekey phase ever
             // changes a physical row's `collection` column, only its
@@ -250,31 +346,58 @@ public final class RekeyOps {
             // (3) Item8: empty-text rows. Reference-only rows resolve through
             // the alias just built from content-bearing siblings; the rest are
             // orphans under the per-run policy.
+            // jOOQ DSL rendering (nexus-4okz4 increment 2): every UPDATE /
+            // DELETE / INSERT below is typed DSL over the per-dim Dim
+            // accessor; predicates are unchanged from the deleted raw SQL,
+            // statement for statement.
             int refResolved = 0;
             int orphansDropped = 0;
             int orphansSynthesized = 0;
-            for (String t : CHUNK_TABLES) {
-                refResolved += ctx.execute(
-                    // chunk_text_hash mirrors the resolved key (same RDR-086
-                    // parity as contentRekeyUpdate — critic-1010).
-                    "UPDATE " + t + " c SET chash = a.new_chash, "
-                    + "metadata = coalesce(c.metadata, '{}'::jsonb) "
-                    + "  || jsonb_build_object('chunk_text_hash', encode(a.new_chash, 'hex')) "
-                    + "FROM nexus.chash_alias a "
-                    + "WHERE c.chunk_text = '' "
-                    + "  AND a.old_bytes = c.chash "
-                    + "  AND c.chash IS DISTINCT FROM a.new_chash "
+            // nexus-4okz4 increment 2 REWORK (C1 fix — see orphanCond's
+            // comment below for the full scoping explanation): aliased
+            // sibling copies of the three dim tables, built ONCE and reused
+            // across every dim iteration's orphanCond (pure expression-tree
+            // objects, no per-iteration state — safe to share).
+            var sib384 = CHUNKS_384.as("sib384");
+            var sib768 = CHUNKS_768.as("sib768");
+            var sib1024 = CHUNKS_1024.as("sib1024");
+            for (Dim d : DIMS) {
+                // self-join alias ("k") for the two-phase resolve/dedupe
+                // guard below — the SAME physical table referenced a second
+                // time within one statement needs a distinguishing alias;
+                // the primary reference (d.table(), unaliased) stays the
+                // update/delete target throughout.
+                var k = d.table().as("k");
+                Field<byte[]> kChash = k.field(d.chash());
+                Field<String> kCollection = k.field(d.collection());
+
+                // chunk_text_hash mirrors the resolved key (same RDR-086
+                // parity as contentRekeyUpdateDsl — critic-1010).
+                Field<JSONB> refStamp = ChashSqlIdioms.jsonbBuildObject(
+                    "chunk_text_hash", hex(CHASH_ALIAS.NEW_CHASH));
+                refResolved += ctx.update(d.table())
+                    .set(d.chash(), CHASH_ALIAS.NEW_CHASH)
+                    .set(d.metadata(), ChashSqlIdioms.mergeMetadata(d.metadata(), refStamp))
+                    .from(CHASH_ALIAS)
+                    .where(d.chunkText().eq(""))
+                    .and(CHASH_ALIAS.OLD_BYTES.eq(d.chash()))
+                    .and(d.chash().isDistinctFrom(CHASH_ALIAS.NEW_CHASH))
                     // two-phase guard: skip if the resolved key already exists
                     // in this collection (shared-content collapse — the row is
                     // a duplicate reference; delete instead below).
-                    + "  AND NOT EXISTS (SELECT 1 FROM " + t + " k "
-                    + "        WHERE k.collection = c.collection AND k.chash = a.new_chash)");
+                    .and(DSL.notExists(ctx.selectOne().from(k)
+                        .where(kCollection.eq(d.collection()))
+                        .and(kChash.eq(CHASH_ALIAS.NEW_CHASH))))
+                    .execute();
                 // duplicate reference rows whose resolved key already exists
-                ctx.execute(
-                    "DELETE FROM " + t + " c USING nexus.chash_alias a "
-                    + "WHERE c.chunk_text = '' AND a.old_bytes = c.chash "
-                    + "  AND EXISTS (SELECT 1 FROM " + t + " k "
-                    + "        WHERE k.collection = c.collection AND k.chash = a.new_chash)");
+                ctx.deleteFrom(d.table())
+                    .using(CHASH_ALIAS)
+                    .where(d.chunkText().eq(""))
+                    .and(CHASH_ALIAS.OLD_BYTES.eq(d.chash()))
+                    .and(DSL.exists(ctx.selectOne().from(k)
+                        .where(kCollection.eq(d.collection()))
+                        .and(kChash.eq(CHASH_ALIAS.NEW_CHASH))))
+                    .execute();
                 // ORPHAN CRITERION (width-free — the same 32-byte-ASCII
                 // blindspot fix as the rekey predicate): an empty-text row is
                 // an orphan when NO alias fact covers its key AND no
@@ -282,60 +405,101 @@ public final class RekeyOps {
                 // content sibling makes it a legitimate reference — either
                 // already-canonical, needing no change, or legacy, resolved
                 // via the alias above).
-                String orphanCond =
-                    "c.chunk_text = '' "
-                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-                    + "        WHERE a.old_bytes = c.chash) "
+                //
+                // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
+                // review-4okz4-increment2 [21863], critique [21864] — pin
+                // fixture: RekeyOpsIntegrationTest's same-dim orphanCond
+                // correlation rows on TA/TB): the three dim-sibling NOT
+                // EXISTS subqueries below MUST use ALIASED copies
+                // (sib384/768/1024), never the bare generated-Tables
+                // constants. For the SAME-DIM branch (e.g. this clause
+                // against CHUNKS_384 when d.table() IS CHUNKS_384, unaliased,
+                // for the current statement's UPDATE/DELETE/INSERT target)
+                // an unaliased `.from(CHUNKS_384)` here would introduce a
+                // SECOND unaliased reference to the identical table name
+                // already in scope from the enclosing statement. PostgreSQL
+                // resolves the qualified column reference `chunks_384.chash`
+                // inside the subquery against the SUBQUERY'S OWN (innermost)
+                // range-table entry, not the outer row — d.chash() and the
+                // subquery's `CHUNKS_384.CHASH` become the SAME shadowed
+                // reference, so the predicate degenerates from "does a
+                // content row with THIS row's chash exist" to the
+                // self-comparison "chash = chash AND chunk_text <> ''",
+                // i.e. "does this dim have ANY content row for the tenant" —
+                // true or false for every orphan candidate uniformly,
+                // independent of which key is being checked. Applied
+                // uniformly to all three dim branches (not just the one that
+                // happens to be same-dim per iteration) so correctness does
+                // not depend on which dim d currently is.
+                Condition orphanCond = d.chunkText().eq("")
+                    .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
+                        .where(CHASH_ALIAS.OLD_BYTES.eq(d.chash()))))
                     // a row already AT an aliased NEW key is a reference the
                     // step-3a resolve just produced (content rows still hold
                     // their OLD keys until step 4) — never an orphan.
-                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a2 "
-                    + "        WHERE a2.new_chash = c.chash) "
-                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 k "
-                    + "        WHERE k.chash = c.chash AND k.chunk_text <> '') "
-                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 k "
-                    + "        WHERE k.chash = c.chash AND k.chunk_text <> '') "
-                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 k "
-                    + "        WHERE k.chash = c.chash AND k.chunk_text <> '')";
+                    .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
+                        .where(CHASH_ALIAS.NEW_CHASH.eq(d.chash()))))
+                    .and(DSL.notExists(ctx.selectOne().from(sib384)
+                        .where(sib384.field(CHUNKS_384.CHASH).eq(d.chash()))
+                        .and(sib384.field(CHUNKS_384.CHUNK_TEXT).ne(""))))
+                    .and(DSL.notExists(ctx.selectOne().from(sib768)
+                        .where(sib768.field(CHUNKS_768.CHASH).eq(d.chash()))
+                        .and(sib768.field(CHUNKS_768.CHUNK_TEXT).ne(""))))
+                    .and(DSL.notExists(ctx.selectOne().from(sib1024)
+                        .where(sib1024.field(CHUNKS_1024.CHASH).eq(d.chash()))
+                        .and(sib1024.field(CHUNKS_1024.CHUNK_TEXT).ne(""))));
                 if (synthesizeOrphans) {
                     // Alias the surrogates FIRST so the step-5 cascade
                     // repoints their surviving pointers (RDR-180 Failure
                     // Modes: a preserved pointer must follow the surrogate,
                     // never dangle at the old key).
-                    ctx.execute(
-                        "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
-                        + "SELECT current_setting('nexus.tenant', true), "
-                        + String.format(OLD_REF, "c.chash") + ", c.chash, "
-                        + "  sha256(convert_to("
-                        + "    'nexus:synthetic-chash:v1|' || current_setting('nexus.tenant', true) "
-                        + "    || '|' || c.collection || '|' || " + String.format(OLD_REF, "c.chash")
-                        + "    , 'UTF8')), '" + t + ":synthetic' "
-                        + "FROM " + t + " c WHERE " + orphanCond + " "
-                        + "ON CONFLICT (tenant_id, old_ref) DO NOTHING");
-                    orphansSynthesized += ctx.execute(
-                        "UPDATE " + t + " c SET "
-                        + "  chash = a.new_chash, "
-                        // chunk_text_hash mirrors the SURROGATE key (RDR-086
-                        // parity, critic-1010 — same as the staging synthesize).
-                        + "  metadata = coalesce(c.metadata, '{}'::jsonb) "
-                        + "             || jsonb_build_object('chash_origin', 'synthetic', "
-                        + "                  'chunk_text_hash', encode(a.new_chash, 'hex')) "
-                        + "FROM nexus.chash_alias a "
-                        + "WHERE c.chunk_text = '' AND a.old_bytes = c.chash "
-                        + "  AND a.source = '" + t + ":synthetic' "
-                        + "  AND c.chash IS DISTINCT FROM a.new_chash");
+                    Field<String> synthOldRef = ChashSqlIdioms.oldRefField(d.chash());
+                    Field<String> synthSeed = DSL.val("nexus:synthetic-chash:v1|")
+                        .concat(currentTenantSetting())
+                        .concat(DSL.val("|"))
+                        .concat(d.collection())
+                        .concat(DSL.val("|"))
+                        .concat(synthOldRef);
+                    Field<byte[]> synthChash = ChashSqlIdioms.digestField(synthSeed);
+                    ctx.insertInto(CHASH_ALIAS,
+                            CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF, CHASH_ALIAS.OLD_BYTES,
+                            CHASH_ALIAS.NEW_CHASH, CHASH_ALIAS.SOURCE)
+                        .select(ctx.select(
+                                currentTenantSetting(), synthOldRef, d.chash(), synthChash,
+                                DSL.val(d.name() + ":synthetic"))
+                            .from(d.table())
+                            .where(orphanCond))
+                        .onConflict(CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF)
+                        .doNothing()
+                        .execute();
+                    // chunk_text_hash mirrors the SURROGATE key (RDR-086
+                    // parity, critic-1010 — same as the staging synthesize).
+                    Field<JSONB> synthStamp = ChashSqlIdioms.jsonbBuildObject(
+                        "chash_origin", "synthetic", "chunk_text_hash", hex(CHASH_ALIAS.NEW_CHASH));
+                    orphansSynthesized += ctx.update(d.table())
+                        .set(d.chash(), CHASH_ALIAS.NEW_CHASH)
+                        .set(d.metadata(), ChashSqlIdioms.mergeMetadata(d.metadata(), synthStamp))
+                        .from(CHASH_ALIAS)
+                        .where(d.chunkText().eq(""))
+                        .and(CHASH_ALIAS.OLD_BYTES.eq(d.chash()))
+                        .and(CHASH_ALIAS.SOURCE.eq(d.name() + ":synthetic"))
+                        .and(d.chash().isDistinctFrom(CHASH_ALIAS.NEW_CHASH))
+                        .execute();
                 } else {
                     // drop: cascade the manifest pointers FIRST
                     // (same transaction — RDR-180 Failure Modes: dangling
                     // manifest pointer), then the orphan rows.
-                    ctx.execute(
-                        "DELETE FROM nexus.catalog_document_chunks m USING " + t + " c "
-                        + "WHERE m.chash = c.chash AND " + orphanCond);
+                    ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                        .using(d.table())
+                        .where(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(d.chash()))
+                        .and(orphanCond)
+                        .execute();
                     // (chash_index cascade RETIRED — RDR-187/nexus-piwya.9:
                     // the router table is dropped at boot, before any rung
                     // runs; there is no router row left to cascade.)
-                    orphansDropped += ctx.execute(
-                        "DELETE FROM " + t + " c WHERE " + orphanCond);
+                    orphansDropped += ctx.deleteFrom(d.table())
+                        .where(orphanCond)
+                        .execute();
                 }
             }
             counts.put("reference_only_resolved", refResolved);
@@ -345,12 +509,19 @@ public final class RekeyOps {
             // (4) two-phase content rekey per dim.
             int collapsed = 0;
             int rekeyed = 0;
-            for (String t : CHUNK_TABLES) {
+            for (Dim d : DIMS) {
                 // phase A: delete collapse-losers. Keeper per (collection,
                 // digest): a row already AT the digest key wins, else min ctid.
-                collapsed += ctx.execute(ChashSqlIdioms.contentCollapseDelete(t));
+                // STAYS raw (ChashSqlIdioms.contentCollapseDelete): the
+                // ctid/array_agg ORDER BY keeper-selection idiom — an
+                // array-subscript of an ordered array_agg — has no jOOQ DSL
+                // form (nexus-4okz4 increment 2 evaluation).
+                collapsed += ctx.execute(ChashSqlIdioms.contentCollapseDelete(d.name()));
                 // phase B: rekey survivors whose key mismatches their digest.
-                rekeyed += ctx.execute(ChashSqlIdioms.contentRekeyUpdate(t));
+                // jOOQ DSL rendering (nexus-4okz4 increment 2):
+                // contentRekeyUpdateDsl replaces the deleted string form.
+                rekeyed += ChashSqlIdioms.contentRekeyUpdateDsl(
+                    ctx, d.table(), d.chash(), d.chunkText(), d.metadata());
             }
             counts.put("collapsed_duplicates", collapsed);
             counts.put("rehashed", rekeyed);
@@ -374,10 +545,14 @@ public final class RekeyOps {
             // comment), with the step-6 abort below serving only as the
             // BACKSTOP for pre-existing corruption and pre-snapshot races,
             // not as the mechanism that covers it.
-            counts.put("manifest_repointed", ctx.execute(
-                "UPDATE nexus.catalog_document_chunks m SET chash = a.new_chash "
-                + "FROM nexus.chash_alias a "
-                + "WHERE m.chash = a.old_bytes AND m.chash IS DISTINCT FROM a.new_chash"));
+            // jOOQ DSL rendering (nexus-4okz4 increment 2): UPDATE...FROM,
+            // identical predicate.
+            counts.put("manifest_repointed", ctx.update(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, CHASH_ALIAS.NEW_CHASH)
+                .from(CHASH_ALIAS)
+                .where(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHASH_ALIAS.OLD_BYTES))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.isDistinctFrom(CHASH_ALIAS.NEW_CHASH))
+                .execute());
             // (chash_index two-phase repoint RETIRED — RDR-187/nexus-piwya.9:
             // the router table is dropped at boot, before any rung runs.
             // The two-collapse-direction idiom it pioneered — the
@@ -386,22 +561,42 @@ public final class RekeyOps {
             // topic_assignments: TEXT doc_id matches old_ref; PK
             // (tenant, doc_id, topic_id) — two-phase in both collapse
             // directions (the RekeyOpsIntegrationTest 3c idiom).
-            ctx.execute(
-                "DELETE FROM nexus.topic_assignments ta "
-                + "USING nexus.topic_assignments tb, nexus.chash_alias aa, nexus.chash_alias ab "
-                + "WHERE aa.old_ref = ta.doc_id AND ab.old_ref = tb.doc_id "
-                + "  AND aa.new_chash = ab.new_chash "
-                + "  AND ta.topic_id = tb.topic_id "
-                + "  AND tb.ctid < ta.ctid");
-            ctx.execute(
-                "DELETE FROM nexus.topic_assignments ta USING nexus.chash_alias a "
-                + "WHERE ta.doc_id = a.old_ref "
-                + "  AND EXISTS (SELECT 1 FROM nexus.topic_assignments k "
-                + "        WHERE k.topic_id = ta.topic_id "
-                + "          AND k.doc_id = encode(a.new_chash, 'hex'))");
-            counts.put("topic_assignments_repointed", ctx.execute(
-                "UPDATE nexus.topic_assignments ta SET doc_id = encode(a.new_chash, 'hex') "
-                + "FROM nexus.chash_alias a WHERE ta.doc_id = a.old_ref"));
+            // jOOQ DSL rendering (nexus-4okz4 increment 2): DELETE...USING
+            // over aliased self-join copies (tb/aa/ab), identical predicate
+            // including the ctid tie-break. ctid is a Postgres SYSTEM
+            // column, absent from jOOQ's generated column metadata for
+            // TOPIC_ASSIGNMENTS — Table.field(String,Class) resolves against
+            // that metadata and returns null for it (caught by this
+            // increment's own test run, not assumed); DSL.field(DSL.name(...))
+            // constructs the reference directly by name instead, the same
+            // idiom this file's EXCLUDED.* / house pattern already uses for
+            // columns with no generated-Field counterpart.
+            var tb = TOPIC_ASSIGNMENTS.as("tb");
+            var aa = CHASH_ALIAS.as("aa");
+            var ab = CHASH_ALIAS.as("ab");
+            Field<Object> taCtid = DSL.field(DSL.name(TOPIC_ASSIGNMENTS.getName(), "ctid"), Object.class);
+            Field<Object> tbCtid = DSL.field(DSL.name("tb", "ctid"), Object.class);
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+                .using(tb, aa, ab)
+                .where(aa.field(CHASH_ALIAS.OLD_REF).eq(TOPIC_ASSIGNMENTS.DOC_ID))
+                .and(ab.field(CHASH_ALIAS.OLD_REF).eq(tb.field(TOPIC_ASSIGNMENTS.DOC_ID)))
+                .and(aa.field(CHASH_ALIAS.NEW_CHASH).eq(ab.field(CHASH_ALIAS.NEW_CHASH)))
+                .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(tb.field(TOPIC_ASSIGNMENTS.TOPIC_ID)))
+                .and(tbCtid.lt(taCtid))
+                .execute();
+            var taKeep = TOPIC_ASSIGNMENTS.as("k");
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+                .using(CHASH_ALIAS)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(CHASH_ALIAS.OLD_REF))
+                .and(DSL.exists(ctx.selectOne().from(taKeep)
+                    .where(taKeep.field(TOPIC_ASSIGNMENTS.TOPIC_ID).eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
+                    .and(taKeep.field(TOPIC_ASSIGNMENTS.DOC_ID).eq(hex(CHASH_ALIAS.NEW_CHASH)))))
+                .execute();
+            counts.put("topic_assignments_repointed", ctx.update(TOPIC_ASSIGNMENTS)
+                .set(TOPIC_ASSIGNMENTS.DOC_ID, hex(CHASH_ALIAS.NEW_CHASH))
+                .from(CHASH_ALIAS)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(CHASH_ALIAS.OLD_REF))
+                .execute());
             // frecency: PK (tenant, chunk_id) — GREATEST-merge on collapse
             // (the RDR-185 _FRECENCY_MERGE_SQL semantics, PG port), covering
             // BOTH collapse directions via a per-target group aggregate over
@@ -409,49 +604,75 @@ public final class RekeyOps {
             // keeper keyed by min(chunk_id), NOT ctid: an UPDATE rewrites
             // the row and changes its ctid, so ctid-based keeper selection
             // goes stale across statements (the 3c "expected 5 was 2" catch).
-            String frecencyAgg = ChashSqlIdioms.frecencyAliasAggregate();
+            // jOOQ DSL rendering (nexus-4okz4 increment 2):
+            // frecencyAliasAggregateDsl replaces the deleted string form;
+            // DSL.greatest() renders Postgres's native GREATEST(...).
+            var g = ChashSqlIdioms.frecencyAliasAggregateDsl(ctx);
+            Field<byte[]> gNewChash = g.field("new_chash", byte[].class);
+            Field<String> gKeepId = g.field("keep_id", String.class);
+            Field<Double> gFs = g.field("fs", Double.class);
+            Field<Integer> gMc = g.field("mc", Integer.class);
+            Field<OffsetDateTime> gLh = g.field("lh", OffsetDateTime.class);
+            Field<OffsetDateTime> gEa = g.field("ea", OffsetDateTime.class);
+            Field<Integer> gTd = g.field("td", Integer.class);
             // (i) an existing row AT the target absorbs the whole group.
-            ctx.execute(
-                "UPDATE nexus.frecency t SET "
-                + "  frecency_score = GREATEST(t.frecency_score, g.fs), "
-                + "  miss_count     = GREATEST(t.miss_count,     g.mc), "
-                + "  last_hit_at    = GREATEST(t.last_hit_at,    g.lh), "
-                + "  embedded_at    = GREATEST(t.embedded_at,    g.ea), "
-                + "  ttl_days       = GREATEST(t.ttl_days,       g.td) "
-                + "FROM " + frecencyAgg + " "
-                + "WHERE t.chunk_id = encode(g.new_chash, 'hex')");
-            ctx.execute(
-                "DELETE FROM nexus.frecency f USING nexus.chash_alias a "
-                + "WHERE f.chunk_id = a.old_ref "
-                + "  AND EXISTS (SELECT 1 FROM nexus.frecency k "
-                + "        WHERE k.chunk_id = encode(a.new_chash, 'hex'))");
+            ctx.update(FRECENCY)
+                .set(FRECENCY.FRECENCY_SCORE, DSL.greatest(FRECENCY.FRECENCY_SCORE, gFs))
+                .set(FRECENCY.MISS_COUNT, DSL.greatest(FRECENCY.MISS_COUNT, gMc))
+                .set(FRECENCY.LAST_HIT_AT, DSL.greatest(FRECENCY.LAST_HIT_AT, gLh))
+                .set(FRECENCY.EMBEDDED_AT, DSL.greatest(FRECENCY.EMBEDDED_AT, gEa))
+                .set(FRECENCY.TTL_DAYS, DSL.greatest(FRECENCY.TTL_DAYS, gTd))
+                .from(g)
+                .where(FRECENCY.CHUNK_ID.eq(hex(gNewChash)))
+                .execute();
+            var frecencyKeep = FRECENCY.as("k");
+            ctx.deleteFrom(FRECENCY)
+                .using(CHASH_ALIAS)
+                .where(FRECENCY.CHUNK_ID.eq(CHASH_ALIAS.OLD_REF))
+                .and(DSL.exists(ctx.selectOne().from(frecencyKeep)
+                    .where(frecencyKeep.field(FRECENCY.CHUNK_ID).eq(hex(CHASH_ALIAS.NEW_CHASH)))))
+                .execute();
             // (ii) no target row: the min-ctid keeper absorbs the group,
             // the other olds are deleted (the keeper is renamed below).
-            ctx.execute(
-                "UPDATE nexus.frecency f SET "
-                + "  frecency_score = g.fs, miss_count = g.mc, "
-                + "  last_hit_at = g.lh, embedded_at = g.ea, ttl_days = g.td "
-                + "FROM " + frecencyAgg + ", nexus.chash_alias a2 "
-                + "WHERE a2.old_ref = f.chunk_id AND a2.new_chash = g.new_chash "
-                + "  AND f.chunk_id = g.keep_id");
-            ctx.execute(
-                "DELETE FROM nexus.frecency f "
-                + "USING " + frecencyAgg + ", nexus.chash_alias a2 "
-                + "WHERE a2.old_ref = f.chunk_id AND a2.new_chash = g.new_chash "
-                + "  AND f.chunk_id <> g.keep_id");
-            counts.put("frecency_repointed", ctx.execute(
-                "UPDATE nexus.frecency f SET chunk_id = encode(a.new_chash, 'hex') "
-                + "FROM nexus.chash_alias a WHERE f.chunk_id = a.old_ref"));
-            counts.put("relevance_log_repointed", ctx.execute(
-                "UPDATE nexus.relevance_log r SET chunk_id = encode(a.new_chash, 'hex') "
-                + "FROM nexus.chash_alias a WHERE r.chunk_id = a.old_ref"));
+            var a2 = CHASH_ALIAS.as("a2");
+            ctx.update(FRECENCY)
+                .set(FRECENCY.FRECENCY_SCORE, gFs)
+                .set(FRECENCY.MISS_COUNT, gMc)
+                .set(FRECENCY.LAST_HIT_AT, gLh)
+                .set(FRECENCY.EMBEDDED_AT, gEa)
+                .set(FRECENCY.TTL_DAYS, gTd)
+                .from(g, a2)
+                .where(a2.field(CHASH_ALIAS.OLD_REF).eq(FRECENCY.CHUNK_ID))
+                .and(a2.field(CHASH_ALIAS.NEW_CHASH).eq(gNewChash))
+                .and(FRECENCY.CHUNK_ID.eq(gKeepId))
+                .execute();
+            ctx.deleteFrom(FRECENCY)
+                .using(g, a2)
+                .where(a2.field(CHASH_ALIAS.OLD_REF).eq(FRECENCY.CHUNK_ID))
+                .and(a2.field(CHASH_ALIAS.NEW_CHASH).eq(gNewChash))
+                .and(FRECENCY.CHUNK_ID.ne(gKeepId))
+                .execute();
+            counts.put("frecency_repointed", ctx.update(FRECENCY)
+                .set(FRECENCY.CHUNK_ID, hex(CHASH_ALIAS.NEW_CHASH))
+                .from(CHASH_ALIAS)
+                .where(FRECENCY.CHUNK_ID.eq(CHASH_ALIAS.OLD_REF))
+                .execute());
+            counts.put("relevance_log_repointed", ctx.update(RELEVANCE_LOG)
+                .set(RELEVANCE_LOG.CHUNK_ID, hex(CHASH_ALIAS.NEW_CHASH))
+                .from(CHASH_ALIAS)
+                .where(RELEVANCE_LOG.CHUNK_ID.eq(CHASH_ALIAS.OLD_REF))
+                .execute());
 
             // (6) verification scans, same transaction: residual mismatched
             // content rows and dangling pointers — MUST all be zero.
+            // jOOQ DSL rendering (nexus-4okz4 increment 2):
+            // residualMismatchCountDsl replaces the deleted string form
+            // (SHARED with StagingPromoteOps.finalizeTenant — see
+            // ChashSqlIdioms.residualMismatchCountDsl's javadoc).
             int residual = 0;
-            for (String t : CHUNK_TABLES) {
-                residual += ctx.fetchOne(
-                    ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
+            for (Dim d : DIMS) {
+                residual += ChashSqlIdioms.residualMismatchCountDsl(
+                    ctx, d.table(), d.chash(), d.chunkText());
             }
             counts.put("residual_mismatched", residual);
             Integer danglingManifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
@@ -519,20 +740,46 @@ public final class RekeyOps {
         return out;
     }
 
-    /** UNION ALL of mismatched content rows across dims with recovered old_ref. */
-    private static String unionAllContentRows() {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < CHUNK_TABLES.size(); i++) {
-            if (i > 0) sb.append(" UNION ALL ");
-            String t = CHUNK_TABLES.get(i);
-            sb.append("SELECT ")
-              .append(String.format(OLD_REF, "chash")).append(" AS old_ref, ")
-              .append("chash AS old_bytes, ")
-              .append(DIGEST).append(" AS new_chash, ")
-              .append("'").append(t).append("' AS source ")
-              .append("FROM ").append(t)
-              .append(" WHERE chunk_text <> '' AND chash IS DISTINCT FROM ").append(DIGEST);
-        }
-        return sb.toString();
+    /**
+     * UNION ALL of mismatched content rows across dims with recovered
+     * old_ref (nexus-4okz4 increment 2 — typed rendering REPLACING the
+     * deleted string-returning {@code unionAllContentRows()}; RekeyOps-
+     * exclusive, private to this class both before and after this
+     * conversion). Columns: {@code old_ref} (the reversibility-lemma
+     * rendering), {@code old_bytes} (the row's CURRENT physical chash),
+     * {@code new_chash} (the digest), {@code source} (the originating dim
+     * table's name, matching {@link ChashSqlIdioms#CHUNK_TABLES}'s entries
+     * exactly). Written as three explicit branches rather than a loop over
+     * {@link #DIMS} — matches this file's own established explicit-three
+     * precedent (step 2b's {@code phys}/{@code targetCollections}) since a
+     * generic loop over heterogeneous per-branch {@code Record4} types has
+     * no simpler typed expression.
+     */
+    private static Table<?> unionAllContentRowsDsl(DSLContext ctx) {
+        var u384 = ctx.select(
+                ChashSqlIdioms.oldRefField(CHUNKS_384.CHASH).as("old_ref"),
+                CHUNKS_384.CHASH.as("old_bytes"),
+                ChashSqlIdioms.digestField(CHUNKS_384.CHUNK_TEXT).as("new_chash"),
+                DSL.val(DIMS.get(0).name()).as("source"))
+            .from(CHUNKS_384)
+            .where(CHUNKS_384.CHUNK_TEXT.ne(""))
+            .and(CHUNKS_384.CHASH.isDistinctFrom(ChashSqlIdioms.digestField(CHUNKS_384.CHUNK_TEXT)));
+        var u768 = ctx.select(
+                ChashSqlIdioms.oldRefField(CHUNKS_768.CHASH).as("old_ref"),
+                CHUNKS_768.CHASH.as("old_bytes"),
+                ChashSqlIdioms.digestField(CHUNKS_768.CHUNK_TEXT).as("new_chash"),
+                DSL.val(DIMS.get(1).name()).as("source"))
+            .from(CHUNKS_768)
+            .where(CHUNKS_768.CHUNK_TEXT.ne(""))
+            .and(CHUNKS_768.CHASH.isDistinctFrom(ChashSqlIdioms.digestField(CHUNKS_768.CHUNK_TEXT)));
+        var u1024 = ctx.select(
+                ChashSqlIdioms.oldRefField(CHUNKS_1024.CHASH).as("old_ref"),
+                CHUNKS_1024.CHASH.as("old_bytes"),
+                ChashSqlIdioms.digestField(CHUNKS_1024.CHUNK_TEXT).as("new_chash"),
+                DSL.val(DIMS.get(2).name()).as("source"))
+            .from(CHUNKS_1024)
+            .where(CHUNKS_1024.CHUNK_TEXT.ne(""))
+            .and(CHUNKS_1024.CHASH.isDistinctFrom(ChashSqlIdioms.digestField(CHUNKS_1024.CHUNK_TEXT)));
+        return u384.unionAll(u768).unionAll(u1024).asTable("u");
     }
 }

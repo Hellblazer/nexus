@@ -1,14 +1,20 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 
 import java.util.List;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 
 /**
  * RDR-180 shared chash-migration SQL idioms (nexus-jxizy.10.2).
@@ -27,18 +33,32 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
  * <p>Scoping note (reconciliation H2): the string-to-bytes direction is the
  * DB function {@code nexus.chash_old_bytes(text)} (rdr180-20 changeset) —
  * total over any legacy ref, used by every {@code chash_alias.old_bytes}
- * writer. The bytes-to-string recovery lemma ({@link #OLD_REF_LEMMA}) stays
- * an in-store-only idiom with its documented CONSTRAINED domain (values
- * that lived under the pre-flip 32-char CHECK): staging always carries the
- * original ref alongside, so the promote path never recovers strings from
- * bytes.
+ * writer. The bytes-to-string recovery lemma ({@link #OLD_REF_LEMMA} /
+ * {@link #oldRefField}) stays an in-store-only idiom with its documented
+ * CONSTRAINED domain (values that lived under the pre-flip 32-char CHECK):
+ * staging always carries the original ref alongside, so the promote path
+ * never recovers strings from bytes.
+ *
+ * <p>nexus-4okz4 increment 2: several fragments below now carry a TYPED
+ * jOOQ-DSL twin alongside (or, where the string form had no other caller,
+ * REPLACING) their raw-string original — see each method's javadoc for
+ * which. The class docstring's "single home" promise extends to the typed
+ * forms: a caller building DSL statements should reach for the typed twin
+ * here rather than re-deriving the formula locally.
  */
-// SANCTIONED RAW (nexus-jxizy.10.2, RawSqlGateTest allowlist): these are the
-// shared fragments of the two one-shot migration ops (RekeyOps sanction
-// heritage, nexus-jxizy.6) — sha256() over chunk_text, ctid/array_agg keeper
-// selection, reversibility-lemma CASE, GREATEST-merge aggregates and
-// verification anti-joins have no jOOQ DSL form and never run on the
-// serving path.
+// SANCTIONED RAW (nexus-jxizy.10.2, narrowed nexus-4okz4 increment 2): the
+// residue after this increment converted contentRekeyUpdate,
+// frecencyAliasAggregate, and residualMismatchCount to typed DSL
+// (contentRekeyUpdateDsl / frecencyAliasAggregateDsl / residualMismatchCountDsl
+// — no allowlist entry needed, pure DSL, no raw-SQL string executed) and
+// deleted the now-dead raw-string forms outright. What remains sanctioned:
+// contentCollapseDelete (the ctid/array_agg ORDER BY keeper-selection idiom
+// has no jOOQ DSL form — array-subscript of an ordered array_agg), and
+// refreshAliasStats (ANALYZE is maintenance DDL with no jOOQ DSL form at
+// all, plus a privilege probe over pg_class/has_table_privilege system
+// catalogs codegen does not cover). chashOldBytes is a one-line string
+// helper with no execute/fetch call of its own — StagingPromoteOps-only,
+// out of this increment's scope. Never serving-path.
 public final class ChashSqlIdioms {
 
     private ChashSqlIdioms() {
@@ -48,13 +68,16 @@ public final class ChashSqlIdioms {
     public static final List<String> CHUNK_TABLES =
         List.of("nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024");
 
-    /** The one digest formula: full sha256 over the row's chunk_text. */
+    /** The one digest formula: full sha256 over the row's chunk_text.
+     *  Typed jOOQ-DSL twin: {@link #digestField(Field)} (nexus-4okz4
+     *  increment 2) — same formula, for callers composing typed DSL. */
     public static final String DIGEST = "sha256(convert_to(chunk_text, 'UTF8'))";
 
     /**
      * Reversibility-lemma rendering of a CONVERTED key's original string
      * (in-store domain only — see class docstring). {@code %1$s} is the
-     * bytea column reference.
+     * bytea column reference. Typed jOOQ-DSL twin: {@link #oldRefField(Field)}
+     * (nexus-4okz4 increment 2).
      */
     public static final String OLD_REF_LEMMA =
         "CASE WHEN octet_length(%1$s) = 16 THEN encode(%1$s, 'hex') "
@@ -67,6 +90,72 @@ public final class ChashSqlIdioms {
      */
     public static String chashOldBytes(String refExpr) {
         return "nexus.chash_old_bytes(" + refExpr + ")";
+    }
+
+    /**
+     * Typed rendering of {@link #DIGEST} (same formula: {@code
+     * sha256(convert_to(chunkText, 'UTF8'))}) — added nexus-4okz4 increment
+     * 2 so callers composing typed jOOQ DSL statements (RekeyOps' UNION /
+     * INSERT / UPDATE sites) do not fall back to string interpolation.
+     * Tied to {@link #DIGEST} by formula identity, not derived from it — a
+     * formula change must update both. Both renderings are exercised by
+     * RekeyOpsIntegrationTest (every rekey assertion depends on the digest
+     * being right), so a drift between them fails loud on the next test
+     * run rather than silently.
+     */
+    public static Field<byte[]> digestField(Field<String> chunkText) {
+        return DSL.function("sha256", byte[].class,
+            DSL.function("convert_to", byte[].class, chunkText, DSL.val("UTF8")));
+    }
+
+    /**
+     * Typed rendering of {@link #OLD_REF_LEMMA} (same in-store-only domain
+     * constraint — see class docstring): {@code CASE WHEN
+     * octet_length(chash) = 16 THEN encode(chash, 'hex') ELSE
+     * convert_from(chash, 'UTF8') END}. Added nexus-4okz4 increment 2.
+     */
+    public static Field<String> oldRefField(Field<byte[]> chash) {
+        return DSL.when(
+                DSL.function("octet_length", Integer.class, chash).eq(16),
+                DSL.function("encode", String.class, chash, DSL.val("hex")))
+            .otherwise(DSL.function("convert_from", String.class, chash, DSL.val("UTF8")));
+    }
+
+    /**
+     * {@code jsonb_build_object(...)} with typed/literal argument pairs
+     * (nexus-4okz4 increment 2) — keys are always Java string literals;
+     * values are either a {@code Field<?>} (passed through as-is) or a
+     * literal (bound via {@link DSL#val(Object)}).
+     */
+    public static Field<JSONB> jsonbBuildObject(Object... keysAndValues) {
+        if (keysAndValues.length % 2 != 0) {
+            throw new IllegalArgumentException(
+                "jsonbBuildObject needs an even number of key/value arguments");
+        }
+        Field<?>[] args = new Field<?>[keysAndValues.length];
+        for (int i = 0; i < keysAndValues.length; i++) {
+            Object v = keysAndValues[i];
+            args[i] = (v instanceof Field<?> f) ? f : DSL.val(v);
+        }
+        return DSL.function("jsonb_build_object", JSONB.class, args);
+    }
+
+    /**
+     * {@code coalesce(metadata, '{}'::jsonb) || stamp} (nexus-4okz4
+     * increment 2) — the RDR-086 metadata-mirror merge every chash-writing
+     * UPDATE in both movers applies (critic-1010: producers stamp {@code
+     * chunk_text_hash} to mirror the current key; this merges a stamp in
+     * without clobbering pre-existing metadata keys). {@code jsonb_concat}
+     * is a real PostgreSQL builtin (verified against a live PG17 instance
+     * during this conversion — it is NOT the {@code ||} operator spelled
+     * differently, it is a genuine function of that name), same idiom
+     * CatalogRepository.buildUpdateDocumentQuery already uses for the
+     * {@code catalog_documents.metadata} merge.
+     */
+    public static Field<JSONB> mergeMetadata(Field<JSONB> metadata, Field<JSONB> stamp) {
+        return DSL.function("jsonb_concat", JSONB.class,
+            DSL.coalesce(metadata, DSL.val(JSONB.valueOf("{}"))),
+            stamp);
     }
 
     /**
@@ -88,46 +177,73 @@ public final class ChashSqlIdioms {
     }
 
     /**
-     * Phase-B content rekey for one chunk table: survivors whose key
-     * mismatches their digest. Verbatim RekeyOps step (4) phase B.
-     *
-     * <p>ALSO re-stamps {@code metadata.chunk_text_hash} to mirror the new
-     * key (critic-1010, nexus-jxizy.10.10): the citation resolver's
-     * where-filter reads that RDR-086 metadata field. Producers have always
-     * stamped the FULL 64-hex there, so for serving-path rows this is a
-     * value-identical no-op — the stamp's real work is BACKFILLING rows
-     * that never carried one (pre-RDR-086 writers) and guaranteeing the
-     * mirror invariant by construction, keeping the in-store rekey path
-     * indistinguishable from {@link StagingPromoteOps}' promote output.
+     * Typed rendering of the former string-returning {@code
+     * contentRekeyUpdate} (nexus-4okz4 increment 2) — grep-verified
+     * RekeyOps-exclusive before this conversion (StagingPromoteOps never
+     * called the string form), so this REPLACES it outright rather than
+     * forking a variant. Phase B of the two-phase content rekey: UPDATE
+     * survivors whose stored chash mismatches {@code sha256(chunk_text)},
+     * re-stamping {@code metadata.chunk_text_hash} to mirror the new key
+     * (critic-1010, nexus-jxizy.10.10 — same behavior as the string form
+     * it replaces).
      */
-    public static String contentRekeyUpdate(String table) {
-        String digest = DIGEST.replace("chunk_text", "c.chunk_text");
-        return "UPDATE " + table + " c SET chash = " + digest + ", "
-            + "metadata = coalesce(c.metadata, '{}'::jsonb) "
-            + "  || jsonb_build_object('chunk_text_hash', encode(" + digest + ", 'hex')) "
-            + "WHERE c.chunk_text <> '' "
-            + "  AND c.chash IS DISTINCT FROM " + digest;
+    public static int contentRekeyUpdateDsl(DSLContext ctx, Table<?> table, Field<byte[]> chash,
+            Field<String> chunkText, Field<JSONB> metadata) {
+        Field<byte[]> digest = digestField(chunkText);
+        Field<JSONB> stamp = jsonbBuildObject("chunk_text_hash",
+            DSL.function("encode", String.class, digest, DSL.val("hex")));
+        return ctx.update(table)
+            .set(chash, digest)
+            .set(metadata, mergeMetadata(metadata, stamp))
+            .where(chunkText.ne(""))
+            .and(chash.isDistinctFrom(digest))
+            .execute();
     }
 
     /**
-     * Frecency per-target group aggregate over old rows joined to the alias
-     * (both collapse directions ride this; keeper keyed by min(chunk_id),
-     * NOT ctid — the 3c catch: an UPDATE changes ctid). Verbatim RekeyOps
-     * step (5). Aliased {@code g}.
+     * Typed rendering of the former string-returning {@code
+     * frecencyAliasAggregate} (nexus-4okz4 increment 2) — grep-verified
+     * RekeyOps-exclusive, replaces it outright. Per-target group aggregate
+     * over old {@code frecency} rows joined to the alias map (both
+     * collapse directions ride this; keeper keyed by {@code min(chunk_id)},
+     * NOT ctid — the RekeyOpsIntegrationTest 3c catch: an UPDATE changes
+     * ctid). Column aliases ({@code new_chash}/{@code keep_id}/{@code fs}/
+     * {@code mc}/{@code lh}/{@code ea}/{@code td}) match the string form's
+     * exactly, so a caller reads either rendering identically. Aliased
+     * {@code g}, same as the string form.
      */
-    public static String frecencyAliasAggregate() {
-        return "(SELECT a.new_chash, min(o.chunk_id) AS keep_id, "
-            + "        max(o.frecency_score) AS fs, max(o.miss_count) AS mc, "
-            + "        max(o.last_hit_at) AS lh, max(o.embedded_at) AS ea, "
-            + "        max(o.ttl_days) AS td "
-            + "   FROM nexus.frecency o JOIN nexus.chash_alias a "
-            + "     ON o.chunk_id = a.old_ref GROUP BY a.new_chash) g";
+    public static Table<?> frecencyAliasAggregateDsl(DSLContext ctx) {
+        return ctx.select(
+                CHASH_ALIAS.NEW_CHASH.as("new_chash"),
+                DSL.min(FRECENCY.CHUNK_ID).as("keep_id"),
+                DSL.max(FRECENCY.FRECENCY_SCORE).as("fs"),
+                DSL.max(FRECENCY.MISS_COUNT).as("mc"),
+                DSL.max(FRECENCY.LAST_HIT_AT).as("lh"),
+                DSL.max(FRECENCY.EMBEDDED_AT).as("ea"),
+                DSL.max(FRECENCY.TTL_DAYS).as("td"))
+            .from(FRECENCY)
+            .join(CHASH_ALIAS).on(FRECENCY.CHUNK_ID.eq(CHASH_ALIAS.OLD_REF))
+            .groupBy(CHASH_ALIAS.NEW_CHASH)
+            .asTable("g");
     }
 
-    /** In-txn verify: residual digest-mismatch count for one chunk table. */
-    public static String residualMismatchCount(String table) {
-        return "SELECT count(*) FROM " + table + " WHERE chunk_text <> '' "
-            + "AND chash IS DISTINCT FROM " + DIGEST;
+    /**
+     * Typed rendering of the former string-returning {@code
+     * residualMismatchCount} (nexus-4okz4 increment 2) — SHARED (RekeyOps
+     * step 6 AND {@code StagingPromoteOps.finalizeTenant} step 7), so this
+     * REPLACES the string form for BOTH callers in the same change
+     * (single-homed, same discipline as {@link #danglingManifestCountDsl}'s
+     * twin collapse in increment 1 — no forked variant left behind for
+     * either caller). In-txn verify: {@code count(*)} of content rows
+     * whose stored chash mismatches {@code sha256(chunk_text)}.
+     */
+    public static Integer residualMismatchCountDsl(DSLContext ctx, Table<?> table,
+            Field<byte[]> chash, Field<String> chunkText) {
+        Field<byte[]> digest = digestField(chunkText);
+        return ctx.selectCount().from(table)
+            .where(chunkText.ne(""))
+            .and(chash.isDistinctFrom(digest))
+            .fetchOne(0, Integer.class);
     }
 
     /**
@@ -204,13 +320,14 @@ public final class ChashSqlIdioms {
      * "neither copy derives from CHUNK_TABLES ... a fourth dim table is
      * the realistic drift trigger"). {@link #CHUNK_TABLES} is a
      * String-typed table-name list built for raw-SQL composition
-     * elsewhere in this class (contentCollapseDelete/contentRekeyUpdate/
-     * residualMismatchCount all iterate it as a loop variable); the three
-     * generated-Tables constants below are typed jOOQ handles for the
-     * SAME three tables and cannot be driven off that String list without
-     * a name-to-generated-class lookup that would be its own drift
-     * surface — kept as the explicit three, tied to CHUNK_TABLES only by
-     * this comment.
+     * elsewhere in this class (contentCollapseDelete iterates it as a
+     * loop variable at call sites); the three generated-Tables constants
+     * below are typed jOOQ handles for the SAME three tables and cannot be
+     * driven off that String list without a name-to-generated-class lookup
+     * that would be its own drift surface — kept as the explicit three,
+     * tied to CHUNK_TABLES only by this comment. See RawSqlGateTest's
+     * {@code chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove}
+     * for the full fourth-dim checklist (nexus-4okz4 increment 2).
      */
     // No SANCTIONED RAW comment: pure DSL, no raw-SQL string executed here.
     public static Integer danglingManifestCountDsl(org.jooq.DSLContext ctx) {

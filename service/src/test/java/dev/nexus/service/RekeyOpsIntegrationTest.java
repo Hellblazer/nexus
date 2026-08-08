@@ -262,6 +262,43 @@ class RekeyOpsIntegrationTest {
                 insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", legacyA, "");
                 // (c) orphan: empty text, no content sibling anywhere
                 insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", orphanKey, "");
+                // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
+                // review [21863] / critique [21864]): adjudicating fixture for
+                // orphanCond's same-dim (384) content-sibling NOT EXISTS
+                // clause. Every content-bearing row seeded above for TA lives
+                // in chunks_768 -- this tenant previously had ZERO
+                // content-bearing rows in chunks_384 itself, so a
+                // de-correlated same-dim subquery (self-shadowed unaliased
+                // table reference, degenerating "chash = c.chash AND
+                // chunk_text <> ''" to just "chunk_text <> ''" -- "does this
+                // dim have ANY content") was indistinguishable from the
+                // correlated form. This row is digest-matching (chash =
+                // sha256(text)) so it is inert to rekey's own mismatch/
+                // collapse predicates (rehashed/collapsed_duplicates counts
+                // below are unaffected) -- its only job is to make chunks_384
+                // non-empty for TA so a de-correlated same-dim clause and the
+                // correlated one disagree.
+                String sameDimContentText =
+                    "rekey same-dim orphanCond correlation fixture ta " + System.nanoTime();
+                byte[] sameDimChash = sha256(sameDimContentText);
+                insertChunk(su, TA, "nexus.chunks_384", 384, "code__k",
+                    sameDimChash, sameDimContentText);
+                // this row is digest-matching so rekey never touches it (see
+                // above) -- stamp metadata.chunk_text_hash here to mirror
+                // what a real producer already does, so it does not trip the
+                // "every row mirrors its chash into metadata" parity sweep
+                // below (that sweep scans the WHOLE table for the tenant,
+                // not just rows rekey actually rewrote).
+                try (PreparedStatement mps = su.prepareStatement(
+                        "UPDATE nexus.chunks_384 SET metadata = "
+                        + "jsonb_build_object('chunk_text_hash', encode(chash, 'hex')) "
+                        + "WHERE tenant_id = ? AND chash = ?")) {
+                    mps.setString(1, TA);
+                    mps.setBytes(2, sameDimChash);
+                    mps.executeUpdate();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
                 try {
                     // pointers at the orphan key (manifest; the chash_index
                     // twin died with the router, RDR-187) — must cascade on drop
@@ -384,6 +421,17 @@ class RekeyOpsIntegrationTest {
                 + "VALUES ('" + TB + "', '2.1', 'doc') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {
                 insertChunk(su, TB, "nexus.chunks_384", 384, "code__s", orphanKey, "");
+                // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
+                // review [21863] / critique [21864]): same adjudicating
+                // fixture as rekey_fullPass_dispositionsAtoC_andCascade,
+                // digest-matching so it is inert to rekey's own predicates --
+                // makes chunks_384 non-empty for TB so orphanCond's same-dim
+                // NOT EXISTS clause is actually exercised for the SYNTHESIZE
+                // policy too, not just DROP.
+                String sameDimContentText =
+                    "rekey same-dim orphanCond correlation fixture tb " + System.nanoTime();
+                insertChunk(su, TB, "nexus.chunks_384", 384, "code__s",
+                    sha256(sameDimContentText), sameDimContentText);
                 try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
@@ -979,7 +1027,13 @@ class RekeyOpsIntegrationTest {
     void preExistingDanglingManifestRow_abortsRekeyLoud() throws Exception {
         String tenant = "t-rekey-dangling";
         byte[] ghost = sha256("rekey pre-existing dangling ghost " + System.nanoTime());
-        String col = "gate-dangling-col";
+        // nexus-4okz4 increment 2 critic follow-up (critic nit, costless —
+        // T2 critique-4okz4-increment2 [21864]): distinct collection name
+        // per dim (one-collection-one-dim convention), rather than the same
+        // "gate-dangling-col" reused across all three dim inserts.
+        String col384 = "gate-dangling-col-384";
+        String col768 = "gate-dangling-col-768";
+        String col1024 = "gate-dangling-col-1024";
         // nexus-4okz4 increment 1, critic ROUND 3 pin-sensitivity finding
         // (T2 critique-t76bp-rekey-gate-2026-08-08 [21807], "Site 2
         // correlation is unpinned"): ChashSqlIdioms.danglingManifestCountDsl
@@ -999,13 +1053,29 @@ class RekeyOpsIntegrationTest {
         // its NOT EXISTS(SELECT 1 FROM chunks_768) collapses to false, the
         // three-way AND goes false, the ghost is no longer counted, and the
         // abort would silently stop firing.
+        //
+        // nexus-4okz4 increment 2 critic follow-up (T2 critique-4okz4-
+        // increment1-2026-08-08 [21850], nit 1 — "honest partial"): the
+        // ORIGINAL fixture inserted the unrelated row into chunks_768 ONLY,
+        // so it pinned correlation for that ONE dim's NOT EXISTS clause —
+        // a regression de-correlating solely the chunks_384 or chunks_1024
+        // subquery (while 768 stayed correlated) would still pass, since
+        // those tables remained empty for this tenant. One unrelated row
+        // per dim closes that gap: EVERY dim's NOT EXISTS clause is now
+        // exercised against a non-empty table, so a single-dim copy-paste
+        // regression in danglingManifestCountDsl is caught regardless of
+        // which dim it hits.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                + tenant + "', '" + col + "') ON CONFLICT DO NOTHING");
+            for (String c : new String[] {col384, col768, col1024}) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + tenant + "', '" + c + "') ON CONFLICT DO NOTHING");
+            }
             String unrelatedText = "rekey dangling-count correlation fixture " + System.nanoTime();
-            insertChunk(su, tenant, "nexus.chunks_768", 768, col, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, "nexus.chunks_384", 384, col384, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, "nexus.chunks_768", 768, col768, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, "nexus.chunks_1024", 1024, col1024, sha256(unrelatedText), unrelatedText);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + tenant + "', 'ghost-doc', 'ghost') ON CONFLICT DO NOTHING");
@@ -1021,8 +1091,9 @@ class RekeyOpsIntegrationTest {
         assertThatThrownBy(() -> rekeyOps.rekey(tenant, false))
             .as("the step-6 detection must be ENFORCED, not merely computed and returned in the "
                 + "envelope -- a caller that never inspects the envelope must not be able to miss "
-                + "this, AND the count must be CORRELATED per row (an unrelated content row in "
-                + "chunks_768 must not mask the ghost manifest row's dangling reference)")
+                + "this, AND the count must be CORRELATED per row in EVERY dim (an unrelated "
+                + "content row in chunks_384/768/1024 must not mask the ghost manifest row's "
+                + "dangling reference)")
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("dangling manifest");
     }

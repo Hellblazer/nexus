@@ -112,14 +112,24 @@ class RawSqlGateTest {
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
             "fetchShowConfig")),
         Map.entry("RekeyOps.java", java.util.Set.of(
-            // SANCTIONED RAW (nexus-jxizy.6): the RDR-180 per-tenant rekey is
-            // deliberately server-side SQL — sha256() over chunk_text, ctid
-            // keeper selection via array_agg ORDER BY, reversibility-lemma
-            // CASE expressions, and multi-table cascades under one
-            // transaction. No jOOQ DSL form exists for the ctid/array_agg
-            // keeper idiom, and the statements are one-shot migration ops,
-            // not serving-path queries.
-            "rekey", "unionAllContentRows")),
+            // SANCTIONED RAW (nexus-jxizy.6 origin; narrowed nexus-4okz4
+            // increment 2 — the method-level sanction remains because
+            // RawSqlGateTest is method-granular, not statement-granular
+            // (that tightening is a later increment), but the raw-SQL
+            // surface actually remaining inside rekey() is now narrow: the
+            // in-transaction ANALYZE + privilege probe (ChashSqlIdioms.
+            // refreshAliasStats) and the two-phase content rekey's phase-A
+            // collapse (ChashSqlIdioms.contentCollapseDelete's ctid/
+            // array_agg ORDER BY keeper idiom) — neither has a jOOQ DSL
+            // form. Every other statement in the method (advisory lock,
+            // conflict pre-check, alias INSERT...SELECT...ON CONFLICT,
+            // step-3 Item8, phase-B content rekey, every step-5 cascade)
+            // converted to typed jOOQ DSL this increment; unionAllContentRows
+            // (the raw-string UNION builder) was deleted outright and
+            // replaced by the private unionAllContentRowsDsl, so it is
+            // REMOVED from this allowlist — a dead sanction entry would
+            // otherwise point at a method that no longer exists.
+            "rekey")),
         Map.entry("StagingHandler.java", java.util.Set.of(
             // SANCTIONED RAW (nexus-jxizy.10.4): the landing surface is
             // dynamic-by-store (8 staging tables, per-store column lists,
@@ -141,11 +151,19 @@ class RawSqlGateTest {
             // anti-join dedupes). Never serving-path.
             "promoteCollection", "finalizeTenant")),
         Map.entry("ChashSqlIdioms.java", java.util.Set.of(
-            // SANCTIONED RAW (nexus-jxizy.10.2): the SHARED fragments of the
-            // two one-shot chash movers (RekeyOps in-store rekey +
-            // StagingPromoteOps land-then-transform promote) — same sanction
-            // rationale as RekeyOps, single-homed so the two writers of the
-            // shared tables cannot drift. Never serving-path.
+            // SANCTIONED RAW (nexus-jxizy.10.2, narrowed nexus-4okz4
+            // increment 2): this increment converted contentRekeyUpdate,
+            // frecencyAliasAggregate, and residualMismatchCount to typed
+            // DSL twins (contentRekeyUpdateDsl / frecencyAliasAggregateDsl
+            // / residualMismatchCountDsl — no allowlist entry needed, pure
+            // DSL, no raw-SQL string executed) and DELETED the now-dead
+            // raw-string forms outright, so all three are REMOVED from
+            // this allowlist. contentCollapseDelete remains: the
+            // ctid/array_agg ORDER BY keeper-selection idiom (an
+            // array-subscript of an ordered array_agg) has no jOOQ DSL
+            // form. chashOldBytes is untouched (StagingPromoteOps-only, a
+            // one-line string helper with no execute/fetch call of its
+            // own — out of this increment's scope).
             // SANCTIONED RAW (rdr180-17): refreshAliasStats additionally
             // EXECUTES — ANALYZE is maintenance DDL with no jOOQ DSL form at
             // all, and its privilege probe reads pg_class / has_table_privilege
@@ -153,9 +171,7 @@ class RawSqlGateTest {
             // caller's transaction so the planner sees the alias rows that
             // transaction just wrote (F2: 101min vs 461s), so it cannot be
             // hoisted out to a typed call site. Never serving-path.
-            "contentCollapseDelete", "contentRekeyUpdate",
-            "frecencyAliasAggregate", "residualMismatchCount",
-            "chashOldBytes", "refreshAliasStats")),
+            "contentCollapseDelete", "chashOldBytes", "refreshAliasStats")),
         Map.entry("SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table
@@ -363,5 +379,39 @@ class RawSqlGateTest {
             "    }",
             "}");
         assertThat(scan("PoolerModeCheck.java", synthetic)).isEmpty();
+    }
+
+    // ── nexus-4okz4 increment 2 critic follow-up (T2 critique-4okz4-
+    //    increment1-2026-08-08 [21850], nit 2) ──
+
+    /**
+     * {@code ChashSqlIdioms.CHUNK_TABLES} silently hardcodes "three dims" in
+     * multiple independently hand-written call sites (RekeyOps' {@code DIMS},
+     * StagingPromoteOps' residual-count call site, {@code
+     * ChashSqlIdioms.danglingManifestCountDsl}'s three explicit NOT EXISTS
+     * clauses). A fourth dim table added without touching every one of
+     * those sites would drift silently. This canary fails LOUD instead:
+     * whoever adds a fourth dim must touch {@code CHUNK_TABLES}, see this
+     * test go red, and follow the checklist below.
+     *
+     * <p>FOURTH-DIM CHECKLIST (update all of these when this assertion
+     * changes):
+     * <ul>
+     *   <li>{@code ChashSqlIdioms.CHUNK_TABLES} itself</li>
+     *   <li>{@code ChashSqlIdioms.danglingManifestCountDsl} (three explicit
+     *       {@code NOT EXISTS} clauses)</li>
+     *   <li>{@code RekeyOps.DIMS} (three explicit typed entries) and its
+     *       {@code orphanCond} (three explicit dim {@code NOT EXISTS}
+     *       clauses) and {@code unionAllContentRowsDsl} (three explicit
+     *       UNION ALL branches)</li>
+     *   <li>{@code StagingPromoteOps.finalizeTenant}'s residual-count call
+     *       site (three explicit {@code residualMismatchCountDsl} calls)</li>
+     *   <li>{@code dev.nexus.service.vectors.DimTables.CHUNKS} /
+     *       {@code CENTROIDS} maps</li>
+     * </ul>
+     */
+    @Test
+    void chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove() {
+        assertThat(ChashSqlIdioms.CHUNK_TABLES).hasSize(3);
     }
 }
