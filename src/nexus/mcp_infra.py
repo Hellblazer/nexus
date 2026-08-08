@@ -565,26 +565,6 @@ def resolve_tumbler_mcp(cat, value):
 # the legacy chash-before-taxonomy invariant).
 
 
-def _embedding_is_empty(embedding: object) -> bool:
-    """True when *embedding* carries no vector data.
-
-    Never evaluates the truthiness of an array-like directly: ``bool(arr)``
-    raises ``ValueError('truth value of an array with more than one
-    element is ambiguous')`` for numpy arrays with more than one element
-    (nexus-h8rf6.11 — hit on every service-mode index when the local
-    fastembed embedder's numpy-array output reached ``any(svc_embeddings)``
-    inside :func:`taxonomy_assign_batch_hook`). Prefers ``.size`` (numpy
-    ndarrays) over ``len()`` since ``len()`` raises ``TypeError`` on 0-d
-    arrays; ``.size`` is defined for both 0-d (``1``) and N-d arrays.
-    """
-    if embedding is None:
-        return True
-    size = getattr(embedding, "size", None)
-    if size is not None:
-        return size == 0
-    return len(embedding) == 0
-
-
 def _record_taxonomy_tripwire(
     collection: str, doc_ids: list, error: str, *, kind: str = "",
 ) -> None:
@@ -635,16 +615,20 @@ def taxonomy_assign_batch_hook(
 ) -> None:
     """Registered batch hook: assign indexed docs to their nearest topics.
 
-    Called via ``HookRegistry.fire_batch`` from every storage event:
-    CLI bulk ingest passes the embeddings already computed by the upsert;
-    MCP ``store_put`` passes ``embeddings=None`` and the hook fetches them
-    from T3 inline (one ChromaDB get per doc). The fetch falls back to
-    local MiniLM embedding when T3 is unavailable, matching the legacy
-    single-doc shim behaviour.
+    Called via ``HookRegistry.fire_batch`` from every storage event. Since
+    nexus-yu9w5, ``doc_ids`` (the chunk chashes just upserted into
+    ``collection`` by THIS SAME flush) is the only chunk-identifying input
+    the hook needs — assignment is computed server-side via
+    ``POST /v1/taxonomy/assignments/assign_from_chashes`` from the
+    already-persisted ``chunks_<dim>`` rows. ``contents``, ``embeddings``,
+    and ``metadatas`` are accepted for ``HookRegistry.fire_batch``'s shared
+    call shape but not read.
 
-    Reads ``embeddings`` and ``contents``; ignores ``metadatas``.
-    No-op when centroids don't exist (no discover run yet) or the
-    collection is excluded.
+    No-op when the local-mode exclude-collections config matches, or the
+    engine reports no assignable chashes (empty ``doc_ids``). No client-side
+    fallback: an engine that lacks the route fails the batch loud via the
+    RDR-172 tripwire (a ``hook_failures`` row + a warning log), never a
+    silent client-side recompute.
 
     Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
     runtime-constructed registry.
@@ -666,61 +650,53 @@ def taxonomy_assign_batch_hook(
     # unconditionally while tests inject chroma-backed T3Database fixtures.
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
     if is_service_backed(get_t3()):
-        # nexus-7ydks: service-backed incremental assignment. Mirrors the raw
-        # path below (compute same + cross, one persist) but persists through
-        # the Java service via the HttpTaxonomyStore drop-in — no raw Chroma
-        # client, no daemon-routed SQLite write.
+        # nexus-yu9w5 (lns3o client half): server-side compute-and-persist via
+        # POST /v1/taxonomy/assignments/assign_from_chashes. The engine
+        # already holds both the embeddings (chunks_<dim>, just upserted by
+        # THIS SAME flush) and the centroids (taxonomy_centroids_<dim>), so
+        # compute-and-persist collapses into ONE round trip — eliminating the
+        # per-flush ~3MB embedding re-download + the client-side
+        # compute_assignments/persist_assignments dance this route replaces
+        # (T2 flush-tail-attribution-2026-08-07: the 50.9% flush-grain hook
+        # term). ``doc_ids`` ARE the chunk chashes here — the T3 natural
+        # chunk id every upsert call site in this codebase passes as
+        # ``ids=`` — so no re-fetch and no client-side cosine math are
+        # needed at all; the nexus-reskd/h8rf6.11 empty-placeholder-embedding
+        # dance this replaced no longer applies (``embeddings`` is unread).
         if is_local_mode():
             exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
             if any(fnmatch(collection, pat) for pat in exclude):
                 return
-        svc_embeddings = embeddings
-        # nexus-reskd: re-fetch when embeddings are absent OR all-empty. The
-        # server-side-embed paths (doc_indexer / streaming PDF) pass
-        # ``[[], [], ...]`` placeholders — a non-empty OUTER list, so the old
-        # ``if not svc_embeddings`` was False and zero-dim vectors reached
-        # compute_assignments, silently producing no taxonomy assignments.
-        # nexus-h8rf6.11: the follow-on ``not any(svc_embeddings)`` fix
-        # itself broke every service-mode index — ``any()`` evaluates
-        # ``bool()`` on each element, and the local fastembed embedder
-        # (bge-768 tier) returns numpy arrays, whose truthiness is
-        # ambiguous for >1-element vectors. Use an element-wise emptiness
-        # check that never calls ``bool()``/``len()`` on an array directly.
-        if not svc_embeddings or all(_embedding_is_empty(e) for e in svc_embeddings):
-            try:
-                arr = get_t3().get_embeddings(collection, doc_ids)
-            except Exception:  # noqa: BLE001 — embedding fetch best-effort; None triggers safe skip on count skew
-                arr = None
-            # get_embeddings drops ids it cannot resolve; a count skew would
-            # mis-pair vectors to docs, so skip rather than assign misaligned.
-            if arr is None or len(arr) != len(doc_ids):
-                _record_taxonomy_tripwire(
-                    collection, doc_ids,
-                    f"service embeddings unavailable: want={len(doc_ids)} "
-                    f"got={0 if arr is None else len(arr)} — no assignments "
-                    f"written for this batch",
-                    kind="embed_unavailable",
-                )
-                return
-            svc_embeddings = arr.tolist()
+        # NO FALLBACK (nexus-yu9w5, mirrors the nexus-sghyo precedent): an
+        # engine below REQUIRED_ENGINE_VERSION that lacks this route 404s;
+        # that (or any other transport failure) is caught below and reported
+        # via the SAME tripwire every other service-path failure uses — the
+        # hook fails loud and reports, it never recomputes client-side.
         try:
-            # Compute (read: queries centroids via the service) + persist in a
-            # single inline t2_index_write lambda — the storage-boundary lint
-            # recognises this routed form, and in service mode persist lands on
-            # the Java service (the single writer).
-            t2_index_write(
-                lambda db: db.taxonomy.persist_assignments(
-                    db.taxonomy.compute_assignments(
-                        collection, doc_ids, svc_embeddings, cross_collection=False,
-                    )
-                    + db.taxonomy.compute_assignments(
-                        collection, doc_ids, svc_embeddings, cross_collection=True,
-                    )
+            result = t2_index_write(
+                lambda db: db.taxonomy.assign_from_chashes(
+                    collection, doc_ids, cross_collection=True,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
             _record_taxonomy_tripwire(
                 collection, doc_ids, f"service path: {type(exc).__name__}: {exc}",
+            )
+            return
+        unmatched = result.get("unmatched_chashes") if isinstance(result, dict) else None
+        if unmatched:
+            # Route contract: a chash never actually upserted into
+            # `collection` is named here rather than silently dropped. The
+            # batch's OTHER chashes still assigned — not a hard failure, but
+            # a real gap (topic-scoped search misses these chunks) worth the
+            # same loudness the RDR-172 tripwire pattern gives every other
+            # taxonomy-assignment gap.
+            _record_taxonomy_tripwire(
+                collection, unmatched,
+                f"assign_from_chashes: {len(unmatched)}/{len(doc_ids)} chashes "
+                "unmatched in chunks_<dim> for this collection — never "
+                "upserted, or upserted under a different collection",
+                kind="unmatched_chashes",
             )
         return
 

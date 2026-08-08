@@ -238,7 +238,14 @@ class TestRequiredEngineVersion:
         # trips Test8hpadAllowlistDoesNotOutliveItsTrigger: the
         # fresh-install-mvv ALLOWLIST_REGEX entries retire in the SAME
         # change (nexus-8hpad).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 67)
+        # ->(0,1,68) 2026-08-07 (7.4.0 paired release): engine-service-v0.1.68
+        # (nexus-lns3o engine half, dc87dd3c) — POST
+        # /v1/taxonomy/assignments/assign_from_chashes, server-side
+        # compute-and-persist topic assignment from just-upserted chunk
+        # chashes. Published + acquire-gated + deployed + edge-gated ahead of
+        # this bump (paired-release choreography). Client half nexus-yu9w5
+        # switches taxonomy_assign_batch_hook to the route with no fallback.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 68)
 
 
 class TestParseEngineVersion:

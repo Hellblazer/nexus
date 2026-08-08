@@ -1084,6 +1084,70 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             )
         )
 
+    def assign_from_chashes(
+        self,
+        collection: str,
+        chashes: list[str],
+        *,
+        cross_collection: bool = True,
+    ) -> dict[str, Any]:
+        """Server-side compute-and-persist assignment for just-upserted chunk
+        chashes (nexus-lns3o engine half / nexus-yu9w5 client half).
+
+        POST ``/v1/taxonomy/assignments/assign_from_chashes``. Replaces THIS
+        store's own :meth:`assign_batch` (``compute_assignments`` ->
+        ``persist_assignments``) for the incremental per-flush indexing hook
+        specifically: the engine already holds both the embeddings
+        (``chunks_<dim>``, just upserted by the SAME flush) and the centroids
+        (``taxonomy_centroids_<dim>``), so compute-and-persist collapses into
+        ONE round trip — no client-side embedding re-download, no local
+        cosine math. ``assign_batch``/``compute_assignments`` themselves are
+        UNCHANGED and still used by discover/rebuild/split, which need the
+        computed (not just persisted) assignment rows.
+
+        NO FALLBACK (nexus-yu9w5, mirrors nexus-sghyo): an engine below
+        ``REQUIRED_ENGINE_VERSION`` that does not carry this route 404s, and
+        this method lets that (or any other transport) exception propagate
+        verbatim to the caller — never a silent client-side recompute.
+
+        ``chashes`` are the chunk content-hashes just upserted into
+        ``collection`` (the T3 natural chunk id — the same values every
+        upsert call site in this codebase passes as ``ids=``).
+        ``cross_collection`` defaults to ``True`` (own-collection "centroid"
+        pass always runs; the foreign-collection "projection" pass is
+        included unless explicitly disabled).
+
+        Returns ``{"assigned": int, "cross_assigned": int,
+        "unmatched_chashes": list[str]}`` — a chash never actually upserted
+        into ``collection`` is named in ``unmatched_chashes``, never
+        silently dropped.
+
+        Paged client-side at the engine's ``MAX_ASSIGN_FROM_CHASHES`` cap
+        (1000; same ``_PAGE`` pattern as :meth:`persist_assignments`).
+        Without this, the legacy per-file fallback path (a single file whose
+        chunk count exceeds the per-POST upsert cap routes around
+        ``ChunkBatcher`` and passes its FULL id list here) would 400 on any
+        >1000-chunk file and lose taxonomy assignment for the whole file
+        (substantive-critic finding on nexus-yu9w5). Results are aggregated
+        across pages; pagination is safe because pages are disjoint and the
+        engine's per-chash assignment is idempotent.
+        """
+        totals: dict[str, Any] = {"assigned": 0, "cross_assigned": 0, "unmatched_chashes": []}
+        _PAGE = 1000  # engine cap (TaxonomyRepository.MAX_ASSIGN_FROM_CHASHES parity)
+        for start in range(0, len(chashes), _PAGE):
+            resp = self._post(
+                "/assignments/assign_from_chashes",
+                {
+                    "collection": collection,
+                    "chashes": chashes[start : start + _PAGE],
+                    "cross_collection": cross_collection,
+                },
+            )
+            totals["assigned"] += int(resp.get("assigned", 0))
+            totals["cross_assigned"] += int(resp.get("cross_assigned", 0))
+            totals["unmatched_chashes"].extend(resp.get("unmatched_chashes", []))
+        return totals
+
     def rebuild_taxonomy(
         self,
         collection_name: str,

@@ -360,7 +360,13 @@ def test_fire_batch_persist_failure_is_best_effort(
 
 # The "Taxonomy batch hook fallback" block stood here: three tests covering
 # mcp_infra._fetch_or_embed. Both the function and these went in nexus-i711w
-# Stage 2 sub-stage C — its only caller was the raw taxonomy-assign path, and
-# the surviving service branch re-fetches through get_t3().get_embeddings with
-# its own count-skew guard and tripwire, which these tests never covered.
-# Nothing was ported: there is no surviving subject to point them at.
+# Stage 2 sub-stage C — its only caller was the raw taxonomy-assign path.
+# At the time, the surviving service branch re-fetched through
+# get_t3().get_embeddings with its own count-skew guard and tripwire, which
+# these tests never covered. nexus-yu9w5 later replaced that re-fetch-then-
+# compute dance with a single server-side POST
+# /v1/taxonomy/assignments/assign_from_chashes call (the engine already
+# holds the embeddings), so the service branch no longer touches
+# get_embeddings at all — see tests/test_taxonomy_service_wiring.py's
+# ``test_assign_batch_hook_ignores_embeddings_entirely``. Nothing was
+# ported here either way: there is no surviving subject to point these at.

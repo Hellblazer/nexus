@@ -326,7 +326,19 @@ from __future__ import annotations
 #: fresh-install-mvv ALLOWLIST_REGEX entries (both engine halves now live
 #: at the pinned floor) — enforced by
 #: Test8hpadAllowlistDoesNotOutliveItsTrigger.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 67)
+#: -> (0,1,68) 2026-08-07 (7.4.0 paired release): engine-service-v0.1.68
+#: (nexus-lns3o engine half, dc87dd3c: POST
+#: /v1/taxonomy/assignments/assign_from_chashes — server-side
+#: compute-and-persist topic assignment from just-upserted chunk chashes,
+#: eliminating the client's per-flush ~3MB embedding re-download). Published
+#: + acquire-gated + deployed + edge-gated ahead of this bump (paired-release
+#: choreography: engine tag cut first, client floor bump + route switch ride
+#: the SAME client release, deploy fires at client-tag push). The client
+#: half (nexus-yu9w5) switches taxonomy_assign_batch_hook to the route and
+#: deletes the client-side compute_assignments/persist_assignments dance the
+#: route replaces for THIS call site — no fallback, an engine below this
+#: floor 404s and the hook fails loud via the RDR-172 tripwire.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 68)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

@@ -390,8 +390,9 @@ def test_discover_topics_still_composes(
 
 
 def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> None:
-    """The rerouted taxonomy_assign_batch_hook must compute client-side and
-    persist via t2_index_write (the daemon path), NOT a direct t2_ctx open.
+    """The rerouted taxonomy_assign_batch_hook must call the engine route
+    (assign_from_chashes) via t2_index_write (the daemon path), NOT a
+    direct t2_ctx open.
 
     Without this the hook's new routing is untested — the pre-existing
     t2_ctx-patching hook tests pass vacuously after the reroute (they don't
@@ -400,10 +401,7 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     """
     import nexus.mcp_infra as mi
 
-    computed = [{
-        "doc_id": "d1", "topic_id": 7, "assigned_by": "centroid",
-        "similarity": None, "source_collection": None,
-    }]
+    route_result = {"assigned": 1, "cross_assigned": 0, "unmatched_chashes": []}
 
     # The hook does `from nexus.config import is_local_mode` at call time,
     # so patch the source module (not mcp_infra).
@@ -412,10 +410,12 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     monkeypatch.setattr(mi, "get_t3", lambda: MagicMock())
     # nexus-i711w sub-stage C: the raw arm this test used to drive (patching
     # CatalogTaxonomy.compute_assignments and handing the hook a ._client
-    # handle) is deleted. The ROUTING contract it guards is unchanged — the
-    # surviving service arm still computes and persists inside ONE
-    # t2_index_write lambda — so the driver moves to that arm and compute is
-    # stubbed on the store the lambda receives.
+    # handle) is deleted. nexus-yu9w5 (lns3o client half) then replaced the
+    # surviving service arm's client-side compute_assignments/
+    # persist_assignments dance with a single server-side
+    # assign_from_chashes call — still inside ONE t2_index_write lambda, so
+    # the driver stays on that arm and the route call is stubbed on the
+    # store the lambda receives.
     monkeypatch.setattr(
         "nexus.db.http_vector_client.is_service_backed", lambda _t3: True
     )
@@ -423,19 +423,18 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     captured: dict = {}
 
     class _FakeTaxonomy:
-        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection):  # noqa: ANN001, ANN201
-            return [] if cross_collection else computed
-
-        def persist_assignments(self, assignments):  # noqa: ANN001
-            captured["assignments"] = assignments
-            return len(assignments)
+        def assign_from_chashes(self, collection, chashes, *, cross_collection=True):  # noqa: ANN001, ANN201
+            captured["collection"] = collection
+            captured["chashes"] = list(chashes)
+            captured["cross_collection"] = cross_collection
+            return route_result
 
     class _FakeDb:
         taxonomy = _FakeTaxonomy()
 
     def _spy_index_write(write_fn):  # noqa: ANN001
         captured["routed"] = True
-        write_fn(_FakeDb())
+        return write_fn(_FakeDb())
 
     monkeypatch.setattr(mi, "t2_index_write", _spy_index_write)
     monkeypatch.setattr(
@@ -449,7 +448,9 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
     )
 
     assert captured.get("routed") is True, "hook must call t2_index_write"
-    assert captured.get("assignments") == computed, "must persist the computed assignments"
+    assert captured.get("collection") == "code__c"
+    assert captured.get("chashes") == ["d1"]
+    assert captured.get("cross_collection") is True
 
 
 def test_assign_topic(db: T2Database) -> None:

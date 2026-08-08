@@ -9,6 +9,7 @@ real Java service lives in tests/db/test_http_taxonomy_store_integration.py.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from nexus.commands.taxonomy_cmd import (
     _enumerate_discoverable_collections,
@@ -276,35 +277,31 @@ def test_discover_probe_skip_echoes_when_not_quiet(capsys):
 # ── Incremental-assignment hook (nexus-7ydks C1) ────────────────────────────
 
 
-def test_assign_batch_hook_routes_through_service_store(monkeypatch):
-    """The per-store_put assignment hook must persist via the service store in
-    service mode, not bail (the Critical the substantive-critic caught)."""
+def test_assign_batch_hook_routes_through_assign_from_chashes(monkeypatch):
+    """nexus-yu9w5 (lns3o client half): the per-store_put assignment hook
+    must call the engine route directly with the batch's chashes — no
+    embedding fetch, no client-side compute_assignments/persist_assignments."""
     import nexus.mcp_infra as mi
     from nexus.db.http_vector_client import HttpVectorClient
 
     ids = [f"c{i}" for i in range(4)]
-    embs = [[float(i), 1.0, 2.0] for i in range(4)]
 
-    # A real-typed (isinstance) HttpVectorClient so is_service_backed() is True,
-    # with the two methods the hook calls stubbed.
+    # A real-typed (isinstance) HttpVectorClient so is_service_backed() is
+    # True. get_embeddings raises if ever called — the route replaces the
+    # embedding-fetch dance entirely; the hook must never touch T3 for it.
     class _SvcT3(HttpVectorClient):
         def __init__(self):  # noqa: D107
             pass
 
         def get_embeddings(self, collection, doc_ids):  # noqa: ANN001
-            import numpy as _np
-            return _np.asarray(embs, dtype=_np.float32)
+            raise AssertionError("must not fetch embeddings — the route computes server-side")
 
-    persisted: list[list[dict]] = []
+    calls: list[tuple] = []
 
     class _SvcTax:
-        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection=False):  # noqa: ANN001
-            # one assignment per doc for the same-collection pass, none cross
-            return [] if cross_collection else [{"doc_id": d, "topic_id": 1} for d in doc_ids]
-
-        def persist_assignments(self, assignments):  # noqa: ANN001
-            persisted.append(assignments)
-            return len(assignments)
+        def assign_from_chashes(self, collection, chashes, *, cross_collection=True):  # noqa: ANN001
+            calls.append((collection, list(chashes), cross_collection))
+            return {"assigned": len(chashes), "cross_assigned": 0, "unmatched_chashes": []}
 
     class _DB:
         taxonomy = _SvcTax()
@@ -315,43 +312,49 @@ def test_assign_batch_hook_routes_through_service_store(monkeypatch):
     # t2_index_write just runs the fn with our fake db (no daemon).
     monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
 
-    # embeddings=None forces the service get_embeddings fetch path.
+    # embeddings=None (the MCP store_put shape) — must reach the route
+    # unchanged; embeddings/contents/metadatas are accepted but not read.
     mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 4, None, None)
 
-    assert persisted, "service-mode hook did not persist any assignments (regressed to bail)"
-    assert len(persisted[0]) == 4
+    assert calls == [("docs__demo", ids, True)], (
+        "hook did not call assign_from_chashes with the batch's chashes verbatim"
+    )
 
 
-def test_assign_batch_hook_refetches_on_empty_placeholder_embeddings(monkeypatch):
-    """nexus-reskd: the server-side-embed paths (doc_indexer / streaming PDF)
-    pass ``[[], [], ...]`` placeholder embeddings. The hook must RE-FETCH real
-    vectors via get_embeddings — the old ``if not svc_embeddings`` was False for
-    a non-empty outer list, so zero-dim vectors reached compute_assignments and
-    silently produced no assignments."""
+@pytest.mark.parametrize(
+    "embeddings",
+    [
+        None,
+        [[] for _ in range(4)],  # server-side-embed placeholder shape (nexus-reskd)
+        [np.array([1.0, 2.0, 3.0], dtype=np.float32) for _ in range(4)],  # bge-768 local tier shape (nexus-h8rf6.11)
+        [[0.1, 0.2, 0.3] for _ in range(4)],
+    ],
+)
+def test_assign_batch_hook_ignores_embeddings_entirely(monkeypatch, embeddings):
+    """Whatever shape ``embeddings`` arrives in — absent, placeholder-empty,
+    a list of numpy arrays, or real vectors — the hook must route to
+    assign_from_chashes unchanged. The nexus-reskd empty-placeholder dance
+    and the nexus-h8rf6.11 numpy-truthiness crash both required the hook to
+    INSPECT embeddings; since the route computes server-side, embeddings are
+    now simply never read, so neither failure mode is reachable."""
     import nexus.mcp_infra as mi
     from nexus.db.http_vector_client import HttpVectorClient
 
-    ids = [f"c{i}" for i in range(3)]
-    real = [[float(i), 1.0, 2.0] for i in range(3)]
-    fetched: list[list[str]] = []
-    seen_embeddings: list = []
+    ids = [f"c{i}" for i in range(4)]
 
     class _SvcT3(HttpVectorClient):
         def __init__(self):  # noqa: D107
             pass
 
         def get_embeddings(self, collection, doc_ids):  # noqa: ANN001
-            import numpy as _np
-            fetched.append(list(doc_ids))
-            return _np.asarray(real, dtype=_np.float32)
+            raise AssertionError("must not fetch embeddings under any embeddings= shape")
+
+    calls: list[tuple] = []
 
     class _SvcTax:
-        def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection=False):  # noqa: ANN001
-            seen_embeddings.append(embeddings)
-            return []
-
-        def persist_assignments(self, assignments):  # noqa: ANN001
-            return 0
+        def assign_from_chashes(self, collection, chashes, *, cross_collection=True):  # noqa: ANN001
+            calls.append((collection, list(chashes), cross_collection))
+            return {"assigned": len(chashes), "cross_assigned": 0, "unmatched_chashes": []}
 
     class _DB:
         taxonomy = _SvcTax()
@@ -360,52 +363,47 @@ def test_assign_batch_hook_refetches_on_empty_placeholder_embeddings(monkeypatch
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
 
-    # The empty-placeholder shape ([[], [], []]) MUST trigger the re-fetch.
-    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 3, [[] for _ in ids], None)
+    # Must not raise regardless of embeddings= shape (no more ValueError
+    # 'truth value of an array ... is ambiguous', no more None-vs-empty
+    # placeholder branching).
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 4, embeddings, None)
 
-    assert fetched == [ids], "empty-placeholder embeddings did not trigger get_embeddings re-fetch"
-    assert seen_embeddings, "compute_assignments was never called"
-    # compute_assignments saw the REAL re-fetched 3-dim vectors, not the empties.
-    assert all(len(v) == 3 for v in seen_embeddings[0])
+    assert calls == [("docs__demo", ids, True)]
 
 
-def test_assign_batch_hook_numpy_array_embeddings_does_not_raise_and_assigns(monkeypatch):
-    """nexus-h8rf6.11: local fastembed (bge-768 tier) hands the hook a list of
-    numpy arrays as ``embeddings`` — ``LocalEmbeddingFunction.__call__``
-    returns ``list(self._ef.embed(input))`` verbatim (db/local_ef.py:215),
-    i.e. a Python list whose ELEMENTS are numpy arrays, not lists. In service
-    mode the old ``not any(svc_embeddings)`` guard called ``bool()`` on each
-    element, which raises ``ValueError: truth value of an array with more
-    than one element is ambiguous`` for any >1-dim vector — crashing on
-    EVERY indexed document and (via hook_registry's warning-only catch)
-    silently dropping all topic assignment. Must not raise, and must
-    actually reach persist_assignments (the swallowed-warning class needs a
-    positive assertion, not just absence of an exception)."""
-    import numpy as np
-
+def test_assign_batch_hook_no_fallback_when_route_errors(monkeypatch):
+    """nexus-yu9w5 NO-FALLBACK contract, falsified by construction: the
+    double's compute_assignments/persist_assignments are LIVE traps that
+    would happily succeed if called — if a future edit reintroduced a
+    client-side recompute after assign_from_chashes fails, this test fails
+    (not a vacuous "method absent" double, which would swallow a fallback
+    call as an AttributeError indistinguishable from the intended error
+    path). assign_from_chashes raising must reach the SAME tripwire every
+    other service-path failure uses, and the batch must not otherwise
+    resolve via the old two-call dance."""
     import nexus.mcp_infra as mi
     from nexus.db.http_vector_client import HttpVectorClient
 
-    ids = [f"c{i}" for i in range(4)]
-    # Exactly what LocalEmbeddingFunction.__call__ returns for the fastembed
-    # (bge-768) tier: a list of numpy arrays, each with > 1 element.
-    embs = [np.array([float(i), 1.0, 2.0], dtype=np.float32) for i in range(4)]
+    ids = [f"c{i}" for i in range(3)]
 
     class _SvcT3(HttpVectorClient):
         def __init__(self):  # noqa: D107
             pass
 
-        def get_embeddings(self, collection, doc_ids):  # noqa: ANN001
-            raise AssertionError("must not re-fetch — caller-supplied embeddings were non-empty")
-
-    persisted: list[list[dict]] = []
+    fallback_calls: list[str] = []
 
     class _SvcTax:
+        def assign_from_chashes(self, collection, chashes, *, cross_collection=True):  # noqa: ANN001
+            raise RuntimeError("simulated: engine lacks this route (pre-floor engine)")
+
+        # LIVE traps — if the hook ever falls back to these, they succeed
+        # silently and this test's assertions below catch it.
         def compute_assignments(self, collection, doc_ids, embeddings, *, cross_collection=False):  # noqa: ANN001
-            return [] if cross_collection else [{"doc_id": d, "topic_id": 1} for d in doc_ids]
+            fallback_calls.append("compute_assignments")
+            return [{"doc_id": d, "topic_id": 1} for d in doc_ids]
 
         def persist_assignments(self, assignments):  # noqa: ANN001
-            persisted.append(assignments)
+            fallback_calls.append("persist_assignments")
             return len(assignments)
 
     class _DB:
@@ -415,31 +413,95 @@ def test_assign_batch_hook_numpy_array_embeddings_does_not_raise_and_assigns(mon
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
 
-    # Must not raise ValueError('truth value of an array ... is ambiguous').
-    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 4, embs, None)
+    tripwired: list[dict] = []
 
-    # Positive assertion: the assignment call actually happened and reached
-    # persist_assignments with real per-doc assignments (not a swallowed
-    # no-op).
-    assert persisted, "numpy-array embeddings did not reach persist_assignments (hook bailed silently)"
-    assert len(persisted[0]) == 4
+    def _spy_tripwire(collection, doc_ids, error, *, kind=""):
+        tripwired.append({"collection": collection, "doc_ids": list(doc_ids), "error": error, "kind": kind})
+
+    monkeypatch.setattr(mi, "_record_taxonomy_tripwire", _spy_tripwire)
+
+    # Must not raise — the hook is best-effort and swallows its own failure.
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 3, None, None)
+
+    assert not fallback_calls, (
+        f"hook fell back to client-side compute after the route errored: {fallback_calls}"
+    )
+    assert tripwired, "route error must reach the RDR-172 tripwire, not be silently swallowed"
+    assert tripwired[0]["doc_ids"] == ids
+    assert "RuntimeError" in tripwired[0]["error"]
 
 
-def test_embedding_is_empty_handles_numpy_scalars_lists_and_none():
-    """Unit coverage for the extracted emptiness predicate (nexus-h8rf6.11):
-    never evaluate array truthiness, handle 0-d arrays (where ``len()``
-    raises ``TypeError``), plain lists, and ``None``."""
-    import numpy as np
+def test_assign_batch_hook_reports_unmatched_chashes_via_tripwire(monkeypatch):
+    """The route names chashes it could not find in chunks_<dim> for this
+    collection (never upserted, or upserted under a different collection)
+    rather than silently dropping them — the hook must surface that via the
+    same RDR-172 loudness the tripwire gives every other assignment gap."""
+    import nexus.mcp_infra as mi
+    from nexus.db.http_vector_client import HttpVectorClient
 
-    from nexus.mcp_infra import _embedding_is_empty
+    ids = ["c0", "c1", "c2"]
 
-    assert _embedding_is_empty(None) is True
-    assert _embedding_is_empty([]) is True
-    assert _embedding_is_empty([1.0, 2.0]) is False
-    assert _embedding_is_empty(np.array([])) is True
-    assert _embedding_is_empty(np.array([1.0, 2.0, 3.0])) is False
-    # 0-d array: len() raises TypeError, .size is 1 — must not crash.
-    assert _embedding_is_empty(np.array(1.0)) is False
+    class _SvcT3(HttpVectorClient):
+        def __init__(self):  # noqa: D107
+            pass
+
+    class _SvcTax:
+        def assign_from_chashes(self, collection, chashes, *, cross_collection=True):  # noqa: ANN001
+            return {"assigned": 2, "cross_assigned": 0, "unmatched_chashes": ["c1"]}
+
+    class _DB:
+        taxonomy = _SvcTax()
+
+    monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+
+    tripwired: list[dict] = []
+
+    def _spy_tripwire(collection, doc_ids, error, *, kind=""):
+        tripwired.append({"doc_ids": list(doc_ids), "kind": kind, "error": error})
+
+    monkeypatch.setattr(mi, "_record_taxonomy_tripwire", _spy_tripwire)
+
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 3, None, None)
+
+    assert tripwired, "unmatched_chashes must be surfaced, not silently dropped"
+    assert tripwired[0]["doc_ids"] == ["c1"]
+    assert tripwired[0]["kind"] == "unmatched_chashes"
+
+
+def test_assign_batch_hook_no_tripwire_when_nothing_unmatched(monkeypatch):
+    """The unmatched-chashes tripwire must not fire on the common case (every
+    chash matched) — a clean run stays clean."""
+    import nexus.mcp_infra as mi
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    ids = ["c0", "c1"]
+
+    class _SvcT3(HttpVectorClient):
+        def __init__(self):  # noqa: D107
+            pass
+
+    class _SvcTax:
+        def assign_from_chashes(self, collection, chashes, *, cross_collection=True):  # noqa: ANN001
+            return {"assigned": 2, "cross_assigned": 0, "unmatched_chashes": []}
+
+    class _DB:
+        taxonomy = _SvcTax()
+
+    monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+
+    tripwired: list[dict] = []
+    monkeypatch.setattr(
+        mi, "_record_taxonomy_tripwire",
+        lambda collection, doc_ids, error, *, kind="": tripwired.append(kind),
+    )
+
+    mi.taxonomy_assign_batch_hook(ids, "docs__demo", ["t"] * 2, None, None)
+
+    assert not tripwired
 
 
 # ── split/project service fetch helpers (nexus-9pqoj) ───────────────────────
