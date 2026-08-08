@@ -2,12 +2,19 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
 
 /**
  * RDR-180 LAND-THEN-TRANSFORM promote (nexus-jxizy.10.3): the in-DB,
@@ -410,18 +417,39 @@ public final class StagingPromoteOps {
             // other multi-gate site uses (§5.1 deadlock analysis: sweepers
             // are pure sinks, writers never escalate SHARED to EXCLUSIVE, so
             // no acquisition order can create a cycle regardless of N).
-            var targetCollections = ctx.fetch(
-                "SELECT DISTINCT phys.collection FROM ("
-                + "  SELECT DISTINCT COALESCE(a.new_chash, decode(s.chash, 'hex')) AS chash "
-                + "  FROM staging.document_chunks s "
-                + "  LEFT JOIN nexus.chash_alias a ON a.old_ref = s.chash "
-                + "  WHERE a.new_chash IS NOT NULL OR s.chash ~ '^[0-9a-f]{64}$'"
-                + ") cand "
-                + "JOIN ("
-                + "  SELECT collection, chash FROM nexus.chunks_384 "
-                + "  UNION ALL SELECT collection, chash FROM nexus.chunks_768 "
-                + "  UNION ALL SELECT collection, chash FROM nexus.chunks_1024"
-                + ") phys ON phys.chash = cand.chash");
+            // jOOQ DSL rendering (nexus-t76bp representation-only pass, Hal
+            // directive 2026-08-08): identical semantics to the prior raw
+            // SQL. `staging.document_chunks` has no generated jOOQ class
+            // (the codegen config does not cover the `staging` schema —
+            // it is a landing area, never a serving-path table), so its
+            // table/column are referenced via DSL.table/DSL.name (the
+            // same house pattern CatalogRepository already uses for
+            // caller-supplied relation strings) while every `nexus.*`
+            // table below uses the generated Tables constants. The
+            // `decode(s.chash, 'hex')` format literal binds via DSL.val
+            // rather than string interpolation.
+            var sdc = DSL.table(DSL.name("staging", "document_chunks")).as("s");
+            // sdc carries NO generated column metadata (DSL.table(Name) is an
+            // opaque table reference), so sdc.field("chash", ...) resolves to
+            // null -- the field must be built directly against the "s" alias,
+            // the same house pattern CatalogRepository uses for other plain-
+            // table columns (e.g. F_DOC_META = DSL.field(DSL.name(
+            // "catalog_documents", "metadata"), String.class)).
+            Field<String> sChash = DSL.field(DSL.name("s", "chash"), String.class);
+            Field<byte[]> sChashDecoded = DSL.function("decode", byte[].class, sChash, DSL.val("hex"));
+            var cand = ctx.selectDistinct(DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded).as("chash"))
+                .from(sdc)
+                .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
+                .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(sChash.likeRegex("^[0-9a-f]{64}$")))
+                .asTable("cand");
+            var phys = ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHASH).from(CHUNKS_384)
+                .unionAll(ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHASH).from(CHUNKS_768))
+                .unionAll(ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHASH).from(CHUNKS_1024))
+                .asTable("phys");
+            var targetCollections = ctx.selectDistinct(phys.field("collection", String.class))
+                .from(cand)
+                .join(phys).on(phys.field("chash", byte[].class).eq(cand.field("chash", byte[].class)))
+                .fetch();
             for (String c : targetCollections.stream()
                     .map(r -> r.get(0, String.class))
                     .filter(name -> name != null && !name.isBlank())
