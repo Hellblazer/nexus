@@ -1265,11 +1265,13 @@ class HttpVectorClient:
         cap = per_collection_chunk_cap(collection)
         metas = metadatas or [{}] * len(ids)
         n = len(ids)
-        for start in range(0, n, cap):
+        pages = (n + cap - 1) // cap if n else 0
+        for page_num, start in enumerate(range(0, n, cap), start=1):
             end = min(start + cap, n)
+            page_ids = ids[start:end]
             body: dict[str, Any] = {
                 "collection": collection,
-                "ids": ids[start:end],
+                "ids": page_ids,
                 "documents": documents[start:end],
                 "metadatas": metas[start:end],
             }
@@ -1277,6 +1279,32 @@ class HttpVectorClient:
                 body["embeddings"] = embeddings[start:end]
             if force_re_embed:
                 body["force_re_embed"] = True
+            # nexus-gtl01 (upsert-chunks ACK coverage): log the OUTGOING
+            # request before the POST, at INFO not DEBUG. This is the only
+            # client-side evidence a write was even ATTEMPTED. INFO does NOT
+            # survive the CLI's untouched WARNING default — it is visible
+            # under NEXUS_LOG_LEVEL=INFO (a realistic troubleshooting
+            # setting) and trivially under the scenario journeys' DEBUG env;
+            # daemon-family modes (mcp/watchdog/t3_daemon/storage_service)
+            # default to INFO, so a background write emits ~2 lines per page
+            # into their rotating logs — bounded, and exactly where post-hoc
+            # evidence matters most (see the sibling response log below for
+            # the full rationale). Cheap: two integer counts + a bool, no
+            # chash lists. ``distinct_chash_count`` is separate from ``count``
+            # because every real caller sends ``ids`` == the chash list —
+            # a page containing a DUPLICATE id collapses server-side
+            # (``PgVectorRepository.upsertChunksInternal``'s in-batch dedup,
+            # engine event ``upsert_dedup_collapsed``); a divergence here is
+            # itself a signal worth having on the wire.
+            _log.info(
+                "http_vector_upsert_chunks_request",
+                collection=collection,
+                page=page_num,
+                pages=pages,
+                count=len(page_ids),
+                distinct_chash_count=len(set(page_ids)),
+                force_re_embed=force_re_embed,
+            )
             result = _post(
                 "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
             )
@@ -1285,7 +1313,38 @@ class HttpVectorClient:
             # missing field or wrong count — means something interposed on
             # the WRITE path (stub proxy, truncating hop). A write whose ack
             # cannot be reconciled must not read as success.
+            ack_present = isinstance(result, dict) and "upserted" in result
             acked = result.get("upserted") if isinstance(result, dict) else None
+            # nexus-gtl01: log the verdict unconditionally, at INFO, BEFORE
+            # the raise below fires (or doesn't) — the RuntimeError message
+            # already carries sent/acked, but that text only surfaces if a
+            # caller catches-and-prints it (CliRunner does; a background
+            # aspect worker or MCP tool call may not). This line is
+            # independent evidence either way.
+            #
+            # ``ack_present=False`` (the response carried no ``upserted``
+            # key at all) is itself the finding, not a degraded case of the
+            # mismatch below — the RuntimeError still fires (None != count),
+            # but the field's *presence* answers a question the count alone
+            # can't: whether the engine gave a verdict at all. Note the
+            # documented gap this exposes for the service/ arc: because the
+            # engine "echoes ids.length unconditionally" (comment above),
+            # ``acked == count`` on a HEALTHY response is not independent
+            # confirmation the rows are durably committed — it is a
+            # request-shape echo, not a commit receipt. Distinguishing
+            # "acked but lost" from "landed" needs an engine-side per-upsert
+            # commit log tying (collection, row count) to a transaction —
+            # that does not exist today and is out of this path's fence
+            # (service/); this log line is the client-side half only.
+            _log.info(
+                "http_vector_upsert_chunks_response",
+                collection=collection,
+                page=page_num,
+                sent=len(page_ids),
+                acked=acked,
+                ack_present=ack_present,
+                match=(acked == len(page_ids)),
+            )
             if acked != end - start:
                 raise RuntimeError(
                     f"upsert-chunks ack mismatch for {collection!r}: sent "
@@ -1297,7 +1356,7 @@ class HttpVectorClient:
             "http_vector_upsert_chunks",
             collection=collection,
             count=n,
-            pages=(n + cap - 1) // cap if n else 0,
+            pages=pages,
         )
 
     def upsert_chunks_with_embeddings(

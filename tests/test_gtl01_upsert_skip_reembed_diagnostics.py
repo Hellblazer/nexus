@@ -145,6 +145,61 @@ class TestBranchTakenLogged:
         assert branches[0]["metadata_only_candidate"] == 2
 
 
+class TestUpsertOutcomeLoggedForFullUpsertBranch:
+    """The full-upsert-no-existing branch's outcome, tied to its own
+    ``upsert_skip_reembed_branch`` event via collection + count — the
+    branch the 2026-08-08 recurrence actually took (probe present=0,
+    branch=full_upsert_no_existing, count=1) immediately before the chunk
+    was found absent at verify with no exception raised in between. A
+    normal return from this test rules out 'the write call never
+    completed' as an explanation for that shape."""
+
+    def test_outcome_logged_after_return_ties_to_branch_event(self, monkeypatch):
+        db = _service_db(monkeypatch, existing=set())
+        with _capture_debug_logs() as logs:
+            sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
+
+        assert sent == 3
+        branches = _events(logs, "upsert_skip_reembed_branch")
+        outcomes = _events(logs, "upsert_skip_reembed_upsert_outcome")
+        assert len(branches) == 1
+        assert len(outcomes) == 1
+        assert branches[0]["branch"] == outcomes[0]["branch"] == "full_upsert_no_existing"
+        assert branches[0]["collection"] == outcomes[0]["collection"] == _COLL
+        assert branches[0]["count"] == outcomes[0]["count"] == 3
+        assert outcomes[0]["completed"] is True
+
+    def test_outcome_not_logged_when_the_write_call_raises(self, monkeypatch):
+        """If ``db.upsert_chunks_with_embeddings`` raises (e.g. the
+        HttpVectorClient ack-mismatch house pattern), the outcome event —
+        which asserts the call RETURNED — must not appear; the exception
+        itself is the evidence in that case."""
+        db = _service_db(monkeypatch, existing=set())
+        db.upsert_chunks_with_embeddings.side_effect = RuntimeError("upsert-chunks ack mismatch")
+        with _capture_debug_logs() as logs:
+            try:
+                _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
+                raised = False
+            except RuntimeError:
+                raised = True
+
+        assert raised
+        assert _events(logs, "upsert_skip_reembed_branch") != []
+        assert _events(logs, "upsert_skip_reembed_upsert_outcome") == []
+
+    def test_other_branches_do_not_emit_this_outcome_event(self, monkeypatch):
+        """Scoped to the full_upsert_no_existing branch only (per relay) —
+        the force_full_upsert and split branches keep their existing
+        trace unchanged, with no new outcome event."""
+        db = _service_db(monkeypatch, existing=set())
+        with _capture_debug_logs() as logs:
+            _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS, force=True)
+
+        branches = _events(logs, "upsert_skip_reembed_branch")
+        assert branches[0]["branch"] == "force_full_upsert"
+        assert _events(logs, "upsert_skip_reembed_upsert_outcome") == []
+
+
 class TestUpdateChunksDispositionLogged:
     """The update_chunks "missing"-list disposition, logged at the decision
     point regardless of downstream outcome — previously the routine

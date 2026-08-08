@@ -1023,6 +1023,28 @@ def _upsert_skip_reembed(
             count=len(ids),
         )
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        # nexus-gtl01 (upsert-chunks ACK coverage): tie the outcome to the
+        # branch event above via collection + count. This is the branch the
+        # captured 2026-08-08 recurrence took (probe present=0, branch=
+        # full_upsert_no_existing, count=1) immediately before the chunk was
+        # found absent at verify, with no exception raised in between.
+        # Reaching this line means ``db.upsert_chunks_with_embeddings``
+        # RETURNED without raising — HttpVectorClient's ack-mismatch house
+        # pattern raises inside it on a missing/wrong count, so a normal
+        # return here rules out "the write call never completed" and "an
+        # exception was silently swallowed above this line" as explanations
+        # for a later-absent chunk, narrowing the healthy-shape residue to
+        # the engine-side commit-durability question logged alongside
+        # HttpVectorClient's own request/response events (see
+        # http_vector_upsert_chunks_response's comment for what remains
+        # undecidable from the client side alone).
+        _log.debug(
+            "upsert_skip_reembed_upsert_outcome",
+            collection=collection_name,
+            branch="full_upsert_no_existing",
+            count=len(ids),
+            completed=True,
+        )
         return len(ids)
     new_idx = [i for i, cid in enumerate(ids) if cid not in present]
     old_idx = [i for i, cid in enumerate(ids) if cid in present]

@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -71,9 +72,37 @@ from tests._engine_substrate import ensure_engine
 #: blind byte-count tail — see ``_engine_log_on_failure``.
 _ENGINE_REFUSAL_EVENTS = ("complete_index_run_refused", "write_manifest_many_complete_refused")
 
+#: nexus-gtl01 (upsert-chunks ACK coverage): engine-side vector-write events
+#: that already exist in engine.log today (``PgVectorRepository.java``'s
+#: ``upsertChunksInternal`` — ``event=upsert_dedup_collapsed`` on in-batch
+#: dedup, ``event=upsert_embed_skipped`` on the RDR-181 existence-partition
+#: skip). Neither is new logging — this file cannot touch service/ (path
+#: fence) — this only widens what the ALREADY-EMITTED lines get matched
+#: against, so the healthy-shape residue (probe present=0, branch=
+#: full_upsert_no_existing, no exception, chunk absent at verify) gets
+#: whatever server-side upsert trace already exists for the failing tenant
+#: folded into the failure report instead of silently tailed off by the
+#: last-200-lines fallback.
+_ENGINE_UPSERT_EVENTS = ("event=upsert_dedup_collapsed", "event=upsert_embed_skipped")
+
+#: Extracts the ``missing_chash_sample=[...]`` payload CatalogRepository's
+#: ``complete_index_run_refused`` WARN logs (Java ``List<String>.toString()``
+#: — ``[a, b, c]`` or ``[]``) so the tail below can also grep the rest of
+#: engine.log for any OTHER line mentioning one of those exact chashes.
+_MISSING_CHASH_SAMPLE_RE = re.compile(r"missing_chash_sample=\[([^\]]*)\]")
+
 #: Fallback tail length (lines) when no refusal event is present in the log
 #: — still bounded, never the whole session's engine.log.
 _ENGINE_LOG_TAIL_LINES = 200
+
+#: nexus-gtl01 (critique round 3, item S2/A3): env var NAMES matching any of
+#: these substrings (case-insensitive) render as ``name=<redacted>`` in
+#: ``_invocation_env_snapshot`` — never the value. This repo's operative
+#: invocation env is predominantly ``NX_*`` (widened below from the
+#: original ``NEXUS_*``-only filter), and ``NX_SERVICE_TOKEN`` is live in
+#: these journeys' env (``t2_service_env`` sets it) — it must never reach
+#: pytest failure output or CI logs.
+_REDACT_ENV_NAME_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD", re.IGNORECASE)
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +128,19 @@ def _engine_log_on_failure(request: pytest.FixtureRequest):
     rep = getattr(request.node, "rep_call", None)
     if rep is None or not rep.failed:
         return
+    # nexus-gtl01: capture the invocation environment unconditionally on
+    # failure — the 2026-08-08 recurrence noted the reds clustered in
+    # orchestrator-invoked full runs (3/3) and the greens in
+    # debugger-invoked full runs (3/3), an unexplained delta this makes
+    # checkable instead of folklore. One bounded line: every NEXUS_*/NX_*
+    # env var (plus CLAUDE_CODE_SESSION_ID) — the invocation-style delta
+    # this snapshot chases lives predominantly in NX_* space (NX_AGENT,
+    # NX_SESSION_ID, NX_SERVICE_HOST/PORT), not the narrower NEXUS_* prefix
+    # — with TOKEN/KEY/SECRET/PASSWORD-named values redacted, the xdist
+    # worker id, and the host load average at failure time.
+    request.node.add_report_section(
+        "teardown", "invocation environment", _invocation_env_snapshot(),
+    )
     try:
         state = ensure_engine()
     except Exception as exc:  # noqa: BLE001 — best-effort diagnostic; must never mask the real failure
@@ -116,14 +158,103 @@ def _engine_log_on_failure(request: pytest.FixtureRequest):
             "teardown", "engine.log (unavailable)", f"could not read {log_path}: {exc}",
         )
         return
-    refusal_lines = [ln for ln in lines if any(ev in ln for ev in _ENGINE_REFUSAL_EVENTS)]
-    if refusal_lines:
-        content = "".join(refusal_lines)
-        label = f"engine.log refusal-event lines ({log_path})"
+    refusal_lines, upsert_lines = _select_failure_evidence_lines(lines)
+    if refusal_lines or upsert_lines:
+        content = "".join(refusal_lines + upsert_lines)
+        label = f"engine.log refusal + upsert-event lines ({log_path})"
     else:
         content = "".join(lines[-_ENGINE_LOG_TAIL_LINES:])
         label = f"engine.log tail, last {_ENGINE_LOG_TAIL_LINES} lines ({log_path})"
     request.node.add_report_section("teardown", label, content)
+
+
+def _select_failure_evidence_lines(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Split a full ``engine.log`` into ``(refusal_lines, upsert_lines)`` —
+    the widened selection nexus-gtl01 adds on top of the bare refusal WARN:
+    (a) any line naming one of the refusal's own ``missing_chash_sample``
+    values (an engine-side event that happens to mention that exact chash,
+    e.g. an exception around it), and (b) any already-emitted engine-side
+    upsert/vector-write event line (``_ENGINE_UPSERT_EVENTS`` — existing
+    ``PgVectorRepository`` logging, not new; this file cannot touch
+    service/), so the write-side trace for the failing tenant/collection
+    rides along with the refusal instead of being at the mercy of the
+    last-200-lines fallback.
+
+    ``upsert_lines`` is capped to the LAST ``_ENGINE_LOG_TAIL_LINES``
+    matches (critique round 3, item A2): engine.log is session-scoped, so a
+    full-run log can carry hundreds-to-thousands of
+    ``upsert_dedup_collapsed``/``upsert_embed_skipped`` lines from UNRELATED
+    tests by the time one journey fails — an uncapped selector would fold
+    all of them into the failure report. Capping to the most recent matches
+    keeps the report bounded and biases toward the lines temporally closest
+    to the failure. ``refusal_lines`` is left uncapped: it is refusal-event-
+    gated (only this test file's own journeys emit it) rather than a
+    suite-wide event, so it stays small in practice.
+
+    Pure and pytest-node-free so it's unit-testable directly — see
+    ``tests/test_gtl01_journey_failure_evidence.py``.
+    """
+    refusal_lines = [ln for ln in lines if any(ev in ln for ev in _ENGINE_REFUSAL_EVENTS)]
+    missing_chashes = _missing_chashes_from(refusal_lines)
+    upsert_lines = [
+        ln for ln in lines
+        if ln not in refusal_lines
+        and (
+            any(ev in ln for ev in _ENGINE_UPSERT_EVENTS)
+            or any(chash and chash in ln for chash in missing_chashes)
+        )
+    ]
+    return refusal_lines, upsert_lines[-_ENGINE_LOG_TAIL_LINES:]
+
+
+def _missing_chashes_from(refusal_lines: list[str]) -> list[str]:
+    """Pull the ``missing_chash_sample=[...]`` values out of the refusal
+    WARN lines (see ``_MISSING_CHASH_SAMPLE_RE``). Returns an empty list
+    when no refusal line matched or the sample was empty (``missing=0``
+    refusals — the zero-content shape — legitimately carry ``[]``)."""
+    out: list[str] = []
+    for ln in refusal_lines:
+        m = _MISSING_CHASH_SAMPLE_RE.search(ln)
+        if not m:
+            continue
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        out.extend(part.strip() for part in raw.split(",") if part.strip())
+    return out
+
+
+def _invocation_env_snapshot() -> str:
+    """One bounded diagnostic line: every ``NEXUS_*``/``NX_*`` env var plus
+    ``CLAUDE_CODE_SESSION_ID`` (name=value, sorted; names matching
+    ``_REDACT_ENV_NAME_RE`` render ``name=<redacted>`` — never the value),
+    the xdist worker id (``PYTEST_XDIST_WORKER``, or ``master`` when not
+    running under xdist), and the host load average — captured at the
+    moment of a scenario-journey failure so an environmental delta between
+    invocation styles is checkable instead of anecdotal.
+
+    Names are always listed (even redacted ones) so a redaction itself is
+    visible in the report; only the value is withheld.
+    """
+    def _rendered(name: str, value: str) -> str:
+        if _REDACT_ENV_NAME_RE.search(name):
+            return f"{name}=<redacted>"
+        return f"{name}={value}"
+
+    relevant = {
+        k: v for k, v in os.environ.items()
+        if k.startswith(("NEXUS_", "NX_")) or k == "CLAUDE_CODE_SESSION_ID"
+    }
+    env_vars = ",".join(_rendered(k, v) for k, v in sorted(relevant.items()))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    try:
+        load1, load5, load15 = os.getloadavg()
+        load = f"{load1:.2f},{load5:.2f},{load15:.2f}"
+    except OSError:  # pragma: no cover — getloadavg is POSIX-only; belt-and-suspenders
+        load = "unavailable"
+    return (
+        f"xdist_worker={worker} load_avg(1,5,15)={load} invocation_env=[{env_vars}]"
+    )
 
 
 def _git_init(repo: Path) -> None:
