@@ -206,6 +206,47 @@ public final class StagingPromoteOps {
                 + "ON CONFLICT (tenant_id, name) DO NOTHING",
                 collection, contentType);
 
+            // nexus-11gh6 round 3 CRITICAL (T2 nexus/critique-11gh6-gate-
+            // impl-2026-08-08 [21798] REWORK DELTA): this content INSERT
+            // lands rows into chunks_<dim> for `collection` -- a SHARED
+            // chash this INSERT lands fresh can ALREADY be referenced by a
+            // live, unrelated document D in the SAME collection (RDR-180
+            // migrates content that "very often already exists live
+            // elsewhere" -- shared boilerplate, license headers). If D's
+            // own ordinary write concurrently drops that reference and
+            // triggers its sweep before this transaction commits, the
+            // sweep's guard (evaluated tenant-wide, no awareness of this
+            // migration) can see NOTHING referencing the chash yet -- D
+            // just dropped it, finalizeTenant hasn't manifested it -- and
+            // delete the very row this INSERT is landing, silently, before
+            // finalizeTenant's canonExists re-check ever runs (it would
+            // then correctly, but uselessly, report the pointer as
+            // manifest_unresolved: DATA LOSS for the migration, not merely
+            // a dangling reference). Gate SHARED for `collection` BEFORE
+            // this INSERT so a concurrent sweep's EXCLUSIVE acquire cannot
+            // be granted until this transaction commits -- unlike
+            // finalizeTenant this is a single, direct-parameter collection,
+            // no multi-collection resolution needed.
+            //
+            // RESIDUAL, honestly named (NOT closed by this gate, matching
+            // the discipline kl2z6/document_restore already established):
+            // this only narrows the window to "concurrent with THIS
+            // transaction". The content this INSERT lands has NO manifest
+            // reference of its own until finalizeTenant runs, which can be
+            // arbitrarily later ("runs after EVERY promote wave" -- no
+            // bound on the gap). Once this transaction COMMITS and releases
+            // the gate, the freshly-landed-but-still-unmanifested chash is
+            // AGAIN a legitimate sweep target for any unrelated doc that
+            // happens to share it, exactly like the client-side upload-
+            // window axis (nexus-kl2z6) one level up: the engine cannot
+            // gate an intent (finalizeTenant's eventual manifest write)
+            // that has not arrived yet. Closing THAT gap would mean
+            // merging promote and finalize into one transaction or holding
+            // the gate across both, which is a structural change to
+            // RDR-180's "one txn per collection, tenant-wide finalize
+            // later" design -- out of scope for a targeted gate fix.
+            CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+
             // (5) content INSERT for the collection's dim table. DISTINCT ON
             // digest with the M1 deterministic tiebreak; DO NOTHING against
             // live rows (idempotent resume; populated-target legal).
@@ -332,6 +373,64 @@ public final class StagingPromoteOps {
                 "EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(s.chash, 'hex')) "
                 + "OR EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(s.chash, 'hex')) "
                 + "OR EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(s.chash, 'hex'))";
+
+            // nexus-11gh6 (post-review Critical, T2 nexus/critique-11gh6-
+            // gate-impl-2026-08-08 [21798]): the manifest INSERT below
+            // creates LIVE catalog_document_chunks references -- the exact
+            // hazard class CatalogRepository.acquireSweepGateShared exists
+            // to serialize against a concurrent sweep=true writer's guard.
+            // Unlike every other gated site this one INSERT statement spans
+            // EVERY collection with staged docs in this tenant at once (and
+            // never stamps a per-row `collection` column at all -- see the
+            // INSERT's column list below), so there is no single `coll` to
+            // gate.
+            //
+            // nexus-11gh6 round 3 SIGNIFICANT fix (T2 nexus/critique-11gh6-
+            // gate-impl-2026-08-08 [21798] REWORK DELTA): round 2 resolved
+            // target collections from the referencing DOCUMENT's own
+            // `physical_collection`. That can DIVERGE from where the
+            // candidate chash's content actually lives: chunks_<dim>'s PK
+            // is (tenant_id, collection, chash) -- content is duplicated
+            // PER COLLECTION, not globally deduped -- and `canonExists`
+            // below is deliberately collection-agnostic (checks all three
+            // dim tables with NO collection filter, mirroring the sweep's
+            // own shared-chash-union guard philosophy). Gating
+            // `physical_collection` alone could therefore gate the WRONG
+            // collection relative to what `canonExists` actually leans on,
+            // leaving the real content's collection unprotected. Fixed by
+            // resolving target collections from the SAME source
+            // `canonExists` reads from -- for every chash this INSERT's own
+            // WHERE clause could select (alias-resolved OR direct 64-hex),
+            // find every `(chunks_384|768|1024).collection` row that
+            // actually carries it. By construction this cannot diverge from
+            // `canonExists`: whatever collection satisfies `canonExists` for
+            // a candidate row is a `(collection, chash)` pair in one of the
+            // three tables, hence a row this query also finds and gates.
+            // Sorted for the same correctness-neutral future-proofing every
+            // other multi-gate site uses (§5.1 deadlock analysis: sweepers
+            // are pure sinks, writers never escalate SHARED to EXCLUSIVE, so
+            // no acquisition order can create a cycle regardless of N).
+            var targetCollections = ctx.fetch(
+                "SELECT DISTINCT phys.collection FROM ("
+                + "  SELECT DISTINCT COALESCE(a.new_chash, decode(s.chash, 'hex')) AS chash "
+                + "  FROM staging.document_chunks s "
+                + "  LEFT JOIN nexus.chash_alias a ON a.old_ref = s.chash "
+                + "  WHERE a.new_chash IS NOT NULL OR s.chash ~ '^[0-9a-f]{64}$'"
+                + ") cand "
+                + "JOIN ("
+                + "  SELECT collection, chash FROM nexus.chunks_384 "
+                + "  UNION ALL SELECT collection, chash FROM nexus.chunks_768 "
+                + "  UNION ALL SELECT collection, chash FROM nexus.chunks_1024"
+                + ") phys ON phys.chash = cand.chash");
+            for (String c : targetCollections.stream()
+                    .map(r -> r.get(0, String.class))
+                    .filter(name -> name != null && !name.isBlank())
+                    .sorted()
+                    .distinct()
+                    .toList()) {
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
+            }
+
             counts.put("manifest_promoted", ctx.execute(
                 "INSERT INTO nexus.catalog_document_chunks "
                 + "  (tenant_id, doc_id, position, chash, chunk_index, line_start, line_end, char_start, char_end) "

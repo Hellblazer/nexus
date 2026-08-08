@@ -21,10 +21,17 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * nexus-eslkl / T2 nexus/design-eslkl-hook-lock-narrowing §8.1 (engine half) —
@@ -404,124 +411,181 @@ class CatalogManifestSweepRepositoryTest {
     }
 
     @Test @Order(16)
-    void sweepGuardSql_crossTransactionWriteSkew_isTheDocumentedNexus11gh6Gap() throws Exception {
-        // nexus-11gh6 (substantive-critic + code-review-expert, round 2,
-        // independent convergence): DELIBERATELY NOT fixed (accept-and-
-        // downgrade decision, recorded on the bead and in nexus-wxjr6). This
-        // test PROVES the residual gap exists and characterizes it exactly,
-        // rather than either (a) silently claiming full closure, or (b)
-        // asserting something that "passes regardless of the race" the way
-        // the CountDownLatch-based version of this test did (code-review-
-        // expert Important-1: thread-start synchronization does not force
-        // the actual interleaving point, so that test could never reliably
-        // demonstrate anything either way).
+    void sweepGate_crossTransactionWriteSkew_isClosed_nexus11gh6() throws Exception {
+        // nexus-11gh6 rev 2 §7a: this test PREVIOUSLY documented an open
+        // write-skew gap (two raw JDBC connections under manual transaction
+        // control reproducing "A's DELETE decides before B's INSERT commits,
+        // A commits after, B ends up dangling"). The per-(tenant, collection)
+        // advisory gate (acquireSweepGateShared / acquireSweepGateExclusive)
+        // now makes that exact interleaving impossible: either the sweeper's
+        // EXCLUSIVE acquire is refused while a writer holds SHARED (sub-case
+        // 1), or the writer commits first and the sweeper's guard, evaluated
+        // fresh under the gate, correctly sees it (sub-case 2). Both leave
+        // the chunk intact — the opposite of the anomaly this test used to
+        // pin. DETERMINISTIC by construction (no threads, no sleep/latch
+        // luck): manual transaction control dictates the exact ordering in
+        // both sub-cases, on every run, every machine.
         //
-        // DETERMINISTIC by construction — no threads, no timing, no
-        // sleep/latch luck: two raw JDBC connections under explicit manual
-        // transaction control let this test dictate the exact COMMIT order,
-        // which is what PostgreSQL's READ COMMITTED snapshot-per-statement
-        // semantics actually key on. This reproduces the gap on every run,
-        // every machine, unconditionally — the opposite of a flaky test.
-        //
-        // Scenario: writer A's sweep DELETE (with its NOT EXISTS guard) is
-        // issued and computes its result while still UNCOMMITTED. Writer B
-        // then independently INSERTs and COMMITS a brand-new manifest
-        // reference to the SAME chash. Writer A commits afterward. A's
-        // DELETE decision was correct as of ITS OWN statement's snapshot —
-        // nothing violates any single transaction's ACID guarantees — but
-        // the FINAL committed state is inconsistent: B's manifest now
-        // references a chash whose T3 row A already removed. This is the
-        // textbook write-skew anomaly SERIALIZABLE isolation exists to
-        // prevent; READ COMMITTED (PostgreSQL's default, and what this
-        // engine uses throughout) does not.
-        String col = "code__swp8__minilm-l6-v2-384__v1";
-        String shared = ch("swp8-writeskew");
-        seedChunk384(TENANT_A, col, shared);
-        registerDoc(TENANT_A, "swp.8a", col);
-        registerDoc(TENANT_A, "swp.8b", col);
-        // A references `shared`, then drops it (sweep=false — this just
-        // establishes "nothing currently manifests `shared`", the
-        // precondition a real sweep's guard would also observe).
-        repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.8a", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))));
-        repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.8a", "rows", List.<Map<String, Object>>of())));
-        assertThat(chunk384Exists(TENANT_A, col, shared))
-            .as("precondition: shared still physically present, nothing manifests it yet").isTrue();
+        // Note: this drives the gate SQL directly on two hand-held JDBC
+        // connections (mirroring the original test's structure) rather than
+        // through the production writeManifestMany path — Order(20)-(25)
+        // below cover the SAME closure behaviourally, through the real
+        // public entry points.
 
-        // The EXACT guard shape sweepChunks384 uses (both NOT EXISTS
-        // clauses) — driven manually so this test controls commit order.
-        String deleteSql =
-            "DELETE FROM nexus.chunks_384 c "
-            + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex') "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m "
-            + "  JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-            + "  WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash AND d.deleted_at IS NULL) "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d2 "
-            + "  WHERE d2.tenant_id = ? AND d2.physical_collection = ? AND d2.deleted_at IS NULL "
-            + "  AND (d2.file_path IS NULL OR d2.file_path = '') "
-            + "  AND (d2.metadata ->> 'doc_id') = ?)";
+        // ── Sub-case 1: writer B takes the gate SHARED first and holds it;
+        //    sweeper A's EXCLUSIVE acquire is refused (55P03) and never even
+        //    reaches the DELETE. ──
+        String col1 = "code__swp8a__minilm-l6-v2-384__v1";
+        String shared1 = ch("swp8a-writeskew");
+        seedChunk384(TENANT_A, col1, shared1);
+        registerDoc(TENANT_A, "swp.8a-a", col1);
+        registerDoc(TENANT_A, "swp.8a-b", col1);
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.8a-a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared1, "chunk_index", 0)))));
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.8a-a", "rows", List.<Map<String, Object>>of())));
+        assertThat(chunk384Exists(TENANT_A, col1, shared1))
+            .as("precondition: shared still physically present, nothing manifests it yet").isTrue();
 
         try (Connection connA = dsConnection(); Connection connB = dsConnection()) {
             connA.setAutoCommit(false);
             connB.setAutoCommit(false);
 
-            // Writer A: compute + apply the delete decision, do NOT commit yet.
-            try (var stA = connA.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                stA.execute();
-            }
-            int deletedByA;
-            try (var psA = connA.prepareStatement(deleteSql)) {
-                psA.setString(1, TENANT_A);
-                psA.setString(2, col);
-                psA.setString(3, shared);
-                psA.setString(4, TENANT_A);
-                psA.setString(5, col);
-                psA.setString(6, shared);
-                deletedByA = psA.executeUpdate();
-            }
-            assertThat(deletedByA)
-                .as("A's guard is satisfied at ITS statement's snapshot: nothing (yet) "
-                    + "references `shared`, so A decides to delete it").isEqualTo(1);
-
-            // Writer B: publish a FRESH manifest reference to the SAME chash,
-            // in a fully separate, independently-committed transaction.
+            // Writer B: take the gate SHARED exactly as writeManifestRows
+            // now does, and hold it open (uncommitted).
             try (var stB = connB.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
                 stB.execute();
             }
+            acquireGateShared(connB, TENANT_A, col1);
+
+            // Sweeper A: short lock_timeout, attempt the EXCLUSIVE gate —
+            // must be refused (55P03) while B holds SHARED, BEFORE any
+            // DELETE statement runs at all.
+            try (var stA = connA.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                stA.execute();
+            }
+            assertThatThrownBy(() -> acquireGateExclusive(connA, TENANT_A, col1, 1000))
+                .as("A's exclusive acquire must be refused, not silently granted, while B holds SHARED")
+                .isInstanceOf(SQLException.class)
+                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("55P03"));
+            connA.rollback();
+
+            // B now completes its manifest insert normally and commits.
             try (var psB = connB.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, chunk_index, collection) "
                     + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?)")) {
                 psB.setString(1, TENANT_A);
-                psB.setString(2, "swp.8b");
-                psB.setString(3, shared);
-                psB.setString(4, col);
+                psB.setString(2, "swp.8a-b");
+                psB.setString(3, shared1);
+                psB.setString(4, col1);
                 psB.executeUpdate();
             }
             connB.commit();
+        }
 
-            // A commits AFTER B — A's already-computed DELETE stands.
+        assertThat(repo.getManifest(TENANT_A, "swp.8a-b").stream()
+                .anyMatch(r -> shared1.equals(r.get("chash"))))
+            .as("B's manifest reference committed and is live").isTrue();
+        assertThat(chunk384Exists(TENANT_A, col1, shared1))
+            .as("nexus-11gh6 CLOSED: A's exclusive acquire was refused while B held the gate — "
+                + "the chunk was never even a delete candidate")
+            .isTrue();
+
+        // ── Sub-case 2: writer B commits FIRST; sweeper A's guard, evaluated
+        //    fresh under the gate, correctly sees B's committed reference. ──
+        String col2 = "code__swp8b__minilm-l6-v2-384__v1";
+        String shared2 = ch("swp8b-writeskew");
+        seedChunk384(TENANT_A, col2, shared2);
+        registerDoc(TENANT_A, "swp.8b-a", col2);
+        registerDoc(TENANT_A, "swp.8b-b", col2);
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.8b-a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared2, "chunk_index", 0)))));
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.8b-a", "rows", List.<Map<String, Object>>of())));
+
+        try (Connection connA = dsConnection(); Connection connB = dsConnection()) {
+            connA.setAutoCommit(false);
+            connB.setAutoCommit(false);
+
+            try (var stB = connB.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                stB.execute();
+            }
+            acquireGateShared(connB, TENANT_A, col2);
+            try (var psB = connB.prepareStatement(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                    + "(tenant_id, doc_id, position, chash, chunk_index, collection) "
+                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?)")) {
+                psB.setString(1, TENANT_A);
+                psB.setString(2, "swp.8b-b");
+                psB.setString(3, shared2);
+                psB.setString(4, col2);
+                psB.executeUpdate();
+            }
+            connB.commit();   // B fully committed before A even starts.
+
+            try (var stA = connA.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                stA.execute();
+            }
+            acquireGateExclusive(connA, TENANT_A, col2, 2000);
+            int deletedByA;
+            try (var psA = connA.prepareStatement(SWEEP_GUARD_DELETE_SQL)) {
+                psA.setString(1, TENANT_A);
+                psA.setString(2, col2);
+                psA.setString(3, shared2);
+                psA.setString(4, TENANT_A);
+                psA.setString(5, col2);
+                psA.setString(6, shared2);
+                deletedByA = psA.executeUpdate();
+            }
+            assertThat(deletedByA)
+                .as("A's guard, evaluated under the gate, sees B's now-committed reference")
+                .isEqualTo(0);
             connA.commit();
         }
 
-        // The documented nexus-11gh6 outcome: B's manifest reference exists
-        // (repo-level read, fresh connection, sees both connA's and connB's
-        // committed work) but the T3 row it points at is gone. THIS is the
-        // inconsistency the accept-and-downgrade decision accepts as a
-        // residual risk, mitigated in production ONLY by the client's own
-        // sweep remaining live (nexus-wxjr6) until this is closed for real
-        // (SERIALIZABLE + retry, or an advisory lock keyed on chash with a
-        // deadlock-safe acquisition order across a batch).
-        boolean bReferencesShared = repo.getManifest(TENANT_A, "swp.8b").stream()
-            .anyMatch(r -> shared.equals(r.get("chash")));
-        assertThat(bReferencesShared)
-            .as("B's manifest reference committed and is live").isTrue();
-        assertThat(chunk384Exists(TENANT_A, col, shared))
-            .as("nexus-11gh6: A's earlier, now-committed DELETE removed the T3 row B's "
-                + "manifest now points at -- the write-skew this test documents, not fixes")
-            .isFalse();
+        assertThat(chunk384Exists(TENANT_A, col2, shared2))
+            .as("nexus-11gh6 CLOSED: the guard correctly retained the chunk").isTrue();
+    }
+
+    /** The EXACT guard shape {@code sweepChunks384} uses (both {@code NOT
+     *  EXISTS} clauses) — driven manually so hand-written tests can control
+     *  commit order around it. */
+    private static final String SWEEP_GUARD_DELETE_SQL =
+        "DELETE FROM nexus.chunks_384 c "
+        + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex') "
+        + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m "
+        + "  JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
+        + "  WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash AND d.deleted_at IS NULL) "
+        + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d2 "
+        + "  WHERE d2.tenant_id = ? AND d2.physical_collection = ? AND d2.deleted_at IS NULL "
+        + "  AND (d2.file_path IS NULL OR d2.file_path = '') "
+        + "  AND (d2.metadata ->> 'doc_id') = ?)";
+
+    /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape on a raw
+     *  connection, for tests that need manual transaction control around it. */
+    private static void acquireGateShared(Connection conn, String tenant, String collection) throws SQLException {
+        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock_shared(hashtext(?))")) {
+            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
+            ps.execute();
+        }
+    }
+
+    /** Hand-drives {@code acquireSweepGateExclusive}'s exact SQL shape
+     *  (lock_timeout + statement_timeout, then the exclusive acquire) on a
+     *  raw connection. */
+    private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
+            throws SQLException {
+        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
+            ps.setString(1, String.valueOf(lockTimeoutMs));
+            ps.execute();
+        }
+        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
+            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
+            ps.execute();
+        }
     }
 
     @Test @Order(17)
@@ -587,6 +651,159 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(repo.getManifest(TENANT_A, "swp.9"))
             .singleElement()
             .satisfies(r -> assertThat(r.get("chash")).isEqualTo(ch("swp9-y")));
+    }
+
+    // ── nexus-11gh6 rev 2 §7b: sweeper blocked by an externally-held SHARED gate ──
+
+    @Test @Order(20)
+    void writeManifestMany_sweepTrue_sweeperBlockedByExternalSharedGate_failsOpen_thenSweepsOnRetry() throws Exception {
+        String col = "code__swp10__minilm-l6-v2-384__v1";
+        String x = ch("swp10-x");
+        seedChunk384(TENANT_A, col, x);
+        registerDoc(TENANT_A, "swp.10", col);
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                st.execute();
+            }
+            acquireGateShared(external, TENANT_A, col);
+
+            // Replace with a manifest that drops x, sweep=true. The sweeper's
+            // OWN transaction (fired AFTER the manifest transaction below
+            // commits — nexus-11gh6 rev 2 §2.3) must fail to acquire the
+            // EXCLUSIVE gate while `external` holds SHARED, and fail OPEN:
+            // the manifest write itself must be entirely unaffected.
+            var result = repo.writeManifestMany(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of(
+                    Map.<String, Object>of("position", 0, "chash", ch("swp10-y"), "chunk_index", 0)))),
+                null, true);
+
+            assertThat(result.get("docs"))
+                .as("the manifest write must commit regardless of sweep gate contention").isEqualTo(1);
+            assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
+            assertThat(result.get("sweep_skipped"))
+                .as("the sweep could not acquire its gate in time -- fail-open skip, not a failure")
+                .isEqualTo(1);
+            assertThat(result.get("swept")).isEqualTo(0);
+            assertThat(chunk384Exists(TENANT_A, col, x))
+                .as("chunk survives while the gate is externally held").isTrue();
+
+            external.rollback();
+        }
+
+        // Retry with the gate free: x itself was already dropped from
+        // swp.10's manifest by the write above (only ITS sweep attempt was
+        // skipped -- the manifest write succeeded), so a fresh drop is
+        // needed to exercise "the gate is free, the sweep now completes"
+        // rather than re-deciding a doc/chash pair that no longer relates
+        // (x is no longer in swp.10's manifest to drop again). Seed a NEW
+        // chash z, reference it, then drop it with the gate uncontended.
+        String z = ch("swp10-z");
+        seedChunk384(TENANT_A, col, z);
+        repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", z, "chunk_index", 0)))));
+        var result2 = repo.writeManifestMany(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of())),
+            null, true);
+        assertThat(result2.get("sweep_skipped"))
+            .as("gate is free now -- no skip this time").isEqualTo(0);
+        assertThat(result2.get("swept")).as("gate now free -- the sweep completes").isEqualTo(1);
+        assertThat(chunk384Exists(TENANT_A, col, z)).isFalse();
+    }
+
+    // ── nexus-11gh6 rev 2 §7c: every public writer entry point BLOCKS on an
+    //    externally-held EXCLUSIVE gate, and proceeds once it releases. ──
+
+    /**
+     * Common shape: hold the sweep gate EXCLUSIVE on a raw connection, submit
+     * {@code writerCall} to a background thread, assert it does NOT complete
+     * within a short window (proving it genuinely BLOCKS rather than racing
+     * past), release the gate, then assert it completes promptly. Non-vacuous
+     * in the direction that matters: a missing/broken gate call makes {@code
+     * writerCall} return immediately and the first assertion fails.
+     */
+    private void assertWriterBlocksOnExternalExclusiveGate(String collection, Runnable writerCall) throws Exception {
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                st.execute();
+            }
+            // Generous lock_timeout on the EXTERNAL holder's own acquire —
+            // it is uncontended, so this returns immediately; it only bounds
+            // this helper's own acquisition, never the writer's (writers take
+            // the gate SHARED with no timeout at all, by design).
+            acquireGateExclusive(external, TENANT_A, collection, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<?> future = executor.submit(writerCall);
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("writer must BLOCK while the gate is held EXCLUSIVE externally")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                future.get(15, TimeUnit.SECONDS);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test @Order(21)
+    void writeManifest_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String col = "code__swp11a__minilm-l6-v2-384__v1";
+        registerDoc(TENANT_A, "swp.11a", col);
+        assertWriterBlocksOnExternalExclusiveGate(col, () ->
+            repo.writeManifest(TENANT_A, "swp.11a", List.of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp11a-x"), "chunk_index", 0))));
+        assertThat(repo.getManifest(TENANT_A, "swp.11a")).hasSize(1);
+    }
+
+    @Test @Order(22)
+    void writeManifestMany_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String col = "code__swp11b__minilm-l6-v2-384__v1";
+        registerDoc(TENANT_A, "swp.11b", col);
+        assertWriterBlocksOnExternalExclusiveGate(col, () ->
+            repo.writeManifestMany(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.11b", "rows", List.<Map<String, Object>>of(
+                    Map.<String, Object>of("position", 0, "chash", ch("swp11b-x"), "chunk_index", 0))))));
+        assertThat(repo.getManifest(TENANT_A, "swp.11b")).hasSize(1);
+    }
+
+    @Test @Order(23)
+    void appendManifestChunks_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String col = "code__swp11c__minilm-l6-v2-384__v1";
+        registerDoc(TENANT_A, "swp.11c", col);
+        assertWriterBlocksOnExternalExclusiveGate(col, () ->
+            repo.appendManifestChunks(TENANT_A, "swp.11c", List.of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp11c-x"), "chunk_index", 0))));
+        assertThat(repo.getManifest(TENANT_A, "swp.11c")).hasSize(1);
+    }
+
+    @Test @Order(24)
+    void importChunk_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String col = "code__swp11d__minilm-l6-v2-384__v1";
+        registerDoc(TENANT_A, "swp.11d", col);
+        assertWriterBlocksOnExternalExclusiveGate(col, () ->
+            repo.importChunk(TENANT_A, "swp.11d",
+                Map.<String, Object>of("position", 0, "chash", ch("swp11d-x"), "chunk_index", 0)));
+        assertThat(repo.getManifest(TENANT_A, "swp.11d")).hasSize(1);
+    }
+
+    @Test @Order(25)
+    void importChunksBatch_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String col = "code__swp11e__minilm-l6-v2-384__v1";
+        registerDoc(TENANT_A, "swp.11e", col);
+        assertWriterBlocksOnExternalExclusiveGate(col, () ->
+            repo.importChunksBatch(TENANT_A, "swp.11e", List.of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp11e-x"), "chunk_index", 0))));
+        assertThat(repo.getManifest(TENANT_A, "swp.11e")).hasSize(1);
     }
 
     /** Raw connection to the service role's own database (test-controlled transaction). */

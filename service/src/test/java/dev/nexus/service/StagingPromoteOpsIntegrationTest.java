@@ -22,9 +22,15 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -748,5 +754,276 @@ class StagingPromoteOpsIntegrationTest {
                     "DELETE FROM nexus.chunks_768 WHERE collection = 'code__kmd5b2'");
             }
         }
+    }
+
+    // ── nexus-11gh6 post-review (T2 nexus/critique-11gh6-gate-impl-2026-08-08
+    //    [21798] Critical finding): finalizeTenant's manifest INSERT is a
+    //    catalog_document_chunks writer just like the 5 sites already gated
+    //    in CatalogRepository — it must take acquireSweepGateShared for
+    //    every DISTINCT target collection it resolves BEFORE the INSERT. ──
+
+    private static final String COLL_GATE = "knowledge__kgate__bge-base-en-v15-768__v1";
+
+    /** Raw connection to the service role's own pool (test-controlled transaction). */
+    private Connection dsConnection() throws SQLException {
+        return svcDs.getConnection();
+    }
+
+    /** Hand-drives {@code CatalogRepository.acquireSweepGateExclusive}'s exact
+     *  SQL shape on a raw connection, for tests needing manual transaction control. */
+    private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
+            throws SQLException {
+        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
+            ps.setString(1, String.valueOf(lockTimeoutMs));
+            ps.execute();
+        }
+        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
+            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
+            ps.execute();
+        }
+    }
+
+    @Test
+    @Order(20)
+    void finalizeTenant_manifestInsert_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String canonicalText = "gate-test unique content " + System.nanoTime();
+        String canonical = digestHex(canonicalText);
+        landChunk(COLL_GATE, 768, canonical, canonicalText, vec(768));
+        // Content lands live BEFORE finalize -- same sequencing every other
+        // test in this file uses (promote, then finalize).
+        Map<String, Object> promoted = ops.promoteCollection(T1, COLL_GATE, 768);
+        assertThat(promoted.get("promoted")).isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, 'gate-doc-1', 'gate doc', ?) ON CONFLICT DO NOTHING",
+                T1, COLL_GATE);
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, 'gate-doc-1', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, canonical);
+            return null;
+        });
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
+                st.execute();
+            }
+            // Generous lock_timeout on the EXTERNAL holder's own acquire --
+            // it is uncontended, so this returns immediately; it never bounds
+            // finalizeTenant's own wait (finalizeTenant takes the gate SHARED
+            // with no timeout at all, by design -- see acquireSweepGateShared).
+            acquireGateExclusive(external, T1, COLL_GATE, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Map<String, Object>> future = executor.submit(() -> ops.finalizeTenant(T1, false));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("finalizeTenant's manifest INSERT must BLOCK while COLL_GATE's gate "
+                        + "is held EXCLUSIVE externally -- a missing/broken gate call would let "
+                        + "this complete immediately and this assertion would fail")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                Map<String, Object> fin = future.get(15, TimeUnit.SECONDS);
+                assertThat(fin.get("manifest_promoted"))
+                    .as("gate released -- the manifest promote completes").isEqualTo(1);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = 'gate-doc-1' AND encode(chash,'hex') = '" + canonical + "'"))
+            .as("the manifest row landed once the gate was released").isEqualTo(1);
+    }
+
+    // ── nexus-11gh6 round 3 (T2 nexus/critique-11gh6-gate-impl-2026-08-08
+    //    [21798] REWORK DELTA Critical finding): promoteCollection's OWN
+    //    content-insert into chunks_<dim> was left ungated in round 2 on an
+    //    incomplete exemption argument -- it must take the gate too. ──
+
+    private static final String COLL_GATE2 = "knowledge__kgate2__bge-base-en-v15-768__v1";
+
+    /** Hand-drives {@code CatalogRepository.acquireSweepGateShared}'s exact
+     *  SQL shape on a raw connection, for tests needing manual transaction control. */
+    private static void acquireGateShared(Connection conn, String tenant, String collection) throws SQLException {
+        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock_shared(hashtext(?))")) {
+            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
+            ps.execute();
+        }
+    }
+
+    @Test
+    @Order(21)
+    void promoteCollection_contentInsert_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String text = "promote-gate-block content " + System.nanoTime();
+        landChunk(COLL_GATE2, 768, digestHex(text), text, vec(768));
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
+                st.execute();
+            }
+            acquireGateExclusive(external, T1, COLL_GATE2, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Map<String, Object>> future =
+                    executor.submit(() -> ops.promoteCollection(T1, COLL_GATE2, 768));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("promoteCollection's content INSERT must BLOCK while COLL_GATE2's gate "
+                        + "is held EXCLUSIVE externally -- a missing/broken gate call would let "
+                        + "this complete immediately and this assertion would fail")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                Map<String, Object> promoted = future.get(15, TimeUnit.SECONDS);
+                assertThat(promoted.get("promoted")).as("gate released -- promote completes").isEqualTo(1);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    @Order(22)
+    void promoteCollection_contentInsert_holdsGateAgainstConcurrentSweepGuard_rowSurvives() throws Exception {
+        // Deterministic reproduction (mirrors CatalogManifestSweepRepositoryTest's
+        // tripwire idiom): while promoteCollection's content-landing transaction
+        // holds the gate SHARED for `collection`, an unrelated document's
+        // concurrent sweep (which must take the SAME gate EXCLUSIVE before its
+        // guarded DELETE can even run) cannot be granted -- so the freshly-landed
+        // row SURVIVES the window, ready for a later finalizeTenant to manifest.
+        // Hand-driven, not through ops.promoteCollection, so this test controls
+        // the exact interleaving deterministically (no threads, no sleep/latch
+        // luck) -- the entry-point gate call itself is proven separately by
+        // Order(21) above.
+        String col = "knowledge__kgate3__bge-base-en-v15-768__v1";
+        String text = "round3 race content " + System.nanoTime();
+        String chash = digestHex(text);
+
+        try (Connection connA = dsConnection(); Connection connB = dsConnection()) {
+            connA.setAutoCommit(false);
+            connB.setAutoCommit(false);
+
+            // Connection A: exactly what promoteCollection's fixed content-
+            // insert step now does -- take the gate SHARED, then land the row
+            // -- held UNCOMMITTED.
+            try (var st = connA.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
+                st.execute();
+            }
+            acquireGateShared(connA, T1, col);
+            try (var st = connA.prepareStatement(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                    + "ON CONFLICT DO NOTHING")) {
+                st.setString(1, T1);
+                st.setString(2, col);
+                st.execute();
+            }
+            try (var ps = connA.prepareStatement(
+                    "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) "
+                    + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
+                ps.setString(1, T1);
+                ps.setString(2, col);
+                ps.setString(3, chash);
+                ps.setString(4, text);
+                ps.setString(5, vec(768));
+                ps.executeUpdate();
+            }
+
+            // Connection B: an unrelated document's ordinary sweep for the SAME
+            // collection -- short lock_timeout, must be refused while A holds
+            // SHARED, so its guarded DELETE never even runs.
+            try (var st = connB.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
+                st.execute();
+            }
+            assertThatThrownBy(() -> acquireGateExclusive(connB, T1, col, 1000))
+                .as("a concurrent unrelated document's sweep must be refused the gate while "
+                    + "promoteCollection's content-insert transaction holds it SHARED")
+                .isInstanceOf(SQLException.class)
+                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("55P03"));
+            connB.rollback();
+
+            connA.commit();
+        }
+
+        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE collection = '" + col
+            + "' AND encode(chash,'hex') = '" + chash + "'"))
+            .as("the freshly-landed row survives the race and is ready for finalizeTenant "
+                + "to manifest later").isEqualTo(1);
+    }
+
+    @Test
+    @Order(23)
+    void finalizeTenant_multiCollectionLoop_gatesEveryDistinctCollection() throws Exception {
+        // nexus-11gh6 round 3: finalizeTenant resolves and gates potentially
+        // MANY distinct collections in one call (one tenant-wide INSERT). A
+        // regression that only gated the FIRST resolved collection (or a
+        // hardcoded one) would let this call proceed even while a DIFFERENT
+        // (second) collection's gate is held externally -- this test is
+        // non-vacuous in exactly that direction.
+        String colA = "knowledge__kmulti-a__bge-base-en-v15-768__v1";
+        String colB = "knowledge__kmulti-b__bge-base-en-v15-768__v1";
+        String textA = "multi-collection gate content A " + System.nanoTime();
+        String textB = "multi-collection gate content B " + System.nanoTime();
+        String chashA = digestHex(textA);
+        String chashB = digestHex(textB);
+        landChunk(colA, 768, chashA, textA, vec(768));
+        landChunk(colB, 768, chashB, textB, vec(768));
+        assertThat(ops.promoteCollection(T1, colA, 768).get("promoted")).isEqualTo(1);
+        assertThat(ops.promoteCollection(T1, colB, 768).get("promoted")).isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, 'multi-doc-a', 'multi doc a', ?) ON CONFLICT DO NOTHING", T1, colA);
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, 'multi-doc-b', 'multi doc b', ?) ON CONFLICT DO NOTHING", T1, colB);
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, 'multi-doc-a', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, chashA);
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, 'multi-doc-b', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, chashB);
+            return null;
+        });
+
+        // Hold colB's gate EXCLUSIVE externally. If the resolution loop only
+        // gated ONE collection (e.g. the first resolved, or a hardcoded one),
+        // this call would NOT block.
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
+                st.execute();
+            }
+            acquireGateExclusive(external, T1, colB, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Map<String, Object>> future = executor.submit(() -> ops.finalizeTenant(T1, false));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("finalizeTenant must BLOCK on colB's gate too, not just colA's -- proving "
+                        + "the multi-collection loop gates EVERY distinct collection it resolves, "
+                        + "not just the first one")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                Map<String, Object> fin = future.get(15, TimeUnit.SECONDS);
+                assertThat(fin.get("manifest_promoted")).isEqualTo(2);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = 'multi-doc-a' AND encode(chash,'hex') = '" + chashA + "'")).isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = 'multi-doc-b' AND encode(chash,'hex') = '" + chashB + "'")).isEqualTo(1);
     }
 }
