@@ -38,9 +38,16 @@ name: Guided-upgrade MVV (weekly + on migration-path changes)
 #
 # So every run since 2026-07-24 has exited 2 before doing any work. Dispatch
 # only rather than deleted, so the bge-asset wiring and container-isolation
-# setup survive for nexus-8nlj4's replacement journey, which is cut-time gated
-# on stranded_install.LAST_MIGRATION_CAPABLE. Restoring the schedule/push block
-# below is the one-line revert.
+# setup survive as raw material.
+#
+# ── RESOLVED 2026-08-08: nexus-8nlj4 LANDED via DIFFERENT files ─────────────
+# The replacement journey did NOT revive this workflow. It lives in
+# .github/workflows/stranded-redirect-rehearsal.yml (weekly) driving
+# `run.sh --stranded` (tests/e2e/migration-rehearsal/rehearse_stranded.sh,
+# Dockerfile.stranded). This file stays dispatch-only as a parts-donor; do
+# NOT restore its schedule — the journey it drives is deleted for good.
+# Residual on the redirect path itself: nexus-4922x (de-strand gate reads a
+# report format nothing writes; hop 3 uncovered).
 on:
   workflow_dispatch:
 

@@ -1,0 +1,63 @@
+name: Package-upgrade convergence MVV (weekly)
+
+# nexus-cfgo9 / nexus-8nlj4 — the ONE-engine convergence gate: a box already
+# running a PREVIOUS conexus release upgrades ONLY the Python package to the
+# working tree (the engine binary is left completely untouched by this
+# harness — the exact GH #1402 shape), and `nexus.upgrade_finish.
+# converge_engine` / `heal_diag_view` must acquire the NEW required engine
+# from the real published GitHub release on its own, boot it clean, and
+# prove T1 data survives the cycle.
+#
+# This axis was UNGATED entirely before this workflow: no scheduled trigger
+# ever existed for `run.sh --package-upgrade` (bead nexus-8nlj4 comment,
+# 2026-07-28 — forwarded from the RDR-155 P4b gate). Running it once by hand
+# surfaced nexus-gu4xd (P1: restart-stale installs a real, sha256-verified
+# new engine while the running service keeps answering the OLD /version) —
+# with no run history to say whether that was a regression or long-standing,
+# exactly the cost of an ungated axis. This workflow closes that gap.
+#
+# PREV_RELEASE / PREV_ENGINE_TAG (tests/e2e/migration-rehearsal/run.sh) are
+# LITERAL and must stay ONE release behind the current engine identity
+# (REQUIRED_ENGINE_VERSION) — run.sh's own guard fails loud if they ever
+# collapse to EQUAL the current floor (the scenario stops being "stale"),
+# but does NOT detect drifting two-or-more releases behind (that needs a
+# human/agent check at each floor bump — see run.sh's own comment on the
+# 2026-08-08 two-release-stale finding).
+#
+# CI-cost discipline (CLAUDE.md DIRECTIVES): NO native GraalVM build (the
+# NEW engine is acquired for real by the product's own convergence code,
+# never locally built or supplied by this harness) — just a host wheel
+# build. Weekly heartbeat + manual dispatch only, never per-PR, never daily.
+# ubuntu-only. Secret-free: local bge-768 mode end to end.
+
+on:
+  schedule:
+    - cron: "47 10 * * 1"   # 10:47 UTC Mondays — staggered off stranded-redirect-rehearsal.yml's 10:17 slot on the same day
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-upgrade-mvv
+  cancel-in-progress: true
+
+jobs:
+  package-upgrade:
+    name: Package-only upgrade, real engine convergence (container-isolated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+
+      - name: Run the package-upgrade convergence MVV
+        # run.sh --package-upgrade builds the working-tree wheel on the
+        # host, builds Dockerfile.package-upgrade (debian-slim: no PG, no
+        # binary, no ONNX pre-staged), and runs
+        # rehearse_package_upgrade.sh inside it. PREV_RELEASE /
+        # PREV_ENGINE_TAG / NEW_ENGINE_TAG are derived by run.sh itself —
+        # no override needed.
+        run: bash tests/e2e/migration-rehearsal/run.sh --package-upgrade

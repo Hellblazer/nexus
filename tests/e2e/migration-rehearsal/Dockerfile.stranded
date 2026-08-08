@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+# nexus-8nlj4 — TWO-HOP STRANDED-REDIRECT rehearsal box.
+#
+# Proves the RDR-185 post-P4b acceptance-harness reshape's own success
+# criterion (the bead's 2026-07-27 note): a box carrying unmigrated pre-PG
+# artifacts that upgrades PACKAGE-ONLY straight to the working tree must hit
+# the ARMED `nexus.stranded_install` detector — loud, exact, and BEFORE any
+# provisioning — and the redirect it prints (`install conexus==$PIN_RELEASE`,
+# `run nx upgrade there`) must be genuinely followable: downgrading back to
+# the pin and running that exact sequence must migrate the SAME on-disk data
+# for real.
+#
+# Base = debian:trixie-slim (conexus's actual runtime deploy base), matching
+# Dockerfile.package-upgrade / Dockerfile.era-hop. NOTHING the service needs
+# is pre-staged: no native binary, no PG bundle, no ONNX model. The pin
+# release's own engine (hop 2's real provisioning) is acquired at runtime by
+# the product's own code, exactly like every other "acquired for real" leg —
+# the harness never supplies an engine binary.
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        python3 python3-venv python3-pip \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — initdb (run by `nx init`, hop 2's provisioning step)
+# refuses to run as root.
+RUN useradd -m -s /bin/bash nexus
+ENV PATH="/home/nexus/nxenv/bin:${PATH}"
+
+RUN pip3 install --no-cache-dir --break-system-packages uv
+
+USER nexus
+WORKDIR /home/nexus
+
+# The WORKING-TREE wheel, in its own subdirectory with its real PEP 427
+# filename (pip/uv parse wheel filenames strictly) so it never collides with
+# the driver's `pip install conexus==$PIN_RELEASE` / downgrade-reinstall
+# from real PyPI into the SAME venv. This is the ONLY conexus artifact in
+# the image; the pin release's package + both its own and the working
+# tree's engine are installed/acquired at runtime.
+COPY worktree-wheel/conexus-*.whl /home/nexus/worktree-wheel/
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv venv --python 3.12 /home/nexus/nxenv
+
+# The seeder runs under the PIN release's own venv (installed by the driver
+# as its first step), so it writes the legacy Chroma + T2 + catalog through
+# THAT release's own libraries — the faithful pre-cutover on-disk state.
+# Same seeder era-hop/chash-window/fullstack already use (nexus-8nlj4
+# 2026-08-08: confirmed live raw material, not retired debt).
+COPY seed_legacy.py /home/nexus/seed_legacy.py
+COPY rehearse_stranded.sh /home/nexus/rehearse_stranded.sh
+
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_stranded.sh"]
