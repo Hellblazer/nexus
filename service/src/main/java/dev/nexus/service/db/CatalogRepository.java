@@ -4571,6 +4571,46 @@ public final class CatalogRepository {
             r.get(MANIFEST_VERIFY.REFERENCED), r.get(MANIFEST_VERIFY.PRESENT), r.get(MANIFEST_VERIFY.MISSING));
     }
 
+    /** nexus-c8hl7: cap on the missing-chash sample logged by {@link #completeIndexRun}'s refusal WARN. */
+    private static final int MISSING_CHASH_SAMPLE_LIMIT = 5;
+
+    /**
+     * nexus-c8hl7: row-level counterpart to {@link #manifestVerifyCtx}'s
+     * aggregate {@code missing} count — the SAME anti-join
+     * ({@code nexus.manifest_verify}'s CTE, hand-expanded in jOOQ rather than
+     * adding a second SQL function) but returning up to {@code limit} of the
+     * actual missing chash values instead of a count, for the refusal WARN's
+     * diagnostic sample. Only meaningful to call when
+     * {@code counts.missing() > 0} — an empty manifest or a fully-present one
+     * returns an empty list either way, so callers gate on the count first to
+     * avoid a wasted query.
+     */
+    private static List<String> sampleMissingChashes(DSLContext ctx, String tenant, String docId, int limit) {
+        return ctx.select(CHK_CHASH_HEX)
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .join(CATALOG_DOCUMENTS)
+              .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                  .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                   .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNotNull())
+                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS_384)
+                           .where(CHUNKS_384.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                                  .and(CHUNKS_384.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                                  .and(CHUNKS_384.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))))
+                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS_768)
+                           .where(CHUNKS_768.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                                  .and(CHUNKS_768.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                                  .and(CHUNKS_768.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))))
+                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
+                           .where(CHUNKS_1024.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                                  .and(CHUNKS_1024.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                                  .and(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))))
+            .limit(limit)
+            .fetch(CHK_CHASH_HEX);
+    }
+
     /**
      * nexus-5xn3k.2 (stacked-review item 1): per-(tenant, doc_id) advisory xact
      * lock serializing the index-run fence's verify-then-stamp
@@ -4747,13 +4787,50 @@ public final class CatalogRepository {
             // guarded UPDATE below still refuses the whole call for a tombstoned
             // target via TombstonedDocumentException, so this filter changes no
             // observable outcome, only satisfies the read-guard invariant.
-            String priorState = ctx.select(CATALOG_DOCUMENTS.INDEX_STATE)
+            //
+            // Also reads PHYSICAL_COLLECTION alongside INDEX_STATE (nexus-c8hl7):
+            // the refusal log below names the collection manifest_verify actually
+            // checked, folded into this same row read rather than a second query.
+            var priorRow = ctx.select(CATALOG_DOCUMENTS.INDEX_STATE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                 .from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                .fetchOne(CATALOG_DOCUMENTS.INDEX_STATE);
+                .fetchOne();
+            String priorState = priorRow == null ? null : priorRow.get(CATALOG_DOCUMENTS.INDEX_STATE);
+            String stampedCollection = priorRow == null ? null : priorRow.get(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
             ManifestVerifyCounts counts = manifestVerifyCtx(ctx, docId);
             if (counts.missing() > 0 || counts.referenced() != chunkCount) {
+                // nexus-c8hl7: unlike stampCompleteIfVerified's write_manifest_many_
+                // complete_refused WARN below, this refusal path logged NOTHING
+                // engine-side — and CliRunner swallows client-side structlog for the
+                // identical event, so an intermittent completion refusal left zero
+                // evidence anywhere (the 2026-08-08 scenario-journey investigation,
+                // T2 debug-scenario-journeys-parallel-red-2026-08-08). Mirror that
+                // sibling's WARN shape, plus the collection manifest_verify actually
+                // checked (the STAMPED physical_collection, not necessarily this
+                // run's target — nexus-2t63u) and a capped sample of the missing
+                // chashes so the next occurrence self-diagnoses from engine.log.
+                // nexus review round (2026-08-08 Q5 nit): the sample query must never
+                // itself turn this 409 refusal into a 500 — diagnostics are strictly
+                // best-effort and must never mask the primary fail-closed outcome. A
+                // sampling failure degrades to an empty sample (still logged, at WARN,
+                // so the degradation itself is visible) rather than propagating.
+                List<String> missingSample;
+                if (counts.missing() > 0) {
+                    try {
+                        missingSample = sampleMissingChashes(ctx, tenant, docId, MISSING_CHASH_SAMPLE_LIMIT);
+                    } catch (RuntimeException sampleEx) {
+                        log.warn("event=complete_index_run_refused_sample_failed tenant={} doc_id={} error={}",
+                                  tenant, docId, sampleEx.getMessage());
+                        missingSample = List.of();
+                    }
+                } else {
+                    missingSample = List.of();
+                }
+                log.warn("event=complete_index_run_refused tenant={} doc_id={} collection={} referenced={} "
+                          + "present={} missing={} claimed_chunk_count={} missing_chash_sample={}",
+                          tenant, docId, stampedCollection, counts.referenced(), counts.present(),
+                          counts.missing(), chunkCount, missingSample);
                 throw new IndexRunVerifyRefused(docId, counts.referenced(), counts.present(), counts.missing(), chunkCount);
             }
             boolean flagged = !"indexing".equals(priorState);

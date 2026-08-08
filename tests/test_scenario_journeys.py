@@ -55,6 +55,7 @@ never read as green just because every ``scenario`` test skipped.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -63,6 +64,66 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from tests._catalog_fixture_ops import active_reader, documents_by_file_path, documents_by_title
+from tests._engine_substrate import ensure_engine
+
+#: Refusal-diagnostic events (nexus-c8hl7's WARN + its
+#: write_manifest_many sibling) the failure-tail below prioritizes over a
+#: blind byte-count tail — see ``_engine_log_on_failure``.
+_ENGINE_REFUSAL_EVENTS = ("complete_index_run_refused", "write_manifest_many_complete_refused")
+
+#: Fallback tail length (lines) when no refusal event is present in the log
+#: — still bounded, never the whole session's engine.log.
+_ENGINE_LOG_TAIL_LINES = 200
+
+
+@pytest.fixture(autouse=True)
+def _engine_log_on_failure(request: pytest.FixtureRequest):
+    """On a scenario-journey FAILURE, fold a bounded tail of the substrate's
+    engine.log into the test report (critic Q1 Critical, 2026-08-08): the
+    engine-side nexus-c8hl7 refusal WARN
+    (``event=complete_index_run_refused`` / its ``write_manifest_many``
+    sibling) lands in ``<pgdata>/engine.log`` inside the session's
+    mkdtemp'd PG cluster, which the substrate's teardown ``rmtree``s at
+    session end -- so on a green run nothing is lost, but on a red run the
+    ONLY surviving evidence today is the pytest failure text itself. This
+    grabs the refusal lines specifically when present (falls back to a
+    bounded byte tail otherwise) and attaches them via
+    ``add_report_section`` so they render in the failure output without
+    needing the log file to survive teardown.
+
+    Scoped to this file only (module-local autouse, not suite-wide) — the
+    scenario journeys are the only tests this investigation's evidence gap
+    concerns; nothing else in the suite loses evidence this way.
+    """
+    yield
+    rep = getattr(request.node, "rep_call", None)
+    if rep is None or not rep.failed:
+        return
+    try:
+        state = ensure_engine()
+    except Exception as exc:  # noqa: BLE001 — best-effort diagnostic; must never mask the real failure
+        request.node.add_report_section(
+            "teardown", "engine.log (unavailable)",
+            f"could not reach the engine substrate to tail engine.log: {exc}",
+        )
+        return
+    log_path = os.path.join(state["pgdata"], "engine.log")
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        request.node.add_report_section(
+            "teardown", "engine.log (unavailable)", f"could not read {log_path}: {exc}",
+        )
+        return
+    refusal_lines = [ln for ln in lines if any(ev in ln for ev in _ENGINE_REFUSAL_EVENTS)]
+    if refusal_lines:
+        content = "".join(refusal_lines)
+        label = f"engine.log refusal-event lines ({log_path})"
+    else:
+        content = "".join(lines[-_ENGINE_LOG_TAIL_LINES:])
+        label = f"engine.log tail, last {_ENGINE_LOG_TAIL_LINES} lines ({log_path})"
+    request.node.add_report_section("teardown", label, content)
 
 
 def _git_init(repo: Path) -> None:
@@ -136,7 +197,14 @@ def test_index_md_creates_doc_level_content_with_catalog_registration(t2_service
     )
 
     runner = CliRunner()
-    idx = runner.invoke(main, ["index", "md", str(md), "--corpus", "scenario2"])
+    # nexus critic (2026-08-08, Q1): DEBUG so the gtl01 write-side decision
+    # trail (upsert_skip_reembed_probe/branch/disposition) rides into
+    # idx.output and therefore into the pytest failure text on any
+    # recurrence of the completion-refusal class this journey chases —
+    # the CLI's default structlog threshold is WARNING and nothing else
+    # in this invoke sets NEXUS_LOG_LEVEL.
+    idx = runner.invoke(main, ["index", "md", str(md), "--corpus", "scenario2"],
+                         env={"NEXUS_LOG_LEVEL": "DEBUG"})
     assert idx.exit_code == 0, idx.output
     assert "Indexed 1 chunk" in idx.output
 
@@ -274,7 +342,10 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
         "Octopuses use chromatophores to rapidly change skin color for "
         "camouflage against coral reef backgrounds.\n"
     )
-    idx = runner.invoke(main, ["index", "md", str(md), "--corpus", "scenario4"])
+    # nexus critic (2026-08-08, Q1): DEBUG so the gtl01 write-side trail
+    # survives into idx.output on recurrence — see journey 2's comment.
+    idx = runner.invoke(main, ["index", "md", str(md), "--corpus", "scenario4"],
+                         env={"NEXUS_LOG_LEVEL": "DEBUG"})
     assert idx.exit_code == 0, idx.output
 
     combined_corpus = "knowledge,docs__scenario4"

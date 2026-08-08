@@ -416,6 +416,26 @@ _SESSION_ITEMS_CENSUS_TEST_NODEIDS: frozenset[str] = frozenset({
 })
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> None:
+    """Stash each phase's TestReport on the item (``rep_setup`` /
+    ``rep_call`` / ``rep_teardown`` -- the standard pytest idiom, e.g. the
+    ``pytest-html``/``pytest-rerunfailures`` "did this test fail" pattern).
+
+    Zero-cost on a green run: a plain attribute set per phase, no I/O, no
+    behavior change to the report itself. Added so any fixture in the suite
+    can check ``request.node.rep_call.failed`` in its own teardown without
+    each one re-registering this hook -- the FIRST consumer is
+    ``tests/test_scenario_journeys.py``'s ``_engine_log_on_failure``
+    fixture (substantive-critic Q1: the engine's nexus-c8hl7 refusal WARN
+    otherwise dies with the substrate's mkdtemp'd pgdata at session
+    teardown, unread).
+    """
+    outcome = yield
+    rep = outcome.get_result()
+    setattr(item, "rep_" + rep.when, rep)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Evaluate the partial-view guard BEFORE any fixture -- including the
