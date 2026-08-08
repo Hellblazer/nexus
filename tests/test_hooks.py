@@ -446,3 +446,67 @@ class TestStaleMcpHostSessionStartNudge:
             output = session_start(claude_session_id="s-otnvr-probe-fail")
         assert "Nexus ready" in output
         assert "NOTE" not in output
+
+
+# ── nexus-h33x8.4: SessionStart guidance imperative, re-plumbed Tier B ──────
+#
+# The guidance imperative (formerly delivered by the pinned plugin's
+# `cat .../using-nx-skills/SKILL.md` hooks.json entry) is now appended to
+# `session_start()`'s own output, gated by the interim double-emission
+# guard in nexus.session_start_guidance (unit-tested directly in
+# tests/test_session_start_guidance.py — these pin the INTEGRATION into
+# session_start() specifically).
+
+
+class TestGuidanceImperativeIntegration:
+    def test_guidance_text_appended_when_channel_open(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.session_start_guidance.guidance_block",
+                return_value="GUIDANCE-MARKER-TEXT",
+            ),
+        ):
+            output = session_start(claude_session_id="s-h33x8-4-open")
+        assert "Nexus ready" in output
+        assert "GUIDANCE-MARKER-TEXT" in output
+
+    def test_no_guidance_text_when_channel_suppressed(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.session_start_guidance.guidance_block", return_value=""),
+        ):
+            output = session_start(claude_session_id="s-h33x8-4-suppressed")
+        assert "Nexus ready" in output
+        assert "GUIDANCE-MARKER-TEXT" not in output
+
+    def test_guidance_probe_failure_never_breaks_session_start(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        def boom():
+            raise RuntimeError("guidance module import failed")
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.session_start_guidance.guidance_block", side_effect=boom),
+        ):
+            output = session_start(claude_session_id="s-h33x8-4-boom")
+        assert "Nexus ready" in output
+
+    def test_real_guidance_text_reaches_output_end_to_end(self, monkeypatch) -> None:
+        """No mocking of the guidance module itself: with no
+        CLAUDE_PLUGIN_ROOT set (the test-harness default), the legacy-
+        channel gate fails open and the real imperative text appears."""
+        from unittest.mock import patch as _patch
+
+        from nexus.session_start_guidance import GUIDANCE_IMPERATIVE
+
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        with _patch("nexus.hooks.write_claude_session_id"):
+            output = session_start(claude_session_id="s-h33x8-4-e2e")
+        assert "Nexus ready" in output
+        assert GUIDANCE_IMPERATIVE in output

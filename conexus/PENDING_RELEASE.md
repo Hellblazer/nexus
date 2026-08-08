@@ -31,6 +31,39 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.4.0)
 
+- `conexus/hooks/hooks.json` — nexus-h33x8.4: the SessionStart
+  `cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md` entry is
+  REMOVED. The guidance imperative it delivered is now emitted by
+  `nx hook session-start` instead (Tier B — already-registered
+  hooks.json entry, PyPI wheel; see `src/nexus/session_start_guidance.py`
+  for the moved, byte-identical-on-landing content). This is the
+  highest-leverage change in the epic: it collapses guidance-iteration
+  latency from plugin-release cadence to PyPI-release/local-reinstall
+  cadence for every future edit, permanently — but only once THIS
+  hooks.json edit itself goes live at the next release. Until then, a
+  session running under the currently-pinned plugin still carries the
+  legacy `cat` entry, so `nx hook session-start`'s own emission is
+  self-suppressing during that window
+  (`session_start_guidance.legacy_cat_channel_active` reads the
+  INSTALLED plugin's own `hooks/hooks.json` via `$CLAUDE_PLUGIN_ROOT` and
+  detects the still-registered legacy entry) — installed sessions get
+  the imperative exactly once (from the legacy `cat` entry, unchanged
+  content) rather than twice. At the next plugin release this entry
+  disappears from the pinned copy too, the suppression gate opens
+  permanently, and `nx hook session-start` becomes the sole channel.
+  nexus-h33x8.4's own TIER PROOF verification (change one word in the
+  wheel, reinstall, confirm it appears with no plugin release) is
+  deliberately NOT expected to pass until AFTER that release ships —
+  see the bead for why closing on merge would repeat the 2026-07-25
+  ledger-blindness incident this file exists to prevent.
+  Post-release verification one-liner:
+  `nx hook session-start | grep -c 'Using Conexus Skills'` (expect 1).
+  Release-note obligation (critic [21867] observation): a machine whose
+  WHEEL predates h33x8.4 gets NEITHER channel for ~one session after
+  this release activates (the pinned cat entry is gone and the old
+  wheel has no emitter); self-healing via the same SessionStart block's
+  `nx upgrade --auto` + the lockstep hook — state this in the release
+  notes rather than letting it read as a regression report.
 - `conexus/hooks/scripts/version_lockstep_action.py` — the detached
   auto-upgrade now writes an always-on audit line per swap attempt
   (`lockstep_upgrade_started` / `lockstep_upgrade_result`) to

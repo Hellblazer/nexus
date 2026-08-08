@@ -28,11 +28,6 @@
             "type": "command",
             "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md",
-            "timeout": 5
           }
         ]
       },

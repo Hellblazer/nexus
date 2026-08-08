@@ -183,7 +183,11 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     # RDR-155 P4b: the substrate-migration bridge notice (nexus-0rwwv) died
     # with the migration machinery; stranded pre-PG installs are redirected
     # to the LAST_MIGRATION_CAPABLE release by the stranded-install detector.
-    return f"Nexus ready (session: {session_id}).{_stale_mcp_host_warning()}"
+    return (
+        f"Nexus ready (session: {session_id})."
+        f"{_stale_mcp_host_warning()}"
+        f"{_guidance_imperative_block()}"
+    )
 
 
 def _stale_mcp_host_warning() -> str:
@@ -222,6 +226,29 @@ def _stale_mcp_host_warning() -> str:
         f"installed conexus {report.installed_version} — if tool calls "
         f"start failing with import errors, run /mcp to reconnect."
     )
+
+
+def _guidance_imperative_block() -> str:
+    """nexus-h33x8.4: emit the SessionStart guidance imperative from the
+    wheel (Tier B) instead of the pinned plugin's ``cat .../SKILL.md``
+    hooks.json entry (Tier C).
+
+    See :mod:`nexus.session_start_guidance` for the moved content and
+    the interim double-emission guard (suppresses this block while the
+    installed plugin's own ``hooks.json`` still carries the legacy
+    ``cat`` entry, so a session under an un-upgraded plugin gets the
+    imperative exactly once, not twice).
+
+    Never raises — a probe failure here must not break session start
+    (mirrors every other best-effort leg in this module).
+    """
+    try:
+        from nexus.session_start_guidance import guidance_block  # noqa: PLC0415 — deferred import, only needed on this path
+        text = guidance_block()
+    except Exception as exc:  # noqa: BLE001 — session start must never break on this probe
+        _log.debug("guidance_imperative_block_failed", error=str(exc))
+        return ""
+    return f"\n\n{text}" if text else ""
 
 
 # -- SessionEnd ---------------------------------------------------------------

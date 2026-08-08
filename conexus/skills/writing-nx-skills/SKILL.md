@@ -92,7 +92,9 @@ After creating a skill, update `conexus/registry.yaml`:
 
 ### Updating using-nx-skills
 
-When adding a new skill, also add it to `conexus/skills/using-nx-skills/SKILL.md` routing tree. This file is injected every session — if your skill isn't listed there, it won't be discovered.
+When adding a new skill, also add it to `conexus/skills/using-nx-skills/SKILL.md` routing tree so it is discoverable when the skill is explicitly invoked (`/conexus:using-nx-skills`).
+
+**SessionStart delivery is a separate copy as of nexus-h33x8.4.** The text actually injected at SessionStart no longer comes from a live `cat` of this file — it is `GUIDANCE_IMPERATIVE` in `src/nexus/session_start_guidance.py` (PyPI wheel, Tier B), moved there so guidance edits ship at reinstall/PyPI-release cadence instead of plugin-release cadence. Editing `SKILL.md` alone changes what an explicit `/conexus:using-nx-skills` invocation sees; it does **not** change what a fresh session sees until `GUIDANCE_IMPERATIVE` is updated too (`scripts/reinstall-tool.sh` to pick it up locally). nexus-h33x8.5 is expected to diverge the two on purpose (short imperative at SessionStart, full routing menu behind the Skill body) — until then, keep both in sync by hand for anything that should be session-visible.
 
 ## Known Pitfalls
 
