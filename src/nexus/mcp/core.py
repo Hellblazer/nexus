@@ -17,6 +17,11 @@ from typing import Any
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
+    from mcp.server.fastmcp.server import Settings as _FastMCPSettings
+except ImportError:  # pragma: no cover — future SDK restructure
+    _FastMCPSettings = None
+
 from nexus.corpus import (
     embedding_model_for_collection,
     embedding_model_for_collection_name,
@@ -133,8 +138,8 @@ _install_default_hooks(_hooks)
 # non-service tail as well: Branch 0 — the SERVICE-backed T1 session path
 # (mint / borrow / inherit a session token against the storage service) —
 # is the ONLY path; a stranded =sqlite export hard-errors at the lifespan's
-# validation call. NX_T1_ISOLATED remains a per-process opt-in for
-# in-process ephemeral scratch (honored in nexus.db.t1, not here).
+# validation call. NX_T1_ISOLATED is retired outright (nexus-4lkmz, T1 is
+# PG-only) — setting it now hard-fails in nexus.db.t1, no opt-out.
 #
 # Cleanup is idempotent across three sites: the lifespan async finally
 # (HTTP/SSE clean exit + clean stdin EOF on stdio), _sigterm_handler
@@ -211,6 +216,52 @@ def _start_t1_refresh_task(session_id: str, interval: float) -> None:
     global _T1_SESSION_REFRESH_TASK
     _T1_SESSION_REFRESH_TASK = asyncio.create_task(
         _t1_session_refresh_loop(session_id, interval)
+    )
+
+
+class T1UnavailableThisProcessError(RuntimeError):
+    """Raised (via the T1 pre-init hook) when this MCP process has no
+    resolvable session id to bind a T1 session to.
+
+    nexus-4lkmz decision 2 (LOCKED 2026-08-07): replaces the pre-fix
+    behaviour of forcing ``NX_T1_ISOLATED=1`` — which, pre-retirement,
+    silently handed this process a private in-process T1Database. That
+    escape hatch is gone (T1 is PG-only); the honest replacement is a
+    FAIL-LOUD, per-call, named error — never a shared identity (the
+    nexus-rn3wo.1 security property this whole branch exists to
+    preserve: an unresolvable-session MCP process must never be pulled
+    into the SAME shared CLI-dedicated identity as every bare `nx
+    scratch` invocation) and never a silent private store.
+
+    Scoped to T1 ONLY, same "a T1-only failure must cost T1 only"
+    posture as the deferred-mint hook above: every other nexus tool
+    (search, memory, store, catalog) is unaffected, and the whole MCP
+    server does not crash — only T1-touching calls raise, and every
+    later call retries the same check (nothing is cached).
+    """
+
+
+def _raise_t1_unavailable_this_process() -> None:
+    """Pre-init hook body for the no-resolvable-session-id case.
+
+    Registered by :func:`_t1_lifespan` Branch 0 in place of the retired
+    ``NX_T1_ISOLATED=1`` force. Raises unconditionally — there is no
+    mint to retry, since without a resolvable session id there is
+    nothing to mint a token FOR (minting a shared "unknown" row would
+    let concurrent unresolvable-session MCPs collide on the (tenant,
+    session_id) UPSERT, each invalidating the other's token — the same
+    hazard the surrounding code already documents).
+    """
+    raise T1UnavailableThisProcessError(
+        "T1 unavailable this process: no resolvable session id for this "
+        "MCP server instance (neither NX_SESSION_ID nor "
+        "CLAUDE_CODE_SESSION_ID resolved one). This affects T1 scratch "
+        "only — every other nexus tool (search, memory, store, catalog) "
+        "is unaffected. A sub-agent that inherited a LIVE minted token "
+        "from its parent is unaffected too (checked before this hook "
+        "would ever be consulted). Remedy: reconnect the conexus "
+        "MCP/extension from a Claude Code session that stamps a "
+        "resolvable session id, or run `nx doctor --check-t1`."
     )
 
 
@@ -393,6 +444,358 @@ async def _cancel_t1_session_refresh_task() -> None:
         await task
 
 
+# ── T1 handoff-marker watcher (nexus-d76vc) ──────────────────────────────────
+#
+# The other half of the aj564 split-brain fix. The SessionStart hook
+# (source=clear|resume, see nexus.hooks._write_t1_handoff_markers) writes
+# ~/.config/nexus/t1_handoff.<mcp_pid> naming the transcript's NEW session
+# id. This loop is a SEPARATE, independent poll -- deliberately not
+# piggybacked on `_t1_session_refresh_loop` above, whose interval is half
+# the token TTL (hours, by default) and which does not even run on the
+# USE_INHERITED/USE_LEASED branches. A handoff needs to be noticed promptly
+# regardless of which branch this MCP server's T1 routing took.
+
+#: Poll interval for the handoff-marker watcher. Independent of (and much
+#: tighter than) `_T1_SESSION_REFRESH_MIN_INTERVAL_S` above, which bounds a
+#: token-TTL-driven interval measured in hours -- a user expects `/clear` or
+#: `/resume` to take effect promptly, not after a multi-hour refresh tick.
+_T1_HANDOFF_WATCH_INTERVAL_S: float = 5.0
+
+#: This process's own start time, stamped at import (module import happens
+#: once per MCP process, at or before `_t1_lifespan` first runs -- close
+#: enough to "server start" for the freshness check below, and simpler than
+#: threading an explicit timestamp through the lifespan's many branches).
+#: A marker whose `written_at` predates this can only be a leftover from a
+#: PRIOR process that happened to reuse this pid (or a clock going
+#: backwards) -- never a legitimate handoff for THIS incarnation.
+_T1_SERVER_START_TIME: float = time.time()
+
+#: The running handoff-watch asyncio task, mirrors `_T1_SESSION_REFRESH_TASK`
+#: above. Started unconditionally near the top of `_t1_lifespan` (every
+#: routing branch gets a watcher); cancelled at every one of that function's
+#: exit points.
+_T1_HANDOFF_WATCH_TASK: Any = None
+
+#: Wall-clock budget for the re-lease mint-or-borrow call (nexus-d76vc
+#: fix-round IMPORTANT/event-loop-block finding, code-review-expert pass
+#: 1). Bounds the flock-wait leg of `_lock_guarded_mint_or_borrow` (the
+#: SAME `deadline=` parameter the by875-hardened CLI path already uses);
+#: the mint HTTP call's own timeout, once started, is `mint_t1_session_
+#: token`'s pre-existing behavior, unchanged by this bead either way.
+_T1_HANDOFF_MINT_DEADLINE_S: float = 30.0
+
+
+def _start_t1_handoff_watch_task() -> None:
+    """Create the handoff-watch task on the CURRENT (running) loop.
+
+    Called synchronously from inside `_t1_lifespan`'s own async-generator
+    body, so `asyncio.get_running_loop()` context already exists -- no
+    `call_soon_threadsafe` indirection needed here (contrast
+    `_start_t1_refresh_task`, which IS scheduled that way because its other
+    caller, `_retry_deferred_t1_mint`, runs in a worker thread).
+    """
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    global _T1_HANDOFF_WATCH_TASK
+    _T1_HANDOFF_WATCH_TASK = asyncio.create_task(_t1_handoff_watch_loop())
+
+
+async def _cancel_t1_handoff_watch_task() -> None:
+    """Cancel and await the handoff-watch task if one is running. Idempotent."""
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import contextlib  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    global _T1_HANDOFF_WATCH_TASK
+    task = _T1_HANDOFF_WATCH_TASK
+    _T1_HANDOFF_WATCH_TASK = None
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
+async def _t1_handoff_watch_loop() -> None:
+    """Poll for a consumed T1 handoff marker every tick; re-lease on one.
+
+    Runs for the server's entire lifetime once started (see
+    `_start_t1_handoff_watch_task`'s call site in `_t1_lifespan`).  A tick
+    that raises (marker corruption not already handled by
+    `read_handoff_marker`'s own fail-safe parsing, a transient mint
+    failure) is logged at warning and the loop continues — never let a
+    single bad tick kill the watcher for the rest of the process
+    lifetime (mirrors `_t1_session_refresh_loop`'s own error handling).
+    """
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    _hw_log = structlog.get_logger("nexus.mcp.core")
+    mcp_pid = _os.getpid()
+    while True:
+        await asyncio.sleep(_T1_HANDOFF_WATCH_INTERVAL_S)
+        try:
+            await _t1_handoff_tick(mcp_pid, _hw_log)
+        except Exception as exc:  # noqa: BLE001 — never let a tick failure kill the watcher for the rest of the process lifetime
+            _hw_log.warning("t1_handoff_watch_tick_failed", error=str(exc))
+
+
+async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
+    """One handoff-watch step: claim, verify, and either re-lease or reject.
+
+    `async` (nexus-d76vc fix-round IMPORTANT/event-loop-block finding,
+    code-review-expert pass 1): the re-lease mint-or-borrow below is
+    blocking (flock + synchronous HTTP) and is offloaded to a worker
+    thread via `asyncio.to_thread` so a stuck mint/lock cannot freeze the
+    event loop -- and therefore every OTHER tool call this MCP server is
+    serving -- for its duration. See that call site for the bounded
+    `deadline=` this is paired with.
+
+    Claim-first (nexus-d76vc fix-round IMPORTANT/TOCTOU finding): the
+    live marker is atomically RENAMED to a tick-private claimed path
+    (`claim_handoff_marker`) before any parsing. The prior shape read the
+    live marker, processed it (a blocking, possibly slow mint), then
+    unconditionally deleted whatever was CURRENTLY at the live path --
+    silently dropping a second `/clear` that landed a fresh marker there
+    mid-tick. Claiming first means this tick only ever touches the
+    specific marker it claimed; a fresh live-path write during processing
+    survives untouched for the next tick.
+
+    Rejection posture (nexus-d76vc TESTS note, resolved): an
+    ancestry-mismatched, malformed, or stale marker is DELETED (the
+    claimed copy), not left in place. Leaving it would retry the SAME
+    rejected marker on every subsequent tick forever with no way to
+    distinguish "still invalid" from "a fresh legitimate marker just got
+    written under the same name" — deleting means a spoof/stale marker
+    gets exactly one silent rejection (loudly logged) and cannot wedge
+    the watcher into repeatedly re-warning about a marker nobody will
+    ever fix, while a GENUINELY new marker for the same pid (a real
+    subsequent /clear) simply gets written fresh at the LIVE path and
+    picked up on its own next tick.
+
+    Re-lease steps, mirroring `_t1_lifespan`'s own MINT branch: mint-or-
+    borrow a token for the new session id (the same flock-guarded helper,
+    so a concurrent sibling MCP re-leasing the SAME new session id
+    converges to one mint), stop refreshing the OLD lease BEFORE adopting
+    the new identity (so the cancelled task can never race a re-mint
+    against the swap), swap the env vars, clear any stale pre-init hook
+    state (see the CRITICAL-fix comment at that call site below), drop
+    the T1 singleton (so the NEXT tool call reconstructs against the new
+    scope -- no per-call re-resolve, the scope only moves on a consumed
+    marker, per MUST-HOLD 3), and — only if THIS call won the mint (never
+    on a borrow, exactly like the original mint branch) — take ownership
+    and start a fresh refresh loop for the new session id.
+
+    Deliberately does NOT touch the old session's T1 rows or explicitly
+    revoke its token: they strand under the old session id and age out
+    via the T1 TTL sweep (design decision, nexus-d76vc bead body) — migrating
+    would silently merge two conversations the user explicitly separated
+    with `/clear`.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.daemon.t1_handoff import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        claim_handoff_marker,
+        consume_claimed_marker,
+        read_claimed_marker,
+        write_handoff_marker_if_absent,
+    )
+
+    config_dir = nexus_config_dir()
+
+    claimed_path = claim_handoff_marker(mcp_pid, config_dir)
+    if claimed_path is None:
+        return  # no live marker -- steady state, every tick, stay silent
+
+    marker = read_claimed_marker(claimed_path)
+    if marker is None:
+        log.warning(
+            "t1_handoff_marker_rejected", reason="malformed_marker", mcp_pid=mcp_pid,
+        )
+        consume_claimed_marker(claimed_path)
+        return
+
+    from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+    # Re-derive OUR OWN ancestry independently rather than trusting the
+    # marker's claimed claude_pid alone (MUST-HOLD rn3wo.1 / the writer's
+    # own ancestry check is defense-in-depth, not the only check — see
+    # nexus.hooks._write_t1_handoff_markers's docstring).
+    own_claude_pid = find_immediate_claude_pid(start_pid=mcp_pid)
+    if own_claude_pid <= 0 or own_claude_pid != marker.claude_pid:
+        log.warning(
+            "t1_handoff_marker_rejected",
+            reason="ancestry_mismatch",
+            mcp_pid=mcp_pid,
+            marker_claude_pid=marker.claude_pid,
+            own_claude_pid=own_claude_pid,
+        )
+        consume_claimed_marker(claimed_path)
+        return
+
+    new_session_id = marker.new_session_id
+    if not new_session_id or new_session_id == "unknown":
+        log.warning(
+            "t1_handoff_marker_rejected",
+            reason="malformed_session_id",
+            mcp_pid=mcp_pid,
+        )
+        consume_claimed_marker(claimed_path)
+        return
+
+    if marker.written_at < _T1_SERVER_START_TIME:
+        log.warning(
+            "t1_handoff_marker_rejected",
+            reason="stale_marker",
+            mcp_pid=mcp_pid,
+            written_at=marker.written_at,
+            server_start=_T1_SERVER_START_TIME,
+        )
+        consume_claimed_marker(claimed_path)
+        return
+
+    old_session_id = _os.environ.get("NX_T1_SESSION_ID", "").strip() or None
+    if old_session_id == new_session_id:
+        # Nothing to do (e.g. a re-tick that raced the previous one's own
+        # consume, or a resume that lands back on the id already active).
+        # Consume so the marker never lingers past the tick that saw it.
+        consume_claimed_marker(claimed_path)
+        return
+
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    from nexus.db.t1 import _lock_guarded_mint_or_borrow  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+    try:
+        token, minted_fresh, mint_ttl = await asyncio.to_thread(
+            _lock_guarded_mint_or_borrow,
+            new_session_id, config_dir,
+            context="T1 handoff re-lease",
+            deadline=time.monotonic() + _T1_HANDOFF_MINT_DEADLINE_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — a re-lease failure must not crash the watcher; the marker is REINSTATED (not left claimed-and-orphaned) so a transient failure retries next tick
+        log.warning(
+            "t1_handoff_release_failed",
+            mcp_pid=mcp_pid, new_session_id=new_session_id, error=str(exc),
+        )
+        # Re-instate at the LIVE path: having claimed the marker away
+        # from the live name before attempting the mint, we must put it
+        # back on failure or the handoff is lost forever (no future tick
+        # ever re-examines the claimed-path name -- claim_handoff_marker
+        # only ever looks at the LIVE path). fix-round 2 (code-review-
+        # expert IMPORTANT): this must NOT be an unconditional overwrite —
+        # ordinary write_handoff_marker's last-write-wins policy is correct
+        # for a genuine WRITER (its own write is always the newest truth
+        # at the moment it happens) but backwards here: the reinstated
+        # content is OLDER truth arriving late (the failed mint took real
+        # wall-clock time), so if a second /clear published a genuinely
+        # newer marker at the live path WHILE this mint was in flight, an
+        # unconditional overwrite would let the STALE reinstate clobber
+        # it — the exact data-loss class the claim-first design exists to
+        # prevent, just relocated to this call site.
+        # write_handoff_marker_if_absent is the no-clobber primitive:
+        # publishes ONLY if the live path is still empty, atomically (no
+        # separate exists-check-then-write TOCTOU window — see its
+        # docstring). If it returns False, a newer marker already won;
+        # drop the stale one loudly rather than silently.
+        reinstated = write_handoff_marker_if_absent(
+            mcp_pid, new_session_id=marker.new_session_id,
+            claude_pid=marker.claude_pid, config_dir=config_dir,
+            clock=lambda: marker.written_at,
+        )
+        if not reinstated:
+            log.warning(
+                "t1_handoff_marker_reinstate_superseded",
+                mcp_pid=mcp_pid,
+                stale_new_session_id=marker.new_session_id,
+            )
+        consume_claimed_marker(claimed_path)
+        return
+
+    # Stop refreshing the OLD lease BEFORE adopting the new identity, so
+    # the cancelled task can never race a re-mint against the swap below
+    # (mirrors the ordering `_t1_lifespan`'s own teardown already uses:
+    # cancel the refresh task before touching session state).
+    global _T1_SESSION_REFRESH_TASK
+    if _T1_SESSION_REFRESH_TASK is not None:
+        _T1_SESSION_REFRESH_TASK.cancel()
+        _T1_SESSION_REFRESH_TASK = None
+    _OWNED_T1_SESSION.clear()
+
+    from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
+
+    # nexus-d76vc fix-round CRITICAL (code-review-expert pass 1): a
+    # successful re-lease means THIS process now has a good, resolvable
+    # session id and a fresh token -- any pre-init hook (or brw1s
+    # deferred-mint state) registered by an EARLIER lifespan branch is
+    # now stale and must never fire again:
+    #   - a stale brw1s `_retry_deferred_t1_mint` hook (registered when
+    #     the storage service was unreachable at MCP startup, for the
+    #     OLD pre-handoff session) would re-mint/borrow for that OLD
+    #     session id on the very next `get_t1()` call and silently
+    #     overwrite NX_T1_SESSION_ID back to it -- reverting this
+    #     handoff with no error, the exact split-brain this bead exists
+    #     to close.
+    #   - a stale 4lkmz `_raise_t1_unavailable_this_process` hook
+    #     (registered when this process started with no resolvable
+    #     session id at all) would keep raising
+    #     `T1UnavailableThisProcessError` forever, even though the
+    #     handoff just supplied a perfectly good session.
+    # A successful re-lease can never itself warrant RE-registering a
+    # hook (it always leaves NX_T1_SESSION/NX_T1_SESSION_ID set to a
+    # freshly minted-or-borrowed, live pair), so clearing unconditionally
+    # is correct in every case, not just the two traced above -- there is
+    # nothing to assert beyond that unconditional clear.
+    #
+    # fix-round 2 (code-review-expert LOW, hardening): this clear now
+    # happens BEFORE the env-var swap below, not after. Neither `get_t1()`
+    # (mcp_infra.py) nor this tick holds `_t1_lock` across the WHOLE
+    # sequence — `get_t1()` only takes it around its own check-hook/
+    # construct step — so a concurrent OS-thread tool call landing in the
+    # gap between two of this function's statements can still observe a
+    # PARTIALLY-applied release. Clearing the hook first closes the
+    # specific window this review flagged (a concurrent get_t1() between
+    # the swap and the clear would have seen the NEW env vars but still
+    # run the STALE hook, which -- for the brw1s case -- reads and acts on
+    # the OLD `_DEFERRED_T1_MINT["session_id"]`, not the new env, so it
+    # would have reverted the swap moments after it happened). A narrower
+    # residual remains structurally (a concurrent get_t1() landing BEFORE
+    # this clear even starts still races it, since nothing here is
+    # lock-held end-to-end) — accepted as low severity per review: it
+    # requires a stale hook to still be registered AND a concurrent
+    # first-ever T1 touch to land in a sub-millisecond window, and the
+    # worst case is one extra failed/reverted call that self-heals on the
+    # very next touch once this clear completes, not a standing split-brain.
+    _DEFERRED_T1_MINT.clear()
+    mcp_infra.set_t1_pre_init_hook(None)
+
+    _os.environ["NX_T1_SESSION"] = token
+    _os.environ["NX_T1_SESSION_ID"] = new_session_id
+
+    # Freeze the NEW scope for subsequent T1 calls (MUST-HOLD 3): drop the
+    # cached singleton so the next `get_t1()` call reconstructs against the
+    # env vars just swapped above, then stays frozen there until the next
+    # consumed marker -- never a per-call re-resolve.
+    mcp_infra.reset_t1_for_release()
+
+    if minted_fresh:
+        _OWNED_T1_SESSION["session_id"] = new_session_id
+        ttl = mint_ttl if mint_ttl is not None else _T1_SESSION_DEFAULT_TTL_SECONDS
+        interval = max(
+            ttl * _T1_SESSION_REFRESH_FRACTION, _T1_SESSION_REFRESH_MIN_INTERVAL_S
+        )
+        _T1_SESSION_REFRESH_TASK = asyncio.create_task(
+            _t1_session_refresh_loop(new_session_id, interval)
+        )
+
+    consume_claimed_marker(claimed_path)
+    log.info(
+        "t1_handoff_released",
+        mcp_pid=mcp_pid,
+        old_session_id=old_session_id,
+        new_session_id=new_session_id,
+        minted_fresh=minted_fresh,
+    )
+
+
 def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
     """Return True if a TCP connection to ``(host, port)`` succeeds.
 
@@ -447,6 +850,17 @@ async def _t1_lifespan(_app: Any):
     import structlog as _structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _svc_log = _structlog.get_logger(__name__)
     _svc_log.info("t1_service_path_active", backend="service")
+
+    # nexus-d76vc: start the T1 handoff-marker watcher UNCONDITIONALLY,
+    # before the routing decision below picks a branch. A handoff can
+    # arrive at any point after this server starts -- including onto a
+    # process that started with USE_INHERITED/USE_LEASED (no mint, no
+    # refresh task of its own) or even the no-resolvable-session branch
+    # further down -- so the watcher's lifetime must not depend on which
+    # branch fires. See ``_t1_handoff_watch_loop``'s own docstring for the
+    # full re-lease protocol; cancelled at every exit point below
+    # (mirrors the multiple yield/return sites this lifespan already has).
+    _start_t1_handoff_watch_task()
 
     # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
     # are the SAME decision get_t1_database() makes for the bare-CLI/
@@ -537,6 +951,7 @@ async def _t1_lifespan(_app: Any):
             session_id=_os.environ.get("NX_T1_SESSION_ID", "").strip(),
         )
         yield
+        await _cancel_t1_handoff_watch_task()
         return
 
     if _decision.action == T1RoutingAction.USE_LEASED:
@@ -544,6 +959,7 @@ async def _t1_lifespan(_app: Any):
         _os.environ["NX_T1_SESSION_ID"] = _decision.session_id
         _svc_log.info("t1_session_leased_no_mint", session_id=_decision.session_id)
         yield
+        await _cancel_t1_handoff_watch_task()
         return
 
     # T1RoutingAction.MINT. Phase D (bead nexus-gmiaf.32.4): mint a
@@ -586,19 +1002,25 @@ async def _t1_lifespan(_app: Any):
         # session" — which would silently pull an unresolvable-session MCP process
         # into the SAME shared CLI-dedicated identity as every bare `nx scratch`
         # invocation, a session-isolation regression across a boundary this code
-        # explicitly treats as security-relevant. Force NX_T1_ISOLATED=1 instead:
-        # get_t1_database()'s explicit-isolation escape hatch wins over backend
-        # routing (nexus-h8rf6) and returns a private, non-shared, in-process
-        # ephemeral T1Database — strictly safer than either raising (breaks the
-        # MCP session outright) or silently sharing identity with unrelated bare-CLI
-        # callers.
+        # explicitly treats as security-relevant.
+        #
+        # nexus-4lkmz decision 2 (LOCKED 2026-08-07): the pre-fix remedy forced
+        # NX_T1_ISOLATED=1, redirecting into a private in-process T1Database.
+        # That leg is deleted outright (T1 is PG-only). The honest replacement:
+        # register a pre-init hook that FAILS LOUD, per call, with a named error
+        # ("T1 unavailable this process") — never a shared identity, never a
+        # silent private store. Mirrors the deferred-mint hook's "a T1-only
+        # failure costs T1 only" posture: the MCP server starts and serves
+        # every non-T1 tool normally; only T1-touching calls raise.
         _t1_session_id = ""
-        _os.environ["NX_T1_ISOLATED"] = "1"
+        from nexus import mcp_infra as _mcp_infra_unresolved  # noqa: PLC0415 — deferred to avoid import cycle at module load
+
+        _mcp_infra_unresolved.set_t1_pre_init_hook(_raise_t1_unavailable_this_process)
         _svc_log.warning(
             "t1_session_unresolved", reason="no_resolvable_session",
-            msg="no session id to mint; T1 scratch uses an inherited token if live, "
-            "else falls back to private in-process ephemeral scratch "
-            "(NX_T1_ISOLATED=1) rather than sharing the CLI-dedicated identity")
+            msg="no session id to mint; T1 scratch uses an inherited token if "
+            "live, else T1 is unavailable this process (fail-loud on first "
+            "use) — every other nexus tool is unaffected")
     else:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.db.t1 import _lock_guarded_mint_or_borrow  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -691,6 +1113,7 @@ async def _t1_lifespan(_app: Any):
                 "t1_session_leased_after_mint_race", session_id=_t1_session_id
             )
             yield
+            await _cancel_t1_handoff_watch_task()
             return
 
         else:
@@ -762,6 +1185,10 @@ async def _t1_lifespan(_app: Any):
         # no-resolvable-session branch) since the task is only created
         # in the mint branch above.
         await _cancel_t1_session_refresh_task()
+        # nexus-d76vc: cancel the handoff watcher too — started
+        # unconditionally right after the storage-backend validation
+        # above, regardless of which branch this lifespan took.
+        await _cancel_t1_handoff_watch_task()
         # Teardown: close the scratch rows (best-effort promptness;
         # backstopped by the service's 24h TTL sweep), then route the
         # session-token close + lease clear through the SAME idempotent
@@ -889,6 +1316,32 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
     _t1_shutdown()
     _os._exit(0)
 
+
+# nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[
+# LifespanResultT] BaseSettings) declares its `lifespan` field with a
+# forward reference to `FastMCP` that is unresolved at class-definition
+# time (`Settings` is defined earlier in the same module than `FastMCP`,
+# in mcp/server/fastmcp/server.py), and the SDK never calls
+# `model_rebuild()` itself. pydantic-settings 2.15.0 added
+# IncompleteFieldDefinitionWarning, which fires from this unresolved
+# reference every time a `Settings()` instance is constructed -- i.e.
+# every `FastMCP(...)` call, including the one directly below. Rebuilding
+# here, now that `FastMCP` is fully defined (its module finished importing
+# above), resolves the forward reference process-wide before our own
+# instantiation. No-op on pydantic-settings versions that predate the
+# warning class. Guarded (nexus-vc5yb/nexus-3hc9z): Settings is an
+# UNEXPORTED SDK internal under an unbounded mcp>=1.0,<2 pin — a future
+# SDK refactor must degrade this cosmetic fix to a logged warning, never
+# crash nx-mcp startup.
+if _FastMCPSettings is not None:
+    try:
+        _FastMCPSettings.model_rebuild()
+    except Exception as _rebuild_exc:  # noqa: BLE001 — boundary fallback: cosmetic-warning fix must never kill startup
+        structlog.get_logger(__name__).debug(
+            "fastmcp_settings_model_rebuild_failed", error=str(_rebuild_exc)
+        )
+else:  # pragma: no cover — future SDK restructure
+    structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 

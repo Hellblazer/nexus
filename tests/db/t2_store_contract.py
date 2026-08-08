@@ -297,6 +297,12 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # there is no oracle method for the parity contract to see. Landing it
         # without this entry left the tripwire red on develop.
         'get_link_drift': ['limit'],
+        # nexus-yu9w5 (lns3o client half): server-side compute-and-persist
+        # assignment from just-upserted chunk chashes. Service-only by
+        # construction — the whole point is that the ENGINE holds the
+        # embeddings and centroids, so no SQLite twin can exist; replaces the
+        # hook's client-side compute leg (deleted in the same change).
+        'assign_from_chashes': ['collection', 'chashes', 'cross_collection'],
     },
     'telemetry': {
         # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,

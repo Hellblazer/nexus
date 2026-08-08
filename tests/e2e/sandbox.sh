@@ -68,7 +68,21 @@ echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
     printf 'export CHROMA_API_KEY="%s"\n' "${CHROMA_API_KEY:-}"
     printf 'export CHROMA_TENANT="%s"\n' "${CHROMA_TENANT:-}"
     printf 'export CHROMA_DATABASE="%s"\n' "${CHROMA_DATABASE:-default_database}"
-    printf '%s\n' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT'
+    # CLAUDE_CODE_SESSION_ID / NX_SESSION_ID must go too (nexus-k0lk9,
+    # found at the 7.4.0 cut): an inherited session id flips the CLI's T1
+    # resolution from the bare-invocation CLI-dedicated mint (the
+    # virgin-user path this sandbox exists to test) into the
+    # explicit-id-fails-loud path (nexus-f7xyq), silently coupling the
+    # shakedown's step 8 to the INVOKING Claude session's lease freshness —
+    # green when the invoker's lease happened to be fresh, red otherwise.
+    # KNOWN TRADE-OFF (substantive-critic, 7.4.0): this is targeted-unset,
+    # the whack-a-mole shape fresh-install-mvv.sh already rejected in
+    # favor of `env -i` allowlisting (nexus-enfoh). This activate is
+    # SOURCED into interactive shells (the `shell`/`tmux` modes need the
+    # user's real environment), so env -i wholesale isn't available here;
+    # if a third leaked var ever bites, that is the signal to split the
+    # battery env (allowlisted) from the interactive env (targeted).
+    printf '%s\n' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID NX_SESSION_ID'
     printf '%s\n' 'echo "sandbox active — HOME=$HOME"'
     printf '%s\n' 'echo "deactivate: export HOME=$SANDBOX_ORIG_HOME"'
 } > "$SANDBOX/activate"

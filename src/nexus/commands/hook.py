@@ -13,12 +13,12 @@ from nexus import hooks
 _log = structlog.get_logger()
 
 
-def _read_stdin_session_id(stream: IO[str]) -> str | None:
-    """Read and parse a Claude-Code SessionStart JSON payload from *stream*.
+def _read_stdin_payload(stream: IO[str]) -> dict | None:
+    """Read and parse a Claude-Code hook JSON payload from *stream*.
 
-    Returns the ``session_id`` field or ``None`` when no usable payload
-    is available. Designed to be safe against the three problematic
-    inputs that produced nexus-rv2x:
+    Returns the parsed dict, or ``None`` when no usable payload is
+    available. Designed to be safe against the three problematic inputs
+    that produced nexus-rv2x:
 
     * **TTY stdin** (no piped input). Reading would block until EOF
       (Ctrl+D) or process death. Detected via ``isatty()`` and skipped
@@ -27,8 +27,11 @@ def _read_stdin_session_id(stream: IO[str]) -> str | None:
       ``json.loads`` raises; helper returns ``None``.
     * **Malformed JSON**. Same swallow-and-return-None as empty.
 
-    The Claude Code invocation path is unchanged: a pipe carrying a
-    valid JSON payload reads and returns the ``session_id`` as before.
+    nexus-d76vc: extracted from the former ``_read_stdin_session_id`` so
+    ``session_start_cmd`` can read stdin exactly ONCE and pull both
+    ``session_id`` and ``source`` (the field distinguishing
+    startup/resume/clear/compact/fork, needed for the T1 handoff marker)
+    out of the same parsed payload — a stream can only be read once.
     """
     try:
         if stream.isatty():
@@ -46,6 +49,21 @@ def _read_stdin_session_id(stream: IO[str]) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
+    return data
+
+
+def _read_stdin_session_id(stream: IO[str]) -> str | None:
+    """Return the ``session_id`` field from a Claude-Code SessionStart
+    JSON payload on *stream*, or ``None``.
+
+    Thin wrapper over :func:`_read_stdin_payload`; retained as its own
+    function (rather than inlined at the one call site) because it is
+    directly unit-tested (tests/test_hook_cli.py) against the exact
+    TTY/empty/malformed-input contract nexus-rv2x pinned.
+    """
+    data = _read_stdin_payload(stream)
+    if data is None:
+        return None
     sid = data.get("session_id")
     return sid if isinstance(sid, str) and sid else None
 
@@ -60,8 +78,18 @@ def session_start_cmd() -> None:
     """Run the SessionStart hook (called by Claude Code on session open)."""
     # nexus-rv2x: TTY-aware stdin parse. Skips read() on a TTY so
     # ``nx hook session-start`` invoked from a shell does not hang.
-    claude_session_id = _read_stdin_session_id(sys.stdin)
-    output = hooks.session_start(claude_session_id=claude_session_id)
+    # nexus-d76vc: read the payload ONCE and pull both session_id and
+    # source out of it (a stream can only be read once) — source drives
+    # the T1 handoff marker on clear/resume.
+    payload = _read_stdin_payload(sys.stdin)
+    claude_session_id: str | None = None
+    source: str | None = None
+    if payload is not None:
+        sid = payload.get("session_id")
+        claude_session_id = sid if isinstance(sid, str) and sid else None
+        src = payload.get("source")
+        source = src if isinstance(src, str) and src else None
+    output = hooks.session_start(claude_session_id=claude_session_id, source=source)
     click.echo(output)
 
 

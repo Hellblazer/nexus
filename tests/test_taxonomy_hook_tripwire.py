@@ -42,10 +42,11 @@ def _fire_service_path_failure(monkeypatch, captured: list) -> None:
     def _capture_write(fn):
         t2 = MagicMock()
         captured.append(t2)
-        # The service arm calls compute_assignments INSIDE the t2_index_write
-        # lambda, so raising there reaches the same handler the old local-path
-        # driver did. The tripwire's own persist then arrives as a later call.
-        t2.taxonomy.compute_assignments.side_effect = RuntimeError("service exploded")
+        # nexus-yu9w5: the service arm calls assign_from_chashes (the engine
+        # route) INSIDE the t2_index_write lambda, so raising there reaches
+        # the same handler the old compute_assignments driver did. The
+        # tripwire's own persist then arrives as a later call.
+        t2.taxonomy.assign_from_chashes.side_effect = RuntimeError("service exploded")
         fn(t2)
 
     monkeypatch.setattr(mcp_infra, "t2_index_write", _capture_write)

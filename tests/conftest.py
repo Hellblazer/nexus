@@ -675,21 +675,54 @@ def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force tests onto the explicit-isolation T1 path.
+def _isolate_t1_sessions(
+    monkeypatch: pytest.MonkeyPatch, _pin_t2_substrate: None
+) -> None:
+    """Give every test its own minted, PG-backed T1 session (nexus-4lkmz).
 
     RDR-105 P4 (nexus-jnx7) collapsed T1 discovery to a single
-    four-branch fail-loud gate. With no env vars and no addr file,
-    the constructor raises ``T1ServerNotFoundError``. Tests that
-    previously relied on the legacy EphemeralClient fallback opt
-    in via ``NX_T1_ISOLATED=1`` Path C; this autouse fixture sets
-    it process-wide so the suite gets the process-scoped
-    ``InMemoryVectorClient`` singleton by default (RDR-155 P4b
-    P0a; session_id metadata filtering provides per-test scoping).
-    Tests that need a different mode (env-passdown, addr file,
-    fail-loud raise) override the env inside the test.
+    fail-loud gate. Through RDR-155 P4b, tests that needed a working T1
+    without the real service opted in via ``NX_T1_ISOLATED=1`` (Path C),
+    which this autouse fixture set process-wide so the suite got the
+    process-scoped ``InMemoryVectorClient`` singleton by default.
+
+    nexus-4lkmz (Hal determination 2026-07-28: "T1 exists in PG only")
+    deletes that leg outright — setting ``NX_T1_ISOLATED`` now hard-fails
+    (:class:`nexus.db.t1.T1IsolatedLegRetiredError`). The migration this
+    fixture follows is the one the bead calls out explicitly: the
+    minted-session PG-backed path via the engine substrate, not a new
+    opt-out. It depends on ``_pin_t2_substrate`` (a real fixture
+    parameter, not merely declaration order, so pytest resolves it
+    FIRST regardless of textual position in this file) so the SAME
+    session-scoped hermetic PG + service JAR that already backs every
+    test's T2 storage also mints this test's T1 session — one HTTP round
+    trip via :func:`nexus.db.t1.mint_t1_session_token`, injected as
+    ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` so ``get_t1_database()``'s
+    ``USE_INHERITED`` tier picks it up directly (no lease lookup, no
+    CLI-dedicated mint).
+
+    ``NX_TEST_T2_SUBSTRATE=none`` (a test that declared it needs no T2
+    store at all — endpoint resolution, env scrubbing, T1's OWN
+    fail-loud/isolation-retirement paths) provisions nothing here either:
+    T1 rides the same substrate T2 does, so there is nothing to mint
+    against. Those tests set up whatever T1 env they need directly.
+
+    Tests that want a different T1 identity (a specific session id, an
+    inherited/leased token, a fail-loud raise) override the env inside
+    the test body — the same "later ``monkeypatch`` call on the same
+    fixture instance wins" contract documented on ``_isolate_config_dir``.
     """
-    monkeypatch.setenv("NX_T1_ISOLATED", "1")
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
+        return
+
+    from uuid import uuid4
+
+    from nexus.db.t1 import mint_t1_session_token
+
+    session_id = str(uuid4())
+    minted = mint_t1_session_token(session_id, context="test isolation mint")
+    monkeypatch.setenv("NX_T1_SESSION", minted["session_token"])
+    monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
 
 
 @pytest.fixture(autouse=True)

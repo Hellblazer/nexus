@@ -4,6 +4,25 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.4.0] - 2026-08-08
+
+### Activated by this pin advance (from PENDING_RELEASE.md)
+- **Push guard is repo-scoped** (nexus-vscgz, nexus-w3apo): the
+  push-to-main deny (nexus-vduer) and the review-coverage gate
+  (nexus-4av2n) now apply only in the nexus repo (origin URL basename
+  `nexus` OR the conexus plugin marker at toplevel — a true OR, so a nexus
+  checkout with a renamed origin keeps its guard) and no-op everywhere
+  else — the guard no longer blocks `git push origin master` in unrelated
+  repos. The wildcard-`git add` rule stays global. registry.yaml rationale
+  updated to match.
+- **expectations.sh**: owes-report lock budget env knob
+  (`NX_EXPECT_LOCK_TRIES`, base-10 coerced, 600-try clamp) with a stderr
+  warning on fail-open (nexus-4b8sz); `expectations_undeclared` exits 3
+  with a NOTE when the session has no ledger file instead of the
+  indistinguishable-from-clean rc=0 (nexus-ahl9v).
+- **orchestration SKILL.md** documents the `expectations_undeclared`
+  rc 0/1/2/3 contract (nexus-ahl9v).
+
 ## [7.3.0] - 2026-08-07
 
 ### Activated by this pin advance (nexus-4av2n — the stacked-reviewer gate goes mechanical)

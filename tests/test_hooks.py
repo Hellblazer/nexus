@@ -108,6 +108,128 @@ def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> No
     assert "fresh-uuid" in output
 
 
+# ── T1 handoff marker writer (nexus-d76vc) ───────────────────────────────────
+#
+# On source=clear/resume, session_start() writes a T1 handoff marker for
+# every live nx-mcp/nx-mcp-catalog sibling of the hook's own claude
+# ancestor, so the MCP lifespan's watcher (nexus.mcp.core) can re-lease
+# onto the new session id. startup/compact write nothing. Ancestry
+# authentication happens via find_mcp_sibling_pids (unit-tested directly
+# in tests/test_t1_discovery.py); these tests pin session_start's own
+# source-gating and confirm it writes real, correctly-keyed marker files.
+
+
+class TestT1HandoffMarkerWriter:
+    def _session_start(self, monkeypatch, tmp_path, *, source, claude_pid=4242,
+                        sibling_pids=(5001, 5002)):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=list(sibling_pids)) as mock_siblings,
+        ):
+            output = session_start(claude_session_id="new-sess-id", source=source)
+        return output, mock_siblings
+
+    def test_clear_writes_markers_for_every_sibling(self, tmp_path, monkeypatch) -> None:
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        self._session_start(monkeypatch, tmp_path, source="clear")
+        for pid in (5001, 5002):
+            marker = read_handoff_marker(pid, tmp_path)
+            assert marker is not None
+            assert marker.new_session_id == "new-sess-id"
+            assert marker.claude_pid == 4242
+
+    def test_resume_writes_markers_for_every_sibling(self, tmp_path, monkeypatch) -> None:
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        self._session_start(monkeypatch, tmp_path, source="resume")
+        for pid in (5001, 5002):
+            marker = read_handoff_marker(pid, tmp_path)
+            assert marker is not None
+            assert marker.new_session_id == "new-sess-id"
+
+    def test_startup_writes_no_marker(self, tmp_path, monkeypatch) -> None:
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        _, mock_siblings = self._session_start(monkeypatch, tmp_path, source="startup")
+        mock_siblings.assert_not_called()
+        for pid in (5001, 5002):
+            assert read_handoff_marker(pid, tmp_path) is None
+
+    def test_compact_writes_no_marker(self, tmp_path, monkeypatch) -> None:
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        _, mock_siblings = self._session_start(monkeypatch, tmp_path, source="compact")
+        mock_siblings.assert_not_called()
+        for pid in (5001, 5002):
+            assert read_handoff_marker(pid, tmp_path) is None
+
+    def test_no_source_writes_no_marker(self, tmp_path, monkeypatch) -> None:
+        """Bare ``nx hook session-start`` invocation (no stdin payload /
+        no source) must not write handoff markers."""
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        _, mock_siblings = self._session_start(monkeypatch, tmp_path, source=None)
+        mock_siblings.assert_not_called()
+        assert read_handoff_marker(5001, tmp_path) is None
+
+    def test_unresolvable_claude_pid_writes_no_marker(self, tmp_path, monkeypatch) -> None:
+        """find_immediate_claude_pid() falling back to 0 (no ancestry at
+        all) must not write anything -- there is no verified ancestor to
+        key the marker to."""
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=0),
+            patch("nexus.session.find_mcp_sibling_pids") as mock_siblings,
+        ):
+            session_start(claude_session_id="new-sess-id", source="clear")
+        mock_siblings.assert_not_called()
+        assert read_handoff_marker(5001, tmp_path) is None
+
+    def test_foreign_pid_never_gets_a_marker(self, tmp_path, monkeypatch) -> None:
+        """find_mcp_sibling_pids is the sole ancestry gate: a pid it does
+        NOT return (a different session's MCP server) never gets a
+        marker written for it, even though it may share a config dir."""
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        self._session_start(
+            monkeypatch, tmp_path, source="clear", sibling_pids=(5001,),
+        )
+        # 5001 (returned) got a marker; 9999 (a foreign/different-session
+        # pid, never returned by find_mcp_sibling_pids) got none.
+        assert read_handoff_marker(5001, tmp_path) is not None
+        assert read_handoff_marker(9999, tmp_path) is None
+
+    def test_no_siblings_found_writes_nothing_and_does_not_raise(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        output, _ = self._session_start(
+            monkeypatch, tmp_path, source="clear", sibling_pids=(),
+        )
+        assert "Nexus ready" in output
+
+    def test_marker_write_failure_does_not_crash_session_start(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A SessionStart hook must never fail the session over a T1-scope
+        convenience feature (best-effort, logged at debug)."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", side_effect=RuntimeError("boom")),
+        ):
+            output = session_start(claude_session_id="new-sess-id", source="clear")
+        assert "Nexus ready" in output
+
+
 # ── session_end ──────────────────────────────────────────────────────────────
 
 

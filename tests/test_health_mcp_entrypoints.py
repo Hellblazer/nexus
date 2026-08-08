@@ -226,6 +226,125 @@ class TestResolveMcpBinary:
         assert path == str(installed_dir / "nx-mcp")
         assert is_own_venv is False
 
+    def test_home_scoping_prefers_own_venv_over_foreign_home_install(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """nexus-k0lk9 sibling (7.4.0 cut): the release sandbox
+        (HOME=~/nexus-sandbox) ran doctor from the sandbox tool venv; the
+        resolver skipped it as own-prefix and probed the REAL home's live
+        install — the gate then tracked host health, not the artifact
+        under test. A hit OUTSIDE the current $HOME, when our own prefix
+        is home-rooted, is FOREIGN and must lose to the own-prefix hit."""
+        home = tmp_path / "sandbox-home"
+        own_venv_dir = home / "tool-venv-bin"
+        own_venv_dir.mkdir(parents=True)
+        foreign_dir = tmp_path / "real-home" / ".local" / "bin"
+        foreign_dir.mkdir(parents=True)
+        _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        _write_fake_binary(foreign_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        # Foreign (host) install listed FIRST — the exact sandbox shape:
+        # sandbox bin, then the inherited host PATH tail.
+        monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{foreign_dir}")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+
+        path, is_own_venv = _resolve_mcp_binary("nx-mcp")
+
+        assert path == str(own_venv_dir / "nx-mcp")
+        assert is_own_venv is True
+
+    def test_home_scoping_keeps_l2ku5_preference_inside_home(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Dev-box shape unchanged: checkout venv AND ~/.local/bin both
+        under $HOME — the separately installed tool still wins."""
+        home = tmp_path / "home"
+        own_venv_dir = home / "git" / "nexus" / ".venv" / "bin"
+        own_venv_dir.mkdir(parents=True)
+        installed_dir = home / ".local" / "bin"
+        installed_dir.mkdir(parents=True)
+        _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        _write_fake_binary(installed_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{installed_dir}")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+
+        path, is_own_venv = _resolve_mcp_binary("nx-mcp")
+
+        assert path == str(installed_dir / "nx-mcp")
+        assert is_own_venv is False
+
+    def test_home_scoping_survives_homeless_environment(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """nexus-262a7 (critic Critical): Path.home() raises RuntimeError —
+        not OSError — when HOME is unset with no passwd entry (K8s
+        arbitrary-UID / distroless). The resolver must degrade to the
+        pre-existing l2ku5 preference, never crash `nx doctor`."""
+        own_venv_dir = tmp_path / "own-venv-bin"
+        own_venv_dir.mkdir()
+        installed_dir = tmp_path / "installed-bin"
+        installed_dir.mkdir()
+        _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        _write_fake_binary(installed_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{installed_dir}")
+        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        monkeypatch.setattr(
+            "nexus.health.Path.home",
+            classmethod(lambda cls: (_ for _ in ()).throw(
+                RuntimeError("Could not determine home directory.")
+            )),
+        )
+
+        path, is_own_venv = _resolve_mcp_binary("nx-mcp")
+
+        assert path == str(installed_dir / "nx-mcp")
+        assert is_own_venv is False
+
+    def test_home_scoping_tradeoff_outside_home_install_loses_to_own_venv(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Pins the ACCEPTED trade-off (see _resolve_mcp_binary docstring):
+        home-rooted own prefix + real install ONLY outside $HOME (the
+        /usr/local shape) → the own venv is probed, honestly labeled.
+        Changing this behavior must be a deliberate decision, not drift."""
+        home = tmp_path / "home"
+        own_venv_dir = home / "checkout" / ".venv" / "bin"
+        own_venv_dir.mkdir(parents=True)
+        system_dir = tmp_path / "usr-local-bin"
+        system_dir.mkdir()
+        _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        _write_fake_binary(system_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{system_dir}")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+
+        path, is_own_venv = _resolve_mcp_binary("nx-mcp")
+
+        assert path == str(own_venv_dir / "nx-mcp")
+        assert is_own_venv is True
+
+    def test_home_scoping_foreign_hit_is_last_resort_not_dropped(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A real binary is always probed, never skipped: when the ONLY
+        PATH hit is foreign (own prefix home-rooted, no own hit on PATH),
+        the foreign hit is still returned rather than None."""
+        home = tmp_path / "home"
+        own_prefix = home / "tool-venv"
+        own_prefix.mkdir(parents=True)
+        foreign_dir = tmp_path / "elsewhere" / "bin"
+        foreign_dir.mkdir(parents=True)
+        _write_fake_binary(foreign_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        monkeypatch.setenv("PATH", str(foreign_dir))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr("nexus.health.sys.prefix", str(own_prefix))
+
+        path, is_own_venv = _resolve_mcp_binary("nx-mcp")
+
+        assert path == str(foreign_dir / "nx-mcp")
+        assert is_own_venv is False
+
     def test_falls_back_to_own_prefix_when_it_is_the_only_hit(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -298,6 +417,12 @@ class TestDoctorCliMcpEntryPointComposition:
         monkeypatch.setenv(
             "PATH", f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"
         )
+        # HOME-scoping (nexus-k0lk9 sibling): with the real HOME, tmp_path
+        # reads as a FOREIGN install and the resolver would walk past the
+        # crashing fake to the host's real ~/.local/bin nx-mcp — coupling
+        # this test to the host install's health. Root the fixture's HOME
+        # at tmp_path so the fake is the legitimate under-home hit.
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         mock_reg = MagicMock()
         mock_reg.all.return_value = []

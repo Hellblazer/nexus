@@ -13,8 +13,8 @@ This is the stop-the-bleeding gate. RDR-149 was created because the same lifecyc
 Concretely, when you touch lifecycle behaviour (how an owner is published, discovered, reaped, fenced, restarted, self-healed, or version-cycled):
 
 1. The change goes in `service_registry.py` (`ServiceRegistry` / `ServiceSupervisor`) — **not** in a single tier's daemon/consumer. (The shared-helper module `discovery.py` was the other home for this; it is deleted.)
-2. Add or extend a property in the conformance suite's `EXPECTATIONS` matrix so the new behaviour is asserted for **every** tier in its `TIERS` tuple — currently `t1`, `storage_service`, `aspect_worker` — not just the one you were debugging. **Read `TIERS` rather than trusting this list**; `t2` was removed in sub-stage B and `t3` at nexus-pmag3 (phantom tier after RDR-155 P4b), and a stale cell is rejected by the matrix's own non-vacuity meta-test. A tier that legitimately cannot satisfy a property records a documented `GAP`/`SPEC` cell with a reason, never a silent omission.
-3. If a property is genuinely tier-specific (e.g. T1's transient-key → session-id re-key, CA-3), it still lives in the conformance file alongside the shared battery, with a non-vacuity meta-test guarding it.
+2. Add or extend a property in the conformance suite's `EXPECTATIONS` matrix so the new behaviour is asserted for **every** tier in its `TIERS` tuple — currently `storage_service`, `aspect_worker` — not just the one you were debugging. **Read `TIERS` rather than trusting this list**; `t2` was removed in sub-stage B, `t3` at nexus-pmag3 (phantom tier after RDR-155 P4b), and `t1` at nexus-8zfwv (phantom tier after `T1LeasePublisher`'s retirement, 2026-08-07 — see below), and a stale cell is rejected by the matrix's own non-vacuity meta-test. A tier that legitimately cannot satisfy a property records a documented `GAP`/`SPEC` cell with a reason, never a silent omission.
+3. If a property is genuinely tier-specific, it still lives in the conformance file alongside the shared battery, with a non-vacuity meta-test guarding it. (T1's transient-key → session-id re-key, CA-3, used to be the example here — it was `T1LeasePublisher`-only behavior; the publisher retired first at nexus-yfh5x, then the read-path + module it left behind retired fully at nexus-8zfwv; no surviving tier re-keys a scope in-place.)
 
 A reviewer seeing a lifecycle change that edits one tier's file without a corresponding `service_registry.py` + conformance change should treat it as a defect: it is the exact pattern that produced the recurring bug class.
 
@@ -23,7 +23,6 @@ A reviewer seeing a lifecycle change that edits one tier's file without a corres
 | File | Purpose |
 |---|---|
 | `service_registry.py` | **The primitive.** `LeaseRecord`, `ServiceRegistry` (publish / heartbeat / discover / mark_shutting_down / relinquish, per-scope election flock, generation fencing), `ServiceSupervisor` (heartbeat cadence + version-skew cycle), `mint_owner_token`. Tier-parameterized by `tier=` + per-call `scope_key`, and **directory-scoped first**: leases live at `<dir>/<tier>_addr.<scope_key>` where `dir=nexus_config_dir()` — a `NEXUS_CONFIG_DIR` sandbox gets an independent lease from `~/.config/nexus` for the same uid (the nexus-tmsnz confusion). |
-| `t1_lease.py` | T1 consumer. `T1LeasePublisher` (MCP-lifespan-owned, NOT a supervised daemon) + `discover_t1_lease`. Publishes under a transient `server_pid` key and re-keys to the session-id (RF-2 / CA-3). `scope_key` is the session-id; directory-scoped per the primitive above. |
 | `storage_service_daemon.py` | Storage-service supervisor. Consumes `ServiceRegistry(tier="storage_service")`; supervises the native engine binary + Postgres. `scope_key=str(os.getuid())`; directory-scoped per the primitive above. |
 | `aspect_worker_daemon.py` | Aspect-worker consumer. Leased, per-tenant host for the aspect queue. |
 | `binary_install.py` / `binary_lifecycle.py` | Engine-binary download, pin verification, and version-cycle wiring. |
@@ -36,7 +35,14 @@ and `t3_daemon.py`, `t3_client.py` (RDR-155 P4b). `discovery.py`'s helpers had n
 consumer once the T3 arm went; the module died whole rather than being folded into the
 primitive. `CATALOG_WRITE_OPS` is still load-bearing (`catalog/factory.py`,
 `catalog/catalog_protocol.py`) but relocated there directly (commit `004fafa4`) — it does
-not live in this package (nexus-2tdkx).
+not live in this package (nexus-2tdkx). `t1_lease.py` (`T1LeasePublisher` + `discover_t1_lease`
+/ `discover_t1_by_claude_ancestor`) is the latest addition to this list (nexus-8zfwv,
+2026-08-07): both zero-caller `service_registry.sweep_dead_t1_holders` /
+`sweep_dead_t1_elect_locks` went with it. T1's live cross-process "session has a live T1
+scope" signal moved off this primitive entirely, to a flat lease file
+(`nexus.db.t1.publish_t1_session_lease`, `t1_session_lease.<session_id>`) with no
+election flock, no re-key protocol, and no `ServiceRegistry` involvement — T1 is no
+longer one of this module's tiers.
 
 ## The two flocks (do NOT conflate) — HISTORICAL as of sub-stage B
 

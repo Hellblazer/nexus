@@ -653,4 +653,41 @@ public final class TokenStore {
                  tenant, sessionId, deleted);
         return deleted;
     }
+
+    /**
+     * Delete every {@code session_tokens} row for {@code tenant} whose {@code
+     * expires_at} is already in the past (nexus-t23zk). {@link #closeSession}
+     * alone leaves a permanent row behind whenever a minting process dies without
+     * calling it (crashed MCP, killed dispatch, machine reboot) — auth checks
+     * {@code expires_at} live (see class javadoc), so an expired-but-unclosed
+     * token is inert (no security exposure), but nothing else ever deletes the
+     * row. This is the backstop: called from {@link
+     * dev.nexus.service.NexusService}'s existing {@code t1-ttl-sweep} thread, in
+     * the SAME per-tenant loop as {@link ScratchRepository#sweepTenant} — one
+     * extra query on an existing schedule, not a new thread.
+     *
+     * <p>{@code session_tokens} carries no RLS (class javadoc: "Phase A leaves
+     * these tables un-RLS'd"), so the {@code tenant_id} predicate here is
+     * defense-in-depth scoping, not a GUC-stamped requirement — mirrors {@link
+     * #closeSession}'s existing tenant-scoped shape rather than a single
+     * unscoped sweep across every tenant at once, so a per-tenant sweep failure
+     * (logged, not thrown, by the caller) never masks another tenant's rows.
+     *
+     * @param tenant the tenant to sweep (blank/null is a no-op, returns 0)
+     * @param now    the sweep's reference instant — a row is swept when its
+     *               {@code expires_at} is strictly before this
+     * @return number of rows deleted (0 when none had expired)
+     */
+    public int sweepExpiredSessions(String tenant, Instant now) {
+        if (tenant == null || tenant.isBlank()) {
+            return 0;
+        }
+        OffsetDateTime cutoff = OffsetDateTime.ofInstant(now, ZoneOffset.UTC);
+        int deleted = dsl().deleteFrom(SESSION_TOKENS)
+            .where(SESSION_TOKENS.TENANT_ID.eq(tenant))
+            .and(SESSION_TOKENS.EXPIRES_AT.lt(cutoff))
+            .execute();
+        log.info("event=session_token_sweep tenant={} cutoff={} deleted={}", tenant, cutoff, deleted);
+        return deleted;
+    }
 }

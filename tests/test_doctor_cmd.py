@@ -790,22 +790,21 @@ class TestCheckQuotas:
 
 
 class TestCheckT1:
-    """Diagnostic: T1 session-id lease presence + reachability (RDR-149 P4)."""
+    """Diagnostic: T1 session lease presence + freshness.
+
+    Ported (nexus-8zfwv, 2026-08-07) off the RDR-149 P4 ``t1_addr.*``
+    ``ServiceRegistry`` lease -- ``T1LeasePublisher``, the only thing that
+    ever published that format, is retired (deleted at ff744321). The
+    fixture below publishes via the REAL ``nexus.db.t1.publish_t1_session_lease``
+    (never a hand-built filename), so these tests exercise the SAME file
+    ``_run_check_t1`` reads.
+    """
 
     @staticmethod
-    def _publish_lease(config_dir, session_id, host, port):
-        from nexus.daemon.service_registry import ServiceRegistry
-        from nexus.daemon.t1_lease import T1LeasePublisher
+    def _publish_lease(config_dir, session_id, *, ttl_seconds):
+        from nexus.db.t1 import publish_t1_session_lease
 
-        registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
-        T1LeasePublisher(
-            registry=registry,
-            server_pid=4242,
-            host=host,
-            port=port,
-            version="1.0.0",
-            session_resolver=lambda: session_id,
-        ).publish()
+        publish_t1_session_lease(session_id, "tok", Path(config_dir), ttl_seconds=ttl_seconds)
 
     def test_no_session_id_is_informational(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
@@ -816,37 +815,34 @@ class TestCheckT1:
         assert result.exit_code == 0, result.output
         assert "no session-id resolves" in result.output.lower()
 
-    def test_lease_missing_under_resolved_session(
+    def test_no_lease_file_under_resolved_session_is_informational(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
+        """A resolved session with NO lease file is not a failure -- a bare
+        CLI invocation legitimately has no lease of its own (the MCP
+        lifespan mints one; the CLI uses its own dedicated scope)."""
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
         result = runner.invoke(main, ["doctor", "--check-t1"])
-        assert result.exit_code == 1, result.output
-        assert "no live lease" in result.output
+        assert result.exit_code == 0, result.output
+        assert "no lease at" in result.output
 
-    def test_lease_present_but_unreachable(
+    def test_lease_present_but_expired_fails(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
-        from unittest.mock import patch
-
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
-        self._publish_lease(tmp_path, "sess-A", "127.0.0.1", 1)
-        with patch("nexus.mcp.core._tcp_probe_alive", return_value=False):
-            result = runner.invoke(main, ["doctor", "--check-t1"])
+        self._publish_lease(tmp_path, "sess-A", ttl_seconds=-1.0)
+        result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 1, result.output
-        assert "TCP probe failed" in result.output
+        assert "expired or unreadable" in result.output
 
     def test_healthy(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
-        from unittest.mock import patch
-
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
-        self._publish_lease(tmp_path, "sess-A", "127.0.0.1", 12345)
-        with patch("nexus.mcp.core._tcp_probe_alive", return_value=True):
-            result = runner.invoke(main, ["doctor", "--check-t1"])
+        self._publish_lease(tmp_path, "sess-A", ttl_seconds=3600.0)
+        result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
-        assert "chroma reachable" in result.output
+        assert "is fresh" in result.output

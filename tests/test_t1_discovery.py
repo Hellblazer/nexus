@@ -29,26 +29,22 @@ from unittest.mock import patch
 import pytest
 
 
-def _discover_t1_endpoint(config_dir, scope_key) -> tuple[str, int] | None:
-    """RDR-149 P4 test helper: read the live T1 lease for ``scope_key``
-    (a session-id or a transient server_pid) and return ``(host, port)``.
-
-    Replaces the legacy ``read_t1_addr_for(claude_pid)`` probe now that T1
-    rides the leased registry instead of the ``host:port`` addr file.
-    """
-    from nexus.daemon.service_registry import ServiceRegistry
-
-    registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
-    record = registry.discover(str(scope_key))
-    if record is None:
-        return None
-    host = record.endpoint.get("host")
-    port = record.endpoint.get("port")
-    if host is None or port is None:
-        return None
-    return host, port
-
-
+# NO _discover_t1_endpoint (nexus-8zfwv, 2026-08-07): drove
+# ``ServiceRegistry(tier="t1")``, the ``t1_addr.*`` lease format nothing
+# publishes any more (T1LeasePublisher retired, deleted at ff744321) --
+# and had zero callers even on develop tip (confirmed by grep against
+# MERGE_HEAD). T1Database's own discovery gate never had an "addr file"
+# leg reading this format either way (RDR-155 P4b already cut
+# ``_init_new_discovery`` down before nexus-4lkmz narrowed it further --
+# see ``nexus.db.t1.T1Database``), so this helper was exercising nothing.
+#
+# ``_publish_t1_session_lease`` below SURVIVES the same audit: unlike its
+# sibling it has a real caller,
+# ``TestT1DatabaseIsolatedLegRetired.test_isolated_hard_fails_even_with_a_live_session_lease``,
+# which needs a genuinely live alternate discovery signal to prove
+# isolation still outranks it (nexus-4lkmz). It already routes through
+# ``ServiceRegistry.publish`` directly rather than the deleted
+# ``T1LeasePublisher`` wrapper (nexus-yfh5x).
 def _publish_t1_session_lease(
     config_dir, session_id, host, port, *, server_pid=4242, claude_pid=None
 ):
@@ -56,22 +52,26 @@ def _publish_t1_session_lease(
     session-keyed; with ``session_id=None`` it is a transient record.
     ``claude_pid`` is stamped into the payload of EITHER kind (nexus-gff3g) for
     the ancestor-pid fallback, which serves both the cold-start window and the
-    common session-id-divergence case (NX_SESSION_ID != current_session)."""
-    from nexus.daemon.service_registry import ServiceRegistry
-    from nexus.daemon.t1_lease import T1LeasePublisher
+    common session-id-divergence case (NX_SESSION_ID != current_session).
+
+    nexus-yfh5x: publishes through ``ServiceRegistry.publish`` directly --
+    the same call the now-deleted ``T1LeasePublisher.publish`` used to make
+    internally -- since that wrapper was retired as dead production code
+    (never constructed outside its own test suite)."""
+    from nexus.daemon.service_registry import ServiceRegistry, mint_owner_token
 
     registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
-    publisher = T1LeasePublisher(
-        registry=registry,
-        server_pid=server_pid,
-        host=host,
-        port=port,
+    scope_key = session_id or str(server_pid)
+    payload = {"session_id": session_id, "server_pid": server_pid}
+    if claude_pid is not None:
+        payload["claude_pid"] = claude_pid
+    return registry.publish(
+        scope_key,
+        endpoint={"host": host, "port": port, "server_pid": server_pid},
         version="1.0.0",
-        session_resolver=lambda: session_id,
-        claude_pid=claude_pid,
+        owner_token=mint_owner_token(),
+        payload=payload,
     )
-    publisher.publish()
-    return publisher
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,96 +172,92 @@ class TestFindImmediateClaudePid:
             assert find_immediate_claude_pid(start_pid=500) == 600
 
 
-class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
-    """Flag-off: legacy resolver chain runs unchanged."""
-
-    def test_isolated_env_uses_ephemeral_before_discovery(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
-
-        fake_chromadb = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
-
-        monkeypatch.setenv("NX_T1_ISOLATED", "1")
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-
-        from nexus.db.t1 import T1Database
-        db = T1Database()
-        assert db.session_id  # constructor succeeded
+# ─────────────────────────────────────────────────────────────────────────────
+# find_mcp_sibling_pids (nexus-d76vc: T1 handoff marker ancestry check)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestT1DatabaseFlagOnIsolationPath:
-    """Path C (RDR-105 P2 / nexus-mj2o): explicit ``NX_T1_ISOLATED=1``
-    opts into the process-scoped ``InMemoryVectorClient`` (RDR-155 P4b
-    P0a — previously a per-process ``EphemeralClient``). No HTTP
-    discovery attempted. (The legacy ``NEXUS_SKIP_T1`` alias was removed
-    at 6.5.2.)
+class TestFindMcpSiblingPids:
+    """The writer-side ancestry check: only nx-mcp/nx-mcp-catalog pids
+    whose IMMEDIATE parent is the given claude_pid are ever returned.
     """
 
-    def test_nx_t1_isolated_uses_inmemory_store(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
+    def test_returns_mcp_and_catalog_children_of_claude_pid(self):
+        from nexus.session import find_mcp_sibling_pids
 
-        fake_chromadb = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "nx-mcp"),
+            (1301, 1200, "nx-mcp-catalog"),
+            (1302, 1200, "bash"),  # unrelated sibling: not an mcp command
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            result = find_mcp_sibling_pids(1200)
+        assert sorted(result) == [1300, 1301]
 
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NX_T1_HOST", raising=False)
-        monkeypatch.delenv("NX_T1_PORT", raising=False)
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+    def test_excludes_pids_under_a_different_claude_pid(self):
+        """Two DISTINCT claude sessions: a marker for one must never be
+        computed as reachable from the other's claude_pid (MUST-HOLD
+        rn3wo.1 -- a concurrent session's hook must not be able to
+        re-point another session's MCP server)."""
+        from nexus.session import find_mcp_sibling_pids
 
-        from nexus.db.inmemory_vector_store import InMemoryVectorClient
-        from nexus.db.t1 import T1Database
-        db = T1Database()
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "nx-mcp"),
+            (2200, 1, "claude"),  # a DIFFERENT top-level claude process
+            (2300, 2200, "nx-mcp"),  # that session's OWN mcp server
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            result_for_1200 = find_mcp_sibling_pids(1200)
+            result_for_2200 = find_mcp_sibling_pids(2200)
+        assert result_for_1200 == [1300]
+        assert result_for_2200 == [2300]
+        # Foreign pid never leaks across:
+        assert 2300 not in result_for_1200
+        assert 1300 not in result_for_2200
 
-        fake_chromadb.HttpClient.assert_not_called()
-        fake_chromadb.EphemeralClient.assert_not_called()
-        assert isinstance(db._client, InMemoryVectorClient)
-        assert db.session_id
+    def test_no_siblings_returns_empty_list(self):
+        from nexus.session import find_mcp_sibling_pids
 
-    def test_isolated_leg_shares_one_client_per_process(self, tmp_path, monkeypatch):
-        """Chroma-parity contract (RDR-155 P4b P0a): the legacy
-        EphemeralClient leg shared backing state per process (the
-        SharedSystemClient settings-hash cache), and the scratch CLI
-        journey (put in one invocation, flag/unflag in the next, same
-        process) depends on it. Two constructions must see one store."""
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+        table = [(1200, 1, "claude"), (1300, 1200, "bash")]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == []
 
-        from nexus.db.t1 import T1Database
-        db1 = T1Database()
-        db2 = T1Database()
-        assert db1._client is db2._client
+    def test_nonpositive_claude_pid_returns_empty_without_scanning(self):
+        from nexus.session import find_mcp_sibling_pids
 
-    def test_legacy_nexus_skip_t1_alias_removed(
-        self, tmp_path, monkeypatch
-    ):
-        """The RF-4 alias was removed at 6.5.2 (promised gone in 5.0):
-        ``NEXUS_SKIP_T1=1`` alone no longer selects the ephemeral path —
-        with no other discovery signal the constructor fails loud."""
-        from unittest.mock import MagicMock
+        with patch("nexus.session._list_processes") as mock_list:
+            assert find_mcp_sibling_pids(0) == []
+            assert find_mcp_sibling_pids(-1) == []
+        mock_list.assert_not_called()
 
-        fake_chromadb = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+    def test_process_enumeration_failure_returns_empty_list(self):
+        """``_list_processes`` already fails safe (returns []) on any OS
+        error -- this pins that find_mcp_sibling_pids propagates that
+        fail-safe rather than raising."""
+        from nexus.session import find_mcp_sibling_pids
 
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NX_T1_HOST", raising=False)
-        monkeypatch.delenv("NX_T1_PORT", raising=False)
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        with patch("nexus.session._list_processes", return_value=[]):
+            assert find_mcp_sibling_pids(1200) == []
 
-        from nexus.db.t1 import T1Database, T1ServerNotFoundError
-        with pytest.raises(T1ServerNotFoundError):
-            T1Database()
+    def test_matches_full_path_comm_by_basename(self):
+        """``ps -o comm=`` can report a full path on some platforms; match
+        on the basename the same way ``find_immediate_claude_pid`` does."""
+        from nexus.session import find_mcp_sibling_pids
 
-        fake_chromadb.EphemeralClient.assert_not_called()
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "/Users/x/.local/bin/nx-mcp"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == [1300]
 
 
 class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
-    """Path D (RDR-105 P2 / nexus-mj2o): no env, no addr file, no
-    isolation flag -> raise ``T1ServerNotFoundError``. Replaces P1's
-    legacy fall-through.
+    """Path D (RDR-105 P2 / nexus-mj2o, narrowed further at nexus-4lkmz):
+    no env, no addr file, no client injection -> raise
+    ``T1ServerNotFoundError``. Replaces P1's legacy fall-through.
     """
 
     def test_raises_when_no_source_available(self, tmp_path, monkeypatch):
@@ -273,7 +269,6 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         # No session-id resolves, so the session-id lease path (Path B) is
         # skipped and the constructor fails loud (RDR-149 P4).
@@ -301,96 +296,90 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         with pytest.raises(T1ServerNotFoundError):
             T1Database()
 
-
-class TestT1DatabaseIsolatedOverridesDiscovery:
-    """nexus-svpq / GH #593: ``NX_T1_ISOLATED=1`` is an explicit operator
-    opt-in and must outrank both env-pair (Path A) and addr-file (Path B)
-    auto-discovery. Pre-fix, Path C only fired when Paths A and B both
-    missed, so an operator setting the flag from inside a Claude session
-    silently wrote into the live MCP-owned T1 instead of a sealed
-    in-process store.
-    """
-
-    def test_isolated_wins_over_env_pair(self, tmp_path, monkeypatch):
+    def test_legacy_nexus_skip_t1_alias_removed(self, tmp_path, monkeypatch):
+        """The RF-4 alias was removed at 6.5.2 (promised gone in 5.0):
+        ``NEXUS_SKIP_T1=1`` alone no longer selects any path — with no
+        other discovery signal the constructor fails loud."""
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()
-        fake_chromadb.HttpClient.return_value = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        with pytest.raises(T1ServerNotFoundError):
+            T1Database()
+
+        fake_chromadb.EphemeralClient.assert_not_called()
+
+
+class TestT1DatabaseIsolatedLegRetired:
+    """nexus-4lkmz (Hal determination 2026-07-28): the isolated
+    in-process leg (``NX_T1_ISOLATED=1`` -> ``InMemoryVectorClient``,
+    formerly Path C) is deleted outright — T1 is PG-only, no opt-out.
+    Setting the retired var now hard-fails with a named error instead of
+    constructing an in-process store, but the CHECKED-FIRST position
+    nexus-svpq / GH #593 established survives: it still outranks every
+    other discovery signal, including ones that would otherwise succeed.
+    """
+
+    def test_isolated_hard_fails_with_no_other_signal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+
+        from nexus.db.t1 import T1Database, T1IsolatedLegRetiredError
+        with pytest.raises(T1IsolatedLegRetiredError, match="NX_T1_ISOLATED"):
+            T1Database()
+
+    def test_isolated_hard_fails_even_when_env_pair_present(self, tmp_path, monkeypatch):
+        """Isolation is checked FIRST — it must still raise even when a
+        (now-inert, chroma-era) env pair is present, never silently
+        resolve some OTHER path instead."""
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "1111")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        from nexus.db.inmemory_vector_store import InMemoryVectorClient
-        from nexus.db.t1 import T1Database
-        db = T1Database()
+        from nexus.db.t1 import T1Database, T1IsolatedLegRetiredError
+        with pytest.raises(T1IsolatedLegRetiredError):
+            T1Database()
 
-        assert isinstance(db._client, InMemoryVectorClient)
-        fake_chromadb.HttpClient.assert_not_called()
-
-    def test_isolated_wins_over_addr_file(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
-
-        fake_chromadb = MagicMock()
-        fake_chromadb.HttpClient.return_value = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
-
+    def test_isolated_hard_fails_even_with_a_live_session_lease(self, tmp_path, monkeypatch):
+        """Isolation is checked FIRST — it must still raise even when a
+        published session-id lease exists that ``get_t1_database()``
+        could otherwise resolve to a real ``HttpScratchStore``."""
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
+        for var in ("NX_T1_HOST", "NX_T1_PORT"):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        # A session-id lease exists, but isolation (Path C) outranks it.
         _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.2", 2222)
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
-        from nexus.db.inmemory_vector_store import InMemoryVectorClient
-        from nexus.db.t1 import T1Database
-        db = T1Database()
+        from nexus.db.t1 import T1IsolatedLegRetiredError, get_t1_database
+        with pytest.raises(T1IsolatedLegRetiredError):
+            get_t1_database()
 
-        assert isinstance(db._client, InMemoryVectorClient)
-        fake_chromadb.HttpClient.assert_not_called()
-
-    def test_isolated_wins_over_env_pair_and_addr_file(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
-
-        fake_chromadb = MagicMock()
-        fake_chromadb.HttpClient.return_value = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
-        monkeypatch.setenv("NX_T1_PORT", "1111")
-        monkeypatch.setenv("NX_T1_ISOLATED", "1")
-
-        # Both an env pair and a session-id lease exist; isolation outranks both.
-        _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.3", 3333)
-        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
-
-        from nexus.db.inmemory_vector_store import InMemoryVectorClient
-        from nexus.db.t1 import T1Database
-        db = T1Database()
-
-        assert isinstance(db._client, InMemoryVectorClient)
-        fake_chromadb.HttpClient.assert_not_called()
-
-    def test_legacy_skip_t1_alias_no_longer_activates_isolation(self, tmp_path, monkeypatch):
+    def test_legacy_skip_t1_alias_does_not_trigger_isolated_retirement(self, tmp_path, monkeypatch):
         """Post-removal (6.5.2): a stale ``NEXUS_SKIP_T1=1`` in the ambient
-        env is INERT — it does NOT activate the isolation branch, so with
-        no NX_T1_ISOLATED the two-branch constructor fails loud (RDR-155
-        P4b: the discovery legs the alias used to be inert AGAINST are
-        gone; inert now means "does not count as opt-in")."""
-        import pytest as _pytest
-
+        env is INERT — it does NOT count as ``NX_T1_ISOLATED``, so with
+        the retired var itself unset the constructor fails loud with the
+        generic ``T1ServerNotFoundError``, not the isolated-retired one."""
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("NEXUS_SKIP_T1", "1")
 
         from nexus.db.t1 import T1Database, T1ServerNotFoundError
-        with _pytest.raises(T1ServerNotFoundError):
+        with pytest.raises(T1ServerNotFoundError):
             T1Database()
 
 
@@ -418,7 +407,7 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
 # evidence.
 
 
-_PATH_IDS = ["isolation", "client_injection"]  # RDR-155 P4b: env/addr_file discovery legs retired
+_PATH_IDS = ["client_injection"]  # RDR-155 P4b: env/addr_file legs retired; nexus-4lkmz: isolation leg retired too
 
 
 def _setup_path(path_id: str, tmp_path, monkeypatch, fake_chromadb):
@@ -427,19 +416,17 @@ def _setup_path(path_id: str, tmp_path, monkeypatch, fake_chromadb):
     Returns ``(extra_kwargs, expected_client_attr)`` for the
     ``T1Database`` constructor call.
 
-    * ``isolation`` -- Path C (NX_T1_ISOLATED=1).
     * ``client_injection`` -- early branch with explicit client=.
 
     (RDR-155 P4b: the env / addr_file HttpClient discovery legs retired
-    with the chroma T1 server.)
+    with the chroma T1 server. nexus-4lkmz: the isolation leg —
+    formerly a second successful-construction path here — retired too;
+    it now hard-fails, see ``TestT1DatabaseIsolatedLegRetired``.)
     """
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
         monkeypatch.delenv(var, raising=False)
 
-    if path_id == "isolation":
-        monkeypatch.setenv("NX_T1_ISOLATED", "1")
-        return {}, "EphemeralClient"
     if path_id == "client_injection":
         return {"client": fake_chromadb.EphemeralClient.return_value}, None
     raise ValueError(path_id)
@@ -518,9 +505,9 @@ class TestT1DatabaseSessionIdResolution:
 
     # RDR-149 P4: the ``addr_file`` (session-id lease) path is excluded here.
     # With no session-id resolving, Path B cannot discover a lease, so only
-    # the env / isolation / client-injection paths can reach the session_id
-    # assignment under test.
-    @pytest.mark.parametrize("path_id", ["isolation", "client_injection"])
+    # the client-injection path can reach the session_id assignment under
+    # test (nexus-4lkmz: the isolation leg retired).
+    @pytest.mark.parametrize("path_id", _PATH_IDS)
     def test_unknown_fallback_when_nothing_set(
         self, path_id, tmp_path, monkeypatch, fake_chromadb
     ):
@@ -561,23 +548,118 @@ class TestDispatcherEnvBuilder:
 
 
 class TestDispatcherEphemeralMode:
-    """RDR-105 P2.5 / nexus-4gby: third dispatcher mode. ``ephemeral=True``
-    sets ``NX_T1_ISOLATED=1`` and strips any inherited host/port; the
-    receiving subprocess opens a per-process ``EphemeralClient``.
+    """RDR-105 P2.5 / nexus-4gby: third dispatcher mode. nexus-4lkmz
+    decision 1 (LOCKED 2026-08-07), blast-radius fix nexus-bjltu (2026-08-07
+    review round): ``ephemeral=True`` mints the subprocess its OWN PG-backed
+    T1 session (never the parent's, never the retired in-process leg) and
+    injects it as ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` — no null-store
+    branches — but ONLY when ``grants_tool_access=True`` (the subprocess
+    was actually handed MCP tool access that could reach T1). A tool-free
+    dispatch (the common case, ``grants_tool_access=False``, the default)
+    never mints at all, and a mint failure on a tool-granted dispatch is
+    deferred fail-loud (warning + no env injected), never fatal to the
+    whole dispatch.
     """
 
-    def test_ephemeral_sets_isolated_when_flag_on(self, monkeypatch):
+    def test_ephemeral_mints_own_pg_backed_session_when_tool_granted(
+        self, monkeypatch
+    ):
         from nexus.operators.dispatch import _build_dispatch_env
 
+        minted_calls: list[tuple[str, str]] = []
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            minted_calls.append((session_id, context))
+            return {"session_token": "minted-tok-xyz", "expires_in_seconds": 3600}
+
+        monkeypatch.setattr("nexus.db.t1.mint_t1_session_token", _fake_mint)
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
-        env = _build_dispatch_env(ephemeral=True, parent_session_id="parent")
-        assert env.get("NX_T1_ISOLATED") == "1"
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+        monkeypatch.setenv("NX_T1_SESSION", "parent-live-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "parent-session-id")
+
+        env = _build_dispatch_env(
+            ephemeral=True, parent_session_id="parent", grants_tool_access=True
+        )
+
+        assert env.get("NX_T1_SESSION") == "minted-tok-xyz"
+        assert env.get("NX_T1_SESSION_ID"), "must mint a session id"
+        assert env["NX_T1_SESSION_ID"] != "parent-session-id", (
+            "must be the subprocess's OWN minted session, never the parent's"
+        )
         assert "NX_T1_HOST" not in env
         assert "NX_T1_PORT" not in env
+        assert "NX_T1_ISOLATED" not in env
+        # NX_SESSION_ID (the attribution/current-session pointer) still
+        # forwards the parent's conversation id -- distinct from T1's own
+        # session identity above.
         assert env.get("NX_SESSION_ID") == "parent"
+        assert len(minted_calls) == 1
+        assert minted_calls[0][0] == env["NX_T1_SESSION_ID"]
 
+    def test_tool_free_dispatch_never_mints(self, monkeypatch):
+        """nexus-bjltu: the stateless tool-free default (grants_tool_access
+        unset/False) must never mint — nothing in a tool-free subprocess
+        can reach T1, so a mint here is pure dead weight and a needless
+        single point of failure."""
+        from nexus.operators.dispatch import _build_dispatch_env
 
+        mint_calls: list[str] = []
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            mint_calls.append(session_id)
+            return {"session_token": "should-never-be-used"}
+
+        monkeypatch.setattr("nexus.db.t1.mint_t1_session_token", _fake_mint)
+        monkeypatch.setenv("NX_T1_SESSION", "parent-live-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "parent-session-id")
+
+        env = _build_dispatch_env(ephemeral=True, parent_session_id="parent")
+
+        assert mint_calls == [], "tool-free dispatch must never mint"
+        assert "NX_T1_SESSION" not in env
+        assert "NX_T1_SESSION_ID" not in env
+
+    def test_mint_failure_on_tool_granted_dispatch_does_not_raise(
+        self, monkeypatch
+    ):
+        """nexus-bjltu CRITICAL fix: a mint failure must never kill the
+        whole dispatch. It logs a warning (carrying the exception) and
+        proceeds WITHOUT injecting NX_T1_SESSION/NX_T1_SESSION_ID. This is
+        deferred fail-loud, not a null-store branch: no store object is
+        fabricated here. (nexus-ylof9: what the subprocess's own nested
+        MCP does next is NOT simply "raises T1UnavailableThisProcessError"
+        — NX_SESSION_ID is still forwarded, so it usually borrows the
+        parent's lease or attempts its own mint; the named error fires
+        only when no session id resolves at all. See
+        ``_build_dispatch_env``'s docstring for the full breakdown — out
+        of scope for this env-shape assertion.)"""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        def _failing_mint(session_id: str, *, context: str) -> dict:
+            raise RuntimeError("T1 operator dispatch mint failed for session")
+
+        monkeypatch.setattr("nexus.db.t1.mint_t1_session_token", _failing_mint)
+
+        with capture_logs() as cap:
+            env = _build_dispatch_env(
+                ephemeral=True, parent_session_id="parent", grants_tool_access=True
+            )
+
+        assert "NX_T1_SESSION" not in env
+        assert "NX_T1_SESSION_ID" not in env
+        warnings = [
+            e for e in cap
+            if e.get("event") == "operator_dispatch_t1_mint_failed"
+        ]
+        assert warnings, f"must log a warning naming the mint failure: {cap}"
+        assert all(e.get("log_level") == "warning" for e in warnings)
+        assert "mint failed" in warnings[0].get("error", ""), (
+            "the warning must carry the mint exception, not swallow it silently"
+        )
 
     def test_share_and_ephemeral_mutually_exclusive(self, monkeypatch):
         from nexus.operators.dispatch import _build_dispatch_env

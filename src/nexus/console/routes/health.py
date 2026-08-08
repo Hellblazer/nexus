@@ -42,20 +42,20 @@ def _collect_health_data() -> dict[str, Any]:
         data["is_local"] = True
         data["health_ok"] = False
 
-    # T1 sessions
+    # T1 sessions (nexus-8zfwv: lease-based, no host/port/pid -- T1 is one
+    # shared nexus-service now, not a per-session chroma). expires_in_seconds
+    # is computed here (not in the template, which has no clock access) so
+    # the template can reuse the same age_str()-shaped formatter.
+    now = time.time()
     data["sessions"] = [
         {
             "session_id": s.session_id,
-            "host": s.host,
-            "port": s.port,
-            "pid": s.pid,
-            "pid_alive": s.pid_alive,
-            "tcp_reachable": s.tcp_reachable,
-            "created_at": s.created_at,
+            "fresh": s.fresh,
+            "expires_in_seconds": max(0, int(s.expires_at - now)),
         }
         for s in scan_sessions_sync(_nexus_config_dir())
     ]
-    data["active_sessions"] = sum(1 for s in data["sessions"] if s["pid_alive"])
+    data["active_sessions"] = sum(1 for s in data["sessions"] if s["fresh"])
 
     # MinerU status
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
@@ -185,11 +185,22 @@ def _age_str(seconds: int) -> str:
     return f"{seconds // 3600}h ago"
 
 
+def _in_str(seconds: int) -> str:
+    """Format a forward-looking duration (T1 lease expiry), mirroring
+    ``_age_str``'s backward-looking one."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
 @router.get("/health")
 async def health_index(request: Request, scope: str = "project"):
     """Panel 2: Sessions & Health — synchronous full render."""
     data = _collect_health_data()
     data["age_str"] = _age_str
+    data["in_str"] = _in_str
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
@@ -203,6 +214,7 @@ async def health_refresh(request: Request, scope: str = "project"):
     """Manual refresh — returns HTMX partial."""
     data = _collect_health_data()
     data["age_str"] = _age_str
+    data["in_str"] = _in_str
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,

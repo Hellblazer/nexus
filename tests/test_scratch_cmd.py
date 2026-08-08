@@ -365,7 +365,7 @@ def test_scratch_list_friendly_error_when_t1_unresolvable(
 
     assert result.exit_code != 0
     assert "Traceback" not in result.output
-    assert "NX_T1_ISOLATED=1" in result.output
+    assert "nx daemon service start" in result.output
     assert "T1 not configured" in result.output
 
 
@@ -374,13 +374,15 @@ def test_scratch_put_service_mode_no_endpoint_clean_error(
 ) -> None:
     """nexus-0l5ym: in service mode (NX_STORAGE_BACKEND=service) with no
     reachable nexus-service, `nx scratch put` must give a clean ClickException
-    (exit 1, no raw RuntimeError traceback) with NX_T1_ISOLATED guidance."""
+    (exit 1, no raw RuntimeError traceback) naming the real remediation."""
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
     for var in ("NX_SERVICE_URL", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN",
-                # The suite-wide autouse fixture sets NX_T1_ISOLATED=1; since
-                # the nexus-h8rf6 fix, isolation WINS over service routing, so
-                # this service-path test must clear it too.
-                "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
+                "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                # nexus-4lkmz: the suite-wide autouse fixture mints a real
+                # NX_T1_SESSION/NX_T1_SESSION_ID against the test engine —
+                # clear both so this service-path test actually reaches the
+                # no-endpoint failure instead of resolving USE_INHERITED.
+                "NX_T1_SESSION", "NX_T1_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
 
     result = runner.invoke(main, ["scratch", "put", "hello"])
@@ -389,4 +391,4 @@ def test_scratch_put_service_mode_no_endpoint_clean_error(
     # The fix converts HttpScratchStore's raw RuntimeError into a clean
     # ClickException — no RuntimeError should escape to the CLI runner.
     assert not isinstance(result.exception, RuntimeError), result.exception
-    assert "NX_T1_ISOLATED" in result.output
+    assert "nx daemon service start" in result.output

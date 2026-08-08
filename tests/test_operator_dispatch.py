@@ -42,6 +42,21 @@ def _make_proc(stdout: bytes = b'{"ok": true}', returncode: int = 0,
 _SIMPLE_SCHEMA = {"type": "object", "properties": {"result": {"type": "string"}}}
 
 
+@pytest.fixture(autouse=True)
+def _fake_t1_dispatch_mint(monkeypatch):
+    """Module-wide default: stub the T1 mint every ``ephemeral=True``
+    dispatch now performs (nexus-4lkmz decision 1), so this file's own
+    stated contract -- "All tests run without network or claude CLI --
+    subprocess is mocked" -- holds for T1 session minting too. Tests that
+    care about the mint call itself (``TestBuildDispatchEnvStripsT1Session``)
+    override this locally via their own ``monkeypatch.setattr`` (later call
+    on the same fixture instance wins)."""
+    monkeypatch.setattr(
+        "nexus.db.t1.mint_t1_session_token",
+        lambda session_id, *, context: {"session_token": f"fake-dispatch-tok-{session_id}"},
+    )
+
+
 # ── Event-loop safety ──────────────────────────────────────────────────────
 
 class TestEventLoopSafety:
@@ -390,13 +405,47 @@ class TestSubprocessContract:
         assert "NX_SESSION_ID" not in env or not env.get("NX_SESSION_ID")
 
     @pytest.mark.asyncio
-    async def test_sets_isolated_t1_env(self) -> None:
-        """claude_dispatch must export NX_T1_ISOLATED=1 in the subprocess env so
-        the spawned `claude -p`'s nx SessionStart hook does not spin up a chroma
-        T1 server. Operator dispatch is stateless — paying the chroma startup
-        cost on every call would be pure waste, and the subprocess's T1 client
-        falls back to EphemeralClient when no server record is found.
-        """
+    async def test_tool_free_dispatch_never_mints_t1_session(self) -> None:
+        """nexus-bjltu: the stateless tool-free default (no allowed_tools /
+        mcp_servers -- the common case, ~15/17 call sites) must NEVER mint
+        a T1 session. Nothing in a tool-free subprocess can reach T1, so
+        minting would be dead weight and a needless single point of
+        failure on the storage service."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+        mint_calls: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            mint_calls.append(session_id)
+            return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert mint_calls == [], "a tool-free dispatch must never mint a T1 session"
+        env = captured[0].get("env")
+        assert env is not None, "subprocess must be spawned with explicit env (got default inherit)"
+        assert "NX_T1_ISOLATED" not in env, (
+            "the retired isolated leg must never be set by claude_dispatch"
+        )
+        assert "NX_T1_SESSION_ID" not in env
+        assert "NX_T1_SESSION" not in env
+
+    @pytest.mark.asyncio
+    async def test_tool_granted_dispatch_mints_own_t1_session(self) -> None:
+        """A dispatch that DOES grant tool access (allowed_tools set) mints
+        its own, freshly minted PG-backed T1 session (NX_T1_SESSION /
+        NX_T1_SESSION_ID) -- the subprocess CAN reach T1 in this case, so
+        the mint is not dead weight."""
         from nexus.operators.dispatch import claude_dispatch
 
         proc = _make_proc()
@@ -406,16 +455,24 @@ class TestSubprocessContract:
             captured.append(kwargs)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
-            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+        ):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read", "Grep"]
+            )
 
         env = captured[0].get("env")
         assert env is not None, "subprocess must be spawned with explicit env (got default inherit)"
-        # RDR-105 P4: claude_dispatch defaults to ephemeral=True, which sets
-        # NX_T1_ISOLATED=1 (the NEXUS_SKIP_T1 alias was removed at 6.5.2).
-        assert env.get("NX_T1_ISOLATED") == "1", (
-            f"NX_T1_ISOLATED=1 missing from subprocess env; got NX_T1_ISOLATED={env.get('NX_T1_ISOLATED')!r}"
+        assert "NX_T1_ISOLATED" not in env, (
+            "the retired isolated leg must never be set by claude_dispatch"
         )
+        assert env.get("NX_T1_SESSION_ID"), "must mint an own T1 session id"
+        assert env.get("NX_T1_SESSION") == f"tok-for-{env['NX_T1_SESSION_ID']}"
 
     @pytest.mark.asyncio
     async def test_includes_p_flag(self) -> None:
@@ -483,17 +540,51 @@ class TestSubprocessContract:
 
 class TestBuildDispatchEnvStripsT1Session:
     def test_ephemeral_strips_inherited_t1_session_pair(self, monkeypatch) -> None:
+        """nexus-4lkmz decision 1 / nexus-bjltu: the parent's INHERITED
+        token must never reach the subprocess; when the dispatch grants
+        tool access, a fresh, OWN minted token replaces it (env keys are
+        present again, but never the inherited values)."""
         from nexus.operators.dispatch import _build_dispatch_env
 
         monkeypatch.setenv("NX_T1_SESSION", "live-parent-token")
         monkeypatch.setenv("NX_T1_SESSION_ID", "live-parent-session")
+        monkeypatch.setattr(
+            "nexus.db.t1.mint_t1_session_token",
+            lambda session_id, *, context: {"session_token": "own-minted-token"},
+        )
 
-        env = _build_dispatch_env(ephemeral=True, parent_session_id="live-parent-session")
+        env = _build_dispatch_env(
+            ephemeral=True,
+            parent_session_id="live-parent-session",
+            grants_tool_access=True,
+        )
 
-        assert "NX_T1_SESSION" not in env, (
+        assert env.get("NX_T1_SESSION") == "own-minted-token", (
             "a nested MCP subprocess must never inherit the parent's live "
             "SERVICE-backed T1 session token"
         )
+        assert env.get("NX_T1_SESSION_ID") != "live-parent-session"
+
+    def test_ephemeral_tool_free_strips_inherited_pair_and_mints_nothing(
+        self, monkeypatch
+    ) -> None:
+        """nexus-bjltu: without tool access granted, the inherited pair is
+        still stripped (defense in depth, unconditional) but nothing new
+        is minted to replace it -- the keys are simply absent."""
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_SESSION", "live-parent-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "live-parent-session")
+        monkeypatch.setattr(
+            "nexus.db.t1.mint_t1_session_token",
+            lambda session_id, *, context: (_ for _ in ()).throw(
+                AssertionError("must not be called for a tool-free dispatch")
+            ),
+        )
+
+        env = _build_dispatch_env(ephemeral=True, parent_session_id="live-parent-session")
+
+        assert "NX_T1_SESSION" not in env
         assert "NX_T1_SESSION_ID" not in env
 
     def test_owned_strips_inherited_t1_session_pair(self, monkeypatch) -> None:
@@ -512,15 +603,299 @@ class TestBuildDispatchEnvStripsT1Session:
     ) -> None:
         """The GENERAL NX_SESSION_ID (distinct from the T1-specific
         NX_T1_SESSION_ID) is deliberately still forwarded for attribution --
-        only the T1 session-token pair is stripped."""
+        only the T1 session-token pair is stripped-then-reminted."""
         from nexus.operators.dispatch import _build_dispatch_env
 
         monkeypatch.setenv("NX_T1_SESSION", "live-parent-token")
         monkeypatch.setenv("NX_T1_SESSION_ID", "live-parent-session")
+        monkeypatch.setattr(
+            "nexus.db.t1.mint_t1_session_token",
+            lambda session_id, *, context: {"session_token": "own-minted-token"},
+        )
 
-        env = _build_dispatch_env(ephemeral=True, parent_session_id="live-parent-session")
+        env = _build_dispatch_env(
+            ephemeral=True,
+            parent_session_id="live-parent-session",
+            grants_tool_access=True,
+        )
 
         assert env.get("NX_SESSION_ID") == "live-parent-session"
+
+
+# ── Minted-session lifecycle (nexus-bjltu Significant #1) ──────────────────
+#
+# operator dispatch is the high-volume default path; a per-dispatch mint
+# with no corresponding close relies entirely on the passive 24h TTL sweep
+# backstop -- real session-row accretion. claude_dispatch now closes any
+# session IT minted in a finally, after the subprocess exits, mirroring
+# mcp.core's Branch-0 teardown (HttpScratchStore().close_session() +
+# .close()) but constructed explicitly from the minted id/token.
+
+
+class _FakeScratchStore:
+    """Records scratch-close activity; used across TestDispatchSessionClose."""
+
+    events: list[tuple] = []
+
+    def __init__(self, *, session_id, _session_token):
+        type(self).events.append(("scratch_constructed", session_id, _session_token))
+
+    def close_session(self):
+        type(self).events.append(("scratch_close_session",))
+        return 0
+
+    def close(self):
+        type(self).events.append(("scratch_close",))
+
+
+class _FakeTokenStore:
+    """Records token-close activity; used across TestDispatchSessionClose."""
+
+    events: list[tuple] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        type(self).events.append(("token_store_closed",))
+
+    def close_session(self, session_id):
+        type(self).events.append(("token_close_session", session_id))
+        return {"closed": 1}
+
+
+class TestDispatchSessionClose:
+    @pytest.mark.asyncio
+    async def test_successful_dispatch_closes_both_scratch_and_token(self) -> None:
+        """nexus-bjltu round 2 (code-review finding): round 1 closed ONLY
+        the scratch rows (HttpScratchStore.close_session). The minted
+        SESSION TOKEN itself (mint_t1_session_token -> POST
+        /v1/sessions/start) is a SEPARATE row, closed by a SEPARATE call
+        (HttpTokenStore().close_session(session_id) -> POST
+        /v1/sessions/close) -- mirroring mcp.core's Branch-0
+        _t1_session_shutdown exactly: scratch close first, token close
+        second, both independently best-effort."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        _FakeScratchStore.events = []
+        _FakeTokenStore.events = []
+
+        proc = _make_proc()
+
+        async def intercept(*args, **kwargs):
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            return {"session_token": f"tok-for-{session_id}"}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+            patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
+            patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
+        ):
+            dispatch_result = await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read"]
+            )
+
+        assert dispatch_result == {"ok": True}
+        scratch_kinds = [e[0] for e in _FakeScratchStore.events]
+        token_kinds = [e[0] for e in _FakeTokenStore.events]
+        assert "scratch_close_session" in scratch_kinds, (
+            f"the minted session's scratch rows must be closed: {_FakeScratchStore.events}"
+        )
+        assert "scratch_close" in scratch_kinds
+        assert "token_close_session" in token_kinds, (
+            f"the minted session TOKEN must be closed independently -- it has "
+            f"no sweep backstop, unlike the scratch rows: {_FakeTokenStore.events}"
+        )
+        # Ordering: scratch close first, then token close (mirrors
+        # mcp.core._t1_session_shutdown's own ordering).
+        scratch_close_idx = scratch_kinds.index("scratch_close_session")
+        token_close_idx = token_kinds.index("token_close_session")
+        # Both event lists are separately ordered per-store; assert via a
+        # combined merge using insertion order is unnecessary here since
+        # _close_dispatch_session runs scratch step 1 to completion before
+        # starting token step 2 -- verified structurally: the scratch
+        # store's close() (pool teardown, always last for that step) must
+        # already be recorded before ANY token event exists.
+        assert "scratch_close" in scratch_kinds[:scratch_close_idx + 2]
+        assert token_close_idx >= 0
+
+    @pytest.mark.asyncio
+    async def test_tool_free_dispatch_attempts_no_close(self) -> None:
+        """No mint happened, so neither the scratch close nor the token
+        close must be attempted."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        _FakeScratchStore.events = []
+        _FakeTokenStore.events = []
+
+        proc = _make_proc()
+
+        async def intercept(*args, **kwargs):
+            return proc
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
+            patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert _FakeScratchStore.events == [], (
+            "a tool-free dispatch minted nothing, so it must attempt no scratch close"
+        )
+        assert _FakeTokenStore.events == [], (
+            "a tool-free dispatch minted nothing, so it must attempt no token close"
+        )
+
+    @pytest.mark.asyncio
+    async def test_scratch_close_failure_does_not_block_token_close(self) -> None:
+        """The two closes are INDEPENDENT: a failure in the scratch-row
+        close must not skip the token close."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import claude_dispatch
+
+        _FakeTokenStore.events = []
+
+        proc = _make_proc()
+
+        async def intercept(*args, **kwargs):
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            return {"session_token": f"tok-for-{session_id}"}
+
+        class _FailingScratchStore:
+            def __init__(self, *, session_id, _session_token):
+                pass
+
+            def close_session(self):
+                raise RuntimeError("scratch close: storage service unreachable")
+
+            def close(self):
+                pass
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+            patch("nexus.db.http_scratch_store.HttpScratchStore", _FailingScratchStore),
+            patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
+            capture_logs() as cap,
+        ):
+            result = await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read"]
+            )
+
+        assert result == {"ok": True}, "a scratch-close failure must not fail an already-successful dispatch"
+        assert any(e[0] == "token_close_session" for e in _FakeTokenStore.events), (
+            "the token close must still run even though the scratch close raised"
+        )
+        warnings = [
+            e for e in cap
+            if e.get("event") == "operator_dispatch_t1_scratch_close_failed"
+        ]
+        assert warnings, f"the scratch-close failure must be logged: {cap}"
+        assert "scratch close: storage service unreachable" in warnings[0].get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_token_close_failure_does_not_fail_the_dispatch(self) -> None:
+        """A token-close failure (storage service hiccup) must be logged
+        and swallowed -- independent of whether the scratch close
+        succeeded. NO sweep backstops an unrevoked token (unlike the
+        scratch rows), but that is exactly why this call must never
+        crash a dispatch that already succeeded -- the failure is
+        recorded, not silently discarded and not fatal."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import claude_dispatch
+
+        _FakeScratchStore.events = []
+
+        proc = _make_proc()
+
+        async def intercept(*args, **kwargs):
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            return {"session_token": f"tok-for-{session_id}"}
+
+        class _FailingTokenStore:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                pass
+
+            def close_session(self, session_id):
+                raise RuntimeError("token close: storage service unreachable")
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+            patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
+            patch("nexus.db.t2.http_token_store.HttpTokenStore", _FailingTokenStore),
+            capture_logs() as cap,
+        ):
+            result = await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read"]
+            )
+
+        assert result == {"ok": True}, "a token-close failure must not fail an already-successful dispatch"
+        assert any(e[0] == "scratch_close_session" for e in _FakeScratchStore.events), (
+            "the scratch close must have run regardless of the token close's later failure"
+        )
+        warnings = [
+            e for e in cap
+            if e.get("event") == "operator_dispatch_t1_token_close_failed"
+        ]
+        assert warnings, f"the token-close failure must be logged: {cap}"
+        assert "token close: storage service unreachable" in warnings[0].get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_subprocess_creation_failure_still_closes_session(self) -> None:
+        """nexus-bjltu round 2 (code-review + critic independently): if
+        ``asyncio.create_subprocess_exec`` itself raises (fork/exec error,
+        resource exhaustion) AFTER a successful mint, the minted session
+        (scratch rows AND token) must still be closed -- not leaked."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        _FakeScratchStore.events = []
+        _FakeTokenStore.events = []
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            return {"session_token": f"tok-for-{session_id}"}
+
+        async def _boom(*args, **kwargs):
+            raise OSError("fork failed: resource temporarily unavailable")
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=_boom),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+            patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
+            patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
+        ):
+            with pytest.raises(OSError, match="fork failed"):
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read"]
+                )
+
+        assert any(e[0] == "scratch_close_session" for e in _FakeScratchStore.events), (
+            f"a subprocess-creation failure must still close the minted "
+            f"scratch session: {_FakeScratchStore.events}"
+        )
+        assert any(e[0] == "token_close_session" for e in _FakeTokenStore.events), (
+            f"a subprocess-creation failure must still close the minted "
+            f"session token: {_FakeTokenStore.events}"
+        )
 
 
 # ── Error handling ─────────────────────────────────────────────────────────

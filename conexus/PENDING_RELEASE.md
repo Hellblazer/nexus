@@ -28,6 +28,7 @@ mechanize, it matters enough to ship.
 
 ---
 
-## Awaiting the next release (pinned: v7.3.0)
 
-(none — the v7.3.0 pin advance made the ledger current; drift is zero)
+## Awaiting the next release (pinned: v7.4.0)
+
+(empty — v7.4.0 shipped everything; add entries as new plugin-surface changes land on develop)

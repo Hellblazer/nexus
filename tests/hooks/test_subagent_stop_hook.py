@@ -95,6 +95,7 @@ def _run_hook(
     tmp_path: Path,
     *,
     mode: str | None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
@@ -103,6 +104,8 @@ def _run_hook(
     env.pop("NX_ORCH_STOP_GUARD", None)
     if mode is not None:
         env["NX_ORCH_STOP_GUARD"] = mode
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["bash", str(SCRIPT)],
         input=stdin,
@@ -377,7 +380,18 @@ class TestBlockMode:
         same-type stops racing 4 units of credit: at most 4 owe (get
         blocked), and the CONSUMED row count for the type never exceeds
         the credit pool — without the lock, a race window lets more than
-        4 threads observe unspent credit simultaneously."""
+        4 threads observe unspent credit simultaneously.
+
+        nexus-4b8sz: CI red 2026-08-07 (run 31215840624 shard 1) got
+        blocked=5 vs credit=4 under a loaded runner — the hardcoded ~1s
+        lock budget (10 x 0.1s) was exhausted by one racer, which then
+        proceeded unlocked (fail-open by design) and over-counted. The
+        budget is now env-tunable (NX_EXPECT_LOCK_TRIES); this test pins a
+        generous one (200 tries =~ 20s), a ~20x margin over the observed
+        CI failure budget (~1s), so the N-of-type exactness this test
+        exists to prove is not itself flaky under ordinary runner load —
+        not a hard guarantee against arbitrarily severe contention,
+        without weakening the tight production default."""
         import concurrent.futures
 
         agent_type = "worker-race"
@@ -393,6 +407,7 @@ class TestBlockMode:
                 _payload(agent_id=aid, agent_type=agent_type, transcript=str(t)),
                 tmp_path,
                 mode="block",
+                extra_env={"NX_EXPECT_LOCK_TRIES": "200"},
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -407,6 +422,122 @@ class TestBlockMode:
         content = _expectations_file(tmp_path).read_text()
         consumed_rows = [ln for ln in content.splitlines() if "\tCONSUMED\t" in ln]
         assert len(consumed_rows) == credit, consumed_rows
+
+    def test_lock_budget_exhaustion_degrades_unlocked_with_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """nexus-4b8sz: with NX_EXPECT_LOCK_TRIES=1 and the owes-report
+        lockdir already held (fresh, so the reap does not remove it), the
+        single try must fail to acquire, and the hook must still fall
+        through to the pre-lock unlocked read rather than deferring the
+        stop (fail-open, unconditional — nexus-bk974's own contract): the
+        agent genuinely owes a report (one background EXPECT credit,
+        unreported transcript) and the unlocked read computes the exact
+        same verdict a locked read would for a single, non-concurrent
+        call, so the hook must still emit its normal block decision, not
+        hang, drop the decision, or silently no-op. Separately, the
+        exhaustion is now debug-visible: exactly one stderr line naming
+        the try budget, not silence. CAVEAT: subagent-stop.sh exits 0 on
+        every path, and the hook contract only surfaces exit-0 stderr to
+        the operator under `claude --debug` (see the LOCKING comment in
+        expectations.sh) — this assertion proves the line is emitted, not
+        that a normal-session operator sees it unprompted."""
+        _expect_row(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        lockdir = Path(str(_expectations_file(tmp_path)) + ".owes.lock")
+        lockdir.mkdir(parents=True)  # fresh mtime -- the reap only sweeps stale (>1min) dirs
+
+        proc = _run_hook(
+            _payload(transcript=str(t)),
+            tmp_path,
+            mode="block",
+            extra_env={"NX_EXPECT_LOCK_TRIES": "1"},
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        decision = _decision(proc)
+        assert decision is not None and decision["decision"] == "block", decision
+        assert "expectations: owes-report lock budget exhausted" in proc.stderr
+        assert "1 tries" in proc.stderr
+        # The warning is diagnostic-only -- never a ledger row.
+        content = _expectations_file(tmp_path).read_text()
+        assert "owes-report lock budget exhausted" not in content
+
+    @pytest.mark.parametrize(
+        ("raw", "decimal"),
+        [
+            ("008", 8),
+            ("009", 9),
+            ("010", 10),
+        ],
+    )
+    def test_lock_tries_leading_zero_reads_as_decimal(
+        self, tmp_path: Path, raw: str, decimal: int
+    ) -> None:
+        """code-review-expert HIGH (nexus-4b8sz fix round): the
+        regex-validated NX_EXPECT_LOCK_TRIES value is used directly in a
+        bash arithmetic `((...))` context, where a leading-zero literal is
+        parsed as OCTAL — "008"/"009" have no valid octal digit and crash
+        the loop init outright (bash: "value too large for base"), and
+        "010" silently means 8, not 10. `tries=$((10#$tries))` forces
+        base-10 interpretation after the charset guard. This asserts the
+        SAFE semantic end to end: the hook never crashes on a leading-zero
+        value (exit 0), and the coerced decimal count is exactly what
+        reaches the exhaustion warning (proven via the "(N tries)" text —
+        the cheapest observable proxy for the loop's actual bound without
+        instrumenting the shell)."""
+        _expect_row(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        lockdir = Path(str(_expectations_file(tmp_path)) + ".owes.lock")
+        lockdir.mkdir(parents=True)
+
+        proc = _run_hook(
+            _payload(transcript=str(t)),
+            tmp_path,
+            mode="block",
+            extra_env={"NX_EXPECT_LOCK_TRIES": raw},
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        decision = _decision(proc)
+        assert decision is not None and decision["decision"] == "block", decision
+        assert f"({decimal} tries)" in proc.stderr, proc.stderr
+
+    def test_lock_tries_clamped_to_ceiling(self, tmp_path: Path) -> None:
+        """Reviewer suggestion 1: an oversized NX_EXPECT_LOCK_TRIES must
+        not be able to hang the hook — clamped to 600 (~60s) after
+        coercion. A real 999999-try exhaustion at 0.1s/try would take
+        hours and blow the subprocess timeout, so this test shadows
+        `sleep` with a no-op on PATH: the loop still runs its full
+        (clamped) iteration count and hits the same mkdir-fails-every-time
+        path, just without the wall-clock cost, and the exhaustion
+        warning's printed count is the observable proof of the clamp."""
+        _expect_row(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        lockdir = Path(str(_expectations_file(tmp_path)) + ".owes.lock")
+        lockdir.mkdir(parents=True)
+
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        fake_sleep = fake_bin / "sleep"
+        fake_sleep.write_text("#!/bin/sh\nexit 0\n")
+        fake_sleep.chmod(0o755)
+
+        proc = _run_hook(
+            _payload(transcript=str(t)),
+            tmp_path,
+            mode="block",
+            extra_env={
+                "NX_EXPECT_LOCK_TRIES": "999999",
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            },
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert "(600 tries)" in proc.stderr, proc.stderr
 
     def test_reported_agent_not_blocked(self, tmp_path: Path) -> None:
         """A SendMessage tool_use in the agent transcript counts as the
@@ -682,10 +813,13 @@ def _run_undeclared(tmp_path: Path, session_id: str = SESSION) -> subprocess.Com
 
 
 class TestUndeclaredExitCodes:
-    """nexus-suuja: expectations_undeclared's rc contract is now three-way:
-    0 = clean, 1 = recognized==0 blindspot (pre-existing, false-clean not a
-    pass), 2 = undeclared>0 — a real declaration-completeness deficit that
-    was previously rc-invisible (same exit 0 as clean)."""
+    """nexus-suuja/nexus-ahl9v: expectations_undeclared's rc contract is
+    four-way: 0 = clean, 1 = recognized==0 blindspot (pre-existing,
+    false-clean not a pass), 2 = undeclared>0 — a real declaration-
+    completeness deficit that was previously rc-invisible (same exit 0 as
+    clean), 3 = no ledger file for this session — also previously
+    rc-invisible as the same exit 0 as clean (nexus-ahl9v: a mistyped
+    session id audited as rc=0)."""
 
     def test_rc_zero_when_clean(self, tmp_path: Path) -> None:
         agent_type = "worker-clean"
@@ -722,6 +856,17 @@ class TestUndeclaredExitCodes:
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "UNDECLARED" in proc.stdout
         assert "undeclared=1" in proc.stdout
+
+    def test_rc_three_when_no_ledger_file(self, tmp_path: Path) -> None:
+        """nexus-ahl9v: a session with no ledger file at all (e.g. a
+        mistyped session id) must not audit as rc=0 clean -- it must be
+        distinguishable via a dedicated rc plus a stderr NOTE. No
+        expectations file is created for this session at all (unlike the
+        other cases in this class, which write one)."""
+        proc = _run_undeclared(tmp_path, session_id="no-such-session-ever")
+        assert proc.returncode == 3, proc.stdout + proc.stderr
+        assert "NOTE" in proc.stderr
+        assert "no-such-session-ever" in proc.stderr
 
 
 class TestPluginWiring:

@@ -73,9 +73,70 @@ def _infer_repo() -> str:
         return Path.cwd().name
 
 
+#: SessionStart ``source`` values that mean "the transcript now has a
+#: DIFFERENT session id than whatever a live MCP server sibling last
+#: sampled at spawn" (nexus-d76vc). ``startup`` spawns fresh MCP servers
+#: (nothing frozen yet, nothing to hand off) and ``compact`` keeps the
+#: SAME session id (no divergence) -- neither writes a marker. ``fork``
+#: (``--fork-session``) is a real Claude Code source value too but is
+#: deliberately NOT included here: the bead's design of record enumerates
+#: clear/resume only, and widening to fork is scope this bead did not
+#: size or test -- tracked as a follow-up, not silently folded in.
+_T1_HANDOFF_SOURCES = frozenset({"clear", "resume"})
+
+
+def _write_t1_handoff_markers(new_session_id: str) -> None:
+    """nexus-d76vc: hand THIS conversation's new session id to any live
+    MCP server sibling of the current claude process, so its frozen T1
+    scope can follow across ``/clear``/``/resume`` instead of staying
+    pinned to the pre-event session (the nexus-aj564 split-brain).
+
+    Ancestry authentication (MUST-HOLD rn3wo.1) happens entirely via
+    *selection*: :func:`~nexus.session.find_mcp_sibling_pids` only ever
+    returns pids that are LIVE, IMMEDIATE children of this hook's own
+    claude ancestor -- there is no separate "verify" step because a
+    marker is never written for a pid that was not found this way, so a
+    concurrent session's hook (walking its OWN, necessarily different,
+    claude ancestor) can structurally never enumerate this session's MCP
+    pids. The watcher side (``nexus.mcp.core``) independently re-derives
+    its own ancestor and re-checks anyway -- defense in depth, never
+    trusting the marker file alone from either direction.
+
+    Best-effort: any failure (no `ps`, no siblings, disk error) is
+    logged at debug and swallowed -- a SessionStart hook must never fail
+    the session over a T1-scope convenience feature. Every non-T1 tool,
+    and T1 itself via the frozen pre-existing scope, keeps working either
+    way.
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.daemon.t1_handoff import write_handoff_marker  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.session import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+            find_immediate_claude_pid,
+            find_mcp_sibling_pids,
+        )
+
+        claude_pid = find_immediate_claude_pid()
+        if claude_pid <= 0:
+            return
+        mcp_pids = find_mcp_sibling_pids(claude_pid)
+        if not mcp_pids:
+            return
+        config_dir = nexus_config_dir()
+        for mcp_pid in mcp_pids:
+            write_handoff_marker(
+                mcp_pid,
+                new_session_id=new_session_id,
+                claude_pid=claude_pid,
+                config_dir=config_dir,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a T1-scope convenience feature
+        _log.debug("t1_handoff_marker_write_failed", error=str(exc))
+
+
 # -- SessionStart -------------------------------------------------------------
 
-def session_start(claude_session_id: str | None = None) -> str:
+def session_start(claude_session_id: str | None = None, source: str | None = None) -> str:
     """Execute the SessionStart hook.
 
     Resolves the session UUID and persists it to ``current_session``
@@ -89,6 +150,16 @@ def session_start(claude_session_id: str | None = None) -> str:
     (RDR-105 P4) and is no fixture of this hook. Multi-writer record
     machinery (``sessions/<uuid>.session``, sweep, reconcile) was
     deleted in P4; the hook does session-id propagation only.
+
+    ``source`` (nexus-d76vc, RDR-105 aj564 follow-up): the Claude Code
+    SessionStart ``source`` field (``startup``/``resume``/``clear``/
+    ``compact``/``fork``). On ``resume``/``clear`` -- the two sources
+    where the transcript's session id changes out from under a live,
+    already-frozen MCP server -- writes a T1 handoff marker for each MCP
+    server sibling so its FastMCP lifespan can re-lease onto the new
+    session id (see :func:`_write_t1_handoff_markers`). ``startup``
+    spawns brand-new MCP servers (nothing frozen yet) and ``compact``
+    keeps the same session id (no divergence); neither writes a marker.
     """
     # Resolve session_id with this precedence:
     #   1. ``NX_SESSION_ID`` env: nested subprocess that inherited the
@@ -100,6 +171,9 @@ def session_start(claude_session_id: str | None = None) -> str:
 
     if not inherited:
         write_claude_session_id(session_id)
+
+    if source in _T1_HANDOFF_SOURCES and session_id and session_id != "unknown":
+        _write_t1_handoff_markers(session_id)
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
     # records the session-id; T1 chroma is owned by the MCP server's FastMCP

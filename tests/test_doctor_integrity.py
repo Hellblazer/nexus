@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -9,7 +8,8 @@ import pytest
 
 
 from nexus.health import (
-    _check_orphan_t1,
+    _check_orphan_t1_lease,
+    _check_orphan_t1_handoff,
     _check_t2_dropped_writes,
     _check_t2_schema_applied,
     _check_orphan_checkpoints,
@@ -20,30 +20,22 @@ from nexus.health import (
 )
 from nexus.db.t2 import T2Database
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _make_session_file(sessions_dir: Path, name: str, pid: int) -> Path:
-    record = {
-        "session_id": "test-session", "server_host": "127.0.0.1",
-        "server_port": 12345, "server_pid": pid, "created_at": 9999999999.0,
-    }
-    path = sessions_dir / name
-    path.write_text(json.dumps(record))
-    return path
+# NO _make_session_file / _run_orphan_t1 (nexus-8zfwv, 2026-08-07): both were
+# already-dead scaffolding (unused anywhere in this file) for the retired
+# ``t1_addr.*`` / ``nexus.session.SESSIONS_DIR`` session-record format --
+# ``T1LeasePublisher``, the only thing that ever published that format, is
+# retired (deleted at ff744321), and ``SESSIONS_DIR`` itself is vestigial.
+# See TestCheckOrphanT1Lease below for the live check's real tests, built on
+# ``nexus.db.t1``'s real path/publish constructors. ``_dead_pid`` below is
+# NOT part of that retirement -- it is a live, actively-used fixture helper
+# for TestCheckOrphanT1Handoff (nexus-9l147), unrelated to the t1_addr.*
+# format.
 
 
 def _dead_pid() -> int:
     proc = subprocess.Popen(["true"])
     proc.wait()
     return proc.pid
-
-
-def _run_orphan_t1(sessions_dir: Path) -> tuple[bool, list[HealthResult]]:
-    with patch("nexus.session.SESSIONS_DIR", sessions_dir):
-        results = _check_orphan_t1()
-    ok = all(r.ok for r in results)
-    return ok, results
 
 
 # ── T2 schema applied (nexus-ay18d PORT off SQLite PRAGMA integrity) ────────
@@ -302,3 +294,190 @@ class TestCheckOrphanCheckpoints:
         self._write_ckpt(ckpt_dir, str(tmp_path / "nope.pdf"), "dead_mixed")
         results = _check_orphan_checkpoints()
         assert results[0].ok is False
+
+
+class TestCheckOrphanT1Lease:
+    """nexus-8zfwv (2026-08-07): port of the orphan-T1 health check off the
+    retired ``t1_addr.*`` ``ServiceRegistry`` lease format onto the live
+    ``t1_session_lease.*`` file (``nexus.db.t1.publish_t1_session_lease``).
+    Unlike its predecessor this check REAPS expired lease files, not merely
+    reports them -- nothing else sweeps them after an ungraceful owner
+    death. Every fixture uses the real publisher/path constructors, never a
+    hand-built filename.
+    """
+
+    @staticmethod
+    def _publish(config_dir: Path, session_id: str, *, ttl_seconds: float) -> Path:
+        from nexus.db.t1 import _t1_session_lease_path, publish_t1_session_lease
+
+        publish_t1_session_lease(session_id, "tok", config_dir, ttl_seconds=ttl_seconds)
+        return _t1_session_lease_path(session_id, config_dir)
+
+    def _run(self, config_dir: Path, monkeypatch):
+        # nexus_config_dir() is imported LOCALLY inside _check_orphan_t1_lease
+        # (deferred, to avoid a circular import), so patching the attribute
+        # on nexus.health would miss -- redirect via the real env-var
+        # precedence nexus.config.nexus_config_dir() itself honours.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        return _check_orphan_t1_lease()
+
+    def test_no_config_dir_reports_ok(self, tmp_path, monkeypatch):
+        results = self._run(tmp_path / "does-not-exist", monkeypatch)
+        assert results[0].ok is True
+        assert "no nexus config dir" in results[0].detail
+
+    def test_empty_config_dir_reports_ok(self, tmp_path, monkeypatch):
+        results = self._run(tmp_path, monkeypatch)
+        assert results[0].ok is True
+        assert "no live t1 sessions" in results[0].detail.lower()
+
+    def test_fresh_lease_reported_and_not_reaped(self, tmp_path, monkeypatch):
+        path = self._publish(tmp_path, "sess-fresh", ttl_seconds=3600.0)
+        results = self._run(tmp_path, monkeypatch)
+        assert results[0].ok is True
+        assert "sess-fresh" in results[0].detail
+        assert path.exists(), "a fresh lease must not be reaped"
+
+    def test_expired_lease_is_reaped(self, tmp_path, monkeypatch):
+        path = self._publish(tmp_path, "sess-expired", ttl_seconds=-100.0)
+        results = self._run(tmp_path, monkeypatch)
+        assert results[0].ok is True
+        assert "reaped" in results[0].detail.lower()
+        assert "sess-expired" in results[0].detail
+        assert not path.exists(), "an expired lease must be reaped"
+
+    def test_malformed_lease_old_enough_is_reaped(self, tmp_path, monkeypatch):
+        """A file that fails to parse as the lease JSON shape (pre-ngcpo
+        bare-token format, or corruption) is fail-safe, not fail-open: it is
+        reaped only once it is old enough that no in-flight publish could
+        explain it."""
+        import os
+        import time
+
+        from nexus.db.t1 import _t1_session_lease_path
+
+        path = _t1_session_lease_path("sess-corrupt", tmp_path)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path.write_text("not-json-at-all")
+        old = time.time() - 7200.0  # 2h old, well past the 1h fallback window
+        os.utime(path, (old, old))
+
+        results = self._run(tmp_path, monkeypatch)
+        assert results[0].ok is True
+        assert "reaped" in results[0].detail.lower()
+        assert not path.exists()
+
+    def test_malformed_lease_too_young_is_left_alone(self, tmp_path, monkeypatch):
+        """A just-written unparseable file (e.g. mid torn-write, or a
+        recent format change) is NOT reaped -- only age proves abandonment."""
+        from nexus.db.t1 import _t1_session_lease_path
+
+        path = _t1_session_lease_path("sess-recent-corrupt", tmp_path)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path.write_text("not-json-at-all")
+
+        results = self._run(tmp_path, monkeypatch)
+        assert results[0].ok is True
+        assert "sess-recent-corrupt" in results[0].detail
+        assert path.exists(), "a young unparseable file must not be reaped"
+
+    def test_mixed_fresh_and_expired(self, tmp_path, monkeypatch):
+        self._publish(tmp_path, "sess-a", ttl_seconds=3600.0)
+        expired_path = self._publish(tmp_path, "sess-b", ttl_seconds=-100.0)
+
+        results = self._run(tmp_path, monkeypatch)
+        assert results[0].ok is True
+        assert "sess-a" in results[0].detail
+        assert "sess-b" in results[0].detail
+        assert not expired_path.exists()
+
+
+# ── Orphan T1 handoff markers (nexus-9l147) ─────────────────────────────────
+
+class TestCheckOrphanT1Handoff:
+    """nexus-d76vc's SessionStart hook writes ``t1_handoff.<mcp_pid>``; the
+    MCP lifespan's handoff watcher claims it (renaming to
+    ``t1_handoff.claimed.<mcp_pid>``) then consumes it within one tick. If
+    the target mcp_pid dies between write and tick (either variant), the
+    marker is never cleaned up. This is the reaper: a marker is orphaned
+    when its filename's mcp_pid names no live process; only orphans are
+    reaped, and a live pid's marker is left completely untouched."""
+
+    def _run(self, config_dir: Path) -> tuple[bool, list[HealthResult]]:
+        with patch("nexus.config.nexus_config_dir", return_value=config_dir):
+            results = _check_orphan_t1_handoff()
+        ok = all(r.ok for r in results)
+        return ok, results
+
+    def test_no_config_dir_reports_ok(self, tmp_path):
+        ok, results = self._run(tmp_path / "nonexistent")
+        assert ok is True
+
+    def test_no_markers_reports_ok(self, tmp_path):
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert "no handoff markers" in results[0].detail.lower()
+
+    def test_orphaned_live_variant_is_reaped(self, tmp_path):
+        from nexus.daemon.t1_handoff import handoff_marker_path, write_handoff_marker
+
+        dead = _dead_pid()
+        write_handoff_marker(
+            dead, new_session_id="sess-A", claude_pid=99999, config_dir=tmp_path,
+        )
+        marker = handoff_marker_path(dead, tmp_path)
+        assert marker.exists()
+
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert not marker.exists(), "orphaned live-variant marker was not reaped"
+        assert "reaped 1" in results[0].detail.lower()
+
+    def test_orphaned_claimed_variant_is_reaped(self, tmp_path):
+        from nexus.daemon.t1_handoff import (
+            claimed_marker_path,
+            handoff_marker_path,
+            write_handoff_marker,
+        )
+
+        dead = _dead_pid()
+        write_handoff_marker(
+            dead, new_session_id="sess-A", claude_pid=99999, config_dir=tmp_path,
+        )
+        # Simulate the watcher having claimed the marker (atomic rename to
+        # the tick-private claimed path, nexus-d76vc fix-round 2) and then
+        # dying before consume_claimed_marker runs.
+        claimed = claimed_marker_path(dead, tmp_path)
+        handoff_marker_path(dead, tmp_path).rename(claimed)
+        assert claimed.exists()
+
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert not claimed.exists(), "orphaned claimed-variant marker was not reaped"
+        assert "reaped 1" in results[0].detail.lower()
+
+    def test_live_pid_marker_is_untouched(self, tmp_path):
+        from nexus.daemon.t1_handoff import handoff_marker_path, write_handoff_marker
+
+        live = os.getpid()
+        write_handoff_marker(
+            live, new_session_id="sess-A", claude_pid=99999, config_dir=tmp_path,
+        )
+        marker = handoff_marker_path(live, tmp_path)
+        assert marker.exists()
+
+        ok, results = self._run(tmp_path)
+        assert ok is True
+        assert marker.exists(), "a marker for a live pid must never be reaped"
+        assert "1 live" in results[0].detail.lower()
+
+    def test_malformed_marker_name_handled_fail_safe(self, tmp_path):
+        # A marker filename whose suffix is not a plain integer must never be
+        # guessed at or deleted -- fail-safe, surfaced instead.
+        bogus = tmp_path / "t1_handoff.not-a-pid"
+        bogus.write_text("{}")
+
+        ok, results = self._run(tmp_path)
+        assert bogus.exists(), "an unparseable marker must never be deleted"
+        assert ok is False
+        assert any("not-a-pid" in r.detail for r in results)

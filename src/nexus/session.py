@@ -164,8 +164,9 @@ def resolve_explicit_session_id() -> str | None:
     or writes a DIFFERENT session's data while believing it addressed the
     one it named -- a session-isolation violation this codebase already
     treats as security-relevant on the MCP side (see
-    :mod:`nexus.daemon.t1_lease`'s locked RF-2 protocol and
-    ``mcp/core.py``'s ``t1_session_unresolved`` branch). The bare
+    :func:`nexus.db.t1.publish_t1_session_lease` / ``read_t1_session_lease``'s
+    session-id-keyed lease and ``mcp/core.py``'s ``t1_session_unresolved``
+    branch). The bare
     invocation with nothing set in env -- including when
     ``current_session`` happens to resolve something -- is not making
     that claim, so it is exempt and keeps the existing shared-identity
@@ -496,9 +497,13 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 
     RDR-149 P4 retired the T1 addr-file publish/discovery that originally
     motivated this (T1 now keys its leased registry record on the
-    session-id, not the claude_pid). This function is retained for its
-    remaining non-T1 consumer, ``nexus.phase_review_sentinel``, which keys
-    its phase-gate sentinel files by the immediate Claude pid.
+    session-id, not the claude_pid). Consumers today: ``nexus.
+    phase_review_sentinel`` (keys its phase-gate sentinel files by the
+    immediate Claude pid) and nexus-d76vc's T1 handoff marker -- both the
+    SessionStart hook's writer (:func:`find_mcp_sibling_pids`, below) and
+    the MCP lifespan's watcher use this SAME function so a marker's
+    claimed ``claude_pid`` is always checked against the identical
+    "immediate, not topmost" ancestor on both sides.
 
     Falls back to the immediate PPID when no ``claude*`` ancestor is
     found (matches the no-claude-in-chain semantics so consumers behave
@@ -517,26 +522,83 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
     return immediate_ppid
 
 
+#: nexus-d76vc: command names the T1 handoff marker writer/watcher treat as
+#: an MCP server sibling. Matches the two ``[project.scripts]`` entry
+#: points in pyproject.toml (``nx-mcp`` / ``nx-mcp-catalog``) that Claude
+#: Code's ``.mcp.json`` spawns as direct children of the claude process.
+_MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
 
-def _t1_isolated_env() -> bool:
-    """Return True when the current env opts into per-process T1 ephemeral.
 
-    ``NX_T1_ISOLATED=1`` only.
+def _list_processes() -> list[tuple[int, int, str]]:
+    """Return ``(pid, ppid, comm)`` for every live process, best-effort.
 
-    The legacy ``NEXUS_SKIP_T1=1`` alias (4.27 -> 4.28 deprecation cycle, RF-4)
-    stopped FUNCTIONING at 6.5.2 — already a full major past its promised 5.0
-    removal — and was recognized-but-ignored with a one-shot warning from then
-    until 7.0.0. That warning is removed here (RDR-155 P4b P3: the shim dies at
-    the MAJOR); the name is no longer special-cased anywhere and is now simply
-    an unrecognised environment variable.
-
-    TRADEOFF, recorded deliberately: the warning existed because a stale alias
-    with a live T1 discoverable would SILENTLY connect the caller to the shared
-    T1 instead of the isolation they asked for (critique 2026-07-13). That
-    failure mode is unchanged — it is now unsignalled. Judged acceptable at a
-    MAJOR after two releases of warning, but it is a real loss, not a no-op.
+    Real process-table enumeration via ``ps -eo pid,ppid,comm=`` (portable
+    across macOS + Linux; unlike :func:`_ppid_of` this has no ``/proc``
+    fast path since a single ``ps`` call already returns the whole table
+    in one shot, cheaper than a ``/proc`` walk for this use). Empty list
+    on any failure -- callers treat that as "no siblings found", never a
+    crash (mirrors :func:`_command_name_of`'s empty-string-on-error
+    posture).
     """
-    return os.environ.get("NX_T1_ISOLATED", "").strip().lower() in ("1", "true", "yes")
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,comm="],
+            stderr=subprocess.DEVNULL, text=True, timeout=5,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+    result: list[tuple[int, int, str]] = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        result.append((pid, ppid, parts[2].strip()))
+    return result
+
+
+def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
+    """Return live ``nx-mcp`` / ``nx-mcp-catalog`` pids whose PPID is
+    *claude_pid*.
+
+    nexus-d76vc: the ancestry check for the T1-handoff marker writer
+    (``nexus.hooks._write_t1_handoff_markers``). A marker is only ever
+    written for an MCP pid discovered THIS way -- filtered by immediate
+    parentage, never by scanning for the command name alone -- so a
+    concurrent session's hook can never target another session's MCP
+    server: two distinct top-level claude processes never share a parent
+    pid for their own spawned MCP servers (the same "immediate, not
+    topmost" ancestry reasoning :func:`find_immediate_claude_pid` already
+    relies on, applied in the other direction: parent -> children instead
+    of child -> ancestor).
+
+    Returns an empty list for a non-positive *claude_pid* or when process
+    enumeration fails (see :func:`_list_processes`) -- fail-safe: no
+    siblings found means no markers get written, never a guess.
+    """
+    if claude_pid <= 0:
+        return []
+    matches: list[int] = []
+    for pid, ppid, comm in _list_processes():
+        if ppid != claude_pid:
+            continue
+        if Path(comm).name in _MCP_SIBLING_COMMANDS:
+            matches.append(pid)
+    return matches
+
+
+
+#: ``_t1_isolated_env()`` (the NX_T1_ISOLATED=1 opt-in check) was removed at
+#: nexus-4lkmz: the isolated/ephemeral in-process T1 leg it gated is deleted
+#: outright (Hal determination 2026-07-28 — "T1 exists in PG only. The need
+#: for an isolated, ephemeral T1 has been eliminated."). The env var is now a
+#: hard-fail, checked directly in :mod:`nexus.db.t1` via
+#: ``_raise_if_t1_isolated_requested`` — there is no "is it set" query left
+#: to answer, only "fail loud if it is."
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

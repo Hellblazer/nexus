@@ -6,16 +6,15 @@
     <div class="stat-label">active</div>
     {% if sessions %}
     <details>
-      <summary>{{ sessions | length }} session file(s)</summary>
+      <summary>{{ sessions | length }} session lease(s)</summary>
       <table role="grid">
-        <thead><tr><th>Session</th><th>Endpoint</th><th>PID</th><th>Status</th></tr></thead>
+        <thead><tr><th>Session</th><th>Status</th><th>Expires</th></tr></thead>
         <tbody>
           {% for s in sessions %}
           <tr>
             <td><code>{{ s.session_id[:12] }}</code></td>
-            <td><code>{{ s.host }}:{{ s.port }}</code></td>
-            <td>{{ s.pid }}</td>
-            <td>{% if s.tcp_reachable %}<span style="color:var(--console-ok);">reachable</span>{% elif s.pid_alive %}<span style="color:var(--console-warn);">pid only</span>{% else %}<span style="color:var(--console-err);">dead</span>{% endif %}</td>
+            <td>{% if s.fresh %}<span style="color:var(--console-ok);">fresh</span>{% else %}<span style="color:var(--console-err);">expired</span>{% endif %}</td>
+            <td>{% if s.fresh %}in {{ in_str(s.expires_in_seconds) }}{% else %}expired{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>

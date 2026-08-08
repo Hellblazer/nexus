@@ -1005,18 +1005,55 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     Resolution rule (by preference, not exclusion — a real binary is
     always probed, never skipped):
     1. Walk PATH left to right; the FIRST match found in a directory that
-       is NOT under ``sys.prefix`` wins.
+       is NOT under ``sys.prefix`` wins — but only among candidates the
+       HOME-scoping rule below admits.
     2. If no such match exists but a match under ``sys.prefix`` does
        (e.g. this process's own venv is the ONLY thing on PATH — a valid
        shape when a user invokes that venv's own ``nx`` directly), that
        match is still returned and still probed for real.
     3. ``None`` only when the binary resolves nowhere on PATH at all.
 
+    HOME-scoping (nexus-k0lk9 sibling finding, 7.4.0 cut): when this
+    process's own prefix lives under the CURRENT ``$HOME``, a PATH hit
+    OUTSIDE that ``$HOME`` is a FOREIGN install, not "the separately
+    installed tool" l2ku5's preference exists to reach. The concrete
+    incident: the release sandbox (``HOME=~/nexus-sandbox``) ran doctor
+    from the sandbox's own tool venv; this resolver skipped the sandbox's
+    nx-mcp as own-prefix and probed the REAL home's live install — the
+    gate's verdict then tracked host load/health instead of the artifact
+    under test. Foreign hits are demoted below the own-prefix fallback,
+    never dropped: with own-prefix outside ``$HOME`` (system-wide
+    installs) the pre-existing rule applies unchanged, and on a dev box
+    both the checkout venv and ``~/.local/bin`` are under ``$HOME`` so
+    the installed tool still wins exactly as before.
+
+    ACCEPTED TRADE-OFF (substantive-critic, 7.4.0): a home-rooted process
+    (e.g. ``uv run`` from a checkout) with the real install ONLY outside
+    ``$HOME`` (e.g. ``/usr/local/bin``) now probes its own venv instead
+    of that install — foreign-vs-genuine is undecidable from the path
+    alone, the result is honestly labeled ``is_own_venv=True`` (never a
+    silent lie), and the topology is pinned by
+    ``test_home_scoping_tradeoff_outside_home_install_loses_to_own_venv``
+    so a future change to this choice is deliberate, not accidental.
+
     Returns ``(path_or_none, is_own_venv)``.
     """
     own_prefix = str(Path(sys.prefix).resolve())
+    try:
+        home = str(Path.home().resolve())
+    except (OSError, RuntimeError):
+        # Path.home() raises RuntimeError (not OSError) when HOME is unset
+        # with no passwd entry — the K8s arbitrary-UID / distroless shape
+        # (nexus-262a7, critic-reproduced: an uncaught raise here crashes
+        # `nx doctor` outright). No home → HOME-scoping disabled, the
+        # pre-existing l2ku5 preference applies unchanged.
+        home = ""
+    own_prefix_under_home = bool(home) and (
+        own_prefix == home or own_prefix.startswith(home + os.sep)
+    )
     path_env = os.environ.get("PATH", os.defpath)
     own_prefix_hit: str | None = None
+    foreign_hit: str | None = None
     for directory in path_env.split(os.pathsep):
         if not directory:
             continue
@@ -1031,8 +1068,18 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
             if own_prefix_hit is None:
                 own_prefix_hit = hit
             continue
+        if own_prefix_under_home and not (
+            resolved_dir == home or resolved_dir.startswith(home + os.sep)
+        ):
+            # Foreign install (outside the current $HOME while our own
+            # prefix is home-rooted) — remember it only as a last resort.
+            if foreign_hit is None:
+                foreign_hit = hit
+            continue
         return hit, False
-    return own_prefix_hit, True
+    if own_prefix_hit is not None:
+        return own_prefix_hit, True
+    return foreign_hit, False
 
 
 def _check_mcp_entry_points() -> list[HealthResult]:
@@ -1375,74 +1422,202 @@ def _check_index_log() -> list[HealthResult]:
     )]
 
 
-def _check_orphan_t1() -> list[HealthResult]:
-    """Report on T1 lease records on disk (RDR-149 P4 leased registry).
+#: Fallback staleness window for a T1 session lease file this check cannot
+#: parse (malformed JSON, missing ``expires_at``, or the pre-ngcpo bare-token
+#: format). Mirrors the fail-safe style of health checks elsewhere in this
+#: module: an unparseable file is reaped only once it is old enough that no
+#: legitimate torn-write window could explain it (atomic temp-file +
+#: os.replace publishes never leave a torn file mid-write), not on first
+#: sight. One hour comfortably exceeds the default 24h lease TTL's refresh
+#: cadence without risking a false reap of a lease mid-publish.
+_ORPHAN_T1_LEASE_STALE_FALLBACK_SECONDS = 3600.0
 
-    T1 publishes a leased registry record at
-    ``~/.config/nexus/t1_addr.<session_id>`` (re-keyed from a transient
-    ``server_pid`` key at cold start). Liveness is lease freshness (TTL),
-    not pid: a dead owner's lease ages out on its own, so there is no
-    bespoke orphan sweep (RDR-149 P5 removed it). This check surfaces any
-    stale (expired) lease record still on disk; such records are inert
-    (readers reap them on discovery), so removal is cosmetic.
+
+def _check_orphan_t1_lease() -> list[HealthResult]:
+    """Report on + reap stale T1 session lease files.
+
+    Ported (nexus-8zfwv, 2026-08-07) off the RDR-149 P4 ``t1_addr.*``
+    ``ServiceRegistry`` lease this check used to read -- ``T1LeasePublisher``,
+    the only thing that ever published that format, is retired (deleted at
+    ff744321). The live cross-process "session has a live T1 scope" signal
+    is now the lease file ``nexus.db.t1.publish_t1_session_lease`` writes:
+    JSON ``{token, expires_at}`` at ``t1_session_lease.<session_id>``.
+
+    Unlike the retired check, THIS one actually reaps: nothing else sweeps
+    an expired ``t1_session_lease.*`` file after an ungraceful owner death
+    (only clean teardown -- ``clear_t1_session_lease`` -- removes one), so
+    without this check stale lease files accumulate forever. A lease past
+    its ``expires_at`` (plus the reader's freshness margin) is unlinked
+    here, not merely reported.
     """
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.t1 import (  # noqa: PLC0415 — deferred to avoid circular import
+        _T1_LEASE_FRESHNESS_MARGIN_SECONDS,
+        _T1_SESSION_LEASE_PREFIX,
+    )
 
     config_dir = nexus_config_dir()
     if not config_dir.exists():
         return [HealthResult(label="T1 sessions", ok=True, detail="no nexus config dir")]
 
-    addr_files = list(config_dir.glob("t1_addr.*"))
-    if not addr_files:
+    lease_files = list(config_dir.glob(f"{_T1_SESSION_LEASE_PREFIX}*"))
+    if not lease_files:
         return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
 
     now = time.time()
     fresh: list[str] = []
-    stale: list[str] = []
-    legacy: list[str] = []
-    for path in addr_files:
-        try:
-            record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, KeyError):
-            # Not a lease record: a pre-P4 ``host:port`` addr file left on
-            # disk by an older version (RDR-149 P4 changed the format). Inert
-            # -- nothing reads it -- but surfaced so it is not silently
-            # invisible after a "no bespoke copies" audit.
-            _log.debug("t1_lease_unparseable", path=str(path))
-            legacy.append(path.name)
+    reaped: list[str] = []
+    for path in lease_files:
+        session_id = path.name[len(_T1_SESSION_LEASE_PREFIX):]
+        if not session_id:
             continue
-        if record.is_fresh(now):
-            age_s = max(0, int(now - record.heartbeat_epoch))
-            fresh.append(f"{path.name} (fresh, last heartbeat {age_s}s ago)")
+        reapable: bool
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            expires_at = float(data["expires_at"])
+            reapable = now >= expires_at - _T1_LEASE_FRESHNESS_MARGIN_SECONDS
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            # Unparseable (pre-ngcpo bare-token format, or corruption):
+            # fail-safe, not fail-open -- only reap if old enough that no
+            # legitimate in-flight publish could explain it.
+            _log.debug("t1_session_lease_unparseable", path=str(path))
+            try:
+                age_s = now - path.stat().st_mtime
+                reapable = age_s > _ORPHAN_T1_LEASE_STALE_FALLBACK_SECONDS
+            except OSError:
+                reapable = False
+
+        if reapable:
+            try:
+                path.unlink()
+                reaped.append(session_id)
+                _log.info("t1_session_lease_reaped", session_id=session_id, path=str(path))
+            except OSError as exc:
+                _log.debug("t1_session_lease_reap_failed", path=str(path), error=str(exc))
+                fresh.append(session_id)  # best-effort: still there, report it
         else:
-            stale.append(path.name)
+            fresh.append(session_id)
 
-    if stale:
+    parts: list[str] = []
+    if fresh:
+        parts.append(f"{len(fresh)} live T1 session(s): {', '.join(fresh)}")
+    if reaped:
+        parts.append(f"reaped {len(reaped)} expired lease(s): {', '.join(reaped)}")
+    if not parts:
+        parts.append("no live T1 sessions")
+
+    return [HealthResult(label="T1 sessions", ok=True, detail="; ".join(parts))]
+
+
+def _check_orphan_t1_handoff() -> list[HealthResult]:
+    """Reap orphaned T1 session-handoff markers (nexus-9l147).
+
+    nexus-d76vc's SessionStart hook writes a LIVE marker
+    (``t1_handoff.<mcp_pid>``, :mod:`nexus.daemon.t1_handoff`) naming the
+    transcript's new session id for a target MCP process; the MCP
+    lifespan's handoff watcher normally claims it (atomically renaming it
+    to the tick-private ``t1_handoff.claimed.<mcp_pid>``) and consumes it
+    within one 5s tick. If the target ``mcp_pid`` dies (crash/OOM/SIGKILL)
+    in the window between the marker being written and its next tick —
+    either the live or the claimed variant, depending on exactly when it
+    died — the marker is never consumed and persists on disk indefinitely.
+    Functionally safe (the handoff watcher's own staleness check rejects a
+    stale marker even after pid reuse), but it is unbounded disk litter
+    with no other sweep touching it. Neither live T1 on-disk artifact
+    self-reaps on read: ``read_t1_session_lease`` treats an expired lease
+    as absent but does not unlink the file either, which is why
+    :func:`_check_orphan_t1_lease` exists as an explicit sweep for THAT
+    litter class. This check is the handoff-marker analogue of that same
+    pattern — a distinct litter class, same "nothing else reaps it"
+    problem. (The old claim this docstring used to make — that
+    ``t1_addr.*`` readers self-reaped on discovery — died with
+    ``T1LeasePublisher``/``ServiceRegistry(tier="t1")``, retired
+    nexus-8zfwv 2026-08-07; that format is gone, not merely unreaped.)
+
+    A marker is orphaned when the ``mcp_pid`` embedded in its filename
+    names no live process (``nexus.session._is_pid_alive``, the same
+    ``os.kill(pid, 0)`` idiom the shared daemon substrate uses elsewhere).
+    Only orphans are reaped (unlinked); a marker whose ``mcp_pid`` IS alive
+    is left completely untouched — the owner may simply be slow to tick.
+    A filename whose suffix does not parse as a plain integer pid is never
+    guessed at or deleted (fail-safe), only surfaced.
+
+    PID-reuse tradeoff (same one ``sweep_dead_t1_holders`` /
+    ``sweep_dead_t1_elect_locks`` document): a marker whose dead
+    ``mcp_pid`` was recycled to an unrelated live process reads as
+    "alive" and is never reaped here — accepted, since the watcher's
+    staleness check makes such a marker inert and the litter is one file.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.daemon.t1_handoff import (  # noqa: PLC0415 — deferred to avoid circular import
+        _CLAIMED_MARKER_PREFIX,
+        _HANDOFF_MARKER_PREFIX,
+    )
+    from nexus.session import _is_pid_alive  # noqa: PLC0415 — deferred to avoid circular import
+
+    config_dir = nexus_config_dir()
+    if not config_dir.exists():
         return [HealthResult(
-            label="T1 sessions",
-            ok=False,
-            detail=f"{len(stale)} stale T1 lease(s) (expired past TTL): {', '.join(stale)}",
-            fix_suggestions=[
-                "Stale leases are inert (readers reap on discovery); removal is cosmetic.",
-                "Remove them anyway: rm ~/.config/nexus/t1_addr.*",
-            ],
+            label="T1 handoff markers", ok=True, detail="no nexus config dir",
         )]
 
-    if legacy and not fresh:
+    markers = list(config_dir.glob(f"{_HANDOFF_MARKER_PREFIX}*"))
+    if not markers:
         return [HealthResult(
-            label="T1 sessions", ok=True,
-            detail=f"no live T1 sessions ({len(legacy)} inert pre-P4 addr file(s) on disk)",
-            fix_suggestions=["Remove inert legacy files: rm ~/.config/nexus/t1_addr.*"],
+            label="T1 handoff markers", ok=True, detail="no handoff markers",
         )]
 
-    if not fresh:
-        return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
+    reaped: list[str] = []
+    live: list[str] = []
+    unparseable: list[str] = []
+    for path in markers:
+        name = path.name
+        # The claimed variant's prefix ("t1_handoff.claimed.") is itself
+        # prefixed by the live variant's ("t1_handoff."), so it must be
+        # checked FIRST or the pid slice below would include "claimed.".
+        if name.startswith(_CLAIMED_MARKER_PREFIX):
+            pid_str = name[len(_CLAIMED_MARKER_PREFIX):]
+        else:
+            pid_str = name[len(_HANDOFF_MARKER_PREFIX):]
+        try:
+            mcp_pid = int(pid_str)
+        except ValueError:
+            # Fail-safe: an unparseable suffix is never guessed at or
+            # deleted, only surfaced as an oddity.
+            unparseable.append(name)
+            continue
+        if _is_pid_alive(mcp_pid):
+            live.append(name)
+            continue
+        try:
+            path.unlink()
+            reaped.append(name)
+        except OSError as exc:
+            _log.debug("t1_handoff_orphan_reap_failed", path=str(path), error=str(exc))
+            unparseable.append(name)
 
-    detail = f"{len(fresh)} live T1 lease(s): {', '.join(fresh)}"
-    if legacy:
-        detail += f" (+{len(legacy)} inert pre-P4 addr file(s))"
-    return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
+    parts: list[str] = []
+    if reaped:
+        parts.append(f"reaped {len(reaped)} orphaned marker(s): {', '.join(sorted(reaped))}")
+    if live:
+        parts.append(f"{len(live)} live marker(s) untouched")
+    if unparseable:
+        parts.append(
+            f"{len(unparseable)} unparseable/unreapable marker(s): "
+            f"{', '.join(sorted(unparseable))}"
+        )
+    if not parts:
+        parts.append("no handoff markers")
+
+    return [HealthResult(
+        label="T1 handoff markers",
+        ok=not unparseable,
+        detail="; ".join(parts),
+        fix_suggestions=(
+            ["Inspect/remove manually: ls ~/.config/nexus/t1_handoff.*"]
+            if unparseable else []
+        ),
+    )]
 
 
 def _check_orphan_checkpoints() -> list[HealthResult]:
@@ -4543,7 +4718,8 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_mcp_entry_points())
     results.extend(_check_git_hooks())
     results.extend(_check_index_log())
-    results.extend(_check_orphan_t1())
+    results.extend(_check_orphan_t1_lease())
+    results.extend(_check_orphan_t1_handoff())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())

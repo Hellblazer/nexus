@@ -1604,7 +1604,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 ## nx scratch
 
-T1 ephemeral session notes (ChromaDB session server, shared across agents).
+T1 ephemeral session notes (PG-backed storage-service session, shared across agents; no in-process opt-out — nexus-4lkmz).
 
 ```
 nx scratch put "hypothesis: cache invalidation is stale"
@@ -2057,7 +2057,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
 | `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
-| `--check-t1` | Diagnose T1 session-id lease presence + reachability (RDR-149 P4). Exits 1 when a session-id resolves but the lease is missing or unreachable |
+| `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
 | `--check-dangling-links` | Report `catalog_links` rows whose `from_tumbler`/`to_tumbler` resolves to no live document — orphans left by document deletion without link cleanup (nexus-ysrwi, GH #1419 issue 7). Calls the engine's `GET /v1/catalog/links/orphaned`. Exits 2 (count UNKNOWN, never a false clean) when the service is unreachable |
 | `--strict-dangling-links` | With `--check-dangling-links`, exit 1 when any dangling link is found (default: warn only). For CI gating |

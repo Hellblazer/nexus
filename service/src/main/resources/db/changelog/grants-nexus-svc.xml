@@ -191,4 +191,66 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
         </rollback>
     </changeSet>
 
+    <changeSet id="grants-003-purge-vacuum-maintain" author="nexus-0ys55" runAlways="true">
+        <comment>
+            nexus-0ys55: MAINTAIN on the five purge-trash VACUUM targets (nexus.chunks_384,
+            nexus.chunks_768, nexus.chunks_1024, nexus.catalog_document_chunks,
+            nexus.catalog_documents) -- mirrors the chash_alias MAINTAIN grant above
+            (grants-nexus-svc-1, rdr180-17/F2) EXACTLY: same PG17+ version guard, same
+            runAlways self-healing placement, same reason a GRANT is required at all --
+            nexus_svc holds DML only and does not own these tables (nexus_admin does), and
+            PostgreSQL does NOT error when a non-owner without MAINTAIN vacuums a table --
+            it emits a WARNING (observed on a live PG17 instance: permission denied to
+            vacuum "&lt;table&gt;", skipping it) and silently no-ops it. Without this grant,
+            CatalogRepository#purgeTrash's post-commit VACUUM (ANALYZE) step
+            (TenantScope#vacuumAnalyze), run asynchronously off the HTTP request thread
+            (nexus-tyxnh), would never actually vacuum on a real production purge,
+            defeating the bead's whole point (a live 11,594-document purge left ~60k
+            dead tuples an operator had to VACUUM by hand) -- every sweep would warn-
+            and-skip silently in the vacuum executor's own log, invisible to the
+            synchronous HTTP response either way.
+
+            TABLE-LIST LOCKSTEP: this list, TenantScope.VACUUM_ALLOWED_TABLES, and
+            CatalogRepository.PURGE_VACUUM_TABLES must all name the SAME five tables. Each
+            of those three call sites carries a comment pointing at the other two, and
+            TenantScopeVacuumMaintainGrantParityTest asserts the two Java lists agree --
+            update all three together or the allowlist / grant / sweep-target sets can
+            silently drift. THIS CHANGESET'S OWN table list is pinned only BEHAVIORALLY,
+            not by a static textual assertion against the Java lists (a changeset SQL
+            string has no Java symbol to compare against): CatalogPurgeTrashVacuumTest's
+            default-nexus_svc-role "real vacuum" proof (verified via
+            pg_stat_user_tables.last_vacuum) is what actually catches this changeset's
+            table list drifting out of lockstep with the other two -- if it silently
+            stops covering all five, this pin is gone and nothing else replaces it.
+
+            MAINTAIN is PostgreSQL 17+ -- same substrate-version caveat as the chash_alias
+            grant above (MANAGED/cloud is Crunchy Bridge-provided, verified 17.10 as of
+            2026-07-20; LOCAL always installs our own signed 17.5+ bundle but keeps whatever
+            data directory a pre-bundle install left behind, which can be older). Where
+            MAINTAIN is unavailable this degrades to the SAME graceful path
+            TenantScope#vacuumAnalyze already handles for any permission gap -- the
+            vacuum executor's completion log names the PostgreSQL warning per table,
+            never a crash and never a silent false-positive.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF current_setting('server_version_num')::int >= 170000 THEN
+        EXECUTE 'GRANT MAINTAIN ON nexus.chunks_384 TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.chunks_768 TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.chunks_1024 TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.catalog_document_chunks TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.catalog_documents TO nexus_svc';
+    ELSE
+        RAISE NOTICE 'grants-nexus-svc: server % predates MAINTAIN (PG17+); purge-trash post-commit VACUUM (nexus-0ys55) will schedule but silently permission-skip every table for every purge-trash execute call on this substrate until it is upgraded -- see the vacuum executor completion log, not the HTTP response, for the skip detail.',
+            current_setting('server_version');
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

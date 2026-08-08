@@ -48,8 +48,9 @@ def _clean_service_errors(fn):
                     "  * the service auth is broken (check NX_SERVICE_TOKEN), or\n"
                     "  * a live Claude MCP session's inherited token went stale — "
                     "reconnect the conexus MCP/extension.\n\n"
-                    "Fallback: prefix with NX_T1_ISOLATED=1 for in-process "
-                    "ephemeral scratch (not shared across invocations)."
+                    "Remedy: confirm the storage service is running "
+                    "(`nx daemon service start`) and a session lease resolves "
+                    "(`nx doctor --check-t1`)."
                 ) from exc
             raise click.ClickException(msg) from exc
     return wrapper
@@ -65,10 +66,10 @@ def _t1():
       :class:`~nexus.db.http_scratch_store.HttpScratchStore` (Postgres
       UNLOGGED, RDR-152 bead nexus-gmiaf.13; CLI cutover completed by
       nexus-rn3wo.1 / nexus-1si7z / nexus-lgnjn).
-    * Explicit ``NX_T1_ISOLATED=1`` / ``sqlite``
-      opt-out → :class:`~nexus.db.t1.T1Database` (ChromaDB path, unchanged).
+    * ``NX_T1_ISOLATED`` set, or ``sqlite`` opt-out → hard errors (nexus-4lkmz
+      / RDR-158 P3 nexus-7bomn). T1 is PG-only; there is no opt-out.
 
-    On ``T1ServerNotFoundError`` (Chroma path) or a service-endpoint
+    On ``T1ServerNotFoundError`` (no resolvable T1 session) or a service-endpoint
     ``RuntimeError`` (service path, ``NX_STORAGE_BACKEND=service`` with no
     reachable nexus-service — nexus-0l5ym), surface a clean actionable message
     via ``click.ClickException`` (exit 1, no traceback) rather than a wall of
@@ -79,10 +80,10 @@ def _t1():
     except T1ServerNotFoundError as exc:
         raise click.ClickException(
             f"{exc}\n\n"
-            "Quick fix: prefix the command with NX_T1_ISOLATED=1 for an "
-            "in-process ephemeral scratch (not shared with the MCP server), or "
-            "reconnect the conexus MCP/extension so a session-id lease is "
-            "published for this session."
+            "Quick fix: start the storage service (`nx daemon service "
+            "start`) and confirm a session-id lease resolves (`nx doctor "
+            "--check-t1`), or reconnect the conexus MCP/extension so a "
+            "session-id lease is published for this session."
         ) from exc
     except RuntimeError as exc:
         # nexus-0l5ym: service-mode T1 (HttpScratchStore) raises a raw
@@ -91,10 +92,10 @@ def _t1():
         # dumping a traceback on `nx scratch`.
         raise click.ClickException(
             f"{exc}\n\n"
-            "Quick fix: prefix the command with NX_T1_ISOLATED=1 for an "
-            "in-process ephemeral scratch, start the service with "
-            "'nx daemon service start', or export NX_SERVICE_URL / "
-            "NX_SERVICE_TOKEN so the service-backed T1 endpoint resolves."
+            "Quick fix: start the service with 'nx daemon service start', "
+            "or export NX_SERVICE_URL / NX_SERVICE_TOKEN so the "
+            "service-backed T1 endpoint resolves (see `nx doctor "
+            "--check-t1`)."
         ) from exc
 
 

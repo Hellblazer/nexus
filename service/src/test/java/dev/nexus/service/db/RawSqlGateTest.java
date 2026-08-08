@@ -167,7 +167,15 @@ class RawSqlGateTest {
             // sequence last_value are sequence-state functions with no generated
             // jOOQ form (codegen models tables, not sequences); one statement on
             // the fidelity-import path only, never serving-path.
-            "advanceTopicsIdSequence"))
+            "advanceTopicsIdSequence")),
+        Map.entry("TenantScope.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-0ys55): VACUUM is PostgreSQL maintenance syntax
+            // with no jOOQ typed-DSL form at all — same category as ChashSqlIdioms'
+            // refreshAliasStats ANALYZE call above. Table names are validated
+            // against a fixed allowlist (VACUUM_ALLOWED_TABLES) before the string is
+            // built, so the concatenation is not an injection surface. Single-homed:
+            // CatalogRepository#purgeTrash's post-commit VACUUM step is the only caller.
+            "vacuumAnalyze"))
     );
 
     /** Length-preserving blank-out of comment bodies and string/char literal

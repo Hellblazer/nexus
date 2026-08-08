@@ -101,3 +101,143 @@ class TestReadStdinSessionId:
 
         result = _read_stdin_session_id(_BrokenStdin())
         assert result is None
+
+
+# ── _read_stdin_payload helper (nexus-d76vc) ────────────────────────────────
+#
+# session_start_cmd reads stdin exactly ONCE via this helper and pulls both
+# session_id and source out of the same parsed dict (a stream can only be
+# read once — the reason _read_stdin_session_id's old read-and-extract-one-
+# field shape had to be generalized rather than called twice).
+
+
+class TestReadStdinPayload:
+    def test_tty_stdin_returns_none_without_reading(self):
+        from nexus.commands.hook import _read_stdin_payload
+
+        class _TtyStream(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+            def read(self, *a, **kw):
+                raise AssertionError(
+                    "must not call read() when isatty()=True"
+                )
+
+        assert _read_stdin_payload(_TtyStream()) is None
+
+    def test_piped_json_returns_full_dict(self):
+        from nexus.commands.hook import _read_stdin_payload
+
+        stdin = io.StringIO('{"session_id": "abc-123", "source": "clear"}')
+        assert _read_stdin_payload(stdin) == {
+            "session_id": "abc-123", "source": "clear",
+        }
+
+    def test_empty_piped_stdin_returns_none(self):
+        from nexus.commands.hook import _read_stdin_payload
+
+        assert _read_stdin_payload(io.StringIO("")) is None
+
+    def test_malformed_json_returns_none(self):
+        from nexus.commands.hook import _read_stdin_payload
+
+        assert _read_stdin_payload(io.StringIO("not json {{")) is None
+
+    def test_non_dict_json_returns_none(self):
+        from nexus.commands.hook import _read_stdin_payload
+
+        assert _read_stdin_payload(io.StringIO("[1, 2, 3]")) is None
+
+    def test_read_stdin_session_id_still_works_via_the_shared_helper(self):
+        """Regression pin: refactoring _read_stdin_session_id to delegate
+        to _read_stdin_payload must not change its observable contract."""
+        from nexus.commands.hook import _read_stdin_session_id
+
+        stdin = io.StringIO('{"session_id": "abc-123", "source": "resume"}')
+        assert _read_stdin_session_id(stdin) == "abc-123"
+
+
+# ── nx hook session-start CLI: source passthrough (nexus-d76vc) ────────────
+
+
+class TestSessionStartCmdSourcePassthrough:
+    """The CLI subcommand extracts BOTH session_id and source from the ONE
+    stdin payload and forwards source to hooks.session_start — end-to-end
+    from stdin JSON through to the T1 handoff marker writer.
+    """
+
+    def test_clear_source_reaches_session_start(self, monkeypatch):
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+
+        runner = CliRunner()
+        with patch("nexus.hooks.session_start", return_value="Nexus ready (session: s1).") as mock_start:
+            result = runner.invoke(
+                hook_group, ["session-start"],
+                input='{"session_id": "s1", "source": "clear"}',
+            )
+        assert result.exit_code == 0
+        mock_start.assert_called_once_with(claude_session_id="s1", source="clear")
+
+    def test_startup_source_reaches_session_start(self, monkeypatch):
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+
+        runner = CliRunner()
+        with patch("nexus.hooks.session_start", return_value="Nexus ready (session: s1).") as mock_start:
+            result = runner.invoke(
+                hook_group, ["session-start"],
+                input='{"session_id": "s1", "source": "startup"}',
+            )
+        assert result.exit_code == 0
+        mock_start.assert_called_once_with(claude_session_id="s1", source="startup")
+
+    def test_no_stdin_payload_passes_none_source(self, monkeypatch):
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+
+        runner = CliRunner()
+        with patch("nexus.hooks.session_start", return_value="Nexus ready (session: s1).") as mock_start:
+            result = runner.invoke(hook_group, ["session-start"], input="")
+        assert result.exit_code == 0
+        mock_start.assert_called_once_with(claude_session_id=None, source=None)
+
+    def test_end_to_end_clear_writes_a_real_marker(self, tmp_path, monkeypatch):
+        """Full stack: stdin JSON -> CLI -> hooks.session_start -> a real
+        marker file on disk, with a mocked ancestry/sibling resolution
+        (no real process tree available under CliRunner)."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
+        runner = CliRunner()
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=777),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[888]),
+        ):
+            result = runner.invoke(
+                hook_group, ["session-start"],
+                input='{"session_id": "new-sess", "source": "clear"}',
+            )
+        assert result.exit_code == 0
+        marker = read_handoff_marker(888, tmp_path)
+        assert marker is not None
+        assert marker.new_session_id == "new-sess"
+        assert marker.claude_pid == 777

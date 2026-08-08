@@ -65,7 +65,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │
 
     └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
-          T1: nexus-service HTTP (HttpScratchStore; session scratch, shared across agent processes; NX_T1_ISOLATED=1 -> private in-process InMemoryVectorClient)
+          T1: nexus-service HTTP (HttpScratchStore; session scratch, shared across agent processes; PG-only, no in-process opt-out — nexus-4lkmz)
           T2: nexus-service over Postgres (the write arbiter)
                 Eight domain stores + the catalog, all HTTP clients behind T2Database
                 Transport: HTTP to the nexus-service
@@ -145,13 +145,19 @@ uid-scoped Postgres, T3 uid-scoped pgvector, all behind the nexus-service) but s
 (`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
 election, ungraceful-death reap, restart fencing, self-heal re-assert, and
 version-skew cycling all live in that one primitive, parameterized by tier
-and scope. Each surviving tier is a thin consumer: T1 via `daemon/t1_lease.py`
-(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), and the
-storage service via `daemon/storage_service_daemon.py`. Both per-tier daemons
-that used to sit here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b)
-and `daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w) — the service
-supervises every tier now. Liveness is **lease freshness (TTL),
-not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
+and scope. The surviving tiers on this primitive are the storage service
+(`daemon/storage_service_daemon.py`) and the aspect-worker
+(`daemon/aspect_worker_daemon.py`). Three per-tier daemons that used to sit
+here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b),
+`daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w), and
+`daemon/t1_lease.py` (the RDR-149 P4 `ServiceRegistry(tier="t1")` MCP-lifespan
+publisher, re-keyed transient `server_pid` → session-id, retired
+nexus-8zfwv 2026-08-07). T1 does not ride this primitive at all any more —
+its live session lease is a standalone flat file
+(`nexus.db.t1.publish_t1_session_lease`, `t1_session_lease.<session_id>`),
+outside `ServiceRegistry`, with no election flock and no re-key protocol.
+Liveness for the tiers that DO ride the primitive is **lease freshness
+(TTL), not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
 MinerU (`daemon/mineru_lifecycle.py`, nexus-1qdb9) consumes the substrate's
 public `election()` spawn guard rather than a full lease: the PDF pipeline's
 `ensure_mineru_running()` elects exactly one spawner per config dir across
@@ -807,7 +813,7 @@ Grouped by verb:
 2. **No ORM client-side** -- Python T2/T3/catalog clients speak HTTP to the engine, never SQL; the engine owns schema via Liquibase-managed Postgres (with a jOOQ-generated codegen layer server-side, `service/pom.xml`). The historical direct-`sqlite3` T2 (WAL + FTS5, stdlib) was the migration source, retired at RDR-158 P4.
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **Session-id-scoped T1, service-backed** -- Historically ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4) the MCP server's chroma lifespan started a per-session ChromaDB HTTP server and published a leased registry record at `~/.config/nexus/t1_addr.<session_id>`; that discovery mechanism retired with the chroma substrate ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b). Today `get_t1_database` routes T1 to `HttpScratchStore` over the one `nexus-service`, scoped by the same Claude session-id (resolved from `~/.config/nexus/current_session`) — child agents and Bash-tool siblings resolve the same session-id and share T1 scratch across the agent tree; concurrent independent windows stay isolated via distinct session-ids. `NX_T1_ISOLATED=1` opts a process into a private, dependency-free in-process `InMemoryVectorClient` instead; otherwise a process outside service-mode routing raises `T1ServerNotFoundError` rather than inventing a private store.
+5. **Session-id-scoped T1, service-backed** -- Historically ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4) the MCP server's chroma lifespan started a per-session ChromaDB HTTP server and published a leased registry record at `~/.config/nexus/t1_addr.<session_id>`; that discovery mechanism retired with the chroma substrate ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b). Today `get_t1_database` routes T1 to `HttpScratchStore` over the one `nexus-service`, scoped by the same Claude session-id (resolved from `~/.config/nexus/current_session`) — child agents and Bash-tool siblings resolve the same session-id and share T1 scratch across the agent tree; concurrent independent windows stay isolated via distinct session-ids. The in-process `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired (nexus-4lkmz, Hal determination 2026-07-28: "T1 exists in PG only") — setting it now hard-fails with `T1IsolatedLegRetiredError` instead of opting into a private in-process `InMemoryVectorClient`; a process outside service-mode routing raises `T1ServerNotFoundError` rather than inventing a private store.
 6. **MCP tools over agent-spawns for utility operations** ([RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md)) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. Agent files are retained as stubs that redirect to the MCP tool.
 
    **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.
@@ -878,8 +884,12 @@ the split was understood.
 
 **Correction of a previously recorded lesson:** "prior-session T1 is never
 searchable" is **true only for the CLI path**. The MCP scope survives
-`/clear` for the life of the MCP server process, so prior-conversation T1
-*is* readable via the MCP scratch tools within the same app process.
+`/clear` for at most one handoff-watch poll tick (nexus-d76vc, ≤5s — see
+the "Update 2026-08-07" note below; this superseded the original,
+now-inaccurate "for the life of the MCP server process" wording), so
+prior-conversation T1 remains readable via the MCP scratch tools only in
+that brief window immediately after `/clear`, not indefinitely for the
+rest of the app process's life.
 
 The incident that originally produced the false lesson was **not** a scope
 mix-up — both the failed search and the eventual write landed in the *same*
@@ -907,6 +917,65 @@ write-back lost"** — an idempotent-notification-handling discipline — not
   actually terminated (not just that a search came back empty) — a search
   that races a still-running agent is expected to find nothing, and that is
   not evidence of loss.
+
+**Update 2026-08-07 (nexus-d76vc): the MCP scope now follows `/clear`/`/resume`.**
+Item 1 above ("frozen into the MCP server process's env at spawn... survives
+`/clear` and `/resume`") described the mechanism as a *permanent* limitation.
+It no longer is: freeze-at-spawn was the honest response to a missing
+signal — the MCP server samples the session id once because the MCP
+protocol carries no per-request session-id channel, so a long-lived server
+has no way to *learn* that the transcript changed. nexus-d76vc supplies that
+missing signal instead of accepting the freeze:
+
+- **Marker writer** (`nexus.hooks._write_t1_handoff_markers`, invoked from
+  `session_start()`). The conexus SessionStart hook fires on matcher
+  `startup|resume|clear|compact` and already runs `nx hook session-start`
+  (`conexus/hooks/hooks.json`). On `source=clear` or `source=resume` — the
+  two Claude Code SessionStart `source` values where the transcript's
+  session id changes out from under an already-running MCP server —
+  the hook writes `~/.config/nexus/t1_handoff.<mcp_pid>` naming the NEW
+  session id, for every live `nx-mcp`/`nx-mcp-catalog` sibling of the
+  hook's own claude ancestor (`nexus.session.find_mcp_sibling_pids`).
+  `startup` spawns brand-new MCP servers (nothing frozen yet) and
+  `compact` keeps the same session id (no divergence); neither writes a
+  marker.
+- **Watcher** (`nexus.mcp.core._t1_handoff_watch_loop` /
+  `_t1_handoff_tick`), a dedicated poll independent of the existing
+  token-refresh loop (whose interval is hours, far too coarse for a user
+  action expected to take effect promptly). Each tick checks for its own
+  marker; when one is present it re-derives its OWN claude ancestor
+  (never trusting the marker's claimed `claude_pid` alone — the marker's
+  authentication is ancestry-based on BOTH sides, per the rn3wo.1
+  never-share-identity property), validates the claimed session id and
+  the marker's freshness, then RE-LEASES: mint-or-borrow a token for the
+  new session (`nexus.db.t1._lock_guarded_mint_or_borrow`, the same
+  flock-guarded helper the original mint path uses, so a racing sibling
+  MCP converges to one mint), swap `NX_T1_SESSION`/`NX_T1_SESSION_ID`,
+  drop the cached T1 singleton (`nexus.mcp_infra.reset_t1_for_release`)
+  so the next tool call reconstructs against the new scope, and stop
+  refreshing the old lease. A rejected marker (ancestry mismatch, stale,
+  malformed) is logged loudly and **deleted** — never left in place to be
+  silently retried forever.
+- **Ownership semantics (locked design decision).** The pre-`/clear`
+  session's T1 rows are **not** migrated onto the new session id — they
+  strand under the old id and age out via the ordinary T1 TTL sweep.
+  Migrating would silently merge two conversations the user explicitly
+  separated with `/clear`.
+- **Consequence:** MCP-tool T1 and `nx` CLI T1 converge to the SAME scope
+  for a given conversation at all times (modulo the watcher's short poll
+  interval, `_T1_HANDOFF_WATCH_INTERVAL_S`, currently 5s) — item 1 above
+  is now the STEADY STATE between events, not a standing divergence.
+  Subagents need no separate handling (MUST-HOLD 4): an Agent-tool
+  dispatch shares its parent's MCP server *process*, so the re-lease's
+  process-wide state swap (env vars + the mcp_infra singleton) is visible
+  to every tool call in that process — parent conversation or dispatched
+  subagent alike — without any subagent-specific code.
+- **What did NOT change:** the CLI-vs-MCP resolution mechanics in items 2
+  and 3 above, the nexus-f7xyq fail-loud contract for an explicit session
+  id with no usable lease, and the "operator `claude -p` subprocess"
+  scopes documented in `T1 sub-agent contract (RDR-105)` (`AGENTS.md`).
+  This fix closes the ONE specific divergence window item 1 described; it
+  does not touch how a session id is resolved in the first place.
 
 ## Heritage
 

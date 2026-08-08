@@ -180,9 +180,69 @@ def _ledger_text() -> str:
 _REQUIRE_ENV = "NX_REQUIRE_PLUGIN_DRIFT_CHECK"
 
 
+def _pyproject_version() -> str:
+    import tomllib
+
+    with open(REPO_ROOT / "pyproject.toml", "rb") as fh:
+        return tomllib.load(fh)["project"]["version"]
+
+
+def _remote_confirms_tag_absent(ref: str) -> bool | None:
+    """Authoritative upstream probe (nexus-icrwy): does origin have *ref*?
+
+    Local unresolvability cannot distinguish "tag genuinely not cut yet"
+    (the release window) from "tag exists upstream but this checkout's
+    fetch failed" — and ref == v<pyproject> is develop's CONTINUOUS
+    resting state between releases, not a seconds-long branch condition.
+    Returns True (confirmed absent upstream → genuine window), False
+    (present upstream → the fetch step is broken, NOT a window), or None
+    (probe itself failed — offline/auth — cannot confirm either way).
+    """
+    proc = _git("ls-remote", "--tags", "origin", f"refs/tags/{ref}")
+    if proc.returncode != 0:
+        return None
+    return not proc.stdout.strip()
+
+
 def _require_or_skip() -> None:
     if _has_any_tags():
         return
+    if _in_release_window():
+        # RELEASE-WINDOW-SHAPED (ref == v<pyproject>, tag locally
+        # unresolvable): the pinned ref cannot be fetched when it does not
+        # exist yet — the workflow's fetch step tolerates exactly this
+        # case, so a tagless checkout here CAN be the documented
+        # sequencing (exposed at the 7.4.0 cut: nexus-05m1i made this job
+        # honest, and the first honest release-window run hit the
+        # require-flag raise below, which every prior cut had sailed past
+        # only because the job was vacuous-green). But window-SHAPED is
+        # not window-CONFIRMED (nexus-icrwy, critic Critical on the first
+        # fix): local unresolvability also matches "fetch step broke",
+        # and ref == v<pyproject> is develop's resting state between
+        # releases. Confirm absence UPSTREAM before trusting the window;
+        # an inconclusive probe fails closed under the require flag.
+        confirmed = _remote_confirms_tag_absent(f"v{_pyproject_version()}")
+        if confirmed is True:
+            # Genuine window: the ledger-EMPTY contract the tests then
+            # enforce needs no tag to check.
+            return
+        if os.environ.get(_REQUIRE_ENV) == "1":
+            raise AssertionError(
+                f"{_REQUIRE_ENV}=1, checkout is tagless and release-window-"
+                f"shaped, but upstream "
+                + (
+                    "HAS the pinned tag — the tag-fetch step is broken, this "
+                    "is NOT a release window"
+                    if confirmed is False
+                    else "absence could not be confirmed (ls-remote failed) — "
+                    "refusing to treat an unverifiable state as a window"
+                )
+                + ". Failing loudly rather than checking nothing (nexus-icrwy)."
+            )
+        pytest.skip(
+            "tagless and release-window-shaped, but upstream absence not "
+            "confirmed — drift unresolvable locally."
+        )
     if os.environ.get(_REQUIRE_ENV) == "1":
         raise AssertionError(
             f"{_REQUIRE_ENV}=1 but this checkout has NO tags, so the pinned ref "
@@ -353,6 +413,12 @@ class TestTaglessBehaviour:
         monkeypatch.setattr(
             "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
         )
+        # Pin the window OFF: on an actual release branch the real checkout
+        # IS in the window, and this test is about NON-window taglessness.
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: False,
+        )
         with pytest.raises(BaseException) as exc:
             _require_or_skip()
         assert exc.typename == "Skipped", f"expected a skip, got {exc.typename}"
@@ -362,8 +428,98 @@ class TestTaglessBehaviour:
         monkeypatch.setattr(
             "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
         )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: False,
+        )
         with pytest.raises(AssertionError, match="tag-fetch step"):
             _require_or_skip()
+
+    def test_tagless_in_confirmed_release_window_proceeds_even_with_flag(
+        self, monkeypatch
+    ) -> None:
+        """The 7.4.0-cut regression: in the release window the pinned tag
+        cannot exist yet, so taglessness is the documented sequencing —
+        the require flag must NOT turn it into a failure (and no skip:
+        the window contract, ledger-EMPTY, is checked tag-free). The
+        window must be CONFIRMED upstream (nexus-icrwy)."""
+        monkeypatch.setenv(_REQUIRE_ENV, "1")
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._remote_confirms_tag_absent",
+            lambda ref: True,
+        )
+        _require_or_skip()  # returns, no raise, no skip
+
+    def test_window_shaped_but_tag_exists_upstream_fails_loudly(
+        self, monkeypatch
+    ) -> None:
+        """nexus-icrwy (critic Critical): ref == v<pyproject> is develop's
+        RESTING state between releases, so window-shaped + tagless can
+        also mean 'the fetch step broke'. Upstream having the tag proves
+        exactly that — never a window, always a loud failure."""
+        monkeypatch.setenv(_REQUIRE_ENV, "1")
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._remote_confirms_tag_absent",
+            lambda ref: False,
+        )
+        with pytest.raises(AssertionError, match="NOT a release window"):
+            _require_or_skip()
+
+    def test_window_shaped_but_probe_inconclusive_fails_closed_with_flag(
+        self, monkeypatch
+    ) -> None:
+        """An unverifiable window is not a window: ls-remote failing
+        (offline/auth) under the require flag raises — the CI runner just
+        cloned from origin, so no-network THERE is itself suspicious."""
+        monkeypatch.setenv(_REQUIRE_ENV, "1")
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._remote_confirms_tag_absent",
+            lambda ref: None,
+        )
+        with pytest.raises(AssertionError, match="could not be confirmed"):
+            _require_or_skip()
+
+    def test_window_shaped_probe_inconclusive_without_flag_skips(
+        self, monkeypatch
+    ) -> None:
+        """Locally (no require flag), an unconfirmable window degrades to
+        a skip — offline dev boxes must not hard-fail."""
+        monkeypatch.delenv(_REQUIRE_ENV, raising=False)
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._remote_confirms_tag_absent",
+            lambda ref: None,
+        )
+        with pytest.raises(BaseException) as exc:
+            _require_or_skip()
+        assert exc.typename == "Skipped", f"expected a skip, got {exc.typename}"
 
 
 class TestTheCIWiringItself:

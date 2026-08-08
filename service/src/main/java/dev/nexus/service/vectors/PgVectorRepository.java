@@ -2199,6 +2199,68 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Batched replacement for the per-row {@link #updateMetadataOneRow} loop
+     * {@link #resolveNeedEmbedIdx} used to run over its have-vector/unchanged-text
+     * subset (nexus-6yps0, T2 [21552] deep-analysis third finding: the loop plus
+     * {@link #selectExistingChashTextCtx}'s unbounded IN list set a 0.024s/chunk
+     * floor on an UNCHANGED file's re-index pass — the dominant cost of a no-op
+     * re-index, since every chunk paid one full network round trip for its
+     * metadata-only UPDATE).
+     *
+     * <p>SEMANTICS ARE BIT-IDENTICAL to the loop this replaces: each row still gets
+     * its own {@code UPDATE ... SET metadata = ? WHERE collection = ? AND chash = ?}
+     * statement — same predicate, same {@code sanitizeNulDeep}/{@code toJson} value
+     * shape as {@link #updateMetadataOneRow} — under the SAME {@link DSLContext} the
+     * caller's {@link TenantScope#withTenant} transaction already stamped (RLS-safe:
+     * no BYPASSRLS, no separate connection). The only change is HOW MANY round trips
+     * it costs: every statement in one {@link #SOURCE_URI_JOIN_BATCH}-sized page rides
+     * a single JDBC batch ({@code ctx.batch(...).execute()}) instead of N separate
+     * {@code execute()} calls.
+     *
+     * <p>Chunked at {@link #SOURCE_URI_JOIN_BATCH} rows per JDBC batch — the same
+     * bind-param-budget constant {@link #sourceUrisByChash} already chunks its
+     * IN-clause at. A per-row UPDATE batch does not carry an unbounded-IN-clause risk
+     * (each statement's bind params are independent of every other statement's), but
+     * capping batch SIZE still bounds per-round-trip memory/driver overhead for an
+     * unusually large have-vector set, and reusing the existing constant avoids adding
+     * a second "what's the right batch size" judgment call to this class.
+     *
+     * @param ids         full dedup id list (index-aligned with {@code metadatas})
+     * @param metadatas   full dedup metadata list (index-aligned with {@code ids})
+     * @param idxToUpdate indices into {@code ids}/{@code metadatas} to UPDATE, in order
+     * @return the SUBSET of {@code idxToUpdate} whose UPDATE affected 0 rows —
+     *         {@link #resolveNeedEmbedIdx}'s concurrent-delete race guard (see that
+     *         method's javadoc): a chash present at the existence SELECT but gone by
+     *         the time this UPDATE runs (concurrent orphan-GC pass) must be rerouted
+     *         to need-embed, never silently dropped. Order matches the SUBSEQUENCE of
+     *         {@code idxToUpdate} whose statement affected 0 rows (page-by-page).
+     */
+    private static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
+                                                       String collection, List<String> ids,
+                                                       List<Map<String, Object>> metadatas,
+                                                       List<Integer> idxToUpdate) {
+        List<Integer> zeroAffected = new ArrayList<>();
+        for (int start = 0; start < idxToUpdate.size(); start += SOURCE_URI_JOIN_BATCH) {
+            List<Integer> page = idxToUpdate.subList(
+                start, Math.min(start + SOURCE_URI_JOIN_BATCH, idxToUpdate.size()));
+            List<org.jooq.Query> queries = new ArrayList<>(page.size());
+            for (int idx : page) {
+                // Same NUL defense as updateMetadataOneRow/upsertChunks (nexus-rvfwj).
+                queries.add(ctx.update(ch.table())
+                               .set(ch.metadata(), JSONB.jsonb(toJson(sanitizeNulDeep(metadatas.get(idx)))))
+                               .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
+            }
+            int[] affectedCounts = ctx.batch(queries).execute();
+            for (int i = 0; i < page.size(); i++) {
+                if (affectedCounts[i] == 0) {
+                    zeroAffected.add(page.get(i));
+                }
+            }
+        }
+        return zeroAffected;
+    }
+
+    /**
      * RDR-181 (bead nexus-f0r8p.1): PK-indexed existence lookup — which of the given
      * chashes already have a stored row (and therefore a stored vector) in
      * {@code (tenant, collection)}. This is the existence-partition primitive behind
@@ -2396,6 +2458,13 @@ public final class PgVectorRepository {
                 // the reroute step ("if 0 rows, move that chash into need-embed") is a
                 // mutation partition.needEmbedIdx() cannot express directly.
                 List<Integer> needEmbedIdx = new ArrayList<>(partition.needEmbedIdx());
+                // nexus-6yps0: split have-vector into "content-divergent" (routed
+                // straight to need-embed below, exactly as before — no UPDATE issued;
+                // the insert path rewrites chunk_text/embedding/metadata together) vs
+                // "unchanged text" (metadata-only UPDATE candidates). The unchanged
+                // subset is UPDATEd in one batched round trip below instead of the
+                // former one-`execute()`-per-row loop.
+                List<Integer> unchangedIdx = new ArrayList<>(partition.haveVectorIdx().size());
                 for (int idx : partition.haveVectorIdx()) {
                     String storedText = existingText.get(dedupIds.get(idx));
                     if (!Objects.equals(storedText, dedupDocs.get(idx))) {
@@ -2406,14 +2475,21 @@ public final class PgVectorRepository {
                         // issued here (the insert path below rewrites chunk_text,
                         // embedding, AND metadata together).
                         needEmbedIdx.add(idx);
-                        continue;
-                    }
-                    int affected = updateMetadataOneRow(ctx, ch, collection,
-                            dedupIds.get(idx), dedupMetas.get(idx));
-                    if (affected == 0) {
-                        needEmbedIdx.add(idx);
+                    } else {
+                        unchangedIdx.add(idx);
                     }
                 }
+                // Order note: entries this call appends (the zero-affected reroute
+                // subset of unchangedIdx) land AFTER the content-divergent entries
+                // added above, rather than interleaved in original haveVectorIdx
+                // iteration order the pre-nexus-6yps0 single pass produced. insertIdx
+                // (this method's return value, one layer up in upsertChunksInternal)
+                // is consumed purely as a SET of indices — each is used independently
+                // to slice docsToEmbed / align an embedding — so this reordering is
+                // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
+                // BatchParityTest for the exact-row-state parity this must hold instead.
+                needEmbedIdx.addAll(
+                    batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx));
                 return needEmbedIdx;
             });
         } catch (RuntimeException e) {
@@ -2432,11 +2508,19 @@ public final class PgVectorRepository {
     private static Map<String, String> selectExistingChashTextCtx(DSLContext ctx, DimTables.ChunkTable ch,
                                                                     String collection, List<String> chashes) {
         Map<String, String> out = new HashMap<>();
-        ctx.select(ch.chash(), ch.chunkText())
-           .from(ch.table())
-           .where(ch.collection().eq(collection).and(ch.chash().in(chashes)))
-           .fetch()
-           .forEach(r -> out.put(r.value1(), r.value2()));
+        // nexus-6yps0: bound the IN-clause bind-param budget at SOURCE_URI_JOIN_BATCH,
+        // the same constant sourceUrisByChash already chunks its own chash IN-clause
+        // at — an unbounded chash().in(chashes) here was the other half of the
+        // 0.024s/chunk floor this bead closes (the per-row updateMetadataOneRow loop
+        // was the other), on a call site RDR-181 added without this bound.
+        for (int start = 0; start < chashes.size(); start += SOURCE_URI_JOIN_BATCH) {
+            List<String> batch = chashes.subList(start, Math.min(start + SOURCE_URI_JOIN_BATCH, chashes.size()));
+            ctx.select(ch.chash(), ch.chunkText())
+               .from(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(batch)))
+               .fetch()
+               .forEach(r -> out.put(r.value1(), r.value2()));
+        }
         return out;
     }
 

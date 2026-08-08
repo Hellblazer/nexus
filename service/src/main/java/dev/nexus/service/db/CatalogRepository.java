@@ -57,6 +57,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * RDR-152 bead nexus-gmiaf.18 — Catalog store repository.
@@ -279,8 +282,75 @@ public final class CatalogRepository {
 
     private final TenantScope tenantScope;
 
+    /**
+     * Dedicated single-thread daemon executor for {@link #applyPostPurgeVacuum}'s
+     * post-commit VACUUM work (nexus-tyxnh). MUST NOT run on the HTTP request
+     * thread: the production incident that motivated nexus-0ys55 reported
+     * chunks_1024 ALONE took 195s to vacuum, while the Python client's shared
+     * httpx timeout is 30s — running synchronously means the client times out
+     * mid-VACUUM, sees an apparent failure for a purge that already committed, and
+     * a reasonable retry starts a SECOND concurrent vacuum sequence against the
+     * same tables during exactly the incident window this bead exists to help
+     * with. Single-threaded so at most one vacuum sequence ever runs per engine
+     * instance; {@link #vacuumInProgress} is the fast-fail guard that keeps a
+     * second {@code purgeTrash} call from queuing behind it instead of reporting
+     * {@code already-running} immediately. Mirrors the {@code sweepScheduler} /
+     * {@code rekeyJobs} daemon-executor idiom in {@link
+     * dev.nexus.service.NexusService}.
+     */
+    private final ExecutorService vacuumExecutor;
+
+    /**
+     * Single-flight guard for {@link #applyPostPurgeVacuum} (nexus-tyxnh): true
+     * while a purge-trash VACUUM sequence is running on {@link #vacuumExecutor}.
+     * Scoped to this {@link CatalogRepository} instance, matching the executor's
+     * own scope (one instance per running engine).
+     */
+    private final AtomicBoolean vacuumInProgress = new AtomicBoolean(false);
+
     public CatalogRepository(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
+        this.vacuumExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "purge-trash-vacuum");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    /**
+     * Test-only (nexus-tyxnh): observe whether a purge-trash VACUUM sweep is
+     * currently running on {@link #vacuumExecutor}. Lets a test bounded-poll for
+     * the async sweep's completion (submit, then poll this until false, then
+     * assert on database state) instead of a fixed sleep — same idiom as {@link
+     * dev.nexus.service.vectors.PgVectorRepository}'s {@code *ForTests} counters.
+     */
+    public boolean isVacuumInProgressForTests() {
+        return vacuumInProgress.get();
+    }
+
+    /**
+     * Test-only (nexus-tyxnh): force the single-flight guard's state directly, so
+     * a test can exercise {@link #applyPostPurgeVacuum}'s {@code already-running}
+     * branch deterministically without needing a genuinely slow VACUUM in flight
+     * (this class's only realistic way to make one artificially slow would be a
+     * multi-GB fixture — disproportionate for testing a boolean CAS). Callers
+     * MUST reset to {@code false} afterward (e.g. in a {@code finally}) or every
+     * subsequent {@code purgeTrash} call on this instance reports
+     * {@code already-running} forever.
+     */
+    public void setVacuumInProgressForTests(boolean inProgress) {
+        vacuumInProgress.set(inProgress);
+    }
+
+    /**
+     * Shuts down {@link #vacuumExecutor} (nexus-tyxnh). Called from {@link
+     * dev.nexus.service.NexusService#stop()} alongside its other executor
+     * teardowns ({@code sweepScheduler.shutdownNow()}, {@code rekeyJobs.close()}).
+     * Idempotent (repeated {@code shutdownNow()} calls are a no-op past the
+     * first); safe to call even when no vacuum was ever submitted.
+     */
+    public void close() {
+        vacuumExecutor.shutdownNow();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2261,9 +2331,44 @@ public final class CatalogRepository {
      * completion. Not an exception: a concurrent committed tombstone/restore between the
      * two statements is a legitimate (if rare) read-committed cause, and aborting a purge
      * that has ALREADY deleted rows would be worse than reporting the discrepancy.
+     *
+     * <p>POST-COMMIT VACUUM, ASYNCHRONOUS (nexus-0ys55, made async by nexus-tyxnh):
+     * after the transaction above commits (inside {@link TenantScope#withTenant}'s own
+     * return path), {@link #applyPostPurgeVacuum} SUBMITS a {@code VACUUM (ANALYZE)}
+     * sweep of every table the DELETE above swept — {@code chunks_384/768/1024},
+     * {@code catalog_document_chunks} (fk-001 CASCADE), and {@code catalog_documents}
+     * itself — to {@link #vacuumExecutor} and returns IMMEDIATELY; it does NOT wait for
+     * the vacuum to finish. Deliberately OUTSIDE the {@code withTenant} lambda: VACUUM
+     * cannot run inside a transaction block, and by the time this method's caller sees
+     * the map, {@code withTenant} has already committed and returned the connection to
+     * the pool.
+     *
+     * <p>WHY ASYNC (nexus-tyxnh, substantive-critique Critical): the production
+     * incident that motivated nexus-0ys55 reported chunks_1024 ALONE took 195s to
+     * vacuum manually. Running the 5-table sweep synchronously on the HTTP request
+     * thread would hold the response open past the Python client's 30s shared httpx
+     * timeout — the client sees an apparent failure for a purge that already
+     * committed, and a reasonable operator retry risks a SECOND vacuum sequence
+     * running concurrently against the same tables during exactly the incident window
+     * this bead exists to help with. Submitting the work and returning immediately
+     * removes that failure mode entirely: the response always returns promptly, and
+     * {@link #vacuumInProgress} (single-flight) makes a concurrent retry report
+     * {@code already-running} rather than queueing a second sweep.
+     *
+     * <p>Gated by {@link #VACUUM_THRESHOLD_ROWS} — see that constant's javadoc — and
+     * reported in the envelope as {@code vacuum} (one of {@code "scheduled"} /
+     * {@code "already-running"} / {@code "skipped:below-threshold"}) plus
+     * {@code skipped_reason} (a human-readable detail string, null only when {@code
+     * vacuum == "scheduled"}). Per-table durations and the permission-skip detection
+     * ({@link TenantScope#vacuumAnalyze}'s {@code getWarnings()} check) are NOT part
+     * of the synchronous response — they cannot be known until the async sweep
+     * actually runs — and land instead in the {@code event=purge_trash_vacuum_complete}
+     * / {@code event=purge_trash_vacuum_failed} structured log lines the executor
+     * writes on completion; that log is the operator's completion signal.
      */
     public Map<String, Object> purgeTrash(String tenant, int olderThanDays) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        long[] totalRowsAffectedHolder = new long[1];
+        Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384));
             long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768));
             long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024));
@@ -2279,15 +2384,137 @@ public final class CatalogRepository {
                          tenant, olderThanDays, eligible, purged);
             }
 
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("dry_run", false);
-            out.put("documents_purged", purged);
-            out.put("documents_eligible", eligible);
-            out.put("chunks_384_stranded", chunks384);
-            out.put("chunks_768_stranded", chunks768);
-            out.put("chunks_1024_stranded", chunks1024);
-            return out;
+            // Best available proxy for "rows this run actually swept": purge_trash's
+            // own bigint return is document-count-only (no per-table chunk-sweep counts
+            // come back across the SQL-function boundary without changing its
+            // signature), but chunks384/768/1024 above are computed in the SAME
+            // transaction immediately before the routine call — the identical
+            // eligible-vs-purged snapshot pattern this method already uses for
+            // documents. Read-committed race caveat applies equally to both.
+            totalRowsAffectedHolder[0] = purged + chunks384 + chunks768 + chunks1024;
+
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("dry_run", false);
+            m.put("documents_purged", purged);
+            m.put("documents_eligible", eligible);
+            m.put("chunks_384_stranded", chunks384);
+            m.put("chunks_768_stranded", chunks768);
+            m.put("chunks_1024_stranded", chunks1024);
+            return m;
         });
+
+        applyPostPurgeVacuum(out, tenant, olderThanDays, totalRowsAffectedHolder[0]);
+        return out;
+    }
+
+    /**
+     * Rows-affected threshold below which {@link #applyPostPurgeVacuum} skips VACUUM
+     * entirely (nexus-0ys55). Guards against paying VACUUM's own I/O + lock-acquisition
+     * cost (a dedicated connection, five sequential table-level VACUUM statements) on a
+     * trivial or near-empty purge cycle, where the resulting dead-tuple bloat is
+     * negligible regardless. Chosen well below the production cycles that motivated
+     * this bead: the relay that filed it purged 63 documents / swept 285 chunks in one
+     * cycle (348 rows), and the incident that bumped it to P1 purged 11,594 documents
+     * (~60k dead tuples, 195s to VACUUM chunks_1024 alone) — both clear this threshold
+     * by well over an order of magnitude, so every cycle with real cleanup work gets
+     * vacuumed; only genuinely tiny/empty runs are skipped.
+     */
+    private static final long VACUUM_THRESHOLD_ROWS = 10L;
+
+    /**
+     * Schema-qualified tables {@code purge_trash} bulk-deletes from, in the order
+     * VACUUM is applied (nexus-0ys55). {@code catalog_document_chunks} is included even
+     * though the SQL function never names it explicitly — its rows are removed via
+     * fk-001's {@code ON DELETE CASCADE} when {@code catalog_documents} rows are
+     * deleted (catalog-003-soft-delete.xml Step 4), so it accumulates dead tuples from
+     * the SAME purge cycle (production evidence: +18,210 dead tuples on
+     * catalog_document_chunks alongside +41,358 on chunks_1024 in the same 11,594-doc
+     * purge).
+     *
+     * <p>LOCKSTEP (nexus-0ys55): must name the SAME five tables as {@link
+     * TenantScope#VACUUM_ALLOWED_TABLES} (this is the list {@link
+     * TenantScope#vacuumAnalyze} validates any call against) and the {@code
+     * grants-003-purge-vacuum-maintain} changeset in {@code grants-nexus-svc.xml}
+     * (the MAINTAIN grant that lets {@code nexus_svc} actually vacuum these tables
+     * rather than PostgreSQL warning-and-skipping every one of them). {@code
+     * TenantScopeVacuumMaintainGrantParityTest} pins the Java-side half of that
+     * agreement. Package-private (not private) so that test can read it directly.
+     */
+    static final List<String> PURGE_VACUUM_TABLES = List.of(
+        "nexus.chunks_384",
+        "nexus.chunks_768",
+        "nexus.chunks_1024",
+        "nexus.catalog_document_chunks",
+        "nexus.catalog_documents");
+
+    /**
+     * Decides whether to SUBMIT the post-commit VACUUM step for {@link #purgeTrash}
+     * and mutates {@code out} in place with {@code vacuum} (one of {@code "scheduled"}
+     * / {@code "already-running"} / {@code "skipped:below-threshold"}) plus {@code
+     * skipped_reason} (nullable String, populated whenever {@code vacuum != "scheduled"}).
+     * Returns to the caller IMMEDIATELY in every case — never blocks on the vacuum
+     * itself (nexus-tyxnh). Never throws: submission failure (executor rejection) is
+     * caught and reported the same as any other skip, never surfaced as a failed HTTP
+     * response for an already-committed purge.
+     */
+    private void applyPostPurgeVacuum(Map<String, Object> out, String tenant, int olderThanDays,
+                                       long totalRowsAffected) {
+        if (totalRowsAffected < VACUUM_THRESHOLD_ROWS) {
+            out.put("vacuum", "skipped:below-threshold");
+            out.put("skipped_reason",
+                "rows_affected=" + totalRowsAffected + " below threshold=" + VACUUM_THRESHOLD_ROWS);
+            return;
+        }
+        if (!vacuumInProgress.compareAndSet(false, true)) {
+            out.put("vacuum", "already-running");
+            out.put("skipped_reason",
+                "a purge-trash VACUUM is already in progress for this engine instance; "
+                + "re-run later rather than retrying now — this call did NOT start a second sweep");
+            log.info("event=purge_trash_vacuum_already_running tenant={} older_than_days={} rows_affected={}",
+                tenant, olderThanDays, totalRowsAffected);
+            return;
+        }
+        try {
+            vacuumExecutor.submit(() -> runPostPurgeVacuum(tenant, olderThanDays, totalRowsAffected));
+            out.put("vacuum", "scheduled");
+            out.put("skipped_reason", null);
+        } catch (RuntimeException e) {
+            // Submission itself failed (e.g. executor rejected the task after
+            // shutdown) — never leave vacuumInProgress stuck true for a sweep that
+            // never actually started.
+            vacuumInProgress.set(false);
+            log.error("event=purge_trash_vacuum_submit_failed tenant={} older_than_days={} rows_affected={}",
+                tenant, olderThanDays, totalRowsAffected, e);
+            out.put("vacuum", "skipped:submit-failed");
+            out.put("skipped_reason", "vacuum_submit_failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The actual VACUUM work, run on {@link #vacuumExecutor} — never on the HTTP
+     * request thread (nexus-tyxnh). Per-table durations and the permission-skip
+     * detection ({@link TenantScope#vacuumAnalyze}'s {@code getWarnings()} check,
+     * surfaced via {@link TenantScope.TableVacuumResult#detail()}) land in the
+     * structured log lines below; this is the ONLY place that information is
+     * reported — the synchronous HTTP response ({@link #applyPostPurgeVacuum}) never
+     * sees it, since it returns before this method runs. Always releases {@link
+     * #vacuumInProgress} in a {@code finally}, success or failure, so a single stuck
+     * sweep can never wedge every future purge-trash call into {@code
+     * already-running} forever.
+     */
+    private void runPostPurgeVacuum(String tenant, int olderThanDays, long totalRowsAffected) {
+        try {
+            Map<String, TenantScope.TableVacuumResult> results = tenantScope.vacuumAnalyze(PURGE_VACUUM_TABLES);
+            boolean allVacuumed = results.values().stream().allMatch(TenantScope.TableVacuumResult::vacuumed);
+            log.info("event=purge_trash_vacuum_complete tenant={} older_than_days={} rows_affected={} "
+                    + "all_vacuumed={} results={}",
+                tenant, olderThanDays, totalRowsAffected, allVacuumed, results);
+        } catch (RuntimeException e) {
+            log.error("event=purge_trash_vacuum_failed tenant={} older_than_days={} rows_affected={}",
+                tenant, olderThanDays, totalRowsAffected, e);
+        } finally {
+            vacuumInProgress.set(false);
+        }
     }
 
     /**

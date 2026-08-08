@@ -93,19 +93,25 @@ log-structured discipline has to respect that.
   snapshot at LSN N + prune below `min(consumer_offsets)`. When the
   rest of this document says "the tuple space," T2 is the tier it is
   load-bearing on.
-- **T1 is per-process working memory; its log is local to the
+- **T1 is per-session working memory; its log is local to the
   RDR-105 cohort.** "Local" here is wider than one agent: it is the
-  parent Claude process plus everything that resolves through its
-  `t1_addr.<pid>` discovery file — in-process `Agent`-tool subagents
-  (share the parent's MCP scratch directly), `Bash`-invoked
-  `nx scratch` calls in the same process (env passdown), and
-  `claude -p` subprocesses dispatched with `share_t1=True`. Sealed
-  off: default-`owned` `claude -p` workers, ephemeral one-shot
-  operators, and other Claude instances on the same machine. Total
-  order within a T1 instance is trivial (one chroma client, one
-  writer) and is used for in-session replay/debug — not for
-  cross-process coordination. If the process dies, the log dies;
-  anything that needs to survive belongs in T2.
+  parent Claude process plus everything that resolves the same
+  session-id — in-process `Agent`-tool subagents (share the parent's
+  MCP scratch directly), `Bash`-invoked `nx scratch` calls in the
+  same process (env passdown), and `claude -p` subprocesses
+  dispatched with `share_t1=True`. Sealed off: default-`owned`
+  `claude -p` workers, ephemeral one-shot operators, and other
+  Claude instances on the same machine. T1 is service-backed
+  (`HttpScratchStore` over the one `nexus-service`, RDR-155 P4b) —
+  there is no per-process chroma any more, and session identity is
+  the Claude session-id (resolved from
+  `~/.config/nexus/current_session`, cross-checked against a live
+  lease file, `t1_session_lease.<session_id>`, rather than the
+  retired per-pid `t1_addr.<pid>` discovery file RDR-149 P4 used to
+  publish). Total order within a T1 session's rows is used for
+  in-session replay/debug — not for cross-process coordination. If
+  the session ends, the working set is wiped; anything that needs to
+  survive belongs in T2.
 - **T3 is content-addressed knowledge — not a coordination log.**
   Writes are curated and deliberate (`store_put`, `nx_tidy`,
   `nx index`). Chashes are content-addressed; position is preserved
@@ -543,10 +549,15 @@ project, current focus, recent activity summary. A cross-instance
 panel `rd`s liveness tuples within TTL. The user sees what every
 instance is doing without context-switching.
 
-This is also where the existing `~/.config/nexus/t1_addr.<pid>`
-discovery mechanism (RDR-105) gets cleaned up: it remains for T1
-bootstrap, but everything else moves to T2 tuples. Cross-instance
-state becomes one query.
+This is also where per-instance liveness bookkeeping consolidates:
+the old `~/.config/nexus/t1_addr.<pid>` discovery mechanism (RDR-105)
+this paragraph originally described is gone (RDR-149 P4 replaced it
+with a session-id-keyed lease, then RDR-155 P4b retired the
+per-process chroma it addressed entirely) — T1 bootstrap today is a
+lease file, `t1_session_lease.<session_id>`, not a per-pid discovery
+file. What still applies: cross-instance liveness bookkeeping moves
+to T2 tuples rather than staying scattered across per-process files.
+Cross-instance state becomes one query.
 
 Inter-instance messaging: post a tuple addressed to the recipient
 PID or by intent ("any instance handling project X"). The recipient

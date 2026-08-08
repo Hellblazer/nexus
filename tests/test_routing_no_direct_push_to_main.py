@@ -72,8 +72,14 @@ def repo_on(tmp_path):
     """
     def _make(branch: str):
         slug = branch.replace("/", "-")   # feature/x must not nest directories
-        origin = tmp_path / f"origin-{slug}"
-        origin.mkdir()
+        # nexus-vscgz: the bare origin's directory is deliberately named
+        # `nexus` (last path component) so `_repo_scope_is_nexus`'s Signal A
+        # (origin URL basename) recognizes this fixture repo as nexus-scoped
+        # -- otherwise rules 2/3 now no-op here by design, and every test in
+        # this file exists to exercise rule 2. The `origin-{slug}` parent
+        # keeps concurrent branch fixtures from colliding on tmp_path.
+        origin = tmp_path / f"origin-{slug}" / "nexus"
+        origin.mkdir(parents=True)
         _git("init", "-q", "--bare", "--initial-branch=main", cwd=origin)
 
         work = tmp_path / f"work-{slug}"
@@ -269,3 +275,132 @@ def test_the_consolidated_hook_is_wired_and_stays_within_the_cap():
         "the registry rationale no longer records the push-to-main half; a "
         "future reader would not know this hook carries two checks"
     )
+
+
+# ── Repo scope (nexus-vscgz): rule 2 is nexus policy, not global ───────────
+#
+# THE 2026-08-07 EVIDENCE. In ChiralBehaviors/inviscid (a hobby repo, `master`
+# default branch, no `develop`, no marketplace surface) this rule blocked a
+# plain `git push origin master` with the nexus-vduer deny message. The repo
+# has never heard of nexus-vduer or the develop/main split it protects. These
+# tests build that exact shape for real: a bare origin path whose basename is
+# NOT `nexus`, a `master`-only repo, no conexus plugin marker anywhere.
+
+
+@pytest.fixture()
+def foreign_repo_on(tmp_path):
+    """Like `repo_on`, but deliberately NOT nexus-scoped: the origin's
+    basename is `inviscid` (not `nexus`) and no conexus plugin marker exists
+    anywhere under tmp_path. Reproduces the 2026-08-07 hobby-repo shape."""
+    def _make(branch: str):
+        slug = branch.replace("/", "-")
+        origin = tmp_path / f"origin-{slug}" / "inviscid"
+        origin.mkdir(parents=True)
+        _git("init", "-q", "--bare", "--initial-branch=master", cwd=origin)
+
+        work = tmp_path / f"work-{slug}"
+        work.mkdir()
+        _git("init", "-q", "--initial-branch=master", cwd=work)
+        _git("remote", "add", "origin", str(origin), cwd=work)
+        (work / "f.txt").write_text("x")
+        _git("add", "f.txt", cwd=work)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i",
+             cwd=work)
+        _git("push", "-q", "-u", "origin", "master", cwd=work)
+        if branch != "master":
+            _git("checkout", "-q", "-b", branch, cwd=work)
+            _git("push", "-q", "-u", "origin", branch, cwd=work)
+        return work
+    return _make
+
+
+def test_foreign_repo_explicit_push_to_master_is_allowed(foreign_repo_on):
+    """THE regression this bead exists for -- the exact GH inviscid shape."""
+    work = foreign_repo_on("master")
+    out = _decision(_run(_bash("git push origin master", str(work))))
+    assert out["permissionDecision"] == "allow", out
+
+
+def test_foreign_repo_bare_push_from_master_checkout_is_allowed(foreign_repo_on):
+    """The incident's own load-bearing shape (bare push, target inherited
+    from upstream) must ALSO be allowed once the repo is out of scope --
+    not just the explicit-refspec form."""
+    work = foreign_repo_on("master")
+    out = _decision(_run(_bash("git push", str(work))))
+    assert out["permissionDecision"] == "allow", out
+
+
+def test_marker_fallback_no_origin_with_plugin_marker_still_guards(tmp_path):
+    """Signal B: no `origin` remote at all, but the conexus plugin marker
+    file is present at toplevel -- still nexus-scoped, rule 2 still fires."""
+    work = tmp_path / "marker-repo"
+    work.mkdir()
+    _git("init", "-q", "--initial-branch=main", cwd=work)
+    marker_dir = work / "conexus" / ".claude-plugin"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "plugin.json").write_text("{}")
+    _git("add", "conexus/.claude-plugin/plugin.json", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i", cwd=work)
+    out = _decision(_run(_bash("git push", str(work))))
+    assert out["permissionDecision"] == "deny", out
+    assert "PRs only" in out["permissionDecisionReason"]
+
+
+def test_marker_fallback_no_origin_no_marker_is_allowed(tmp_path):
+    """Signal B miss too: no `origin` remote AND no marker file -- genuinely
+    undeterminable, resolves to NOT-nexus, rule 2 no-ops."""
+    work = tmp_path / "no-marker-repo"
+    work.mkdir()
+    _git("init", "-q", "--initial-branch=main", cwd=work)
+    (work / "f.txt").write_text("x")
+    _git("add", "f.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i", cwd=work)
+    out = _decision(_run(_bash("git push", str(work))))
+    assert out["permissionDecision"] == "allow", out
+
+
+def test_renamed_origin_with_plugin_marker_still_guards(tmp_path):
+    """nexus-w3apo (substantive-critic Critical on the first cut): Signal A
+    resolving DETERMINATELY to a non-`nexus` basename must still consult the
+    marker. A nexus checkout behind a renamed/local origin (scratch clone,
+    mirror) is exactly the shape that silently lost the vduer guard when
+    Signal B was fallback-only."""
+    origin = tmp_path / "nexus-mirror"
+    origin.mkdir()
+    _git("init", "-q", "--bare", "--initial-branch=main", cwd=origin)
+    work = tmp_path / "work-renamed"
+    work.mkdir()
+    _git("init", "-q", "--initial-branch=main", cwd=work)
+    _git("remote", "add", "origin", str(origin), cwd=work)
+    marker_dir = work / "conexus" / ".claude-plugin"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "plugin.json").write_text("{}")
+    _git("add", "conexus/.claude-plugin/plugin.json", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i", cwd=work)
+    _git("push", "-q", "-u", "origin", "main", cwd=work)
+    out = _decision(_run(_bash("git push", str(work))))
+    assert out["permissionDecision"] == "deny", out
+    assert "PRs only" in out["permissionDecisionReason"]
+
+
+def test_trailing_slash_dot_git_origin_is_still_nexus(tmp_path):
+    """Normalization-order regression (code-review finding, reproduced
+    live): `.../nexus.git/` -- trailing slash AFTER `.git` -- must still
+    resolve its last path component to `nexus`. The first cut stripped
+    `.git` before the slash, so the suffix survived and a genuine nexus
+    remote read as foreign (guard silently OFF in the one direction the
+    scoping must never fail)."""
+    origin = tmp_path / "nexus.git"
+    origin.mkdir()
+    _git("init", "-q", "--bare", "--initial-branch=main", cwd=origin)
+    work = tmp_path / "work-trailing-slash"
+    work.mkdir()
+    _git("init", "-q", "--initial-branch=main", cwd=work)
+    _git("remote", "add", "origin", str(origin) + "/", cwd=work)
+    (work / "f.txt").write_text("x")
+    _git("add", "f.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i", cwd=work)
+    _git("push", "-q", "-u", "origin", "main", cwd=work)
+    out = _decision(_run(_bash("git push", str(work))))
+    assert out["permissionDecision"] == "deny", out
+    assert "PRs only" in out["permissionDecisionReason"]

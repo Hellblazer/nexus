@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,65 +79,56 @@ class JSONLTailWatcher:
 
 @dataclass
 class SessionInfo:
-    """Info about one T1 session."""
+    """Info about one live T1 session (lease-based liveness).
+
+    Ported (nexus-8zfwv, 2026-08-07) off the RDR-149 P4 ``t1_addr.*``
+    ``ServiceRegistry`` lease this used to scan -- ``T1LeasePublisher``, the
+    only thing that ever published that format, is retired (deleted at
+    ff744321). T1 is one shared nexus-service now, not a per-session
+    chroma: a session's lease carries a bearer token + expiry
+    (``nexus.db.t1.publish_t1_session_lease``), not a host/port/pid
+    endpoint, so there is nothing left to TCP-probe or attribute to a pid.
+    """
 
     session_id: str
-    host: str
-    port: int
-    pid: int
-    pid_alive: bool
-    tcp_reachable: bool
-    created_at: str
-
-
-def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:
-    if port == 0:
-        return False
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (OSError, ConnectionRefusedError):
-        return False
+    expires_at: float
+    fresh: bool
 
 
 def scan_sessions_sync(config_dir: Path) -> list[SessionInfo]:
-    """Scan ``t1_addr.<session_id>`` lease records and probe each for liveness.
+    """Scan ``t1_session_lease.<session_id>`` files and report liveness.
 
-    RDR-149 P4: T1 publishes a leased registry record per live session
-    (``~/.config/nexus/t1_addr.<session_id>``, re-keyed from a transient
-    ``server_pid`` key at cold start). Liveness is lease freshness (TTL),
-    not pid; the endpoint is additionally TCP-probed. ``session_id`` is the
-    lease scope key; ``pid`` carries the chroma ``server_pid`` for display.
+    A session is live iff its lease file exists, parses, and is unexpired
+    (using the same freshness margin ``nexus.db.t1.read_t1_session_lease``
+    applies). Malformed/unreadable lease files are silently skipped (a
+    display concern, not a correctness one -- ``nexus.health``'s
+    orphan-T1-lease check is what reaps them).
     """
     if not config_dir.exists():
         return []
 
-    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.t1 import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        _T1_LEASE_FRESHNESS_MARGIN_SECONDS,
+        _T1_SESSION_LEASE_PREFIX,
+    )
 
     now = time.time()
     results: list[SessionInfo] = []
-    for path in config_dir.glob("t1_addr.*"):
-        try:
-            record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, KeyError):
-            continue  # not a lease record (malformed / legacy / partial write)
-        host = record.endpoint.get("host")
-        port = record.endpoint.get("port")
-        if not isinstance(host, str) or not isinstance(port, int):
+    for path in config_dir.glob(f"{_T1_SESSION_LEASE_PREFIX}*"):
+        session_id = path.name[len(_T1_SESSION_LEASE_PREFIX):]
+        if not session_id:
             continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            expires_at = float(data["expires_at"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue  # not a lease record (malformed / legacy / partial write)
 
-        fresh = record.is_fresh(now)
-        tcp_ok = _tcp_probe(host, port) if fresh else False
-        server_pid = record.endpoint.get("server_pid")
-
+        fresh = now < expires_at - _T1_LEASE_FRESHNESS_MARGIN_SECONDS
         results.append(SessionInfo(
-            session_id=record.scope_key,
-            host=host,
-            port=port,
-            pid=server_pid if isinstance(server_pid, int) else 0,
-            pid_alive=fresh,
-            tcp_reachable=tcp_ok,
-            created_at="",
+            session_id=session_id,
+            expires_at=expires_at,
+            fresh=fresh,
         ))
 
     return results

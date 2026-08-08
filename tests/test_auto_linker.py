@@ -320,7 +320,8 @@ class TestCatalogAutoLinkIntegration:
             meta={"doc_id": "test-doc-001"},
         )
 
-        t1 = T1Database(session_id="test-auto-link-session")
+        from tests.conftest import make_vector_test_client  # nexus-4lkmz: isolated leg retired, inject client explicitly
+        t1 = T1Database(session_id="test-auto-link-session", client=make_vector_test_client())
         _inject_t1(t1)
 
         # Seed link-context in T1 scratch
@@ -359,7 +360,8 @@ class TestCatalogAutoLinkIntegration:
             meta={"doc_id": "test-doc-002"},
         )
 
-        t1 = T1Database(session_id="test-no-context-session")
+        from tests.conftest import make_vector_test_client  # nexus-4lkmz: isolated leg retired, inject client explicitly
+        t1 = T1Database(session_id="test-no-context-session", client=make_vector_test_client())
         _inject_t1(t1)
 
         count = _catalog_auto_link("test-doc-002")
@@ -400,7 +402,8 @@ class TestCatalogAutoLinkIntegration:
             meta={"doc_id": "multi-doc-002"},
         )
 
-        t1 = T1Database(session_id="test-multi-store-session")
+        from tests.conftest import make_vector_test_client  # nexus-4lkmz: isolated leg retired, inject client explicitly
+        t1 = T1Database(session_id="test-multi-store-session", client=make_vector_test_client())
         _inject_t1(t1)
 
         # Seed once

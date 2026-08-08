@@ -125,17 +125,17 @@ if [ "${COMPREHENSIVE:-0}" = 1 ]; then
     else bad "T2 memory search did not surface the put"; fi
   else bad "nx memory put failed"; _why; fi
 
-  # T1 scratch: T1 is MCP-session working memory (RDR-105). Service-backed T1
-  # requires a MINTED session token (the MCP lifespan mints it via /v1/sessions/
-  # start); a bare CLI cannot, so it uses the in-process ephemeral store. Force
-  # ephemeral (env -u beats the container's NX_STORAGE_BACKEND_T1=service, which
-  # otherwise wins over NX_T1_ISOLATED) and assert the CLI write+list path; note
-  # that persistent/cross-process T1 is MCP-session-scoped, not a bare-CLI property.
-  if env -u NX_STORAGE_BACKEND -u NX_STORAGE_BACKEND_T1 NX_T1_ISOLATED=1 \
-       nx scratch put "scratch shakeout $MARK" >"$DD" 2>&1 \
-     && env -u NX_STORAGE_BACKEND -u NX_STORAGE_BACKEND_T1 NX_T1_ISOLATED=1 \
-       nx scratch list >"$DD" 2>&1; then
-    ok "T1 scratch CLI write+list (ephemeral; persistent T1 is MCP-session-scoped, RDR-105)"
+  # T1 scratch: T1 is MCP-session working memory (RDR-105), PG-only
+  # (nexus-4lkmz — the in-process NX_T1_ISOLATED=1 escape hatch retired
+  # outright, it now hard-fails). Service-backed T1 requires a MINTED
+  # session token (the MCP lifespan mints it via /v1/sessions/start); a
+  # bare CLI mints its own persisted CLI-dedicated session instead
+  # (nexus-rn3wo.1) — no opt-in flag needed. Assert the CLI write+list
+  # path; note that a live MCP session's T1 scope is a SEPARATE,
+  # session-id-keyed identity from this bare-CLI one.
+  if nx scratch put "scratch shakeout $MARK" >"$DD" 2>&1 \
+     && nx scratch list >"$DD" 2>&1; then
+    ok "T1 scratch CLI write+list (CLI-dedicated session, RDR-105/nexus-rn3wo.1)"
   else bad "nx scratch CLI failed"; _why; fi
 
   # T3 knowledge (bge-768): store put -> semantic search round-trip

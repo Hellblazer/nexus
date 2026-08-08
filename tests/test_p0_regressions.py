@@ -30,8 +30,15 @@ def test_t1_session_isolation_list_entries_scoped(tmp_path: Path, monkeypatch: p
     """
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    db_a = T1Database(session_id="session-A")
-    db_b = T1Database(session_id="session-B")
+    # nexus-4lkmz: the isolated in-process leg this test used to rely on
+    # implicitly (via the conftest autouse NX_T1_ISOLATED=1) is retired
+    # outright. Explicit client injection, shared between the two
+    # sessions, is the supported construction path -- this is exactly
+    # the "same underlying store, different session_id filter" shape
+    # the docstring above already describes.
+    shared_client = make_vector_test_client()
+    db_a = T1Database(session_id="session-A", client=shared_client)
+    db_b = T1Database(session_id="session-B", client=shared_client)
     # Clean state in case of leftover data.
     db_a.clear()
     db_b.clear()

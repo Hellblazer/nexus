@@ -101,4 +101,28 @@ jobs:
           # silently breaks, a skip would report green having checked nothing --
           # precisely the bug this ledger exists to catch, one level up.
           NX_REQUIRE_PLUGIN_DRIFT_CHECK: "1"
-        run: uv run pytest tests/test_plugin_release_drift_ledger.py -q
+          # The autouse engine-substrate fixture (nexus-i711w) routes EVERY
+          # test to the engine unless told otherwise. This minimal runner has
+          # no jar/PG by design (see the COST header), so without the opt-out
+          # all 12 tests skip at fixture setup and the job reports green
+          # having checked nothing -- the require-flag above cannot help,
+          # because it lives inside the test bodies and a fixture-level skip
+          # preempts it. Observed live (nexus-05m1i): run 31223172021 on
+          # develop@599e4980 ended "12 skipped in 0.23s", SUCCESS, while that
+          # very commit carried undeclared SKILL.md drift. These tests are
+          # pure git/YAML; they need no substrate anywhere.
+          NX_TEST_T2_SUBSTRATE: "none"
+        run: |
+          set -euo pipefail
+          uv run pytest tests/test_plugin_release_drift_ledger.py -q -rs 2>&1 \
+            | tee pytest-drift-ledger.txt
+          # Non-vacuity belt (nexus-05m1i): on this gate runner a skip is
+          # NEVER acceptable -- the taglessness skip already hard-fails via
+          # NX_REQUIRE_PLUGIN_DRIFT_CHECK, so any skip that still appears
+          # means a NEW vacuity mechanism (fixture- or collection-level)
+          # crept in around the flag. Fail loudly instead of green-nothing.
+          if grep -qE '[0-9]+ skipped' pytest-drift-ledger.txt; then
+            echo "VACUITY: drift-ledger tests skipped on the gate runner -- " \
+                 "the job proved nothing. See nexus-05m1i." >&2
+            exit 1
+          fi

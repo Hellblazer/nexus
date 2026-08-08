@@ -10,8 +10,12 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
+import java.sql.SQLWarning;
+import java.sql.Statement;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
@@ -265,6 +269,124 @@ public final class TenantScope {
             } catch (SQLException e) {
                 log.error("event=rollback_failed", e);
             }
+        }
+    }
+
+    /**
+     * Result of attempting {@code VACUUM (ANALYZE)} on one table (nexus-0ys55).
+     *
+     * @param vacuumed   true iff PostgreSQL actually performed the vacuum — i.e. the
+     *                   statement raised no warning. False means PostgreSQL warned-and-
+     *                   skipped the table (see permission caveat on {@link
+     *                   #vacuumAnalyze(List)}).
+     * @param durationMs wall-clock time of the statement, whether it vacuumed or was
+     *                   skipped (a skip is still a round trip worth reporting).
+     * @param detail     null on a clean vacuum; the PostgreSQL warning text otherwise.
+     */
+    public record TableVacuumResult(boolean vacuumed, long durationMs, String detail) {}
+
+    /**
+     * Allowlist of schema-qualified tables {@link #vacuumAnalyze(List)} may target
+     * (nexus-0ys55), mirroring the {@link #PERMITTED_GUCS} discipline above. VACUUM
+     * cannot bind-parameterize a table identifier (PostgreSQL takes no bind parameter
+     * for a relation name in DDL/maintenance statements), so callers pass literal
+     * strings; every caller today passes a {@code static final} constant, but this set
+     * is the only durable guard against a future caller passing a request-derived name.
+     *
+     * <p>LOCKSTEP (nexus-0ys55): must name the SAME five tables as {@code
+     * CatalogRepository.PURGE_VACUUM_TABLES} (the only caller today) and the
+     * {@code grants-003-purge-vacuum-maintain} changeset in {@code
+     * grants-nexus-svc.xml} (the MAINTAIN grant that makes a real vacuum possible
+     * for the {@code nexus_svc} role this allowlist is otherwise silently pointless
+     * for). {@code TenantScopeVacuumMaintainGrantParityTest} pins the Java-side half
+     * of that agreement; the changelog comment points back here. Package-private
+     * (not private) so that test can read it directly.
+     */
+    static final Set<String> VACUUM_ALLOWED_TABLES = Set.of(
+        "nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024",
+        "nexus.catalog_document_chunks", "nexus.catalog_documents");
+
+    /**
+     * Runs {@code VACUUM (ANALYZE)} on each of {@code qualifiedTableNames}, one
+     * statement per table, on a SINGLE dedicated connection borrowed directly from the
+     * pool — deliberately NOT via {@link #withTenant}. Two independent reasons this
+     * bypasses the normal gateway:
+     * <ol>
+     *   <li>VACUUM cannot run inside a transaction block. {@link #withTenant} always
+     *       stamps the GUC under {@code autoCommit=false} (mandatory for {@code SET
+     *       LOCAL} semantics) and commits when the caller's lambda returns — there is
+     *       no point inside that lifecycle where a bare connection is both stamped and
+     *       out of a transaction. Callers MUST invoke this only after any related
+     *       {@code withTenant} call has already returned (i.e. already committed).</li>
+     *   <li>VACUUM is not tenant-scoped work in the RLS sense — it operates on the
+     *       whole physical table across every tenant's rows. There is no GUC to stamp
+     *       and nothing to scope.</li>
+     * </ol>
+     *
+     * <p>PERMISSION CAVEAT (mirrors the ANALYZE note in {@code grants-nexus-svc.xml}
+     * lines 124-162): PostgreSQL does NOT throw when a non-owner without the {@code
+     * MAINTAIN} privilege (PG17+) vacuums a table it does not own — {@code vacuum_rel}
+     * emits a WARNING (observed on PG17: {@code permission denied to vacuum "<table>",
+     * skipping it}) and silently no-ops that table. A bare {@code execute()} returning
+     * without exception
+     * is therefore NOT proof of a real vacuum. This method inspects {@link
+     * Statement#getWarnings()} after each statement and reports {@code vacuumed=false}
+     * with the warning text for any table PostgreSQL actually skipped, so a caller
+     * never reports {@code vacuumed=true} on a silent no-op.
+     *
+     * <p>Does NOT go through the {@link #ADMISSION} semaphore that bounds concurrent
+     * {@link #withTenant} callers: this is a rare, post-commit administrative step
+     * (today: only purge-trash's execute path, itself already rate-limited by being an
+     * explicit operator-triggered call), and {@code dataSource.getConnection()} already
+     * provides its own backpressure via HikariCP's pool + connectionTimeout.
+     *
+     * @param qualifiedTableNames schema-qualified table names, validated against
+     *                            {@link #VACUUM_ALLOWED_TABLES}
+     * @return per-table result, in call order
+     * @throws IllegalArgumentException if any name is not in the allowlist
+     * @throws RuntimeException wrapping a {@link SQLException} that aborts the whole
+     *                          batch (a connection-level failure — distinct from a
+     *                          per-table permission skip, which is reported, not thrown)
+     */
+    // SANCTIONED RAW (nexus-0ys55): VACUUM is PostgreSQL maintenance syntax, not DML —
+    // jOOQ has no typed DSL form for it at all (same category as ChashSqlIdioms'
+    // refreshAliasStats ANALYZE call, RawSqlGateTest.SANCTIONED_METHODS). Table names
+    // are validated against VACUUM_ALLOWED_TABLES above BEFORE this string is built, so
+    // this is not an injection surface despite the concatenation.
+    public Map<String, TableVacuumResult> vacuumAnalyze(List<String> qualifiedTableNames) {
+        for (String table : qualifiedTableNames) {
+            if (!VACUUM_ALLOWED_TABLES.contains(table)) {
+                throw new IllegalArgumentException(
+                    "table not permitted for VACUUM: " + table + " (allowed: " + VACUUM_ALLOWED_TABLES + ")");
+            }
+        }
+
+        Map<String, TableVacuumResult> results = new LinkedHashMap<>();
+        try (Connection conn = dataSource.getConnection()) {
+            // VACUUM requires autocommit; be explicit rather than trust pool state —
+            // stampAndRun always restores autoCommit=true before returning a connection
+            // to the pool, but this method does not rely on that being the ONLY writer.
+            conn.setAutoCommit(true);
+            for (String table : qualifiedTableNames) {
+                long startNanos = System.nanoTime();
+                String detail = null;
+                try (Statement stmt = conn.createStatement()) {
+                    stmt.execute("VACUUM (ANALYZE) " + table);
+                    SQLWarning warning = stmt.getWarnings();
+                    if (warning != null) {
+                        detail = warning.getMessage();
+                    }
+                }
+                long durationMs = (System.nanoTime() - startNanos) / 1_000_000;
+                boolean vacuumed = detail == null;
+                results.put(table, new TableVacuumResult(vacuumed, durationMs, detail));
+                log.info("event=vacuum_analyze_table table={} vacuumed={} duration_ms={} detail={}",
+                    table, vacuumed, durationMs, detail);
+            }
+            return results;
+        } catch (SQLException e) {
+            log.error("event=vacuum_analyze_connection_failed tables={}", qualifiedTableNames, e);
+            throw new RuntimeException("VACUUM (ANALYZE) failed", e);
         }
     }
 }

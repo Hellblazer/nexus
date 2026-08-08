@@ -61,7 +61,6 @@ from nexus.daemon.service_registry import (
     ServiceSupervisor,
     ttl_for_tier,
 )
-from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
 
 
@@ -80,7 +79,21 @@ from nexus import session as _sess
 # publishes, identically to t2's case above, not exercising the primitive
 # under a name a future tier might reuse — the primitive's generic behavior
 # is already proven by storage_service and aspect_worker, both real.
-TIERS = ("t1", "storage_service", "aspect_worker")
+#
+# "t1" removed the same way (nexus-8zfwv, 2026-08-07). PHANTOM TIER, same
+# determination as t2/t3: T1LeasePublisher (the ``ServiceRegistry(tier="t1",
+# ...)`` publisher T1RecordHarness drove) was deleted at ff744321 — nothing
+# in production publishes the ``t1_addr.*`` lease format this primitive
+# instance served any more. T1's live cross-process "session has a live T1
+# scope" signal moved to a different mechanism entirely: the lease file
+# ``nexus.db.t1.publish_t1_session_lease`` writes at
+# ``t1_session_lease.<session_id>`` (JSON ``{token, expires_at}``, no
+# ServiceRegistry involved). That mechanism is conformance-tested in
+# ``tests/db/test_t1_cli_dedicated_session.py``, not here — it never rode
+# this primitive, so it has no cell to occupy. The generic
+# publish/discover/reap/fence properties this suite proves remain covered by
+# storage_service and aspect_worker, both real.
+TIERS = ("storage_service", "aspect_worker")
 
 # Synthetic owner pids, never real live processes; liveness is injected.
 _OWNER_PID = 970001
@@ -210,82 +223,6 @@ class RecordHarness:
         raise NotImplementedError
 
 
-class T1RecordHarness(RecordHarness):
-    """RDR-149 P4: T1 rides the leased registry, MCP-lifespan-owned and
-    scoped on the **session-id** (intentionally N owners per uid, one T1
-    server per session). Each sibling drives a real ``T1LeasePublisher``
-    keyed on one shared session-id, so the unit battery exercises the
-    production publish / heartbeat-self-heal / re-key / fence path, not a
-    bespoke copy. The transient ``server_pid`` -> session-id re-key (CA-3)
-    is covered separately by ``TestT1SessionRekey``; here the publishers
-    resolve the session-id at publish time so they key on it directly."""
-
-    tier = "t1"
-    scope = "session"
-    has_self_heal = True  # RDR-149 P4: publisher heartbeat self-heals (#1114)
-    has_version_cycle = False  # T1 is MCP-lifespan-owned, not upgrade-cycled
-    _SESSION = "sess-A"
-
-    def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
-        super().__init__(config_dir, alive, clock)
-        self._registry = ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=3.0, heartbeat_interval=1.0
-        )
-        self._pubs: dict[int, T1LeasePublisher] = {}
-
-    def publish(self, owner: int = _OWNER_PID) -> None:
-        pub = T1LeasePublisher(
-            registry=self._registry,
-            server_pid=owner,
-            host="127.0.0.1",
-            port=0,
-            version="1.0.0",
-            session_resolver=lambda: self._SESSION,
-            owner_token=f"tok-{owner}",
-        )
-        pub.publish()
-        self._pubs[owner] = pub
-
-    def discover(self, owner: int = _OWNER_PID) -> Optional[dict[str, Any]]:
-        rec = self._registry.discover(self._SESSION)
-        if rec is None:
-            return None
-        return {
-            "pid": rec.endpoint.get("server_pid"),
-            "owner": rec.endpoint.get("server_pid"),
-            "generation": rec.generation,
-            "owner_token": rec.owner_token,
-        }
-
-    def simulate_ungraceful_death(self, owner: int = _OWNER_PID) -> None:
-        # The owner stops heartbeating; the lease ages out on its own. No pid
-        # is consulted (lease freshness is the liveness primitive).
-        self._pubs.pop(owner, None)
-
-    def advance_to_reap(self) -> None:
-        self._clock.advance(3.1)  # past TTL
-
-    def reap(self) -> None:
-        self._registry.discover(self._SESSION)  # discovery reaps an expired lease
-
-    def external_delete(self, owner: int = _OWNER_PID) -> None:
-        self._registry._record_path(self._SESSION).unlink(missing_ok=True)
-
-    def self_heal_tick(self, owner: int = _OWNER_PID) -> None:
-        pub = self._pubs.get(owner)
-        if pub is not None:
-            pub.tick()  # re-stamps; self-heals a lost record
-
-    def stale_reassert(self, owner: int) -> None:
-        pub = self._pubs.get(owner)
-        if pub is not None:
-            pub.tick()  # fenced: sets pub.fenced, writes nothing
-
-    def owners_in_scope(self, session_id: str) -> int:
-        # Session-scoped: two siblings of ONE session converge to one record.
-        return 1 if self.discover() is not None else 0
-
-
 class _LeaseHarness(RecordHarness):
     """Shared harness for tiers migrated onto the leased registry (T2 in P2,
     T3 in P3). Drives the SAME ``ServiceRegistry`` + ``ServiceSupervisor``
@@ -368,6 +305,15 @@ class _LeaseHarness(RecordHarness):
 # NO T3RecordHarness: RDR-149 P3 migrated the T3-daemon lease onto this same
 # primitive, but the T3 daemon itself retired at RDR-155 P4b (nexus-pmag3,
 # 2026-08-07) — see TIERS' comment above for the phantom-tier determination.
+#
+# NO T1RecordHarness: RDR-149 P4 migrated T1 onto this same primitive via
+# T1LeasePublisher; nexus-yfh5x then refactored the harness onto the shared
+# _LeaseHarness after that publisher retired as dead production code. Both
+# were an intermediate state -- T1 has since retired from this primitive
+# ENTIRELY (nexus-8zfwv, 2026-08-07, see TIERS' comment above): its live
+# lease mechanism (nexus.db.t1.publish_t1_session_lease /
+# t1_session_lease.<session_id>) never touches ServiceRegistry, so there is
+# no publish/discover/reap path left for a harness to drive here.
 
 class StorageServiceRecordHarness(_LeaseHarness):
     """RDR-149 P5.1 (nexus-gmiaf.30): storage_service rides the leased registry,
@@ -402,7 +348,6 @@ class AspectWorkerRecordHarness(_LeaseHarness):
 
 
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
-    "t1": T1RecordHarness,
     "storage_service": StorageServiceRecordHarness,
     "aspect_worker": AspectWorkerRecordHarness,
 }
@@ -416,46 +361,37 @@ GAP = "gap"
 SPEC = "spec"
 
 EXPECTATIONS: dict[str, dict[str, Any]] = {
-    "roundtrip": {"t1": "pass", "storage_service": "pass", "aspect_worker": "pass"},
-    "reap_ungraceful": {"t1": "pass", "storage_service": "pass", "aspect_worker": "pass"},
+    "roundtrip": {"storage_service": "pass", "aspect_worker": "pass"},
+    "reap_ungraceful": {"storage_service": "pass", "aspect_worker": "pass"},
     "self_heal": {
-        "t1": "pass",  # RDR-149 P4: publisher heartbeat self-heals (#1114)
         "storage_service": "pass",  # RDR-149 P5.1: supervisor heartbeat self-heals
         "aspect_worker": "pass",  # RDR-173 P1: rides the same supervisor heartbeat
     },
     "concurrent_one_owner": {
-        "t1": "pass",  # RDR-149 P4: session-id scope converges to one owner
         "storage_service": "pass",  # uid-scoped, same lease fencing as the retired T2/T3 daemons
         "aspect_worker": "pass",  # per-tenant scope converges to one owner (RDR-173 P1)
     },
     "version_cycle": {
-        # T1 is MCP-lifespan-owned, not covered by any upgrade-cycle: an
-        # upgrade republishes by restarting the MCP server, not by an
-        # in-process cycle. This is a documented N/A, not a #1114 blocker
-        # (RDR-149 P4, CA / Approach item 5).
-        "t1": (GAP, "T1 is MCP-lifespan-owned, not upgrade-cycled; RDR-149 P4 N/A"),
         "storage_service": "pass",  # RDR-149 P5.1: _cycle_storage_service_to_current
         # aspect-worker is spawn-if-absent from the enqueue hook; an upgrade
         # re-spawns + generation-fences the predecessor rather than driving an
-        # in-process cycle_to_current (RDR-173 P1/P2) — documented N/A, like T1.
+        # in-process cycle_to_current (RDR-173 P1/P2) — documented N/A, like the
+        # retired T1 harness row used to be.
         "aspect_worker": (GAP, "aspect-worker upgrade = re-spawn + fence, not in-process cycle; RDR-173"),
     },
-    # RDR-149 P4/P5.1 + RDR-173 P1: all three LIVE tiers ride the primitive,
-    # so their lease properties pass. (T2/T3 rode it too, historically; both
-    # daemons are retired — nexus-i711w / nexus-pmag3 — and their columns
-    # removed with them, not left as phantom rows.)
+    # RDR-149 P5.1 + RDR-173 P1: both LIVE tiers ride the primitive, so their
+    # lease properties pass. (T1/T2/T3 rode it too, historically; all three
+    # are retired — nexus-8zfwv / nexus-i711w / nexus-pmag3 — and their
+    # columns removed with them, not left as phantom rows.)
     "pid_reuse_immunity": {
-        "t1": "pass",  # RDR-149 P4: lease/generation kills pid-reuse
         "storage_service": "pass",  # RDR-149 P5.1: lease/generation kills pid-reuse
         "aspect_worker": "pass",  # RDR-173 P1: lease/generation kills pid-reuse
     },
     "restart_higher_generation": {
-        "t1": "pass",  # RDR-149 P4: generation fencing token
         "storage_service": "pass",  # RDR-149 P5.1: generation fencing token
         "aspect_worker": "pass",  # RDR-173 P1: generation fencing token
     },
     "restart_race_fencing": {
-        "t1": "pass",  # RDR-149 P4: CA-4 heartbeat-fencing arm
         "storage_service": "pass",  # RDR-149 P5.1: CA-4 heartbeat-fencing arm
         "aspect_worker": "pass",  # RDR-173 P1: CA-4 heartbeat-fencing arm
     },
@@ -619,120 +555,22 @@ class TestLifecycleConformance:
         assert rec["owner"] == _SIBLING_PID, "stale predecessor clobbered the record"
 
 
-# ---------------------------------------------------------------------------
-# T1-only property (CA-3): the locked RF-2 transient-key -> session-id re-key.
-# The cold-start lifespan race: the SessionStart hook writes current_session
-# independently of the MCP lifespan, so session-id may be None at publish. The
-# publisher keys transiently on the chroma server_pid and re-keys the instant
-# the session-id resolves. RDR-149 P4 makes this real (was xfail through P3).
-# ---------------------------------------------------------------------------
-
-
-_SERVER_PID = 90001
-_SIBLING_SERVER_PID = 90002
-
-
-def _t1_publisher(
-    registry: ServiceRegistry,
-    *,
-    server_pid: int,
-    session_resolver,
-) -> T1LeasePublisher:
-    return T1LeasePublisher(
-        registry=registry,
-        server_pid=server_pid,
-        host="127.0.0.1",
-        port=0,
-        version="1.0.0",
-        session_resolver=session_resolver,
-        owner_token=f"tok-{server_pid}",
-    )
-
-
-class TestT1SessionRekey:
-    """CA-3: the transient-key -> session-id re-key has no ``"unknown"``
-    collapse and no window where the OWNER or an env-inheriting subprocess
-    is stranded. This asserts the registry-layer invariant: the transient
-    lease is discoverable under the ``server_pid`` key (the re-key
-    carry-forward + owner ``_t1_state`` breadcrumb). The bare Bash sibling's
-    production read path (matching the transient lease by claude_pid,
-    nexus-0x16i) is covered in ``test_t1_discovery`` /
-    ``test_t1_lease.TestTransientClaudeFallback``."""
-
-    def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
-        return ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=3.0, heartbeat_interval=1.0
-        )
-
-    def test_no_record_is_ever_keyed_unknown(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # CA-3 (i): a cold publish with an unresolved session-id keys on the
-        # server_pid, never the legacy "unknown" string.
-        reg = self._registry(config_dir, clock)
-        _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None).publish()
-        assert not (config_dir / "t1_addr.unknown").exists()
-        assert [p.name for p in config_dir.glob("t1_addr.*")] == [
-            f"t1_addr.{_SERVER_PID}"
-        ]
-
-    def test_transient_lease_is_registry_discoverable_under_server_pid(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # CA-3 carry-forward: during the transient window the record exists
-        # under the server_pid key (so the re-key can read-and-carry its
-        # generation, and the owner's _t1_state breadcrumb is backed by a
-        # real record) while NOT yet discoverable under the session-id. This
-        # asserts the registry-layer invariant only; it is NOT a claim that a
-        # bare Bash sibling reads the server_pid key (it does not -- see
-        # tests/test_t1_discovery.py for the honest production read path).
-        reg = self._registry(config_dir, clock)
-        pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None)
-        pub.publish()
-        assert reg.discover(str(_SERVER_PID)) is not None
-        assert reg.discover("sess-A") is None
-
-    def test_rekey_moves_record_to_session_id_atomically(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # The core re-key: transient server_pid record -> session-id record,
-        # transient unlinked, exactly one record at every observable step.
-        reg = self._registry(config_dir, clock)
-        sid: dict[str, str | None] = {"v": None}
-        pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: sid["v"])
-        pub.publish()
-        assert (config_dir / f"t1_addr.{_SERVER_PID}").exists()
-
-        sid["v"] = "sess-A"
-        pub.tick()
-
-        assert (config_dir / "t1_addr.sess-A").exists(), "no session-id-keyed record"
-        assert not (config_dir / f"t1_addr.{_SERVER_PID}").exists(), "transient leaked"
-        assert pub.session_keyed
-
-    def test_rekey_atomic_under_concurrent_sibling_flock(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        # CA-3 (iii): two siblings of one session re-key concurrently. The
-        # session-key publish is flock-serialized (monotonic generation) and
-        # each unlinks only its own server_pid record. End state: exactly one
-        # session record at generation 2, both transient records gone.
-        reg = self._registry(config_dir, clock)
-        sid: dict[str, str | None] = {"v": None}
-        a = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: sid["v"])
-        b = _t1_publisher(
-            reg, server_pid=_SIBLING_SERVER_PID, session_resolver=lambda: sid["v"]
-        )
-        a.publish()
-        b.publish()
-
-        sid["v"] = "sess-A"
-        a.tick()
-        b.tick()
-
-        assert [p.name for p in config_dir.glob("t1_addr.*")] == ["t1_addr.sess-A"]
-        rec = reg.discover("sess-A")
-        assert rec is not None and rec.generation == 2
+# NO "T1-only property (CA-3)" section: the locked RF-2 transient-key ->
+# session-id re-key (TestT1SessionRekey, T1LeasePublisher, _t1_publisher)
+# tested T1LeasePublisher directly. That was ``T1LeasePublisher``-only
+# behavior -- no production caller ever exercised the re-key path (zero
+# production construction sites) -- and was first retired down to a
+# dangling cross-reference at nexus-yfh5x (T1RecordHarness refactored onto
+# the shared _LeaseHarness, which never re-keys a scope in-place). T1 has
+# since retired from this primitive ENTIRELY (nexus-8zfwv, 2026-08-07,
+# T1LeasePublisher deleted at ff744321) -- T1 no longer rides
+# ServiceRegistry at all, so there is no re-key protocol left to prove
+# here, and no bare-Bash-sibling claude_pid-ancestor-matching test surface
+# either (``discover_t1_by_claude_ancestor`` retired with it -- see
+# daemon/t1_lease.py's deletion). T1's current lease mechanism
+# (nexus.db.t1.publish_t1_session_lease, a flat {token, expires_at} JSON
+# file with no transient-key re-key step and no claude-ancestor fallback)
+# is conformance-tested in tests/db/test_t1_cli_dedicated_session.py.
 
 
 # ---------------------------------------------------------------------------
@@ -741,13 +579,14 @@ class TestT1SessionRekey:
 
 
 class TestMatrixIsNotVacuous:
-    def test_1114_t1_self_heal_fixed_structurally(self) -> None:
-        # #1114 (T1 chroma runs with a lost addr file, no self-heal) was the
-        # red-first GAP cell through P0-P3; RDR-149 P4 fixed it structurally
-        # by migrating T1 onto the leased registry so its publisher heartbeat
-        # self-heals a lost record, exactly as T2/T3 do. This guards against a
-        # regression silently re-opening it.
-        assert EXPECTATIONS["self_heal"]["t1"] == "pass"
+    # NO test_1114_t1_self_heal_fixed_structurally: #1114 (T1 chroma runs
+    # with a lost addr file, no self-heal) was the red-first GAP cell
+    # through P0-P3; RDR-149 P4 fixed it structurally by migrating T1 onto
+    # the leased registry. T1 has since moved OFF this primitive entirely
+    # (nexus-8zfwv, 2026-08-07 — T1LeasePublisher deleted at ff744321): its
+    # live cross-process signal is now nexus.db.t1's t1_session_lease.*
+    # file, conformance-tested in tests/db/test_t1_cli_dedicated_session.py
+    # instead. There is no "t1" cell left in EXPECTATIONS to guard.
 
     # NO test_1112_t3_version_cycle_fixed_structurally: #1112 (T3 stale after
     # upgrade) was the red-first GAP cell through P0-P2; RDR-149 P3 fixed it
@@ -761,18 +600,24 @@ class TestMatrixIsNotVacuous:
 
     def test_reference_tier_passes_every_gap_another_tier_fails(self) -> None:
         # CA-1: a property that is a GAP everywhere would be mis-specified, so
-        # at least the REFERENCE tier must pass it. T2 (then T3) was that
-        # reference until both retired (nexus-i711w Stage 2 sub-stage B;
-        # nexus-pmag3); storage_service takes over, being the one supervised
-        # tier that is actually live.
+        # at least the REFERENCE tier must pass it. T1/T2/T3 were that
+        # reference in turn until all three retired (nexus-8zfwv / nexus-i711w
+        # Stage 2 sub-stage B / nexus-pmag3); storage_service takes over,
+        # being the one supervised tier that is actually live. Generalized
+        # over every non-reference tier (not hardcoded to one retired tier
+        # name) so this keeps working as the tier roster changes.
         reference = "storage_service"
         for prop, cells in EXPECTATIONS.items():
-            t1_gap = isinstance(cells["t1"], tuple) and cells["t1"][0] == GAP
-            if t1_gap:
-                assert cells[reference] == "pass", (
-                    f"property {prop!r} is a GAP for T1 but {reference} does "
-                    f"not pass it; the property is mis-specified (CA-1)"
-                )
+            for tier_name, cell in cells.items():
+                if tier_name == reference:
+                    continue
+                is_gap = isinstance(cell, tuple) and cell[0] == GAP
+                if is_gap:
+                    assert cells[reference] == "pass", (
+                        f"property {prop!r} is a GAP for {tier_name!r} but "
+                        f"{reference} does not pass it; the property is "
+                        f"mis-specified (CA-1)"
+                    )
 
     # NO test_t2_migration_flipped_its_spec_cells / test_t3_migration_flipped_
     # its_cells: the RDR-149 P2/P3 ratchets each asserted every lease property
@@ -782,25 +627,11 @@ class TestMatrixIsNotVacuous:
     # ratchets below carry the same guarantee for the tiers that are actually
     # live.
 
-    def test_t1_migration_flipped_its_cells(self) -> None:
-        # RDR-149 P4 ratchet: T1 now rides the primitive, so self_heal goes
-        # green (#1114), session-scope converges to one owner, and the lease
-        # SPEC properties pass. version_cycle stays a documented N/A (T1 is
-        # MCP-lifespan-owned, not upgrade-cycled). A regression surfaces here.
-        for prop in (
-            "self_heal",
-            "concurrent_one_owner",
-            "pid_reuse_immunity",
-            "restart_higher_generation",
-            "restart_race_fencing",
-        ):
-            assert EXPECTATIONS[prop]["t1"] == "pass", (
-                f"T1 lease property {prop!r} regressed to non-pass after P4"
-            )
-        cell = EXPECTATIONS["version_cycle"]["t1"]
-        assert isinstance(cell, tuple) and cell[0] == GAP, (
-            "version_cycle[t1] must stay a documented N/A (MCP-lifespan-owned)"
-        )
+    # NO test_t1_migration_flipped_its_cells: the RDR-149 P4 ratchet asserted
+    # every T1 lease property stayed "pass" once it rode the primitive. T1
+    # has since retired from this primitive altogether (nexus-8zfwv,
+    # 2026-08-07 — see TIERS' comment above), so there is no cell left to
+    # ratchet.
 
     def test_storage_service_migration_flipped_its_cells(self) -> None:
         # RDR-149 P5.1 ratchet: storage_service now rides the primitive
@@ -932,373 +763,17 @@ class TestDiscoverReapToctou:
         assert survived.generation == fresh.generation
 
 
-# ---------------------------------------------------------------------------
-# Fix #3: T1 lifecycle GC — sweep_dead_t1_holders (nexus-ycwec).
-#
-# Lives in the shared primitive per CLAUDE.md / daemon/AGENTS.md discipline:
-# "lifecycle fixes land in service_registry.py + the conformance suite."
-# ---------------------------------------------------------------------------
-
-
-class TestSweepDeadT1Holders:
-    """sweep_dead_t1_holders in service_registry removes lease records whose
-    both claude_pid (payload) AND server_pid (payload) are not alive.
-
-    CRITICAL SAFETY invariant: a holder where EITHER pid is alive MUST NOT
-    be removed.  Exact == assertions on counts (not >= ).
-    """
-
-    def _registry(self, config_dir: Path, clock: _FakeClock) -> "ServiceRegistry":
-        return ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=300.0, heartbeat_interval=1.0
-        )
-
-    def test_removes_holder_with_both_pids_dead(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 80001, 80002
-        alive.mark_dead(claude_pid)
-        alive.mark_dead(server_pid)
-        reg.publish(
-            "sess-dead",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-dead",
-            payload={"session_id": "sess-dead", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-        assert (config_dir / "t1_addr.sess-dead").exists()
-
-        removed = sweep_dead_t1_holders(config_dir=config_dir)
-        assert removed == 1
-        assert not (config_dir / "t1_addr.sess-dead").exists()
-
-    def test_preserves_holder_with_claude_pid_alive(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 80003, 80004
-        alive.mark_alive(claude_pid)   # claude alive → must NOT remove
-        alive.mark_dead(server_pid)
-        reg.publish(
-            "sess-claudelive",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-clive",
-            payload={"session_id": "sess-claudelive", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-
-        removed = sweep_dead_t1_holders(config_dir=config_dir)
-        assert removed == 0
-        assert (config_dir / "t1_addr.sess-claudelive").exists()
-
-    def test_preserves_holder_with_server_pid_alive(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 80005, 80006
-        alive.mark_dead(claude_pid)
-        alive.mark_alive(server_pid)   # server alive → must NOT remove
-        reg.publish(
-            "sess-serverlive",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-slive",
-            payload={"session_id": "sess-serverlive", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-
-        removed = sweep_dead_t1_holders(config_dir=config_dir)
-        assert removed == 0
-        assert (config_dir / "t1_addr.sess-serverlive").exists()
-
-    def test_preserves_holder_with_both_pids_alive(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 80007, 80008
-        alive.mark_alive(claude_pid)
-        alive.mark_alive(server_pid)
-        reg.publish(
-            "sess-alllive",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-alllive",
-            payload={"session_id": "sess-alllive", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-
-        removed = sweep_dead_t1_holders(config_dir=config_dir)
-        assert removed == 0
-        assert (config_dir / "t1_addr.sess-alllive").exists()
-
-    def test_exact_count_with_mixed_holders(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """3 dead holders + 2 live holders → exactly 3 removed, 2 preserved."""
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-
-        # 3 dead holders
-        for i in range(3):
-            cp, sp = 81000 + i * 2, 81001 + i * 2
-            alive.mark_dead(cp)
-            alive.mark_dead(sp)
-            reg.publish(
-                f"sess-dead-{i}",
-                endpoint={"host": "127.0.0.1", "port": 0, "server_pid": sp},
-                version="1.0",
-                owner_token=f"tok-dead-{i}",
-                payload={"session_id": f"sess-dead-{i}", "server_pid": sp,
-                         "claude_pid": cp},
-            )
-
-        # 2 live holders (claude_pid alive)
-        for j in range(2):
-            cp, sp = 82000 + j * 2, 82001 + j * 2
-            alive.mark_alive(cp)
-            alive.mark_dead(sp)
-            reg.publish(
-                f"sess-live-{j}",
-                endpoint={"host": "127.0.0.1", "port": 0, "server_pid": sp},
-                version="1.0",
-                owner_token=f"tok-live-{j}",
-                payload={"session_id": f"sess-live-{j}", "server_pid": sp,
-                         "claude_pid": cp},
-            )
-
-        removed = sweep_dead_t1_holders(config_dir=config_dir)
-        assert removed == 3  # exact, not >=
-        # Live holders still present
-        for j in range(2):
-            assert (config_dir / f"t1_addr.sess-live-{j}").exists()
-
-    def test_holder_without_claude_pid_in_payload_is_left_alone(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A holder with no claude_pid payload (old format / transient key)
-        cannot be verified fully and must NOT be removed."""
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        server_pid = 83001
-        alive.mark_dead(server_pid)
-        reg.publish(
-            "sess-noclaudepid",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-ncp",
-            payload={"session_id": "sess-noclaudepid", "server_pid": server_pid},
-            # no claude_pid in payload
-        )
-
-        removed = sweep_dead_t1_holders(config_dir=config_dir)
-        assert removed == 0
-        assert (config_dir / "t1_addr.sess-noclaudepid").exists()
-
-    def test_returns_zero_when_dir_absent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from nexus.daemon.service_registry import sweep_dead_t1_holders
-
-        removed = sweep_dead_t1_holders(config_dir=tmp_path / "no-such-dir")
-        assert removed == 0
-
-
-# ---------------------------------------------------------------------------
-
-
-class TestSweepDeadT1ElectLocks:
-    """GAP B fix: sweep_dead_t1_elect_locks removes t1_elect.<scope>.lock
-    files whose matching t1_addr record is absent (no live scope) OR whose
-    matched record has both pids dead.
-
-    Safety invariant (same as sweep_dead_t1_holders): a lock whose scope has
-    a live t1_addr record MUST NOT be removed.  Elect locks carry no pid
-    metadata themselves; liveness is inferred from the matching addr record.
-
-    Exact == count assertions; never >= .
-    """
-
-    def _registry(self, config_dir: Path, clock: _FakeClock) -> "ServiceRegistry":
-        return ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=300.0, heartbeat_interval=1.0
-        )
-
-    def test_removes_elect_lock_with_no_matching_addr_file(
-        self, config_dir: Path, clock: _FakeClock
-    ) -> None:
-        """An elect lock with no corresponding t1_addr.* file is orphaned
-        and must be removed (no live addr → scope is dead)."""
-        from nexus.daemon.service_registry import sweep_dead_t1_elect_locks
-
-        lock = config_dir / "t1_elect.orphan-scope.lock"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        lock.touch()
-
-        removed = sweep_dead_t1_elect_locks(config_dir=config_dir)
-        assert removed == 1
-        assert not lock.exists()
-
-    def test_preserves_elect_lock_with_live_addr_record(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An elect lock whose scope has a live t1_addr record must not be
-        removed — the scope owner is still alive."""
-        from nexus.daemon.service_registry import sweep_dead_t1_elect_locks
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 90001, 90002
-        alive.mark_alive(claude_pid)
-        alive.mark_alive(server_pid)
-        reg.publish(
-            "live-scope",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-live",
-            payload={"session_id": "live-scope", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-        # The registry creates the elect lock during publish.
-        assert (config_dir / "t1_elect.live-scope.lock").exists()
-
-        removed = sweep_dead_t1_elect_locks(config_dir=config_dir)
-        assert removed == 0
-        assert (config_dir / "t1_elect.live-scope.lock").exists()
-
-    def test_preserves_elect_lock_when_claude_pid_alive_server_pid_dead(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """PRESERVATION invariant: if claude_pid is alive but server_pid is
-        dead, the elect lock MUST be preserved.  Both pids must be dead before
-        a lock (or its matching addr record) is eligible for removal — this
-        mirrors the symmetric invariant enforced by sweep_dead_t1_holders.
-
-        This is the exact case the review flagged as missing from
-        TestSweepDeadT1ElectLocks — guards against a future regression that
-        relaxes the both-pids-dead gate to a single-pid-dead check.
-        """
-        from nexus.daemon.service_registry import sweep_dead_t1_elect_locks
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 92001, 92002
-        alive.mark_alive(claude_pid)   # claude is alive
-        alive.mark_dead(server_pid)    # server is dead
-        reg.publish(
-            "partial-live-scope",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-partial",
-            payload={"session_id": "partial-live-scope", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-        lock = config_dir / "t1_elect.partial-live-scope.lock"
-        assert lock.exists(), "publish must create the elect lock"
-
-        removed = sweep_dead_t1_elect_locks(config_dir=config_dir)
-
-        assert removed == 0, (
-            "sweep_dead_t1_elect_locks removed a lock whose claude_pid is "
-            "still alive — this violates the both-pids-dead safety invariant"
-        )
-        assert lock.exists(), (
-            "elect lock was deleted even though claude_pid is alive; "
-            "both pids must be dead before removal"
-        )
-
-    def test_removes_elect_lock_whose_addr_record_has_both_pids_dead(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Elect lock survives addr-record removal correctly: when addr
-        is already gone but lock lingers, the lock is orphaned → removed."""
-        from nexus.daemon.service_registry import sweep_dead_t1_elect_locks
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        reg = self._registry(config_dir, clock)
-        claude_pid, server_pid = 90003, 90004
-        alive.mark_dead(claude_pid)
-        alive.mark_dead(server_pid)
-        reg.publish(
-            "dead-scope",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": server_pid},
-            version="1.0",
-            owner_token="tok-dead",
-            payload={"session_id": "dead-scope", "server_pid": server_pid,
-                     "claude_pid": claude_pid},
-        )
-        # Manually remove the addr file (simulates crash-reap scenario
-        # where sweep_dead_t1_holders already ran but left the lock).
-        (config_dir / "t1_addr.dead-scope").unlink()
-        assert (config_dir / "t1_elect.dead-scope.lock").exists()
-
-        removed = sweep_dead_t1_elect_locks(config_dir=config_dir)
-        assert removed == 1
-        assert not (config_dir / "t1_elect.dead-scope.lock").exists()
-
-    def test_exact_count_mixed_elect_locks(
-        self, config_dir: Path, clock: _FakeClock, alive: "_AliveSet",
-        monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """2 orphaned + 1 live → exactly 2 removed, 1 preserved."""
-        from nexus.daemon.service_registry import sweep_dead_t1_elect_locks
-
-        monkeypatch.setattr("nexus.session._is_pid_alive", alive.is_alive)
-        config_dir.mkdir(parents=True, exist_ok=True)
-        # 2 orphaned elect locks (no addr file).
-        for i in range(2):
-            (config_dir / f"t1_elect.orphan-{i}.lock").touch()
-
-        # 1 live scope: addr file present + claude_pid alive.
-        reg = self._registry(config_dir, clock)
-        cp, sp = 91000, 91001
-        alive.mark_alive(cp)
-        alive.mark_alive(sp)
-        reg.publish(
-            "live-scope-m",
-            endpoint={"host": "127.0.0.1", "port": 0, "server_pid": sp},
-            version="1.0",
-            owner_token="tok-live-m",
-            payload={"session_id": "live-scope-m", "server_pid": sp,
-                     "claude_pid": cp},
-        )
-
-        removed = sweep_dead_t1_elect_locks(config_dir=config_dir)
-        assert removed == 2  # exact
-        assert (config_dir / "t1_elect.live-scope-m.lock").exists()
-
-    def test_returns_zero_when_dir_absent(self, tmp_path: Path) -> None:
-        from nexus.daemon.service_registry import sweep_dead_t1_elect_locks
-
-        removed = sweep_dead_t1_elect_locks(config_dir=tmp_path / "no-such-dir")
-        assert removed == 0
+# NO "Fix #3: T1 lifecycle GC" section (TestSweepDeadT1Holders,
+# TestSweepDeadT1ElectLocks): sweep_dead_t1_holders and
+# sweep_dead_t1_elect_locks (service_registry.py) were the startup-sweep
+# half of the nexus-ycwec T1 lifecycle GC, scanning t1_addr.*/t1_elect.*.lock
+# files nothing publishes any more (T1LeasePublisher retired, nexus-8zfwv,
+# 2026-08-07, deleted at ff744321). Both functions had ZERO production
+# callers even before this retirement -- doubly dead, not merely orphaned by
+# the publisher's removal -- and are deleted alongside it. T1's current
+# lease file (nexus.db.t1's t1_session_lease.*) has its own orphan-reap
+# check (nexus.health._check_orphan_t1_lease), tested in
+# tests/test_doctor_integrity.py, not here.
 
 
 # ---------------------------------------------------------------------------
@@ -1308,14 +783,16 @@ class TestSweepDeadT1ElectLocks:
 
 class TestRelinquishCleansElectLock:
     """GAP C fix: ServiceRegistry.relinquish must remove the elect lock
-    for the scope being released, so graceful MCP shutdown leaves no
-    t1_elect.*.lock orphan.
+    for the scope being released, so graceful shutdown leaves no
+    <tier>_elect.*.lock orphan.
 
-    The only clean-session-end hook seam that runs before the MCP process
-    exits is the lifespan's ``finally`` block (via ``_t1_shutdown`` ->
-    ``publisher.relinquish()``).  Wiring elect-lock cleanup into
-    ``relinquish()`` is the correct place per the RDR-149 shared-primitive
-    mandate: no per-tier lifecycle code outside service_registry.py.
+    Tier string is incidental here (same reasoning as
+    TestDiscoverReapToctou above): this exercises the PRIMITIVE's
+    relinquish/elect-lock behaviour, not a specific tier's lifecycle. Moved
+    off "t1" (nexus-8zfwv, 2026-08-07) since T1LeasePublisher — the only
+    production caller that ever published ``ServiceRegistry(tier="t1",
+    ...)`` records — is retired; "storage_service" names a tier that still
+    exists.
 
     Safety: the lock is only unlinked for the scope WE own — the identity
     check (``current.owner_token != record.owner_token``) runs first.  If
@@ -1325,7 +802,8 @@ class TestRelinquishCleansElectLock:
 
     def _registry(self, config_dir: Path, clock: _FakeClock) -> "ServiceRegistry":
         return ServiceRegistry(
-            dir=config_dir, tier="t1", clock=clock, ttl=300.0, heartbeat_interval=1.0
+            dir=config_dir, tier="storage_service", clock=clock, ttl=300.0,
+            heartbeat_interval=1.0,
         )
 
     def test_relinquish_removes_elect_lock(
@@ -1339,12 +817,12 @@ class TestRelinquishCleansElectLock:
             version="1.0",
             owner_token="tok-A",
         )
-        lock = config_dir / "t1_elect.my-session.lock"
+        lock = config_dir / "storage_service_elect.my-session.lock"
         assert lock.exists(), "publish must create the elect lock"
 
         reg.relinquish(record)
 
-        assert not (config_dir / "t1_addr.my-session").exists(), "addr file must be unlinked"
+        assert not (config_dir / "storage_service_addr.my-session").exists(), "addr file must be unlinked"
         assert not lock.exists(), "elect lock must be removed by relinquish (GAP C)"
 
     def test_relinquish_does_not_remove_successor_elect_lock(
@@ -1366,7 +844,7 @@ class TestRelinquishCleansElectLock:
             version="1.0",
             owner_token="tok-fresh",
         )
-        lock = config_dir / "t1_elect.shared-scope.lock"
+        lock = config_dir / "storage_service_elect.shared-scope.lock"
         assert lock.exists()
 
         # Stale owner tries to relinquish — must leave successor's lock intact.
@@ -1376,4 +854,4 @@ class TestRelinquishCleansElectLock:
             "relinquish of a STALE record must not remove the successor's elect lock"
         )
         # Successor addr file should also still be present.
-        assert (config_dir / "t1_addr.shared-scope").exists()
+        assert (config_dir / "storage_service_addr.shared-scope").exists()

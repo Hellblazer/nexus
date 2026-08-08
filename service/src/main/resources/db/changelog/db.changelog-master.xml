@@ -368,6 +368,14 @@
          below for file-order clarity (matches taxonomy-005 above). -->
     <include file="db/changelog/rdr180-021-chash-conformance-report.xml"/>
 
+    <!-- nexus-lns3o (engine half, T2 [21580] NEW-A): nexus.assign_from_chashes_<dim>
+         — server-side compute-and-persist taxonomy assignment from just-upserted
+         chashes, eliminating the client's per-flush embedding re-download. Needs
+         chunks_<dim> (vectors-001), taxonomy_centroids_<dim> (taxonomy-002),
+         topic_assignments (taxonomy-001), catalog_collections (catalog-001) — all
+         already included above; before the runAlways grants below. -->
+    <include file="db/changelog/taxonomy-006-assign-from-chashes.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

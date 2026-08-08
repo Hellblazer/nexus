@@ -344,10 +344,21 @@ if printf '%s\n' "$out" | grep -qE "general-purpose|declared-bg|declared-sync"; 
 else
     ok "sync-unnamed and both declared dispatches not flagged"
 fi
-if expectations_undeclared "no-such-audit-session"; then
-    ok "missing file: audit exits 0 with no output (fail-open)"
+# nexus-ahl9v: a session with no ledger file is NOT evidence of
+# cleanliness -- it must be distinguishable (rc=3 + stderr NOTE) from a
+# genuinely clean session (rc=0), not collapsed into the same fail-open
+# 0 the live stop-guard callers use.
+no_ledger_err="$(expectations_undeclared "no-such-audit-session" 2>&1 1>/dev/null)"
+no_ledger_rc=$?
+if [[ "$no_ledger_rc" == "3" ]]; then
+    ok "missing file: audit exits 3 (no-ledger, distinct from clean)"
 else
-    bad "audit errored on a missing file"
+    bad "missing file: expected rc=3, got rc=$no_ledger_rc"
+fi
+if printf '%s\n' "$no_ledger_err" | grep -q "NOTE"; then
+    ok "missing file: NOTE line printed to stderr"
+else
+    bad "missing file: no NOTE line on stderr: $no_ledger_err"
 fi
 rm -f "$audf"
 

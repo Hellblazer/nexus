@@ -1,0 +1,344 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-lns3o (engine half) — server-side taxonomy assignment from just-upserted
+    chashes. T2 [21580] flush-tail-attribution-2026-08-07 NEW-A: the client's
+    per-flush taxonomy hook re-downloaded ~3MB of embeddings it had JUST uploaded
+    (HttpTaxonomyStore.compute_assignments ran the cosine argmax client-side), the
+    single largest term in the measured flush tail (est. 25-40%). The engine already
+    holds both halves — chunks_&lt;dim&gt; (the embeddings, same flush) and
+    taxonomy_centroids_&lt;dim&gt; (RDR-156) — so compute-and-persist collapses into
+    one server-side round trip.
+
+    nexus.assign_from_chashes_&lt;dim&gt;(p_collection, p_chashes, p_cross_collection)
+    RETURNS TABLE(chash, topic_id, similarity). Per-dim (384/768/1024), following the
+    catalog-006 combined-query-function pattern: set-returning LANGUAGE plpgsql
+    (VOLATILE — it writes, unlike catalog-006's STABLE readers), SECURITY INVOKER so
+    FORCE RLS on chunks_&lt;dim&gt; / taxonomy_centroids_&lt;dim&gt; / topic_assignments /
+    catalog_collections scopes every row to the caller's stamped nexus.tenant GUC.
+
+    PARITY CONTRACT (pinned by AssignFromChashesParityTest / the Python-side contract
+    test) — replicates HttpTaxonomyStore.compute_assignments + the persist_assignments
+    upsert semantics (TaxonomyRepository.assignOne) EXACTLY:
+      - cosine similarity = 1 - (embedding &lt;=&gt; centroid), matching the client's
+        _cosine_matrix (normalized dot product == 1 - cosine distance).
+      - argmax over the centroid set in scope, NO minimum-similarity threshold — a
+        matched chash is ALWAYS assigned to its single nearest centroid, however low
+        the similarity (mirrors sim.argmax(axis=1) exactly; PROJECTION_THRESHOLD
+        gates compute_cross_links only, a different codepath never touched here).
+      - p_cross_collection=false ("own" pass): assigned_by='centroid', ON CONFLICT
+        DO NOTHING (first-write-wins, assignOne's non-projection branch verbatim);
+        the returned similarity is always NULL, matching compute_assignments'
+        "similarity": None for the non-projection branch.
+      - p_cross_collection=true ("cross" pass): assigned_by='projection', ON CONFLICT
+        DO UPDATE with GREATEST(existing, new) similarity + assigned_at/
+        source_collection following the winning value (assignOne's projection branch
+        verbatim); pre-registers p_collection into catalog_collections first
+        (ensureCollectionRegistered's FK-satisfaction step, since source_collection
+        carries a soft FK there).
+      - a chash present in chunks_&lt;dim&gt; but with NO centroid in scope (empty
+        taxonomy) is silently absent from the result set — mirrors the client's
+        `if not c_embs: return []` short-circuit; this is NOT an "unmatched chash",
+        it is a normal empty-taxonomy state. A chash ABSENT from chunks_&lt;dim&gt;
+        altogether is a genuinely unmatched input; the ENGINE HALF here does not
+        determine that (it only ever sees chunk rows that exist) — the Java caller
+        (TaxonomyRepository#assignFromChashes) computes unmatched_chashes via a
+        separate typed existence probe against chunks_&lt;dim&gt; and names them in the
+        HTTP response, never silently dropping them (design gate, bead comment
+        2026-08-07).
+
+    Returns the FRESHLY COMPUTED (chash, topic_id, similarity) triple from the
+    argmax — NOT the post-upsert DB value — so a re-flush of an already-assigned
+    chash whose new similarity loses the GREATEST comparison still reports the
+    row it computed (parity with compute_assignments, which has no visibility into
+    persisted state; only persist_assignments's separate upsert step decides what
+    the DB actually keeps). Achieved via a data-modifying CTE ("persisted") left
+    UNREFERENCED by the final SELECT: Postgres always executes a data-modifying
+    WITH item to completion exactly once, whether or not the primary query reads
+    its output (documented behavior, PostgreSQL "Data-Modifying Statements in
+    WITH") — this is what lets the function report the computed set while still
+    performing the real upsert as a side effect in the same statement.
+
+    Deterministic tie-break (argmax ties, exceedingly unlikely at float32 precision
+    but pinned for determinism): distance ASC, then centroid ordering matching
+    TaxonomyCentroidRepository#fetchCentroids — own pass ties break on topic_id ASC;
+    cross pass ties break on collection ASC, topic_id ASC (getForeignCentroids' own
+    ORDER BY).
+
+    #variable_conflict use_column: RETURNS TABLE(chash, topic_id, similarity) implicitly
+    declares plpgsql variables by those names; ON CONFLICT (tenant_id, doc_id, topic_id)'s
+    conflict-target list is necessarily BARE column names (Postgres does not allow
+    table-qualifying it), so "topic_id" there collided with the OUT variable ("column
+    reference topic_id is ambiguous"). This pragma tells the parser bare identifiers
+    prefer the table-column reading — exactly the ON CONFLICT clause's own intent.
+
+    Ordering: after taxonomy-001 (topic_assignments), taxonomy-002 (centroids),
+    catalog-001 (catalog_collections), vectors-001 (chunks_&lt;dim&gt;) — all already
+    included well before this point in db.changelog-master.xml. Before the runAlways
+    grants-nexus-svc.xml, matching the taxonomy-005 placement rationale.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-006-1" author="nexus-lns3o">
+        <comment>nexus.assign_from_chashes_384: chunks_384 x taxonomy_centroids_384 argmax, persist in-statement</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_384 c
+              JOIN nexus.taxonomy_centroids_384 ct
+                ON ct.collection &lt;&gt; p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_384 c
+              JOIN nexus.taxonomy_centroids_384 ct
+                ON ct.collection = p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.assign_from_chashes_384(text, text[], boolean)</rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-006-2" author="nexus-lns3o">
+        <comment>nexus.assign_from_chashes_768</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_768 c
+              JOIN nexus.taxonomy_centroids_768 ct
+                ON ct.collection &lt;&gt; p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_768 c
+              JOIN nexus.taxonomy_centroids_768 ct
+                ON ct.collection = p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.assign_from_chashes_768(text, text[], boolean)</rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-006-3" author="nexus-lns3o">
+        <comment>nexus.assign_from_chashes_1024</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_1024 c
+              JOIN nexus.taxonomy_centroids_1024 ct
+                ON ct.collection &lt;&gt; p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_1024 c
+              JOIN nexus.taxonomy_centroids_1024 ct
+                ON ct.collection = p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.assign_from_chashes_1024(text, text[], boolean)</rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-006-4" author="nexus-lns3o">
+        <comment>GRANT EXECUTE on the three assign_from_chashes functions to nexus_svc</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_384(text, text[], boolean)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_768(text, text[], boolean)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_1024(text, text[], boolean) TO nexus_svc;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_1024(text, text[], boolean) FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_768(text, text[], boolean)  FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_384(text, text[], boolean)  FROM nexus_svc;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

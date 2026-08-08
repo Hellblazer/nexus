@@ -45,6 +45,8 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/topics/merge        merge source→target
  *   POST  /v1/taxonomy/assignments/assign  upsert assignment
  *   POST  /v1/taxonomy/assignments/assign_many batch upsert assignments
+ *   POST  /v1/taxonomy/assignments/assign_from_chashes server-side compute+persist
+ *         from just-upserted chashes (nexus-lns3o engine half)
  *   GET   /v1/taxonomy/assignments/docs    doc_ids for topic_id=
  *   POST  /v1/taxonomy/assignments/for_docs assignments for doc_ids list
  *   POST  /v1/taxonomy/assignments/details full assignment rows incl. quality cols (nexus-onjvy)
@@ -137,6 +139,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 // Assignments
                 case "/assignments/assign"        -> handleAssign(exchange, tenant, method);
                 case "/assignments/assign_many"   -> handleAssignMany(exchange, tenant, method);
+                case "/assignments/assign_from_chashes" -> handleAssignFromChashes(exchange, tenant, method);
                 case "/assignments/docs"          -> handleGetDocIds(exchange, tenant, method);
                 case "/assignments/for_docs"      -> handleGetAssignmentsForDocs(exchange, tenant, method);
                 case "/assignments/details"       -> handleGetAssignmentDetails(exchange, tenant, method);
@@ -453,6 +456,48 @@ public final class TaxonomyHandler implements HttpHandler {
         }
         int persisted = repo.assignMany(tenant, rows);
         HttpUtil.send(ex, 200, json(Map.of("persisted", persisted)));
+    }
+
+    /**
+     * POST /v1/taxonomy/assignments/assign_from_chashes (nexus-lns3o engine half,
+     * T2 [21580] flush-tail-attribution-2026-08-07 NEW-A).
+     *
+     * <p>Body {@code {"collection": str, "chashes": [str, ...], "cross_collection"?: bool
+     * (default true)}}. Given chashes just upserted into {@code collection}, computes
+     * cosine-nearest-centroid assignment server-side (own collection always; every OTHER
+     * collection too when {@code cross_collection}) and persists in one round trip —
+     * see {@link dev.nexus.service.db.TaxonomyRepository#assignFromChashes} for the full
+     * parity contract with the client's {@code compute_assignments} + {@code
+     * persist_assignments} it replaces. Response 200
+     * {@code {"assigned": int, "cross_assigned": int, "unmatched_chashes": [...]}} — a
+     * chash never actually upserted into {@code collection} is named in
+     * {@code unmatched_chashes}, never silently dropped.
+     */
+    private void handleAssignFromChashes(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        Object raw = body.get("chashes");
+        if (!(raw instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new IllegalArgumentException("field 'chashes' must be a non-empty JSON array");
+        }
+        if (rawList.size() > TaxonomyRepository.MAX_ASSIGN_FROM_CHASHES) {
+            throw new IllegalArgumentException("too many chashes (max "
+                + TaxonomyRepository.MAX_ASSIGN_FROM_CHASHES + ")");
+        }
+        List<String> chashes = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (o == null || o.toString().isBlank()) {
+                throw new IllegalArgumentException("each element of 'chashes' must be a non-blank string");
+            }
+            chashes.add(o.toString());
+        }
+        // cross_collection defaults to true (design bead 2026-08-07): absent, null, or
+        // any non-Boolean value means "run the cross pass"; only an explicit `false`
+        // disables it.
+        boolean crossCollection = !(body.get("cross_collection") instanceof Boolean b) || b;
+        Map<String, Object> result = repo.assignFromChashes(tenant, collection, chashes, crossCollection);
+        HttpUtil.send(ex, 200, json(result));
     }
 
     private void handleGetDocIds(HttpExchange ex, String tenant, String method) throws IOException {

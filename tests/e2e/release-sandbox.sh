@@ -122,6 +122,22 @@ _svc_teardown() {
             kill "$mineru_pid" 2>/dev/null || true
         fi
     done
+
+    # nexus-bv8yl: `nx daemon service stop --with-pg` stops the storage
+    # service + PG but NOT the aspect-worker daemon the indexing steps
+    # spawn. The survivor holds files under the sandbox HOME, so the NEXT
+    # run's recreate dies with `rm: Directory not empty` (bit twice at the
+    # 7.4.0 cut, back-to-back). Same sandbox-HOME-scoped matching rule as
+    # the mineru reaper above: command path must be rooted under THIS
+    # sandbox HOME, so a real install's worker is never touched.
+    local worker_pid worker_cmd
+    for worker_pid in $(pgrep -f "aspect-worker" 2>/dev/null || true); do
+        worker_cmd=$(ps -p "$worker_pid" -o command= 2>/dev/null || true)
+        if [[ "$worker_cmd" == *"$HOME"* ]]; then
+            echo "  [fallback] terminating leftover sandbox aspect-worker (pid $worker_pid)"
+            kill "$worker_pid" 2>/dev/null || true
+        fi
+    done
 }
 
 # nexus-596jm: smoke and shakedown exercise substrate steps (plan reseed,
@@ -642,19 +658,13 @@ case "$MODE" in
         echo
         echo "── 8/11 T1 scratch use (write + readback) ──"
         # Outside a Claude Code session, no SessionStart hook fires to
-        # publish a T1 chroma address (RDR-105 hybrid discovery: env
-        # passdown from MCP parent OR addr-file PPID walk to a claude
-        # ancestor). With neither path available, ``nx scratch *`` fails
-        # loud with ``T1ServerNotFoundError`` (the silent EphemeralClient
-        # fallback was removed in 4.27.0 because it produced data-loss
-        # bugs where put + list landed in different per-process clients).
-        #
-        # The shakedown opts into the documented escape hatch:
-        # ``NX_T1_ISOLATED=1`` makes T1Database open an in-process
-        # ``EphemeralClient`` for THIS invocation only. Cross-invocation
-        # readback is still impossible without a real session — that's
-        # tested by the cc-validation harness.
-        SCRATCH_OUT=$(NX_T1_ISOLATED=1 nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
+        # publish a live MCP session lease. T1 is PG-only (nexus-4lkmz —
+        # the in-process ``NX_T1_ISOLATED=1`` escape hatch retired
+        # outright, it now hard-fails). The bare-CLI path
+        # (``get_t1_database()``'s CLI-dedicated mint, nexus-rn3wo.1)
+        # mints its own persisted session against the live storage
+        # service instead — no opt-in flag needed.
+        SCRATCH_OUT=$(nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
         if [[ "$SCRATCH_OUT" == *"Stored:"* ]]; then
             echo "  put: ok ($SCRATCH_OUT)"
         else
