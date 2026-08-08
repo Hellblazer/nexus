@@ -183,6 +183,17 @@ _REQUIRE_ENV = "NX_REQUIRE_PLUGIN_DRIFT_CHECK"
 def _require_or_skip() -> None:
     if _has_any_tags():
         return
+    if _in_release_window():
+        # RELEASE WINDOW (ref == v<pyproject>, tag not yet cut): the pinned
+        # ref CANNOT be fetched because it does not exist yet — the
+        # workflow's fetch step tolerates exactly this case, so a tagless
+        # checkout here is the documented sequencing, not a broken fetch.
+        # The window contract the tests then enforce (ledger EMPTY) needs
+        # no tag to check. Exposed at the 7.4.0 cut: nexus-05m1i made this
+        # job honest, and the FIRST honest release-window run hit the
+        # require-flag raise below — which every prior cut (7.0.0..7.3.0)
+        # had sailed past only because the job was vacuous-green.
+        return
     if os.environ.get(_REQUIRE_ENV) == "1":
         raise AssertionError(
             f"{_REQUIRE_ENV}=1 but this checkout has NO tags, so the pinned ref "
@@ -353,6 +364,12 @@ class TestTaglessBehaviour:
         monkeypatch.setattr(
             "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
         )
+        # Pin the window OFF: on an actual release branch the real checkout
+        # IS in the window, and this test is about NON-window taglessness.
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: False,
+        )
         with pytest.raises(BaseException) as exc:
             _require_or_skip()
         assert exc.typename == "Skipped", f"expected a skip, got {exc.typename}"
@@ -362,8 +379,29 @@ class TestTaglessBehaviour:
         monkeypatch.setattr(
             "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
         )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: False,
+        )
         with pytest.raises(AssertionError, match="tag-fetch step"):
             _require_or_skip()
+
+    def test_tagless_in_release_window_proceeds_even_with_flag(
+        self, monkeypatch
+    ) -> None:
+        """The 7.4.0-cut regression: in the release window the pinned tag
+        cannot exist yet, so taglessness is the documented sequencing —
+        the require flag must NOT turn it into a failure (and no skip:
+        the window contract, ledger-EMPTY, is checked tag-free)."""
+        monkeypatch.setenv(_REQUIRE_ENV, "1")
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._in_release_window",
+            lambda: True,
+        )
+        _require_or_skip()  # returns, no raise, no skip
 
 
 class TestTheCIWiringItself:
