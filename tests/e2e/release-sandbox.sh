@@ -122,6 +122,22 @@ _svc_teardown() {
             kill "$mineru_pid" 2>/dev/null || true
         fi
     done
+
+    # nexus-bv8yl: `nx daemon service stop --with-pg` stops the storage
+    # service + PG but NOT the aspect-worker daemon the indexing steps
+    # spawn. The survivor holds files under the sandbox HOME, so the NEXT
+    # run's recreate dies with `rm: Directory not empty` (bit twice at the
+    # 7.4.0 cut, back-to-back). Same sandbox-HOME-scoped matching rule as
+    # the mineru reaper above: command path must be rooted under THIS
+    # sandbox HOME, so a real install's worker is never touched.
+    local worker_pid worker_cmd
+    for worker_pid in $(pgrep -f "aspect-worker" 2>/dev/null || true); do
+        worker_cmd=$(ps -p "$worker_pid" -o command= 2>/dev/null || true)
+        if [[ "$worker_cmd" == *"$HOME"* ]]; then
+            echo "  [fallback] terminating leftover sandbox aspect-worker (pid $worker_pid)"
+            kill "$worker_pid" 2>/dev/null || true
+        fi
+    done
 }
 
 # nexus-596jm: smoke and shakedown exercise substrate steps (plan reseed,

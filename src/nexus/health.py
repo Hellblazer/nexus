@@ -1005,18 +1005,55 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     Resolution rule (by preference, not exclusion — a real binary is
     always probed, never skipped):
     1. Walk PATH left to right; the FIRST match found in a directory that
-       is NOT under ``sys.prefix`` wins.
+       is NOT under ``sys.prefix`` wins — but only among candidates the
+       HOME-scoping rule below admits.
     2. If no such match exists but a match under ``sys.prefix`` does
        (e.g. this process's own venv is the ONLY thing on PATH — a valid
        shape when a user invokes that venv's own ``nx`` directly), that
        match is still returned and still probed for real.
     3. ``None`` only when the binary resolves nowhere on PATH at all.
 
+    HOME-scoping (nexus-k0lk9 sibling finding, 7.4.0 cut): when this
+    process's own prefix lives under the CURRENT ``$HOME``, a PATH hit
+    OUTSIDE that ``$HOME`` is a FOREIGN install, not "the separately
+    installed tool" l2ku5's preference exists to reach. The concrete
+    incident: the release sandbox (``HOME=~/nexus-sandbox``) ran doctor
+    from the sandbox's own tool venv; this resolver skipped the sandbox's
+    nx-mcp as own-prefix and probed the REAL home's live install — the
+    gate's verdict then tracked host load/health instead of the artifact
+    under test. Foreign hits are demoted below the own-prefix fallback,
+    never dropped: with own-prefix outside ``$HOME`` (system-wide
+    installs) the pre-existing rule applies unchanged, and on a dev box
+    both the checkout venv and ``~/.local/bin`` are under ``$HOME`` so
+    the installed tool still wins exactly as before.
+
+    ACCEPTED TRADE-OFF (substantive-critic, 7.4.0): a home-rooted process
+    (e.g. ``uv run`` from a checkout) with the real install ONLY outside
+    ``$HOME`` (e.g. ``/usr/local/bin``) now probes its own venv instead
+    of that install — foreign-vs-genuine is undecidable from the path
+    alone, the result is honestly labeled ``is_own_venv=True`` (never a
+    silent lie), and the topology is pinned by
+    ``test_home_scoping_tradeoff_outside_home_install_loses_to_own_venv``
+    so a future change to this choice is deliberate, not accidental.
+
     Returns ``(path_or_none, is_own_venv)``.
     """
     own_prefix = str(Path(sys.prefix).resolve())
+    try:
+        home = str(Path.home().resolve())
+    except (OSError, RuntimeError):
+        # Path.home() raises RuntimeError (not OSError) when HOME is unset
+        # with no passwd entry — the K8s arbitrary-UID / distroless shape
+        # (nexus-262a7, critic-reproduced: an uncaught raise here crashes
+        # `nx doctor` outright). No home → HOME-scoping disabled, the
+        # pre-existing l2ku5 preference applies unchanged.
+        home = ""
+    own_prefix_under_home = bool(home) and (
+        own_prefix == home or own_prefix.startswith(home + os.sep)
+    )
     path_env = os.environ.get("PATH", os.defpath)
     own_prefix_hit: str | None = None
+    foreign_hit: str | None = None
     for directory in path_env.split(os.pathsep):
         if not directory:
             continue
@@ -1031,8 +1068,18 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
             if own_prefix_hit is None:
                 own_prefix_hit = hit
             continue
+        if own_prefix_under_home and not (
+            resolved_dir == home or resolved_dir.startswith(home + os.sep)
+        ):
+            # Foreign install (outside the current $HOME while our own
+            # prefix is home-rooted) — remember it only as a last resort.
+            if foreign_hit is None:
+                foreign_hit = hit
+            continue
         return hit, False
-    return own_prefix_hit, True
+    if own_prefix_hit is not None:
+        return own_prefix_hit, True
+    return foreign_hit, False
 
 
 def _check_mcp_entry_points() -> list[HealthResult]:
