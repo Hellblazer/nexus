@@ -29,6 +29,7 @@ GH #1419.4 split-brain: at one backup timestamp ``.catalog.db`` showed
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -57,6 +58,62 @@ _log = structlog.get_logger(__name__)
 # storage_service lease without polling a TTL clock).
 _service_catalog_lock = threading.Lock()
 _service_catalog_client: Any = None
+
+#: nexus-jb4pp: per-op ``{op: [calls, lock_wait_s, call_s]}`` for the shared
+#: service-catalog handle. ``_service_catalog_lock`` is held for the FULL
+#: duration of every forwarded call — including the network round trip — so
+#: every catalog write in the process (manifest write_many, the RUNFENCE
+#: begin_index_run_many, registration) is strictly serialized against every
+#: other, across all indexing workers. That serialization was invisible: it
+#: is billed to whichever caller's timer brackets the call, so the manifest
+#: hook's measured cost has always included time spent waiting on OTHER
+#: threads' catalog traffic. Splitting wait from call is what makes
+#: "is the manifest cost client, network, or server?" answerable at all.
+#: Counters are plain floats mutated under the lock they measure.
+_service_catalog_op_stats: dict[str, list[float]] = {}
+
+
+def _record_catalog_op(name: str, wait_s: float, call_s: float,
+                       *, calls: int = 1) -> None:
+    """Accumulate one op's timings. Called while holding the lock it
+    measures, so the read-modify-write of the shared row is atomic.
+
+    *calls* is 0 for the non-callable attribute path — that access still
+    queued for the lock, so its wait is real and must be counted, but it
+    is not a round trip and must not inflate the call count.
+    """
+    _row = _service_catalog_op_stats.setdefault(name, [0.0, 0.0, 0.0])
+    _row[0] += calls
+    _row[1] += wait_s
+    _row[2] += call_s
+
+
+def service_catalog_op_stats() -> dict[str, dict[str, float]]:
+    """Snapshot of per-op shared-catalog-handle timings (nexus-jb4pp).
+
+    ``{op: {"calls": n, "lock_wait_s": s, "call_s": s}}`` where
+    ``lock_wait_s`` is time blocked on ``_service_catalog_lock`` before the
+    call began and ``call_s`` is the forwarded call itself (client
+    serialization + network + server). Cumulative across threads, so both
+    may exceed wall clock.
+    """
+    with _service_catalog_lock:
+        return {
+            op: {"calls": v[0], "lock_wait_s": v[1], "call_s": v[2]}
+            for op, v in _service_catalog_op_stats.items()
+        }
+
+
+def reset_service_catalog_op_stats() -> None:
+    """Zero the per-op counters (review finding on nexus-jb4pp): the stats
+    dict is a process-lifetime module global, so a process that runs more
+    than one index pass (MCP tool, watch mode, a multi-indexing pytest
+    session) would otherwise report cumulative-since-process-start numbers
+    with no signal — the same mis-attribution class this instrumentation
+    exists to kill. ``_run_index`` calls this at start so every
+    ``index_catalog_op_stats`` event covers exactly one run."""
+    with _service_catalog_lock:
+        _service_catalog_op_stats.clear()
 
 
 def _get_shared_service_catalog_client() -> Any:
@@ -92,15 +149,31 @@ class _SharedServiceCatalogHandle:
     """
 
     def __getattr__(self, name: str) -> Any:
+        # nexus-jb4pp: this acquisition is NOT a formality — it blocks for
+        # the full duration of any in-flight call on another thread, since
+        # _call below holds the same lock across its network round trip.
+        # Instrumenting only _call read a near-zero wait while threads were
+        # demonstrably serializing, because they were queueing HERE. A
+        # timer that measures the wrong side of a convoy is worse than none.
+        _w0 = time.monotonic()
         with _service_catalog_lock:
+            _wait = time.monotonic() - _w0
             client = _get_shared_service_catalog_client()
             attr = getattr(client, name)  # may raise (e.g. local-mode-only ._db) — let it propagate untouched
-        if not callable(attr):
+            _non_callable = not callable(attr)
+            if _non_callable:
+                # Recorded INSIDE the lock: the counters are plain floats
+                # whose only mutual exclusion is this lock.
+                _record_catalog_op(name, _wait, 0.0, calls=0)
+        if _non_callable:
             return attr
 
         def _call(*args: Any, **kwargs: Any) -> Any:
             global _service_catalog_client
+            _w1 = time.monotonic()
             with _service_catalog_lock:
+                _wait2 = time.monotonic() - _w1
+                _c0 = time.monotonic()
                 current = _get_shared_service_catalog_client()
                 try:
                     return getattr(current, name)(*args, **kwargs)
@@ -109,6 +182,12 @@ class _SharedServiceCatalogHandle:
                         current.close()
                         _service_catalog_client = None
                     raise
+                finally:
+                    # Both acquisitions belong to this op's wait: the
+                    # attribute resolution and the call itself each queue
+                    # behind whatever else is talking to the catalog.
+                    _record_catalog_op(
+                        name, _wait + _wait2, time.monotonic() - _c0)
 
         return _call
 

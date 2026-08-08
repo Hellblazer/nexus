@@ -685,12 +685,16 @@ class TestFlushInstrumentation:
 
     def test_partition_sums_to_wall_within_epsilon(self) -> None:
         """The exact test the critic's probe sketches: inject a distinct,
-        recognizable delay into EACH of the four attributed phases
-        (upload, flush_hook, settle, file_hook) and assert
-        upload_s + flush_hook_s + settle_s + file_hook_s reconstructs the
-        real wall clock of the flush within a small epsilon — the
-        partition-completeness check that would have caught both the
-        original G3 gap and this round's settle-bookkeeping recurrence."""
+        recognizable delay into EACH of the attributed phases
+        (begin_hook, upload, flush_hook, settle, file_hook) and assert
+        they reconstruct the real wall clock of the flush within a small
+        epsilon — the partition-completeness check that would have caught
+        the original G3 gap, this round's settle-bookkeeping recurrence,
+        and (nexus-jb4pp) the on_batch_begin gap that vw594 F1 opened by
+        inserting a round trip ahead of the upload timer. That last one
+        slipped through precisely because this test left on_batch_begin
+        at its no-op default, so the missing phase cost 0.0s here while
+        costing ~0.4s per flush in production."""
         import time as _time
         import unittest.mock as mock
 
@@ -719,6 +723,7 @@ class TestFlushInstrumentation:
             on_file_complete=slow_on_complete,
             on_file_failed=rec.on_failed,
             on_batch_complete=lambda *a: _time.sleep(DELAY),
+            on_batch_begin=lambda *a: _time.sleep(DELAY),
             max_chunks=100,
         )
         b.add("a.py", "code__x", *_mk(2, "a"))  # single file, single flush
@@ -730,11 +735,18 @@ class TestFlushInstrumentation:
                 wall = _time.monotonic() - wall_t0
 
         e = next(l for l in logs if l["event"] == "chunk_flush_complete")
-        total = e["upload_s"] + e["flush_hook_s"] + e["settle_s"] + e["file_hook_s"]
+        phases = ("begin_hook_s", "upload_s", "flush_hook_s", "settle_s",
+                  "file_hook_s")
+        total = sum(e[k] for k in phases)
         # Each phase carries its own DELAY; a real attribution gap would
         # show up as total < wall by roughly one DELAY (0.03s) or more —
         # epsilon well under that so a reintroduced gap still fails loud.
         assert total == pytest.approx(wall, abs=0.05), (
             f"total={total} wall={wall} — a phase is unattributed again"
         )
-        assert min(e["upload_s"], e["flush_hook_s"], e["settle_s"], e["file_hook_s"]) >= DELAY * 0.5
+        assert min(e[k] for k in phases) >= DELAY * 0.5
+        # ...and the batcher's own cumulative counter must agree, so the
+        # end-of-run report cannot drift from the per-flush event.
+        assert b.stats["flush_seconds"] == pytest.approx(wall, abs=0.05)
+        # abs=1e-3: the event rounds to 3dp, the counter does not.
+        assert b.stats["begin_hook_seconds"] == pytest.approx(e["begin_hook_s"], abs=1e-3)

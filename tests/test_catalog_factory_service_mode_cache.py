@@ -140,3 +140,68 @@ def test_reset_shared_service_catalog_client_for_tests_clears_singleton(monkeypa
 
     factory.reset_shared_service_catalog_client_for_tests()
     assert factory._service_catalog_client is None
+
+
+# ── per-op timing split (nexus-jb4pp) ────────────────────────────────────────
+
+
+def test_op_stats_split_lock_wait_from_call(monkeypatch) -> None:
+    """``_service_catalog_lock`` is held across the whole forwarded call —
+    network round trip included — so every catalog write in the process
+    serializes against every other. Without splitting WAIT from CALL, that
+    serialization is billed to whichever hook's timer brackets the call, and
+    "is the manifest leg client, network, or server?" has no answer.
+
+    Also pins that the counter keys on the OP NAME: the flush-grain
+    attribution work turned on being able to say ``atomic_manifest_replace``
+    ran 109 times where ``write_manifest_many`` should have run 29.
+    """
+    import threading
+    import time
+
+    import nexus.catalog.factory as factory
+    from nexus.catalog.factory import make_catalog_reader
+
+    constructed: list = []
+
+    class _SlowClient:
+        def __init__(self, *_a, **_kw) -> None:
+            constructed.append(self)
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def by_doc_id(self, doc_id: str) -> str:
+            time.sleep(0.05)
+            return f"doc:{doc_id}"
+
+    monkeypatch.setattr(
+        "nexus.catalog.http_catalog_client.HttpCatalogClient", _SlowClient)
+    factory.reset_shared_service_catalog_client_for_tests()
+    factory._service_catalog_op_stats.clear()
+
+    threads = [
+        threading.Thread(target=lambda: make_catalog_reader().by_doc_id("a"))
+        for _ in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    stats = factory.service_catalog_op_stats()
+    assert "by_doc_id" in stats, "ops must be recorded under their own name"
+    row = stats["by_doc_id"]
+    assert row["calls"] == 3
+    # Three 0.05s serialized calls: call_s ~= 0.15 total...
+    assert row["call_s"] >= 0.10
+    # ...and the two losers waited on the lock. Direction only, generously,
+    # so a loaded box cannot flake it.
+    assert row["lock_wait_s"] > 0.02, (
+        "lock wait must be measured separately from call time — conflating "
+        "them is what hid the convoy"
+    )
+
+    factory.reset_shared_service_catalog_client_for_tests()
+    factory._service_catalog_op_stats.clear()

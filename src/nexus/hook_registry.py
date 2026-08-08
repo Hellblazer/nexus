@@ -102,6 +102,14 @@ class HookRegistry:
         ``register_post_store_hook``."""
         self._single.append(fn)
 
+    def has_single_hooks(self) -> bool:
+        """Would :meth:`fire_single` invoke any hook? (nexus-itpdc)"""
+        return bool(self._single)
+
+    def has_document_hooks(self) -> bool:
+        """Would :meth:`fire_document` invoke any hook? (nexus-itpdc)"""
+        return bool(self._document)
+
     def fire_single(self, doc_id: str, collection: str, content: str) -> None:
         """Invoke every single-doc hook. Per-hook exceptions are caught,
         logged at WARNING, and persisted to T2 ``hook_failures``; never
@@ -153,6 +161,22 @@ class HookRegistry:
                 "post_store_batch_hook_signature_unintrospectable",
                 hook=getattr(fn, "__name__", repr(fn)),
             )
+
+    def has_batch_hooks(self, grain: str = "all") -> bool:
+        """Would :meth:`fire_batch` invoke ANY hook at this *grain*?
+
+        Mirrors :meth:`fire_batch`'s grain filter exactly (same
+        ``getattr(hook, "batch_grain", "file")`` default, same ``"all"``
+        wildcard). Lets a caller skip work that a zero-match dispatch
+        would make pointless — notably :class:`LockedHookRegistry`,
+        which must not serialize a call that fires nothing (nexus-itpdc).
+        """
+        if grain == "all":
+            return bool(self._batch)
+        return any(
+            getattr(hook, "batch_grain", "file") == grain
+            for hook in self._batch
+        )
 
     def fire_batch(
         self,
@@ -598,11 +622,37 @@ class LockedHookRegistry:
     The nexus-cfc72 bounded file-level indexing concurrency runs 2+ file
     pipelines at once; the hook chains they fire (manifest writes, chash
     ledger, taxonomy assign, aspect enqueue) were written for the
-    sequential loop and are not audited for interleaving. Hooks are
-    milliseconds against the multi-second embed/upsert work, so
-    serializing them costs ~nothing and removes the question. Everything
+    sequential loop and are not audited for interleaving. Everything
     else (registration, attribute access) delegates to the wrapped
     registry unchanged.
+
+    That original rationale also claimed "hooks are milliseconds against
+    the multi-second embed/upsert work, so serializing them costs
+    ~nothing". The premise is FALSE on the service path and was never
+    re-checked: measured on conexus 7.4.0 (T2
+    ``nexus/indexing-perf-assessment-7.4.0``) the flush-grain chain costs
+    ~2s per flush (manifest 1.5-1.9s + taxonomy ~0.5s) against 3
+    concurrent flush workers plus the file-loop workers, so this lock is
+    contended and the wait is a first-order term of the indexing tail
+    rather than a rounding error. :attr:`lock_wait_seconds` measures it
+    instead of assuming it away (nexus-itpdc): the wait is billed to
+    whichever timer brackets the caller's fire, which is how a
+    provably-EMPTY ``fire_batch`` chain came to cost ~0.5s per call.
+
+    Two consequences are load-bearing:
+
+    * A fire that would invoke ZERO hooks must NOT take the lock —
+      there is nothing to serialize, so the acquisition is pure convoy
+      wait. :meth:`fire_batch` pre-checks the grain via
+      :meth:`HookRegistry.has_batch_hooks` OUTSIDE the lock. That read
+      touches ``_batch``, which is append-only and is not mutated during
+      an indexing run, so the unlocked read cannot see a torn state; a
+      hook registered concurrently with a fire was already unordered
+      with respect to that fire.
+    * Serialization of NON-empty chains is genuine and still required —
+      ``resolve_index_concurrency``'s docstring names this lock as what
+      makes a diverging T2 memory backend safe under concurrency.
+      Narrowing it further is a design change, not a tweak.
     """
 
     def __init__(self, registry: HookRegistry) -> None:
@@ -610,22 +660,67 @@ class LockedHookRegistry:
 
         self._registry = registry
         self._lock = threading.Lock()
+        # Seconds spent WAITING to acquire the lock, summed across every
+        # contending thread (so it can exceed wall clock, like the other
+        # per-grain hook totals). Two monotonic() reads per fire is noise
+        # next to a chain that makes network round trips; without it the
+        # wait is invisible and silently inflates whichever timer happens
+        # to bracket the fire.
+        self.lock_wait_seconds = 0.0
+
+    def _acquire_timed(self) -> None:
+        _t0 = time.monotonic()
+        self._lock.acquire()
+        # Mutated while holding the lock we just took, so the += is atomic.
+        self.lock_wait_seconds += time.monotonic() - _t0
 
     def fire_single(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
+        # Zero-match fast path — and the one that matters MOST by call
+        # count: the batched indexer fires this once per CHUNK (~2000 per
+        # run), and the default hook set registers no single-grain hook
+        # at all. Guarding only fire_batch measurably RELOCATED the
+        # convoy here rather than removing it (measured: file_batch
+        # 52.7s -> 0.0s while file_single 1.2s -> 76.5s), which is also
+        # what proved the wait was lock contention and not, as previously
+        # hypothesised, GIL starvation.
+        if not self._registry.has_single_hooks():
+            return
+        self._acquire_timed()
+        try:
             self._registry.fire_single(*args, **kwargs)
+        finally:
+            self._lock.release()
 
     def fire_batch(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
+        # Zero-match fast path (nexus-itpdc): a grain with no registered
+        # hook fires nothing, so taking the lock buys only convoy wait
+        # behind the flush-grain chain's ~2s critical section. The
+        # default hook set registers ONLY flush-grain batch hooks, which
+        # makes the indexer's per-file grain="file" fire exactly this
+        # case — a provably-empty chain that was billing ~0.5s/file.
+        if not self._registry.has_batch_hooks(kwargs.get("grain", "all")):
+            return
+        self._acquire_timed()
+        try:
             self._registry.fire_batch(*args, **kwargs)
+        finally:
+            self._lock.release()
 
     def fire_document(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
+        if not self._registry.has_document_hooks():
+            return
+        self._acquire_timed()
+        try:
             self._registry.fire_document(*args, **kwargs)
+        finally:
+            self._lock.release()
 
     def fire_store_chains(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
+        self._acquire_timed()
+        try:
             self._registry.fire_store_chains(*args, **kwargs)
+        finally:
+            self._lock.release()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._registry, name)

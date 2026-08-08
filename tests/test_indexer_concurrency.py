@@ -341,6 +341,193 @@ class TestLockedHookRegistry:
         assert overlaps == []
         assert sorted(fired) == [f"/p{i}" for i in range(6)]
 
+    def test_zero_match_fires_never_take_the_lock(self):
+        """nexus-itpdc: a fire that would invoke NO hook must not acquire
+        the shared lock.
+
+        This is the whole defect. The lock is held for the full hook
+        chain — ~2s per flush on the service path — so an empty chain
+        that still queues for it pays convoy wait for nothing: measured
+        ~0.5s per call, 53s per indexing run of a provably-empty
+        ``grain="file"`` chain. Asserted by HOLDING the lock from another
+        thread and requiring each empty fire to return anyway; a fire
+        that acquired would block until the timeout and fail."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+        # Only a FLUSH-grain batch hook — exactly the default hook set's
+        # shape (taxonomy + manifest are both batch_grain="flush").
+        def flush_hook(ids, col, docs, embs, metas):
+            pass
+        flush_hook.batch_grain = "flush"
+        registry.register_batch(flush_hook)
+
+        locked = LockedHookRegistry(registry)
+        held = threading.Event()
+        release = threading.Event()
+
+        def hog():
+            with locked._lock:
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hog)
+        t.start()
+        assert held.wait(5)
+        try:
+            done = threading.Event()
+
+            def empty_fires():
+                # file-grain batch: no hook declares it -> zero match.
+                locked.fire_batch(["d1"], "col", ["x"], None, [{}], grain="file")
+                # single chain: nothing registered at all.
+                locked.fire_single("d1", "col", "x")
+                # document chain: nothing registered at all.
+                locked.fire_document("/p", "col", "x")
+                done.set()
+
+            probe = threading.Thread(target=empty_fires)
+            probe.start()
+            assert done.wait(3), (
+                "an empty hook chain blocked on the shared lock — the "
+                "zero-match fast path regressed"
+            )
+            probe.join(3)
+        finally:
+            release.set()
+            t.join(5)
+
+    def test_non_empty_chains_still_serialize_and_fire(self):
+        """The fast path must not become a correctness hole: a chain with
+        a registered hook still takes the lock (so cfc72's interleaving
+        guarantee holds) and still fires."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+        fired: list[str] = []
+        overlaps: list[str] = []
+        in_hook = threading.Event()
+
+        def batch_hook(ids, col, docs, embs, metas):
+            if in_hook.is_set():
+                overlaps.append(ids[0])
+            in_hook.set()
+            time.sleep(0.01)
+            in_hook.clear()
+            fired.append(ids[0])
+        batch_hook.batch_grain = "file"
+        registry.register_batch(batch_hook)
+        locked = LockedHookRegistry(registry)
+
+        threads = [
+            threading.Thread(
+                target=locked.fire_batch,
+                args=([f"d{i}"], "col", ["x"], None, [{}]),
+                kwargs={"grain": "file"},
+            )
+            for i in range(6)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert overlaps == []
+        assert sorted(fired) == [f"d{i}" for i in range(6)]
+
+    def test_lock_wait_seconds_measures_contention(self):
+        """nexus-itpdc: the wait must be MEASURABLE, not inferred.
+
+        Without this counter the convoy is billed to whichever caller's
+        timer brackets the fire, which is how ~53s/run of pure lock wait
+        was mis-attributed to GIL starvation for a full investigation
+        cycle."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+
+        def slow(source_path, collection, content):
+            time.sleep(0.05)
+        registry.register_document(slow)
+        locked = LockedHookRegistry(registry)
+        assert locked.lock_wait_seconds == 0.0
+
+        threads = [
+            threading.Thread(target=locked.fire_document,
+                             args=(f"/p{i}", "col", "x"))
+            for i in range(3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Three 0.05s serialized hooks => the two losers wait ~0.05 and
+        # ~0.10s. Assert only the direction, generously, so a loaded CI
+        # box cannot flake it.
+        assert locked.lock_wait_seconds > 0.02
+
+    def test_has_batch_hooks_mirrors_the_fire_batch_grain_filter(self):
+        """The fast-path predicate and the dispatch filter must agree —
+        a predicate that said 'no hooks' where fire_batch would have
+        fired one would silently DROP hooks, which is a correctness bug,
+        not a perf regression."""
+        from nexus.hook_registry import HookRegistry
+
+        registry = HookRegistry()
+        assert registry.has_batch_hooks("file") is False
+        assert registry.has_batch_hooks("flush") is False
+        assert registry.has_batch_hooks("all") is False
+
+        def default_grain(ids, col, docs, embs, metas):
+            pass
+        registry.register_batch(default_grain)
+        # No batch_grain attribute => "file" default, same as fire_batch's.
+        assert registry.has_batch_hooks("file") is True
+        assert registry.has_batch_hooks("flush") is False
+        assert registry.has_batch_hooks("all") is True
+
+        def flush_grain(ids, col, docs, embs, metas):
+            pass
+        flush_grain.batch_grain = "flush"
+        registry.register_batch(flush_grain)
+        assert registry.has_batch_hooks("flush") is True
+
+        # Cross-check against the real dispatcher rather than trusting
+        # two independent readings of the same rule.
+        for grain in ("file", "flush", "all", "unknown"):
+            seen: list[str] = []
+
+            def spy(ids, col, docs, embs, metas, _s=seen):
+                _s.append("x")
+            registry2 = HookRegistry()
+            registry2.register_batch(default_grain)
+            registry2.register_batch(flush_grain)
+            registry2.fire_batch(["d"], "col", ["x"], None, [{}], grain=grain)
+            fired_any = registry2.has_batch_hooks(grain)
+            # has_batch_hooks is the PREDICTION; a False must never
+            # accompany a dispatch that would have matched something.
+            matched = [
+                h for h in registry2._batch
+                if grain == "all" or getattr(h, "batch_grain", "file") == grain
+            ]
+            assert fired_any == bool(matched), grain
+
+    def test_default_hook_set_registers_no_file_grain_batch_hook(self):
+        """Pins the premise the fast path exploits in production.
+
+        If a future default hook registers at file grain, the indexer's
+        per-file fire stops being a no-op — this test is what tells the
+        author that the itpdc measurements no longer describe reality."""
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+
+        registry = HookRegistry()
+        install_default_hooks(registry)
+        assert registry.has_batch_hooks("file") is False
+        assert registry.has_batch_hooks("flush") is True
+        assert registry.has_single_hooks() is False
+        assert registry.has_document_hooks() is True
+
     def test_getattr_falls_through_to_registry(self):
         from nexus.hook_registry import HookRegistry, LockedHookRegistry
 

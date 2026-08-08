@@ -3016,6 +3016,14 @@ def _run_index(
     if info is None:
         return {}
 
+    # The per-op catalog counters are a process-lifetime global; zero them
+    # here so the end-of-run index_catalog_op_stats event covers exactly
+    # THIS run, not cumulative-since-process-start (review finding,
+    # nexus-jb4pp — the multi-index-per-process mis-attribution class).
+    from nexus.catalog.factory import reset_service_catalog_op_stats  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+
+    reset_service_catalog_op_stats()
+
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
     # catalog for a conformant name. Phase 4 migration runs further
@@ -4071,23 +4079,51 @@ def _run_index(
         _taxonomy_s = _flush_hook_by_name.get("taxonomy_assign_batch_hook", 0.0)
         _manifest_s = _flush_hook_by_name.get("manifest_write_batch_hook", 0.0)
         _aspect_s = _flush_hook_by_name.get("aspect_enqueue", 0.0)
+        # nexus-jb4pp: the pre-upload RUNFENCE stamp (on_batch_begin ->
+        # _fence_begin_many). A real round trip per flush that no timer
+        # covered — not upload, not any file/flush hook bucket — so the
+        # per-grain report could not be made to sum honestly.
+        _fence_s = _bstats.get("begin_hook_seconds", 0.0)
+        # nexus-itpdc: seconds threads spent WAITING for the
+        # LockedHookRegistry mutex. Reported separately because it is NOT
+        # a sixth kind of work — it is already inside the file_*/flush_*
+        # buckets above, inflating whichever grain happened to queue. It
+        # is the difference between "the taxonomy hook is slow" and "the
+        # taxonomy hook is BLOCKING the other workers".
+        _lock_wait_s = float(getattr(hooks, "lock_wait_seconds", 0.0) or 0.0)
         _log.info(
             "index_chunk_batch_stats",
             flushes=int(_bstats["flushes"]),
             upload_seconds=round(_upload_s, 1),
             flush_wall_seconds=round(_flush_wall_s, 1),
+            flush_fence_seconds=round(_fence_s, 1),
             file_batch_seconds=round(_hook_seconds["file_batch"], 1),
             file_single_seconds=round(_hook_seconds["file_single"], 1),
             file_document_seconds=round(_hook_seconds["file_document"], 1),
             flush_taxonomy_seconds=round(_taxonomy_s, 1),
             flush_manifest_seconds=round(_manifest_s, 1),
             flush_aspect_seconds=round(_aspect_s, 1),
+            hook_lock_wait_seconds=round(_lock_wait_s, 1),
         )
+        # nexus-jb4pp: per-op split for the SHARED service-catalog handle
+        # (manifest write_many, RUNFENCE begin_index_run_many, ...). Its
+        # module lock is held across the network call, so a hook's measured
+        # cost silently includes other threads' catalog traffic; this is
+        # the only place the two are separable.
+        from nexus.catalog.factory import service_catalog_op_stats  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+        for _op, _st in sorted(service_catalog_op_stats().items()):
+            _log.info(
+                "index_catalog_op_stats",
+                op=_op,
+                calls=int(_st["calls"]),
+                lock_wait_seconds=round(_st["lock_wait_s"], 1),
+                call_seconds=round(_st["call_s"], 1),
+            )
         if on_phase is not None and _bstats["flushes"]:
             on_phase(
                 f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
                 f"{_upload_s:.1f}s upload ({_flush_wall_s:.1f}s full flush "
-                f"wall); hooks "
+                f"wall); fence {_fence_s:.1f}s; hooks "
                 f"{_hook_seconds['file']:.1f}s file-grain "
                 f"(batch={_hook_seconds['file_batch']:.1f}s "
                 f"single={_hook_seconds['file_single']:.1f}s "
@@ -4096,6 +4132,8 @@ def _run_index(
                 f"(taxonomy={_taxonomy_s:.1f}s "
                 f"manifest={_manifest_s:.1f}s "
                 f"aspect={_aspect_s:.1f}s)"
+                + (f"; hook lock wait {_lock_wait_s:.1f}s (included above)"
+                   if _lock_wait_s else "")
             )
         _batch_failures = _batcher.failed_files
         if _batch_failures:
