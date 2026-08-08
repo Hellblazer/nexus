@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,7 +8,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
@@ -371,8 +368,12 @@ public final class RekeyOps {
             // scoped advisory locks release only at commit/rollback). See
             // step (2b)'s comment for the freeze-window investigation, why
             // the resolution moved there and switched to an `old_bytes`
-            // join, and the named orphan-synthesize residual the step-6
-            // abort below covers instead of a wider gate.
+            // join, and the named orphan-synthesize residual that a wider
+            // gate does NOT reach: that sub-branch is shielded by
+            // row-locks-through-commit + EvalPlanQual (see step (2b)'s
+            // comment), with the step-6 abort below serving only as the
+            // BACKSTOP for pre-existing corruption and pre-snapshot races,
+            // not as the mechanism that covers it.
             counts.put("manifest_repointed", ctx.execute(
                 "UPDATE nexus.catalog_document_chunks m SET chash = a.new_chash "
                 + "FROM nexus.chash_alias a "
@@ -453,7 +454,7 @@ public final class RekeyOps {
                     ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
             }
             counts.put("residual_mismatched", residual);
-            Integer danglingManifest = danglingManifestCountDsl(ctx);
+            Integer danglingManifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
             counts.put("dangling_manifest", danglingManifest);
             // nexus-t76bp REWORK, critic Option 2 (T2 nexus/critique-t76bp-
             // rekey-gate-2026-08-08 [21807]): both counts were COMPUTED here
@@ -516,32 +517,6 @@ public final class RekeyOps {
         });
         log.info("event=rekey_complete tenant={} counts={}", tenant, out);
         return out;
-    }
-
-    /**
-     * jOOQ DSL rendering of {@link ChashSqlIdioms#danglingManifestCount()}
-     * (nexus-t76bp representation-only pass, Hal directive 2026-08-08):
-     * same semantics — {@code count(*)} of manifest rows whose chash
-     * matches no content row in any of the three dim tables. Kept LOCAL to
-     * this class rather than changing {@code ChashSqlIdioms}'s shared
-     * method: that helper is also called, unchanged, by {@code
-     * StagingPromoteOps.finalizeTenant} — a site outside this pass's
-     * three-site scope — so its raw-SQL-returning signature is left alone
-     * to avoid forcing an edit there. The two renderings are logically
-     * identical (verified against the SQL in {@code
-     * ChashSqlIdioms.danglingManifestCount()}), just two representations
-     * of the one query for two call sites in this pass.
-     */
-    private static Integer danglingManifestCountDsl(DSLContext ctx) {
-        return ctx.selectCount()
-            .from(CATALOG_DOCUMENT_CHUNKS)
-            .where(DSL.notExists(ctx.selectOne().from(CHUNKS_384)
-                    .where(CHUNKS_384.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
-            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_768)
-                    .where(CHUNKS_768.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
-            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
-                    .where(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
-            .fetchOne(0, Integer.class);
     }
 
     /** UNION ALL of mismatched content rows across dims with recovered old_ref. */

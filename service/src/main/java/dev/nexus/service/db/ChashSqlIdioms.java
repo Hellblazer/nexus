@@ -1,7 +1,14 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import org.jooq.impl.DSL;
+
 import java.util.List;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
 
 /**
  * RDR-180 shared chash-migration SQL idioms (nexus-jxizy.10.2).
@@ -183,11 +190,38 @@ public final class ChashSqlIdioms {
         return true;
     }
 
-    /** In-txn verify: manifest rows pointing at no content row in any dim. */
-    public static String danglingManifestCount() {
-        return "SELECT count(*) FROM nexus.catalog_document_chunks m "
-            + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = m.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = m.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = m.chash)";
+    /**
+     * In-txn verify: {@code count(*)} of manifest rows pointing at no
+     * content row in any dim. SINGLE-HOMED (nexus-4okz4 increment 1,
+     * collapsing the twin renderings the nexus-t76bp jOOQ-DSL pass left
+     * split across {@code RekeyOps} (a private DSL copy) and this class's
+     * former raw-SQL {@code danglingManifestCount()} string — both callers
+     * ({@code RekeyOps.rekey} step 6, {@code StagingPromoteOps.
+     * finalizeTenant} step 7, {@code ChashCensus.danglingPointers}) now
+     * call this ONE implementation, closing the drift hazard both prior
+     * copies independently hardcoding the three dim tables carried (T2
+     * critique-t76bp-rekey-gate-2026-08-08 [21807] ROUND 3, condition (3):
+     * "neither copy derives from CHUNK_TABLES ... a fourth dim table is
+     * the realistic drift trigger"). {@link #CHUNK_TABLES} is a
+     * String-typed table-name list built for raw-SQL composition
+     * elsewhere in this class (contentCollapseDelete/contentRekeyUpdate/
+     * residualMismatchCount all iterate it as a loop variable); the three
+     * generated-Tables constants below are typed jOOQ handles for the
+     * SAME three tables and cannot be driven off that String list without
+     * a name-to-generated-class lookup that would be its own drift
+     * surface — kept as the explicit three, tied to CHUNK_TABLES only by
+     * this comment.
+     */
+    // No SANCTIONED RAW comment: pure DSL, no raw-SQL string executed here.
+    public static Integer danglingManifestCountDsl(org.jooq.DSLContext ctx) {
+        return ctx.selectCount()
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .where(DSL.notExists(ctx.selectOne().from(CHUNKS_384)
+                    .where(CHUNKS_384.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_768)
+                    .where(CHUNKS_768.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
+                    .where(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .fetchOne(0, Integer.class);
     }
 }

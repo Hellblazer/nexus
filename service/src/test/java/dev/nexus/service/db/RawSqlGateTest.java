@@ -155,7 +155,7 @@ class RawSqlGateTest {
             // hoisted out to a typed call site. Never serving-path.
             "contentCollapseDelete", "contentRekeyUpdate",
             "frecencyAliasAggregate", "residualMismatchCount",
-            "danglingManifestCount", "chashOldBytes", "refreshAliasStats")),
+            "chashOldBytes", "refreshAliasStats")),
         Map.entry("SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table

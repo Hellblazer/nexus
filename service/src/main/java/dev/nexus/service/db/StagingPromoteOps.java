@@ -622,8 +622,7 @@ public final class StagingPromoteOps {
                     ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
             }
             counts.put("residual_mismatched", residual);
-            Integer danglingManifest = ctx.fetchOne(
-                ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class);
+            Integer danglingManifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
             counts.put("dangling_manifest", danglingManifest);
             if (residual != 0) {
                 throw new IllegalStateException(

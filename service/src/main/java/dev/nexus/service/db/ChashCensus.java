@@ -200,8 +200,7 @@ public final class ChashCensus {
         // exactly as planned at .5.)
         // The manifest (review P1 Critical: the census backstop must cover
         // catalog_document_chunks independently of the finalize call site).
-        Integer manifest = ctx.fetchOne(
-            ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class);
+        Integer manifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
         if (manifest != null && manifest > 0) out.put("dangling.catalog_document_chunks", manifest);
         return out;
     }

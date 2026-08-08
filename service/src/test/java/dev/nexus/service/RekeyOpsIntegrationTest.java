@@ -979,8 +979,33 @@ class RekeyOpsIntegrationTest {
     void preExistingDanglingManifestRow_abortsRekeyLoud() throws Exception {
         String tenant = "t-rekey-dangling";
         byte[] ghost = sha256("rekey pre-existing dangling ghost " + System.nanoTime());
+        String col = "gate-dangling-col";
+        // nexus-4okz4 increment 1, critic ROUND 3 pin-sensitivity finding
+        // (T2 critique-t76bp-rekey-gate-2026-08-08 [21807], "Site 2
+        // correlation is unpinned"): ChashSqlIdioms.danglingManifestCountDsl
+        // is THREE correlated NOT EXISTS subqueries (m.chash matched against
+        // each dim table's own chash). A de-correlated rewrite (e.g. a
+        // dropped .where() turning "NOT EXISTS(SELECT 1 FROM chunks_768
+        // WHERE chash = m.chash)" into the unconditional "NOT EXISTS(SELECT
+        // 1 FROM chunks_768)") passed every fixture that predates this row:
+        // this tenant previously had ZERO content rows in any dim table, so
+        // the de-correlated form's "table is empty" check was ALSO true,
+        // giving the identical count=1/abort-fires result as the correlated
+        // form -- no discrimination. Inserting one UNRELATED, live content
+        // row into chunks_768 for this tenant changes nothing for the
+        // CORRELATED form (the ghost chash still matches no row in any dim,
+        // by construction -- it is never referenced by any INSERT here) but
+        // flips the DE-CORRELATED form: chunks_768 is no longer empty, so
+        // its NOT EXISTS(SELECT 1 FROM chunks_768) collapses to false, the
+        // three-way AND goes false, the ghost is no longer counted, and the
+        // abort would silently stop firing.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + tenant + "', '" + col + "') ON CONFLICT DO NOTHING");
+            String unrelatedText = "rekey dangling-count correlation fixture " + System.nanoTime();
+            insertChunk(su, tenant, "nexus.chunks_768", 768, col, sha256(unrelatedText), unrelatedText);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + tenant + "', 'ghost-doc', 'ghost') ON CONFLICT DO NOTHING");
@@ -996,7 +1021,8 @@ class RekeyOpsIntegrationTest {
         assertThatThrownBy(() -> rekeyOps.rekey(tenant, false))
             .as("the step-6 detection must be ENFORCED, not merely computed and returned in the "
                 + "envelope -- a caller that never inspects the envelope must not be able to miss "
-                + "this")
+                + "this, AND the count must be CORRELATED per row (an unrelated content row in "
+                + "chunks_768 must not mask the ghost manifest row's dangling reference)")
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("dangling manifest");
     }

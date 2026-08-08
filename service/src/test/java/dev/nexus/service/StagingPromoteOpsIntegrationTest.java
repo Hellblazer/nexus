@@ -1026,4 +1026,90 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = 'multi-doc-b' AND encode(chash,'hex') = '" + chashB + "'")).isEqualTo(1);
     }
+
+    // ── nexus-4okz4 increment 1, critic ROUND 3 pin-sensitivity finding
+    //    (T2 critique-t76bp-rekey-gate-2026-08-08 [21807], "Site 3 ALIAS
+    //    branch is unpinned"): finalizeTenant's gate-target resolution
+    //    query (StagingPromoteOps.java site 3) has TWO candidate arms --
+    //    `COALESCE(a.new_chash, decode(s.chash, 'hex'))` -- the alias arm
+    //    (a.new_chash, taken when a LEGACY staged chash resolves through
+    //    chash_alias) and the direct-hex decode arm (taken when the staged
+    //    chash already IS the 64-hex canonical digest). Every gate-blocking
+    //    fixture through Order(23) stages a CANONICAL 64-hex chash
+    //    (`digestHex(text)`), so every one of them flows through the
+    //    decode arm only -- a rendering bug that silently emptied the
+    //    ALIAS arm (e.g. a wrong CHASH_ALIAS.OLD_REF join field, or an
+    //    inverted `.isNotNull()`) would under-gate a LEGACY-pointer
+    //    finalize and still pass all of Order(20)-(23). THIS test stages a
+    //    LEGACY (32-hex, non-canonical-width) ref instead, so
+    //    `s.chash ~ '^[0-9a-f]{64}$'` is false and the ONLY way the query
+    //    can resolve a target collection is through `a.new_chash`. ──
+
+    private static final String COLL_GATE4 = "knowledge__kgate4__bge-base-en-v15-768__v1";
+
+    @Test
+    @Order(24)
+    void finalizeTenant_aliasResolvedLegacyPointer_blocksOnExternalExclusiveGate_thenProceeds()
+            throws Exception {
+        String text = "alias-branch gate content " + System.nanoTime();
+        String legacyRef = legacy32(text);
+        String canonical = digestHex(text);
+        landChunk(COLL_GATE4, 768, legacyRef, text, vec(768));
+        // Promote builds the chash_alias fact (old_ref=legacyRef ->
+        // new_chash=canonical) AND lands the physical content row --
+        // finalize's manifest promote below relies on BOTH.
+        Map<String, Object> promoted = ops.promoteCollection(T1, COLL_GATE4, 768);
+        assertThat(promoted.get("promoted")).isEqualTo(1);
+        assertThat(promoted.get("alias_rows"))
+            .as("legacyRef is genuinely non-canonical -- it must alias").isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, 'gate-doc-4', 'gate doc 4', ?) ON CONFLICT DO NOTHING",
+                T1, COLL_GATE4);
+            // The staged manifest pointer carries the LEGACY ref VERBATIM,
+            // not the canonical digest -- this is what forces the query
+            // through the alias arm (`a.new_chash IS NOT NULL`) rather than
+            // the direct-hex decode arm every earlier gate test exercises.
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, 'gate-doc-4', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, legacyRef);
+            return null;
+        });
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
+                st.execute();
+            }
+            acquireGateExclusive(external, T1, COLL_GATE4, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Map<String, Object>> future = executor.submit(() -> ops.finalizeTenant(T1, false));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("finalizeTenant must BLOCK on COLL_GATE4's gate for an ALIAS-resolved "
+                        + "legacy pointer too, not just a direct-hex-canonical one -- a rendering "
+                        + "bug that emptied the alias arm would let this complete immediately "
+                        + "and this assertion would fail")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                Map<String, Object> fin = future.get(15, TimeUnit.SECONDS);
+                assertThat(fin.get("manifest_promoted"))
+                    .as("gate released -- the alias-resolved manifest promote completes")
+                    .isEqualTo(1);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = 'gate-doc-4' AND encode(chash,'hex') = '" + canonical + "'"))
+            .as("the manifest row landed at the ALIAS-RESOLVED canonical digest, proving the "
+                + "alias arm actually ran (not merely the decode arm)")
+            .isEqualTo(1);
+    }
 }
