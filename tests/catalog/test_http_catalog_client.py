@@ -624,6 +624,15 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "1.1.1": [{"position": 0, "chash": CHASH_A, "line_start": 1, "line_end": 9}],
             }
             self._send_json({"manifests": manifests, "count": len(manifests)})
+        elif op == "/manifest/chashes_many":
+            # nexus-eslkl / T2 nexus/design-eslkl-hook-lock-narrowing §8.1:
+            # mirrors CatalogHandler.handleManifestChashesMany's
+            # {"chashes": {doc_id: [chash, ...]}, "count": N} shape — the
+            # chash-only twin of /manifest/get_many above. No client
+            # consumer yet (get_manifests already serves the sweep's
+            # before-read); faked for census parity / future callers.
+            chashes = {"1.1.1": [CHASH_A]}
+            self._send_json({"chashes": chashes, "count": len(chashes)})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...], "count": N}
             # (flat list, SELECT DISTINCT) — count reconciled client-side

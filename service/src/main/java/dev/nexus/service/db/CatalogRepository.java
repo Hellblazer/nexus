@@ -273,6 +273,27 @@ public final class CatalogRepository {
     private static final Field<String>  C384_CHASH_HEX  = ChashHex.hex(CHUNKS_384.CHASH);
     private static final Field<String>  C768_CHASH_HEX  = ChashHex.hex(CHUNKS_768.CHASH);
     private static final Field<String>  C1024_CHASH_HEX = ChashHex.hex(CHUNKS_1024.CHASH);
+    // nexus-eslkl / nexus-nl3fn: the engine-side mirror of the client's
+    // is_note_shaped(entry) predicate (indexer_utils.py) — a manifest-less
+    // MCP store_put / nx store put note's OWN catalog_documents row stamps
+    // its identity chash into metadata->>'doc_id' (catalog/store_hook.py
+    // ::catalog_store_hook_tracked, meta={"doc_id": doc_id}). Same jOOQ raw-
+    // template idiom PgVectorRepository already uses for JSONB extraction
+    // (DSL.field("metadata ->> {0}", ...)), qualified to CATALOG_DOCUMENTS
+    // explicitly since this field is used in subqueries alongside other
+    // tables.
+    //
+    // TEXT, deliberately NOT compared to a ChashHex-converted chash field
+    // directly: ChashHex's Converter operates ONLY at the JDBC value-binding
+    // layer (Java String <-> byte[] when a VALUE is bound), never by
+    // rewriting the SQL for a bare field-to-field reference — a call site
+    // comparing DOC_META_DOC_ID.eq(C384_CHASH_HEX) renders literally as
+    // `metadata->>'doc_id' = chunks_384.chash` (text = bytea) and PostgreSQL
+    // rejects it with no implicit cast. Every call site instead compares
+    // against `encode(chunks_<dim>.chash, 'hex')` (an explicit TEXT-to-TEXT
+    // comparison) — see sweepChunks384/768/1024.
+    private static final Field<String>  DOC_META_DOC_ID =
+        DSL.field("{0} ->> 'doc_id'", String.class, CATALOG_DOCUMENTS.METADATA);
     private static final Field<String>  EX_CHK_COLL   = DSL.field("EXCLUDED.collection",  String.class);
     private static final Field<Integer> EX_CHK_IDX   = DSL.field("EXCLUDED.chunk_index",  Integer.class);
     private static final Field<Integer> EX_CHK_LST   = DSL.field("EXCLUDED.line_start",   Integer.class);
@@ -3552,15 +3573,66 @@ public final class CatalogRepository {
      * response's {@code complete_refused} list instead of
      * {@code failed_doc_ids}.
      *
+     * <p>{@code sweep} defaults to {@code false} — BACKWARD COMPATIBLE with
+     * every existing caller of this overload (see the 4-arg overload below).
+     *
      * @return {@code {docs, rows, failed_doc_ids, failed, complete_refused, complete_refused_count}}
      */
     public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
                                                   Map<String, String> complete) {
+        return writeManifestMany(tenant, docs, complete, false);
+    }
+
+    /**
+     * Overload adding the optional {@code sweep} flag (nexus-eslkl / T2
+     * nexus/design-eslkl-hook-lock-narrowing §8.1). Defaults to {@code false}
+     * on every OTHER overload above — a caller that does not opt in gets
+     * byte-for-byte the same behaviour as before this flag existed
+     * (BACKWARD COMPATIBLE, deliberately, so an in-flight client build
+     * against the 3-arg shape keeps working unchanged).
+     *
+     * <p>When {@code true}, each doc's per-doc transaction ALSO runs
+     * nexus-39upx's superseded-vector sweep server-side, INSIDE the same
+     * transaction as the manifest replace — see {@link
+     * #sweepSupersededVectors} for the exact guard. This NARROWS (does
+     * NOT close) the client-side sweep's read-after-replace TOCTOU
+     * (nexus-eslkl's interleaving audit): a concurrent sibling flush
+     * publishing the SAME shared chash between the client's before-read and
+     * its T3 delete could otherwise let the sweep hard-delete a chunk
+     * another in-flight write was about to reference. Folding the guard
+     * into the DELETE statement itself collapses THIS write's own
+     * round-trip-scale window (tens of milliseconds, two separate HTTP
+     * calls) down to intra-transaction scale — but at PostgreSQL's default
+     * READ COMMITTED isolation, with no FK/lock between
+     * {@code catalog_document_chunks} and {@code chunks_<dim>}, a genuinely
+     * CONCURRENT second {@code sweep=true} writer can still write-skew this
+     * decision (nexus-11gh6, deliberately accepted and tracked, not fixed
+     * here — see {@link #sweepSupersededVectors}'s javadoc for the full
+     * accept-and-downgrade rationale). The client's own sweep therefore
+     * remains the required safety net (nexus-wxjr6) until 11gh6 resolves
+     * for real.
+     *
+     * <p>Response gains {@code swept} (total T3 rows deleted across every
+     * doc in this call), {@code sweep_skipped} (docs where the sweep was
+     * attempted but could not run to completion — before-read or delete
+     * failure; fail-open, NEVER fails the doc's manifest write) and
+     * {@code sweep_detail} (per-doc {@code {doc_id, dropped, swept, kept}}
+     * for every doc where at least one chash dropped out of the manifest).
+     * All three are present and zero/empty when {@code sweep=false}.
+     *
+     * @return {@code {docs, rows, failed_doc_ids, failed, complete_refused,
+     *         complete_refused_count, swept, sweep_skipped, sweep_detail}}
+     */
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
+                                                  Map<String, String> complete, boolean sweep) {
         int okDocs = 0;
         int totalRows = 0;
+        int totalSwept = 0;
+        int sweepSkipped = 0;
         List<String> failed = new ArrayList<>();
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
+        List<Map<String, Object>> sweepDetail = new ArrayList<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -3570,6 +3642,10 @@ public final class CatalogRepository {
                     ? (List<Map<String, Object>>) l
                     : List.of();
                 String completeHash = (complete != null && docId != null) ? complete.get(docId) : null;
+                // Per-doc sweep outcome, populated inside the txn lambda below
+                // (effectively-final array cell — a local var cannot be assigned
+                // from within the lambda).
+                Map<String, Object>[] sweepOutcome = new Map[1];
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
@@ -3577,7 +3653,51 @@ public final class CatalogRepository {
                     // (chunk_count folds inside writeManifestRows — nexus-b6enc
                     // F5 unified the fold for the single-doc and batch paths.)
                     tenantScope.withTenant(tenant, ctx -> {
+                        // nexus-eslkl: the sweep's "before" read MUST happen before
+                        // writeManifestRows deletes doc_id's current rows below —
+                        // it is the only way to learn which chashes THIS write drops.
+                        // Savepoint-guarded (fail-open): a before-read failure must
+                        // not abort the manifest write that follows it in the SAME
+                        // transaction (TenantScope.withTenant rolls back the WHOLE
+                        // transaction on any propagated exception).
+                        //
+                        // code-review-expert Important-2: the fallback sentinel is
+                        // `null`, NOT Set.of() — a legitimately EMPTY manifest (a
+                        // brand-new doc with nothing to drop) and a FAILED read must
+                        // be distinguishable, because the accounting below routes a
+                        // failed read into sweep_skipped/sweep_detail same as a
+                        // failed delete. Collapsing both into Set.of() silently
+                        // dropped a before-read failure on the floor — not counted
+                        // anywhere, not in sweep_skipped, not in sweep_detail — the
+                        // exact "swallowed failure" class nexus-fhhwf already fixed
+                        // once for the doc-level catch a few lines up.
+                        Set<String> beforeRead = sweep
+                            ? withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
+                                  tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null)
+                            : Set.of();
+                        boolean beforeReadFailed = sweep && beforeRead == null;
+                        // Effectively-final for the lambda capture below — beforeRead
+                        // itself cannot be reassigned once captured by a lambda.
+                        final Set<String> before = beforeRead != null ? beforeRead : Set.of();
                         writeManifestRows(ctx, tenant, docId, rows);
+                        if (beforeReadFailed) {
+                            // Nothing to compute — the before-read itself is what
+                            // failed, so `dropped` was never determined. Reported
+                            // as an honest errored=true outcome, never silently
+                            // absorbed into "nothing to sweep".
+                            sweepOutcome[0] = Map.of("doc_id", docId, "dropped", 0,
+                                "swept", 0, "kept", 0, "errored", true);
+                        } else if (sweep && !before.isEmpty()) {
+                            // Fallback is a DISTINGUISHABLE errored-marker map, not null —
+                            // sweepSupersededVectors also legitimately returns null on the
+                            // NORMAL path (nothing actually dropped, or no collection to
+                            // scope to), and that must NOT count as sweep_skipped. Only
+                            // withSavepointFailOpen's exception branch reaches this literal.
+                            sweepOutcome[0] = withSavepointFailOpen(ctx,
+                                "write_manifest_many_sweep_failed", tenant, docId,
+                                () -> sweepSupersededVectors(ctx, tenant, docId, before, rows),
+                                Map.of("doc_id", docId, "dropped", 0, "swept", 0, "kept", 0, "errored", true));
+                        }
                         if (completeHash != null) {
                             stampCompleteIfVerified(ctx, tenant, docId, completeHash, rows.size(), completeRefused);
                         }
@@ -3595,6 +3715,16 @@ public final class CatalogRepository {
                               tenant, docId, detail.get("reason"), detail.get("sqlstate"));
                     failed.add(docId);
                     failedDetail.add(detail);
+                }
+                if (sweep) {
+                    Map<String, Object> outcome = sweepOutcome[0];
+                    if (outcome != null) {
+                        sweepDetail.add(outcome);
+                        totalSwept += (Integer) outcome.get("swept");
+                        if (Boolean.TRUE.equals(outcome.get("errored"))) {
+                            sweepSkipped++;
+                        }
+                    }
                 }
             }
         }
@@ -3617,7 +3747,291 @@ public final class CatalogRepository {
         // counts can silently never look at complete_refused; a non-zero scalar
         // is harder to miss in a log line or a quick response-shape glance).
         result.put("complete_refused_count", completeRefused.size());
+        // nexus-eslkl: same "scalar sibling to a list" discipline — swept/
+        // sweep_skipped are hard to miss even if a caller never inspects
+        // sweep_detail (mirrors _record_superseded_swept /
+        // _record_superseded_sweep_skip's CLI-summary contract client-side).
+        result.put("swept", totalSwept);
+        result.put("sweep_skipped", sweepSkipped);
+        result.put("sweep_detail", sweepDetail);
         return result;
+    }
+
+    /**
+     * Fail-open wrapper for a sweep sub-step (nexus-eslkl). Runs {@code body}
+     * under a JDBC SAVEPOINT taken on the transaction's own connection and
+     * rolls back to it on ANY exception, so a sweep failure can never leave
+     * the surrounding transaction in PostgreSQL's aborted state — which
+     * would otherwise silently kill the manifest write, chunk_count update,
+     * and completion stamp that run AFTER it in the same transaction
+     * ({@link TenantScope#withTenant} rolls back the WHOLE transaction on
+     * any exception that escapes the lambda it wraps; a plain Java
+     * try/catch around the sweep call, with no savepoint, does NOT undo
+     * Postgres's server-side "current transaction is aborted" state once a
+     * statement inside it has errored).
+     *
+     * <p>Logs at WARNING and returns {@code fallback} on any failure — never
+     * rethrows. This is the mechanism, not the policy: "sweep errors are
+     * fail-open" is the memo's requirement (over-retention is recoverable,
+     * over-deletion is not); this method is what makes that true even
+     * though the sweep now shares a transaction with load-bearing writes.
+     *
+     * <p>code-review-expert Suggestion (round 2): no explicit
+     * {@code RELEASE SAVEPOINT} on the success path. Deliberate, not an
+     * oversight — PostgreSQL auto-discards a savepoint at its enclosing
+     * transaction's COMMIT/ROLLBACK regardless, and every call site here
+     * takes at most one savepoint per per-doc transaction (no nesting, no
+     * savepoint-count buildup within a single {@code withTenant} call), so
+     * an explicit release buys nothing beyond what the transaction's own
+     * end already does.
+     */
+    private static <T> T withSavepointFailOpen(DSLContext ctx, String event, String tenant, String docId,
+                                                java.util.concurrent.Callable<T> body, T fallback) {
+        java.sql.Connection conn = ctx.configuration().connectionProvider().acquire();
+        java.sql.Savepoint sp = null;
+        try {
+            sp = conn.setSavepoint();
+            return body.call();
+        } catch (Exception e) {
+            log.warn("event={} tenant={} doc_id={} error={}", event, tenant, docId, e.toString());
+            if (sp != null) {
+                try {
+                    conn.rollback(sp);
+                } catch (java.sql.SQLException se) {
+                    log.error("event=write_manifest_many_sweep_savepoint_rollback_failed tenant={} doc_id={}",
+                              tenant, docId, se);
+                }
+            }
+            return fallback;
+        } finally {
+            ctx.configuration().connectionProvider().release(conn);
+        }
+    }
+
+    /**
+     * Read doc_id's CURRENT manifest chashes — the sweep's "before" set,
+     * read BEFORE {@link #writeManifestRows} deletes them (nexus-eslkl).
+     *
+     * <p>{@link #liveParentDoc}-filtered (TombstoneFilterGateTest): a
+     * tombstoned doc_id cannot reach the sweep in practice anyway —
+     * {@code writeManifestRows} throws {@link TombstonedDocumentException}
+     * for one, and the surrounding per-doc catch already routes that case
+     * to {@code failed_doc_ids} with no sweep ever running — but the filter
+     * costs nothing here and keeps this read honest with every other
+     * manifest read in the file (getManifest/getManifestMany) rather than
+     * relying on a downstream throw to make an unguarded read harmless.
+     */
+    private static Set<String> currentManifestChashes(DSLContext ctx, String tenant, String docId) {
+        Set<String> out = new LinkedHashSet<>();
+        var rows = ctx.select(CHK_CHASH_HEX).from(CATALOG_DOCUMENT_CHUNKS)
+                      .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                             .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                             .and(liveParentDoc(ctx, tenant)))
+                      .fetch();
+        for (var r : rows) {
+            String c = r.value1();
+            if (c != null && !c.isBlank()) out.add(c);
+        }
+        return out;
+    }
+
+    /**
+     * nexus-39upx's superseded-vector sweep, folded server-side into the
+     * SAME transaction as {@link #writeManifestRows} (T2
+     * nexus/design-eslkl-hook-lock-narrowing §8.1) — the engine half of
+     * nexus-jk88j's "sweep in the fast branch first, then whitelist"
+     * ordering.
+     *
+     * <p><b>nexus-nl3fn CORRECTION</b> (substantive-critic round 2): an
+     * earlier version of this javadoc claimed the notes guard was satisfied
+     * STRUCTURALLY — "a chash in {@code dropped} was necessarily in doc_id's
+     * OWN prior manifest, so a manifest-less note can never appear there."
+     * That is true but does NOT close the hazard: {@code is_note_shaped}
+     * (indexer_utils.py) identifies a note by its OWN catalog_documents row
+     * ({@code file_path==""} AND {@code meta.doc_id==<chash>}) — completely
+     * independent of whether that SAME chash also happens to appear (by
+     * content-addressed coincidence) in some OTHER live document's manifest,
+     * dropped by THIS write. Concretely: legacy pre-{@code nexus-vw594}
+     * store_put notes (before {@code store_put_manifest_direct} started
+     * writing a manifest row for the note's own document) have ZERO
+     * {@code catalog_document_chunks} rows anywhere, ever — live in
+     * production databases today. If an unrelated indexed document also
+     * once contained byte-identical text (content addressing collapses them
+     * to ONE T3 row) and later drops that reference, the shared-chash-only
+     * guard below sees "nothing manifests this chash" and deletes it —
+     * destroying the note's content even though the note was NEVER part of
+     * any manifest and {@code nexus.live_chunks}'s own contract says a
+     * manifest-less chunk must never be swept. The structural argument only
+     * proves {@code dropped} can't contain THIS document's own note-shaped
+     * self-reference; it says nothing about a note living under a
+     * DIFFERENT document sharing the same content. Fixed below with a real,
+     * second {@code NOT EXISTS} mirroring {@code is_note_shaped} directly.
+     *
+     * <p>TWO independent guards, both required, both {@code NOT EXISTS}
+     * clauses of the DELETE statement itself (evaluated by PostgreSQL
+     * inside this transaction, not from a client-held snapshot):
+     * <ol>
+     *   <li><b>Shared-chash union guard</b>: identical chunk TEXT collapses
+     *       to ONE T3 row shared by every document that contains it, so
+     *       "dropped from THIS document's manifest" is not "unreferenced"
+     *       if another LIVE document's manifest still references it.</li>
+     *   <li><b>Notes guard</b> ({@code DOC_META_DOC_ID}): exclude any
+     *       candidate that is the identity chash of a live, note-shaped
+     *       {@code catalog_documents} row ({@code file_path} null/empty,
+     *       {@code metadata->>'doc_id' = candidate}) in THIS collection —
+     *       the direct engine-side mirror of {@code is_note_shaped} /
+     *       {@code live_note_chashes}, scoped per-collection exactly like
+     *       the client's {@code catalog_documents_for_collection}.</li>
+     * </ol>
+     *
+     * <p>Narrows (does not eliminate) the TOCTOU the nexus-eslkl
+     * interleaving audit found: within THIS write's own read-then-delete
+     * sequence, nothing can observe a stale decision (the guard is
+     * evaluated live at DELETE time, not from a snapshot read tens of
+     * milliseconds earlier over a separate HTTP round trip) — strictly
+     * better than the client's two-call version for THAT axis. It does
+     * NOT close the CROSS-TRANSACTION write-skew window: at PostgreSQL's
+     * default READ COMMITTED isolation, with no FK/lock between
+     * {@code catalog_document_chunks(chash)} and {@code chunks_<dim>(chash)},
+     * two genuinely concurrent {@code sweep=true} writers can still write-
+     * skew (writer A's NOT EXISTS snapshot, taken at ITS DELETE statement's
+     * start, cannot see writer B's manifest INSERT if B commits after A's
+     * snapshot but before A's own commit) — see nexus-11gh6 (deliberately
+     * NOT fixed here; tracked, accept-and-downgrade decision recorded on
+     * the bead and in nexus-wxjr6, which keeps the client's OWN sweep as
+     * the required safety net until 11gh6 resolves for real).
+     *
+     * <p>Runs the delete against all three {@code chunks_<dim>} tables — a
+     * chash's dim is not modeled in Java (same reason {@link #resolveChash}
+     * and {@code purge_trash} repeat themselves per dim rather than
+     * resolving one); exactly one table holds real rows for any given
+     * chash+collection pair, so the other two deletes affect 0 rows.
+     * Scoped to {@code collection} — this doc's OWN
+     * {@code physical_collection} — matching the client's
+     * {@code make_t3().get_collection(collection).delete(ids=...)} scoping
+     * exactly (a chash shared across two DIFFERENT collections only has its
+     * row in THIS doc's collection removed). NOTE (code-review-expert
+     * Suggestion): the shared-chash union guard itself is NOT collection-
+     * scoped — {@code catalog_document_chunks} carries no collection filter
+     * in that subquery, deliberately: a live manifest reference to the same
+     * chash in a DIFFERENT collection still proves "someone references
+     * this," and skipping the delete in that case is over-RETENTION (the
+     * fail-safe direction this whole subsystem is built around), never
+     * over-deletion.
+     *
+     * @return {@code null} when there is nothing to report (no
+     *         {@code physical_collection} to scope a delete to — the doc
+     *         carries no collection, so nothing was ever written to T3 for
+     *         it). Otherwise {@code {doc_id, dropped, swept, kept,
+     *         errored=false}} — a genuine sweep exception is caught by the
+     *         caller's {@link #withSavepointFailOpen} wrapper instead, which
+     *         never reaches this method's return.
+     */
+    private Map<String, Object> sweepSupersededVectors(DSLContext ctx, String tenant, String docId,
+                                                        Set<String> before, List<Map<String, Object>> rows) {
+        Set<String> after = new LinkedHashSet<>();
+        for (var row : rows) {
+            String c = s(row, "chash");
+            if (c != null && !c.isBlank()) after.add(c);
+        }
+        List<String> dropped = new ArrayList<>();
+        for (String c : before) {
+            if (!after.contains(c)) dropped.add(c);
+        }
+        if (dropped.isEmpty()) return null;
+        String collection = physicalCollectionOf(ctx, tenant, docId);
+        if (collection == null) return null;
+        int swept = sweepChunks384(ctx, tenant, collection, dropped)
+                  + sweepChunks768(ctx, tenant, collection, dropped)
+                  + sweepChunks1024(ctx, tenant, collection, dropped);
+        if (swept > 0) {
+            log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={}",
+                      tenant, docId, collection, dropped.size(), swept);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("doc_id", docId);
+        out.put("dropped", dropped.size());
+        out.put("swept", swept);
+        out.put("kept", dropped.size() - swept);
+        out.put("errored", false);
+        return out;
+    }
+
+    /**
+     * Per-dim sweep DELETE against {@code chunks_384} — see
+     * {@link #sweepSupersededVectors} for the full guard rationale (nl3fn:
+     * TWO independent {@code NOT EXISTS} clauses, shared-chash union guard
+     * AND notes guard — neither alone is sufficient). The nested selects
+     * reference the OUTER delete target's own row ({@code CHUNKS_384.TENANT_ID}/
+     * {@code CHUNKS_384.CHASH}) — a standard correlated-subquery DELETE, the
+     * same shape {@code purge_trash}'s raw SQL uses with an explicit alias.
+     */
+    private static int sweepChunks384(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+        return ctx.deleteFrom(CHUNKS_384)
+            .where(CHUNKS_384.TENANT_ID.eq(tenant))
+            .and(CHUNKS_384.COLLECTION.eq(collection))
+            .and(C384_CHASH_HEX.in(dropped))
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS)
+                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS_384.TENANT_ID))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS_384.CHASH))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
+            // nl3fn NOTES GUARD: is this chash a live note's OWN identity
+            // chash (is_note_shaped mirror)? Collection-scoped, matching
+            // catalog_documents_for_collection's scope client-side.
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
+                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_384.CHASH)))))
+            .execute();
+    }
+
+    /** Per-dim sweep DELETE against {@code chunks_768} — see {@link #sweepChunks384}. */
+    private static int sweepChunks768(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+        return ctx.deleteFrom(CHUNKS_768)
+            .where(CHUNKS_768.TENANT_ID.eq(tenant))
+            .and(CHUNKS_768.COLLECTION.eq(collection))
+            .and(C768_CHASH_HEX.in(dropped))
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS)
+                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS_768.TENANT_ID))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS_768.CHASH))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
+                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_768.CHASH)))))
+            .execute();
+    }
+
+    /** Per-dim sweep DELETE against {@code chunks_1024} — see {@link #sweepChunks384}. */
+    private static int sweepChunks1024(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+        return ctx.deleteFrom(CHUNKS_1024)
+            .where(CHUNKS_1024.TENANT_ID.eq(tenant))
+            .and(CHUNKS_1024.COLLECTION.eq(collection))
+            .and(C1024_CHASH_HEX.in(dropped))
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS)
+                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS_1024.TENANT_ID))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS_1024.CHASH))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
+                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_1024.CHASH)))))
+            .execute();
     }
 
     /**
@@ -4228,6 +4642,41 @@ public final class CatalogRepository {
                 m.put("char_start",  r.value7());
                 m.put("char_end",    r.value8());
                 result.computeIfAbsent(docId, k -> new ArrayList<>()).add(m);
+            }
+            return result;
+        });
+    }
+
+    /**
+     * Batch-fetch just the chash list for multiple doc_ids, ordered by position
+     * (nexus-eslkl / T2 nexus/design-eslkl-hook-lock-narrowing §8.1). The
+     * batched twin of the superseded-vector sweep's per-doc "before" read
+     * ({@code reader.get_chunk_chashes(doc_id)}, {@code mcp_infra.py:1465}):
+     * collapses the client's N before-reads (one per flushed doc) into ONE
+     * round trip per flush, mirroring {@link #getManifestMany}'s shape but
+     * chash-only — the sweep's before-read needs nothing else (no position,
+     * no line/char offsets).
+     *
+     * @return {@code {docId -> [chash, ...]}} ordered by position; doc_ids with
+     *         no manifest rows are absent from the result map.
+     */
+    public Map<String, List<String>> getChunkChashesMany(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CHK_CHASH_HEX)
+                          .from(CATALOG_DOCUMENT_CHUNKS)
+                          // Same tombstone filter as getManifestMany/getManifest — a
+                          // sweep's before-read must not see a tombstoned doc's rows
+                          // as "still live" candidates.
+                          .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds).and(liveParentDoc(ctx, tenant)))
+                          .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
+                          .fetch();
+            Map<String, List<String>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                String docId = r.value1();
+                String chash = r.value2();
+                if (chash == null || chash.isBlank()) continue;
+                result.computeIfAbsent(docId, k -> new ArrayList<>()).add(chash);
             }
             return result;
         });

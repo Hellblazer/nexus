@@ -48,6 +48,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/write_many batch replace manifests for multiple docs (+chunk_count)
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
  *   POST  /v1/catalog/manifest/get_many  batch-fetch manifests for multiple doc_ids (nexus-7lm3q)
+ *   POST  /v1/catalog/manifest/chashes_many batch-fetch just the chash list for multiple doc_ids (nexus-eslkl)
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
@@ -150,6 +151,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/write_many"   -> handleManifestWriteMany(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
                 case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
+                case "/manifest/chashes_many" -> handleManifestChashesMany(exchange, tenant, method);
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
@@ -787,6 +789,16 @@ public final class CatalogHandler implements HttpHandler {
      * per-doc atomicity, cross-doc isolation) via
      * {@link CatalogRepository#writeManifestMany}. Cap {@value #MAX_BATCH_DOC_IDS}
      * docs. Response 200 {@code {docs: N_ok, rows: M_total, failed_doc_ids: [...]}}.
+     *
+     * <p>Optional {@code "sweep": true} (nexus-eslkl / T2
+     * nexus/design-eslkl-hook-lock-narrowing §8.1, default {@code false} —
+     * BACKWARD COMPATIBLE, an omitted field is byte-for-byte the pre-eslkl
+     * behaviour): folds nexus-39upx's superseded-vector sweep into each
+     * doc's own transaction server-side. See
+     * {@link CatalogRepository#writeManifestMany(String, List, Map, boolean)}
+     * for the exact guard. Adds {@code swept}/{@code sweep_skipped}/
+     * {@code sweep_detail} to the response, zero/empty when
+     * {@code sweep=false}.
      */
     @SuppressWarnings("unchecked")
     private void handleManifestWriteMany(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -839,7 +851,12 @@ public final class CatalogHandler implements HttpHandler {
                 complete.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
             }
         }
-        var result = repo.writeManifestMany(tenant, docs, complete);
+        // ABSENT/null/non-Boolean means false — same "explicit true only" idiom
+        // as handleAssignMany's cross_collection default (only inverted: sweep
+        // is opt-IN, cross_collection is opt-OUT), so an in-flight client
+        // built against the pre-eslkl 3-arg shape gets identical behaviour.
+        boolean sweep = Boolean.TRUE.equals(body.get("sweep"));
+        var result = repo.writeManifestMany(tenant, docs, complete, sweep);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
@@ -953,6 +970,48 @@ public final class CatalogHandler implements HttpHandler {
         // reconcile manifests.size() == count before trusting a page as complete.
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("manifests", manifests, "count", manifests.size())));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/chashes_many (nexus-eslkl / T2
+     * nexus/design-eslkl-hook-lock-narrowing §8.1)
+     *
+     * <p>Batch-fetch just the chash list for multiple doc_ids in ONE round
+     * trip — the batched twin of the superseded-vector sweep's per-doc
+     * "before" read ({@code reader.get_chunk_chashes(doc_id)},
+     * {@code mcp_infra.py:1465}). Same shape as {@link #handleManifestGetMany}
+     * but chash-only (no position/line/char payload) — the sweep needs
+     * nothing else, and the lighter response collapses the client's N
+     * before-reads (one per flushed doc) to 1 call per flush.
+     *
+     * <p>Request body:  {@code {"doc_ids": ["tumbler1", "tumbler2", ...]}}
+     * Response body:   {@code {"chashes": {"tumbler1": [chash...], "tumbler2": [chash...]}, "count": N}}
+     *
+     * <p>Doc_ids with no manifest rows are absent from the response map.
+     * {@code count} is the number of doc_ids present in the map (same
+     * truncation-defense convention as {@code handleManifestGetMany}'s
+     * {@code manifests.size()}), not the total chash count.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestChashesMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (docIds.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"chashes\":{},\"count\":0}"); return;
+        }
+        // Same cap + rationale as handleManifestGetMany/handleResolveMany: well under
+        // PostgreSQL's 32767-parameter Bind limit.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var chashesByDoc = repo.getChunkChashesMany(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("chashes", chashesByDoc, "count", chashesByDoc.size())));
     }
 
     /**
