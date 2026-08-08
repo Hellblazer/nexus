@@ -4,6 +4,70 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.4.0] - 2026-08-08
+
+Paired release with engine-service-v0.1.68 (cloud-deployed 2026-08-07;
+`REQUIRED_ENGINE_VERSION` bumped to it in this release — fresh local installs
+and package upgrades converge to the same engine identity).
+
+### Changed
+- **Taxonomy assignment is engine-side** (nexus-lns3o / nexus-yu9w5): the
+  per-flush assignment hook now calls the engine's
+  `POST /v1/taxonomy/assignments/assign_from_chashes` — one round trip,
+  server-side compute-and-persist against the just-upserted embeddings and
+  centroids. The client embedding-fetch + compute/persist leg for the hook is
+  deleted, with NO fallback: a route failure surfaces via the taxonomy
+  tripwire (hook_failures, `nx taxonomy status`, doctor), never a silent
+  client recompute. Requests page client-side at the engine's 1000-chash cap.
+- **T1 is PG-only** (nexus-4lkmz, nexus-bjltu): the in-process
+  isolated/ephemeral T1 leg is deleted; `NX_T1_ISOLATED` now hard-fails with
+  `T1IsolatedLegRetiredError` naming the real remedy. Stateless operator
+  dispatches mint a PG-backed session only when the subprocess actually gets
+  tool access, and close it deterministically afterwards.
+- **MCP T1 scope follows the transcript** (nexus-d76vc): `/clear` and
+  `/resume` hand the MCP server's T1 scope to the new session id within one
+  ~5s watcher tick (ancestry-authenticated handoff markers + lifespan
+  re-lease). The CLI/MCP scratch split-brain (nexus-aj564) is closed by
+  design; pre-clear entries strand under the old id and age out via TTL.
+- **`nx doctor --check-t1` diagnoses the real lease mechanism**
+  (nexus-8zfwv, nexus-yfh5x, nexus-9l147): the dead `t1_addr.*` registry
+  surface (unpublished since T1LeasePublisher's removal) is retired —
+  doctor reads `t1_session_lease.<session_id>` with honest semantics (a
+  bare CLI with no lease is informational, not a failure; only an
+  expired/corrupt lease exits 1), health checks now REAP expired lease
+  files and orphaned handoff markers, and the console T1 card reflects
+  real session liveness.
+- `scripts/reinstall-tool.sh` refuses cleanly when live MCP servers hold the
+  venv and gains `--cycle-mcp` to do the reconnect dance (nexus-hrqox).
+
+### Fixed
+- FastMCP `Settings` forward-ref warning on MCP server startup silenced
+  end-to-end (nexus-20iee, nexus-vc5yb).
+- Push-gate owes-report lock: env-tunable retry budget
+  (`NX_EXPECT_LOCK_TRIES`, octal-safe, clamped), observable fail-open
+  (nexus-4b8sz); `expectations_undeclared` distinguishes "no ledger" (rc=3)
+  from clean (nexus-ahl9v).
+- Batched unchanged-chunk metadata refresh with a bounded chash IN list on
+  the flush path (nexus-6yps0, engine half in v0.1.68).
+- plugin-drift-ledger CI gate no longer vacuous-green on the minimal runner
+  (nexus-05m1i): substrate opt-out + any-skip-fails belt.
+- `nx doctor`'s MCP entry-point probe no longer resolves a FOREIGN home's
+  install when the running process's own prefix is home-rooted
+  (nexus-ocsym): under a relocated `$HOME` (release sandbox, chroot-style
+  envs) the resolver probed the host's live `nx-mcp`, so the verdict
+  tracked host health instead of the install under test. PATH hits outside
+  the current `$HOME` are now demoted below the own-prefix fallback (never
+  dropped). Also survives HOME-less environments (K8s arbitrary-UID /
+  distroless) instead of crashing doctor (nexus-262a7).
+
+### Engine (engine-service-v0.1.68 — deployed 2026-08-07, pinned here)
+- `assign_from_chashes` taxonomy route (nexus-lns3o).
+- Async `VACUUM (ANALYZE)` on purge-trash swept tables with the MAINTAIN
+  grant, single-flight, honest `vacuum` envelope (nexus-0ys55, nexus-4e465,
+  nexus-tyxnh).
+- `session_tokens` expiry sweep on the t1-ttl-sweep thread (nexus-t23zk).
+- Batched metadata refresh endpoint (nexus-6yps0).
+
 ## [7.3.0] - 2026-08-07
 
 ### Release-gate integrity (2026-08-07)

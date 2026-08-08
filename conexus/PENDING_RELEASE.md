@@ -28,34 +28,7 @@ mechanize, it matters enough to ship.
 
 ---
 
-## Awaiting the next release (pinned: v7.3.0)
 
-- `conexus/hooks/scripts/expectations.sh` — owes-report lock: NX_EXPECT_LOCK_TRIES
-  env knob (base-10 coerced, 600-try clamp) + stderr warning on fail-open
-  unlocked proceed (nexus-4b8sz; observable under `claude --debug` only).
-  Installed sessions keep the silent 10-try fail-open until the next plugin
-  release.
-- `conexus/hooks/scripts/expectations.sh` — `expectations_undeclared` now exits
-  3 with a stderr NOTE when the session has no ledger file, instead of the
-  indistinguishable-from-clean rc=0 (nexus-ahl9v; a mistyped session id
-  previously audited as clean). Installed sessions keep the old rc=0
-  behavior until the next plugin release.
-- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py` —
-  rules 2 (push-to-main, nexus-vduer) and 3 (review-coverage gate,
-  nexus-4av2n) are now scoped to the nexus repo via `_repo_scope_is_nexus`
-  (origin remote URL basename `nexus` OR the conexus plugin marker file at
-  toplevel — an OR, per nexus-w3apo) and no-op in any other repo
-  (nexus-vscgz; evidence: the hook denied a plain `git push origin master`
-  in an unrelated hobby repo with no `develop`, no marketplace surface).
-  Rule 1 (wildcard `git add`) stays global, unaffected. Installed sessions
-  keep firing rules 2+3 in every repo until the next plugin release.
-- `conexus/hooks/scripts/routing/registry.yaml` — rationale updated to
-  record the nexus-vscgz repo-scope fix above. Installed sessions read the
-  old rationale until the next plugin release (documentation-only drift,
-  no behavioral effect).
-- `conexus/skills/orchestration/SKILL.md` — documents the
-  `expectations_undeclared` rc=3 no-ledger contract (nexus-ahl9v, landed
-  599e4980) alongside the rc 0/1/2 meanings. Backfilled entry: the commit
-  shipped without declaring it and the drift-ledger CI job was vacuous-green
-  at the time (nexus-05m1i). Installed sessions read the pre-rc=3 skill text
-  until the next plugin release.
+## Awaiting the next release (pinned: v7.4.0)
+
+(empty — v7.4.0 shipped everything; add entries as new plugin-surface changes land on develop)
