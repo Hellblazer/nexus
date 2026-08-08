@@ -186,6 +186,16 @@ if [[ "$MODE" == "observe" ]]; then
     exit 0
 fi
 
-expectations_mark_blocked "$SESSION_ID" "$AGENT_ID"
-printf '{"decision": "block", "reason": "You are the named background teammate %s and your orchestrator expects a completion report you have not sent. Use SendMessage now to report: outcome, artifacts (paths/commits/IDs), and anything blocking. Then stop."}\n' "$AGENT_TYPE"
+expectations_mark_blocked "$SESSION_ID" "$AGENT_ID" "$EXPECTATIONS_OWES_CAUSE"
+# nexus-plycy: an exhaustion-forced block (EXPECTATIONS_OWES_CAUSE set by
+# expectations_owes_report, see THE CONTRACT in expectations.sh) was
+# never verified against the credit ledger -- name that in the reason so
+# an over-blocked agent's operator can tell it apart from a genuine,
+# credit-backed owes verdict (the ledger's BLOCKED row carries the same
+# cause in its 4th field for later audit).
+REASON="You are the named background teammate ${AGENT_TYPE} and your orchestrator expects a completion report you have not sent. Use SendMessage now to report: outcome, artifacts (paths/commits/IDs), and anything blocking. Then stop."
+if [[ "$EXPECTATIONS_OWES_CAUSE" == "lock-exhausted" ]]; then
+    REASON="${REASON} (NOTE: this block could not verify remaining report credit under lock contention -- treat it as a precaution, not a confirmed miss; see nexus-plycy.)"
+fi
+printf '{"decision": "block", "reason": "%s"}\n' "$REASON"
 exit 0

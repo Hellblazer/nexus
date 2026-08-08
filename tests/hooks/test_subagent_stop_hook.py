@@ -127,6 +127,21 @@ def _expect_row(tmp_path: Path, name: str = NAME, mode: str = "background", sess
         fh.write(f"2026-07-17T00:00:00Z\tEXPECT\t{name}\t{mode}\n")
 
 
+def _blocked_rows(tmp_path: Path, session_id: str = SESSION) -> list[tuple[str, str]]:
+    """(agent_id, cause) for every BLOCKED row in the session's
+    expectations file; cause is '' when the row carries no 4th field
+    (nexus-plycy: expectations_mark_blocked's optional cause param)."""
+    f = _expectations_file(tmp_path, session_id)
+    if not f.exists():
+        return []
+    out: list[tuple[str, str]] = []
+    for ln in f.read_text().splitlines():
+        parts = ln.split("\t")
+        if len(parts) >= 3 and parts[1] == "BLOCKED":
+            out.append((parts[2], parts[3] if len(parts) >= 4 else ""))
+    return out
+
+
 def _decision(proc: subprocess.CompletedProcess[str]) -> dict | None:
     """Parse a {"decision": ...} JSON object from hook stdout, if any."""
     for line in proc.stdout.splitlines():
@@ -377,21 +392,44 @@ class TestBlockMode:
         agent-dispatch-expect.sh's _expect_if_absent / nexus-3h0u6
         precedent) must hold N-of-type exactness under REAL concurrency,
         not just the sequential test_consumed_settlement_n_of_type. 8
-        same-type stops racing 4 units of credit: at most 4 owe (get
-        blocked), and the CONSUMED row count for the type never exceeds
-        the credit pool — without the lock, a race window lets more than
-        4 threads observe unspent credit simultaneously.
+        same-type stops racing 4 units of credit.
 
         nexus-4b8sz: CI red 2026-08-07 (run 31215840624 shard 1) got
         blocked=5 vs credit=4 under a loaded runner — the hardcoded ~1s
         lock budget (10 x 0.1s) was exhausted by one racer, which then
         proceeded unlocked (fail-open by design) and over-counted. The
-        budget is now env-tunable (NX_EXPECT_LOCK_TRIES); this test pins a
-        generous one (200 tries =~ 20s), a ~20x margin over the observed
-        CI failure budget (~1s), so the N-of-type exactness this test
-        exists to prove is not itself flaky under ordinary runner load —
-        not a hard guarantee against arbitrarily severe contention,
-        without weakening the tight production default."""
+        budget was made env-tunable (NX_EXPECT_LOCK_TRIES); this test
+        pins a generous one (200 tries =~ 20s).
+
+        nexus-7z7rj round 1: widening the budget alone narrows but does
+        not close the window — the SAME test still reproduced blocked=5
+        vs credit=4 in CI at 200 tries (PR #1445 run 31244456036). Round
+        1 made the decision atomic-under-lock and had exhaustion default
+        to "does not owe" (never touch the ledger).
+
+        nexus-plycy (round 2, substantive-critic Critical on round 1):
+        a fixed "does not owe" default, combined with the pre-existing
+        60s stale-lock reap, could silence the guard SESSION-WIDE for up
+        to a minute on an orphaned lock holder — an unsafe (silent-miss)
+        failure direction for a guard whose entire purpose is not missing
+        undeclared dispatches. Round 2 keeps decision-only-under-lock for
+        the CONSUMED append (that half was sound — see THE CONTRACT in
+        expectations.sh) but flips the exhaustion default to BLOCK
+        (disclosed via a "lock-exhausted" cause, both in the JSON reason
+        and the BLOCKED row's 4th field) now that the lockdir is PER-TYPE,
+        which removes the cross-type false-accusation risk round 1 was
+        avoiding. Consequence for THIS test: "CONSUMED rows never exceed
+        credit" is still a MECHANICAL invariant (asserted below), but
+        raw "blocked" count is no longer bounded by credit at all — an
+        exhaustion-forced block is now a deliberate, safe, DISCLOSED
+        over-block, not an accounting entry. So this test asserts the
+        ledger-level ceiling (consumed <= credit) plus the disclosure
+        invariant (every BLOCKED row is either backed by a matching
+        CONSUMED row or explicitly names cause=lock-exhausted — never an
+        unexplained block) instead of a raw blocked<=credit ceiling. See
+        test_owes_report_lock_exhaustion_never_exceeds_credit_under_forced_contention
+        for the version that deterministically forces exhaustion and
+        checks the lower bound (the winner still blocks)."""
         import concurrent.futures
 
         agent_type = "worker-race"
@@ -417,35 +455,151 @@ class TestBlockMode:
             assert proc.returncode == 0, proc.stderr
 
         blocked = sum(1 for proc in results if _decision(proc) is not None)
-        assert blocked == credit, f"expected exactly {credit} blocked, got {blocked}"
+        assert blocked >= 1, "an always-pass regression would silently satisfy every other assertion here"
 
         content = _expectations_file(tmp_path).read_text()
         consumed_rows = [ln for ln in content.splitlines() if "\tCONSUMED\t" in ln]
-        assert len(consumed_rows) == credit, consumed_rows
+        assert len(consumed_rows) <= credit, consumed_rows
 
-    def test_lock_budget_exhaustion_degrades_unlocked_with_warning(
+        consumed_ids = {ln.split("\t")[2] for ln in consumed_rows}
+        for agent_id, cause in _blocked_rows(tmp_path):
+            assert agent_id in consumed_ids or cause == "lock-exhausted", (
+                f"BLOCKED row for {agent_id} has neither a matching CONSUMED "
+                f"row nor a disclosed cause (cause={cause!r})"
+            )
+
+    def test_owes_report_lock_exhaustion_never_exceeds_credit_under_forced_contention(
         self, tmp_path: Path
     ) -> None:
-        """nexus-4b8sz: with NX_EXPECT_LOCK_TRIES=1 and the owes-report
-        lockdir already held (fresh, so the reap does not remove it), the
-        single try must fail to acquire, and the hook must still fall
-        through to the pre-lock unlocked read rather than deferring the
-        stop (fail-open, unconditional — nexus-bk974's own contract): the
-        agent genuinely owes a report (one background EXPECT credit,
-        unreported transcript) and the unlocked read computes the exact
-        same verdict a locked read would for a single, non-concurrent
-        call, so the hook must still emit its normal block decision, not
-        hang, drop the decision, or silently no-op. Separately, the
-        exhaustion is now debug-visible: exactly one stderr line naming
-        the try budget, not silence. CAVEAT: subagent-stop.sh exits 0 on
-        every path, and the hook contract only surfaces exit-0 stderr to
-        the operator under `claude --debug` (see the LOCKING comment in
-        expectations.sh) — this assertion proves the line is emitted, not
-        that a normal-session operator sees it unprompted."""
+        """nexus-7z7rj/nexus-plycy falsification harness: rather than
+        hoping a CI runner happens to be loaded enough to reproduce the
+        double-spend (the bug only surfaced under real load — 2026-08-08,
+        PR #1445 run 31244456036 — and was invisible in 8/8 local and
+        even 200-try CI runs most of the time), force lock exhaustion
+        deterministically. NX_EXPECT_LOCK_HOLD_DELAY_S widens the
+        critical section (sleeps after acquiring, before the
+        read-decide-append) so a tiny NX_EXPECT_LOCK_TRIES budget
+        guarantees every racer but the current lock holder exhausts its
+        budget while the holder is still inside its critical section.
+
+        Proves THREE things the round-2 contract requires together:
+        (1) the winner still blocks via a verified CONSUMED spend — a
+            regression that made the concurrent path always return "no"
+            would fail `blocked >= 1` (substantive-critic Significant-3:
+            the round-1 tests had no lower bound, so an always-pass
+            regression would have passed silently);
+        (2) CONSUMED rows never exceed credit — manually reverting
+            decision-only-under-lock (moving the awk read + CONSUMED
+            append back outside `if [[ -n "$held" ]]`, i.e. 4b8sz's
+            shipped shape) reliably reds this with consumed_rows > credit;
+        (3) every exhaustion-forced block is DISCLOSED (cause=
+            lock-exhausted in the BLOCKED row), never a bare, unexplained
+            over-block — manually reverting the round-2 exhaustion
+            default back to round 1's silent "does not owe" would fail
+            `exhausted > 0` implying no blocks at all from the losing
+            racers, the exact silent-miss class nexus-plycy exists to
+            prevent."""
+        import concurrent.futures
+
+        agent_type = "worker-race-forced"
+        credit = 3
+        for _ in range(credit):
+            _expect_row(tmp_path, name=agent_type, mode="background")
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        ids = [f"aforce{i:02d}0000000000" for i in range(6)]
+
+        def _stop(aid: str) -> subprocess.CompletedProcess[str]:
+            return _run_hook(
+                _payload(agent_id=aid, agent_type=agent_type, transcript=str(t)),
+                tmp_path,
+                mode="block",
+                extra_env={
+                    # ~0.3s budget (3 x 0.1s) against a 0.5s post-acquire
+                    # hold: any racer that does not win the very first
+                    # mkdir is essentially guaranteed to exhaust its
+                    # budget while the winner is still sleeping inside
+                    # the (now-widened) critical section.
+                    "NX_EXPECT_LOCK_TRIES": "3",
+                    "NX_EXPECT_LOCK_HOLD_DELAY_S": "0.5",
+                },
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(_stop, ids))
+
+        for proc in results:
+            assert proc.returncode == 0, proc.stderr
+
+        exhausted = sum(1 for proc in results if "lock budget exhausted" in proc.stderr)
+        assert exhausted > 0, (
+            "test did not actually force lock exhaustion in any racer -- "
+            "not a valid falsification run; widen NX_EXPECT_LOCK_HOLD_DELAY_S "
+            "or shrink NX_EXPECT_LOCK_TRIES"
+        )
+
+        blocked = sum(1 for proc in results if _decision(proc) is not None)
+        # Lower bound (critic Significant-3): the lock WINNER genuinely
+        # owes (real background credit, unreported transcript) and must
+        # still block via a verified spend, regardless of how many other
+        # racers exhaust their budget. An always-pass regression in the
+        # concurrent/lock path would satisfy every ceiling-only assertion
+        # silently; this is the assertion that catches it.
+        assert blocked >= 1, "the lock winner must still block on a genuine, verified owe"
+
+        content = _expectations_file(tmp_path).read_text()
+        consumed_rows = [ln for ln in content.splitlines() if "\tCONSUMED\t" in ln]
+        assert len(consumed_rows) <= credit, consumed_rows
+        assert len(consumed_rows) >= 1, (
+            "the lock winner's block must be backed by a verified CONSUMED spend"
+        )
+
+        consumed_ids = {ln.split("\t")[2] for ln in consumed_rows}
+        exhaustion_forced = 0
+        for agent_id, cause in _blocked_rows(tmp_path):
+            assert agent_id in consumed_ids or cause == "lock-exhausted", (
+                f"BLOCKED row for {agent_id} has neither a matching CONSUMED "
+                f"row nor a disclosed cause (cause={cause!r})"
+            )
+            if cause == "lock-exhausted":
+                exhaustion_forced += 1
+        # At least one of the exhausted racers must have actually blocked
+        # WITH the cause disclosed -- proves the round-2 "block, but name
+        # it" contract end to end, not just that exhaustion happened.
+        assert exhaustion_forced > 0, "forced exhaustion never produced a disclosed over-block"
+
+    def test_lock_budget_exhaustion_degrades_to_fixed_default_with_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """nexus-plycy (round 2, supersedes nexus-7z7rj round 1's
+        "does not owe" default): with NX_EXPECT_LOCK_TRIES=1 and the
+        owes-report lockdir already held (fresh, so the reap does not
+        remove it), the single try must fail to acquire. Per THE
+        CONTRACT in expectations.sh, the CONSUMED-append decision is
+        still made ONLY while holding the lock, but the BLOCK decision
+        on exhaustion now defaults to "owes" (round 1's "does not owe"
+        default, combined with the pre-existing 60s stale-lock reap,
+        could silence the guard session-wide for up to a minute — an
+        unsafe failure direction a substantive-critic review caught
+        before this shipped, T2 nexus/critique-7z7rj-owes-report-
+        decision-under-lock). So this agent (genuine unspent background
+        credit, unreported transcript) IS blocked even though the lock
+        was never acquired — but the block is DISCLOSED as unverified:
+        the JSON reason names the lock-contention cause, and the BLOCKED
+        row itself carries "lock-exhausted" as a 4th field, distinct
+        from a verified CONSUMED-backed block. Separately, the
+        exhaustion is still debug-visible: exactly one stderr line
+        naming the try budget. CAVEAT: subagent-stop.sh exits 0 on every
+        path, and the hook contract only surfaces exit-0 stderr to the
+        operator under `claude --debug` (see the LOCKING comment in
+        expectations.sh) — this assertion proves the line is emitted,
+        not that a normal-session operator sees it unprompted."""
         _expect_row(tmp_path)
         t = _transcript(tmp_path, with_sendmessage=False)
 
-        lockdir = Path(str(_expectations_file(tmp_path)) + ".owes.lock")
+        # Per-type lockdir (nexus-plycy): NAME has no ':' so the encoding
+        # is the identity mapping (see THE CONTRACT's '__'-for-':' note).
+        lockdir = Path(str(_expectations_file(tmp_path)) + f".owes.{NAME}.lock")
         lockdir.mkdir(parents=True)  # fresh mtime -- the reap only sweeps stale (>1min) dirs
 
         proc = _run_hook(
@@ -458,11 +612,18 @@ class TestBlockMode:
         assert proc.returncode == 0, proc.stderr
         decision = _decision(proc)
         assert decision is not None and decision["decision"] == "block", decision
+        assert "lock contention" in decision["reason"], decision
         assert "expectations: owes-report lock budget exhausted" in proc.stderr
         assert "1 tries" in proc.stderr
-        # The warning is diagnostic-only -- never a ledger row.
+        assert "fixed default = owes" in proc.stderr
+        assert "cause=lock-exhausted" in proc.stderr
+        # The warning is diagnostic-only -- never a ledger row -- but the
+        # BLOCKED row IS written (with the disclosed cause), and NO
+        # CONSUMED row (never spend credit that was never verified).
         content = _expectations_file(tmp_path).read_text()
         assert "owes-report lock budget exhausted" not in content
+        assert "\tCONSUMED\t" not in content
+        assert f"\tBLOCKED\t{AGENT_ID}\tlock-exhausted\n" in content
 
     @pytest.mark.parametrize(
         ("raw", "decimal"),
@@ -483,14 +644,17 @@ class TestBlockMode:
         "010" silently means 8, not 10. `tries=$((10#$tries))` forces
         base-10 interpretation after the charset guard. This asserts the
         SAFE semantic end to end: the hook never crashes on a leading-zero
-        value (exit 0), and the coerced decimal count is exactly what
-        reaches the exhaustion warning (proven via the "(N tries)" text —
-        the cheapest observable proxy for the loop's actual bound without
+        value (exit 0, blocked with a disclosed cause — nexus-plycy's
+        round-2 exhaustion-defaults-to-block contract, see
+        test_lock_budget_exhaustion_degrades_to_fixed_default_with_warning),
+        and the coerced decimal count is exactly what reaches the
+        exhaustion warning (proven via the "(N tries)" text — the
+        cheapest observable proxy for the loop's actual bound without
         instrumenting the shell)."""
         _expect_row(tmp_path)
         t = _transcript(tmp_path, with_sendmessage=False)
 
-        lockdir = Path(str(_expectations_file(tmp_path)) + ".owes.lock")
+        lockdir = Path(str(_expectations_file(tmp_path)) + f".owes.{NAME}.lock")
         lockdir.mkdir(parents=True)
 
         proc = _run_hook(
@@ -517,7 +681,7 @@ class TestBlockMode:
         _expect_row(tmp_path)
         t = _transcript(tmp_path, with_sendmessage=False)
 
-        lockdir = Path(str(_expectations_file(tmp_path)) + ".owes.lock")
+        lockdir = Path(str(_expectations_file(tmp_path)) + f".owes.{NAME}.lock")
         lockdir.mkdir(parents=True)
 
         fake_bin = tmp_path / "fakebin"
